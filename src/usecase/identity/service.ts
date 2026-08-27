@@ -13,6 +13,7 @@
 //      the behaviour a firm expects the afternoon it dismisses someone.
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
+import type { RateLimiter } from "../../platform/ratelimit";
 import type { Principal } from "../../platform/callctx";
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
 import type { EventSink } from "../ledger/ports";
@@ -30,6 +31,7 @@ import {
 import {
   InvalidCredentials,
   InvalidMagicLink,
+  TooManyAttempts,
   NoActiveMembership,
   NotAMember,
   UserDisabled,
@@ -46,6 +48,17 @@ import type {
   UserDirectory,
 } from "./ports";
 
+/**
+ * Per-account budgets. Ten password attempts an hour is generous for a person
+ * who has forgotten which passphrase they used and hopeless for a machine
+ * working through a list. Three sign-in emails an hour is more than anyone
+ * needs and stops the endpoint being used to flood an inbox.
+ */
+export const LOGIN_ATTEMPTS_PER_WINDOW = 10;
+export const LOGIN_WINDOW_SECONDS = 3600;
+export const MAGIC_LINKS_PER_WINDOW = 3;
+export const MAGIC_LINK_WINDOW_SECONDS = 3600;
+
 export interface Deps {
   readonly users: UserDirectory;
   readonly memberships: MembershipDirectory;
@@ -58,6 +71,8 @@ export interface Deps {
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+  /** Keyed on the ACCOUNT, not the caller — see the note on login(). */
+  readonly attempts: RateLimiter;
   /** Where a magic link sends the user — the frontend's redemption page. From
    *  config, injected: this layer never reads the environment. */
   readonly magicLinkBaseUrl: string;
@@ -94,9 +109,29 @@ export class IdentityService {
     await this.deps.sessions.revokeAllForUser(userId, this.deps.clock.now().toISOString());
   }
 
-  /** Sign in with email + password. */
+  /**
+   * Sign in with email + password.
+   *
+   * Throttled PER ACCOUNT, which is a different defence from the edge's
+   * per-address limit and does not replace it. A botnet spreads its guesses
+   * across a thousand addresses and sails past any per-IP rule; what it cannot
+   * spread is the account it is trying to break into.
+   *
+   * The attempt is counted before the password is checked, not after a failure.
+   * Counting only failures would tell an attacker which guesses were right by
+   * whether the counter moved, and would let a correct guess reset the budget
+   * they are burning.
+   */
   async login(email: string, password: string): Promise<SignInResult> {
     const normalized = normalizeEmail(email);
+
+    const budget = await this.deps.attempts.check(
+      `login:${normalized}`,
+      LOGIN_ATTEMPTS_PER_WINDOW,
+      LOGIN_WINDOW_SECONDS,
+    );
+    if (!budget.allowed) throw new TooManyAttempts(budget.retryAfterSeconds);
+
     const user = await this.deps.users.findByEmail(normalized);
 
     // The unknown-email path still pays for a hash comparison, so response time
@@ -110,6 +145,9 @@ export class IdentityService {
     // are worth naming — a disabled user or one with no membership needs to
     // know why, and by this point the caller has already proved who they are.
     if (user.status !== "active") throw new UserDisabled(normalized);
+    // Cleared on success, so one person mistyping their password three times is
+    // not then locked out by finally getting it right.
+    await this.deps.attempts.reset(`login:${normalized}`);
     return this.openSession(user);
   }
 
@@ -121,6 +159,19 @@ export class IdentityService {
    */
   async requestMagicLink(email: string): Promise<void> {
     const normalized = normalizeEmail(email);
+
+    // Throttled per address, because the cost here lands on someone who did not
+    // ask for it: without a limit this endpoint mails an unbounded stream of
+    // sign-in links to a person an attacker chooses. It returns quietly rather
+    // than raising — the caller already learns nothing from this route, and a
+    // 429 here would tell them the address exists.
+    const budget = await this.deps.attempts.check(
+      `magic-link:${normalized}`,
+      MAGIC_LINKS_PER_WINDOW,
+      MAGIC_LINK_WINDOW_SECONDS,
+    );
+    if (!budget.allowed) return;
+
     const user = await this.deps.users.findByEmail(normalized);
     if (!user || user.status !== "active") return;
 

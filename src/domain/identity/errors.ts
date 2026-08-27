@@ -26,7 +26,8 @@ export type IdentityErrorCode =
   | "NO_ACTIVE_MEMBERSHIP"
   | "NOT_A_MEMBER"
   | "USER_DISABLED"
-  | "WEAK_PASSWORD";
+  | "WEAK_PASSWORD"
+  | "TOO_MANY_ATTEMPTS";
 
 export class InvalidCredentials extends IdentityError {
   constructor() {
@@ -69,6 +70,15 @@ export class NotAMember extends IdentityError {
 export class UserDisabled extends IdentityError {
   constructor(email: string) {
     super("USER_DISABLED", `the account for ${JSON.stringify(email)} is disabled`);
+  }
+}
+
+export class TooManyAttempts extends IdentityError {
+  constructor(readonly retryAfterSeconds: number) {
+    super(
+      "TOO_MANY_ATTEMPTS",
+      `too many sign-in attempts for this account; retry in ${String(retryAfterSeconds)}s`,
+    );
   }
 }
 

@@ -210,20 +210,19 @@ sandbox access + credentials. **Not on any demo's critical path.**
 
 ---
 
-## Known-open security work (found while building T1.7; not yet scheduled)
+## Known-open security work
 
-Neither is a hole today — both are limits worth closing before anything public.
-
-- **No rate limiting anywhere.** `POST /api/v1/auth/login` accepts unlimited attempts, so a
-  password is brute-forceable at whatever rate the box serves. The same endpoint is also a
-  **memory-amplification DoS**: scrypt at N=2^15 costs ~32 MB and ~50–100 ms per attempt,
-  unauthenticated, so a few hundred concurrent logins are gigabytes of RSS. Wants a limiter
-  keyed on IP **and** on account (they defend different things), and a concurrency cap on
-  the hash. Cheap to add, and it should land before any public environment exists.
-- **`/internal` authenticates but does not authorize.** One shared secret grants every
+- [x] **Rate limiting** — done. Two limiters that defend different things: the edge keys on
+  client address (10/min on the sign-in routes, 300/min elsewhere), the identity use case
+  keys on the ACCOUNT (10 password attempts/hour, 3 sign-in emails/hour), because a botnet
+  spreads across addresses but cannot spread which account it is attacking. Plus a
+  concurrency cap of 6 on scrypt, bounding hash memory to ~192 MB however the requests
+  arrive. *Limitation, by design:* the store is per-process, so behind N pods every limit is
+  N times looser — it is a port, and Redis replaces it when there is a second pod.
+- [ ] **`/internal` authenticates but does not authorize.** One shared secret grants every
   provisioning action — create a tenant, grant a membership, set any user's password.
-  That is acceptable while the only caller is us, and stops being acceptable the moment a
-  second system holds the key. Revisit when one does.
+  Acceptable while the only caller is us; not acceptable the moment a second system holds
+  the key. Revisit when one does.
 
 ## Parking lot / decisions to make (don't build on guesses)
 

@@ -3,6 +3,7 @@
 // working the moment a session is revoked.
 import { beforeEach, describe, expect, it } from "vitest";
 import { IdentityService } from "../../src/usecase/identity/service";
+import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import type { FakeMembershipRepo, FakeUserRepo } from "../../src/testfakes/tenancy";
 import {
@@ -17,12 +18,18 @@ import {
 import {
   InvalidCredentials,
   InvalidMagicLink,
+  TooManyAttempts,
   NoActiveMembership,
   NotAMember,
   UserDisabled,
   WeakPassword,
 } from "../../src/domain/identity/errors";
 import { SESSION_TTL_DAYS, MAGIC_LINK_TTL_MINUTES } from "../../src/domain/identity/model";
+import {
+  LOGIN_ATTEMPTS_PER_WINDOW,
+  LOGIN_WINDOW_SECONDS,
+  MAGIC_LINKS_PER_WINDOW,
+} from "../../src/usecase/identity/service";
 import type { RecordingEventSink } from "../../src/testfakes/ledger";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
@@ -60,6 +67,7 @@ function harness(): Harness {
     ids: fakes.ids,
     clock,
     events: fakes.events,
+    attempts: new InMemoryRateLimiter(clock),
     magicLinkBaseUrl: "https://app.example.com",
   });
   return {
@@ -395,5 +403,97 @@ describe("magic links", () => {
 
   it("refuses an unknown token with the same error as an expired one", async () => {
     await expect(h.service.redeemMagicLink("made-up")).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+});
+
+
+describe("per-account throttling", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  // The edge limits by client address; this limits by ACCOUNT. A botnet spreads
+  // its guesses over a thousand addresses and walks past any per-IP rule — what
+  // it cannot spread is whose password it is trying to break.
+  it("stops a password from being ground down, however many addresses try", async () => {
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
+      await expect(
+        h.service.login("priya@harbourpoint.in", `guess-${String(i)}`),
+      ).rejects.toBeInstanceOf(InvalidCredentials);
+    }
+    await expect(
+      h.service.login("priya@harbourpoint.in", "guess-again"),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
+  });
+
+  it("refuses even the CORRECT password once the budget is spent", async () => {
+    // The attempt is counted before the password is checked. Counting only
+    // failures would let a correct guess refund the budget being burned, and
+    // would tell an attacker which guesses were right by whether it moved.
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
+      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+    }
+    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).rejects.toBeInstanceOf(
+      TooManyAttempts,
+    );
+  });
+
+  it("throttles the account, not the caller — an unknown email is limited too", async () => {
+    // Otherwise the endpoint answers "is this address one of yours?" by which
+    // requests get throttled.
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
+      await h.service.login("stranger@example.com", "guess").catch(() => null);
+    }
+    await expect(h.service.login("stranger@example.com", "guess")).rejects.toBeInstanceOf(
+      TooManyAttempts,
+    );
+  });
+
+  it("clears the budget on a successful sign-in", async () => {
+    // Someone who mistypes their passphrase twice and then gets it right must
+    // not be locked out by their own success.
+    await seedUser(h);
+    await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+    await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+    await h.service.login("priya@harbourpoint.in", PASSWORD);
+
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
+      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+    }
+    // The budget was reset by the success, so the full allowance was available.
+    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).rejects.toBeInstanceOf(
+      TooManyAttempts,
+    );
+  });
+
+  it("recovers after the window", async () => {
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
+      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+    }
+    h.clock.advanceMinutes(LOGIN_WINDOW_SECONDS / 60 + 1);
+    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).resolves.toBeDefined();
+  });
+
+  it("caps sign-in emails, so the endpoint cannot flood someone's inbox", async () => {
+    // The cost of this one lands on a person who did not ask for it, which is
+    // why it is capped lower than login.
+    await seedUser(h);
+    for (let i = 0; i < MAGIC_LINKS_PER_WINDOW + 3; i += 1) {
+      await h.service.requestMagicLink("priya@harbourpoint.in");
+    }
+    expect(h.mailer.sent).toHaveLength(MAGIC_LINKS_PER_WINDOW);
+  });
+
+  it("still says nothing when a magic link is throttled", async () => {
+    // A 429 here would confirm the address exists, which is exactly what this
+    // endpoint refuses to reveal.
+    await seedUser(h);
+    for (let i = 0; i < MAGIC_LINKS_PER_WINDOW + 1; i += 1) {
+      await expect(h.service.requestMagicLink("priya@harbourpoint.in")).resolves.toBeUndefined();
+    }
   });
 });

@@ -14,6 +14,10 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "./guards";
 import { internalGuard, sessionGuard } from "./guards";
 import type { PrincipalResolver } from "./principal";
+import type { RateLimiter } from "../platform/ratelimit";
+import { rateLimit } from "./ratelimit";
+import type { RateLimitConfig } from "./ratelimit";
+import { PUBLIC_PATHS } from "./guards";
 import type { Logger } from "../platform/log";
 import { createOpenAPIApp } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
@@ -35,6 +39,8 @@ export interface RouterOptions {
   readonly internalApiKey: string;
   /** How a request becomes a principal on the /api/v1 surface. */
   readonly principalOf: PrincipalResolver;
+  readonly rateLimiter: RateLimiter;
+  readonly rateLimit: RateLimitConfig;
 }
 
 /** Per-module dependencies the router mounts. One field per capability. */
@@ -67,6 +73,16 @@ export function buildRouter(
   // balancer cannot hold a credential, and neither endpoint reveals anything.
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/ready", (c) => c.json({ status: "ready" }));
+
+  // RATE LIMITING, before anything else that costs something. It runs ahead of
+  // the guards so an unauthenticated flood is refused at the cheapest possible
+  // point — on the login route in particular, reaching the handler means
+  // spending ~32 MB and ~50 ms of scrypt on a caller who has proved nothing.
+  //
+  // The tight bucket covers exactly the routes that are reachable without
+  // credentials, which is the same list the session guard exempts. Deriving it
+  // from PUBLIC_PATHS rather than restating it means the two cannot drift.
+  app.use("*", rateLimit(opts.rateLimiter, opts.rateLimit, PUBLIC_PATHS));
 
   // AUTHENTICATION, BY PREFIX. These two lines cover every route below them —
   // including routes nobody has written yet, which is the point. A per-handler

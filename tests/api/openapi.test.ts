@@ -5,6 +5,8 @@
 //   3. the principal gate still answers 401 with that envelope.
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
+import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -52,6 +54,7 @@ function identityService(): IdentityService {
     clock: new FakeClock(),
     magicLinkBaseUrl: "http://localhost:3000",
     events: fakes.events,
+    attempts: new InMemoryRateLimiter(systemClock),
   });
 }
 
@@ -71,6 +74,8 @@ function app() {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalApiKey: INTERNAL_KEY,
+    rateLimiter: new InMemoryRateLimiter(systemClock),
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: devPrincipal,
   });
 }
@@ -94,6 +99,8 @@ describe("OpenAPI spec", () => {
     const res = await buildRouter(deps(), silentLog, {
       docsEnabled: false,
       internalApiKey: INTERNAL_KEY,
+    rateLimiter: new InMemoryRateLimiter(systemClock),
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
       principalOf: devPrincipal,
     }).request("/openapi.json");
     expect(res.status).toBe(404);

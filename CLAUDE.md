@@ -174,6 +174,22 @@ HONEST REGISTRY: the dev `x-user-id` resolver and the logging mailer are the onl
 left, both gated on config, and `validateServer` refuses to boot a production-like
 environment with either. Do not add a third without the same treatment.
 
+## Rate limiting
+
+Two limiters, defending different things — neither substitutes for the other. The edge
+(`api/ratelimit.ts`) keys on **client address**; the identity use case keys on the
+**account**. A botnet spreads its guesses across a thousand addresses and walks past any
+per-IP rule; what it cannot spread is whose password it is attacking. Both are mounted by
+prefix, like the auth guards, for the same reason.
+
+`ScryptPasswordHasher` additionally caps concurrent hashes: memory-hardness protects the
+password *and* points a loaded gun at the server, since login is unauthenticated by
+definition and each hash holds ~32 MB.
+
+The store is a port with an in-process implementation — **per-process, so behind N pods
+every limit is N times looser**. That is fine at one pod and is why the interface is async:
+Redis drops in unchanged.
+
 ## The audit ledger
 
 Every state transition writes an event. Depend on the **`EventSink`** port

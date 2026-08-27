@@ -30,6 +30,21 @@ const MAXMEM = 128 * 1024 * 1024; // node's 32 MB default is below what N=2^15 n
 const KEYLEN = 64;
 const SALT_BYTES = 16;
 
+/**
+ * How many hashes may run at once.
+ *
+ * Memory-hard is the property that protects a password, and it is also a
+ * loaded gun pointed at the server: each hash holds ~32 MB, and the login route
+ * is unauthenticated by definition, so a few hundred concurrent sign-ins are
+ * gigabytes of resident memory. Rate limiting throttles ARRIVALS; this bounds
+ * what is in flight regardless of how they arrive.
+ *
+ * Six is ~192 MB of ceiling. Excess attempts queue rather than being refused —
+ * queueing costs a promise, and refusing would turn a burst of real sign-ins
+ * into failures. The rate limiters keep that queue short.
+ */
+const MAX_CONCURRENT_HASHES = 6;
+
 /** A well-formed hash that no password matches. Used on the unknown-email path
  *  so that failing costs the same as succeeding — see PasswordHasher.dummyHash. */
 const DUMMY =
@@ -37,9 +52,13 @@ const DUMMY =
   "kUH4KHw1gkJlejeteiVa6cAWh4ycNFkpu9AO3ncO7t+EdGczqWNcH1brzMzXFq2eElv2cuXVITgq6YXAxwd7Ag==";
 
 export class ScryptPasswordHasher implements PasswordHasher {
+  private readonly gate = new Semaphore(MAX_CONCURRENT_HASHES);
+
   async hash(plain: string): Promise<string> {
     const salt = randomBytes(SALT_BYTES);
-    const derived = await scryptAsync(plain, salt, KEYLEN, { ...PARAMS, maxmem: MAXMEM });
+    const derived = await this.gate.run(() =>
+      scryptAsync(plain, salt, KEYLEN, { ...PARAMS, maxmem: MAXMEM }),
+    );
     return [
       "scrypt",
       String(PARAMS.N),
@@ -57,12 +76,14 @@ export class ScryptPasswordHasher implements PasswordHasher {
     const parsed = parse(encoded);
     if (!parsed) return false;
     try {
-      const derived = await scryptAsync(plain, parsed.salt, parsed.hash.length, {
-        N: parsed.N,
-        r: parsed.r,
-        p: parsed.p,
-        maxmem: MAXMEM,
-      });
+      const derived = await this.gate.run(() =>
+        scryptAsync(plain, parsed.salt, parsed.hash.length, {
+          N: parsed.N,
+          r: parsed.r,
+          p: parsed.p,
+          maxmem: MAXMEM,
+        }),
+      );
       return derived.length === parsed.hash.length && timingSafeEqual(derived, parsed.hash);
     } catch {
       return false;
@@ -71,6 +92,39 @@ export class ScryptPasswordHasher implements PasswordHasher {
 
   dummyHash(): string {
     return DUMMY;
+  }
+}
+
+/** A minimal counting semaphore. Waiters are released in arrival order, so a
+ *  queued sign-in cannot be starved by a steady stream of newer ones. */
+class Semaphore {
+  private inFlight = 0;
+  private readonly waiting: (() => void)[] = [];
+
+  constructor(private readonly max: number) {}
+
+  async run<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+
+  private async acquire(): Promise<void> {
+    if (this.inFlight < this.max) {
+      this.inFlight += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.waiting.push(resolve));
+    this.inFlight += 1;
+  }
+
+  private release(): void {
+    this.inFlight -= 1;
+    const next = this.waiting.shift();
+    if (next) next();
   }
 }
 

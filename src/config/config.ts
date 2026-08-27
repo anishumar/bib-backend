@@ -43,6 +43,15 @@ const EnvSchema = z.object({
   // default and no optionality: an unset value would mean "the provisioning
   // API is open", and that is not a state this process may boot in.
   BIB_INTERNAL_API_KEY: z.string().min(32, "must be at least 32 characters"),
+
+  // ── Rate limiting ─────────────────────────────────────────────────────────
+  // Whether X-Forwarded-For may be believed. Must match the deployment: behind
+  // a load balancer, off means every client shares the balancer's address and
+  // one bucket throttles everyone; with no proxy in front, ON lets any client
+  // invent its own key and opt out of rate limiting entirely.
+  BIB_TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  BIB_RATELIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
+  BIB_RATELIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
 });
 
 export type Environment = z.infer<typeof EnvSchema>["BIB_ENVIRONMENT"];
@@ -68,6 +77,14 @@ export interface AuthConfig {
   readonly internalApiKey: string;
 }
 
+export interface RateLimitConfig {
+  readonly trustProxy: boolean;
+  /** Per client, per minute, on the unauthenticated sign-in routes. */
+  readonly authPerMinute: number;
+  /** Per client, per minute, everywhere else. */
+  readonly generalPerMinute: number;
+}
+
 export interface Config {
   readonly environment: Environment;
   readonly logLevel: "debug" | "info" | "warn" | "error";
@@ -76,6 +93,7 @@ export interface Config {
   /** Whether to serve the OpenAPI spec and Swagger UI. */
   readonly docsEnabled: boolean;
   readonly auth: AuthConfig;
+  readonly rateLimit: RateLimitConfig;
 }
 
 /**
@@ -128,6 +146,11 @@ export function load(): Config {
       mailTransport: env.BIB_MAIL_TRANSPORT,
       internalApiKey: env.BIB_INTERNAL_API_KEY,
     },
+    rateLimit: {
+      trustProxy: env.BIB_TRUST_PROXY === "true",
+      authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
+      generalPerMinute: env.BIB_RATELIMIT_GENERAL_PER_MINUTE,
+    },
     db: {
       ownerUrl: env.BIB_DATABASE_URL,
       appUrl: env.BIB_APP_DATABASE_URL,
@@ -160,6 +183,7 @@ export function redacted(cfg: Config): Record<string, unknown> {
     // The internal key is a credential; redacted() exists so a config dump is
     // safe to log, and this is exactly the field that would make it unsafe.
     auth: { ...cfg.auth, internalApiKey: "***" },
+    rateLimit: cfg.rateLimit,
     db: {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),

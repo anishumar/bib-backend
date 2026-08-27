@@ -9,6 +9,7 @@ import type { Pools } from "../db/pool";
 import { assertLedgerAppendOnly, assertTenantWall } from "../db/boot-check";
 import { systemIds } from "../platform/ids";
 import { systemClock } from "../platform/clock";
+import { InMemoryRateLimiter } from "../platform/ratelimit";
 import type { Logger } from "../platform/log";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../infrastructure/postgres/user-repository";
@@ -67,6 +68,15 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // ONE limiter instance, two very different uses: the edge keys it on the
+  // client address, identity keys it on the account. Sharing the store is safe
+  // because the keys are namespaced, and it keeps a single eviction budget.
+  //
+  // HONEST LIMITATION: this state is per-process, so behind N pods every limit
+  // is effectively N times looser. Acceptable at one pod; the Redis adapter
+  // behind the same port is the fix when there are more.
+  const rateLimiter = new InMemoryRateLimiter(systemClock);
+
   const identity = new IdentityService({
     users,
     memberships,
@@ -82,6 +92,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     ids: systemIds,
     clock: systemClock,
     events: ledger,
+    attempts: rateLimiter,
     magicLinkBaseUrl: cfg.auth.appBaseUrl,
   });
 
@@ -127,6 +138,12 @@ export function wire(cfg: Config, log: Logger): Wired {
         docsEnabled: cfg.docsEnabled,
         internalApiKey: cfg.auth.internalApiKey,
         principalOf,
+        rateLimiter,
+        rateLimit: {
+          auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },
+          general: { limit: cfg.rateLimit.generalPerMinute, windowSeconds: 60 },
+          trustProxy: cfg.rateLimit.trustProxy,
+        },
       },
     ),
     pools,

@@ -26,6 +26,7 @@ import { FakeClock, FakeMailer } from "../../src/testfakes/identity";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { systemIds } from "../../src/platform/ids";
+import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { InvalidMagicLink } from "../../src/domain/identity/errors";
 
 const cfg = load();
@@ -50,6 +51,7 @@ const identity = new IdentityService({
   ids: systemIds,
   clock,
   events: new LedgerService({ events: new PostgresEventStore(app), ids: systemIds }),
+  attempts: new InMemoryRateLimiter(clock),
   magicLinkBaseUrl: "https://app.example.test",
 });
 

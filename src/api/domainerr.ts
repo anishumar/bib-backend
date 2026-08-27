@@ -81,6 +81,8 @@ export function mapError(err: unknown): MappedError {
         return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
       case "WEAK_PASSWORD":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "TOO_MANY_ATTEMPTS":
+        return { status: 429, code: "RATE_LIMITED", message: err.message, reason: err.code };
     }
   }
   // A refused event is OUR bug, never the caller's: services build events from

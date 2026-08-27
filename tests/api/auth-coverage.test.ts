@@ -14,6 +14,8 @@
 import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
+import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -59,6 +61,7 @@ function deps(): RouterDeps {
         ids: fakes.ids,
         clock: new FakeClock(),
         events: fakes.events,
+        attempts: new InMemoryRateLimiter(systemClock),
         magicLinkBaseUrl: "http://localhost:3000",
       }),
       cookieName: "bib_session",
@@ -73,6 +76,8 @@ function app(principal: Principal | null = null) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalApiKey: INTERNAL_KEY,
+    rateLimiter: new InMemoryRateLimiter(systemClock),
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: () => Promise.resolve(principal),
   });
 }
