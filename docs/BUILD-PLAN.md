@@ -210,6 +210,21 @@ sandbox access + credentials. **Not on any demo's critical path.**
 
 ---
 
+## Known-open security work (found while building T1.7; not yet scheduled)
+
+Neither is a hole today — both are limits worth closing before anything public.
+
+- **No rate limiting anywhere.** `POST /api/v1/auth/login` accepts unlimited attempts, so a
+  password is brute-forceable at whatever rate the box serves. The same endpoint is also a
+  **memory-amplification DoS**: scrypt at N=2^15 costs ~32 MB and ~50–100 ms per attempt,
+  unauthenticated, so a few hundred concurrent logins are gigabytes of RSS. Wants a limiter
+  keyed on IP **and** on account (they defend different things), and a concurrency cap on
+  the hash. Cheap to add, and it should land before any public environment exists.
+- **`/internal` authenticates but does not authorize.** One shared secret grants every
+  provisioning action — create a tenant, grant a membership, set any user's password.
+  That is acceptable while the only caller is us, and stops being acceptable the moment a
+  second system holds the key. Revisit when one does.
+
 ## Parking lot / decisions to make (don't build on guesses)
 
 - Dev vs QA cloud DB strategy (recommended: local seeded-from-cloud + shared QA). *Deferred by user.*
