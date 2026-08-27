@@ -15,6 +15,13 @@
 //                  authenticates with a shared secret from config.
 //   /api/v1/*    — the product. Requires a session, except the handful of routes
 //                  that exist to GET one, which are listed below by exact path.
+//
+// And one more gate on that second surface: WHICH AUDIENCE the session belongs
+// to. This is a B2B2C product — a firm's staff and a firm's clients both log in
+// here — so an authenticated session says nothing about whether the caller is
+// allowed to see a firm's book. Audience is denied by default and allowed by
+// exact path, for the same reason authentication is: the alternative is a check
+// each new route remembers to make.
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import type { Principal } from "../platform/callctx";
@@ -42,6 +49,32 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/login",
   "/api/v1/auth/magic-link",
   "/api/v1/auth/magic-link/redeem",
+]);
+
+/**
+ * The routes a CLIENT_PORTAL session may reach. Everything else on /api/v1 is
+ * the STAFF workspace.
+ *
+ * Today that is only the routes a client needs to manage their own session,
+ * because no client-facing feature exists yet (U1 is Phase 6). The list is
+ * short for the right reason: a portal user should reach exactly what has been
+ * built FOR them, and nothing has been.
+ *
+ * Denied by default, and that default is load-bearing. With the reverse — allow
+ * unless denied — a client contact could list the firm's entire book of
+ * clients, create parties in it, and read its audit trail, simply by signing in
+ * through the front door. That was true of this codebase until this list
+ * existed; it was not an attack, it was the normal login path.
+ *
+ * When U1 lands (T6.5–T6.7), its routes are added here AND get record-scope
+ * (gate 4): a portal user sees only the parties they represent, which needs the
+ * user-to-party link that does not exist yet. Audience is the coarse gate;
+ * record-scope is the fine one, and a portal route needs both.
+ */
+export const PORTAL_PATHS: ReadonlySet<string> = new Set([
+  "/api/v1/auth/me",
+  "/api/v1/auth/switch-tenant",
+  "/api/v1/auth/logout",
 ]);
 
 /**
@@ -94,6 +127,21 @@ export function sessionGuard(principalOf: PrincipalResolver): MiddlewareHandler<
         401,
       );
     }
+
+    // GATE 2 — audience. A client-portal session is authenticated and belongs
+    // to the tenant; neither fact entitles it to the firm's staff workspace.
+    if (principal.audience === "CLIENT_PORTAL" && !PORTAL_PATHS.has(c.req.path)) {
+      return c.json(
+        toEnvelope({
+          status: 403,
+          code: "FORBIDDEN",
+          message:
+            "this is a client-portal session; the staff workspace is not available to it",
+        }),
+        403,
+      );
+    }
+
     c.set("principal", principal);
     await next();
     return undefined;

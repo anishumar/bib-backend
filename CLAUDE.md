@@ -142,6 +142,13 @@ exist yet.
 - **`/api/v1/*`** — the product. Requires a session. The only exceptions are the three
   routes that exist to *obtain* one, listed by exact path in `PUBLIC_PATHS`. Adding to that
   set needs a reason as good as theirs.
+- **Audience (gate 2) is denied by default on that surface.** A `CLIENT_PORTAL` session
+  reaches only `PORTAL_PATHS`; everything else is the STAFF workspace and answers 403.
+  This product is B2B2C — a firm's staff *and* its clients log in here — so an
+  authenticated, in-tenant session says nothing about which of the two the caller is. With
+  the reverse default a client contact could list the firm's entire book of clients through
+  the front door. When U1 lands, its routes join `PORTAL_PATHS` **and** need record-scope
+  (gate 4): a portal user sees only the parties they represent.
 
 Handlers read the resolved principal from the request context (`c.get("principal")`) and
 call `scopeOf()` (`api/scope.ts`) when they need a tenant — 401 "not signed in" and 403

@@ -12,9 +12,10 @@
 // new unauthenticated route fails here the moment it is registered, without
 // anyone remembering to add a test for it.
 import { describe, expect, it } from "vitest";
+import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
 import type { RouterDeps } from "../../src/api/router";
-import { PUBLIC_PATHS } from "../../src/api/guards";
+import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
@@ -66,14 +67,25 @@ function deps(): RouterDeps {
   };
 }
 
-function app() {
+/** By default nothing resolves: requests are anonymous unless a test says
+ *  otherwise. `as` builds a router where every request carries one session. */
+function app(principal: Principal | null = null) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalApiKey: INTERNAL_KEY,
-    // No session ever resolves: every request in this file is anonymous.
-    principalOf: () => Promise.resolve(null),
+    principalOf: () => Promise.resolve(principal),
   });
 }
+
+const STAFF_SESSION: Principal = {
+  userId: "00000000-0000-4000-8000-00000000staff".replace("staff", "00005"),
+  sessionId: "00000000-0000-4000-8000-000000000006",
+  tenantId: "00000000-0000-4000-8000-000000000007",
+  audience: "STAFF",
+};
+
+/** A client contact of the firm: authenticated, in the tenant, and outside it. */
+const PORTAL_SESSION: Principal = { ...STAFF_SESSION, audience: "CLIENT_PORTAL" };
 
 /** Every (method, path) the router actually registers, read from the spec it
  *  generates — so this cannot drift from the routes. */
@@ -173,5 +185,62 @@ describe("the /internal platform key", () => {
       headers: { authorization: `Bearer ${INTERNAL_KEY}` },
     });
     expect(res.status).toBe(401);
+  });
+});
+
+
+describe("gate 2 — audience", () => {
+  // This product is B2B2C: a firm's staff and a firm's CLIENTS both log in
+  // here. Being authenticated and inside the tenant says nothing about which
+  // of the two you are, and a client contact must never reach the workspace
+  // where the firm's whole book of clients lives.
+
+  it("refuses a client-portal session everywhere on the staff surface", async () => {
+    const reachable: string[] = [];
+
+    for (const { method, path } of await registeredRoutes()) {
+      if (!path.startsWith("/api/v1/")) continue;
+      if (PUBLIC_PATHS.has(path) || PORTAL_PATHS.has(path)) continue;
+      const init: RequestInit =
+        method === "get"
+          ? { method: "GET" }
+          : { method: method.toUpperCase(), headers: { "content-type": "application/json" }, body: "{}" };
+      const res = await app(PORTAL_SESSION).request(concrete(path), init);
+      if (res.status !== 403) {
+        reachable.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
+      }
+    }
+
+    // Before this gate existed, every one of these answered 200 or 201: a
+    // client contact could list the firm's other clients, create parties, and
+    // read its audit trail — through the front door, not an attack.
+    expect(reachable).toEqual([]);
+  });
+
+  it("lets a client-portal session manage its own session", async () => {
+    for (const path of PORTAL_PATHS) {
+      const res = await app(PORTAL_SESSION).request(path, {
+        method: path.endsWith("/me") ? "GET" : "POST",
+        headers: { "content-type": "application/json" },
+        ...(path.endsWith("/me") ? {} : { body: "{}" }),
+      });
+      expect(res.status, `${path} should not be 403 for a portal session`).not.toBe(403);
+    }
+  });
+
+  it("still lets staff through", async () => {
+    const res = await app(STAFF_SESSION).request("/api/v1/parties");
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps the portal list to session management only", () => {
+    // Nothing has been built FOR portal users yet (U1 is Phase 6), so they
+    // should reach nothing but their own session. A route added here needs
+    // record-scope (gate 4) as well — audience alone is the coarse gate.
+    expect([...PORTAL_PATHS].sort()).toEqual([
+      "/api/v1/auth/logout",
+      "/api/v1/auth/me",
+      "/api/v1/auth/switch-tenant",
+    ]);
   });
 });
