@@ -130,6 +130,9 @@ npm run check      # typecheck + lint + arch + test  ← the gate; run before ev
 npm test           # vitest (unit + the architecture test)
 npm run test:integration   # the checks only a real Postgres can make (RLS, append-only
                            # ledger). Needs a migrated local DB; not in `check`.
+npm run smoke              # end-to-end against a RUNNING server: seeds a firm with three
+                           # roles and walks every gate, the party model, rate limits,
+                           # CORS and the audit trail. Prints logins to continue in the UI.
 npm run arch       # the import wall, standalone
 ```
 

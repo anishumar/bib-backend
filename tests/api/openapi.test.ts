@@ -167,3 +167,25 @@ describe("principal gate", () => {
     expect(Array.isArray(body.memberships)).toBe(true);
   });
 });
+
+
+describe("transport-level faults", () => {
+  it("answers a malformed JSON body 400, not 500", async () => {
+    // Hono raises HTTPException before any handler runs. Falling through to
+    // INTERNAL blamed the server for the client's bad request AND logged every
+    // one as an unhandled error, which is how a real 500 gets lost.
+    const res = await app().request("/internal/v1/tenants", {
+      method: "POST",
+      headers: internal,
+      body: "{not json",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("VALIDATION");
+  });
+
+  it("still answers an unknown route 404 in the envelope", async () => {
+    const res = await app().request("/internal/v1/nope", { headers: internal });
+    expect(res.status).toBe(404);
+  });
+});

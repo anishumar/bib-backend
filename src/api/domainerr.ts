@@ -5,6 +5,7 @@
 // the domain nor the use case would know either edge exists.
 //
 // No service adds to this set — finer distinctions go in `reason`.
+import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
@@ -38,6 +39,14 @@ export interface MappedError {
 }
 
 export function mapError(err: unknown): MappedError {
+  // The transport's own faults, raised before any handler runs — a malformed
+  // JSON body is the everyday one. Without this branch they fell through to
+  // INTERNAL, so a client sending bad JSON got a 500 blaming the server, and
+  // every such request was logged as an unhandled error. That is worse than
+  // the wrong status code: routine client mistakes drown the log that real
+  // 500s have to be found in.
+  if (err instanceof HTTPException) return fromHttpException(err);
+
   if (err instanceof TenancyError) {
     switch (err.code) {
       case "INVALID_SLUG":
@@ -102,4 +111,28 @@ export function mapError(err: unknown): MappedError {
     return { status: 500, code: "INTERNAL", message: "internal error", reason: err.code };
   }
   return { status: 500, code: "INTERNAL", message: "internal error" };
+}
+
+/** Hono raises HTTPException with a numeric status; this narrows it into the
+ *  closed set the rest of the system speaks. A 4xx we do not name is the
+ *  client's fault and reported as VALIDATION; anything else is ours. */
+function fromHttpException(err: HTTPException): MappedError {
+  switch (err.status) {
+    case 400:
+      return { status: 400, code: "VALIDATION", message: err.message };
+    case 401:
+      return { status: 401, code: "UNAUTHORIZED", message: err.message };
+    case 403:
+      return { status: 403, code: "FORBIDDEN", message: err.message };
+    case 404:
+      return { status: 404, code: "NOT_FOUND", message: err.message };
+    case 409:
+      return { status: 409, code: "CONFLICT", message: err.message };
+    case 429:
+      return { status: 429, code: "RATE_LIMITED", message: err.message };
+    default:
+      return err.status >= 400 && err.status < 500
+        ? { status: 400, code: "VALIDATION", message: err.message }
+        : { status: 500, code: "INTERNAL", message: "internal error" };
+  }
 }
