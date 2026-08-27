@@ -9,8 +9,10 @@ import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/handler/tenancy";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { PartyService } from "../../src/usecase/party/service";
+import { LedgerService } from "../../src/usecase/ledger/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import { makePartyFakes } from "../../src/testfakes/party";
+import { makeLedgerFakes } from "../../src/testfakes/ledger";
 
 const silentLog = { info() {}, warn() {}, error() {} };
 
@@ -23,6 +25,7 @@ function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()), principalOf: devPrincipal },
     party: { service: new PartyService(makePartyFakes()) },
+    ledger: { service: new LedgerService(makeLedgerFakes()) },
   };
 }
 
@@ -36,11 +39,12 @@ describe("OpenAPI spec", () => {
     expect(res.status).toBe(200);
     const spec = (await res.json()) as { paths: Record<string, unknown> };
     const paths = Object.keys(spec.paths);
-    // Tenancy + party routes are both mounted; assert a representative set.
+    // Tenancy, party and ledger routes are all mounted; assert a representative set.
     expect(paths).toContain("/internal/v1/tenants");
     expect(paths).toContain("/api/v1/tenancy/me/memberships");
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/organizations");
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/parties/{partyId}");
+    expect(paths).toContain("/internal/v1/tenants/{tenantId}/events");
   });
 
   it("is not served when docs are disabled", async () => {

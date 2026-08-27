@@ -5,7 +5,7 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { Config } from "../config/config";
 import { createPools } from "../db/pool";
 import type { Pools } from "../db/pool";
-import { assertTenantWall } from "../db/boot-check";
+import { assertLedgerAppendOnly, assertTenantWall } from "../db/boot-check";
 import { systemIds } from "../platform/ids";
 import type { Logger } from "../platform/log";
 import type { Principal } from "../platform/callctx";
@@ -15,8 +15,10 @@ import { PostgresMembershipRepository } from "../infrastructure/postgres/members
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
+import { PostgresEventStore } from "../infrastructure/postgres/event-repository";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
+import { LedgerService } from "../usecase/ledger/service";
 import type { PrincipalResolver, TenancyDeps } from "../api/handler/tenancy";
 import { buildRouter } from "../api/router";
 
@@ -49,6 +51,15 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   const tenancyDeps: TenancyDeps = { service: tenancy, principalOf: devPrincipal };
 
+  // The ledger is constructed BEFORE the services that will write to it: every
+  // module that records events receives this one instance through its own
+  // EventSink port, so there is exactly one implementation of the event
+  // contract in the process and no service can reach the table around it.
+  const ledger = new LedgerService({
+    events: new PostgresEventStore(pools.app),
+    ids: systemIds,
+  });
+
   const party = new PartyService({
     parties: new PostgresPartyRepository(pools.app),
     identifiers: new PostgresIdentifierRepository(pools.app),
@@ -57,10 +68,15 @@ export function wire(cfg: Config, log: Logger): Wired {
   });
 
   return {
-    app: buildRouter({ tenancy: tenancyDeps, party: { service: party } }, log, {
-      docsEnabled: cfg.docsEnabled,
-    }),
+    app: buildRouter(
+      { tenancy: tenancyDeps, party: { service: party }, ledger: { service: ledger } },
+      log,
+      { docsEnabled: cfg.docsEnabled },
+    ),
     pools,
-    assertReady: () => assertTenantWall(pools.app),
+    assertReady: async () => {
+      await assertTenantWall(pools.app);
+      await assertLedgerAppendOnly(pools.app);
+    },
   };
 }

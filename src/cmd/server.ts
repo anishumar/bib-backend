@@ -19,7 +19,9 @@ async function main(): Promise<void> {
 
   try {
     await wired.assertReady();
-    log.info("tenant wall verified: app role is NOBYPASSRLS and RLS is enabled");
+    log.info(
+      "boot checks passed: app role is NOBYPASSRLS, RLS is enabled, and the ledger is append-only",
+    );
   } catch (err) {
     log.error({ err }, "boot check failed — refusing to serve");
     await wired.pools.close();

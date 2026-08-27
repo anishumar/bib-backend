@@ -116,6 +116,8 @@ npm run dev        # tsx watch — local server
 npm run migrate    # apply migrations (owner role; ensures bib_owner/bib_app)
 npm run check      # typecheck + lint + arch + test  ← the gate; run before every push
 npm test           # vitest (unit + the architecture test)
+npm run test:integration   # the checks only a real Postgres can make (RLS, append-only
+                           # ledger). Needs a migrated local DB; not in `check`.
 npm run arch       # the import wall, standalone
 ```
 
@@ -124,7 +126,17 @@ the work is not done — fix it, do not disable the rule. If a rule is genuinely
 a design conversation in the PR, landed as its own commit with the reasoning — never a quiet
 exception or an import moved to dodge the matcher.
 
+## The audit ledger
+
+Every state transition writes an event. Depend on the **`EventSink`** port
+(`usecase/ledger/ports.ts`) and call `recordEvent()` — never on `LedgerService`, never on a
+ledger adapter. The verb comes from the closed registry in `domain/ledger/model.ts`;
+`object_type` is derived from it; the payload holds ids and machine facts and **no personal
+data** (refused at the write — the log cannot be erased). Record the event *after* the
+change it describes has committed. The full contract is `docs/EVENT-CONTRACT.md`; read it
+before emitting your first event.
+
 ## First module
 
-`tenancy` is built (this scaffold). Next, in order: `crm`, then `billing` — the flagship
-slice. Reuse the platform's auth and notifications; do not rebuild them.
+`tenancy`, `party` and the `ledger` are built. Next, in order: `crm`, then `billing` — the
+flagship slice. Reuse the platform's auth and notifications; do not rebuild them.

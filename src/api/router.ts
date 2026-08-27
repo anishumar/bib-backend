@@ -16,6 +16,8 @@ import { registerTenancyRoutes } from "./handler/tenancy";
 import type { TenancyDeps } from "./handler/tenancy";
 import { registerPartyRoutes } from "./handler/party";
 import type { PartyDeps } from "./handler/party";
+import { registerLedgerRoutes } from "./handler/ledger";
+import type { LedgerDeps } from "./handler/ledger";
 import { mapError } from "./domainerr";
 import { toEnvelope } from "./httpresp";
 
@@ -29,6 +31,7 @@ export interface RouterOptions {
 export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly party: PartyDeps;
+  readonly ledger: LedgerDeps;
 }
 
 export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions): OpenAPIHono {
@@ -52,6 +55,7 @@ export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions):
   // App + platform routes, one registrar per module.
   registerTenancyRoutes(app, deps.tenancy);
   registerPartyRoutes(app, deps.party);
+  registerLedgerRoutes(app, deps.ledger);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

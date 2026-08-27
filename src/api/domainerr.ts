@@ -7,6 +7,7 @@
 // No service adds to this set — finer distinctions go in `reason`.
 import { TenancyError } from "../domain/tenancy/errors";
 import { PartyError } from "../domain/party/errors";
+import { LedgerError } from "../domain/ledger/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -62,6 +63,14 @@ export function mapError(err: unknown): MappedError {
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
     }
+  }
+  // A refused event is OUR bug, never the caller's: services build events from
+  // their own vocabulary, so an unknown verb or a personal-data payload means
+  // this codebase got it wrong. Reporting it as a 400 would blame the client
+  // for a defect they cannot fix. It maps to INTERNAL — which the router logs
+  // with the full error — and `reason` carries which rule was broken.
+  if (err instanceof LedgerError) {
+    return { status: 500, code: "INTERNAL", message: "internal error", reason: err.code };
   }
   return { status: 500, code: "INTERNAL", message: "internal error" };
 }
