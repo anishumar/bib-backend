@@ -8,6 +8,7 @@
 import { TenancyError } from "../domain/tenancy/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
+import { IdentityError } from "../domain/identity/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -61,6 +62,24 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_RELATIONSHIP_TYPE":
       case "INVALID_DATE_RANGE":
       case "SELF_RELATIONSHIP":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof IdentityError) {
+    switch (err.code) {
+      // 401: the caller has not proved who they are. Both of these are
+      // deliberately vague to the client — the precise reason is server-side.
+      case "INVALID_CREDENTIALS":
+      case "INVALID_MAGIC_LINK":
+      case "SESSION_INVALID":
+        return { status: 401, code: "UNAUTHORIZED", message: err.message, reason: err.code };
+      // 403: identity is established, the access is not. Saying so is safe —
+      // the caller has already proved who they are.
+      case "NO_ACTIVE_MEMBERSHIP":
+      case "NOT_A_MEMBER":
+      case "USER_DISABLED":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      case "WEAK_PASSWORD":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
     }
   }

@@ -8,13 +8,8 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import { z, errorResponse } from "../openapi";
 import type { TenancyService } from "../../usecase/tenancy/service";
-import type { Principal } from "../../platform/callctx";
 import { toEnvelope } from "../httpresp";
-
-/** Resolves the authenticated principal from request headers. A driving port:
- *  the dev adapter reads a header; a real session/SSO adapter (ADR-03) drops in
- *  here later without touching this layer. */
-export type PrincipalResolver = (getHeader: (name: string) => string | undefined) => Principal | null;
+import type { PrincipalResolver } from "../principal";
 
 /** What the route registrar needs. The service is the one collaborator the
  *  handlers call; the principal resolver is injected so this layer never knows
@@ -143,7 +138,11 @@ const myMembershipsRoute = createRoute({
         .string()
         .uuid()
         .optional()
-        .openapi({ description: "Dev principal (until the SSO adapter, ADR-03, lands)" }),
+        .openapi({
+          description:
+            "Dev principal, accepted only when BIB_DEV_AUTH_ENABLED is on. The real path is " +
+            "the session cookie from POST /api/v1/auth/login.",
+        }),
     }),
   },
   responses: {
@@ -178,7 +177,7 @@ export function registerTenancyRoutes(app: OpenAPIHono, deps: TenancyDeps): void
   });
 
   app.openapi(myMembershipsRoute, async (c) => {
-    const principal = deps.principalOf((name) => c.req.header(name));
+    const principal = await deps.principalOf((name) => c.req.header(name));
     if (!principal) {
       return c.json(
         toEnvelope({ status: 401, code: "UNAUTHORIZED", message: "no authenticated user" }),

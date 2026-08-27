@@ -23,6 +23,22 @@ const EnvSchema = z.object({
   // production-like — the spec lists every endpoint, so a public environment
   // opts in explicitly rather than leaking it by default.
   BIB_DOCS_ENABLED: z.enum(["true", "false"]).optional(),
+
+  // ── Auth (T1.7) ───────────────────────────────────────────────────────────
+  BIB_SESSION_COOKIE_NAME: z.string().min(1).default("bib_session"),
+  // Unset ⇒ on for production-like, off locally (a Secure cookie is dropped by
+  // the browser over plain http, which would silently break local development).
+  BIB_SESSION_COOKIE_SECURE: z.enum(["true", "false"]).optional(),
+  // Where a magic link sends the user: the FRONTEND's redemption page, not this
+  // API. Two different origins, so it cannot be inferred from the request.
+  BIB_APP_BASE_URL: z.string().url().default("http://localhost:3000"),
+  // The honest registry, as a switch. When on, the dev x-user-id header is
+  // accepted as a principal. validate.ts refuses it in production-like.
+  BIB_DEV_AUTH_ENABLED: z.enum(["true", "false"]).optional(),
+  // Only 'log' is implemented — it writes the magic link to the log instead of
+  // sending it. The enum grows when a real transport lands; production-like
+  // refuses to boot on 'log'.
+  BIB_MAIL_TRANSPORT: z.enum(["log"]).default("log"),
 });
 
 export type Environment = z.infer<typeof EnvSchema>["BIB_ENVIRONMENT"];
@@ -36,6 +52,16 @@ export interface DbConfig {
   readonly ownerPoolSize: number;
 }
 
+export interface AuthConfig {
+  readonly sessionCookieName: string;
+  readonly sessionCookieSecure: boolean;
+  /** Base URL of the frontend, used to build magic links. */
+  readonly appBaseUrl: string;
+  /** Whether the dev x-user-id principal resolver is registered. */
+  readonly devAuthEnabled: boolean;
+  readonly mailTransport: "log";
+}
+
 export interface Config {
   readonly environment: Environment;
   readonly logLevel: "debug" | "info" | "warn" | "error";
@@ -43,6 +69,7 @@ export interface Config {
   readonly db: DbConfig;
   /** Whether to serve the OpenAPI spec and Swagger UI. */
   readonly docsEnabled: boolean;
+  readonly auth: AuthConfig;
 }
 
 /**
@@ -81,6 +108,19 @@ export function load(): Config {
     logLevel: env.BIB_LOG_LEVEL,
     port: env.BIB_PORT,
     docsEnabled,
+    auth: {
+      sessionCookieName: env.BIB_SESSION_COOKIE_NAME,
+      sessionCookieSecure:
+        env.BIB_SESSION_COOKIE_SECURE !== undefined
+          ? env.BIB_SESSION_COOKIE_SECURE === "true"
+          : productionLike,
+      appBaseUrl: env.BIB_APP_BASE_URL,
+      devAuthEnabled:
+        env.BIB_DEV_AUTH_ENABLED !== undefined
+          ? env.BIB_DEV_AUTH_ENABLED === "true"
+          : !productionLike,
+      mailTransport: env.BIB_MAIL_TRANSPORT,
+    },
     db: {
       ownerUrl: env.BIB_DATABASE_URL,
       appUrl: env.BIB_APP_DATABASE_URL,
@@ -110,6 +150,7 @@ export function redacted(cfg: Config): Record<string, unknown> {
     logLevel: cfg.logLevel,
     port: cfg.port,
     docsEnabled: cfg.docsEnabled,
+    auth: cfg.auth,
     db: {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),

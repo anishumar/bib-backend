@@ -7,8 +7,8 @@ import { createPools } from "../db/pool";
 import type { Pools } from "../db/pool";
 import { assertLedgerAppendOnly, assertTenantWall } from "../db/boot-check";
 import { systemIds } from "../platform/ids";
+import { systemClock } from "../platform/clock";
 import type { Logger } from "../platform/log";
-import type { Principal } from "../platform/callctx";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
@@ -16,10 +16,20 @@ import { PostgresPartyRepository } from "../infrastructure/postgres/party-reposi
 import { PostgresIdentifierRepository } from "../infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
 import { PostgresEventStore } from "../infrastructure/postgres/event-repository";
+import {
+  PostgresCredentialRepository,
+  PostgresMagicLinkRepository,
+  PostgresSessionRepository,
+} from "../infrastructure/postgres/identity-repository";
+import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
+import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
+import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
-import type { PrincipalResolver, TenancyDeps } from "../api/handler/tenancy";
+import { IdentityService } from "../usecase/identity/service";
+import type { TenancyDeps } from "../api/handler/tenancy";
+import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
 import { buildRouter } from "../api/router";
 
 export interface Wired {
@@ -32,24 +42,53 @@ export interface Wired {
 export function wire(cfg: Config, log: Logger): Wired {
   const pools = createPools(cfg.db);
 
+  // The users and memberships repositories serve two use cases: tenancy
+  // creates them, identity reads them. Identity states its needs as its own
+  // narrow ports (UserDirectory / MembershipDirectory), which these satisfy —
+  // so one adapter, two consumers, and neither use case knows about the other.
+  const users = new PostgresUserRepository(pools.app);
+  const memberships = new PostgresMembershipRepository(pools.app);
+
   const tenancy = new TenancyService({
     tenants: new PostgresTenantRepository(pools.app),
-    users: new PostgresUserRepository(pools.app),
-    memberships: new PostgresMembershipRepository(pools.app),
+    users,
+    memberships,
     ids: systemIds,
   });
 
-  // HONEST REGISTRY: this is the ONLY principal resolver registered today — a
-  // dev adapter that trusts an x-user-id header. It is safe locally and must
-  // never be the resolver in a production-like environment. The real session /
-  // SSO adapter (ADR-03) is implemented as a port here and plugged in when a
-  // deal requires it; until then it is deliberately unregistered.
-  const devPrincipal: PrincipalResolver = (getHeader): Principal | null => {
-    const userId = getHeader("x-user-id");
-    return userId ? { userId } : null;
-  };
+  const identity = new IdentityService({
+    users,
+    memberships,
+    credentials: new PostgresCredentialRepository(pools.app),
+    sessions: new PostgresSessionRepository(pools.app),
+    magicLinks: new PostgresMagicLinkRepository(pools.app),
+    passwords: new ScryptPasswordHasher(),
+    tokens: new RandomTokenFactory(),
+    // HONEST REGISTRY: the only mailer registered writes the link to the log
+    // instead of sending it. validateServer refuses to boot a production-like
+    // environment with it — see config/validate.ts.
+    mailer: new LoggingMailer(log),
+    ids: systemIds,
+    clock: systemClock,
+    magicLinkBaseUrl: cfg.auth.appBaseUrl,
+  });
 
-  const tenancyDeps: TenancyDeps = { service: tenancy, principalOf: devPrincipal };
+  // HONEST REGISTRY, the second half. The session resolver is the real one and
+  // is always registered. The dev resolver — which trusts an x-user-id header
+  // and is not authentication — is added ONLY when config says so, and
+  // validateServer has already refused that config in any public environment.
+  // So there is no fallback to fall back to in production; there is one
+  // resolver, and it requires a session.
+  const principalOf = cfg.auth.devAuthEnabled
+    ? firstOf(sessionResolver(identity, cfg.auth.sessionCookieName), devHeaderResolver())
+    : sessionResolver(identity, cfg.auth.sessionCookieName);
+  if (cfg.auth.devAuthEnabled) {
+    log.warn(
+      "DEV AUTH IS ON: an x-user-id header is accepted as a principal. Local development only.",
+    );
+  }
+
+  const tenancyDeps: TenancyDeps = { service: tenancy, principalOf };
 
   // The ledger is constructed BEFORE the services that will write to it: every
   // module that records events receives this one instance through its own
@@ -69,7 +108,17 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   return {
     app: buildRouter(
-      { tenancy: tenancyDeps, party: { service: party }, ledger: { service: ledger } },
+      {
+        auth: {
+          service: identity,
+          principalOf,
+          cookieName: cfg.auth.sessionCookieName,
+          cookieSecure: cfg.auth.sessionCookieSecure,
+        },
+        tenancy: tenancyDeps,
+        party: { service: party },
+        ledger: { service: ledger },
+      },
       log,
       { docsEnabled: cfg.docsEnabled },
     ),

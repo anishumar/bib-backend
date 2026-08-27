@@ -6,26 +6,65 @@
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import type { RouterDeps } from "../../src/api/router";
-import type { PrincipalResolver } from "../../src/api/handler/tenancy";
+import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
+import { IdentityService } from "../../src/usecase/identity/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import { makePartyFakes } from "../../src/testfakes/party";
 import { makeLedgerFakes } from "../../src/testfakes/ledger";
+import {
+  FakeClock,
+  FakeCredentialRepo,
+  FakeMagicLinkRepo,
+  FakeMailer,
+  FakePasswordHasher,
+  FakeSessionRepo,
+  FakeTokenFactory,
+} from "../../src/testfakes/identity";
 
 const silentLog = { info() {}, warn() {}, error() {} };
 
+// The dev resolver, as the composition root registers it locally: an x-user-id
+// header stands in for a session. Not authentication — see api/principal.ts.
 const devPrincipal: PrincipalResolver = (getHeader) => {
   const userId = getHeader("x-user-id");
-  return userId ? { userId } : null;
+  return Promise.resolve(
+    userId ? { userId, sessionId: DEV_SESSION, tenantId: null, audience: null } : null,
+  );
 };
+
+const DEV_SESSION = "00000000-0000-0000-0000-0000000000de";
+
+function identityService(): IdentityService {
+  const fakes = makeFakes();
+  return new IdentityService({
+    users: fakes.users,
+    memberships: fakes.memberships,
+    credentials: new FakeCredentialRepo(),
+    sessions: new FakeSessionRepo(),
+    magicLinks: new FakeMagicLinkRepo(),
+    passwords: new FakePasswordHasher(),
+    tokens: new FakeTokenFactory(),
+    mailer: new FakeMailer(),
+    ids: fakes.ids,
+    clock: new FakeClock(),
+    magicLinkBaseUrl: "http://localhost:3000",
+  });
+}
 
 function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()), principalOf: devPrincipal },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
+    auth: {
+      service: identityService(),
+      principalOf: devPrincipal,
+      cookieName: "bib_session",
+      cookieSecure: false,
+    },
   };
 }
 
@@ -45,6 +84,7 @@ describe("OpenAPI spec", () => {
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/organizations");
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/parties/{partyId}");
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/events");
+    expect(paths).toContain("/api/v1/auth/login");
   });
 
   it("is not served when docs are disabled", async () => {

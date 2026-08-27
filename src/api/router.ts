@@ -2,6 +2,7 @@
 // see every route the service exposes, how it is gated, and where the docs are:
 //
 //   /health, /ready                    ops, auth-free
+//   /api/v1/auth/...                   sign in / prove / switch org / sign out
 //   /internal/v1/...                   service-to-service / platform (not app-facing)
 //   /api/v1/tenancy/...                app-facing (user principal)
 //   /openapi.json, /docs               generated spec + Swagger UI (gated)
@@ -18,6 +19,8 @@ import { registerPartyRoutes } from "./handler/party";
 import type { PartyDeps } from "./handler/party";
 import { registerLedgerRoutes } from "./handler/ledger";
 import type { LedgerDeps } from "./handler/ledger";
+import { registerAuthRoutes } from "./handler/auth";
+import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
 import { toEnvelope } from "./httpresp";
 
@@ -32,6 +35,7 @@ export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly party: PartyDeps;
   readonly ledger: LedgerDeps;
+  readonly auth: AuthDeps;
 }
 
 export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions): OpenAPIHono {
@@ -53,6 +57,7 @@ export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions):
   app.get("/ready", (c) => c.json({ status: "ready" }));
 
   // App + platform routes, one registrar per module.
+  registerAuthRoutes(app, deps.auth);
   registerTenancyRoutes(app, deps.tenancy);
   registerPartyRoutes(app, deps.party);
   registerLedgerRoutes(app, deps.ledger);

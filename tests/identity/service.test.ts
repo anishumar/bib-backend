@@ -1,0 +1,352 @@
+// The sign-in flow, against in-memory ports. The interesting assertions here
+// are the negative ones: what the system refuses to reveal, and what stops
+// working the moment a session is revoked.
+import { beforeEach, describe, expect, it } from "vitest";
+import { IdentityService } from "../../src/usecase/identity/service";
+import { makeFakes } from "../../src/testfakes/tenancy";
+import type { FakeMembershipRepo, FakeUserRepo } from "../../src/testfakes/tenancy";
+import {
+  FakeClock,
+  FakeCredentialRepo,
+  FakeMagicLinkRepo,
+  FakeMailer,
+  FakePasswordHasher,
+  FakeSessionRepo,
+  FakeTokenFactory,
+} from "../../src/testfakes/identity";
+import {
+  InvalidCredentials,
+  InvalidMagicLink,
+  NoActiveMembership,
+  NotAMember,
+  UserDisabled,
+  WeakPassword,
+} from "../../src/domain/identity/errors";
+import { SESSION_TTL_DAYS, MAGIC_LINK_TTL_MINUTES } from "../../src/domain/identity/model";
+
+const TENANT_A = "11111111-1111-1111-1111-111111111111";
+const TENANT_B = "22222222-2222-2222-2222-222222222222";
+const PASSWORD = "correct horse battery staple";
+
+interface Harness {
+  service: IdentityService;
+  users: FakeUserRepo;
+  memberships: FakeMembershipRepo;
+  credentials: FakeCredentialRepo;
+  sessions: FakeSessionRepo;
+  magicLinks: FakeMagicLinkRepo;
+  mailer: FakeMailer;
+  clock: FakeClock;
+}
+
+function harness(): Harness {
+  const fakes = makeFakes();
+  const credentials = new FakeCredentialRepo();
+  const sessions = new FakeSessionRepo();
+  const magicLinks = new FakeMagicLinkRepo();
+  const mailer = new FakeMailer();
+  const clock = new FakeClock();
+  const service = new IdentityService({
+    users: fakes.users,
+    memberships: fakes.memberships,
+    credentials,
+    sessions,
+    magicLinks,
+    passwords: new FakePasswordHasher(),
+    tokens: new FakeTokenFactory(),
+    mailer,
+    ids: fakes.ids,
+    clock,
+    magicLinkBaseUrl: "https://app.example.com",
+  });
+  return {
+    service,
+    users: fakes.users,
+    memberships: fakes.memberships,
+    credentials,
+    sessions,
+    magicLinks,
+    mailer,
+    clock,
+  };
+}
+
+/** A user with a password and one active STAFF membership — the ordinary case. */
+async function seedUser(
+  h: Harness,
+  email = "priya@harbourpoint.in",
+  tenants: readonly string[] = [TENANT_A],
+): Promise<string> {
+  const user = await h.users.create({ id: `user-${email}`, email });
+  for (const tenantId of tenants) {
+    await h.memberships.create({
+      id: `m-${tenantId}-${email}`,
+      tenantId,
+      userId: user.id,
+      audience: "STAFF",
+      role: "partner",
+      commercialVisibility: true,
+    });
+  }
+  await h.service.setPassword(user.id, PASSWORD);
+  return user.id;
+}
+
+describe("setPassword", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  it("refuses a password shorter than the policy", async () => {
+    const user = await h.users.create({ id: "u1", email: "a@b.co" });
+    await expect(h.service.setPassword(user.id, "short")).rejects.toBeInstanceOf(WeakPassword);
+  });
+
+  it("revokes every existing session — a password change ends the thief's too", async () => {
+    const userId = await seedUser(h);
+    const first = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    const second = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    expect(await h.service.resolveSession(first.token)).not.toBeNull();
+
+    await h.service.setPassword(userId, "an entirely new passphrase");
+
+    expect(await h.service.resolveSession(first.token)).toBeNull();
+    expect(await h.service.resolveSession(second.token)).toBeNull();
+  });
+});
+
+describe("login", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  it("opens a session and auto-selects the only tenant", async () => {
+    await seedUser(h);
+    const result = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    expect(result.principal.tenantId).toBe(TENANT_A);
+    expect(result.principal.audience).toBe("STAFF");
+    expect(result.memberships).toHaveLength(1);
+  });
+
+  it("normalises the email — case and padding are not a different account", async () => {
+    await seedUser(h);
+    const result = await h.service.login("  PRIYA@HarbourPoint.in ", PASSWORD);
+    expect(result.principal.userId).toBe("user-priya@harbourpoint.in");
+  });
+
+  it("leaves the tenant unset when the user belongs to several", async () => {
+    await seedUser(h, "partner@two-firms.com", [TENANT_A, TENANT_B]);
+    const result = await h.service.login("partner@two-firms.com", PASSWORD);
+    // A partner acting for two firms must SAY which one — every downstream gate
+    // keys on that answer, so it is never guessed.
+    expect(result.principal.tenantId).toBeNull();
+    expect(result.principal.audience).toBeNull();
+    expect(result.memberships).toHaveLength(2);
+  });
+
+  it("answers identically for an unknown email and a wrong password", async () => {
+    await seedUser(h);
+    const unknown = await h.service
+      .login("nobody@example.com", PASSWORD)
+      .catch((e: unknown) => e);
+    const wrong = await h.service
+      .login("priya@harbourpoint.in", "not the password")
+      .catch((e: unknown) => e);
+
+    expect(unknown).toBeInstanceOf(InvalidCredentials);
+    expect(wrong).toBeInstanceOf(InvalidCredentials);
+    // Same error, same message: the endpoint is not an oracle for who has an
+    // account here — which, for a firm's client list, is itself the leak.
+    expect((unknown as Error).message).toBe((wrong as Error).message);
+  });
+
+  it("refuses a user with no password set", async () => {
+    await h.users.create({ id: "u-invited", email: "invited@example.com" });
+    await expect(
+      h.service.login("invited@example.com", PASSWORD),
+    ).rejects.toBeInstanceOf(InvalidCredentials);
+  });
+
+  it("names the reason only once the password is proved", async () => {
+    // A disabled account and one with no membership are both told why — but
+    // only after a correct password, so neither answer leaks to a stranger.
+    const user = await h.users.create({ id: "u-none", email: "orphan@example.com" });
+    await h.service.setPassword(user.id, PASSWORD);
+    await expect(h.service.login("orphan@example.com", PASSWORD)).rejects.toBeInstanceOf(
+      NoActiveMembership,
+    );
+
+    await seedUser(h, "gone@example.com");
+    h.users.rows[h.users.rows.findIndex((r) => r.email === "gone@example.com")] = {
+      id: "user-gone@example.com",
+      email: "gone@example.com",
+      status: "disabled",
+    };
+    await expect(h.service.login("gone@example.com", PASSWORD)).rejects.toBeInstanceOf(
+      UserDisabled,
+    );
+  });
+
+  it("refuses a user whose only membership was deactivated", async () => {
+    await seedUser(h, "left@example.com");
+    const i = h.memberships.rows.findIndex((m) => m.userId === "user-left@example.com");
+    const row = h.memberships.rows[i];
+    if (row) h.memberships.rows[i] = { ...row, isActive: false };
+    await expect(h.service.login("left@example.com", PASSWORD)).rejects.toBeInstanceOf(
+      NoActiveMembership,
+    );
+  });
+});
+
+describe("sessions", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  it("resolves a valid token to a principal, and an unknown one to null", async () => {
+    await seedUser(h);
+    const { token, principal } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    expect(await h.service.resolveSession(token)).toEqual(principal);
+    expect(await h.service.resolveSession("not-a-token")).toBeNull();
+  });
+
+  it("stops resolving once the session expires", async () => {
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    h.clock.advanceDays(SESSION_TTL_DAYS - 1);
+    expect(await h.service.resolveSession(token)).not.toBeNull();
+    h.clock.advanceDays(2);
+    expect(await h.service.resolveSession(token)).toBeNull();
+  });
+
+  it("stops resolving the moment it is revoked — not when it expires", async () => {
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    await h.service.logout(token);
+    expect(await h.service.resolveSession(token)).toBeNull();
+  });
+
+  it("logout is idempotent and safe on an unknown token", async () => {
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    await h.service.logout(token);
+    await expect(h.service.logout(token)).resolves.toBeUndefined();
+    await expect(h.service.logout("never-existed")).resolves.toBeUndefined();
+  });
+
+  it("revokeAllSessions ends every session and reports how many", async () => {
+    const userId = await seedUser(h);
+    await h.service.login("priya@harbourpoint.in", PASSWORD);
+    await h.service.login("priya@harbourpoint.in", PASSWORD);
+    expect(await h.service.revokeAllSessions(userId)).toBe(2);
+    expect(await h.service.revokeAllSessions(userId)).toBe(0);
+  });
+});
+
+describe("switchTenant", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  it("points the session at another of the caller's tenants", async () => {
+    await seedUser(h, "partner@two-firms.com", [TENANT_A, TENANT_B]);
+    const { principal } = await h.service.login("partner@two-firms.com", PASSWORD);
+    const switched = await h.service.switchTenant(
+      principal.sessionId,
+      principal.userId,
+      TENANT_B,
+    );
+    expect(switched.tenantId).toBe(TENANT_B);
+    expect(switched.audience).toBe("STAFF");
+  });
+
+  it("refuses a tenant the caller has no active membership in", async () => {
+    await seedUser(h);
+    const { principal } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    await expect(
+      h.service.switchTenant(principal.sessionId, principal.userId, TENANT_B),
+    ).rejects.toBeInstanceOf(NotAMember);
+  });
+
+  it("re-checks the membership, so a revoked one cannot be switched into", async () => {
+    await seedUser(h, "partner@two-firms.com", [TENANT_A, TENANT_B]);
+    const { principal } = await h.service.login("partner@two-firms.com", PASSWORD);
+    const i = h.memberships.rows.findIndex((m) => m.tenantId === TENANT_B);
+    const row = h.memberships.rows[i];
+    if (row) h.memberships.rows[i] = { ...row, isActive: false };
+
+    await expect(
+      h.service.switchTenant(principal.sessionId, principal.userId, TENANT_B),
+    ).rejects.toBeInstanceOf(NotAMember);
+  });
+});
+
+describe("magic links", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** The token as the user receives it: pulled out of the emailed url. */
+  function tokenFromEmail(h2: Harness): string {
+    const last = h2.mailer.sent.at(-1);
+    if (!last) throw new Error("no email was sent");
+    const token = new URL(last.url).searchParams.get("token");
+    if (token === null) throw new Error(`no token in ${last.url}`);
+    return token;
+  }
+
+  it("emails a link that redeems for a session", async () => {
+    await seedUser(h);
+    await h.service.requestMagicLink("priya@harbourpoint.in");
+    expect(h.mailer.sent).toHaveLength(1);
+
+    const result = await h.service.redeemMagicLink(tokenFromEmail(h));
+    expect(result.principal.tenantId).toBe(TENANT_A);
+    expect(await h.service.resolveSession(result.token)).not.toBeNull();
+  });
+
+  it("signs in a user who has no password at all — the invited case", async () => {
+    const user = await h.users.create({ id: "u-invited", email: "invited@example.com" });
+    await h.memberships.create({
+      id: "m-invited",
+      tenantId: TENANT_A,
+      userId: user.id,
+      audience: "CLIENT_PORTAL",
+      role: "client_contact",
+      commercialVisibility: false,
+    });
+    await h.service.requestMagicLink("invited@example.com");
+    const result = await h.service.redeemMagicLink(tokenFromEmail(h));
+    expect(result.principal.audience).toBe("CLIENT_PORTAL");
+  });
+
+  it("says nothing and sends nothing for an address with no account", async () => {
+    await expect(h.service.requestMagicLink("stranger@example.com")).resolves.toBeUndefined();
+    expect(h.mailer.sent).toHaveLength(0);
+  });
+
+  it("is single use — the second redemption fails", async () => {
+    await seedUser(h);
+    await h.service.requestMagicLink("priya@harbourpoint.in");
+    const token = tokenFromEmail(h);
+    await h.service.redeemMagicLink(token);
+    await expect(h.service.redeemMagicLink(token)).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("expires", async () => {
+    await seedUser(h);
+    await h.service.requestMagicLink("priya@harbourpoint.in");
+    const token = tokenFromEmail(h);
+    h.clock.advanceMinutes(MAGIC_LINK_TTL_MINUTES + 1);
+    await expect(h.service.redeemMagicLink(token)).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("refuses an unknown token with the same error as an expired one", async () => {
+    await expect(h.service.redeemMagicLink("made-up")).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+});

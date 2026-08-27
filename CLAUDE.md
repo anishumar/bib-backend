@@ -126,6 +126,22 @@ the work is not done — fix it, do not disable the rule. If a rule is genuinely
 a design conversation in the PR, landed as its own commit with the reasoning — never a quiet
 exception or an import moved to dodge the matcher.
 
+## Authentication
+
+A request becomes a `Principal` through the **`PrincipalResolver`** in `api/principal.ts` —
+a session cookie (or `Authorization: Bearer`) resolved against `tenancy.session`. Sessions
+are server-side because they must be **revocable**: a firm that dismisses someone expects
+access to stop that afternoon, not when a token expires. The token is only ever a SHA-256
+digest at rest and only ever leaves in an httpOnly cookie — never in a response body.
+
+`Principal` carries `tenantId` and `audience`, which are **null until an org is chosen**:
+a user with several memberships must call `POST /api/v1/auth/switch-tenant`. Anything that
+needs a tenant checks for it; nothing guesses.
+
+HONEST REGISTRY: the dev `x-user-id` resolver and the logging mailer are the only stubs
+left, both gated on config, and `validateServer` refuses to boot a production-like
+environment with either. Do not add a third without the same treatment.
+
 ## The audit ledger
 
 Every state transition writes an event. Depend on the **`EventSink`** port

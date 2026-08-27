@@ -19,6 +19,30 @@ export function validateServer(cfg: Config): void {
           `The app role must authenticate in a production-like environment.`,
       );
     }
+
+    // THE HONEST REGISTRY, enforced. The dev resolver accepts an x-user-id
+    // header as proof of identity — it is a hole with a lock on it, and the
+    // lock is this check. A public environment that boots with it is one header
+    // away from anyone being anyone.
+    if (cfg.auth.devAuthEnabled) {
+      throw new Error(
+        `BIB_DEV_AUTH_ENABLED is true while BIB_ENVIRONMENT=${cfg.environment} ` +
+          `(production-like). The dev resolver trusts an x-user-id header as proof of ` +
+          `identity, which is not authentication. Set BIB_DEV_AUTH_ENABLED=false.`,
+      );
+    }
+
+    // Same rule, applied to notifications: the only registered mailer writes
+    // magic links to the log instead of sending them. Booting with it in a
+    // public environment would mean sign-in links appear in log aggregation
+    // and never reach the user.
+    if (cfg.auth.mailTransport === "log") {
+      throw new Error(
+        `BIB_MAIL_TRANSPORT=log while BIB_ENVIRONMENT=${cfg.environment} (production-like). ` +
+          `The logging mailer does not send email — it prints the sign-in link. Register a real ` +
+          `transport (infrastructure/mail) and set BIB_MAIL_TRANSPORT to it before deploying.`,
+      );
+    }
   }
 }
 
