@@ -47,6 +47,8 @@ export function devHeaderResolver(): PrincipalResolver {
       sessionId: DEV_SESSION_ID,
       tenantId: null,
       audience: null,
+      role: null,
+      commercialVisibility: null,
     });
   };
 }

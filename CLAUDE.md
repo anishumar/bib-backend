@@ -77,6 +77,16 @@ GLOBAL tables (marked so in the migration); everything else is tenant-scoped.
 [STAFF | CLIENT_PORTAL], (3) role, (4) record-scope [portal user sees only its own parties].
 Fee/commercial visibility is a **fifth, orthogonal** axis — a flag on membership, never a role.
 
+Gates 1–3 are built. Gate 1 is RLS; gates 2 and 3 are prefix middleware (`api/guards.ts`),
+both **denied by default** — a `CLIENT_PORTAL` session reaches only `PORTAL_PATHS`, and a
+route absent from `ROUTE_PERMISSIONS` is refused for everyone. Roles are the seeded matrix
+in `domain/authz/model.ts` behind a `PermissionSource` port; **T2.5 swaps in config rows and
+no call site changes**. An unrecognised role carries nothing and says so (`UNKNOWN_ROLE`),
+because a firm locked out by a typo must not look like policy working as intended. Gate 4
+needs the user-to-party link and lands with U1. The fee axis is `AuthzService.seesFees()` /
+`withFeeVisibility()` — it **redacts** money rather than omitting the record, so "you may
+not see this" never looks like "there is no fee".
+
 ## Domain non-negotiables (compliance + money)
 
 - Money = amount + currency + FX-rate + rate-date. `numeric`, never float.

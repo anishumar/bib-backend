@@ -9,6 +9,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
+import { AuthzError } from "../domain/authz/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -64,6 +65,13 @@ export function mapError(err: unknown): MappedError {
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
     }
+  }
+  // Both authorization failures are 403: the caller is who they say they are
+  // and may not do this. `reason` separates a policy decision (NOT_PERMITTED)
+  // from a misconfigured membership (UNKNOWN_ROLE) — the second is a firm whose
+  // staff are locked out by a typo, and it must not read as normal.
+  if (err instanceof AuthzError) {
+    return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
   }
   if (err instanceof IdentityError) {
     switch (err.code) {

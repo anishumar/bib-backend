@@ -1,0 +1,107 @@
+// Which permission each route requires — one table, read by one middleware.
+//
+// The alternative is a check inside each handler, and this codebase has already
+// paid for that: three routes shipped with no authentication at all because the
+// check lived in the files rather than in front of them. Gate 3 gets the
+// treatment gates 1 and 2 got.
+//
+// DENY BY DEFAULT. A route with no entry here is refused for everyone, so
+// adding a route without deciding who may reach it fails loudly and
+// immediately, rather than being open until someone notices. A structural test
+// asserts every registered route is either listed here or explicitly exempt.
+import type { Permission } from "../domain/authz/model";
+
+/** `METHOD /path` exactly as the OpenAPI spec names it, templates included. */
+export type RouteKey = string;
+
+export function routeKey(method: string, path: string): RouteKey {
+  return `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * Routes that need a session but no particular permission.
+ *
+ * Only session management belongs here: a caller must be able to see who they
+ * are, choose an org, and sign out regardless of what their role permits —
+ * otherwise a misconfigured role would lock someone out of the very endpoints
+ * they need to fix it.
+ */
+export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
+  routeKey("GET", "/api/v1/auth/me"),
+  routeKey("POST", "/api/v1/auth/switch-tenant"),
+  routeKey("POST", "/api/v1/auth/logout"),
+  routeKey("GET", "/api/v1/tenancy/me/memberships"),
+]);
+
+/** The permission each business route requires. */
+export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
+  [routeKey("GET", "/api/v1/parties"), "party:read" as const],
+  [routeKey("GET", "/api/v1/parties/{partyId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/parties/organizations"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/persons"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/parties/organizations/{partyId}/legal-entities"),
+    "party:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
+  // The firm's whole audit trail is a partner-and-manager read: it names every
+  // client the firm has, which is more than an associate needs to do their work.
+  [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
+  [routeKey("GET", "/api/v1/objects/{objectType}/{objectId}/events"), "ledger:read" as const],
+]);
+
+// ── Matching a request to its entry ──────────────────────────────────────────
+//
+// The middleware sees a concrete path (/api/v1/parties/9f8b…) and the tables
+// above are keyed by template (/api/v1/parties/{partyId}). Rather than reach
+// into the framework for the matched route pattern — undocumented, and it
+// reports the MIDDLEWARE's pattern at this point in the chain — the templates
+// are compiled to regexes once and matched here. Fifteen regex tests per
+// request is nothing next to the database work that follows.
+
+export type RouteDecision =
+  | { readonly kind: "permission"; readonly permission: Permission }
+  /** Needs a session, no particular permission. */
+  | { readonly kind: "open" }
+  /** No entry in either table — refused, loudly. */
+  | { readonly kind: "unmapped" };
+
+interface CompiledRoute {
+  readonly method: string;
+  readonly pattern: RegExp;
+  readonly literal: boolean;
+  readonly decision: RouteDecision;
+}
+
+function compile(key: RouteKey, decision: RouteDecision): CompiledRoute {
+  const [method = "", path = ""] = key.split(" ");
+  const literal = !path.includes("{");
+  const source = path
+    .split("/")
+    .map((segment) =>
+      segment.startsWith("{") && segment.endsWith("}")
+        ? "[^/]+"
+        : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    )
+    .join("/");
+  return { method, pattern: new RegExp(`^${source}$`), literal, decision };
+}
+
+// Literal routes first: /api/v1/parties/organizations must not be swallowed by
+// /api/v1/parties/{partyId} because a template happened to be checked earlier.
+const COMPILED: readonly CompiledRoute[] = [
+  ...[...NO_PERMISSION_REQUIRED].map((key) => compile(key, { kind: "open" })),
+  ...[...ROUTE_PERMISSIONS].map(([key, permission]) =>
+    compile(key, { kind: "permission", permission }),
+  ),
+].sort((a, b) => Number(b.literal) - Number(a.literal));
+
+/** What this request needs. Unmapped is a refusal, never a pass. */
+export function decideRoute(method: string, path: string): RouteDecision {
+  const wanted = method.toUpperCase();
+  for (const route of COMPILED) {
+    if (route.method === wanted && route.pattern.test(path)) return route.decision;
+  }
+  return { kind: "unmapped" };
+}

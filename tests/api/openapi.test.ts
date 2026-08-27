@@ -6,6 +6,8 @@
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { AuthzService } from "../../src/usecase/authz/service";
+import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
@@ -33,7 +35,16 @@ const silentLog = { info() {}, warn() {}, error() {} };
 const devPrincipal: PrincipalResolver = (getHeader) => {
   const userId = getHeader("x-user-id");
   return Promise.resolve(
-    userId ? { userId, sessionId: DEV_SESSION, tenantId: null, audience: null } : null,
+    userId
+      ? {
+          userId,
+          sessionId: DEV_SESSION,
+          tenantId: null,
+          audience: null,
+          role: null,
+          commercialVisibility: null,
+        }
+      : null,
   );
 };
 
@@ -74,6 +85,7 @@ function app() {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalApiKey: INTERNAL_KEY,
+    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: devPrincipal,
@@ -99,6 +111,7 @@ describe("OpenAPI spec", () => {
     const res = await buildRouter(deps(), silentLog, {
       docsEnabled: false,
       internalApiKey: INTERNAL_KEY,
+    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
       principalOf: devPrincipal,

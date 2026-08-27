@@ -25,7 +25,9 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import type { Principal } from "../platform/callctx";
+import type { AuthzService } from "../usecase/authz/service";
 import type { PrincipalResolver } from "./principal";
+import { decideRoute } from "./permissions";
 import { toEnvelope } from "./httpresp";
 
 /** What the guards put into the request context for handlers to read. Typed
@@ -160,4 +162,52 @@ function bearer(header: string | undefined): Buffer | null {
  *  attacker did not already supply. */
 function constantTimeEquals(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/**
+ * GATE 3 — role. Runs after the session guard, so a principal is present and
+ * its audience has already been checked.
+ *
+ * The permission comes from one central table (api/permissions.ts) and an
+ * unmapped route is REFUSED. Adding a route without deciding who may reach it
+ * therefore fails immediately and visibly, instead of being open until someone
+ * notices — which is exactly how the holes in 5314ef6 survived review.
+ *
+ * `require` throws, and the router's onError maps AuthzError to 403. That is
+ * deliberate: a check whose result can be ignored eventually is.
+ */
+export function permissionGuard(authz: AuthzService): MiddlewareHandler<AppEnv> {
+  return async (c, next) => {
+    if (PUBLIC_PATHS.has(c.req.path)) {
+      await next();
+      return undefined;
+    }
+    const principal = c.get("principal");
+    if (!principal) {
+      // Unreachable behind sessionGuard; refusing is the safe reading anyway.
+      return c.json(
+        toEnvelope({ status: 401, code: "UNAUTHORIZED", message: "no authenticated session" }),
+        401,
+      );
+    }
+
+    const decision = decideRoute(c.req.method, c.req.path);
+    if (decision.kind === "unmapped") {
+      return c.json(
+        toEnvelope({
+          status: 403,
+          code: "FORBIDDEN",
+          message:
+            "this route declares no permission, so nobody may reach it. Add it to " +
+            "ROUTE_PERMISSIONS (or NO_PERMISSION_REQUIRED) in api/permissions.ts.",
+        }),
+        403,
+      );
+    }
+    if (decision.kind === "permission") {
+      await authz.require(principal, decision.permission);
+    }
+    await next();
+    return undefined;
+  };
 }

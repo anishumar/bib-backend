@@ -15,9 +15,12 @@ import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { AuthzService } from "../../src/usecase/authz/service";
+import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
+import { decideRoute } from "../../src/api/permissions";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
@@ -76,6 +79,7 @@ function app(principal: Principal | null = null) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalApiKey: INTERNAL_KEY,
+    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: () => Promise.resolve(principal),
@@ -83,14 +87,21 @@ function app(principal: Principal | null = null) {
 }
 
 const STAFF_SESSION: Principal = {
-  userId: "00000000-0000-4000-8000-00000000staff".replace("staff", "00005"),
+  userId: "00000000-0000-4000-8000-000000000005",
   sessionId: "00000000-0000-4000-8000-000000000006",
   tenantId: "00000000-0000-4000-8000-000000000007",
   audience: "STAFF",
+  role: "partner",
+  commercialVisibility: true,
 };
 
 /** A client contact of the firm: authenticated, in the tenant, and outside it. */
-const PORTAL_SESSION: Principal = { ...STAFF_SESSION, audience: "CLIENT_PORTAL" };
+const PORTAL_SESSION: Principal = {
+  ...STAFF_SESSION,
+  audience: "CLIENT_PORTAL",
+  role: "client_contact",
+  commercialVisibility: false,
+};
 
 /** Every (method, path) the router actually registers, read from the spec it
  *  generates — so this cannot drift from the routes. */
@@ -247,5 +258,64 @@ describe("gate 2 — audience", () => {
       "/api/v1/auth/me",
       "/api/v1/auth/switch-tenant",
     ]);
+  });
+});
+
+
+describe("gate 3 — role", () => {
+  const as = (role: string): Principal => ({ ...STAFF_SESSION, role });
+
+  it("every registered route declares who may reach it", async () => {
+    // The structural half of gate 3. A route with no entry is refused for
+    // everyone, so this failing means someone added a route without deciding
+    // who it is for — which is the moment to decide, not later.
+    const undeclared: string[] = [];
+    for (const { method, path } of await registeredRoutes()) {
+      if (!path.startsWith("/api/v1/")) continue;
+      if (PUBLIC_PATHS.has(path)) continue;
+      if (decideRoute(method, concrete(path)).kind === "unmapped") {
+        undeclared.push(`${method.toUpperCase()} ${path}`);
+      }
+    }
+    expect(undeclared).toEqual([]);
+  });
+
+  it("refuses a route the role does not carry", async () => {
+    // An associate does the work and does not sweep the firm's whole audit
+    // trail — it names every client the firm has.
+    const res = await app(as("associate")).request("/api/v1/events");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { reason?: string } };
+    expect(body.error.reason).toBe("NOT_PERMITTED");
+  });
+
+  it("allows a route the role does carry", async () => {
+    expect((await app(as("associate")).request("/api/v1/parties")).status).toBe(200);
+    expect((await app(as("manager")).request("/api/v1/events")).status).toBe(200);
+    expect((await app(as("partner")).request("/api/v1/events")).status).toBe(200);
+  });
+
+  it("says a role is UNKNOWN rather than merely unpermitted", async () => {
+    // A firm whose staff are all locked out by a typo in a role name must not
+    // look like ordinary policy working as intended.
+    const res = await app(as("rm")).request("/api/v1/parties");
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { reason?: string; message: string } };
+    expect(body.error.reason).toBe("UNKNOWN_ROLE");
+    expect(body.error.message).toContain("partner");
+  });
+
+  it("never lets a role reach an unmapped route", async () => {
+    const res = await app(as("partner")).request("/api/v1/not-a-real-route");
+    expect(res.status).not.toBe(200);
+  });
+
+  it("leaves session management reachable whatever the role", async () => {
+    // Otherwise a misconfigured role locks someone out of the endpoints they
+    // need to switch to a firm where their role is fine.
+    for (const role of ["partner", "associate", "rm"]) {
+      const res = await app(as(role)).request("/api/v1/auth/me");
+      expect(res.status, `${role} should reach /auth/me`).toBe(200);
+    }
   });
 });

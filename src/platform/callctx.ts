@@ -22,6 +22,18 @@ export interface Principal {
   /** The tenant this session is acting under, or null before an org is chosen. */
   readonly tenantId: string | null;
   readonly audience: Audience | null;
+  /**
+   * The role held in that tenant — the firm's own word for it, resolved
+   * against the permission source (gate 3). Null whenever tenantId is: a
+   * session with no org has no role either.
+   */
+  readonly role: string | null;
+  /**
+   * The FIFTH, ORTHOGONAL axis: may this membership see fees. Not a role and
+   * never derived from one — delivery staff see the work and not the money,
+   * and a firm can grant it to one associate without promoting them.
+   */
+  readonly commercialVisibility: boolean | null;
 }
 
 export interface CallContext {

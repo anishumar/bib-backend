@@ -68,6 +68,8 @@ describe("devHeaderResolver", () => {
       sessionId: "00000000-0000-0000-0000-0000000000de",
       tenantId: null,
       audience: null,
+      role: null,
+      commercialVisibility: null,
     });
   });
 
@@ -80,7 +82,14 @@ describe("devHeaderResolver", () => {
 describe("firstOf", () => {
   const never: PrincipalResolver = () => Promise.resolve(null);
   const always = (userId: string): PrincipalResolver => () =>
-    Promise.resolve({ userId, sessionId: "s", tenantId: null, audience: null });
+    Promise.resolve({
+      userId,
+      sessionId: "s",
+      tenantId: null,
+      audience: null,
+      role: null,
+      commercialVisibility: null,
+    });
 
   it("returns the first resolver that answers", async () => {
     const principal = await firstOf(never, always("second"), always("third"))(headers({}));

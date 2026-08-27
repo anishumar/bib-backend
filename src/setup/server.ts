@@ -26,9 +26,11 @@ import {
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
+import { StaticPermissionSource } from "../infrastructure/authz/static-permissions";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
+import { AuthzService } from "../usecase/authz/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -76,6 +78,11 @@ export function wire(cfg: Config, log: Logger): Wired {
   // is effectively N times looser. Acceptable at one pod; the Redis adapter
   // behind the same port is the fix when there are more.
   const rateLimiter = new InMemoryRateLimiter(systemClock);
+
+  // HONEST REGISTRY: the seeded four-role matrix is the only permission source
+  // registered. It is not the configurable role system — T2.5 replaces it with
+  // an adapter reading rule rows a partner edited, behind this same port.
+  const authz = new AuthzService({ permissions: new StaticPermissionSource() });
 
   const identity = new IdentityService({
     users,
@@ -138,6 +145,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         docsEnabled: cfg.docsEnabled,
         internalApiKey: cfg.auth.internalApiKey,
         principalOf,
+        authz,
         rateLimiter,
         rateLimit: {
           auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },

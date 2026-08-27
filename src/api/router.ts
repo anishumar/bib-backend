@@ -12,8 +12,9 @@
 import { swaggerUI } from "@hono/swagger-ui";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "./guards";
-import { internalGuard, sessionGuard } from "./guards";
+import { internalGuard, permissionGuard, sessionGuard } from "./guards";
 import type { PrincipalResolver } from "./principal";
+import type { AuthzService } from "../usecase/authz/service";
 import type { RateLimiter } from "../platform/ratelimit";
 import { rateLimit } from "./ratelimit";
 import type { RateLimitConfig } from "./ratelimit";
@@ -39,6 +40,7 @@ export interface RouterOptions {
   readonly internalApiKey: string;
   /** How a request becomes a principal on the /api/v1 surface. */
   readonly principalOf: PrincipalResolver;
+  readonly authz: AuthzService;
   readonly rateLimiter: RateLimiter;
   readonly rateLimit: RateLimitConfig;
 }
@@ -92,6 +94,10 @@ export function buildRouter(
   // rather than a 400 that tells an anonymous caller about the request shape.
   app.use("/internal/*", internalGuard(opts.internalApiKey));
   app.use("/api/v1/*", sessionGuard(opts.principalOf));
+  // Gate 3 rides behind the session guard: by here the caller is authenticated
+  // and their audience is settled, so the only question left is whether their
+  // ROLE carries what this route needs.
+  app.use("/api/v1/*", permissionGuard(opts.authz));
 
   // App + platform routes, one registrar per module.
   registerAuthRoutes(app, deps.auth);

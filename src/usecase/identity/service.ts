@@ -231,13 +231,22 @@ export class IdentityService {
   async resolveSession(token: string): Promise<Principal | null> {
     const session = await this.deps.sessions.findByTokenHash(this.deps.tokens.hash(token));
     if (!session || !isUsableSession(session, this.deps.clock.now())) return null;
-    if (session.activeTenantId === null) return toPrincipal(session);
+    if (session.activeTenantId === null) return toPrincipal(session, undefined);
 
-    const stillAMember = (await this.deps.memberships.listByUser(session.userId)).some(
+    // The membership is read for the revocation check above; the role and fee
+    // flag ride out of that same read, so gate 3 costs nothing extra.
+    const active = (await this.deps.memberships.listByUser(session.userId)).find(
       (m) => m.isActive && m.tenantId === session.activeTenantId,
     );
-    if (stillAMember) return toPrincipal(session);
-    return { userId: session.userId, sessionId: session.id, tenantId: null, audience: null };
+    if (active) return toPrincipal(session, active);
+    return {
+      userId: session.userId,
+      sessionId: session.id,
+      tenantId: null,
+      audience: null,
+      role: null,
+      commercialVisibility: null,
+    };
   }
 
   /** The org switch: point an existing session at another of the user's tenants.
@@ -254,7 +263,7 @@ export class IdentityService {
       membership.audience,
     );
     await this.recordSessionStarted(tenantId, userId);
-    return toPrincipal(session);
+    return toPrincipal(session, membership);
   }
 
   /** Sign out. Idempotent: an unknown or already-revoked token is a no-op, so a
@@ -313,18 +322,28 @@ export class IdentityService {
     // firm can answer is the one it cares about: when did this person's session
     // become active HERE.
     if (only) await this.recordSessionStarted(only.tenantId, user.id);
-    return { token, session, principal: toPrincipal(session), memberships };
+    return { token, session, principal: toPrincipal(session, only), memberships };
   }
 }
 
-/** The session row, as the rest of the system sees it. Assigning the domain's
- *  Audience to the platform's is what keeps those two unions identical — the
- *  compiler fails here if they ever drift. */
-function toPrincipal(session: Session): Principal {
+/**
+ * The session row plus the membership it is acting under, as the rest of the
+ * system sees it.
+ *
+ * Assigning the domain's Audience to the platform's is what keeps those two
+ * unions identical — the compiler fails here if they ever drift.
+ *
+ * `membership` is undefined only when the session has not chosen an org, in
+ * which case there is no role to carry and every gated route refuses on the
+ * tenant check first.
+ */
+function toPrincipal(session: Session, membership: Membership | undefined): Principal {
   return {
     userId: session.userId,
     sessionId: session.id,
     tenantId: session.activeTenantId,
     audience: session.activeAudience,
+    role: membership?.role ?? null,
+    commercialVisibility: membership?.commercialVisibility ?? null,
   };
 }
