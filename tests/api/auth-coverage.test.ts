@@ -97,6 +97,7 @@ function app(principal: Principal | null = null) {
     internalApiKey: INTERNAL_KEY,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
+    corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: () => Promise.resolve(principal),
   });
@@ -190,6 +191,7 @@ describe("every route is accounted for", () => {
       internalApiKey: INTERNAL_KEY,
       authz: new AuthzService({ permissions: new StaticPermissionSource() }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
+    corsOrigins: ["http://localhost:3000"],
       rateLimit: {
         auth: { limit: 1000, windowSeconds: 60 },
         general: { limit: 10000, windowSeconds: 60 },
@@ -383,5 +385,72 @@ describe("gate 3 — role", () => {
       const res = await app(as(role)).request("/api/v1/auth/me");
       expect(res.status, `${role} should reach /auth/me`).toBe(200);
     }
+  });
+});
+
+
+describe("CORS — the frontend is a separate origin", () => {
+  const ALLOWED = "http://localhost:3000";
+  const preflight = (origin: string): RequestInit => ({
+    method: "OPTIONS",
+    headers: {
+      Origin: origin,
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type",
+    },
+  });
+
+  it("answers a preflight for an allowed origin", async () => {
+    const res = await app().request("/api/v1/auth/login", preflight(ALLOWED));
+    expect(res.status).toBeLessThan(300);
+    expect(res.headers.get("access-control-allow-origin")).toBe(ALLOWED);
+    // Without this the browser sends no cookie and the session never works.
+    expect(res.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
+  it("does not hand credentials to an origin that is not on the list", async () => {
+    // The dangerous version of CORS reflects whatever Origin arrived. Combined
+    // with credentials that lets ANY site call this API as the logged-in user
+    // and read the answers.
+    const res = await app().request("/api/v1/auth/login", preflight("https://evil.example"));
+    expect(res.headers.get("access-control-allow-origin")).not.toBe("https://evil.example");
+  });
+
+  it("puts the headers on real responses, not only on preflights", async () => {
+    const res = await app().request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { Origin: ALLOWED, "content-type": "application/json" },
+      body: JSON.stringify({ email: "a@b.co", password: "x" }),
+    });
+    expect(res.headers.get("access-control-allow-origin")).toBe(ALLOWED);
+  });
+
+  it("answers the preflight without spending the caller's rate-limit budget", async () => {
+    // A browser preflights every credentialed POST. If that counted, each real
+    // login would cost two of ten attempts a minute and the auth bucket would
+    // bite at five sign-ins.
+    const tight = buildRouter(deps(), silentLog, {
+      docsEnabled: true,
+      internalApiKey: INTERNAL_KEY,
+      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      rateLimiter: new InMemoryRateLimiter(systemClock),
+      rateLimit: {
+        auth: { limit: 3, windowSeconds: 60 },
+        general: { limit: 3, windowSeconds: 60 },
+        trustProxy: false,
+      },
+      corsOrigins: [ALLOWED],
+      principalOf: () => Promise.resolve(null),
+    });
+
+    for (let i = 0; i < 10; i += 1) {
+      const res = await tight.request("/api/v1/auth/login", preflight(ALLOWED));
+      expect(res.status, `preflight ${String(i)} should not be rate limited`).not.toBe(429);
+    }
+  });
+
+  it("gives /internal no CORS at all — no browser should reach it", async () => {
+    const res = await app().request("/internal/v1/tenants", preflight(ALLOWED));
+    expect(res.headers.get("access-control-allow-origin")).toBeNull();
   });
 });

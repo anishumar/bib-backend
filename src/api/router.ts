@@ -10,6 +10,7 @@
 // Per-module routes live in their handler module's registrar (registerTenancy…)
 // and are mounted here; ops, error mapping and docs are cross-cutting and stay.
 import { swaggerUI } from "@hono/swagger-ui";
+import { cors } from "hono/cors";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "./guards";
 import { internalGuard, permissionGuard, sessionGuard } from "./guards";
@@ -43,6 +44,8 @@ export interface RouterOptions {
   readonly authz: AuthzService;
   readonly rateLimiter: RateLimiter;
   readonly rateLimit: RateLimitConfig;
+  /** Exact browser origins allowed to send credentialed requests. */
+  readonly corsOrigins: readonly string[];
 }
 
 /** Per-module dependencies the router mounts. One field per capability. */
@@ -75,6 +78,35 @@ export function buildRouter(
   // balancer cannot hold a credential, and neither endpoint reveals anything.
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/ready", (c) => c.json({ status: "ready" }));
+
+  // CORS, first of all, and only on the product surface.
+  //
+  // The frontend is a separate app on a separate origin, so without this a
+  // browser discards every response before the page sees it — T1.8's whole
+  // acceptance ("calls a real endpoint through the generated client") is
+  // unreachable until these headers exist.
+  //
+  // Mounted ahead of the rate limiter on purpose: a browser sends a preflight
+  // OPTIONS before each credentialed request, and cors() answers it and stops.
+  // Behind the limiter, every login would cost TWO of the ten attempts a minute
+  // and the tight auth bucket would bite at five real sign-ins.
+  //
+  // Exact origins only, never a reflection of whatever Origin arrived. With
+  // credentials: true, reflecting the origin lets any site on the internet make
+  // authenticated requests with the user's cookie and read the replies.
+  //
+  // /internal gets NO CORS, deliberately: it is service-to-service and no
+  // browser should reach it. Its preflight 404s, which is the correct answer.
+  app.use(
+    "/api/v1/*",
+    cors({
+      origin: [...opts.corsOrigins],
+      credentials: true,
+      allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      allowHeaders: ["Content-Type", "Authorization"],
+      maxAge: 600,
+    }),
+  );
 
   // RATE LIMITING, before anything else that costs something. It runs ahead of
   // the guards so an unauthenticated flood is refused at the cheapest possible

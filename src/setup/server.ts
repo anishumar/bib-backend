@@ -147,6 +147,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         principalOf,
         authz,
         rateLimiter,
+        corsOrigins: cfg.cors.origins,
         rateLimit: {
           auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },
           general: { limit: cfg.rateLimit.generalPerMinute, windowSeconds: 60 },

@@ -52,6 +52,12 @@ const EnvSchema = z.object({
   BIB_TRUST_PROXY: z.enum(["true", "false"]).default("false"),
   BIB_RATELIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
   BIB_RATELIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
+
+  // ── CORS ──────────────────────────────────────────────────────────────────
+  // Which browser origins may call the API. Comma-separated, exact matches
+  // only. Unset falls back to BIB_APP_BASE_URL — the app that receives magic
+  // links is the app that calls the API, so one origin covers both by default.
+  BIB_CORS_ORIGINS: z.string().optional(),
 });
 
 export type Environment = z.infer<typeof EnvSchema>["BIB_ENVIRONMENT"];
@@ -77,6 +83,11 @@ export interface AuthConfig {
   readonly internalApiKey: string;
 }
 
+export interface CorsConfig {
+  /** Exact origins allowed to send credentialed requests. Never a wildcard. */
+  readonly origins: readonly string[];
+}
+
 export interface RateLimitConfig {
   readonly trustProxy: boolean;
   /** Per client, per minute, on the unauthenticated sign-in routes. */
@@ -94,6 +105,7 @@ export interface Config {
   readonly docsEnabled: boolean;
   readonly auth: AuthConfig;
   readonly rateLimit: RateLimitConfig;
+  readonly cors: CorsConfig;
 }
 
 /**
@@ -146,6 +158,14 @@ export function load(): Config {
       mailTransport: env.BIB_MAIL_TRANSPORT,
       internalApiKey: env.BIB_INTERNAL_API_KEY,
     },
+    cors: {
+      origins:
+        env.BIB_CORS_ORIGINS === undefined
+          ? [env.BIB_APP_BASE_URL]
+          : env.BIB_CORS_ORIGINS.split(",")
+              .map((o) => o.trim())
+              .filter((o) => o !== ""),
+    },
     rateLimit: {
       trustProxy: env.BIB_TRUST_PROXY === "true",
       authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
@@ -184,6 +204,7 @@ export function redacted(cfg: Config): Record<string, unknown> {
     // safe to log, and this is exactly the field that would make it unsafe.
     auth: { ...cfg.auth, internalApiKey: "***" },
     rateLimit: cfg.rateLimit,
+    cors: cfg.cors,
     db: {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),

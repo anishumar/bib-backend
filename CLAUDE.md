@@ -186,6 +186,20 @@ HONEST REGISTRY: the dev `x-user-id` resolver and the logging mailer are the onl
 left, both gated on config, and `validateServer` refuses to boot a production-like
 environment with either. Do not add a third without the same treatment.
 
+## CORS — the frontend is a separate origin
+
+The frontend is its own app in its own repo, so every call it makes is cross-origin and the
+API must say so or the browser discards the response. `BIB_CORS_ORIGINS` is an **exact
+allowlist**, never a reflection of whatever `Origin` arrived: with `credentials: true`,
+reflecting the origin lets any site on the internet make authenticated requests with the
+user's cookie and read the replies. Boot refuses a wildcard, an empty list, and any
+`http://` or localhost origin in a production-like environment.
+
+CORS is mounted ahead of the rate limiter so a preflight is answered and stopped before it
+spends the caller's budget — a browser preflights every credentialed POST, so otherwise
+each login would cost two of ten attempts a minute. `/internal` gets no CORS at all: it is
+service-to-service, and its preflight 404ing is the correct answer.
+
 ## Rate limiting
 
 Two limiters, defending different things — neither substitutes for the other. The edge

@@ -87,6 +87,7 @@ function app() {
     internalApiKey: INTERNAL_KEY,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
+    corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
     principalOf: devPrincipal,
   });
@@ -113,6 +114,7 @@ describe("OpenAPI spec", () => {
       internalApiKey: INTERNAL_KEY,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
+    corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
       principalOf: devPrincipal,
     }).request("/openapi.json");

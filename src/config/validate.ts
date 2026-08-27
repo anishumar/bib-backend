@@ -43,6 +43,35 @@ export function validateServer(cfg: Config): void {
       );
     }
 
+    // CORS with credentials is the one place a wildcard is catastrophic rather
+    // than merely sloppy: it would let ANY site make authenticated requests
+    // with the user's session cookie and read the answers. Browsers refuse the
+    // combination, so this would fail at runtime anyway — failing at boot with
+    // the reason is better than a frontend that mysteriously cannot log in.
+    if (cfg.cors.origins.includes("*")) {
+      throw new Error(
+        `BIB_CORS_ORIGINS contains "*" while BIB_ENVIRONMENT=${cfg.environment}. ` +
+          `A wildcard cannot be combined with credentialed requests: list exact origins.`,
+      );
+    }
+    if (cfg.cors.origins.length === 0) {
+      throw new Error(
+        `BIB_CORS_ORIGINS is empty while BIB_ENVIRONMENT=${cfg.environment}. No browser ` +
+          `origin could call this API. Set it to the frontend's origin, e.g. https://app.example.com`,
+      );
+    }
+    const insecure = cfg.cors.origins.filter(
+      (o) => o.startsWith("http://") || o.includes("localhost"),
+    );
+    if (insecure.length > 0) {
+      throw new Error(
+        `BIB_CORS_ORIGINS contains ${insecure.join(", ")} while ` +
+          `BIB_ENVIRONMENT=${cfg.environment} (production-like). A session cookie is Secure ` +
+          `there and will not be sent to a plain-http origin, and a localhost origin in a ` +
+          `public environment means someone's laptop can call this API with a real session.`,
+      );
+    }
+
     // Same rule, applied to notifications: the only registered mailer writes
     // magic links to the log instead of sending them. Booting with it in a
     // public environment would mean sign-in links appear in log aggregation
