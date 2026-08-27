@@ -1,0 +1,212 @@
+# BiB — Build Plan & Task Board
+
+The single source of truth for what we're building, who owns it, and what's done.
+Both developers work off this file. Commit changes to it like code.
+
+## How this board works
+
+- **Owners:** `(A)` = Anish · `(B)` = second developer (senior). `(A/B)` = pairs or either.
+- **Task IDs** like `T2.4` are stable — reference them in commits and when asking Claude
+  to check something ("mark T2.4 done").
+- **Definition of Done (every task):** the change is merged to `main`, `npm run check`
+  is green (typecheck + lint + arch + tests), AND the task's stated acceptance holds.
+  No task is "done" on a branch that fails the gate.
+- **Marking done:** tell your Claude session "verify and mark T2.4" — it inspects the
+  code against the acceptance line, and only then ticks the box and updates this file.
+  Claude never ticks a box it hasn't verified against the acceptance criterion.
+- **`[~]`** = in progress · **`[ ]`** = not started · **`[x]`** = done & verified.
+
+## The estimate (read the caveats)
+
+Two senior devs, full-time, Claude-assisted, **full-stack incl. both UIs**. Ranges, not promises.
+
+| Milestone | What it includes | Estimate |
+|---|---|---|
+| **Demoable core** | Spine + engine end-to-end + 1 service pack + workspace UI; agents stubbed (humans in loop) | **10–14 weeks** |
+| **Sellable V1** | + billing, obligations, 2–3 service packs, core agents, both UIs at MVP, integrations as fakes | **5–7 months** |
+| **Full BiB** | All 11 flows, all 11 agents, all 6 service packs, both UIs polished, real integrations | **9–13 months** |
+
+**The wildcard is P11 (real integrations).** MCA / GST / GSP / TRACES / banking are
+externally gated — sandbox access, credentials, and portal quirks are outside our control
+and can dwarf the code effort. We build every connector as a **port with a fake first**
+(the pattern is already in place), so the product is demoable and testable without them;
+the real adapters are a separate track that starts whenever the client grants access.
+**Do not put real integrations on the critical path for a demo.**
+
+## The two lanes
+
+They meet at the **audit ledger (P7)** and the **engine's trigger contract**. Agree those
+two interfaces first (T1.1, T2.5), then the lanes run parallel with minimal collision.
+
+- **(A) Commercial lane:** party → leads → proposals → engagement letter → billing →
+  documents → dashboards → the drafting/context/intake agents → deal-shaped service packs.
+- **(B) Delivery lane:** audit ledger → config registry → scheduler → orchestrator →
+  agent runtime → verification queue → work/obligations → the rule/compute/monitor agents →
+  compliance-shaped service packs.
+- **UI:** each dev builds the screens for the modules they built the backend for
+  (vertical ownership), against the OpenAPI surface. **UI is not a late phase** — the
+  frontend app is scaffolded in Phase 1 (T1.8) and the staff workspace (U2) grows
+  vertically alongside each module from ~week 4. Phase 6 is the **client portal + polish**,
+  not the start of UI.
+
+## Dependency spine
+
+```
+[DONE] Substrate — tenancy, RLS wall, config, ports, OpenAPI
+   ↓
+Phase 1  Core spine:  P7 ledger (B) · Party+identifiers (A) · RBAC+fee-visibility (B)
+                      + Frontend foundation (T1.8): app shell + design system + OpenAPI client
+   ↓
+Phase 2  Commercial (A): leads→proposals→EL→spawn   ∥   Engine (B): config→scheduler→orchestrator→runtime→verify
+   ↓                                    ┌─────────────────────────────────────────────┐
+Phase 3  Close loop: work+obligations (B) · billing+docs+dashboards (A)               │
+   ↓                                    │  U2 (staff workspace) grows vertically here  │
+Phase 4  Agents A1–A11 (split A/B) — layered on the runtime, guardrails first         │  — each module ships its screen when its  │
+   ↓                                    │  API stabilizes (~week 4 onward)             │
+Phase 5  Service packs S1–S6 (config + connectors, parallelized)                      └─────────────────────────────────────────────┘
+   ↓
+Phase 6  Client portal (U1) + cross-app polish — NOT the start of UI
+   ↓
+Phase 7  Real integrations P11 — external-gated, its own track
+```
+
+---
+
+## Phase 0 · Substrate — DONE
+
+- [x] `(A)` **T0.1** Tenancy: `tenant` / `user_account` / `membership`, global identity above tenant.
+- [x] `(A)` **T0.2** RLS tenant wall: NOBYPASSRLS app role, `withTenant()`, boot check refuses to serve if wall is down.
+- [x] `(A)` **T0.3** Config-as-adapter: only `src/config` reads env; fail-closed boot validators.
+- [x] `(A)` **T0.4** Hexagonal layering enforced by dependency-cruiser + typed ESLint (arch is a test).
+- [x] `(A)` **T0.5** Ports pattern with local fakes; honest registry (dev principal, real SSO deferred).
+- [x] `(A)` **T0.6** OpenAPI: zod DTOs generate `/openapi.json` + gated `/docs`; validation → one shared envelope.
+
+---
+
+## Phase 1 · Core spine  (~3–4 weeks) — everything below depends on this
+
+- [ ] `(A/B)` **T1.1** Agree the **domain-event vocabulary** + ledger write API (the interface both lanes call). *Acc: a written `event` contract + a `recordEvent()` port stub both lanes import.*
+- [ ] `(B)` **T1.2** **P7 audit ledger**: append-only `event` (tenant, actor_type human|agent|system, actor_id, verb, object_ref, payload, occurred_at); app role SELECT+INSERT only. *Acc: no UPDATE/DELETE grant; a test proves an update is rejected.*
+- [ ] `(A)` **T1.3** **Party model**: `party` / `organization` / `person` / `legal_entity`, all effective-dated, with RLS from line one. *Acc: create a company + a director as parties; RLS test isolates across tenants.*
+- [ ] `(A)` **T1.4** **`party_relationship`** (from, to, type, valid_from, valid_to, attributes) — directorship, employment, shareholding, client-of. *Acc: "who was a director on 31 Mar" resolves by date.*
+- [ ] `(A)` **T1.5** **`party_identifier`** — PAN, GSTIN (many per entity), TRN, CIN, effective-dated. *Acc: an entity holds ≥2 GSTINs; lookup by identifier works.*
+- [ ] `(B)` **T1.6** **RBAC + fee-visibility axis**: role on membership enforced; commercial visibility is a separate boolean gate. *Acc: a delivery role sees a work item but not its fee, proven in a test.*
+- [ ] `(B)` **T1.7** **Real principal adapter** (session) replacing the dev `x-user-id` stub; client-portal audience wired. *Acc: prod boot refuses the dev resolver (honest registry).*
+- [ ] `(A/B)` **T1.8** **Frontend foundation** (separate app — "clean separation"): Next.js shell, auth flow against the session adapter, design system/tokens, and a **typed API client generated from `/openapi.json`**. Runs in parallel with the backend spine — whoever has slack. *Acc: the app boots, authenticates, and calls a real endpoint (e.g. `me/memberships`) through the generated client; regenerating the client after an API change is one command.*
+
+**Milestone M1:** a client company with entities, directors, and multiple GSTINs exists, tenant-isolated, every write landing in the ledger — **and the frontend app renders its first authenticated call**. *(Maps to C2 client records + P1/P7; UI foundation ready for the first screen.)*
+
+---
+
+## Phase 2 · Commercial spine (A)  ∥  Engine (B)  (~4–6 weeks)
+
+### Lane A — sell
+- [ ] `(A)` **T2.1** **C1 Leads & pipeline**: source, owner (round-robin/territory), dedupe on **phone+PAN+email before create**. *Acc: a duplicate lead merges to the existing party, appends timeline.*
+- [ ] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
+- [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
+- [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
+
+### Lane B — the engine
+- [ ] `(B)` **T2.5** **P2 Master configuration registry**: services, workflow templates (**versioned**), rule packs (`gst-in@2026.07`), SLAs — data, not code. *Acc: a new service is a config row; running jobs pin their template version.*
+- [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
+- [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
+- [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
+- [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
+
+**Milestone M2:** a signed engagement letter automatically spawns jobs that walk a configured step graph and land in a verification queue — the **engine runs end-to-end** with fake executors. *(This is the demoable core spine.)*
+
+---
+
+## Phase 3 · Close the loop  (~4–6 weeks)
+
+### Lane B — delivery
+- [ ] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
+- [ ] `(B)` **T3.2** **Obligations**: `obligation_template` → `obligation_instance`, statutory **and** internal-target dates, T–X lead time, financial-year periods. *Acc: an Indian quarter is Apr–Jun; March TDS exception resolves to 30 Apr.*
+- [ ] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
+
+### Lane A — money & documents
+- [ ] `(A)` **T3.4** **C6 Invoicing**: **gapless per-entity series** (trigger-frozen), IRN field, `invoice`/`invoice_line`, balance is a sum. *Acc: numbers cannot be edited; a gap is impossible under concurrency.*
+- [ ] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
+- [ ] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
+- [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
+
+**Milestone M3:** full compliance cycle (spawn → work → verify → file → invoice → collect) runs with humans in the loop; money is gapless and auditable.
+
+---
+
+## Phase 4 · Agents A1–A11  (~5–7 weeks) — guardrails first, then capabilities
+
+Runtime guardrails (from T2.8) must hold for **all**: never commit above tier · never
+contact a regulator autonomously · never invent data (flag, don't fill) · every action →
+P7 with confidence · can't approve own output.
+
+- [ ] `(B)` **T4.1** **A4 Computation** (deterministic, code not LLM): GST/TDS/payroll/challans, reproducible. *Acc: recompute delta = 0.*
+- [ ] `(B)` **T4.2** **A7 Reconciliation**: ledger↔books, payment↔invoice matching. *Acc: no force-match; unmatched ages into a queue.*
+- [ ] `(B)` **T4.3** **A3 Rule-Match**: facts → section/rate/form/due-date from **versioned** rule pack + confidence. *Acc: refuses to answer outside its pack version.*
+- [ ] `(B)` **T4.4** **A8 Chaser**: reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
+- [ ] `(B)` **T4.5** **A9 Monitor** (no human trigger): SLA timers, T–X countdowns, stale items, reassignment triggers. *Acc: alerts + spawns tasks only, never acts itself.*
+- [ ] `(B)` **T4.6** **A10 Rule-Pack Watcher**: reads CBDT/CBIC/MCA notices → drafts version diffs for approval. *Acc: never auto-activates a version.*
+- [ ] `(A)` **T4.7** **A1 Intake**: OCR, classify, extract, dedupe, attach. Extraction **port** with deterministic fake. *Acc: ambiguous doc routes to human, isn't discarded.*
+- [ ] `(A)` **T4.8** **A2 Enrichment**: MCA/GST/public lookups → fill record, flag conflicts. *Acc: never overwrites human-entered data.*
+- [ ] `(A)` **T4.9** **A5 Drafting**: returns, proposals, letters, DD reports, query responses. *Acc: sends nothing externally; asserts no unverified fact.*
+- [ ] `(A)` **T4.10** **A6 Validation**: completeness, cross-checks vs books/prior periods, anomaly scan. *Acc: flags only, never fixes.*
+- [ ] `(A)` **T4.11** **A11 Context Writer** (pgvector RAG): approved positions/outcomes → per-client context, **hard tenancy wall**. *Acc: cross-client retrieval is impossible (RLS-filtered vector search).*
+
+**Milestone M4:** the confidence-routed autonomy loop works — agents draft, machines check, humans approve, everything scored and logged.
+
+---
+
+## Phase 5 · Service packs S1–S6  (~4–6 weeks) — mostly config + connectors
+
+Each pack = rule-pack rows + step-graph config + pack-specific connectors + screens.
+They parallelize heavily because the engine already exists.
+
+- [ ] `(A)` **T5.1** **S1 Market entry** (incorporation): SPICe+/name-check/PAN-TAN-GST, CS-approval gate. *Acc: flow ends by arming the compliance calendar.*
+- [ ] `(B)` **T5.2** **S2 Managed services** (recurring compliance — the volume engine): TDS/GST/PF/ESI/ROC packs. *Acc: statutory dates drive spawns; T–X lead times honored.*
+- [ ] `(A)` **T5.3** **S3 Deals**: DD checklist, data room, SHA/SSA markup, CP/CS tracker, rights monitor. *Acc: CP/CS chased like statutory deadlines.*
+- [ ] `(B)` **T5.4** **S4 Audit**: query-loop pattern, working papers, deadline calendar. *Acc: positions stored for cross-year consistency.*
+- [ ] `(B)` **T5.5** **S5 Litigation**: same query-loop engine, hearings/submissions. *Acc: reuses S4 engine + a rule pack, not new code.*
+- [ ] `(A)` **T5.6** **S6 Exit / M&A**: data room from stages 1–5, buyer Q&A, closing, post-closing obligations. *Acc: data room assembles from existing indexed docs.*
+
+---
+
+## Phase 6 · Client portal (U1) + polish  (~4–6 weeks)
+
+**UI does NOT start here.** The staff workspace (U2) is built **vertically from ~week 4** —
+each dev skins their own modules as the API stabilizes (the T6.1–T6.4 tasks below land during
+Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cross-app polish.
+
+### U2 · 10X workspace (staff) — built vertically during Phases 2–5, tracked here
+- [ ] `(B)` **T6.1** App shell, auth'd nav, work board (Kanban), verification queue screen. *(with Ph2–3)*
+- [ ] `(A)` **T6.2** Client 360 (as-of date), leads pipeline, proposal/EL builder. *(first screen ~week 4–5, with Ph1–2)*
+- [ ] `(A)` **T6.3** Invoicing + collections screens, leadership dashboards (MRR/DSO/ageing). *(with Ph3)*
+- [ ] `(B)` **T6.4** Compliance calendar + rules screen (config a partner can edit — the "row with a screen" bar). *(with Ph3)*
+
+### U1 · Client portal (client) — the real Phase 6 work
+- [ ] `(A)` **T6.5** Invite + secure login, per-contact roles, status home.
+- [ ] `(A)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals.
+- [ ] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest.
+
+**Milestone M5 (Sellable V1):** both UIs at MVP over the full backend, 2–3 service packs live, core agents on, integrations faked.
+
+---
+
+## Phase 7 · Real integrations P11 — EXTERNAL-GATED, own track
+
+Built as ports (fakes already exist). Each real adapter starts when the client grants
+sandbox access + credentials. **Not on any demo's critical path.**
+
+- [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
+- [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
+- [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).
+- [ ] `(A)` **T7.4** Banking feed (payment reconciliation), payments (Razorpay/Stripe).
+- [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), email (Gmail/M365), WhatsApp (P10 transport).
+
+---
+
+## Parking lot / decisions to make (don't build on guesses)
+
+- Dev vs QA cloud DB strategy (recommended: local seeded-from-cloud + shared QA). *Deferred by user.*
+- zod 3 → 4 migration (unlocks `@hono/zod-openapi@1.x`) — own commit, later.
+- Product name; which prior-vendor data (if any) migrates.
+- Real-integration access: which portals/sandboxes the client can grant, and when.

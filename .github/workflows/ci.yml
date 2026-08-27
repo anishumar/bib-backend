@@ -1,0 +1,21 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # The gate. typecheck + lint (incl. the process.env/no-any/no-TODO rules)
+      # + arch (the import wall) + test (unit + the architecture-as-test).
+      # No rule here can be skipped by a reviewer under deadline.
+      - run: npm run check
