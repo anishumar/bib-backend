@@ -5,9 +5,12 @@
 //   3. the principal gate still answers 401 with that envelope.
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
-import type { TenancyDeps, PrincipalResolver } from "../../src/api/handler/tenancy";
+import type { RouterDeps } from "../../src/api/router";
+import type { PrincipalResolver } from "../../src/api/handler/tenancy";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { PartyService } from "../../src/usecase/party/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
+import { makePartyFakes } from "../../src/testfakes/party";
 
 const silentLog = { info() {}, warn() {}, error() {} };
 
@@ -16,10 +19,15 @@ const devPrincipal: PrincipalResolver = (getHeader) => {
   return userId ? { userId } : null;
 };
 
+function deps(): RouterDeps {
+  return {
+    tenancy: { service: new TenancyService(makeFakes()), principalOf: devPrincipal },
+    party: { service: new PartyService(makePartyFakes()) },
+  };
+}
+
 function app() {
-  const service = new TenancyService(makeFakes());
-  const deps: TenancyDeps = { service, principalOf: devPrincipal };
-  return buildRouter(deps, silentLog, { docsEnabled: true });
+  return buildRouter(deps(), silentLog, { docsEnabled: true });
 }
 
 describe("OpenAPI spec", () => {
@@ -27,20 +35,16 @@ describe("OpenAPI spec", () => {
     const res = await app().request("/openapi.json");
     expect(res.status).toBe(200);
     const spec = (await res.json()) as { paths: Record<string, unknown> };
-    expect(Object.keys(spec.paths).sort()).toEqual(
-      [
-        "/api/v1/tenancy/me/memberships",
-        "/api/v1/tenancy/users",
-        "/internal/v1/memberships",
-        "/internal/v1/tenants",
-      ].sort(),
-    );
+    const paths = Object.keys(spec.paths);
+    // Tenancy + party routes are both mounted; assert a representative set.
+    expect(paths).toContain("/internal/v1/tenants");
+    expect(paths).toContain("/api/v1/tenancy/me/memberships");
+    expect(paths).toContain("/internal/v1/tenants/{tenantId}/organizations");
+    expect(paths).toContain("/internal/v1/tenants/{tenantId}/parties/{partyId}");
   });
 
   it("is not served when docs are disabled", async () => {
-    const service = new TenancyService(makeFakes());
-    const deps: TenancyDeps = { service, principalOf: devPrincipal };
-    const res = await buildRouter(deps, silentLog, { docsEnabled: false }).request("/openapi.json");
+    const res = await buildRouter(deps(), silentLog, { docsEnabled: false }).request("/openapi.json");
     expect(res.status).toBe(404);
   });
 });

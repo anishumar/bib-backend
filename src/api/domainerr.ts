@@ -6,6 +6,7 @@
 //
 // No service adds to this set — finer distinctions go in `reason`.
 import { TenancyError } from "../domain/tenancy/errors";
+import { PartyError } from "../domain/party/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -45,6 +46,21 @@ export function mapError(err: unknown): MappedError {
       case "TENANT_NOT_FOUND":
       case "USER_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof PartyError) {
+    switch (err.code) {
+      case "PARTY_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "DUPLICATE_IDENTIFIER":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      case "NOT_AN_ORGANIZATION":
+      case "INVALID_IDENTIFIER":
+      case "INVALID_IDENTIFIER_TYPE":
+      case "INVALID_RELATIONSHIP_TYPE":
+      case "INVALID_DATE_RANGE":
+      case "SELF_RELATIONSHIP":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
     }
   }
   return { status: 500, code: "INTERNAL", message: "internal error" };

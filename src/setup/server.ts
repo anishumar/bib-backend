@@ -12,7 +12,11 @@ import type { Principal } from "../platform/callctx";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
+import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
+import { PostgresIdentifierRepository } from "../infrastructure/postgres/identifier-repository";
+import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
 import { TenancyService } from "../usecase/tenancy/service";
+import { PartyService } from "../usecase/party/service";
 import type { PrincipalResolver, TenancyDeps } from "../api/handler/tenancy";
 import { buildRouter } from "../api/router";
 
@@ -43,10 +47,19 @@ export function wire(cfg: Config, log: Logger): Wired {
     return userId ? { userId } : null;
   };
 
-  const deps: TenancyDeps = { service: tenancy, principalOf: devPrincipal };
+  const tenancyDeps: TenancyDeps = { service: tenancy, principalOf: devPrincipal };
+
+  const party = new PartyService({
+    parties: new PostgresPartyRepository(pools.app),
+    identifiers: new PostgresIdentifierRepository(pools.app),
+    relationships: new PostgresRelationshipRepository(pools.app),
+    ids: systemIds,
+  });
 
   return {
-    app: buildRouter(deps, log, { docsEnabled: cfg.docsEnabled }),
+    app: buildRouter({ tenancy: tenancyDeps, party: { service: party } }, log, {
+      docsEnabled: cfg.docsEnabled,
+    }),
     pools,
     assertReady: () => assertTenantWall(pools.app),
   };

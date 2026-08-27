@@ -14,6 +14,8 @@ import type { Logger } from "../platform/log";
 import { createOpenAPIApp } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
 import type { TenancyDeps } from "./handler/tenancy";
+import { registerPartyRoutes } from "./handler/party";
+import type { PartyDeps } from "./handler/party";
 import { mapError } from "./domainerr";
 import { toEnvelope } from "./httpresp";
 
@@ -23,7 +25,13 @@ export interface RouterOptions {
   readonly docsEnabled: boolean;
 }
 
-export function buildRouter(deps: TenancyDeps, log: Logger, opts: RouterOptions): OpenAPIHono {
+/** Per-module dependencies the router mounts. One field per capability. */
+export interface RouterDeps {
+  readonly tenancy: TenancyDeps;
+  readonly party: PartyDeps;
+}
+
+export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions): OpenAPIHono {
   const app = createOpenAPIApp();
 
   // One place maps every thrown error to the envelope — and logs the ones that
@@ -41,8 +49,9 @@ export function buildRouter(deps: TenancyDeps, log: Logger, opts: RouterOptions)
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/ready", (c) => c.json({ status: "ready" }));
 
-  // App + platform routes.
-  registerTenancyRoutes(app, deps);
+  // App + platform routes, one registrar per module.
+  registerTenancyRoutes(app, deps.tenancy);
+  registerPartyRoutes(app, deps.party);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {
