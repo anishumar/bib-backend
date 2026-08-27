@@ -2,6 +2,8 @@
 // SQL, no HTTP: every outside thing is an injected port, so this reads like a
 // description of what the business does and is testable with in-memory fakes.
 import type { IdGen } from "../../platform/ids";
+import type { Actor } from "../../domain/ledger/model";
+import type { EventSink } from "../ledger/ports";
 import type {
   IdentifierType,
   LegalEntity,
@@ -37,6 +39,9 @@ export interface Deps {
   readonly identifiers: IdentifierRepository;
   readonly relationships: RelationshipRepository;
   readonly ids: IdGen;
+  /** The audit trail. Every write below records one event naming its actor —
+   *  the port, never the ledger service or an adapter (docs/EVENT-CONTRACT.md). */
+  readonly events: EventSink;
 }
 
 // Optional fields are written `?: T | undefined` on purpose: the project runs
@@ -97,10 +102,21 @@ export interface PartyProfile {
 export class PartyService {
   constructor(private readonly deps: Deps) {}
 
+  // Every mutating method takes the actor as a second argument rather than
+  // folding it into the input DTO: WHO is doing this is orthogonal to WHAT is
+  // being done, and keeping it separate means the request shapes stay the
+  // shapes the API documents.
+  //
+  // The event is recorded AFTER the change commits, per the contract — an event
+  // must never claim something that was rolled back. If the ledger write then
+  // fails the call fails with it, deliberately: a silent gap in an audit trail
+  // is the kind of thing discovered in a regulator's meeting, so it is louder
+  // to break here than to quietly stop recording.
+
   /** Create an organization party. Display name prefers the trade name, falling
    *  back to the legal name. */
-  async createOrganization(input: CreateOrganizationInput): Promise<Organization> {
-    return this.deps.parties.createOrganization({
+  async createOrganization(input: CreateOrganizationInput, actor: Actor): Promise<Organization> {
+    const org = await this.deps.parties.createOrganization({
       partyId: this.deps.ids.newId(),
       tenantId: input.tenantId,
       legalName: input.legalName,
@@ -109,11 +125,19 @@ export class PartyService {
       website: input.website ?? null,
       displayName: input.tradeName?.trim() || input.legalName,
     });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.created",
+      objectId: org.partyId,
+      actor,
+      payload: { kind: "organization" },
+    });
+    return org;
   }
 
   /** Create a person party. */
-  async createPerson(input: CreatePersonInput): Promise<Person> {
-    return this.deps.parties.createPerson({
+  async createPerson(input: CreatePersonInput, actor: Actor): Promise<Person> {
+    const person = await this.deps.parties.createPerson({
       partyId: this.deps.ids.newId(),
       tenantId: input.tenantId,
       fullName: input.fullName,
@@ -121,14 +145,27 @@ export class PartyService {
       dateOfBirth: input.dateOfBirth ?? null,
       displayName: input.fullName,
     });
+    // The payload names the KIND, never the person. A name is personal data and
+    // the ledger cannot be erased; the row it points at can.
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.created",
+      objectId: person.partyId,
+      actor,
+      payload: { kind: "person" },
+    });
+    return person;
   }
 
   /** Register a legal entity against an existing organization party. Enforced
    *  here and by the DB FK to organization — a person can never be one. */
-  async registerLegalEntity(input: RegisterLegalEntityInput): Promise<LegalEntity> {
+  async registerLegalEntity(
+    input: RegisterLegalEntityInput,
+    actor: Actor,
+  ): Promise<LegalEntity> {
     const org = await this.deps.parties.findOrganization(input.tenantId, input.organizationPartyId);
     if (!org) throw new NotAnOrganization(input.organizationPartyId);
-    return this.deps.parties.addLegalEntity({
+    const entity = await this.deps.parties.addLegalEntity({
       partyId: input.organizationPartyId,
       tenantId: input.tenantId,
       jurisdiction: input.jurisdiction.trim().toUpperCase(),
@@ -137,12 +174,20 @@ export class PartyService {
       financialYearEnd: input.financialYearEnd ?? null,
       registeredAddress: input.registeredAddress ?? null,
     });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.registered",
+      objectId: entity.partyId,
+      actor,
+      payload: { jurisdiction: entity.jurisdiction, entityType: entity.entityType },
+    });
+    return entity;
   }
 
   /** Attach an identifier (PAN, GSTIN, email…) to a party. Normalises and
    *  shape-validates the value, and rejects a duplicate within the tenant so
    *  the dedup key stays trustworthy. */
-  async addIdentifier(input: AddIdentifierInput): Promise<PartyIdentifier> {
+  async addIdentifier(input: AddIdentifierInput, actor: Actor): Promise<PartyIdentifier> {
     const party = await this.deps.parties.findParty(input.tenantId, input.partyId);
     if (!party) throw new PartyNotFound(input.partyId);
 
@@ -155,7 +200,7 @@ export class PartyService {
     const existing = await this.deps.identifiers.findByValue(input.tenantId, input.type, value);
     if (existing) throw new DuplicateIdentifier(input.type, value);
 
-    return this.deps.identifiers.add({
+    const identifier = await this.deps.identifiers.add({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       partyId: input.partyId,
@@ -166,10 +211,21 @@ export class PartyService {
       validFrom: input.validFrom,
       validTo: input.validTo ?? null,
     });
+    // The TYPE of identifier, never the value. A PAN or a passport number in an
+    // un-erasable log is precisely what the contract's no-PII rule is about —
+    // and note the denylist would not have caught it under the key "value".
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party_identifier.added",
+      objectId: identifier.id,
+      actor,
+      payload: { partyId: input.partyId, identifierType: input.type },
+    });
+    return identifier;
   }
 
   /** Record an effective-dated relationship between two parties. */
-  async addRelationship(input: AddRelationshipInput): Promise<PartyRelationship> {
+  async addRelationship(input: AddRelationshipInput, actor: Actor): Promise<PartyRelationship> {
     if (input.fromPartyId === input.toPartyId) throw new SelfRelationship();
     if (!isValidDateRange(input.validFrom, input.validTo ?? null)) {
       throw new InvalidDateRange(input.validFrom, input.validTo ?? null);
@@ -184,7 +240,7 @@ export class PartyService {
     if (!to) throw new PartyNotFound(input.toPartyId);
     if (!typeOk) throw new InvalidRelationshipType(input.type);
 
-    return this.deps.relationships.add({
+    const relationship = await this.deps.relationships.add({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       fromPartyId: input.fromPartyId,
@@ -194,6 +250,19 @@ export class PartyService {
       validTo: input.validTo ?? null,
       attributes: input.attributes ?? {},
     });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party_relationship.recorded",
+      objectId: relationship.id,
+      actor,
+      payload: {
+        fromPartyId: relationship.fromPartyId,
+        toPartyId: relationship.toPartyId,
+        relationshipType: relationship.type,
+        validFrom: relationship.validFrom,
+      },
+    });
+    return relationship;
   }
 
   /** A small Party 360: the party, its identifiers, and its relationships —

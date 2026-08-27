@@ -21,7 +21,8 @@ import type {
   PartyRepository,
   RelationshipRepository,
 } from "../usecase/party/ports";
-import { FakeIds } from "./tenancy";
+import { FakeIds } from "./ids";
+import { RecordingEventSink } from "./ledger";
 
 // The seeded relationship_type codes (migration 0002).
 const RELATIONSHIP_TYPES = new Set([
@@ -182,5 +183,6 @@ export function makePartyFakes(): Deps {
     identifiers: new FakeIdentifierRepo(),
     relationships: new FakeRelationshipRepo(),
     ids: new FakeIds(),
+    events: new RecordingEventSink(),
   };
 }

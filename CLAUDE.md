@@ -102,6 +102,8 @@ pass a raw string where a number/enum is meant. Validate in `validate.ts` — fa
 
 - **A route** → add to `src/api/router.ts` (all routes in one file) + a handler method in
   `src/api/handler/`. Handler parses, calls one use-case method, maps the result. No rules in it.
+  App-facing routes take the tenant from the **session**, never from the path — see
+  `api/handler/party.ts`. `/internal/…` is the platform's own S2S surface (provisioning).
 - **A business rule** → `usecase/<area>/service.ts`. If it needs something external, declare a
   port in `ports.ts` and inject it; never import an adapter.
 - **An external system** (DB table, vendor API) → an adapter in `infrastructure/`, implementing

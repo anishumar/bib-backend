@@ -120,3 +120,51 @@ describe("resolveAccess (org-switcher)", () => {
     expect(access.map((m) => m.tenantId).sort()).toEqual([a.id, b.id].sort());
   });
 });
+
+describe("the audit trail", () => {
+  it("records a tenant's own creation as the first row in its timeline", async () => {
+    const { service, f } = svc();
+    const tenant = await service.createTenant({ name: "Harbour Point", slug: "harbour-point" });
+    const [event] = f.events.recorded;
+    expect(event?.verb).toBe("tenant.created");
+    expect(event?.tenantId).toBe(tenant.id);
+    expect(event?.objectId).toBe(tenant.id);
+    // Platform provisioning has no end user behind it, so it names the system
+    // rather than inventing a human.
+    expect(event?.actorType).toBe("system");
+    expect(event?.actorId).toBeNull();
+  });
+
+  it("records a membership grant without the user's email", async () => {
+    const { service, f } = svc();
+    const tenant = await service.createTenant({ name: "Harbour Point", slug: "harbour-point" });
+    const user = await service.ensureUser("priya@harbourpoint.in");
+    const membership = await service.addMember({
+      tenantId: tenant.id,
+      userId: user.id,
+      audience: "STAFF",
+      role: "partner",
+      commercialVisibility: true,
+    });
+
+    const granted = f.events.recorded.find((e) => e.verb === "membership.granted");
+    expect(granted?.objectId).toBe(membership.id);
+    // The user id, never the address: an email is personal data and this log
+    // cannot be erased. Role and audience are the firm's own configuration.
+    expect(granted?.payload).toEqual({
+      userId: user.id,
+      audience: "STAFF",
+      role: "partner",
+      commercialVisibility: true,
+    });
+    expect(JSON.stringify(f.events.recorded)).not.toContain("priya@harbourpoint.in");
+  });
+
+  it("does not record the creation of a global user — it belongs to no tenant", async () => {
+    const { service, f } = svc();
+    await service.ensureUser("priya@harbourpoint.in");
+    // Every event is tenant-scoped and a global identity has no tenant. The
+    // fact a firm cares about is membership.granted, which does.
+    expect(f.events.recorded).toHaveLength(0);
+  });
+});

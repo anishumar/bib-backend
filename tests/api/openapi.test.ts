@@ -51,13 +51,14 @@ function identityService(): IdentityService {
     ids: fakes.ids,
     clock: new FakeClock(),
     magicLinkBaseUrl: "http://localhost:3000",
+    events: fakes.events,
   });
 }
 
 function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()), principalOf: devPrincipal },
-    party: { service: new PartyService(makePartyFakes()) },
+    party: { service: new PartyService(makePartyFakes()), principalOf: devPrincipal },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     auth: {
       service: identityService(),
@@ -81,8 +82,8 @@ describe("OpenAPI spec", () => {
     // Tenancy, party and ledger routes are all mounted; assert a representative set.
     expect(paths).toContain("/internal/v1/tenants");
     expect(paths).toContain("/api/v1/tenancy/me/memberships");
-    expect(paths).toContain("/internal/v1/tenants/{tenantId}/organizations");
-    expect(paths).toContain("/internal/v1/tenants/{tenantId}/parties/{partyId}");
+    expect(paths).toContain("/api/v1/parties/organizations");
+    expect(paths).toContain("/api/v1/parties/{partyId}");
     expect(paths).toContain("/internal/v1/tenants/{tenantId}/events");
     expect(paths).toContain("/api/v1/auth/login");
   });

@@ -3,6 +3,9 @@
 // reads like a description of what the business does and is testable with
 // in-memory fakes and zero infrastructure.
 import type { IdGen } from "../../platform/ids";
+import type { Actor } from "../../domain/ledger/model";
+import { SYSTEM_ACTOR } from "../../domain/ledger/model";
+import type { EventSink } from "../ledger/ports";
 import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
 import {
   activeMemberships,
@@ -29,6 +32,7 @@ export interface Deps {
   readonly users: UserRepository;
   readonly memberships: MembershipRepository;
   readonly ids: IdGen;
+  readonly events: EventSink;
 }
 
 export interface AddMemberInput {
@@ -42,16 +46,34 @@ export interface AddMemberInput {
 export class TenancyService {
   constructor(private readonly deps: Deps) {}
 
+  // Two of these writes are recorded and one is not, and the exception is worth
+  // stating: creating a global user_account (ensureUser / registerUser) has NO
+  // TENANT, and every event is tenant-scoped. The fact a firm actually cares
+  // about — that this person gained access to it — is membership.granted, which
+  // does have one. See docs/EVENT-CONTRACT.md § "identity and the tenant".
+  //
+  // Provisioning runs on the platform's S2S surface with no end user behind it,
+  // so these events name the system as actor rather than inventing a human.
+
   /** Register a firm as a tenant. Slug is validated and must be unique. */
-  async createTenant(input: { name: string; slug: string }): Promise<Tenant> {
+  async createTenant(input: { name: string; slug: string }, actor: Actor = SYSTEM_ACTOR): Promise<Tenant> {
     if (!isValidSlug(input.slug)) throw new InvalidSlug(input.slug);
     const existing = await this.deps.tenants.findBySlug(input.slug);
     if (existing) throw new SlugTaken(input.slug);
-    return this.deps.tenants.create({
+    const tenant = await this.deps.tenants.create({
       id: this.deps.ids.newId(),
       slug: input.slug,
       name: input.name,
     });
+    // A tenant's own creation is the first row in its own timeline.
+    await this.deps.events.recordEvent({
+      tenantId: tenant.id,
+      verb: "tenant.created",
+      objectId: tenant.id,
+      actor,
+      payload: { slug: tenant.slug },
+    });
+    return tenant;
   }
 
   /**
@@ -76,13 +98,13 @@ export class TenancyService {
   }
 
   /** Grant a user access to a tenant, in an audience, with a role. */
-  async addMember(input: AddMemberInput): Promise<Membership> {
+  async addMember(input: AddMemberInput, actor: Actor = SYSTEM_ACTOR): Promise<Membership> {
     if (!isAudience(input.audience)) throw new InvalidAudience(input.audience);
     const tenant = await this.deps.tenants.findById(input.tenantId);
     if (!tenant) throw new TenantNotFound(input.tenantId);
     const user = await this.deps.users.findById(input.userId);
     if (!user) throw new UserNotFound(input.userId);
-    return this.deps.memberships.create({
+    const membership = await this.deps.memberships.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       userId: input.userId,
@@ -90,6 +112,21 @@ export class TenancyService {
       role: input.role,
       commercialVisibility: input.commercialVisibility,
     });
+    // userId, not email: the address is personal data and the ledger cannot be
+    // erased. Role and audience are the firm's own configuration, not personal.
+    await this.deps.events.recordEvent({
+      tenantId: membership.tenantId,
+      verb: "membership.granted",
+      objectId: membership.id,
+      actor,
+      payload: {
+        userId: membership.userId,
+        audience: membership.audience,
+        role: membership.role,
+        commercialVisibility: membership.commercialVisibility,
+      },
+    });
+    return membership;
   }
 
   /** The org-switcher: every active membership this user holds, across tenants. */

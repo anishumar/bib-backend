@@ -2,7 +2,8 @@
 // interface (compile-time assertion), so business rules can be tested with zero
 // infrastructure. These live in src (not tests) so any module's tests can reuse
 // them.
-import type { IdGen } from "../platform/ids";
+import { FakeIds } from "./ids";
+import { RecordingEventSink } from "./ledger";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
   MembershipRepository,
@@ -12,17 +13,6 @@ import type {
   TenantRepository,
   UserRepository,
 } from "../usecase/tenancy/ports";
-
-export class FakeIds implements IdGen {
-  private n = 0;
-  newId(): string {
-    this.n += 1;
-    return `id-${this.n}`;
-  }
-  derivedId(namespace: string, key: string): string {
-    return `${namespace}:${key}`;
-  }
-}
 
 export class FakeTenantRepo implements TenantRepository {
   readonly rows: Tenant[] = [];
@@ -71,11 +61,13 @@ export function makeFakes(): {
   users: FakeUserRepo;
   memberships: FakeMembershipRepo;
   ids: FakeIds;
+  events: RecordingEventSink;
 } {
   return {
     tenants: new FakeTenantRepo(),
     users: new FakeUserRepo(),
     memberships: new FakeMembershipRepo(),
     ids: new FakeIds(),
+    events: new RecordingEventSink(),
   };
 }

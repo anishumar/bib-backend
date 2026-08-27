@@ -94,9 +94,11 @@ Phase 7  Real integrations P11 — external-gated, its own track
 - [x] `(B)` **T1.7** **Real principal adapter** (session) replacing the dev `x-user-id` stub; client-portal audience wired. *Acc: prod boot refuses the dev resolver (honest registry).* — migration `0004_identity` (credential / session / magic_link, GLOBAL per ADR-02). Password (scrypt, no dependency) **and** magic link, both behind ports; server-side revocable sessions in an httpOnly cookie, token never in a response body. `Principal` now carries `sessionId + tenantId + audience`, with the org switch (`POST /auth/switch-tenant`) re-checking the membership. Verified live end to end, and **the acceptance holds twice**: a `BIB_ENVIRONMENT=qa` boot refuses `BIB_DEV_AUTH_ENABLED` *and* the logging mailer, by name.
 - [ ] `(A/B)` **T1.8** **Frontend foundation** (separate app — "clean separation"): Next.js shell, auth flow against the session adapter, design system/tokens, and a **typed API client generated from `/openapi.json`**. Runs in parallel with the backend spine — whoever has slack. *Acc: the app boots, authenticates, and calls a real endpoint (e.g. `me/memberships`) through the generated client; regenerating the client after an API change is one command.*
 
-> **Open against M1:** the party/tenancy services do not yet call `recordEvent()`. T1.7 has
-> landed, so a real actor now exists and the blocker is gone — the wiring is one line per
-> write and ships as its own PR.
+> **M1 backend is closed.** Every tenancy, party and session write now records an event
+> naming its actor, and the party routes moved from `/internal/v1/tenants/{tenantId}/…` to
+> `/api/v1/parties/…` with the tenant taken from the session — a caller can no longer name
+> the firm they would like to write to. What remains for M1 is T1.8, the frontend's first
+> authenticated call.
 
 **Milestone M1:** a client company with entities, directors, and multiple GSTINs exists, tenant-isolated, every write landing in the ledger — **and the frontend app renders its first authenticated call**. *(Maps to C2 client records + P1/P7; UI foundation ready for the first screen.)*
 

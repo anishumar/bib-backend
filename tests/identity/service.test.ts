@@ -23,6 +23,7 @@ import {
   WeakPassword,
 } from "../../src/domain/identity/errors";
 import { SESSION_TTL_DAYS, MAGIC_LINK_TTL_MINUTES } from "../../src/domain/identity/model";
+import type { RecordingEventSink } from "../../src/testfakes/ledger";
 
 const TENANT_A = "11111111-1111-1111-1111-111111111111";
 const TENANT_B = "22222222-2222-2222-2222-222222222222";
@@ -37,6 +38,7 @@ interface Harness {
   magicLinks: FakeMagicLinkRepo;
   mailer: FakeMailer;
   clock: FakeClock;
+  events: RecordingEventSink;
 }
 
 function harness(): Harness {
@@ -57,6 +59,7 @@ function harness(): Harness {
     mailer,
     ids: fakes.ids,
     clock,
+    events: fakes.events,
     magicLinkBaseUrl: "https://app.example.com",
   });
   return {
@@ -68,7 +71,19 @@ function harness(): Harness {
     magicLinks,
     mailer,
     clock,
+    events: fakes.events,
   };
+}
+
+/** Stable uuids from readable labels. Seeded ids have to be real uuids now that
+ *  every write records an event and the ledger validates what it is handed. */
+const uuids = new Map<string, string>();
+function uuidFor(label: string): string {
+  const existing = uuids.get(label);
+  if (existing !== undefined) return existing;
+  const id = `00000000-0000-4000-9000-${String(uuids.size + 1).padStart(12, "0")}`;
+  uuids.set(label, id);
+  return id;
 }
 
 /** A user with a password and one active STAFF membership — the ordinary case. */
@@ -77,10 +92,10 @@ async function seedUser(
   email = "priya@harbourpoint.in",
   tenants: readonly string[] = [TENANT_A],
 ): Promise<string> {
-  const user = await h.users.create({ id: `user-${email}`, email });
+  const user = await h.users.create({ id: uuidFor(`user:${email}`), email });
   for (const tenantId of tenants) {
     await h.memberships.create({
-      id: `m-${tenantId}-${email}`,
+      id: uuidFor(`membership:${tenantId}:${email}`),
       tenantId,
       userId: user.id,
       audience: "STAFF",
@@ -99,7 +114,7 @@ describe("setPassword", () => {
   });
 
   it("refuses a password shorter than the policy", async () => {
-    const user = await h.users.create({ id: "u1", email: "a@b.co" });
+    const user = await h.users.create({ id: uuidFor("user:a@b.co"), email: "a@b.co" });
     await expect(h.service.setPassword(user.id, "short")).rejects.toBeInstanceOf(WeakPassword);
   });
 
@@ -133,7 +148,7 @@ describe("login", () => {
   it("normalises the email — case and padding are not a different account", async () => {
     await seedUser(h);
     const result = await h.service.login("  PRIYA@HarbourPoint.in ", PASSWORD);
-    expect(result.principal.userId).toBe("user-priya@harbourpoint.in");
+    expect(result.principal.userId).toBe(uuidFor("user:priya@harbourpoint.in"));
   });
 
   it("leaves the tenant unset when the user belongs to several", async () => {
@@ -163,7 +178,7 @@ describe("login", () => {
   });
 
   it("refuses a user with no password set", async () => {
-    await h.users.create({ id: "u-invited", email: "invited@example.com" });
+    await h.users.create({ id: uuidFor("user:invited2"), email: "invited@example.com" });
     await expect(
       h.service.login("invited@example.com", PASSWORD),
     ).rejects.toBeInstanceOf(InvalidCredentials);
@@ -172,7 +187,7 @@ describe("login", () => {
   it("names the reason only once the password is proved", async () => {
     // A disabled account and one with no membership are both told why — but
     // only after a correct password, so neither answer leaks to a stranger.
-    const user = await h.users.create({ id: "u-none", email: "orphan@example.com" });
+    const user = await h.users.create({ id: uuidFor("user:orphan"), email: "orphan@example.com" });
     await h.service.setPassword(user.id, PASSWORD);
     await expect(h.service.login("orphan@example.com", PASSWORD)).rejects.toBeInstanceOf(
       NoActiveMembership,
@@ -180,7 +195,7 @@ describe("login", () => {
 
     await seedUser(h, "gone@example.com");
     h.users.rows[h.users.rows.findIndex((r) => r.email === "gone@example.com")] = {
-      id: "user-gone@example.com",
+      id: uuidFor("user:gone@example.com"),
       email: "gone@example.com",
       status: "disabled",
     };
@@ -191,7 +206,7 @@ describe("login", () => {
 
   it("refuses a user whose only membership was deactivated", async () => {
     await seedUser(h, "left@example.com");
-    const i = h.memberships.rows.findIndex((m) => m.userId === "user-left@example.com");
+    const i = h.memberships.rows.findIndex((m) => m.userId === uuidFor("user:left@example.com"));
     const row = h.memberships.rows[i];
     if (row) h.memberships.rows[i] = { ...row, isActive: false };
     await expect(h.service.login("left@example.com", PASSWORD)).rejects.toBeInstanceOf(
@@ -311,9 +326,9 @@ describe("magic links", () => {
   });
 
   it("signs in a user who has no password at all — the invited case", async () => {
-    const user = await h.users.create({ id: "u-invited", email: "invited@example.com" });
+    const user = await h.users.create({ id: uuidFor("user:invited"), email: "invited@example.com" });
     await h.memberships.create({
-      id: "m-invited",
+      id: uuidFor("membership:invited"),
       tenantId: TENANT_A,
       userId: user.id,
       audience: "CLIENT_PORTAL",

@@ -42,6 +42,15 @@ export interface Wired {
 export function wire(cfg: Config, log: Logger): Wired {
   const pools = createPools(cfg.db);
 
+  // The ledger is constructed BEFORE the services that will write to it: every
+  // module that records events receives this one instance through its own
+  // EventSink port, so there is exactly one implementation of the event
+  // contract in the process and no service can reach the table around it.
+  const ledger = new LedgerService({
+    events: new PostgresEventStore(pools.app),
+    ids: systemIds,
+  });
+
   // The users and memberships repositories serve two use cases: tenancy
   // creates them, identity reads them. Identity states its needs as its own
   // narrow ports (UserDirectory / MembershipDirectory), which these satisfy —
@@ -54,6 +63,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     users,
     memberships,
     ids: systemIds,
+    events: ledger,
   });
 
   const identity = new IdentityService({
@@ -70,6 +80,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     mailer: new LoggingMailer(log),
     ids: systemIds,
     clock: systemClock,
+    events: ledger,
     magicLinkBaseUrl: cfg.auth.appBaseUrl,
   });
 
@@ -90,20 +101,12 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   const tenancyDeps: TenancyDeps = { service: tenancy, principalOf };
 
-  // The ledger is constructed BEFORE the services that will write to it: every
-  // module that records events receives this one instance through its own
-  // EventSink port, so there is exactly one implementation of the event
-  // contract in the process and no service can reach the table around it.
-  const ledger = new LedgerService({
-    events: new PostgresEventStore(pools.app),
-    ids: systemIds,
-  });
-
   const party = new PartyService({
     parties: new PostgresPartyRepository(pools.app),
     identifiers: new PostgresIdentifierRepository(pools.app),
     relationships: new PostgresRelationshipRepository(pools.app),
     ids: systemIds,
+    events: ledger,
   });
 
   return {
@@ -116,7 +119,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           cookieSecure: cfg.auth.sessionCookieSecure,
         },
         tenancy: tenancyDeps,
-        party: { service: party },
+        party: { service: party, principalOf },
         ledger: { service: ledger },
       },
       log,

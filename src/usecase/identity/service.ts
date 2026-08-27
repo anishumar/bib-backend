@@ -15,6 +15,7 @@ import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Principal } from "../../platform/callctx";
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
+import type { EventSink } from "../ledger/ports";
 import { normalizeEmail } from "../../domain/tenancy/model";
 import type { Session } from "../../domain/identity/model";
 import {
@@ -56,6 +57,7 @@ export interface Deps {
   readonly mailer: Mailer;
   readonly ids: IdGen;
   readonly clock: Clock;
+  readonly events: EventSink;
   /** Where a magic link sends the user — the frontend's redemption page. From
    *  config, injected: this layer never reads the environment. */
   readonly magicLinkBaseUrl: string;
@@ -179,6 +181,7 @@ export class IdentityService {
       tenantId,
       membership.audience,
     );
+    await this.recordSessionStarted(tenantId, userId);
     return toPrincipal(session);
   }
 
@@ -205,6 +208,18 @@ export class IdentityService {
    * partner who belongs to two firms must SAY which one they are acting as,
    * because every downstream gate keys on that answer.
    */
+  /** One place writes session.started, so the payload cannot drift between the
+   *  login path and the org switch. No email, no address, no user agent — the
+   *  user id, and the row it points at stays erasable. */
+  private async recordSessionStarted(tenantId: string, userId: string): Promise<void> {
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "session.started",
+      objectId: userId,
+      actor: { type: "human", id: userId },
+    });
+  }
+
   private async openSession(user: UserAccount): Promise<SignInResult> {
     const memberships = (await this.deps.memberships.listByUser(user.id)).filter((m) => m.isActive);
     if (memberships.length === 0) throw new NoActiveMembership(user.email);
@@ -220,6 +235,12 @@ export class IdentityService {
       activeAudience: only?.audience ?? null,
       expiresAt: sessionExpiryFrom(now),
     });
+    // Recorded only if a tenant was resolved. Every event is tenant-scoped, and
+    // a session that has not chosen an org belongs to no firm's timeline yet —
+    // switchTenant records it the moment one is chosen. So the question each
+    // firm can answer is the one it cares about: when did this person's session
+    // become active HERE.
+    if (only) await this.recordSessionStarted(only.tenantId, user.id);
     return { token, session, principal: toPrincipal(session), memberships };
   }
 }

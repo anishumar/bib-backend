@@ -8,7 +8,9 @@
 import type { DomainEvent } from "../domain/ledger/model";
 import type { EventStore, NewEvent } from "../usecase/ledger/ports";
 import type { Deps } from "../usecase/ledger/service";
-import { FakeIds } from "./tenancy";
+import { LedgerService } from "../usecase/ledger/service";
+import type { EventSink, RecordEventInput } from "../usecase/ledger/ports";
+import { FakeIds } from "./ids";
 
 /** A fixed clock, so a test can assert on timestamps. Real time comes from the
  *  database; the fake needs only to be ordered and deterministic. */
@@ -63,4 +65,30 @@ export class FakeEventStore implements EventStore {
 /** A ready-made dependency set for LedgerService, matching makePartyFakes(). */
 export function makeLedgerFakes(): Deps {
   return { events: new FakeEventStore(), ids: new FakeIds() };
+}
+
+/**
+ * The EventSink other modules' tests inject.
+ *
+ * It is the REAL LedgerService over an in-memory store, not a stub that records
+ * whatever it is handed — so a party or tenancy test fails if its event breaks
+ * the contract (an unregistered verb, a payload carrying personal data). The
+ * contract is enforced for every consumer, in every suite, not just its own.
+ */
+export class RecordingEventSink implements EventSink {
+  readonly store = new FakeEventStore();
+  private readonly service = new LedgerService({ events: this.store, ids: new FakeIds() });
+
+  recordEvent(input: RecordEventInput): Promise<DomainEvent> {
+    return this.service.recordEvent(input);
+  }
+
+  /** Everything recorded, oldest first. */
+  get recorded(): readonly DomainEvent[] {
+    return this.store.rows;
+  }
+
+  verbs(): readonly string[] {
+    return this.store.rows.map((e) => e.verb);
+  }
 }

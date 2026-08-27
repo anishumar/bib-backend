@@ -115,6 +115,26 @@ clicks.
 tenant-scoped: a key that collides across tenants produces a row RLS then hides, and the
 adapter raises rather than guess.
 
+## 3.6 Every event needs a tenant — and what that excludes
+
+The ledger is tenant-scoped (RLS, like every other business table), so an event that has
+no tenant has nowhere to live. That is not a gap to work around; it is the wall doing its
+job. Two consequences, both found by wiring the first consumers:
+
+- **Creating a global `user_account` is not recorded.** Identity lives above tenant
+  (ADR-02), so a fresh login belongs to no firm's timeline. The fact a firm actually cares
+  about — *this person gained access to us* — is `membership.granted`, which does have a
+  tenant. The verb `user.registered` was in the first draft of this registry and has been
+  removed for exactly this reason.
+- **`session.started` is recorded when a session becomes active IN A TENANT** — at login
+  when there is one membership to select, and at `switch-tenant` when the user chooses.
+  A partner who belongs to two firms and has not yet chosen has a valid session that no
+  firm can see, which is the correct answer: neither firm has been accessed yet.
+
+If you find yourself wanting to record something that has no tenant, it is either
+platform-level (and belongs in logs, not the ledger) or you have not yet found the
+tenant-scoped fact underneath it.
+
 ## 4 · When to write, and the honest limit
 
 Record the event **after** the change it describes has committed.
@@ -156,15 +176,14 @@ A correction is a **new event**. There is no other kind.
 Owned per lane. Reading is unrestricted — the lane says who is expected to *write* it.
 The authoritative list is `EVENT_VERBS`; this table is its rendering.
 
-### Platform — tenancy + party (built)
+### Platform — tenancy + party (built, and wired)
 
 | Verb | Object | Means |
 |---|---|---|
 | `tenant.created` | tenant | A firm was registered as a tenant. |
-| `user.registered` | user_account | A global identity was created for an email. |
 | `membership.granted` | membership | A user was given a role in a tenant, for one audience. |
 | `membership.revoked` | membership | A membership was deactivated. |
-| `session.started` | user_account | A user authenticated. |
+| `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |

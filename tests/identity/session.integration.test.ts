@@ -23,6 +23,8 @@ import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/
 import { ScryptPasswordHasher } from "../../src/infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { FakeClock, FakeMailer } from "../../src/testfakes/identity";
+import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
+import { LedgerService } from "../../src/usecase/ledger/service";
 import { systemIds } from "../../src/platform/ids";
 import { InvalidMagicLink } from "../../src/domain/identity/errors";
 
@@ -47,6 +49,7 @@ const identity = new IdentityService({
   mailer,
   ids: systemIds,
   clock,
+  events: new LedgerService({ events: new PostgresEventStore(app), ids: systemIds }),
   magicLinkBaseUrl: "https://app.example.test",
 });
 

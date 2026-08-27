@@ -69,10 +69,9 @@ export interface VerbSpec {
 export const EVENT_VERBS = {
   // ── platform · tenancy + party (the spine) ─────────────────────────────────
   "tenant.created":              { objectType: "tenant",              lane: "platform",   description: "A firm was registered as a tenant." },
-  "user.registered":             { objectType: "user_account",        lane: "platform",   description: "A global identity was created for an email." },
   "membership.granted":          { objectType: "membership",          lane: "platform",   description: "A user was given a role in a tenant, for one audience." },
   "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated." },
-  "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user authenticated." },
+  "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user's session became active in THIS tenant — at login, or when the org switcher selected it." },
   "party.created":               { objectType: "party",               lane: "platform",   description: "An organization or person party was created." },
   "legal_entity.registered":     { objectType: "legal_entity",        lane: "platform",   description: "An organization was registered as a legal entity in a jurisdiction." },
   "party_identifier.added":      { objectType: "party_identifier",    lane: "platform",   description: "A PAN / GSTIN / handle was attached to a party." },
