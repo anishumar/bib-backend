@@ -5,13 +5,18 @@
 // way an audit trail must not be. So there is no POST here.
 //
 // Two reads, the two questions the log is asked: "what happened at this firm
-// lately" and "everything that ever happened to this object". Both live on the
-// /internal surface with tenantId in the path, matching the tenancy and party
-// precedent — the app-facing wrapper that derives tenantId from the caller's
-// membership arrives with T1.6/T1.7.
+// lately" and "everything that ever happened to this object".
+//
+// THE TENANT COMES FROM THE SESSION. These routes shipped on /internal with
+// tenantId as a path parameter and no authentication at all, which meant any
+// caller could read any firm's audit trail by naming it — RLS scoped the query
+// perfectly, to the tenant the ATTACKER supplied. The wall was never the
+// problem; handing the caller the key to it was.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
+import { scopeOf } from "../scope";
 import { MAX_TIMELINE_LIMIT } from "../../usecase/ledger/service";
 import type { LedgerService } from "../../usecase/ledger/service";
 
@@ -36,20 +41,17 @@ const EventSchema = z
 
 const EventListSchema = z.object({ events: z.array(EventSchema) }).openapi("EventList");
 
-const TenantParam = z.object({ tenantId: z.string().uuid() });
 const ObjectParam = z.object({
-  tenantId: z.string().uuid(),
   objectType: z.string().min(1),
   objectId: z.string().uuid(),
 });
 
 const tenantTimelineRoute = createRoute({
   method: "get",
-  path: "/internal/v1/tenants/{tenantId}/events",
+  path: "/api/v1/events",
   tags: ["ledger"],
   summary: "The tenant's event timeline, newest first",
   request: {
-    params: TenantParam,
     query: z.object({
       limit: z.coerce
         .number()
@@ -63,32 +65,39 @@ const tenantTimelineRoute = createRoute({
   responses: {
     200: { description: "Events", content: { "application/json": { schema: EventListSchema } } },
     400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
   },
 });
 
 const objectTimelineRoute = createRoute({
   method: "get",
-  path: "/internal/v1/tenants/{tenantId}/objects/{objectType}/{objectId}/events",
+  path: "/api/v1/objects/{objectType}/{objectId}/events",
   tags: ["ledger"],
   summary: "Everything that ever happened to one object, newest first",
   request: { params: ObjectParam },
   responses: {
     200: { description: "Events", content: { "application/json": { schema: EventListSchema } } },
     400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
   },
 });
 
-export function registerLedgerRoutes(app: OpenAPIHono, deps: LedgerDeps): void {
+export function registerLedgerRoutes(app: OpenAPIHono<AppEnv>, deps: LedgerDeps): void {
   app.openapi(tenantTimelineRoute, async (c) => {
-    const { tenantId } = c.req.valid("param");
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
     const { limit } = c.req.valid("query");
-    const events = await deps.service.recent(tenantId, limit);
+    const events = await deps.service.recent(s.tenantId, limit);
     return c.json({ events: [...events] }, 200);
   });
 
   app.openapi(objectTimelineRoute, async (c) => {
-    const { tenantId, objectType, objectId } = c.req.valid("param");
-    const events = await deps.service.forObject(tenantId, objectType, objectId);
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { objectType, objectId } = c.req.valid("param");
+    const events = await deps.service.forObject(s.tenantId, objectType, objectId);
     return c.json({ events: [...events] }, 200);
   });
 }

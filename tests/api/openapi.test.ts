@@ -57,20 +57,22 @@ function identityService(): IdentityService {
 
 function deps(): RouterDeps {
   return {
-    tenancy: { service: new TenancyService(makeFakes()), principalOf: devPrincipal },
-    party: { service: new PartyService(makePartyFakes()), principalOf: devPrincipal },
+    tenancy: { service: new TenancyService(makeFakes()) },
+    party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
-    auth: {
-      service: identityService(),
-      principalOf: devPrincipal,
-      cookieName: "bib_session",
-      cookieSecure: false,
-    },
+    auth: { service: identityService(), cookieName: "bib_session", cookieSecure: false },
   };
 }
 
+const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
+const internal = { authorization: `Bearer ${INTERNAL_KEY}`, "content-type": "application/json" };
+
 function app() {
-  return buildRouter(deps(), silentLog, { docsEnabled: true });
+  return buildRouter(deps(), silentLog, {
+    docsEnabled: true,
+    internalApiKey: INTERNAL_KEY,
+    principalOf: devPrincipal,
+  });
 }
 
 describe("OpenAPI spec", () => {
@@ -82,14 +84,18 @@ describe("OpenAPI spec", () => {
     // Tenancy, party and ledger routes are all mounted; assert a representative set.
     expect(paths).toContain("/internal/v1/tenants");
     expect(paths).toContain("/api/v1/tenancy/me/memberships");
+    expect(paths).toContain("/api/v1/events");
     expect(paths).toContain("/api/v1/parties/organizations");
     expect(paths).toContain("/api/v1/parties/{partyId}");
-    expect(paths).toContain("/internal/v1/tenants/{tenantId}/events");
     expect(paths).toContain("/api/v1/auth/login");
   });
 
   it("is not served when docs are disabled", async () => {
-    const res = await buildRouter(deps(), silentLog, { docsEnabled: false }).request("/openapi.json");
+    const res = await buildRouter(deps(), silentLog, {
+      docsEnabled: false,
+      internalApiKey: INTERNAL_KEY,
+      principalOf: devPrincipal,
+    }).request("/openapi.json");
     expect(res.status).toBe(404);
   });
 });
@@ -98,7 +104,7 @@ describe("validation", () => {
   it("maps a schema failure to the shared error envelope", async () => {
     const res = await app().request("/internal/v1/tenants", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: internal,
       body: JSON.stringify({ name: "Acme" }), // slug missing
     });
     expect(res.status).toBe(400);
@@ -112,7 +118,7 @@ describe("happy path", () => {
   it("creates a tenant and echoes it", async () => {
     const res = await app().request("/internal/v1/tenants", {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: internal,
       body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
     });
     expect(res.status).toBe(201);

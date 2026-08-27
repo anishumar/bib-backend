@@ -32,6 +32,17 @@ export function validateServer(cfg: Config): void {
       );
     }
 
+    // The committed example value is public. Booting a public environment with
+    // it would leave the provisioning API — create tenants, grant memberships,
+    // set any user's password — open to anyone who has read the repo.
+    if (cfg.auth.internalApiKey === EXAMPLE_INTERNAL_KEY) {
+      throw new Error(
+        `BIB_INTERNAL_API_KEY is still the value from .env.example while ` +
+          `BIB_ENVIRONMENT=${cfg.environment} (production-like). That value is committed and ` +
+          `public. Generate one: openssl rand -hex 32`,
+      );
+    }
+
     // Same rule, applied to notifications: the only registered mailer writes
     // magic links to the log instead of sending them. Booting with it in a
     // public environment would mean sign-in links appear in log aggregation
@@ -45,6 +56,9 @@ export function validateServer(cfg: Config): void {
     }
   }
 }
+
+/** The value committed in .env.example — safe locally, never anywhere public. */
+const EXAMPLE_INTERNAL_KEY = "local-dev-internal-key-not-for-any-real-environment";
 
 function looksLocal(url: string): boolean {
   try {

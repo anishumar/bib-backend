@@ -11,6 +11,9 @@
 // and are mounted here; ops, error mapping and docs are cross-cutting and stay.
 import { swaggerUI } from "@hono/swagger-ui";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "./guards";
+import { internalGuard, sessionGuard } from "./guards";
+import type { PrincipalResolver } from "./principal";
 import type { Logger } from "../platform/log";
 import { createOpenAPIApp } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
@@ -28,6 +31,10 @@ export interface RouterOptions {
   /** Serve /openapi.json and /docs. Off in production-like environments unless
    *  BIB_DOCS_ENABLED is set — the spec enumerates every endpoint. */
   readonly docsEnabled: boolean;
+  /** The shared secret every /internal route requires. */
+  readonly internalApiKey: string;
+  /** How a request becomes a principal on the /api/v1 surface. */
+  readonly principalOf: PrincipalResolver;
 }
 
 /** Per-module dependencies the router mounts. One field per capability. */
@@ -38,7 +45,11 @@ export interface RouterDeps {
   readonly auth: AuthDeps;
 }
 
-export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions): OpenAPIHono {
+export function buildRouter(
+  deps: RouterDeps,
+  log: Logger,
+  opts: RouterOptions,
+): OpenAPIHono<AppEnv> {
   const app = createOpenAPIApp();
 
   // One place maps every thrown error to the envelope — and logs the ones that
@@ -52,9 +63,19 @@ export function buildRouter(deps: RouterDeps, log: Logger, opts: RouterOptions):
     return c.json(toEnvelope(m), m.status);
   });
 
-  // Ops — always auth-free.
+  // Ops — always auth-free. Deliberately mounted BEFORE the guards: a load
+  // balancer cannot hold a credential, and neither endpoint reveals anything.
   app.get("/health", (c) => c.json({ status: "ok" }));
   app.get("/ready", (c) => c.json({ status: "ready" }));
+
+  // AUTHENTICATION, BY PREFIX. These two lines cover every route below them —
+  // including routes nobody has written yet, which is the point. A per-handler
+  // check is a thing a new file can forget; a prefix guard is not.
+  //
+  // They run before request validation, so an unauthenticated call gets 401
+  // rather than a 400 that tells an anonymous caller about the request shape.
+  app.use("/internal/*", internalGuard(opts.internalApiKey));
+  app.use("/api/v1/*", sessionGuard(opts.principalOf));
 
   // App + platform routes, one registrar per module.
   registerAuthRoutes(app, deps.auth);

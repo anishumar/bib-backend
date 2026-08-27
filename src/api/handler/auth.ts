@@ -8,17 +8,16 @@
 // out of band.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "../guards";
 import { setCookie } from "hono/cookie";
 import { z, errorResponse } from "../openapi";
 import { toEnvelope } from "../httpresp";
 import { SESSION_TTL_DAYS } from "../../domain/identity/model";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
-import type { PrincipalResolver } from "../principal";
 import { tokenFrom } from "../principal";
 
 export interface AuthDeps {
   readonly service: IdentityService;
-  readonly principalOf: PrincipalResolver;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
 }
@@ -159,8 +158,9 @@ const setPasswordRoute = createRoute({
   tags: ["auth"],
   summary: "Set a user's password (platform surface)",
   description:
-    "Service-to-service, not app-facing: it is how a login is seeded today. Every existing " +
-    "session of that user is revoked. Self-service password change arrives with the portal.",
+    "Provisioning, not app-facing: it is how a login is seeded today, and it requires the " +
+    "platform key like everything under /internal. Every existing session of that user is " +
+    "revoked. Self-service password change arrives with the portal.",
   request: {
     params: z.object({ userId: z.string().uuid() }),
     body: { content: { "application/json": { schema: SetPasswordBody } }, required: true },
@@ -168,12 +168,13 @@ const setPasswordRoute = createRoute({
   responses: {
     204: { description: "Password set" },
     400: errorResponse("Password does not meet the length policy"),
+    401: errorResponse("Missing or wrong platform key"),
   },
 });
 
 // ── Registration ─────────────────────────────────────────────────────────────
 
-export function registerAuthRoutes(app: OpenAPIHono, deps: AuthDeps): void {
+export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): void {
   const unauthorized = (message: string): ReturnType<typeof toEnvelope> =>
     toEnvelope({ status: 401, code: "UNAUTHORIZED", message });
 
@@ -219,14 +220,17 @@ export function registerAuthRoutes(app: OpenAPIHono, deps: AuthDeps): void {
     return c.json(signInBody(result), 200);
   });
 
-  app.openapi(meRoute, async (c) => {
-    const principal = await deps.principalOf((name) => c.req.header(name));
+  // The guard has already refused an unauthenticated caller on these two, so
+  // the null branch is unreachable in practice — but the type says nullable and
+  // an unreachable branch that returns 401 is cheaper than a cast that lies.
+  app.openapi(meRoute, (c) => {
+    const principal = c.get("principal");
     if (!principal) return c.json(unauthorized("no authenticated session"), 401);
     return c.json(principal, 200);
   });
 
   app.openapi(switchTenantRoute, async (c) => {
-    const principal = await deps.principalOf((name) => c.req.header(name));
+    const principal = c.get("principal");
     if (!principal) return c.json(unauthorized("no authenticated session"), 401);
     const { tenantId } = c.req.valid("json");
     const switched = await deps.service.switchTenant(

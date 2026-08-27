@@ -237,6 +237,38 @@ describe("sessions", () => {
     expect(await h.service.resolveSession(token)).toBeNull();
   });
 
+  it("drops the tenant the moment the membership is deactivated", async () => {
+    // Without this, dismissing someone left their existing session working in
+    // that firm until it expired — up to a fortnight. Checking only at login
+    // and switch-tenant misses the path every request actually takes.
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    expect((await h.service.resolveSession(token))?.tenantId).toBe(TENANT_A);
+
+    const i = h.memberships.rows.findIndex((m) => m.tenantId === TENANT_A);
+    const row = h.memberships.rows[i];
+    if (row) h.memberships.rows[i] = { ...row, isActive: false };
+
+    const after = await h.service.resolveSession(token);
+    // Still signed in, but acting for nobody — a person removed from one firm
+    // may still work at another, so they land on the org switcher.
+    expect(after).not.toBeNull();
+    expect(after?.tenantId).toBeNull();
+    expect(after?.audience).toBeNull();
+  });
+
+  it("keeps working in the firms the user still belongs to", async () => {
+    await seedUser(h, "partner@two-firms.com", [TENANT_A, TENANT_B]);
+    const { token, principal } = await h.service.login("partner@two-firms.com", PASSWORD);
+    await h.service.switchTenant(principal.sessionId, principal.userId, TENANT_B);
+
+    const i = h.memberships.rows.findIndex((m) => m.tenantId === TENANT_A);
+    const row = h.memberships.rows[i];
+    if (row) h.memberships.rows[i] = { ...row, isActive: false };
+
+    expect((await h.service.resolveSession(token))?.tenantId).toBe(TENANT_B);
+  });
+
   it("stops resolving the moment it is revoked — not when it expires", async () => {
     await seedUser(h);
     const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);

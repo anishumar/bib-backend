@@ -2,6 +2,7 @@
 // Every wiring decision lives here so the rest of the codebase can be read
 // without knowing which adapter is plugged into which port.
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "../api/guards";
 import type { Config } from "../config/config";
 import { createPools } from "../db/pool";
 import type { Pools } from "../db/pool";
@@ -33,7 +34,7 @@ import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
 import { buildRouter } from "../api/router";
 
 export interface Wired {
-  readonly app: OpenAPIHono;
+  readonly app: OpenAPIHono<AppEnv>;
   readonly pools: Pools;
   /** Fail-closed readiness: throws if the tenant wall is not intact. */
   assertReady(): Promise<void>;
@@ -99,7 +100,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     );
   }
 
-  const tenancyDeps: TenancyDeps = { service: tenancy, principalOf };
+  const tenancyDeps: TenancyDeps = { service: tenancy };
 
   const party = new PartyService({
     parties: new PostgresPartyRepository(pools.app),
@@ -114,16 +115,19 @@ export function wire(cfg: Config, log: Logger): Wired {
       {
         auth: {
           service: identity,
-          principalOf,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
         },
         tenancy: tenancyDeps,
-        party: { service: party, principalOf },
+        party: { service: party },
         ledger: { service: ledger },
       },
       log,
-      { docsEnabled: cfg.docsEnabled },
+      {
+        docsEnabled: cfg.docsEnabled,
+        internalApiKey: cfg.auth.internalApiKey,
+        principalOf,
+      },
     ),
     pools,
     assertReady: async () => {

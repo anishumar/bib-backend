@@ -161,11 +161,32 @@ export class IdentityService {
    * This runs on every authenticated request. It returns null rather than
    * throwing, because "not signed in" is an ordinary state of the world and the
    * edge decides what to do about it.
+   *
+   * THE MEMBERSHIP IS RE-CHECKED HERE, not just at login and switch. Without
+   * this, deactivating someone's membership left their existing session working
+   * in that firm until it expired — up to a fortnight of access for someone the
+   * firm dismissed this morning, which is the exact scenario server-side
+   * sessions exist to prevent. Checking only on the paths that CHANGE the
+   * tenant misses the one everybody actually uses.
+   *
+   * A lost membership strips the tenant rather than killing the session: a
+   * person removed from one firm may still work at another, and should land on
+   * the org switcher rather than a login screen.
+   *
+   * The cost is one indexed lookup by user_id per authenticated request, on top
+   * of the session lookup. That is the price of revocation taking effect on the
+   * next request instead of at expiry, and it is worth paying.
    */
   async resolveSession(token: string): Promise<Principal | null> {
     const session = await this.deps.sessions.findByTokenHash(this.deps.tokens.hash(token));
     if (!session || !isUsableSession(session, this.deps.clock.now())) return null;
-    return toPrincipal(session);
+    if (session.activeTenantId === null) return toPrincipal(session);
+
+    const stillAMember = (await this.deps.memberships.listByUser(session.userId)).some(
+      (m) => m.isActive && m.tenantId === session.activeTenantId,
+    );
+    if (stillAMember) return toPrincipal(session);
+    return { userId: session.userId, sessionId: session.id, tenantId: null, audience: null };
   }
 
   /** The org switch: point an existing session at another of the user's tenants.

@@ -6,17 +6,17 @@
 // the router's onError — one place maps and logs them, so nothing is swallowed.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { TenancyService } from "../../usecase/tenancy/service";
 import { toEnvelope } from "../httpresp";
-import type { PrincipalResolver } from "../principal";
 
 /** What the route registrar needs. The service is the one collaborator the
- *  handlers call; the principal resolver is injected so this layer never knows
- *  whether identity came from a header, a cookie, or an SSO round-trip. */
+ *  handlers call; the principal arrives from the session guard through the
+ *  request context, so this layer never learns whether identity came from a
+ *  cookie, a bearer token, or an SSO round-trip. */
 export interface TenancyDeps {
   readonly service: TenancyService;
-  readonly principalOf: PrincipalResolver;
 }
 
 // ── Response schemas (describe the shapes the service returns) ──────────────
@@ -92,22 +92,27 @@ const createTenantRoute = createRoute({
   responses: {
     201: { description: "Tenant created", content: { "application/json": { schema: TenantSchema } } },
     400: errorResponse("Request failed validation"),
+    401: errorResponse("Missing or wrong platform key"),
     409: errorResponse("Slug already taken"),
   },
 });
 
 const registerUserRoute = createRoute({
   method: "post",
-  path: "/api/v1/tenancy/users",
+  path: "/internal/v1/users",
   tags: ["tenancy"],
   summary: "Register a user (global identity)",
-  description: "Idempotent by email (ADR-02): an existing email links, never duplicates.",
+  description:
+    "Provisioning: creating a login is not something an anonymous caller may do, so it " +
+    "requires the platform key. Idempotent by email (ADR-02): an existing email links, " +
+    "never duplicates.",
   request: {
     body: { content: { "application/json": { schema: RegisterUserRequest } }, required: true },
   },
   responses: {
     201: { description: "User ensured", content: { "application/json": { schema: UserAccountSchema } } },
     400: errorResponse("Request failed validation"),
+    401: errorResponse("Missing or wrong platform key"),
   },
 });
 
@@ -123,6 +128,7 @@ const addMemberRoute = createRoute({
   responses: {
     201: { description: "Membership granted", content: { "application/json": { schema: MembershipSchema } } },
     400: errorResponse("Request failed validation, or unknown audience"),
+    401: errorResponse("Missing or wrong platform key"),
     404: errorResponse("Tenant or user not found"),
   },
 });
@@ -132,19 +138,6 @@ const myMembershipsRoute = createRoute({
   path: "/api/v1/tenancy/me/memberships",
   tags: ["tenancy"],
   summary: "List the caller's active memberships (org switcher)",
-  request: {
-    headers: z.object({
-      "x-user-id": z
-        .string()
-        .uuid()
-        .optional()
-        .openapi({
-          description:
-            "Dev principal, accepted only when BIB_DEV_AUTH_ENABLED is on. The real path is " +
-            "the session cookie from POST /api/v1/auth/login.",
-        }),
-    }),
-  },
   responses: {
     200: { description: "Active memberships", content: { "application/json": { schema: MembershipsResponse } } },
     401: errorResponse("No authenticated principal"),
@@ -157,7 +150,7 @@ const myMembershipsRoute = createRoute({
  *  the tightest possible type link between a route's schema and its handler:
  *  `c.req.valid("json")` is typed from the route, and the returned status +
  *  body are checked against the declared responses. */
-export function registerTenancyRoutes(app: OpenAPIHono, deps: TenancyDeps): void {
+export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDeps): void {
   app.openapi(createTenantRoute, async (c) => {
     const input = c.req.valid("json");
     const tenant = await deps.service.createTenant(input);
@@ -177,7 +170,7 @@ export function registerTenancyRoutes(app: OpenAPIHono, deps: TenancyDeps): void
   });
 
   app.openapi(myMembershipsRoute, async (c) => {
-    const principal = await deps.principalOf((name) => c.req.header(name));
+    const principal = c.get("principal");
     if (!principal) {
       return c.json(
         toEnvelope({ status: 401, code: "UNAUTHORIZED", message: "no authenticated user" }),

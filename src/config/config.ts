@@ -39,6 +39,10 @@ const EnvSchema = z.object({
   // sending it. The enum grows when a real transport lands; production-like
   // refuses to boot on 'log'.
   BIB_MAIL_TRANSPORT: z.enum(["log"]).default("log"),
+  // The shared secret for the /internal surface (platform provisioning). No
+  // default and no optionality: an unset value would mean "the provisioning
+  // API is open", and that is not a state this process may boot in.
+  BIB_INTERNAL_API_KEY: z.string().min(32, "must be at least 32 characters"),
 });
 
 export type Environment = z.infer<typeof EnvSchema>["BIB_ENVIRONMENT"];
@@ -60,6 +64,8 @@ export interface AuthConfig {
   /** Whether the dev x-user-id principal resolver is registered. */
   readonly devAuthEnabled: boolean;
   readonly mailTransport: "log";
+  /** Bearer secret required by every /internal route. */
+  readonly internalApiKey: string;
 }
 
 export interface Config {
@@ -120,6 +126,7 @@ export function load(): Config {
           ? env.BIB_DEV_AUTH_ENABLED === "true"
           : !productionLike,
       mailTransport: env.BIB_MAIL_TRANSPORT,
+      internalApiKey: env.BIB_INTERNAL_API_KEY,
     },
     db: {
       ownerUrl: env.BIB_DATABASE_URL,
@@ -150,7 +157,9 @@ export function redacted(cfg: Config): Record<string, unknown> {
     logLevel: cfg.logLevel,
     port: cfg.port,
     docsEnabled: cfg.docsEnabled,
-    auth: cfg.auth,
+    // The internal key is a credential; redacted() exists so a config dump is
+    // safe to log, and this is exactly the field that would make it unsafe.
+    auth: { ...cfg.auth, internalApiKey: "***" },
     db: {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),

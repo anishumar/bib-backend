@@ -9,6 +9,7 @@
 import { OpenAPIHono, z } from "@hono/zod-openapi";
 import { ERROR_CODES } from "./domainerr";
 import { toEnvelope } from "./httpresp";
+import type { AppEnv } from "./guards";
 
 export { z };
 
@@ -43,8 +44,8 @@ export function errorResponse(description: string): {
  * emitting Hono's default shape. So adopting OpenAPI added zero new error
  * formats — there is still exactly one.
  */
-export function createOpenAPIApp(): OpenAPIHono {
-  return new OpenAPIHono({
+export function createOpenAPIApp(): OpenAPIHono<AppEnv> {
+  return new OpenAPIHono<AppEnv>({
     defaultHook: (result, c) => {
       if (!result.success) {
         const reason = result.error.issues

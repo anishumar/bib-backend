@@ -128,12 +128,35 @@ the work is not done — fix it, do not disable the rule. If a rule is genuinely
 a design conversation in the PR, landed as its own commit with the reasoning — never a quiet
 exception or an import moved to dodge the matcher.
 
-## Authentication
+## Authentication — two surfaces, both guarded by prefix
+
+Authentication is **middleware on a path prefix** (`api/guards.ts`), never a check a handler
+remembers to make. Three routes once shipped unauthenticated because the check lived in
+each file and new files forgot; a prefix guard cannot be forgotten by a file that does not
+exist yet.
+
+- **`/internal/*`** — the platform's own provisioning API (create a tenant, grant a
+  membership, register a user, set a password). No end user behind it, so it takes a shared
+  secret: `Authorization: Bearer $BIB_INTERNAL_API_KEY`, compared in constant time. Services
+  record these writes as the **system** actor.
+- **`/api/v1/*`** — the product. Requires a session. The only exceptions are the three
+  routes that exist to *obtain* one, listed by exact path in `PUBLIC_PATHS`. Adding to that
+  set needs a reason as good as theirs.
+
+Handlers read the resolved principal from the request context (`c.get("principal")`) and
+call `scopeOf()` (`api/scope.ts`) when they need a tenant — 401 "not signed in" and 403
+"signed in, but no org chosen" are different answers and both matter.
+
+`tests/api/auth-coverage.test.ts` walks the generated OpenAPI spec and fails if any route
+outside the allowlists answers anything but 401 to an anonymous caller. **A new route is
+covered by it automatically** — that is the point of it.
 
 A request becomes a `Principal` through the **`PrincipalResolver`** in `api/principal.ts` —
 a session cookie (or `Authorization: Bearer`) resolved against `tenancy.session`. Sessions
 are server-side because they must be **revocable**: a firm that dismisses someone expects
-access to stop that afternoon, not when a token expires. The token is only ever a SHA-256
+access to stop that afternoon, not when a token expires. `resolveSession` therefore
+re-checks the membership on **every** request — checking only at login and org-switch left
+a deactivated member working for up to a fortnight. The token is only ever a SHA-256
 digest at rest and only ever leaves in an httpOnly cookie — never in a response body.
 
 `Principal` carries `tenantId` and `audience`, which are **null until an org is chosen**:

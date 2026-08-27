@@ -16,57 +16,13 @@
 // event, and the ledger refuses to record one.
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
-import { toEnvelope } from "../httpresp";
-import type { ErrorEnvelope } from "../httpresp";
-import type { Actor } from "../../domain/ledger/model";
-import type { Principal } from "../../platform/callctx";
+import { scopeOf } from "../scope";
 import type { PartyService } from "../../usecase/party/service";
-import type { PrincipalResolver } from "../principal";
 
 export interface PartyDeps {
   readonly service: PartyService;
-  readonly principalOf: PrincipalResolver;
-}
-
-/**
- * What every route below starts with: either the caller's tenant and the actor
- * to name in the audit trail, or the reason they get neither.
- *
- * 401 and 403 are different answers and both are needed: "you are not signed
- * in", versus "you are, but you have not said which firm you are acting for".
- * The second is a real state — a partner who belongs to two firms holds a valid
- * session with no tenant until they choose.
- */
-type Scope =
-  | { readonly ok: true; readonly tenantId: string; readonly actor: Actor }
-  | { readonly ok: false; readonly deny: ErrorEnvelope; readonly status: 401 | 403 };
-
-function scopeOf(principal: Principal | null): Scope {
-  if (!principal) {
-    return {
-      ok: false,
-      status: 401,
-      deny: toEnvelope({ status: 401, code: "UNAUTHORIZED", message: "no authenticated session" }),
-    };
-  }
-  if (principal.tenantId === null) {
-    return {
-      ok: false,
-      status: 403,
-      deny: toEnvelope({
-        status: 403,
-        code: "FORBIDDEN",
-        message:
-          "this session has not selected an org. Call POST /api/v1/auth/switch-tenant first.",
-      }),
-    };
-  }
-  return {
-    ok: true,
-    tenantId: principal.tenantId,
-    actor: { type: "human", id: principal.userId },
-  };
 }
 
 // ── Response schemas ────────────────────────────────────────────────────────
@@ -334,12 +290,9 @@ const partyProfileRoute = createRoute({
 
 // ── Registration ────────────────────────────────────────────────────────────
 
-export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
-  const scope = async (getHeader: (name: string) => string | undefined): Promise<Scope> =>
-    scopeOf(await deps.principalOf(getHeader));
-
+export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): void {
   app.openapi(createOrganizationRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
     const org = await deps.service.createOrganization({ tenantId: s.tenantId, ...body }, s.actor);
@@ -347,7 +300,7 @@ export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
   });
 
   app.openapi(createPersonRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
     const person = await deps.service.createPerson({ tenantId: s.tenantId, ...body }, s.actor);
@@ -355,7 +308,7 @@ export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
   });
 
   app.openapi(registerLegalEntityRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
@@ -367,7 +320,7 @@ export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
   });
 
   app.openapi(addIdentifierRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
@@ -379,7 +332,7 @@ export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
   });
 
   app.openapi(addRelationshipRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
     const relationship = await deps.service.addRelationship(
@@ -390,14 +343,14 @@ export function registerPartyRoutes(app: OpenAPIHono, deps: PartyDeps): void {
   });
 
   app.openapi(listPartiesRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const parties = await deps.service.listParties(s.tenantId);
     return c.json({ parties: [...parties] }, 200);
   });
 
   app.openapi(partyProfileRoute, async (c) => {
-    const s = await scope((name) => c.req.header(name));
+    const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const { asOf } = c.req.valid("query");
