@@ -6,11 +6,19 @@
 // Every existing test passed, because every existing test asked "does this
 // route do its job" and none asked "who is allowed to reach it".
 //
-// So this file does not test routes. It enumerates the OpenAPI spec — the same
-// spec generated from the real router — and asserts that EVERY path is either
-// on a short, justified public list or answers 401 to an anonymous caller. A
-// new unauthenticated route fails here the moment it is registered, without
-// anyone remembering to add a test for it.
+// So this file does not test routes. It enumerates every route the router has
+// REGISTERED — read off the Hono instance itself, not off the OpenAPI spec —
+// and asserts each one is either on a short, justified public list or answers
+// 401 to an anonymous caller. A new unauthenticated route fails here the moment
+// it is registered, without anyone remembering to add a test for it.
+//
+// Reading the Hono instance rather than the spec is deliberate and was a real
+// gap: the first version of this file walked /openapi.json, which lists only
+// routes registered through app.openapi(). /health, /ready, /docs and
+// /openapi.json itself are plain app.get() calls and were invisible to it — as
+// any future plain-Hono route would have been. The middleware guards still
+// covered them, but a test that claims "every route is accounted for" must be
+// able to SEE every route.
 import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
@@ -41,9 +49,17 @@ import {
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
 const silentLog = { info() {}, warn() {}, error() {} };
 
-/** Ops endpoints. A load balancer cannot hold a credential, and neither of
- *  these reveals anything about a tenant. */
-const OPS_PATHS = new Set(["/health", "/ready"]);
+/**
+ * Routes that are public by design, each for a stated reason.
+ *
+ * /health and /ready — a load balancer cannot hold a credential, and neither
+ * endpoint reveals anything about a tenant.
+ *
+ * /openapi.json and /docs — the spec enumerates every endpoint, so they are
+ * gated by BIB_DOCS_ENABLED, which defaults OFF in every production-like
+ * environment. A test below proves that gate actually closes them.
+ */
+const INTENTIONALLY_PUBLIC = new Set(["/health", "/ready", "/openapi.json", "/docs"]);
 
 function deps(): RouterDeps {
   const fakes = makeFakes();
@@ -103,44 +119,86 @@ const PORTAL_SESSION: Principal = {
   commercialVisibility: false,
 };
 
-/** Every (method, path) the router actually registers, read from the spec it
- *  generates — so this cannot drift from the routes. */
-async function registeredRoutes(): Promise<{ method: string; path: string }[]> {
-  const res = await app().request("/openapi.json");
-  const spec = (await res.json()) as {
-    paths: Record<string, Record<string, unknown>>;
-  };
-  return Object.entries(spec.paths).flatMap(([path, methods]) =>
-    Object.keys(methods).map((method) => ({ method, path })),
-  );
+/**
+ * Every route the router registers, read off the Hono instance.
+ *
+ * Entries whose path contains a wildcard are the middleware mounts
+ * (app.use("/api/v1/*", …)), not routes anyone can call, so they are dropped.
+ * Everything else is a real endpoint — including the ones registered outside
+ * the OpenAPI registry, which is the whole point of reading from here.
+ */
+function registeredRoutes(): { method: string; path: string }[] {
+  const seen = new Set<string>();
+  return app()
+    .routes.filter((r) => !r.path.includes("*"))
+    .map((r) => ({ method: r.method, path: r.path }))
+    .filter((r) => {
+      const key = `${r.method} ${r.path}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
-/** A concrete request for a templated path — the guards run before validation,
- *  so the values only have to exist, not to be meaningful. */
+/** GET and HEAD may not carry a body; everything else gets an empty JSON one,
+ *  which is enough because the guards run before validation. */
+function bodylessOrJson(method: string): RequestInit {
+  const verb = method.toUpperCase();
+  if (verb === "GET" || verb === "HEAD") return { method: verb };
+  return { method: verb, headers: { "content-type": "application/json" }, body: "{}" };
+}
+
+/** A concrete request for a templated path. Hono registers params as :name and
+ *  the OpenAPI spec renders them as {name}; both appear in this file. The
+ *  guards run before validation, so the values need only exist. */
 function concrete(path: string): string {
-  return path.replace(/\{[^}]+\}/g, "00000000-0000-4000-8000-000000000001");
+  return path
+    .replace(/\{[^}]+\}/g, "00000000-0000-4000-8000-000000000001")
+    .replace(/:[^/]+/g, "00000000-0000-4000-8000-000000000001");
 }
 
 describe("every route is accounted for", () => {
-  it("registers something to check", async () => {
-    expect((await registeredRoutes()).length).toBeGreaterThan(10);
+  it("can see every registered route, not just the documented ones", () => {
+    const paths = registeredRoutes().map((r) => r.path);
+    expect(paths.length).toBeGreaterThan(10);
+    // The four that the spec-based version of this test was blind to.
+    for (const path of INTENTIONALLY_PUBLIC) {
+      expect(paths, `${path} must be visible to this sweep`).toContain(path);
+    }
   });
 
   it("refuses every non-public route to an anonymous caller", async () => {
     const unguarded: string[] = [];
 
-    for (const { method, path } of await registeredRoutes()) {
-      if (PUBLIC_PATHS.has(path) || OPS_PATHS.has(path)) continue;
-      const init: RequestInit =
-        method === "get"
-          ? { method: "GET" }
-          : { method: method.toUpperCase(), headers: { "content-type": "application/json" }, body: "{}" };
+    for (const { method, path } of registeredRoutes()) {
+      if (PUBLIC_PATHS.has(path) || INTENTIONALLY_PUBLIC.has(path)) continue;
+      const init = bodylessOrJson(method);
       const res = await app().request(concrete(path), init);
       if (res.status !== 401) unguarded.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
     }
 
     // Named, not counted: a failure here should say which route is open.
     expect(unguarded).toEqual([]);
+  });
+
+  it("closes the docs when config says to — the gate the public list relies on", async () => {
+    // /openapi.json and /docs are public by design, on the promise that
+    // BIB_DOCS_ENABLED shuts them in any production-like environment. That
+    // promise is what makes them acceptable on the list above, so it is tested.
+    const closed = buildRouter(deps(), silentLog, {
+      docsEnabled: false,
+      internalApiKey: INTERNAL_KEY,
+      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      rateLimiter: new InMemoryRateLimiter(systemClock),
+      rateLimit: {
+        auth: { limit: 1000, windowSeconds: 60 },
+        general: { limit: 10000, windowSeconds: 60 },
+        trustProxy: false,
+      },
+      principalOf: () => Promise.resolve(null),
+    });
+    expect((await closed.request("/openapi.json")).status).toBe(404);
+    expect((await closed.request("/docs")).status).toBe(404);
   });
 
   it("keeps the public list short and justified", () => {
@@ -214,13 +272,10 @@ describe("gate 2 — audience", () => {
   it("refuses a client-portal session everywhere on the staff surface", async () => {
     const reachable: string[] = [];
 
-    for (const { method, path } of await registeredRoutes()) {
+    for (const { method, path } of registeredRoutes()) {
       if (!path.startsWith("/api/v1/")) continue;
       if (PUBLIC_PATHS.has(path) || PORTAL_PATHS.has(path)) continue;
-      const init: RequestInit =
-        method === "get"
-          ? { method: "GET" }
-          : { method: method.toUpperCase(), headers: { "content-type": "application/json" }, body: "{}" };
+      const init = bodylessOrJson(method);
       const res = await app(PORTAL_SESSION).request(concrete(path), init);
       if (res.status !== 403) {
         reachable.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
@@ -235,13 +290,22 @@ describe("gate 2 — audience", () => {
 
   it("lets a client-portal session manage its own session", async () => {
     for (const path of PORTAL_PATHS) {
+      const isGet = path.endsWith("/me") || path.endsWith("/memberships");
       const res = await app(PORTAL_SESSION).request(path, {
-        method: path.endsWith("/me") ? "GET" : "POST",
+        method: isGet ? "GET" : "POST",
         headers: { "content-type": "application/json" },
-        ...(path.endsWith("/me") ? {} : { body: "{}" }),
+        ...(isGet ? {} : { body: "{}" }),
       });
       expect(res.status, `${path} should not be 403 for a portal session`).not.toBe(403);
     }
+  });
+
+  it("lets a portal user discover the orgs it may switch to", async () => {
+    // switch-tenant without this is reachable and useless: the caller can act
+    // on a choice they have no way to enumerate. It returns only the caller's
+    // own memberships, so it tells a portal session nothing new about itself.
+    const res = await app(PORTAL_SESSION).request("/api/v1/tenancy/me/memberships");
+    expect(res.status).toBe(200);
   });
 
   it("still lets staff through", async () => {
@@ -257,6 +321,8 @@ describe("gate 2 — audience", () => {
       "/api/v1/auth/logout",
       "/api/v1/auth/me",
       "/api/v1/auth/switch-tenant",
+      // The org switcher's data — their own memberships and nothing else.
+      "/api/v1/tenancy/me/memberships",
     ]);
   });
 });
@@ -265,12 +331,12 @@ describe("gate 2 — audience", () => {
 describe("gate 3 — role", () => {
   const as = (role: string): Principal => ({ ...STAFF_SESSION, role });
 
-  it("every registered route declares who may reach it", async () => {
+  it("every registered route declares who may reach it", () => {
     // The structural half of gate 3. A route with no entry is refused for
     // everyone, so this failing means someone added a route without deciding
     // who it is for — which is the moment to decide, not later.
     const undeclared: string[] = [];
-    for (const { method, path } of await registeredRoutes()) {
+    for (const { method, path } of registeredRoutes()) {
       if (!path.startsWith("/api/v1/")) continue;
       if (PUBLIC_PATHS.has(path)) continue;
       if (decideRoute(method, concrete(path)).kind === "unmapped") {

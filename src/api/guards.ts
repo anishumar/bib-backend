@@ -77,6 +77,11 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/me",
   "/api/v1/auth/switch-tenant",
   "/api/v1/auth/logout",
+  // The org switcher's data. Without it a portal user could CALL switch-tenant
+  // and have no way to learn what to switch to — reachable and useless. It
+  // returns only the caller's own memberships, so a portal session sees exactly
+  // what it already knows about itself.
+  "/api/v1/tenancy/me/memberships",
 ]);
 
 /**

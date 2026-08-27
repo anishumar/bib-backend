@@ -164,9 +164,11 @@ Handlers read the resolved principal from the request context (`c.get("principal
 call `scopeOf()` (`api/scope.ts`) when they need a tenant — 401 "not signed in" and 403
 "signed in, but no org chosen" are different answers and both matter.
 
-`tests/api/auth-coverage.test.ts` walks the generated OpenAPI spec and fails if any route
-outside the allowlists answers anything but 401 to an anonymous caller. **A new route is
-covered by it automatically** — that is the point of it.
+`tests/api/auth-coverage.test.ts` enumerates **every route the Hono instance has
+registered** — not the OpenAPI spec, which lists only `app.openapi()` routes and is blind
+to plain `app.get()` ones like `/health` and `/docs` — and fails if any route outside the
+allowlists answers anything but 401 to an anonymous caller. **A new route is covered by it
+automatically**, however it was registered. That is the point of it.
 
 A request becomes a `Principal` through the **`PrincipalResolver`** in `api/principal.ts` —
 a session cookie (or `Authorization: Bearer`) resolved against `tenancy.session`. Sessions
