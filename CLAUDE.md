@@ -349,6 +349,13 @@ data** (refused at the write — the log cannot be erased). Record the event *af
 change it describes has committed. The full contract is `docs/EVENT-CONTRACT.md`; read it
 before emitting your first event.
 
+**The actor's NAME is a read-time join, never a stored field.** `EventRecord` carries the
+account as it stands now; the row keeps only `actor_id`. That is what lets erasure work — an
+erased account stops resolving and the event survives — and it is why the read is a LEFT join
+and `actor: null` is a real answer (system and agent actors have no account either). The
+smoke check guarding this greps the **stored `event` half** of each record, not the whole
+response: grepping both would call the join a leak, and that distinction is the design.
+
 ## Proposals — the first module that stores money (T2.2)
 
 A proposal is a document about a party, built from catalogue rows. Three rules shape it and

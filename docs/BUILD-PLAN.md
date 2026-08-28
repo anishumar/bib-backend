@@ -393,6 +393,26 @@ open and are recorded above; neither blocks Phase 2.
   > No migration — the data was always there. Gate: `npm run check` 342 · `test:integration` 77
   > · `smoke` 86.
   >
+  > **And the last two: the catalogue and the audit trail (2026-08-28).** `/catalogue` (services
+  > + the discount policy, read on `config:read`, written on `tenant:admin`) and `/audit` (the
+  > firm's whole trail, and any object's timeline via `?type=&id=`). **Every module now has a
+  > screen** — ten routes against forty-four.
+  >
+  > The audit screen found the same class of gap a fourth time, in the place it matters most:
+  > **the trail named its actor by uuid, and nothing a `ledger:read` holder can call resolved
+  > it.** `EventRecord` now joins the account — at READ time, deliberately, because the stored
+  > row must keep only the id: personal data cannot go into a log erasure is unable to mutate.
+  > An erased account stops resolving and the event survives, which is what erasability
+  > requires. Storing the name would have made erasure impossible; omitting the join left the
+  > trail unreadable.
+  >
+  > That change made the smoke's "no personal data in the log" check fail, correctly — it
+  > grepped the whole response and could not tell a stored field from a joined one. It now
+  > reads the `event` half only, and a second check asserts every human act resolves to a
+  > person, so the two halves of the property are tested apart instead of conflated.
+  >
+  > Gate: `npm run check` 344 · `test:integration` 77 · `smoke` 87.
+  >
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
