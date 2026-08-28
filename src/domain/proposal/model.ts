@@ -16,6 +16,7 @@
 //   the COMPARISON and what it means, so the rule is stated once and the use
 //   case only supplies the two numbers.
 import type { Amount, CurrencyCode } from "../money/model";
+import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 
 /**
  * Where a proposal has got to.
@@ -187,12 +188,84 @@ export interface ProposalLine {
   readonly description: string;
   readonly position: number;
   readonly quantity: Amount;
-  readonly unitAmount: Amount;
+  /**
+   * The price asked, per unit of the service's billing basis — or NULL, which is
+   * a real and common state: several lines are genuinely "as mutually agreed".
+   *
+   * NULLABLE since G1.6, and the relaxation is the point of that task. The
+   * column was `NOT NULL CHECK (>= 0)`, so an unpriced line had to be quoted as
+   * ZERO — a completely different statement to a client, and one that reads as a
+   * commitment to work for nothing.
+   *
+   * NULL IS NOT ZERO ANYWHERE DOWNSTREAM. A line with no price contributes
+   * nothing to a total and is COUNTED instead: see
+   * `ProposalTotals.unpricedLineCount`, which travels beside every figure so
+   * that "₹4,80,000" can never be read as the price of a document that also
+   * contains two lines nobody has priced. `pricingNote` is required when this is
+   * null (0023) — a blank where a price belongs is indistinguishable from data
+   * somebody forgot to type.
+   */
+  readonly unitAmount: Amount | null;
   /** Always equal to the proposal's, held there by a composite foreign key.
    *  Carried on the line anyway so an amount and its currency are never
    *  separated. */
   readonly currency: CurrencyCode;
+  /** Zero when there is no price: a discount off "as mutually agreed" is not a
+   *  number, and the database refuses one (0023). It would also reach
+   *  `needsDiscountApproval` and hold the proposal at the approval gate over a
+   *  discount that does not exist. */
   readonly discountPercent: Amount;
+  /**
+   * WHERE THE WORK IS. A proposal is built by picking countries and then the
+   * services offered in them, so this is the thing the user actually chose.
+   *
+   * Stated, never derived. On a letter it is the entity's own jurisdiction, and
+   * resolving that would need the entity's registrations — a lookup nothing here
+   * makes, and a jurisdiction invented from a null is indistinguishable from one
+   * somebody chose.
+   */
+  readonly jurisdiction: string | null;
+  /**
+   * How often THIS DEAL is billed — defaulted from the pinned service's
+   * `recurrence` when the caller says nothing, and freely different from it.
+   * A monthly service billed quarterly is an arrangement the firm has today.
+   *
+   * Null when the caller stated none AND the pinned version stated no
+   * recurrence. Not invented: a billing frequency nobody chose is one nobody can
+   * trace.
+   */
+  readonly billingFrequency: BillingFrequency | null;
+  /**
+   * THE FOUR OVERRIDES — this document's own wording for the four scope blocks,
+   * or null to print the pinned catalogue version's words.
+   *
+   * WHAT MAKES AN ISSUED DOCUMENT REPRODUCIBLE. Without them, tailoring one
+   * client's scope means editing the catalogue, which silently rewrites the
+   * standard scope for every document issued afterwards. Blank is refused by the
+   * database: null means "we did not tailor this", and a document that means to
+   * print nothing writes the sentence.
+   *
+   * Resolved against the catalogue by `resolveTerms` — one place, and it reports
+   * which of the two won.
+   */
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  /** The out-of-pocket range, in its own currency. Separate from the fee,
+   *  reimbursed at actuals, and never summed into a total — see
+   *  `OutOfPocketEstimate`. */
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  /**
+   * WHY there is no amount — "As mutually agreed", "Quoted on receipt of the
+   * registrar's schedule". REQUIRED when `unitAmount` is null (0023), which is
+   * the acceptance in one constraint: a line may say "as mutually agreed" with a
+   * REASON instead of a price.
+   *
+   * A priced line may carry one too — "plus statutory fees at actuals" — so the
+   * rule is one-directional.
+   */
+  readonly pricingNote: string | null;
 }
 
 /**
@@ -209,6 +282,22 @@ export interface ProposalTotals {
   /** What the client would pay: gross − discount. */
   readonly net: Amount;
   readonly currency: CurrencyCode;
+  /**
+   * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER.
+   *
+   * A line with no price contributes nothing to a sum — `numeric` NULL times a
+   * quantity is NULL and `sum()` skips it — so without this the total would
+   * quietly understate the document and nothing on it would say so. That is the
+   * one outcome G1.6 refused: a total is a claim about what a client owes, and
+   * when a line has no price the honest claim is "this much, PLUS whatever is
+   * agreed for N further lines". Two values, not one, and they travel together
+   * from the view to the wire.
+   *
+   * Non-zero therefore means `net` is a FLOOR rather than the price of the
+   * document. Zero means the figures are complete. A renderer that drops this
+   * field prints a number that is not the price of this document.
+   */
+  readonly unpricedLineCount: number;
 }
 
 // ── Pure rules ───────────────────────────────────────────────────────────────

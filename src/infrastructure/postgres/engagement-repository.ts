@@ -17,6 +17,8 @@ import type {
   LetterStatus,
 } from "../../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
+import { resolveTerms } from "../../domain/document/model";
+import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
   EngagementRepository,
   FirmSignatureRecord,
@@ -77,10 +79,38 @@ interface LineRow {
   description: string;
   position: number;
   quantity: string;
-  unit_amount: string;
+  /** Nullable since 0023: an agreed line may genuinely be "as mutually agreed". */
+  unit_amount: string | null;
   currency: string;
   discount_percent: string;
   effective_from: Date | null;
+  jurisdiction: string | null;
+  billing_frequency: BillingFrequency | null;
+  scope_override: string | null;
+  client_obligations_override: string | null;
+  volume_limits_override: string | null;
+  exclusions_override: string | null;
+  oop_estimate_min: string | null;
+  oop_estimate_max: string | null;
+  oop_currency: string | null;
+  pricing_note: string | null;
+}
+
+/** Every column of a line, in one place: the SELECT list appears in three
+ *  queries and a column added to two of them reads as null on the third. */
+const LINE_COLUMNS = `id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
+                      description, position, quantity, unit_amount, currency, discount_percent,
+                      effective_from, jurisdiction, billing_frequency, scope_override,
+                      client_obligations_override, volume_limits_override, exclusions_override,
+                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note`;
+
+/** The out-of-pocket range as ONE value or none — the three columns move
+ *  together (`el_line_oop_is_whole_chk`). */
+function toOopEstimate(r: LineRow): OutOfPocketEstimate | null {
+  if (r.oop_estimate_min === null || r.oop_estimate_max === null || r.oop_currency === null) {
+    return null;
+  }
+  return { min: r.oop_estimate_min, max: r.oop_estimate_max, currency: r.oop_currency };
 }
 
 interface ClauseRow {
@@ -164,6 +194,14 @@ function toLine(r: LineRow): LetterLine {
     currency: r.currency,
     discountPercent: r.discount_percent,
     effectiveFrom: r.effective_from === null ? null : toDay(r.effective_from),
+    jurisdiction: r.jurisdiction,
+    billingFrequency: r.billing_frequency,
+    scopeOverride: r.scope_override,
+    clientObligationsOverride: r.client_obligations_override,
+    volumeLimitsOverride: r.volume_limits_override,
+    exclusionsOverride: r.exclusions_override,
+    oopEstimate: toOopEstimate(r),
+    pricingNote: r.pricing_note,
   };
 }
 
@@ -332,7 +370,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
 
       const lines = await db<
         (LineRow & {
-          net: string;
+          net: string | null;
           service_key: string;
           service_version: number;
           service_body: Record<string, unknown>;
@@ -342,7 +380,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
         SELECT l.id, l.tenant_id, l.engagement_letter_id, l.entity_party_id,
                l.service_version_id, l.description,
                l.position, l.quantity, l.unit_amount, l.currency, l.discount_percent,
-               l.effective_from,
+               l.effective_from, l.jurisdiction, l.billing_frequency, l.scope_override,
+               l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
+               l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
+               -- NULL for an unpriced line, and deliberately not coalesced:
+               -- there is no net of an amount that does not exist, and a zero
+               -- here would be a line the client gets free.
                round(l.unit_amount * l.quantity * (1 - l.discount_percent / 100), 4) AS net,
                e.key AS service_key, v.version AS service_version, v.body AS service_body,
                entity.display_name AS entity_display_name
@@ -372,13 +415,27 @@ export class PostgresEngagementRepository implements EngagementRepository {
         ORDER BY c.position
       `;
 
-      const [totals] = await db<{ gross: string | null; discount: string | null; net: string | null }[]>`
+      // The letter's arithmetic is written here rather than in a view — the
+      // proposal's lives in crm.proposal_totals (0013) — and BOTH now answer the
+      // same question about an unpriced line the same way: `sum` skips it, and
+      // `unpriced_line_count` says how many the figures leave out. Without that
+      // count the three sums silently understate a letter and nothing on the row
+      // says so.
+      const [totals] = await db<
+        {
+          gross: string | null;
+          discount: string | null;
+          net: string | null;
+          unpriced_line_count: string;
+        }[]
+      >`
         SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
                coalesce(sum(round(unit_amount * quantity, 4)
                           - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
                  AS discount,
                coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                 AS net
+                 AS net,
+               count(*) FILTER (WHERE unit_amount IS NULL) AS unpriced_line_count
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
       `;
@@ -430,6 +487,19 @@ export class PostgresEngagementRepository implements EngagementRepository {
             line: toLine(r),
             entity: { id: r.entity_party_id, displayName: r.entity_display_name },
             service: toPinnedService(r.service_key, r.service_version, r.service_body),
+            // OVERRIDE ELSE CATALOGUE, resolved once, by the domain. On a signed
+            // letter both halves are frozen — the override by the line trigger
+            // (0017), the catalogue's words by the config freeze (0005) — which
+            // is what makes an issued document reproducible.
+            terms: resolveTerms(
+              {
+                scope: r.scope_override,
+                clientObligations: r.client_obligations_override,
+                volumeLimits: r.volume_limits_override,
+                exclusions: r.exclusions_override,
+              },
+              readServiceBody(r.service_body),
+            ),
             net: r.net,
           }),
         ),
@@ -448,6 +518,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           discount: totals?.discount ?? "0",
           net: totals?.net ?? "0",
           currency: head.currency,
+          unpricedLineCount: Number(totals?.unpriced_line_count ?? 0),
         },
         engagements: engagements.map(toEngagement),
       };
@@ -464,6 +535,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           discount: string | null;
           net: string | null;
           line_count: string;
+          unpriced_line_count: string;
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
@@ -477,7 +549,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.firm_signed_at,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
-               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
+               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
+               coalesce(t.unpriced_line_count, 0) AS unpriced_line_count
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
         JOIN core.party issuer ON issuer.id = l.issuing_entity_party_id
@@ -488,7 +561,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                    AS discount,
                  coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
                    AS net,
-                 count(*) AS line_count
+                 count(*) AS line_count,
+                 count(*) FILTER (WHERE unit_amount IS NULL) AS unpriced_line_count
           FROM crm.engagement_letter_line
           WHERE engagement_letter_id = l.id AND removed_at IS NULL
         ) t ON true
@@ -506,6 +580,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
             discount: r.discount ?? "0",
             net: r.net ?? "0",
             currency: r.currency,
+            unpricedLineCount: Number(r.unpriced_line_count),
           },
           lineCount: Number(r.line_count),
         }),
@@ -517,20 +592,44 @@ export class PostgresEngagementRepository implements EngagementRepository {
     return withTenant(this.app, l.tenantId, async (db) => {
       // The position is assigned in the same statement that inserts, so two
       // people adding a line to one draft cannot race for the same number.
-      const [row] = await db<LineRow[]>`
+      const [row] = await db.unsafe<LineRow[]>(
+        `
         INSERT INTO crm.engagement_letter_line
           (id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-           description, position, quantity, unit_amount, currency, discount_percent, effective_from)
-        SELECT ${l.id}, ${l.tenantId}, ${l.engagementLetterId}, ${l.entityPartyId},
-               ${l.serviceVersionId},
-               ${l.description}, coalesce(max(position), 0) + 1,
-               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
-               ${l.effectiveFrom}
+           description, position, quantity, unit_amount, currency, discount_percent,
+           effective_from, jurisdiction, billing_frequency, scope_override,
+           client_obligations_override, volume_limits_override, exclusions_override,
+           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note)
+        SELECT $1, $2, $3, $4, $5, $6, coalesce(max(position), 0) + 1,
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
         FROM crm.engagement_letter_line
-        WHERE engagement_letter_id = ${l.engagementLetterId} AND removed_at IS NULL
-        RETURNING id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-                  description, position, quantity, unit_amount, currency, discount_percent, effective_from
-      `;
+        WHERE engagement_letter_id = $3 AND removed_at IS NULL
+        RETURNING ${LINE_COLUMNS}
+      `,
+        [
+          l.id,
+          l.tenantId,
+          l.engagementLetterId,
+          l.entityPartyId,
+          l.serviceVersionId,
+          l.description,
+          l.quantity,
+          l.unitAmount,
+          l.currency,
+          l.discountPercent,
+          l.effectiveFrom,
+          l.jurisdiction,
+          l.billingFrequency,
+          l.scopeOverride,
+          l.clientObligationsOverride,
+          l.volumeLimitsOverride,
+          l.exclusionsOverride,
+          l.oopEstimate?.min ?? null,
+          l.oopEstimate?.max ?? null,
+          l.oopEstimate?.currency ?? null,
+          l.pricingNote,
+        ],
+      );
       if (!row) throw new Error("engagement letter line insert returned no row");
       return toLine(row);
     });
@@ -547,13 +646,13 @@ export class PostgresEngagementRepository implements EngagementRepository {
 
   async listLines(tenantId: string, letterId: string): Promise<readonly LetterLine[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<LineRow[]>`
-        SELECT id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-               description, position, quantity, unit_amount, currency, discount_percent, effective_from
-        FROM crm.engagement_letter_line
-        WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
-        ORDER BY position
-      `;
+      // Every column, because `signAndFanOut` hashes what this returns: a line
+      // read without its overrides would be signed for without its scope.
+      const rows = await db.unsafe<LineRow[]>(
+        `SELECT ${LINE_COLUMNS} FROM crm.engagement_letter_line
+          WHERE engagement_letter_id = $1 AND removed_at IS NULL ORDER BY position`,
+        [letterId],
+      );
       return rows.map(toLine);
     });
   }

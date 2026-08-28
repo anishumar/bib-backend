@@ -24,6 +24,17 @@
 // test keeps passing while the freeze has been widened. The list's CONTENTS are
 // then pinned below, so widening it is a visible, argued edit to this file.
 //
+// AND THE SAME SWEEP OVER THE LINE TABLE, added by G1.6. The head's freeze was
+// a property of the TABLE and the line's was a property of nobody checking: a
+// column added to `crm.engagement_letter_line` was protected by
+// `crm.refuse_signed_child_change()` (0017, which refuses ANY write) and
+// nothing said so, so the ten columns G1.6 added — the four scope OVERRIDES
+// among them, which are the words the client actually agreed to — would have
+// gone in with no test claiming they cannot move after signature. The line
+// sweep asks the catalogue the same way, so the eleventh column is covered the
+// day it exists. It needs no allow-list: nothing on a signed letter's line may
+// change, and that is the whole rule.
+//
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -42,6 +53,15 @@ const EXPECTED_MUTABLE = ["advance_recorded_at", "advance_recorded_by", "updated
 /** Untouched by every test in this file: the frozen-column sweep updates it two
  *  dozen times and every one of those updates must be refused. */
 let frozenLetter = "";
+/** A live line on the frozen letter, and one on the draft — the line sweep's
+ *  subject and its control. */
+let frozenLine = "";
+let draftLine = "";
+/** The catalogue version both probe lines pin. */
+let serviceVersion = "";
+/** The signed letter `frozenLine` hangs off — its own, so the head sweep's row
+ *  never gains a child. */
+let frozenLineLetter = "";
 /** The one the allow-list is exercised against, so the sweep's row never moves. */
 let advanceLetter = "";
 /** Not signed — the control. A trigger that refused everything would pass every
@@ -104,6 +124,31 @@ beforeAll(async () => {
   frozenLetter = await insertSignedLetter(tenant.id, party.id);
   advanceLetter = await insertSignedLetter(tenant.id, party.id);
 
+  // A published service for the probe lines to pin. Raw SQL, like everything
+  // else here: this file bypasses the application on purpose.
+  const [entry] = await owner<{ id: string }[]>`
+    INSERT INTO config.entry (tenant_id, kind, key)
+    VALUES (${tenant.id}, 'service', 'freeze-probe') RETURNING id
+  `;
+  if (!entry) throw new Error("could not create the probe service entry");
+  const [version] = await owner<{ id: string }[]>`
+    INSERT INTO config.version (tenant_id, entry_id, version, status, body, published_at)
+    VALUES (${tenant.id}, ${entry.id}, 1, 'published',
+            ${owner.json({ name: "Freeze probe service", billingBasis: "fixed" })}, now())
+    RETURNING id
+  `;
+  if (!version) throw new Error("could not create the probe service version");
+  serviceVersion = version.id;
+
+  // THE LINE HAS TO EXIST BEFORE THE SIGNATURE. `trg_el_line_freeze` refuses an
+  // INSERT onto a signed letter as firmly as an UPDATE — which is the rule, not
+  // an obstacle — so the sweep's letter is drafted, given its line, and only
+  // then signed.
+  const lineLetter = await insertDraftLetter(tenant.id, party.id);
+  frozenLine = await insertLine(tenant.id, lineLetter);
+  await signLetter(lineLetter);
+  frozenLineLetter = lineLetter;
+
   const [draft] = await owner<{ id: string }[]>`
     INSERT INTO crm.engagement_letter
       (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
@@ -114,7 +159,64 @@ beforeAll(async () => {
   `;
   if (!draft) throw new Error("could not create the draft letter");
   draftLetter = draft.id;
+  draftLine = await insertLine(tenant.id, draftLetter);
 });
+
+/** An UNSIGNED letter. The line sweep needs one, because a line cannot be
+ *  inserted onto a signed letter at all. */
+async function insertDraftLetter(tenantId: string, partyId: string): Promise<string> {
+  refCounter += 1;
+  const [row] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter
+      (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
+       currency, fx_rate, fx_rate_date, advance_required)
+    VALUES (${tenantId}, ${`EL-2026-${String(refCounter).padStart(4, "0")}`}, ${partyId},
+            ${partyId}, 'IN', 'Freeze probe — line sweep', 'INR', 1, '2026-07-01', false)
+    RETURNING id
+  `;
+  if (!row) throw new Error("could not create the draft probe letter");
+  return row.id;
+}
+
+/** Sign it, in the one statement the CHECKs allow: a letter that claims to be
+ *  signed with no signature is refused by 0017. */
+async function signLetter(letterId: string): Promise<void> {
+  await owner`
+    UPDATE crm.engagement_letter
+       SET status = 'signed', sent_at = now(), signed_at = now(),
+           signed_by_name = 'Priya Menon', signature_method = 'attested',
+           signature_reference = 'paper-line-sweep', signed_content_hash = ${"b".repeat(64)}
+     WHERE id = ${letterId}
+  `;
+}
+
+/**
+ * A line on a letter, with EVERY nullable column filled in.
+ *
+ * Filled in because a freeze is only exercised by columns that hold something:
+ * "set a null column to null" is not a change, and the sweep below would pass
+ * vacuously on a line that stated nothing. The four overrides in particular have
+ * to hold real wording — they are what a tamper would target.
+ */
+async function insertLine(tenantId: string, letterId: string): Promise<string> {
+  const [row] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter_line
+      (tenant_id, engagement_letter_id, entity_party_id, service_version_id, description,
+       position, quantity, unit_amount, currency, discount_percent, effective_from,
+       jurisdiction, billing_frequency, scope_override, client_obligations_override,
+       volume_limits_override, exclusions_override,
+       oop_estimate_min, oop_estimate_max, oop_currency, pricing_note)
+    SELECT ${tenantId}, ${letterId}, l.party_id, ${serviceVersion}, 'Freeze probe line',
+           1, 12, 2000, 'INR', 5, '2026-08-01',
+           'IN', 'quarterly', 'Scope as agreed with this client.',
+           'Records by the 5th.', 'Under 1,000 entries.', 'Appeals are excluded.',
+           5000, 6000, 'USD', 'Plus statutory fees at actuals'
+    FROM crm.engagement_letter l WHERE l.id = ${letterId}
+    RETURNING id
+  `;
+  if (!row) throw new Error("could not create the probe letter line");
+  return row.id;
+}
 
 afterAll(async () => {
   await owner.end({ timeout: 5 });
@@ -128,6 +230,19 @@ async function letterColumns(): Promise<readonly ColumnRow[]> {
     FROM pg_attribute a
     JOIN pg_type t ON t.oid = a.atttypid
     WHERE a.attrelid = 'crm.engagement_letter'::regclass
+      AND a.attnum > 0 AND NOT a.attisdropped
+    ORDER BY a.attnum
+  `;
+}
+
+async function lineColumns(): Promise<readonly ColumnRow[]> {
+  return owner<ColumnRow[]>`
+    SELECT a.attname                              AS name,
+           format_type(a.atttypid, a.atttypmod)   AS type,
+           t.typcategory                          AS category
+    FROM pg_attribute a
+    JOIN pg_type t ON t.oid = a.atttypid
+    WHERE a.attrelid = 'crm.engagement_letter_line'::regclass
       AND a.attnum > 0 AND NOT a.attisdropped
     ORDER BY a.attnum
   `;
@@ -237,6 +352,120 @@ describe("the freeze covers every column of crm.engagement_letter", () => {
     // longer exists while the real one goes unprotected.
     const names = (await letterColumns()).map((c) => c.name);
     expect(mutable.filter((m) => !names.includes(m))).toEqual([]);
+  });
+});
+
+describe("the freeze covers every column of crm.engagement_letter_line", () => {
+  it("refuses an UPDATE to each one, as the owner role", async () => {
+    // The LINE table has no allow-list, and that asymmetry is the design:
+    // `crm.refuse_signed_child_change()` (0017) refuses ANY write once the
+    // parent is signed, because nothing on a term of a signed agreement has a
+    // reason to move. So every column is swept, `updated_at` included — a
+    // trigger that tried to touch it on a signed line would itself be refused,
+    // which is correct.
+    //
+    // G1.6's ten columns are the reason this sweep exists. The four scope
+    // OVERRIDES are the words the client agreed to; a letter whose scope could
+    // be quietly narrowed after signature would make the whole G1.6 argument —
+    // "this is what makes an issued document reproducible" — false.
+    const columns = await lineColumns();
+    const [current] = await owner<{ row: Record<string, unknown> }[]>`
+      SELECT to_jsonb(l) AS row FROM crm.engagement_letter_line l WHERE id = ${frozenLine}
+    `;
+    if (!current) throw new Error("the probe line vanished");
+    expect(columns.length).toBeGreaterThan(0);
+
+    const escaped: string[] = [];
+    for (const column of columns) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(column.name)) {
+        throw new Error(`unexpected column name ${column.name}: this test builds SQL by hand`);
+      }
+      const probe = probeValueFor(column, current.row[column.name] === null);
+      const outcome = await owner
+        .unsafe(`UPDATE crm.engagement_letter_line SET "${column.name}" = ${probe} WHERE id = $1`, [
+          frozenLine,
+        ])
+        .then(() => "the UPDATE SUCCEEDED — this column is editable after signature")
+        .catch((e: unknown) => {
+          const code = (e as { code?: string }).code;
+          return code === "23001"
+            ? null
+            : `refused with SQLSTATE ${code ?? "(none)"}, not restrict_violation`;
+        });
+      if (outcome) escaped.push(`${column.name} (${column.type}): ${outcome}`);
+    }
+
+    expect(
+      escaped,
+      "each of these columns of a line of a SIGNED engagement letter can be changed after the " +
+        "client agreed to it. The freeze is crm.refuse_signed_child_change() (migration 0017) " +
+        "and it refuses EVERY write to a signed letter's children — so a column reaching this " +
+        "list means the trigger was weakened or dropped.",
+    ).toEqual([]);
+  });
+
+  it("refuses MOVING a line off the signed letter onto a draft one", async () => {
+    // THE HOLE THIS SWEEP FOUND, and what migration 0024 closed.
+    // `crm.refuse_signed_child_change()` (0017) resolved the parent from
+    // NEW.engagement_letter_id on an UPDATE, so it asked about the letter the
+    // row was moving TO and never about the one it was moving FROM. Repointing
+    // a signed letter's line at any draft letter of the same firm in the same
+    // currency succeeded — a term removed from a signed agreement, the letter's
+    // totals changed, and nothing raised.
+    //
+    // It is the same SHAPE of bug as the one 0019 fixed on the head: a trigger
+    // asking a narrower question than the rule it enforces.
+    const err = await owner`
+      UPDATE crm.engagement_letter_line
+         SET engagement_letter_id = ${draftLetter}
+       WHERE id = ${frozenLine}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+    // The refusal names WHICH letter objected and says the row was being moved,
+    // because "the letter is signed" with two letters in the statement sends
+    // the reader to the trigger source.
+    expect((err as Error).message).toContain("moves a engagement_letter_line");
+
+    // The line is still where it was. A refusal that left it moved would be the
+    // bug with an error message.
+    const [row] = await owner<{ engagement_letter_id: string }[]>`
+      SELECT engagement_letter_id FROM crm.engagement_letter_line WHERE id = ${frozenLine}
+    `;
+    expect(row?.engagement_letter_id).toBe(frozenLineLetter);
+  });
+
+  it("refuses a DELETE, and an INSERT of a new line", async () => {
+    // The other two arms. A term cannot be removed from a signed agreement, and
+    // one cannot be added to it either — the second is the one an application
+    // rule forgets.
+    const deleted = await owner`
+      DELETE FROM crm.engagement_letter_line WHERE id = ${frozenLine}
+    `.catch((e: unknown) => e);
+    expect((deleted as { code?: string }).code).toBe("23001");
+
+    const [letter] = await owner<{ tenant_id: string }[]>`
+      SELECT tenant_id FROM crm.engagement_letter WHERE id = ${frozenLineLetter}
+    `;
+    const inserted = await insertLine(letter?.tenant_id ?? "", frozenLineLetter).catch(
+      (e: unknown) => e,
+    );
+    expect((inserted as { code?: string }).code).toBe("23001");
+  });
+
+  it("leaves a DRAFT letter's line freely editable", async () => {
+    // The control. A trigger that raised on everything would satisfy both
+    // assertions above and make drafting impossible.
+    await owner`
+      UPDATE crm.engagement_letter_line
+         SET scope_override = 'Rewritten while still a draft', billing_frequency = 'annually'
+       WHERE id = ${draftLine}
+    `;
+    const [row] = await owner<{ scope_override: string; billing_frequency: string }[]>`
+      SELECT scope_override, billing_frequency
+      FROM crm.engagement_letter_line WHERE id = ${draftLine}
+    `;
+    expect(row?.scope_override).toBe("Rewritten while still a draft");
+    expect(row?.billing_frequency).toBe("annually");
   });
 });
 

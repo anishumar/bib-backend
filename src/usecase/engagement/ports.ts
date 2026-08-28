@@ -3,7 +3,12 @@
 // and two are satisfied by other use cases at the composition root.
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
-import type { DocumentType } from "../../domain/document/model";
+import type {
+  BillingFrequency,
+  DocumentTerms,
+  DocumentType,
+  OutOfPocketEstimate,
+} from "../../domain/document/model";
 import type {
   Engagement,
   EngagementLetter,
@@ -92,11 +97,23 @@ export interface NewLetterLine {
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: Amount;
-  readonly unitAmount: Amount;
+  /** Null for a line that is genuinely "as mutually agreed". `pricingNote` is
+   *  then required — see `LetterLine.unitAmount`. */
+  readonly unitAmount: Amount | null;
   readonly currency: CurrencyCode;
   readonly discountPercent: Amount;
   /** When THIS line starts, when it is not the letter's date. */
   readonly effectiveFrom: string | null;
+  readonly jurisdiction: string | null;
+  /** RESOLVED before it gets here: the caller's value, else the pinned
+   *  service's `recurrence`, else null. */
+  readonly billingFrequency: BillingFrequency | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  readonly pricingNote: string | null;
 }
 
 export interface NewLetterClause {
@@ -210,6 +227,14 @@ export interface LetterRecord {
     readonly discount: Amount;
     readonly net: Amount;
     readonly currency: CurrencyCode;
+    /**
+     * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER — the lines with
+     * no price. Non-zero means the totals are a FLOOR rather than what this
+     * letter commits the client to, and a screen that prints the figure without
+     * this one prints a number that is not the price of the document. Same
+     * reasoning, and the same field, as `ProposalTotals.unpricedLineCount`.
+     */
+    readonly unpricedLineCount: number;
   };
   /** The engagements this letter created, once it has been signed. Rows, as the
    *  repository read them; the service narrows each one against the clock
@@ -320,7 +345,22 @@ export interface LetterLineRecord {
   /** The service as it was PINNED. Null only if the pinned version has somehow
    *  gone, which the composite foreign key makes impossible. */
   readonly service: PinnedService | null;
-  readonly net: Amount;
+  /**
+   * THE FOUR SCOPE BLOCKS, RESOLVED — this line's override where it has one,
+   * the pinned catalogue version's words where it does not, and a flag saying
+   * which of the two won.
+   *
+   * Resolved by `resolveTerms` in the domain, in ONE place. On a SIGNED letter
+   * this is the wording the client agreed to and nothing can change it: the
+   * override is a column on a frozen row, and the catalogue's half is a frozen
+   * config version. `service` carries the catalogue's own words untouched
+   * beside this, so a reader can see what was standard and what this client
+   * negotiated.
+   */
+  readonly terms: DocumentTerms;
+  /** NULL when the line has no price — there is no net of an amount that does
+   *  not exist. */
+  readonly net: Amount | null;
 }
 
 export interface LetterClauseRecord {

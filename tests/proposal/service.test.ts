@@ -13,6 +13,11 @@ import { parseShareToken } from "../../src/domain/proposal/model";
 import {
   AlreadyApproved,
   ApprovalNotNeeded,
+  InvalidLineBillingFrequency,
+  InvalidLineJurisdiction,
+  InvalidOutOfPocketEstimate,
+  UnpricedLineHasDiscount,
+  UnpricedLineNeedsReason,
   DiscountNeedsApproval,
   EmptyProposal,
   InvalidDecision,
@@ -438,6 +443,326 @@ describe("quoting a line", () => {
         discountPercent: "0",
       }),
     ).rejects.toBeInstanceOf(NotADraft);
+  });
+});
+
+describe("a line with no price — what a total MEANS then", () => {
+  /** A proposal with one priced line and one that is genuinely "as mutually
+   *  agreed". The shape the old schema could not hold at all. */
+  async function mixedProposal(s: ReturnType<typeof setup>): Promise<string> {
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "Incorporation",
+      quantity: "1",
+      pricingNote: "As mutually agreed, once the registrar's schedule is known",
+      discountPercent: "0",
+    });
+    return id;
+  }
+
+  it("stores no price at all, rather than a zero that means something else", async () => {
+    const s = setup();
+    const id = await mixedProposal(s);
+    const record = await s.service.describe(TENANT, id);
+    expect(record.lines[1]?.line.unitAmount).toBeNull();
+    // The distinction the whole task is about: not "0", which is a price the
+    // firm committed to.
+    expect(record.lines[1]?.line.unitAmount).not.toBe("0");
+    expect(record.lines[1]?.line.pricingNote).toBe(
+      "As mutually agreed, once the registrar's schedule is known",
+    );
+    // No net either. A zero here would sum into the document as a line the
+    // client gets free.
+    expect(record.lines[1]?.net).toBeNull();
+  });
+
+  it("leaves the unpriced line OUT of the total and says how many it left out", async () => {
+    // THE ANSWER TO "what does a total mean when a line has no price": it is the
+    // sum of the lines that HAVE one, plus a count of the lines it does not
+    // cover. One number could not say that, so the read model carries two.
+    const s = setup();
+    const id = await mixedProposal(s);
+    const totals = (await s.service.describe(TENANT, id)).totals;
+    expect(totals.net).toBe("24000.0000");
+    expect(totals.gross).toBe("24000.0000");
+    // Non-zero means the figure above is a FLOOR, not the price of the
+    // document.
+    expect(totals.unpricedLineCount).toBe(1);
+  });
+
+  it("counts a document that is ENTIRELY unpriced, where the total reads zero", async () => {
+    // The case that would be a lie on its own. Every line "as mutually agreed"
+    // sums to nothing, and a screen printing the net alone would tell a partner
+    // this client agreed to pay zero. The count beside it is the whole defence.
+    const s = setup();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "Advisory retainer",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+    const totals = (await s.service.describe(TENANT, id)).totals;
+    expect(totals.net).toBe("0.0000");
+    expect(totals.unpricedLineCount).toBe(1);
+  });
+
+  it("refuses a line with no price and no reason", async () => {
+    // The acceptance says a line may say "as mutually agreed" WITH A REASON. A
+    // blank price with no reason is indistinguishable on the client's document
+    // from a figure somebody forgot to type.
+    const s = setup();
+    const id = await draftWith(s);
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        proposalId: id,
+        serviceVersionId: GST_VERSION,
+        description: "Incorporation",
+        quantity: "1",
+        discountPercent: "0",
+      }),
+    ).rejects.toBeInstanceOf(UnpricedLineNeedsReason);
+  });
+
+  it("refuses a discount off a price that does not exist", async () => {
+    // 15% off "as mutually agreed" is not a number — and it would count towards
+    // the largest discount on the proposal and hold the whole thing at the
+    // approval gate over a discount nobody gave.
+    const s = setup();
+    const id = await draftWith(s);
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        proposalId: id,
+        serviceVersionId: GST_VERSION,
+        description: "Incorporation",
+        quantity: "1",
+        pricingNote: "As mutually agreed",
+        discountPercent: "15",
+      }),
+    ).rejects.toBeInstanceOf(UnpricedLineHasDiscount);
+  });
+});
+
+describe("line detail — the wording, the frequency and the out-of-pockets", () => {
+  const SCOPED = "00000000-0000-0000-0000-0000000000da";
+
+  function withScopedService(): ReturnType<typeof setup> {
+    const s = setup();
+    s.catalogue.publishService(SCOPED, "bookkeeping", {
+      name: "Monthly bookkeeping",
+      billingBasis: "retainer",
+      recurrence: "monthly",
+      scope: "Books written up monthly.",
+      clientObligations: "Records by the 5th.",
+      volumeLimits: "Under 1,000 entries.",
+      exclusions: "Statutory audit is not included.",
+    });
+    return s;
+  }
+
+  it("prints the catalogue's words when the document tailored nothing", async () => {
+    const s = withScopedService();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+    });
+    const terms = (await s.service.describe(TENANT, id)).lines[0]?.terms;
+    expect(terms?.scope).toEqual({ text: "Books written up monthly.", tailored: false });
+    expect(terms?.exclusions.tailored).toBe(false);
+  });
+
+  it("prints THIS document's words when it has them, and says it was tailored", async () => {
+    // The point of the overrides: editing one client's scope must not touch the
+    // catalogue, and a screen has to be able to say which wording it is showing.
+    const s = withScopedService();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+      scopeOverride: "Books written up monthly for BOTH entities of the group.",
+    });
+    const line = (await s.service.describe(TENANT, id)).lines[0];
+    expect(line?.terms.scope).toEqual({
+      text: "Books written up monthly for BOTH entities of the group.",
+      tailored: true,
+    });
+    // …and the CATALOGUE's own words are still there beside it, untouched, so
+    // an editor can show the standard scope next to what this document changed
+    // it to.
+    expect(line?.service?.scope).toBe("Books written up monthly.");
+    // The blocks this document did not tailor still come from the catalogue.
+    expect(line?.terms.clientObligations).toEqual({
+      text: "Records by the 5th.",
+      tailored: false,
+    });
+  });
+
+  it("says so when neither the document nor the catalogue states a block", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST filing",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    const terms = (await s.service.describe(TENANT, id)).lines[0]?.terms;
+    expect(terms?.scope).toEqual({ text: null, tailored: false });
+  });
+
+  it("defaults the billing frequency from the pinned service's recurrence", async () => {
+    const s = withScopedService();
+    const id = await draftWith(s);
+    const line = await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+    });
+    expect(line.billingFrequency).toBe("monthly");
+  });
+
+  it("keeps a monthly service billed quarterly representable", async () => {
+    // The whole reason billing frequency is a column rather than a read-time
+    // derivation: how often the WORK comes round and how often the CLIENT is
+    // invoiced are different facts, and the firm has clients on both.
+    const s = withScopedService();
+    const id = await draftWith(s);
+    const line = await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+      billingFrequency: "quarterly",
+    });
+    expect(line.billingFrequency).toBe("quarterly");
+    // The catalogue still says monthly. Neither has restated the other.
+    const cited = (await s.service.describe(TENANT, id)).lines[0]?.service;
+    expect(cited?.recurrence).toBe("monthly");
+  });
+
+  it("invents nothing when the pinned version states no recurrence", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    const line = await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST filing",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    // Not `one_time`. A billing frequency nobody chose is one nobody can trace.
+    expect(line.billingFrequency).toBeNull();
+  });
+
+  it("carries an out-of-pocket range in its OWN currency, outside the fee", async () => {
+    // The reason it has a currency at all: a client quoted in INR still faces a
+    // filing fee in USD, and the document's FX rate says nothing about a third
+    // currency — so the estimate is never converted and never summed.
+    const s = setup();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "US filings",
+      quantity: "1",
+      unitAmount: "50000",
+      discountPercent: "0",
+      oopEstimate: { min: "5000", max: "6000", currency: "usd" },
+    });
+    const record = await s.service.describe(TENANT, id);
+    // Normalised on the way in, because a currency code is compared.
+    expect(record.lines[0]?.line.oopEstimate).toEqual({
+      min: "5000",
+      max: "6000",
+      currency: "USD",
+    });
+    // And the INR total is untouched by the USD estimate beside it.
+    expect(record.totals.net).toBe("50000.0000");
+    expect(record.totals.currency).toBe("INR");
+  });
+
+  it("refuses a range whose ends are the wrong way round, and a bad code", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    const line = {
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "x",
+      quantity: "1",
+      unitAmount: "1",
+      discountPercent: "0",
+    };
+    await expect(
+      s.service.addLine({ ...line, oopEstimate: { min: "6000", max: "5000", currency: "USD" } }),
+    ).rejects.toBeInstanceOf(InvalidOutOfPocketEstimate);
+    await expect(
+      s.service.addLine({ ...line, oopEstimate: { min: "5000", max: "6000", currency: "DOLLAR" } }),
+    ).rejects.toBeInstanceOf(InvalidOutOfPocketEstimate);
+  });
+
+  it("refuses a jurisdiction and a billing frequency it does not recognise", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    const line = {
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "x",
+      quantity: "1",
+      unitAmount: "1",
+      discountPercent: "0",
+    };
+    await expect(s.service.addLine({ ...line, jurisdiction: "INR" })).rejects.toBeInstanceOf(
+      InvalidLineJurisdiction,
+    );
+    await expect(
+      s.service.addLine({ ...line, billingFrequency: "fortnightly" }),
+    ).rejects.toBeInstanceOf(InvalidLineBillingFrequency);
+    // …and normalises the one it does.
+    const ok = await s.service.addLine({ ...line, jurisdiction: "in" });
+    expect(ok.jurisdiction).toBe("IN");
   });
 });
 

@@ -14,6 +14,7 @@ import type {
   LetterStatus,
 } from "../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../domain/config/model";
+import { resolveTerms } from "../domain/document/model";
 import type {
   ClauseLibrary,
   ContentHasher,
@@ -123,6 +124,14 @@ export class FakeEngagementRepo implements EngagementRepository {
       currency: l.currency,
       discountPercent: l.discountPercent,
       effectiveFrom: l.effectiveFrom,
+      jurisdiction: l.jurisdiction,
+      billingFrequency: l.billingFrequency,
+      scopeOverride: l.scopeOverride,
+      clientObligationsOverride: l.clientObligationsOverride,
+      volumeLimitsOverride: l.volumeLimitsOverride,
+      exclusionsOverride: l.exclusionsOverride,
+      oopEstimate: l.oopEstimate,
+      pricingNote: l.pricingNote,
       removed: false,
     };
     this.lines.push(row);
@@ -321,6 +330,18 @@ export class FakeEngagementRepo implements EngagementRepository {
           displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
         },
         service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        // The SAME `resolveTerms` the Postgres adapter calls, over the same
+        // pinned body — a second override-else-catalogue rule in here would
+        // disagree with the adapter on the case the rule exists for.
+        terms: resolveTerms(
+          {
+            scope: l.scopeOverride,
+            clientObligations: l.clientObligationsOverride,
+            volumeLimits: l.volumeLimitsOverride,
+            exclusions: l.exclusionsOverride,
+          },
+          pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        ),
         net: net(l),
       })),
       clauses: clauses.map((c) => {
@@ -535,18 +556,28 @@ function mul(a: bigint, b: bigint): bigint {
   return (a * b + UNIT / 2n) / UNIT;
 }
 
-function grossOf(l: Pick<LetterLine, "unitAmount" | "quantity">): bigint {
+// AN UNPRICED LINE IS NOT ZERO HERE EITHER: `null` in, `null` out, and the line
+// is COUNTED instead — so this fake agrees with the SQL in the Postgres adapter
+// about what a letter's totals leave out.
+
+function grossOf(l: Pick<LetterLine, "unitAmount" | "quantity">): bigint | null {
+  if (l.unitAmount === null) return null;
   return mul(scaled(l.unitAmount), scaled(l.quantity));
 }
 
 function netScaled(
   l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">,
-): bigint {
-  return mul(mul(grossOf(l), scaled("100") - scaled(l.discountPercent)), scaled("0.01"));
+): bigint | null {
+  const gross = grossOf(l);
+  if (gross === null) return null;
+  return mul(mul(gross, scaled("100") - scaled(l.discountPercent)), scaled("0.01"));
 }
 
-function net(l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">): string {
-  return unscaled(netScaled(l));
+function net(
+  l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">,
+): string | null {
+  const value = netScaled(l);
+  return value === null ? null : unscaled(value);
 }
 
 function totals(
@@ -555,11 +586,24 @@ function totals(
 ): LetterRecord["totals"] {
   let gross = 0n;
   let n = 0n;
+  let unpriced = 0;
   for (const line of lines) {
-    gross += grossOf(line);
-    n += netScaled(line);
+    const lineGross = grossOf(line);
+    const lineNet = netScaled(line);
+    if (lineGross === null || lineNet === null) {
+      unpriced += 1;
+      continue;
+    }
+    gross += lineGross;
+    n += lineNet;
   }
-  return { gross: unscaled(gross), discount: unscaled(gross - n), net: unscaled(n), currency };
+  return {
+    gross: unscaled(gross),
+    discount: unscaled(gross - n),
+    net: unscaled(n),
+    currency,
+    unpricedLineCount: unpriced,
+  };
 }
 
 /**

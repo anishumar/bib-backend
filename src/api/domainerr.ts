@@ -150,8 +150,18 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       // Malformed input: a number where a decimal string belongs, a currency
       // that is not one, a discount outside 0–100.
+      //
+      // G1.6's line detail joins them, the two about an unpriced line included:
+      // "no price and no reason" and "a discount off no price" are both things
+      // the caller SENT, not states the proposal is in, and both are fixed by
+      // sending something different.
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
+      case "UNPRICED_LINE_NEEDS_REASON":
+      case "UNPRICED_LINE_HAS_DISCOUNT":
+      case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_LINE_JURISDICTION":
+      case "INVALID_OOP_ESTIMATE":
       case "INVALID_DISCOUNT":
       case "INVALID_FX_RATE":
       case "INVALID_CURRENCY":
@@ -187,8 +197,13 @@ export function mapError(err: unknown): MappedError {
       // advance errors below: "advanceRequired with no amount" is a malformed
       // REQUEST, not a state the letter is in — there is no letter yet. It sat
       // in the wrong group until the end-to-end walk asked for a 400.
+      // G1.6's line detail joins these, same reasoning as on a proposal.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
+      case "UNPRICED_LINE_NEEDS_REASON":
+      case "UNPRICED_LINE_HAS_DISCOUNT":
+      case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_OOP_ESTIMATE":
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":
       case "CLAUSE_WRONG_JURISDICTION":

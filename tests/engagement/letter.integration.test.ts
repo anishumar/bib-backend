@@ -653,6 +653,147 @@ describe("the pin", () => {
     expect(record.lines[0]?.line.unitAmount).toBe("85000.0000");
   });
 
+  it("keeps THIS client's own wording after the catalogue is rewritten", async () => {
+    // G1.6's second half, and the reason the overrides exist at all: without
+    // them, tailoring one client's scope means editing the catalogue, which
+    // silently rewrites the standard scope for every document issued
+    // afterwards. With them the letter carries its own words, so a revision
+    // next year cannot change what a signed document says.
+    const defined = await config.define(
+      {
+        tenantId: tenantA,
+        kind: "service",
+        key: "payroll",
+        body: {
+          name: "Payroll processing",
+          billingBasis: "fixed",
+          recurrence: "monthly",
+          scope: "Monthly payroll run for up to 50 employees.",
+          clientObligations: "Attendance inputs by the 25th.",
+          volumeLimits: "Up to 50 employees.",
+          exclusions: "Payroll tax litigation.",
+        },
+      },
+      SYSTEM_ACTOR,
+    );
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "payroll", version: 1 },
+      SYSTEM_ACTOR,
+    );
+
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — payroll",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: defined.draft.id,
+      description: "Payroll, 12 months",
+      quantity: "12",
+      unitAmount: "12000",
+      discountPercent: "0",
+      scopeOverride: "Monthly payroll run for up to 120 employees ACROSS BOTH ENTITIES.",
+      jurisdiction: "IN",
+      billingFrequency: "quarterly",
+      oopEstimate: { min: "5000", max: "6000", currency: "USD" },
+    });
+    // A second line the two sides genuinely have not priced. On a letter that
+    // is a TERM, not a gap.
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA2,
+      serviceVersionId: defined.draft.id,
+      description: "Group restructuring support",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    await service.sign(
+      {
+        tenantId: tenantA,
+        letterId: letter.id,
+        signedByName: "Priya Menon",
+        reference: "paper-g16",
+      },
+      SYSTEM_ACTOR,
+    );
+
+    // The catalogue is rewritten AFTER the client signed.
+    await config.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "payroll",
+      body: {
+        name: "Payroll processing",
+        billingBasis: "fixed",
+        recurrence: "annually",
+        scope: "REWRITTEN 2027: payroll for up to 20 employees.",
+        exclusions: "REWRITTEN 2027: everything else.",
+      },
+    });
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "payroll", version: 2 },
+      SYSTEM_ACTOR,
+    );
+
+    const record = await service.describe(tenantA, letter.id);
+    const line = record.lines[0];
+    // The tailored block is THIS letter's, and it says so.
+    expect(line?.terms.scope).toEqual({
+      text: "Monthly payroll run for up to 120 employees ACROSS BOTH ENTITIES.",
+      tailored: true,
+    });
+    // The blocks nobody tailored come from the version the line PINNED — not
+    // from the catalogue as it reads now.
+    expect(line?.terms.exclusions).toEqual({
+      text: "Payroll tax litigation.",
+      tailored: false,
+    });
+    expect(line?.terms.exclusions.text).not.toContain("REWRITTEN");
+    // A monthly service billed quarterly, which is the arrangement a derived
+    // billing frequency would have made unrepresentable.
+    expect(line?.line.billingFrequency).toBe("quarterly");
+    expect(line?.service?.recurrence).toBe("monthly");
+    // Out-of-pockets in a currency the letter is not in, outside the money.
+    expect(line?.line.oopEstimate).toEqual({
+      min: "5000.0000",
+      max: "6000.0000",
+      currency: "USD",
+    });
+
+    // AND THE TOTALS SAY WHAT THEY DO NOT COVER. 12 × 12,000 is the whole of
+    // the priced work; the second line is agreed and unpriced, and a figure
+    // that did not admit it would be a number a partner acts on.
+    expect(Number(record.totals.net)).toBe(144000);
+    expect(record.totals.unpricedLineCount).toBe(1);
+    expect(record.lines[1]?.line.unitAmount).toBeNull();
+    expect(record.lines[1]?.net).toBeNull();
+    expect(record.lines[1]?.line.pricingNote).toBe("As mutually agreed");
+
+    // And the wording cannot be edited out from under the signature — as the
+    // OWNER role, which is where an application rule would not reach.
+    const err = await owner`
+      UPDATE crm.engagement_letter_line
+         SET scope_override = 'quietly narrowed'
+       WHERE id = ${line?.line.id ?? ""}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+  });
+
   it("records a verifiable fingerprint of what was signed", async () => {
     const id = await signedLetter();
     const record = await service.describe(tenantA, id);

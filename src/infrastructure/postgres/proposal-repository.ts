@@ -13,6 +13,8 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { readServiceBody } from "../../domain/config/model";
+import { resolveTerms } from "../../domain/document/model";
+import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
   NewProposal,
   NewProposalLine,
@@ -56,16 +58,37 @@ interface LineRow {
   description: string;
   position: number;
   quantity: string;
-  unit_amount: string;
+  /** Nullable since 0023: an unpriced line is "as mutually agreed", never zero. */
+  unit_amount: string | null;
   currency: string;
   discount_percent: string;
+  jurisdiction: string | null;
+  billing_frequency: BillingFrequency | null;
+  scope_override: string | null;
+  client_obligations_override: string | null;
+  volume_limits_override: string | null;
+  exclusions_override: string | null;
+  oop_estimate_min: string | null;
+  oop_estimate_max: string | null;
+  oop_currency: string | null;
+  pricing_note: string | null;
 }
+
+/** Every column of a line, in one place: the SELECT list appears in four
+ *  queries and a column added to three of them is a field that reads as null on
+ *  whichever read nobody happened to open. */
+const LINE_COLUMNS = `id, tenant_id, proposal_id, entity_party_id, service_version_id,
+                      description, position, quantity, unit_amount, currency, discount_percent,
+                      jurisdiction, billing_frequency, scope_override,
+                      client_obligations_override, volume_limits_override, exclusions_override,
+                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note`;
 
 interface TotalsRow {
   gross: string | null;
   discount: string | null;
   net: string | null;
   line_count: string;
+  unpriced_line_count: string;
 }
 
 /** A date column, as a day. `toISOString().slice(0,10)` would be wrong for a
@@ -102,6 +125,16 @@ function toProposal(r: ProposalRow): Proposal {
   };
 }
 
+/** The out-of-pocket range as ONE value or none. The three columns move
+ *  together (`proposal_line_oop_is_whole_chk`), so the type says what the
+ *  constraint says and no caller has to test three nulls. */
+function toOopEstimate(r: LineRow): OutOfPocketEstimate | null {
+  if (r.oop_estimate_min === null || r.oop_estimate_max === null || r.oop_currency === null) {
+    return null;
+  }
+  return { min: r.oop_estimate_min, max: r.oop_estimate_max, currency: r.oop_currency };
+}
+
 function toLine(r: LineRow): ProposalLine {
   return {
     id: r.id,
@@ -115,17 +148,35 @@ function toLine(r: LineRow): ProposalLine {
     unitAmount: r.unit_amount,
     currency: r.currency,
     discountPercent: r.discount_percent,
+    jurisdiction: r.jurisdiction,
+    billingFrequency: r.billing_frequency,
+    scopeOverride: r.scope_override,
+    clientObligationsOverride: r.client_obligations_override,
+    volumeLimitsOverride: r.volume_limits_override,
+    exclusionsOverride: r.exclusions_override,
+    oopEstimate: toOopEstimate(r),
+    pricingNote: r.pricing_note,
   };
 }
 
-/** An empty proposal sums to nulls, not to zeroes — SUM over no rows is null.
- *  Zero in the quote's own currency is the honest reading of "nothing yet". */
+/**
+ * An empty proposal sums to nulls, not to zeroes — SUM over no rows is null.
+ * Zero in the quote's own currency is the honest reading of "nothing yet".
+ *
+ * SINCE 0023 A NULL SUM HAS A SECOND CAUSE: every live line is unpriced, so
+ * `sum()` had nothing to add. Zero is still the right FIGURE — the priced part
+ * of this document comes to nothing — and it is `unpricedLineCount` beside it
+ * that stops the zero reading as "this work is free". The two are read together
+ * or the total is a lie; that is the whole reason the count is on this type
+ * rather than somewhere a caller can forget to ask for.
+ */
 function toTotals(r: TotalsRow | undefined, currency: string): ProposalRecord["totals"] {
   return {
     gross: r?.gross ?? "0",
     discount: r?.discount ?? "0",
     net: r?.net ?? "0",
     currency,
+    unpricedLineCount: Number(r?.unpriced_line_count ?? 0),
   };
 }
 
@@ -205,7 +256,7 @@ export class PostgresProposalRepository implements ProposalRepository {
       // call the registry once per line.
       const lines = await db<
         (LineRow & {
-          net: string;
+          net: string | null;
           service_key: string;
           service_version: number;
           service_body: Record<string, unknown>;
@@ -215,6 +266,12 @@ export class PostgresProposalRepository implements ProposalRepository {
         SELECT l.id, l.tenant_id, l.proposal_id, l.entity_party_id, l.service_version_id,
                l.description,
                l.position, l.quantity, l.unit_amount, l.currency, l.discount_percent,
+               l.jurisdiction, l.billing_frequency, l.scope_override,
+               l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
+               l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
+               -- NULL for an unpriced line, straight out of the view: there is
+               -- no net of an amount that does not exist, and 0 here would sum
+               -- into the document's total as a line the client gets free.
                a.net,
                e.key AS service_key,
                v.version AS service_version,
@@ -232,7 +289,7 @@ export class PostgresProposalRepository implements ProposalRepository {
       `;
 
       const [totals] = await db<TotalsRow[]>`
-        SELECT line_count, gross, discount, net
+        SELECT line_count, gross, discount, net, unpriced_line_count
         FROM crm.proposal_totals WHERE proposal_id = ${proposalId}
       `;
 
@@ -251,6 +308,19 @@ export class PostgresProposalRepository implements ProposalRepository {
                 ? null
                 : { id: r.entity_party_id, displayName: r.entity_display_name },
             service: toPinnedService(r.service_key, r.service_version, r.service_body),
+            // OVERRIDE ELSE CATALOGUE, resolved once, by the domain — never by
+            // this adapter and never by a screen. The catalogue's half comes
+            // out of the SAME pinned body the join already read, so the words
+            // that print are the version's, not today's.
+            terms: resolveTerms(
+              {
+                scope: r.scope_override,
+                clientObligations: r.client_obligations_override,
+                volumeLimits: r.volume_limits_override,
+                exclusions: r.exclusions_override,
+              },
+              readServiceBody(r.service_body),
+            ),
             net: r.net,
           }),
         ),
@@ -281,6 +351,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           discount: string | null;
           net: string | null;
           line_count: string;
+          unpriced_line_count: string;
         })[]
       >`
         SELECT p.id, p.tenant_id, p.ref, p.party_id, p.issuing_entity_party_id, p.lead_id,
@@ -290,7 +361,8 @@ export class PostgresProposalRepository implements ProposalRepository {
                p.first_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
-               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
+               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
+               coalesce(t.unpriced_line_count, 0) AS unpriced_line_count
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
@@ -319,20 +391,44 @@ export class PostgresProposalRepository implements ProposalRepository {
       // rather than computed by the caller and passed down: two people adding a
       // line to one draft would otherwise race for the same number and one of
       // them would lose to the unique index for no reason they could act on.
-      const [row] = await db<LineRow[]>`
+      const [row] = await db.unsafe<LineRow[]>(
+        `
         INSERT INTO crm.proposal_line
           (id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
-           position, quantity, unit_amount, currency, discount_percent)
-        SELECT ${l.id}, ${l.tenantId}, ${l.proposalId}, ${l.entityPartyId},
-               ${l.serviceVersionId},
-               ${l.description},
+           position, quantity, unit_amount, currency, discount_percent,
+           jurisdiction, billing_frequency, scope_override, client_obligations_override,
+           volume_limits_override, exclusions_override,
+           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note)
+        SELECT $1, $2, $3, $4, $5, $6,
                coalesce(max(position), 0) + 1,
-               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent}
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
         FROM crm.proposal_line
-        WHERE proposal_id = ${l.proposalId} AND removed_at IS NULL
-        RETURNING id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
-                  position, quantity, unit_amount, currency, discount_percent
-      `;
+        WHERE proposal_id = $3 AND removed_at IS NULL
+        RETURNING ${LINE_COLUMNS}
+      `,
+        [
+          l.id,
+          l.tenantId,
+          l.proposalId,
+          l.entityPartyId,
+          l.serviceVersionId,
+          l.description,
+          l.quantity,
+          l.unitAmount,
+          l.currency,
+          l.discountPercent,
+          l.jurisdiction,
+          l.billingFrequency,
+          l.scopeOverride,
+          l.clientObligationsOverride,
+          l.volumeLimitsOverride,
+          l.exclusionsOverride,
+          l.oopEstimate?.min ?? null,
+          l.oopEstimate?.max ?? null,
+          l.oopEstimate?.currency ?? null,
+          l.pricingNote,
+        ],
+      );
       if (!row) throw new Error("proposal line insert returned no row");
       return toLine(row);
     });
@@ -349,13 +445,11 @@ export class PostgresProposalRepository implements ProposalRepository {
 
   async listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<LineRow[]>`
-        SELECT id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
-               position, quantity, unit_amount, currency, discount_percent
-        FROM crm.proposal_line
-        WHERE proposal_id = ${proposalId} AND removed_at IS NULL
-        ORDER BY position
-      `;
+      const rows = await db.unsafe<LineRow[]>(
+        `SELECT ${LINE_COLUMNS} FROM crm.proposal_line
+          WHERE proposal_id = $1 AND removed_at IS NULL ORDER BY position`,
+        [proposalId],
+      );
       return rows.map(toLine);
     });
   }
@@ -436,13 +530,14 @@ export class PostgresProposalRepository implements ProposalRepository {
           gross: string | null;
           discount: string | null;
           net: string | null;
+          unpriced_line_count: string | null;
         }[]
       >`
         SELECT p.id, p.ref, p.title, p.status, p.currency, p.valid_until, p.sent_at,
                firm.name AS firm_name,
                issuer.display_name AS issuer_display_name,
                party.display_name AS party_display_name,
-               t.gross, t.discount, t.net
+               t.gross, t.discount, t.net, t.unpriced_line_count
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- The recipient is told which of our companies is offering. It is not
@@ -459,12 +554,24 @@ export class PostgresProposalRepository implements ProposalRepository {
         {
           description: string;
           quantity: string;
-          unit_amount: string;
+          unit_amount: string | null;
           discount_percent: string;
-          net: string;
+          net: string | null;
+          pricing_note: string | null;
+          billing_frequency: BillingFrequency | null;
+          oop_estimate_min: string | null;
+          oop_estimate_max: string | null;
+          oop_currency: string | null;
         }[]
       >`
-        SELECT l.description, l.quantity, l.unit_amount, l.discount_percent, a.net
+        SELECT l.description, l.quantity, l.unit_amount, l.discount_percent, a.net,
+               -- What the RECIPIENT reads where a figure would be, how often
+               -- they will be invoiced, and what they are told to expect to
+               -- reimburse. The four scope blocks are deliberately not here:
+               -- this route is a PUBLIC path and widening what an
+               -- unauthenticated link exposes is its own decision.
+               l.pricing_note, l.billing_frequency,
+               l.oop_estimate_min, l.oop_estimate_max, l.oop_currency
         FROM crm.proposal_line l
         JOIN crm.proposal_line_amount a ON a.id = l.id
         WHERE l.proposal_id = ${head.id} AND l.removed_at IS NULL
@@ -488,12 +595,29 @@ export class PostgresProposalRepository implements ProposalRepository {
           unitAmount: l.unit_amount,
           discountPercent: l.discount_percent,
           net: l.net,
+          pricingNote: l.pricing_note,
+          billingFrequency: l.billing_frequency,
+          oopEstimate:
+            l.oop_estimate_min === null ||
+            l.oop_estimate_max === null ||
+            l.oop_currency === null
+              ? null
+              : {
+                  min: l.oop_estimate_min,
+                  max: l.oop_estimate_max,
+                  currency: l.oop_currency,
+                },
         })),
         totals: {
           gross: head.gross ?? "0",
           discount: head.discount ?? "0",
           net: head.net ?? "0",
           currency: head.currency,
+          // The recipient is told the same thing a partner is: how many lines
+          // this figure does not cover. A client reading a total that quietly
+          // omits two "as mutually agreed" lines is the worst place for this to
+          // go wrong.
+          unpricedLineCount: Number(head.unpriced_line_count ?? 0),
         },
       };
     });

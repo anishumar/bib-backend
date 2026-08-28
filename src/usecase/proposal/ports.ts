@@ -4,7 +4,12 @@
 // cases at the composition root.
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
-import type { DocumentType } from "../../domain/document/model";
+import type {
+  BillingFrequency,
+  DocumentTerms,
+  DocumentType,
+  OutOfPocketEstimate,
+} from "../../domain/document/model";
 import type {
   Proposal,
   ProposalLine,
@@ -59,9 +64,23 @@ export interface NewProposalLine {
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: Amount;
-  readonly unitAmount: Amount;
+  /** Null for a line that is genuinely "as mutually agreed". `pricingNote` is
+   *  then required — see `ProposalLine.unitAmount`. */
+  readonly unitAmount: Amount | null;
   readonly currency: CurrencyCode;
   readonly discountPercent: Amount;
+  readonly jurisdiction: string | null;
+  /** RESOLVED before it gets here: the caller's value, else the pinned
+   *  service's `recurrence`, else null. The use case does that once so the
+   *  default is a property of the deal at the moment it was struck rather than
+   *  something re-derived from a catalogue that has since moved. */
+  readonly billingFrequency: BillingFrequency | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  readonly pricingNote: string | null;
 }
 
 /**
@@ -178,9 +197,25 @@ export interface ProposalLineRecord {
    *  gone, which the composite foreign key makes impossible; the type is honest
    *  about the join anyway. */
   readonly service: PinnedService | null;
+  /**
+   * THE FOUR SCOPE BLOCKS, RESOLVED — this line's override where it has one,
+   * the pinned catalogue version's words where it does not, and a flag saying
+   * which of the two won.
+   *
+   * Resolved by `resolveTerms` in the domain, in ONE place, because the
+   * alternative is every screen resolving it and the second one getting it
+   * wrong. `service` still carries the CATALOGUE's words untouched beside this,
+   * so an editor can show what the standard scope says and what this document
+   * changed it to — which is the comparison somebody makes before tailoring.
+   */
+  readonly terms: DocumentTerms;
   /** gross − discount for this line, in the proposal's currency. From the
-   *  database, like every other sum here. */
-  readonly net: Amount;
+   *  database, like every other sum here.
+   *
+   *  NULL when the line has no price — there is no net of an amount that does
+   *  not exist, and the alternative is a zero that sums into the document's
+   *  total as though the client agreed to pay nothing for this. */
+  readonly net: Amount | null;
 }
 
 /**
@@ -236,9 +271,26 @@ export interface SharedProposal {
   readonly lines: readonly {
     readonly description: string;
     readonly quantity: Amount;
-    readonly unitAmount: Amount;
+    /** Null for "as mutually agreed" — and then `pricingNote` is what the
+     *  recipient reads where the figure would be. */
+    readonly unitAmount: Amount | null;
     readonly discountPercent: Amount;
-    readonly net: Amount;
+    readonly net: Amount | null;
+    /**
+     * WHY there is no figure. On the recipient's own document, because that is
+     * the whole point of the field: a client looking at a blank price has to be
+     * told it is deliberate.
+     *
+     * The four scope blocks deliberately do NOT travel here. This is the fourth
+     * PUBLIC path and widening what an unauthenticated link exposes is its own
+     * decision, not a side effect of G1.6.
+     */
+    readonly pricingNote: string | null;
+    /** How often the client will be invoiced for this line. */
+    readonly billingFrequency: BillingFrequency | null;
+    /** What the client is told to expect to reimburse, separate from the fee
+     *  and in its own currency. Never folded into the totals. */
+    readonly oopEstimate: OutOfPocketEstimate | null;
   }[];
   readonly totals: ProposalTotals;
 }

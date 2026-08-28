@@ -15,6 +15,7 @@
 // Like the proposal domain, this file does not add up money — Postgres does,
 // exactly once — and it does not know what the firm's clause library contains.
 import type { Amount, CurrencyCode } from "../money/model";
+import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
 
 /**
  * Where a letter has got to.
@@ -228,9 +229,52 @@ export interface LetterLine {
   readonly description: string;
   readonly position: number;
   readonly quantity: Amount;
-  readonly unitAmount: Amount;
+  /**
+   * The price agreed, per unit of the service's billing basis — or NULL.
+   *
+   * NULLABLE since G1.6, and on a LETTER that is the sharper case: "as mutually
+   * agreed" is a term two parties signed, and the column being `NOT NULL CHECK
+   * (>= 0)` meant it had to be recorded as ZERO, which is a different agreement.
+   *
+   * NULL IS NOT ZERO ANYWHERE DOWNSTREAM: an unpriced line contributes nothing
+   * to the letter's totals and is COUNTED instead — see the totals on
+   * `LetterRecord`. `pricingNote` is required when this is null (0023).
+   */
+  readonly unitAmount: Amount | null;
   readonly currency: CurrencyCode;
+  /** Zero when there is no price — a discount off "as mutually agreed" is not a
+   *  number, and the database refuses one (0023). */
   readonly discountPercent: Amount;
+  /**
+   * WHERE THE WORK IS. On a letter this is the entity's own jurisdiction,
+   * carried so a letter and the proposal it came from print and group the same
+   * way. Stated rather than derived — see the note on `ProposalLine`.
+   */
+  readonly jurisdiction: string | null;
+  /** How often THIS DEAL is billed. Defaulted from the pinned service's
+   *  `recurrence` and freely different from it: a monthly service billed
+   *  quarterly is an arrangement the firm has today. */
+  readonly billingFrequency: BillingFrequency | null;
+  /**
+   * THE FOUR OVERRIDES — this letter's own wording for the four scope blocks,
+   * or null to print the pinned catalogue version's words.
+   *
+   * WHAT MAKES A SIGNED LETTER REPRODUCIBLE, and the reason this matters more
+   * here than on a proposal: the letter carries the words, so a catalogue
+   * revision next year cannot change what the client agreed to. The signature
+   * commits to them — they are in `canonicalContent` — and the freeze then makes
+   * them unwritable.
+   */
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  /** The out-of-pocket range, in its own currency: reimbursed at ACTUALS,
+   *  separate from the fee, never summed into a total. */
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  /** WHY there is no amount. Required when `unitAmount` is null (0023) — a
+   *  signed line that says neither a price nor why is a term nobody can read. */
+  readonly pricingNote: string | null;
   /**
    * When THIS line's work begins, when it differs from the rest of the letter.
    *
@@ -402,6 +446,16 @@ export function utcDay(at: Date): string {
  * agreement at a different price. A signature that did not commit to it would
  * leave the one dimension the delivery lane schedules against outside the thing
  * the hash proves.
+ *
+ * G1.6's LINE DETAIL joined the line's fields for the same reason, and the four
+ * scope OVERRIDES are the ones that had to: they are the wording this client
+ * agreed to, and a hash that did not cover them would verify a document whose
+ * scope was whatever the catalogue happened to say. The cost is stated rather
+ * than hidden: this rendering now produces different bytes than it did before
+ * G1.6, so a hash taken earlier cannot be re-derived from it. Nothing in the
+ * product re-derives one — the fingerprint is stored and the freeze (0017) is
+ * what actually holds a signed letter still — and a signature that did not cover
+ * the client's own scope wording was the worse of the two.
  */
 export function canonicalContent(input: {
   readonly letter: Pick<
@@ -432,6 +486,14 @@ export function canonicalContent(input: {
     | "unitAmount"
     | "discountPercent"
     | "effectiveFrom"
+    | "jurisdiction"
+    | "billingFrequency"
+    | "scopeOverride"
+    | "clientObligationsOverride"
+    | "volumeLimitsOverride"
+    | "exclusionsOverride"
+    | "oopEstimate"
+    | "pricingNote"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
@@ -477,11 +539,35 @@ export function canonicalContent(input: {
         l.serviceVersionId,
         l.description,
         l.quantity,
-        l.unitAmount,
+        // Empty for an unpriced line. "As mutually agreed" and "agreed at zero"
+        // are different terms, and `pricingNote` two fields down is what carries
+        // the difference into the hash.
+        l.unitAmount ?? "",
         l.discountPercent,
         // A line that starts three months after the rest of the letter is a
         // different agreement from one that starts with it.
         l.effectiveFrom ?? "",
+        // G1.6's line detail, and every one of these is a TERM. THE FOUR
+        // OVERRIDES ABOVE ALL: they are the wording this client agreed to, and
+        // a signature that did not commit to them would verify a document whose
+        // scope was whatever the catalogue happened to say. That is the exact
+        // failure the overrides exist to prevent, so leaving them outside the
+        // hash would have been the freeze protecting the wrong thing.
+        //
+        // The jurisdiction and the billing frequency are terms for the same
+        // reason the currency is; the out-of-pocket range is what the client was
+        // told to expect to reimburse; the pricing note is the sentence that
+        // stands where a price would.
+        l.jurisdiction ?? "",
+        l.billingFrequency ?? "",
+        l.scopeOverride ?? "",
+        l.clientObligationsOverride ?? "",
+        l.volumeLimitsOverride ?? "",
+        l.exclusionsOverride ?? "",
+        l.oopEstimate === null
+          ? ""
+          : `${l.oopEstimate.currency} ${l.oopEstimate.min} ${l.oopEstimate.max}`,
+        l.pricingNote ?? "",
       ].join("\t"),
     );
 
@@ -492,16 +578,14 @@ export function canonicalContent(input: {
   return [head, ...lines, ...clauses].join("\n");
 }
 
-/** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2. */
-const JURISDICTION_PATTERN = /^[A-Z]{2}$/;
-
-export function normalizeJurisdiction(raw: string): string {
-  return raw.trim().toUpperCase();
-}
-
-export function isJurisdiction(v: string): boolean {
-  return JURISDICTION_PATTERN.test(v);
-}
+/** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2.
+ *
+ *  ONE implementation, in `domain/document/model.ts`, since G1.6 put a
+ *  jurisdiction on both documents' LINES as well as on this letter's head. Two
+ *  copies of the rule is two places for it to drift. Re-exported rather than
+ *  moved so every existing caller keeps importing it from the domain it belongs
+ *  to. */
+export { isJurisdiction, normalizeJurisdiction } from "../document/model";
 
 /**
  * Whether a clause applies in a jurisdiction.

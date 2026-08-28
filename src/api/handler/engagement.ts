@@ -18,6 +18,7 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { EngagementService } from "../../usecase/engagement/service";
 import type { EngagementRecord, LetterSummary, LetterView } from "../../usecase/engagement/ports";
 import type { EngagementState, EngagementStatus, LetterStatus } from "../../domain/engagement/model";
+import type { BillingFrequency } from "../../domain/document/model";
 
 export interface EngagementDeps {
   readonly service: EngagementService;
@@ -66,10 +67,50 @@ const TotalsSchema = z
     discount: AmountSchema.nullable(),
     net: AmountSchema.nullable(),
     currency: CurrencySchema,
+    /**
+     * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER — the ones with
+     * no price. Non-zero means the money is a FLOOR rather than what this letter
+     * commits the client to. Not redacted by the fee axis: it is a count of
+     * lines, and "this agreement is not fully priced" is a fact about the work.
+     */
+    unpricedLineCount: z.number().int(),
   })
   .openapi("EngagementLetterTotals");
 
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
+
+/** The closed set lives in the domain; zod needs a literal tuple. */
+export const BILLING_FREQUENCY_VALUES = [
+  "one_time",
+  "monthly",
+  "quarterly",
+  "annually",
+  "custom",
+] as const satisfies readonly BillingFrequency[];
+
+/** Out-of-pocket expenses: a range, in its own currency, reimbursed at actuals
+ *  and never folded into a total. All three or none. Its own component name
+ *  from the proposal surface's, because the two documents are separate wire
+ *  shapes even where they agree. */
+const OopEstimateSchema = z
+  .object({ min: AmountSchema, max: AmountSchema, currency: CurrencySchema })
+  .openapi("LetterOutOfPocketEstimate");
+
+/** One of the four scope blocks, RESOLVED: the words that print, and whether
+ *  THIS letter wrote them. On a signed letter `tailored: true` is the record
+ *  that this client negotiated their own wording. */
+const ResolvedTermSchema = z
+  .object({ text: z.string().nullable(), tailored: z.boolean() })
+  .openapi("LetterResolvedTerm");
+
+const DocumentTermsSchema = z
+  .object({
+    scope: ResolvedTermSchema,
+    clientObligations: ResolvedTermSchema,
+    volumeLimits: ResolvedTermSchema,
+    exclusions: ResolvedTermSchema,
+  })
+  .openapi("LetterDocumentTerms");
 
 /**
  * THE CATALOGUE ROW THIS LINE CITES, as it was PINNED — its own schema rather
@@ -175,15 +216,35 @@ const LetterLineSchema = z
     entity: z.object({ id: z.string().uuid(), displayName: z.string() }).nullable(),
     serviceVersionId: z.string().uuid(),
     service: PinnedServiceSchema.nullable(),
+    /** THE FOUR SCOPE BLOCKS, RESOLVED — this letter's override where it has
+     *  one, the pinned catalogue version's words where it does not. On a SIGNED
+     *  letter this is the wording the client agreed to, and both halves of it
+     *  are frozen. */
+    terms: DocumentTermsSchema,
     description: z.string(),
     position: z.number().int(),
     quantity: AmountSchema,
+    /** Null for two different reasons — a redacted fee and a line that HAS no
+     *  price. `priced` below is which. */
     unitAmount: AmountSchema.nullable(),
+    /** Whether this line has a price at all; false means "as mutually agreed"
+     *  and `pricingNote` says why. Not redacted — see the proposal surface. */
+    priced: z.boolean(),
     currency: CurrencySchema,
     discountPercent: AmountSchema.nullable(),
     net: AmountSchema.nullable(),
     /** When THIS line's work begins. Null means whatever the letter says. */
     effectiveFrom: DaySchema.nullable(),
+    /** Where the WORK is — on a letter, the entity's own jurisdiction. */
+    jurisdiction: z.string().nullable(),
+    /** How often this DEAL is billed. */
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    /** WHY there is no amount. Not redacted: it is what prints where a figure
+     *  would. */
+    pricingNote: z.string().nullable(),
+    /** Out-of-pocket expenses, separate from the fee and never in the totals.
+     *  Redacted with the money. */
+    oopEstimate: OopEstimateSchema.nullable(),
   })
   .openapi("EngagementLetterLine");
 
@@ -328,12 +389,31 @@ const AddLineRequest = z
     serviceVersionId: z.string().uuid(),
     description: z.string().min(1),
     quantity: AmountSchema.default("1"),
-    unitAmount: AmountSchema,
+    /** OPTIONAL since G1.6: omit it for a line that is genuinely "as mutually
+     *  agreed" and send `pricingNote`. Omitting it is NOT sending "0". */
+    unitAmount: AmountSchema.optional(),
     discountPercent: AmountSchema.default("0"),
     effectiveFrom: DaySchema.optional().openapi({
       description:
         "When THIS line starts, if that is not the letter's date. Omit for the letter's.",
     }),
+    /** Where the WORK is. */
+    jurisdiction: JurisdictionSchema.optional(),
+    /** How often this DEAL is billed. Omit and it defaults from the PINNED
+     *  service's `recurrence`. */
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    /** THIS LETTER'S OWN WORDING for any of the four scope blocks — what makes
+     *  a signed document reproducible. Omit any and the pinned catalogue
+     *  version's words print. */
+    scopeOverride: z.string().min(1).optional(),
+    clientObligationsOverride: z.string().min(1).optional(),
+    volumeLimitsOverride: z.string().min(1).optional(),
+    exclusionsOverride: z.string().min(1).optional(),
+    /** Out-of-pocket expenses: a range in its own currency, reimbursed at
+     *  actuals. */
+    oopEstimate: OopEstimateSchema.optional(),
+    /** WHY there is no amount — REQUIRED when `unitAmount` is omitted. */
+    pricingNote: z.string().min(1).optional(),
   })
   .openapi("AddEngagementLetterLineRequest");
 
@@ -658,14 +738,24 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
       service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
+      // NOT redacted, like the clauses below and for the same reason: the
+      // wording is what the firm undertook, not what it charged.
+      terms: { ...l.terms },
       description: l.line.description,
       position: l.line.position,
       quantity: l.line.quantity,
       unitAmount: fees ? l.line.unitAmount : null,
+      // Computed BEFORE the redaction, from the line itself: it is what makes
+      // the null above readable.
+      priced: l.line.unitAmount !== null,
       currency: l.line.currency,
       discountPercent: fees ? l.line.discountPercent : null,
       net: fees ? l.net : null,
       effectiveFrom: l.line.effectiveFrom,
+      jurisdiction: l.line.jurisdiction,
+      billingFrequency: l.line.billingFrequency,
+      pricingNote: l.line.pricingNote,
+      oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
     })),
     // NOT redacted. What the firm undertook is the work, and somebody delivering
     // it needs the scope and the limits even when they may not see the fee.
@@ -683,6 +773,9 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       discount: fees ? record.totals.discount : null,
       net: fees ? record.totals.net : null,
       currency: record.totals.currency,
+      // Not redacted: a count of lines, not an amount, and "this agreement is
+      // not fully priced" is a fact about the work.
+      unpricedLineCount: record.totals.unpricedLineCount,
     },
     engagements: record.engagements.map(toEngagementBody),
   };
@@ -698,6 +791,7 @@ function toSummaryBody(s: LetterSummary, fees: boolean): z.infer<typeof LetterSu
       discount: fees ? s.totals.discount : null,
       net: fees ? s.totals.net : null,
       currency: s.totals.currency,
+      unpricedLineCount: s.totals.unpricedLineCount,
     },
     lineCount: s.lineCount,
   };
@@ -750,14 +844,38 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
         entity: null,
         serviceVersionId: line.serviceVersionId,
         service: null,
+        // Same as `service`: the catalogue's half of the four blocks needs the
+        // pinned body, which is a join the write path does not make. What the
+        // LINE wrote is reported as written, so `tailored` is exactly right and
+        // the read route fills in the fallback.
+        terms: {
+          scope: { text: line.scopeOverride, tailored: line.scopeOverride !== null },
+          clientObligations: {
+            text: line.clientObligationsOverride,
+            tailored: line.clientObligationsOverride !== null,
+          },
+          volumeLimits: {
+            text: line.volumeLimitsOverride,
+            tailored: line.volumeLimitsOverride !== null,
+          },
+          exclusions: {
+            text: line.exclusionsOverride,
+            tailored: line.exclusionsOverride !== null,
+          },
+        },
         description: line.description,
         position: line.position,
         quantity: line.quantity,
         unitAmount: fees ? line.unitAmount : null,
+        priced: line.unitAmount !== null,
         currency: line.currency,
         discountPercent: fees ? line.discountPercent : null,
         net: null,
         effectiveFrom: line.effectiveFrom,
+        jurisdiction: line.jurisdiction,
+        billingFrequency: line.billingFrequency,
+        pricingNote: line.pricingNote,
+        oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
       },
       201,
     );

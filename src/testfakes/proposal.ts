@@ -16,6 +16,7 @@
 //   real Postgres.
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
 import { readServiceBody } from "../domain/config/model";
+import { resolveTerms } from "../domain/document/model";
 import type {
   NewProposal,
   NewProposalLine,
@@ -104,6 +105,14 @@ export class FakeProposalRepo implements ProposalRepository {
       unitAmount: l.unitAmount,
       currency: l.currency,
       discountPercent: l.discountPercent,
+      jurisdiction: l.jurisdiction,
+      billingFrequency: l.billingFrequency,
+      scopeOverride: l.scopeOverride,
+      clientObligationsOverride: l.clientObligationsOverride,
+      volumeLimitsOverride: l.volumeLimitsOverride,
+      exclusionsOverride: l.exclusionsOverride,
+      oopEstimate: l.oopEstimate,
+      pricingNote: l.pricingNote,
       removed: false,
     };
     this.lines.push(row);
@@ -183,6 +192,10 @@ export class FakeProposalRepo implements ProposalRepository {
         unitAmount: l.unitAmount,
         discountPercent: l.discountPercent,
         net: netOf(l),
+        // The recipient reads the reason where the figure would be.
+        pricingNote: l.pricingNote,
+        billingFrequency: l.billingFrequency,
+        oopEstimate: l.oopEstimate,
       })),
       totals: totalsOf(lines, proposal.currency),
     };
@@ -224,6 +237,18 @@ export class FakeProposalRepo implements ProposalRepository {
                 displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
               },
         service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        // The SAME `resolveTerms` the Postgres adapter calls, over the same
+        // pinned body: a fake with its own override-else-catalogue rule would
+        // disagree with the adapter on the one case the rule exists for.
+        terms: resolveTerms(
+          {
+            scope: l.scopeOverride,
+            clientObligations: l.clientObligationsOverride,
+            volumeLimits: l.volumeLimitsOverride,
+            exclusions: l.exclusionsOverride,
+          },
+          pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        ),
         net: netOf(l),
       })),
       totals: totalsOf(lines, proposal.currency),
@@ -401,19 +426,31 @@ function mulRound(a: bigint, b: bigint): bigint {
   return (product + half) / UNIT;
 }
 
-function grossOf(l: Pick<ProposalLine, "unitAmount" | "quantity">): bigint {
+// AN UNPRICED LINE IS NOT ZERO HERE EITHER. `null` in, `null` out — matching
+// `numeric` NULL through `crm.proposal_line_amount` — and the line is COUNTED
+// instead, so this fake and the view agree about what a total leaves out. A
+// fake that quietly treated it as zero would make the unit tests green on
+// exactly the number the migration exists to stop anybody printing.
+
+function grossOf(l: Pick<ProposalLine, "unitAmount" | "quantity">): bigint | null {
+  if (l.unitAmount === null) return null;
   return mulRound(toScaled(l.unitAmount), toScaled(l.quantity));
 }
 
 function netScaled(
   l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">,
-): bigint {
+): bigint | null {
+  const gross = grossOf(l);
+  if (gross === null) return null;
   const keep = toScaled("100") - toScaled(l.discountPercent);
-  return mulRound(mulRound(grossOf(l), keep), toScaled("0.01"));
+  return mulRound(mulRound(gross, keep), toScaled("0.01"));
 }
 
-function netOf(l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">): string {
-  return fromScaled(netScaled(l));
+function netOf(
+  l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">,
+): string | null {
+  const net = netScaled(l);
+  return net === null ? null : fromScaled(net);
 }
 
 function totalsOf(
@@ -422,15 +459,23 @@ function totalsOf(
 ): ProposalRecord["totals"] {
   let gross = 0n;
   let net = 0n;
+  let unpriced = 0;
   for (const line of lines) {
-    gross += grossOf(line);
-    net += netScaled(line);
+    const lineGross = grossOf(line);
+    const lineNet = netScaled(line);
+    if (lineGross === null || lineNet === null) {
+      unpriced += 1;
+      continue;
+    }
+    gross += lineGross;
+    net += lineNet;
   }
   return {
     gross: fromScaled(gross),
     discount: fromScaled(gross - net),
     net: fromScaled(net),
     currency,
+    unpricedLineCount: unpriced,
   };
 }
 

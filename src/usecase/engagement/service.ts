@@ -39,8 +39,14 @@ import {
   resolveEffectiveFrom,
   utcDay,
 } from "../../domain/engagement/model";
-import { readClauseBody } from "../../domain/config/model";
+import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import {
+  isBillingFrequency,
+  outOfPocketProblem,
+  BILLING_FREQUENCIES,
+} from "../../domain/document/model";
+import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import {
   AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
@@ -54,6 +60,8 @@ import {
   InvalidDate,
   InvalidJurisdiction,
   InvalidLetterTransition,
+  InvalidLineBillingFrequency,
+  InvalidOutOfPocketEstimate,
   LetterLineNotFound,
   LetterNotEditable,
   LetterNotFound,
@@ -62,6 +70,8 @@ import {
   NotAClause,
   ServiceNotQuotable,
   SignatureIncomplete,
+  UnpricedLineHasDiscount,
+  UnpricedLineNeedsReason,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type {
@@ -143,10 +153,30 @@ export interface AddLetterLineInput {
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: string;
-  readonly unitAmount: string;
+  /** OPTIONAL since G1.6. Absent means "as mutually agreed", and then
+   *  `pricingNote` is required. Absent is NOT "0" — zero is a price the firm
+   *  committed to, and it is what the old schema forced. */
+  readonly unitAmount?: string | undefined;
   readonly discountPercent: string;
   /** When THIS line starts, when that is not the letter's date. */
   readonly effectiveFrom?: string | undefined;
+  /** Where the WORK is — on a letter, the entity's own jurisdiction, carried so
+   *  a letter and its proposal print and group the same way. */
+  readonly jurisdiction?: string | undefined;
+  /** How often this DEAL is billed. Absent falls back to the PINNED service's
+   *  `recurrence`. */
+  readonly billingFrequency?: string | undefined;
+  /** This letter's own wording for any of the four scope blocks. Absent prints
+   *  the pinned catalogue version's words. */
+  readonly scopeOverride?: string | undefined;
+  readonly clientObligationsOverride?: string | undefined;
+  readonly volumeLimitsOverride?: string | undefined;
+  readonly exclusionsOverride?: string | undefined;
+  readonly oopEstimate?:
+    | { readonly min: string; readonly max: string; readonly currency: string }
+    | undefined;
+  /** WHY there is no amount, and REQUIRED when there is none. */
+  readonly pricingNote?: string | undefined;
 }
 
 export interface SignInput {
@@ -273,13 +303,28 @@ export class EngagementService {
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidAmount("quantity", input.quantity);
     }
-    if (!isAmount(input.unitAmount)) throw new InvalidAmount("unit amount", input.unitAmount);
+    // THE UNPRICED LINE. On a letter this is a TERM two parties sign, so the
+    // reason is required and a discount off it is refused — the same two rules
+    // the CHECKs make (0023), stated here so a caller is told what to send.
+    const unitAmount = input.unitAmount ?? null;
+    if (unitAmount !== null && !isAmount(unitAmount)) {
+      throw new InvalidAmount("unit amount", unitAmount);
+    }
+    const pricingNote = blankToNull(input.pricingNote);
+    if (unitAmount === null && pricingNote === null) throw new UnpricedLineNeedsReason();
     if (!isAmount(input.discountPercent) || Number(input.discountPercent) > 100) {
       throw new InvalidAmount("discount", input.discountPercent);
+    }
+    if (unitAmount === null && Number(input.discountPercent) !== 0) {
+      throw new UnpricedLineHasDiscount(input.discountPercent);
     }
     if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
       throw new InvalidDate("effective date", input.effectiveFrom);
     }
+
+    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
+    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     const pinned = await this.deps.library.readPinnedVersion(
       input.tenantId,
@@ -304,11 +349,50 @@ export class EngagementService {
       serviceVersionId: input.serviceVersionId,
       description: input.description,
       quantity: input.quantity,
-      unitAmount: input.unitAmount,
+      unitAmount,
       currency: letter.currency,
       discountPercent: input.discountPercent,
       effectiveFrom: input.effectiveFrom ?? null,
+      jurisdiction,
+      // DEFAULTED FROM THE PIN, ONCE, AND STORED — see the same line on
+      // ProposalService.addLine. On a letter it matters more: the value is part
+      // of what the client signs, so it must be the one decided at drafting and
+      // not one re-derived from a catalogue that has since moved.
+      billingFrequency: billingFrequency ?? readServiceBody(pinned.body).recurrence,
+      scopeOverride: blankToNull(input.scopeOverride),
+      clientObligationsOverride: blankToNull(input.clientObligationsOverride),
+      volumeLimitsOverride: blankToNull(input.volumeLimitsOverride),
+      exclusionsOverride: blankToNull(input.exclusionsOverride),
+      oopEstimate,
+      pricingNote,
     });
+  }
+
+  /** The line's jurisdiction, normalised. Refused rather than dropped: "in" and
+   *  "IN" are the same country and "INR" is not one. */
+  private lineJurisdiction(raw: string | undefined): string | null {
+    if (raw === undefined || raw.trim() === "") return null;
+    const normalised = normalizeJurisdiction(raw);
+    if (!isJurisdiction(normalised)) throw new InvalidJurisdiction(raw);
+    return normalised;
+  }
+
+  private statedBillingFrequency(raw: string | undefined): BillingFrequency | null {
+    if (raw === undefined || raw.trim() === "") return null;
+    if (!isBillingFrequency(raw)) throw new InvalidLineBillingFrequency(raw, BILLING_FREQUENCIES);
+    return raw;
+  }
+
+  /** The out-of-pocket range, whole or absent. Its currency is normalised but
+   *  NOT held to the letter's — see `OutOfPocketEstimate`. */
+  private outOfPocket(
+    raw: { readonly min: string; readonly max: string; readonly currency: string } | undefined,
+  ): OutOfPocketEstimate | null {
+    if (raw === undefined) return null;
+    const estimate = { min: raw.min, max: raw.max, currency: normalizeCurrency(raw.currency) };
+    const problem = outOfPocketProblem(estimate, isAmount, isCurrencyCode);
+    if (problem !== null) throw new InvalidOutOfPocketEstimate(problem);
+    return estimate;
   }
 
   async removeLine(tenantId: string, letterId: string, lineId: string): Promise<void> {

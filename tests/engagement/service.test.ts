@@ -25,8 +25,13 @@ import {
   NoClauses,
   NotAClause,
   ServiceNotQuotable,
+  InvalidLineBillingFrequency,
+  InvalidOutOfPocketEstimate,
+  UnpricedLineHasDiscount,
+  UnpricedLineNeedsReason,
 } from "../../src/domain/engagement/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
+import type { BillingFrequency } from "../../src/domain/document/model";
 import {
   canonicalContent,
   engagementState,
@@ -289,6 +294,182 @@ describe("the terms", () => {
         discountPercent: "0",
       }),
     ).rejects.toBeInstanceOf(ServiceNotQuotable);
+  });
+});
+
+describe("a line with no price, and the wording that goes with it", () => {
+  const SCOPED = "00000000-0000-0000-0000-0000000000d5";
+
+  function withScopedService(): ReturnType<typeof setup> {
+    const s = setup();
+    s.library.publishService(SCOPED, "bookkeeping", {
+      name: "Monthly bookkeeping",
+      billingBasis: "retainer",
+      recurrence: "monthly",
+      scope: "Books written up monthly.",
+      clientObligations: "Records by the 5th.",
+      volumeLimits: "Under 1,000 entries.",
+      exclusions: "Statutory audit is not included.",
+    });
+    return s;
+  }
+
+  it("agrees a line as mutually agreed, and leaves it out of the totals", async () => {
+    // On a LETTER this is a term two parties sign. The old schema could only
+    // record it as zero, which is a different agreement.
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_B,
+      serviceVersionId: GST,
+      description: "Group restructuring advisory",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+
+    const record = await s.service.describe(TENANT, id);
+    expect(record.lines[1]?.line.unitAmount).toBeNull();
+    expect(record.lines[1]?.net).toBeNull();
+    // The total covers the priced line and SAYS it does not cover the other.
+    expect(record.totals.net).toBe("24000.0000");
+    expect(record.totals.unpricedLineCount).toBe(1);
+  });
+
+  it("refuses a price-less line with no reason, and a discount off one", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const line = {
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "Advisory",
+      quantity: "1",
+      discountPercent: "0",
+    };
+    await expect(s.service.addLine(line)).rejects.toBeInstanceOf(UnpricedLineNeedsReason);
+    await expect(
+      s.service.addLine({ ...line, pricingNote: "As mutually agreed", discountPercent: "10" }),
+    ).rejects.toBeInstanceOf(UnpricedLineHasDiscount);
+  });
+
+  it("carries this client's OWN wording, and says which blocks are theirs", async () => {
+    // What makes an issued document reproducible: the letter holds the words, so
+    // a catalogue revision cannot change what was agreed — and tailoring one
+    // client's scope stops meaning "edit the catalogue".
+    const s = withScopedService();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+      exclusionsOverride: "Statutory audit and the transfer-pricing study are not included.",
+    });
+    const line = (await s.service.describe(TENANT, id)).lines[0];
+    expect(line?.terms.exclusions).toEqual({
+      text: "Statutory audit and the transfer-pricing study are not included.",
+      tailored: true,
+    });
+    // Untouched blocks still come from the pinned catalogue version…
+    expect(line?.terms.scope).toEqual({ text: "Books written up monthly.", tailored: false });
+    // …and the catalogue's own exclusions are still readable beside the
+    // tailored ones, which is what an editor needs to show the difference.
+    expect(line?.service?.exclusions).toBe("Statutory audit is not included.");
+  });
+
+  it("defaults billing frequency from the pin, and lets the deal differ", async () => {
+    const s = withScopedService();
+    const id = await draft(s);
+    const defaulted = await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+    });
+    expect(defaulted.billingFrequency).toBe("monthly");
+
+    const quarterly = await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_B,
+      serviceVersionId: SCOPED,
+      description: "Bookkeeping — second entity",
+      quantity: "12",
+      unitAmount: "18000",
+      discountPercent: "0",
+      billingFrequency: "quarterly",
+    });
+    expect(quarterly.billingFrequency).toBe("quarterly");
+  });
+
+  it("keeps the out-of-pocket range out of the letter's money", async () => {
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "US filings",
+      quantity: "1",
+      unitAmount: "50000",
+      discountPercent: "0",
+      oopEstimate: { min: "5000", max: "6000", currency: "USD" },
+    });
+    const record = await s.service.describe(TENANT, id);
+    expect(record.lines[0]?.line.oopEstimate).toEqual({
+      min: "5000",
+      max: "6000",
+      currency: "USD",
+    });
+    // The letter is in INR and its total is the fee alone. There is no rate on
+    // this document for a third currency, so there is no honest conversion —
+    // which is right, because an out-of-pocket estimate was never a fee.
+    expect(record.totals.net).toBe("50000.0000");
+    expect(record.totals.currency).toBe("INR");
+  });
+
+  it("refuses a malformed range and an unknown billing frequency", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const line = {
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "x",
+      quantity: "1",
+      unitAmount: "1",
+      discountPercent: "0",
+    };
+    await expect(
+      s.service.addLine({ ...line, oopEstimate: { min: "6000", max: "5000", currency: "USD" } }),
+    ).rejects.toBeInstanceOf(InvalidOutOfPocketEstimate);
+    await expect(
+      s.service.addLine({ ...line, billingFrequency: "fortnightly" }),
+    ).rejects.toBeInstanceOf(InvalidLineBillingFrequency);
   });
 });
 
@@ -1006,9 +1187,17 @@ describe("what the signature commits to", () => {
       serviceVersionId: GST,
       description: "GST filing",
       quantity: "12",
-      unitAmount: "2000",
+      unitAmount: "2000" as string | null,
       discountPercent: "0",
       effectiveFrom: null as string | null,
+      jurisdiction: "IN" as string | null,
+      billingFrequency: "monthly" as BillingFrequency | null,
+      scopeOverride: "Filing of GSTR-1 and GSTR-3B for the Bengaluru GSTIN." as string | null,
+      clientObligationsOverride: null as string | null,
+      volumeLimitsOverride: null as string | null,
+      exclusionsOverride: null as string | null,
+      oopEstimate: null as { min: string; max: string; currency: string } | null,
+      pricingNote: null as string | null,
     };
     const base = {
       letter: {
@@ -1041,6 +1230,39 @@ describe("what the signature commits to", () => {
       signatory: { ...base, letter: { ...base.letter, firmSignatoryUserId: SUCCESSOR } },
       capacity: { ...base, letter: { ...base.letter, firmSignatoryTitle: "Managing Partner" } },
       lineDate: { ...base, lines: [{ ...line, effectiveFrom: "2026-12-01" }] },
+      // G1.6. The four OVERRIDES matter most: they are the wording THIS client
+      // agreed to, and a hash that did not cover them would verify a document
+      // whose scope was whatever the catalogue happened to say — the exact
+      // failure the overrides exist to prevent.
+      lineScope: {
+        ...base,
+        lines: [{ ...line, scopeOverride: "Filing for BOTH GSTINs." }],
+      },
+      lineObligations: {
+        ...base,
+        lines: [{ ...line, clientObligationsOverride: "Records by the 3rd." }],
+      },
+      lineLimits: {
+        ...base,
+        lines: [{ ...line, volumeLimitsOverride: "Up to 2,000 entries." }],
+      },
+      lineExclusions: {
+        ...base,
+        lines: [{ ...line, exclusionsOverride: "Appeals are not included." }],
+      },
+      lineJurisdiction: { ...base, lines: [{ ...line, jurisdiction: "AE" }] },
+      lineBilling: { ...base, lines: [{ ...line, billingFrequency: "quarterly" as const }] },
+      lineOop: {
+        ...base,
+        lines: [{ ...line, oopEstimate: { min: "5000", max: "6000", currency: "USD" } }],
+      },
+      // "As mutually agreed" and "agreed at 2000" are different terms, and the
+      // reason has to be inside the hash or a signed letter's only statement
+      // about its own price sits outside the signature.
+      lineUnpriced: {
+        ...base,
+        lines: [{ ...line, unitAmount: null, pricingNote: "As mutually agreed" }],
+      },
     };
 
     const rendered = canonicalContent(base);

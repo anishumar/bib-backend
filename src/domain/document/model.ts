@@ -138,3 +138,180 @@ export function resolveIssuingEntity(
   }
   return preferences.find((p) => p.clientJurisdiction === ANY_JURISDICTION) ?? null;
 }
+
+// ── Line detail (G1.6) — the facts a DOCUMENT LINE carries about this deal ───
+//
+// Stated once here, for the same reason the reference and the issuing entity
+// are: a proposal line and an engagement letter line are the same document line
+// at two stages of its life, and two copies of these rules in two domains would
+// drift in the direction nobody checks.
+
+/**
+ * How often THIS DEAL is billed.
+ *
+ * The same vocabulary as the catalogue's `ServiceRecurrence`, deliberately, so
+ * that defaulting a line's billing frequency from the service's recurrence is a
+ * copy rather than a mapping table nobody can keep in step. It is a DIFFERENT
+ * FACT: `recurrence` says how often the work comes round, this says how often
+ * the client is invoiced, and A1 is a monthly service that some clients are
+ * billed quarterly for. Deriving one from the other at read time would make that
+ * arrangement — which the firm has today — impossible to write down.
+ *
+ * These literals are the `billing_frequency` CHECK on both line tables
+ * (migration 0023): one vocabulary, two enforcers.
+ */
+export type BillingFrequency = "one_time" | "monthly" | "quarterly" | "annually" | "custom";
+
+export const BILLING_FREQUENCIES: readonly BillingFrequency[] = [
+  "one_time",
+  "monthly",
+  "quarterly",
+  "annually",
+  "custom",
+];
+
+export function isBillingFrequency(v: string): v is BillingFrequency {
+  return (BILLING_FREQUENCIES as readonly string[]).includes(v);
+}
+
+/**
+ * ONE OF THE FOUR SCOPE BLOCKS, resolved.
+ *
+ * `text` is what the document actually says; `tailored` is whether THIS document
+ * said it. Both, because a screen showing tailored wording has to be able to say
+ * it was tailored — an editor that cannot tell "our standard scope" from "what
+ * we agreed with this client" is one where somebody edits the catalogue to fix a
+ * single letter, which is the failure the overrides exist to prevent.
+ *
+ * `text: null` with `tailored: false` is a real answer: neither the document nor
+ * the catalogue version it pinned states this block. It is not an error and not
+ * an empty block — the firm never wrote one, and a renderer should print
+ * nothing rather than a heading with nothing under it.
+ *
+ * There is no `tailored: true, text: null`: an override is either wording or it
+ * is absent, and the database refuses a blank one (0023). "This document has no
+ * exclusions" is a sentence somebody writes, not an empty string.
+ */
+export interface ResolvedTerm {
+  readonly text: string | null;
+  readonly tailored: boolean;
+}
+
+/** The four scope blocks of one line, each resolved. */
+export interface DocumentTerms {
+  readonly scope: ResolvedTerm;
+  readonly clientObligations: ResolvedTerm;
+  readonly volumeLimits: ResolvedTerm;
+  readonly exclusions: ResolvedTerm;
+}
+
+/**
+ * OVERRIDE ELSE CATALOGUE — the resolution, in the one place both documents
+ * call.
+ *
+ * A per-document override wins over the pinned catalogue version's words, and
+ * that is what makes an issued document reproducible: the document carries its
+ * own wording, so a catalogue revision cannot change what a signed letter says.
+ * Where the document said nothing, the CATALOGUE's words print — and they are
+ * the words of the version the line PINNED, not of the catalogue as it reads
+ * today, which is the other half of the same guarantee.
+ *
+ * Here rather than in either repository because the two would eventually differ
+ * on the one case that matters, and here rather than in a screen because a
+ * screen resolving it means every screen resolving it, and the second one gets
+ * it wrong.
+ */
+export function resolveTerm(override: string | null, catalogue: string | null): ResolvedTerm {
+  if (override !== null) return { text: override, tailored: true };
+  return { text: catalogue, tailored: false };
+}
+
+export function resolveTerms(
+  overrides: {
+    readonly scope: string | null;
+    readonly clientObligations: string | null;
+    readonly volumeLimits: string | null;
+    readonly exclusions: string | null;
+  },
+  catalogue: {
+    readonly scope: string | null;
+    readonly clientObligations: string | null;
+    readonly volumeLimits: string | null;
+    readonly exclusions: string | null;
+  } | null,
+): DocumentTerms {
+  return {
+    scope: resolveTerm(overrides.scope, catalogue?.scope ?? null),
+    clientObligations: resolveTerm(overrides.clientObligations, catalogue?.clientObligations ?? null),
+    volumeLimits: resolveTerm(overrides.volumeLimits, catalogue?.volumeLimits ?? null),
+    exclusions: resolveTerm(overrides.exclusions, catalogue?.exclusions ?? null),
+  };
+}
+
+/** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2.
+ *
+ *  Here rather than in either document's own domain because BOTH documents now
+ *  carry one on the head and one per line, and two copies of a two-letter regex
+ *  is two places for it to become three letters. `domain/engagement/model.ts`
+ *  re-exports these so its own callers did not have to move. */
+const JURISDICTION_PATTERN = /^[A-Z]{2}$/;
+
+export function normalizeJurisdiction(raw: string): string {
+  return raw.trim().toUpperCase();
+}
+
+export function isJurisdiction(v: string): boolean {
+  return JURISDICTION_PATTERN.test(v);
+}
+
+/**
+ * An OUT-OF-POCKET estimate: a RANGE, in its own currency.
+ *
+ * Separate from the professional fee and never added into a total. It is
+ * reimbursed at ACTUALS — "approx. USD 5,000–6,000" is what the firm expects to
+ * spend on the client's behalf, not what it is charging — and its currency is
+ * routinely not the document's, because a client quoted in INR still faces a
+ * filing fee in USD. The document's FX rate is struck for the FEE currency and
+ * says nothing about a third one, so there is no honest conversion available and
+ * none is attempted.
+ *
+ * All three together or none, mirroring `*_oop_is_whole_chk` (0023): a range
+ * with one end is not a range, and an amount without a currency is the one shape
+ * this codebase never stores.
+ */
+export interface OutOfPocketEstimate {
+  readonly min: string;
+  readonly max: string;
+  readonly currency: string;
+}
+
+/**
+ * What is WRONG with an out-of-pocket estimate, or null when nothing is.
+ *
+ * A validator that returns the REASON rather than a boolean, because the two
+ * use cases throw their own sentinel errors and the explanation is the same
+ * sentence in both — "min is not an amount" and "max is below min" are
+ * different mistakes and a caller fixing one should not be told the other.
+ *
+ * Shape only. It does not compare the currency to the document's, deliberately:
+ * an out-of-pocket estimate is routinely in a third currency (see
+ * `OutOfPocketEstimate`), which is the whole reason it carries one.
+ */
+export function outOfPocketProblem(
+  estimate: { readonly min: string; readonly max: string; readonly currency: string },
+  isAmount: (v: string) => boolean,
+  isCurrencyCode: (v: string) => boolean,
+): string | null {
+  if (!isAmount(estimate.min)) return `"min" ${JSON.stringify(estimate.min)} is not an amount`;
+  if (!isAmount(estimate.max)) return `"max" ${JSON.stringify(estimate.max)} is not an amount`;
+  if (!isCurrencyCode(estimate.currency)) {
+    return `"currency" ${JSON.stringify(estimate.currency)} is not an ISO 4217 code`;
+  }
+  // Both are non-negative decimal strings of bounded precision by the time they
+  // get here, so comparing them as numbers cannot reorder two distinct values —
+  // the same argument `comparePercent` makes. They are still STORED as strings.
+  if (Number(estimate.max) < Number(estimate.min)) {
+    return `"max" ${JSON.stringify(estimate.max)} is below "min" ${JSON.stringify(estimate.min)}`;
+  }
+  return null;
+}
