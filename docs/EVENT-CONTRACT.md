@@ -213,7 +213,9 @@ version is exactly what gets asked about afterwards.
 | Verb | Object | Means |
 |---|---|---|
 | `lead.captured` | lead | A lead entered the pipeline. |
-| `lead.merged` | lead | A duplicate lead was merged into an existing party. |
+| `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. |
+| `lead.stage_changed` | lead | A lead moved through the pipeline. Reaching a terminal stage closes it. |
+| `lead.owner_assigned` | lead | A lead was put on somebody's desk, or taken off it. |
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |
 | `proposal.viewed` | proposal | The recipient opened it. |
 | `proposal.accepted` | proposal | Accepted. |
@@ -226,6 +228,15 @@ version is exactly what gets asked about afterwards.
 | `credit_note.issued` | credit_note | Issued against an invoice. |
 | `dunning.escalated` | invoice | A receivable moved up the ladder. |
 | `document.attached` | document | A document version was linked to an object. |
+
+> **The lead's timeline IS this table.** T2.1 ships no timeline of its own: capture, merge,
+> stage moves and reassignment all write against the lead's id, so
+> `GET /api/v1/objects/lead/{id}/events` is its history — already immutable, already
+> tenant-scoped, already free of personal data. A second table would have had to be kept in
+> step with this one, and the day they disagreed nobody would know which was right.
+>
+> Note what those payloads carry: `identifierType`, never the identifier. An email address or
+> a PAN is how a prospect is *reached*, it is personal data, and this log cannot be erased.
 
 ### Delivery lane (B) — configure → schedule → execute → verify
 

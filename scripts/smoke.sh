@@ -7,7 +7,8 @@
 # then walks the properties the product actually depends on: the provisioning
 # key, the session wall, the audience and role gates, the party model, the
 # effective-dated relationships, the configuration registry (a published
-# version is frozen; a firm cannot strand itself), rate limiting, CORS, and
+# version is frozen; a firm cannot strand itself), the lead pipeline (a
+# duplicate capture merges rather than creating), rate limiting, CORS, and
 # the audit trail.
 #
 # Run:  npm run dev   (in another terminal)
@@ -40,6 +41,7 @@ for spec in "partner:STAFF:true" "associate:STAFF:false" "client:CLIENT_PORTAL:f
   R=${spec%%:*}; rest=${spec#*:}; AUD=${rest%%:*}; VIS=${rest##*:}
   ROLE=$R; [ "$R" = "client" ] && ROLE=client_contact
   U=$(curl -s -XPOST $API/internal/v1/users -H "$H" -H "$A" -d "{\"email\":\"$R-$S@example.com\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+  echo "$U" > $J/$R.id
   curl -s -o /dev/null -XPOST $API/internal/v1/memberships -H "$H" -H "$A" \
     -d "{\"tenantId\":\"$T\",\"userId\":\"$U\",\"audience\":\"$AUD\",\"role\":\"$ROLE\",\"commercialVisibility\":$VIS}"
   curl -s -o /dev/null -XPUT $API/internal/v1/users/$U/password -H "$H" -H "$A" -d '{"password":"correct horse battery staple"}'
@@ -114,18 +116,56 @@ curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/role -H "$H" \
   -d '{"key":"rm","body":{"label":"Relationship manager","permissions":["party:read","config:read"]}}'
 chk "a firm can add a role of its own"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/role/rm/versions/1/publish -H "$H")"
 
-echo; echo "── 7. Rate limiting ────────────────────────────────────────────────"
+echo; echo "── 7. The lead pipeline — dedup before create ──────────────────────"
+PAN2=AAACL5678M
+LEAD1='{"source":"inbound","kind":"organization","name":"Lakeview Foods Private Limited","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"email","value":"ops-'$S'@lakeview.example"}]}'
+curl -s -o $J/lead1.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD1"
+chk "capture a new lead"               201 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"outbound","kind":"organization","name":"Northwind Traders","identifiers":[{"type":"email","value":"hello-'$S'@northwind.example"}]}')"
+
+# The acceptance: the same prospect, reached a different way, does not become a
+# second party or a second opportunity.
+LEAD2='{"source":"referral","kind":"organization","name":"Lakeview Foods Pvt Ltd","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"phone","value":"+91 98180 11223"}]}'
+MERGE=$(curl -s -o $J/merge.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD2")
+chk "a duplicate does not create a lead" 200 "$MERGE"
+SAME=$(python3 -c '
+import json
+a = json.load(open("'$J'/lead1.json")); b = json.load(open("'$J'/merge.json"))
+print("%s/%s" % (a["lead"]["id"] == b["lead"]["id"], b["merged"]))' 2>/dev/null || echo "?")
+chk "…it lands on the existing one"     "True/True" "$SAME"
+ONE=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
+import sys, json
+leads = json.load(sys.stdin)["leads"]
+print(len([l for l in leads if l["stage"] not in ("converted","lost")]))')
+chk "two captures, two open leads"      2 "$ONE"
+
+chk "a lead with no way to reach them"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","kind":"organization","name":"Anonymous Ltd","identifiers":[{"type":"cin","value":"U17110MH2019PTC123456"}]}')"
+chk "a source we cannot report on"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"linkedin","kind":"person","name":"A N Other","identifiers":[{"type":"email","value":"x-'$S'@y.example"}]}')"
+
+LID=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["id"])')
+chk "move it through the pipeline"      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$LID/stage -H "$H" -d '{"stage":"qualified"}')"
+chk "assign it to the associate"        200 "$(code -b $J/partner.txt -XPUT $API/api/v1/leads/$LID/owner -H "$H" -d "{\"ownerUserId\":\"$(cat $J/associate.id)\"}")"
+chk "not to a client contact"           409 "$(code -b $J/partner.txt -XPUT $API/api/v1/leads/$LID/owner -H "$H" -d "{\"ownerUserId\":\"$(cat $J/client.id)\"}")"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/leads/$LID/stage -H "$H" -d '{"stage":"converted"}'
+chk "a finished lead cannot reopen"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$LID/stage -H "$H" -d '{"stage":"contacted"}')"
+
+echo "  the lead's timeline, which is the ledger and not a second table:"
+curl -s -b $J/partner.txt "$API/api/v1/objects/lead/$LID/events" | python3 -c '
+import sys, json
+for e in reversed(json.load(sys.stdin)["events"]):
+    print("    %-24s %s" % (e["verb"], json.dumps(e["payload"])[:64]))'
+
+echo; echo "── 8. Rate limiting ────────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 8. CORS — the frontend is a separate origin ─────────────────────"
+echo; echo "── 9. CORS — the frontend is a separate origin ─────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 9. The audit trail, as recorded ─────────────────────────────────"
+echo; echo "── 10. The audit trail, as recorded ─────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):

@@ -115,7 +115,50 @@ open and are recorded above; neither blocks Phase 2.
 ## Phase 2 · Commercial spine (A)  ∥  Engine (B)  (~4–6 weeks)
 
 ### Lane A — sell
-- [ ] `(A)` **T2.1** **C1 Leads & pipeline**: source, owner (round-robin/territory), dedupe on **phone+PAN+email before create**. *Acc: a duplicate lead merges to the existing party, appends timeline.*
+- [x] `(A)` **T2.1** **C1 Leads & pipeline**: source, owner (round-robin/territory), dedupe on **phone+PAN+email before create**. *Acc: a duplicate lead merges to the existing party, appends timeline.*
+  > **Done (2026-08-28), with one half deliberately deferred — see below.** A lead is an
+  > opportunity ABOUT A PARTY, not a second copy of one: capture resolves the party by
+  > identifier *before* anything is written, and `crm.lead` (migration 0007) carries only
+  > source, stage and owner. **At most one OPEN lead per party**, as a partial unique index —
+  > that index IS the merge rule, and it is what makes the acceptance true rather than a
+  > convention someone could forget. A prospect who went cold and came back is a second lead
+  > behind the same party, so a conversion rate counts two attempts rather than one that took
+  > nine months.
+  >
+  > Dedup matches on the NORMALISED value through the party module, so "Priya@Example.COM " and
+  > "+91 98765-43210" find their prospects. Three refusals, all before any write: no contact
+  > identifier at all (nobody can follow it up, and dedup would never fire), a proposed owner
+  > who is not active STAFF here, and **details pointing at two different parties** — that last
+  > is not a merge, it means the firm's own records hold the counterparty twice, and choosing
+  > one would attach the opportunity to whichever the query returned first.
+  >
+  > **No timeline table.** Capture, merge, stage moves and reassignment all write to the ledger
+  > against the lead's id, so `GET /api/v1/objects/lead/{id}/events` is the history — carrying
+  > `identifierType`, never the identifier, because an email or a PAN in a log that cannot be
+  > erased is exactly what the event contract forbids. Two verbs added (`lead.stage_changed`,
+  > `lead.owner_assigned`).
+  >
+  > Routes reuse `party:read` / `party:write` rather than inventing `lead:*`: a lead IS a party
+  > here, so a role that can already list every prospect through `/api/v1/parties` gains nothing
+  > from a second permission — and since T2.5, a new permission costs a migration to reach
+  > existing firms. A firm that does want the pipeline kept from delivery staff can now publish
+  > its own role instead, with no deploy.
+  >
+  > **Agreed at the start (2026-08-28), and both are real gaps, not omissions:**
+  > **(1) Owner assignment is MANUAL.** Round-robin and territory are not built. Round-robin was
+  > buildable today; territory is not, because nothing in the schema has a territory concept and
+  > the axis — geography, industry, service line — has never been chosen. Guessing it means a
+  > mapping table with data in it before anyone finds out it is the wrong axis. **T2.1 therefore
+  > does not fully meet its own line on this board**, and that is the trade, not an oversight.
+  > **(2) Stages and sources are closed sets in code**, not config kinds, so a firm cannot yet
+  > rename them. They join the registry when the pipeline screen (T6.2) exists and a firm asks —
+  > designing a firm-editable pipeline vocabulary against neither is the same trap T2.5 avoided
+  > by deferring workflow templates.
+  >
+  > Gate: `npm run check` 252 tests · `test:integration` 44 · `smoke` 46.
+- [ ] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
+  `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
+  captured with no owner distribute evenly; a territory rule overrides the rotation.*
 - [ ] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
@@ -277,6 +320,14 @@ sandbox access + credentials. **Not on any demo's critical path.**
   refuses it sharing a key with any other capability in a production-like environment —
   it is the step that completes the escalation path. Provisioning events now carry
   `provisionedBy`, because "system did it" cannot be traced to a system.
+
+- [ ] **Composite tenant keys across `core`** — `core.organization`, `core.person`,
+  `core.legal_entity`, `core.party_identifier` and `core.party_relationship` still reference
+  their parents by id alone. Foreign-key checks run as a system operation RLS does not filter,
+  so each is the hole 0006 closed for `config` and 0007 closed for `crm.lead`: one firm's row
+  can attach to another firm's object. It leaks nothing — RLS still hides the row both ways —
+  but the wall should make it unrepresentable rather than invisible. Found while building T2.1;
+  its own migration and its own commit, so the constraint change is reviewed on its own.
 
 ## Parking lot / decisions to make (don't build on guesses)
 

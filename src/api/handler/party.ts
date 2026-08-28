@@ -112,7 +112,9 @@ const PartyParam = z.object({ partyId: z.string().uuid() });
 
 // The closed identifier set lives in the domain; the DTO checks shape, the
 // service normalises and shape-validates, and the DB CHECK is the backstop.
-const IdentifierTypeSchema = z.enum([
+// Exported because lead capture takes the same set — one wire vocabulary, so an
+// identifier type valid on one route cannot be rejected on the other.
+export const IdentifierTypeSchema = z.enum([
   "pan", "gstin", "cin", "llpin", "tan", "din",
   "uen", "trn", "ein", "crn",
   "vat", "passport", "email", "phone", "other",

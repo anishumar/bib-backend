@@ -90,7 +90,9 @@ export const EVENT_VERBS = {
 
   // ── commercial lane (A) · sell → bill → collect ────────────────────────────
   "lead.captured":               { objectType: "lead",                lane: "commercial", description: "A lead entered the pipeline." },
-  "lead.merged":                 { objectType: "lead",                lane: "commercial", description: "A duplicate lead was merged into an existing party." },
+  "lead.merged":                 { objectType: "lead",                lane: "commercial", description: "A duplicate capture landed on an existing open lead instead of starting a rival one." },
+  "lead.stage_changed":          { objectType: "lead",                lane: "commercial", description: "A lead moved through the pipeline. Reaching a terminal stage closes it." },
+  "lead.owner_assigned":         { objectType: "lead",                lane: "commercial", description: "A lead was put on somebody's desk, or taken off it." },
   "proposal.sent":               { objectType: "proposal",            lane: "commercial", description: "A proposal was sent to a prospect." },
   "proposal.viewed":             { objectType: "proposal",            lane: "commercial", description: "The recipient opened the proposal." },
   "proposal.accepted":           { objectType: "proposal",            lane: "commercial", description: "A proposal was accepted." },

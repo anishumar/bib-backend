@@ -50,6 +50,27 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
   [routeKey("GET", "/api/v1/objects/{objectType}/{objectId}/events"), "ledger:read" as const],
 
+  // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
+  // lead:read / lead:write, and that is a decision rather than laziness.
+  //
+  // A lead in this model IS a party — the opportunity is a row about a
+  // counterparty the firm already stores, not a shadow copy of one — so a role
+  // that may read the firm's parties may already see every prospect in it
+  // through /api/v1/parties. A separate permission would look like a boundary
+  // while enforcing none.
+  //
+  // It is also no longer free to add one. Permissions reach existing firms as
+  // config rows, so a new one costs a migration that carries it to every tenant
+  // that has not customised the role. Worth paying when a firm asks to keep the
+  // pipeline from delivery staff; not worth paying for a distinction nobody has
+  // asked for. When they do ask, they can now do most of it themselves: a
+  // custom role, published, no deploy.
+  [routeKey("GET", "/api/v1/leads"), "party:read" as const],
+  [routeKey("GET", "/api/v1/leads/{leadId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/leads"), "party:write" as const],
+  [routeKey("POST", "/api/v1/leads/{leadId}/stage"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/leads/{leadId}/owner"), "party:write" as const],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

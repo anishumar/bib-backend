@@ -27,11 +27,13 @@ import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
+import { LeadService } from "../usecase/lead/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -161,6 +163,26 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // The pipeline sits ON TOP of the party module rather than beside it: a lead
+  // is an opportunity about a party, so capture creates prospects through
+  // PartyService — which owns display-name derivation, identifier normalisation
+  // and the party.created / party_identifier.added events. Wiring the party
+  // REPOSITORIES in here instead would produce parties the party module never
+  // saw, with no events and none of its rules.
+  //
+  // ProspectDirectory is declared by the lead use case in its own vocabulary and
+  // PartyService satisfies it structurally, so neither module imports the other.
+  // This line is where they meet, and where a drift in party's inputs would
+  // fail — at compile time, in one place.
+  const lead = new LeadService({
+    leads: new PostgresLeadRepository(pools.app),
+    prospects: party,
+    staff: memberships,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   return {
     app: buildRouter(
       {
@@ -173,6 +195,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         party: { service: party },
         ledger: { service: ledger },
         config: { service: config },
+        lead: { service: lead },
       },
       log,
       {

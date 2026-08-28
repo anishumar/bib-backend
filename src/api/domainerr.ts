@@ -12,6 +12,7 @@ import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
 import { AuthzError } from "../domain/authz/errors";
 import { ConfigError } from "../domain/config/errors";
+import { LeadError } from "../domain/lead/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -74,6 +75,25 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DATE_RANGE":
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof LeadError) {
+    switch (err.code) {
+      case "INVALID_SOURCE":
+      case "INVALID_STAGE":
+      case "NO_CONTACT_DETAIL":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "LEAD_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Each of these is "the pipeline is not in the state this call assumed",
+      // and none is a malformed request. AMBIGUOUS_MATCH in particular is a
+      // conflict in the firm's own data — the same counterparty stored twice —
+      // which the caller resolves by merging those parties, not by resending.
+      case "AMBIGUOUS_MATCH":
+      case "LEAD_CLOSED":
+      case "SAME_STAGE":
+      case "OWNER_NOT_STAFF":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }
   if (err instanceof ConfigError) {

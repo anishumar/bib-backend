@@ -26,6 +26,7 @@ import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { ConfigService } from "../../src/usecase/config/service";
+import { LeadService } from "../../src/usecase/lead/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
@@ -39,6 +40,7 @@ import { makeFakes } from "../../src/testfakes/tenancy";
 import { makePartyFakes } from "../../src/testfakes/party";
 import { makeLedgerFakes } from "../../src/testfakes/ledger";
 import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
+import { makeLeadFakes } from "../../src/testfakes/lead";
 import {
   FakeClock,
   FakeCredentialRepo,
@@ -84,6 +86,7 @@ function deps(): RouterDeps {
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },
+    lead: { service: new LeadService(makeLeadFakes()) },
     auth: {
       service: new IdentityService({
         users: fakes.users,

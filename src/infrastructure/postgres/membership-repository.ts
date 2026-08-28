@@ -6,6 +6,7 @@ import type { Db } from "../../db/pool";
 import { withIdentity, withTenant } from "../../db/tenant";
 import type { Membership } from "../../domain/tenancy/model";
 import type { NewMembership, MembershipRepository } from "../../usecase/tenancy/ports";
+import type { StaffDirectory } from "../../usecase/lead/ports";
 
 interface MembershipRow {
   id: string;
@@ -29,7 +30,10 @@ function toMembership(r: MembershipRow): Membership {
   };
 }
 
-export class PostgresMembershipRepository implements MembershipRepository {
+// Two ports over one table, the same pattern as the users repository serving
+// both tenancy and identity: tenancy owns memberships, and the lead use case
+// asks the much narrower question "may this person hold a lead here".
+export class PostgresMembershipRepository implements MembershipRepository, StaffDirectory {
   constructor(private readonly app: Db) {}
 
   async create(m: NewMembership): Promise<Membership> {
@@ -43,6 +47,28 @@ export class PostgresMembershipRepository implements MembershipRepository {
       `;
       if (!row) throw new Error("membership insert returned no row");
       return toMembership(row);
+    });
+  }
+
+  /**
+   * Whether this user is active STAFF at this firm.
+   *
+   * Read in TENANT mode, not identity mode: the question is about one firm's
+   * roster, and answering it from the user's own cross-tenant view would let a
+   * lead be assigned to somebody whose membership is at a different firm.
+   *
+   * CLIENT_PORTAL is excluded by the predicate, not by the caller remembering
+   * to. A client contact of the firm is a real, active membership — and putting
+   * a lead on their desk would hand a prospect's file to somebody outside the
+   * firm entirely.
+   */
+  async isActiveStaff(tenantId: string, userId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ one: number }[]>`
+        SELECT 1 AS one FROM tenancy.membership
+        WHERE user_id = ${userId} AND audience = 'STAFF' AND is_active
+      `;
+      return row !== undefined;
     });
   }
 

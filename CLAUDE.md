@@ -178,8 +178,8 @@ npm run test:integration   # the checks only a real Postgres can make (RLS, appe
                            # ledger). Needs a migrated local DB; not in `check`.
 npm run smoke              # end-to-end against a RUNNING server: seeds a firm with three
                            # roles and walks every gate, the party model, the config
-                           # registry, rate limits, CORS and the audit trail. Prints
-                           # logins to continue in the UI.
+                           # registry, the lead pipeline, rate limits, CORS and the
+                           # audit trail. Prints logins to continue in the UI.
 npm run arch       # the import wall, standalone
 ```
 
@@ -284,6 +284,14 @@ before emitting your first event.
 
 ## First module
 
-`tenancy`, `party`, the `ledger` and the `config` registry are built. Next, in order: `crm`,
-then `billing` — the flagship slice. Reuse the platform's auth, notifications and config; do
-not rebuild them.
+`tenancy`, `party`, the `ledger`, the `config` registry and the `lead` pipeline are built.
+Next: the rest of `crm` (proposals, engagement letters), then `billing` — the flagship slice.
+Reuse the platform's auth, notifications and config; do not rebuild them.
+
+**A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves
+a party by identifier FIRST (phone + PAN + email, normalised), and `crm.lead` holds only what
+is about the opportunity — source, stage, owner. At most one OPEN lead per party, enforced by
+a partial unique index, which is what makes a duplicate capture *append* rather than compete.
+Capture goes through `PartyService` behind the lead use case's own `ProspectDirectory` port,
+so prospects get the same validation and the same `party.created` events as any other party.
+A lead has no timeline table: its history is the ledger.
