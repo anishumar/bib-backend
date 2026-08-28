@@ -26,6 +26,21 @@ API=${API:-http://localhost:8080}
 KEY=local-dev-internal-key-not-for-any-real-environment
 H='content-type: application/json'
 A="authorization: Bearer $KEY"
+# The scratch directory for this run's cookie jars and captured responses.
+#
+# NOTHING BELOW MAY HAND ONE OF THESE PATHS TO python3. `mktemp -d` returns a
+# POSIX path (/tmp/tmp.XXXX), and on Windows the `python3` on PATH is native
+# Windows Python, which cannot resolve it — it looks for C:	mp\... and raises
+# FileNotFoundError. curl and bash are fine with these paths; only python is not.
+#
+# The symptom is brutal and does not look like a path problem: the capture that
+# feeds $LID returns nothing, every later URL becomes /api/v1/leads//stage, no
+# route matches, and thirty-eight checks report 403 as though a permission were
+# missing. It cost a full investigation across two lanes before anyone looked at
+# the path.
+#
+# So JSON reaches python either on STDIN (curl ... | python3) or as an ARGV
+# string ("$(cat $J/file.json)"). Never as a filename.
 J=$(mktemp -d)
 S=$(date +%s)
 ok=0; bad=0
@@ -365,9 +380,9 @@ LEAD2='{"source":"referral","title":"Transfer pricing study","kind":"organizatio
 MERGE=$(curl -s -o $J/merge.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD2")
 chk "a duplicate does not create a lead" 200 "$MERGE"
 SAME=$(python3 -c '
-import json
-a = json.load(open("'$J'/lead1.json")); b = json.load(open("'$J'/merge.json"))
-print("%s/%s" % (a["lead"]["id"] == b["lead"]["id"], b["merged"]))' 2>/dev/null || echo "?")
+import json, sys
+a = json.loads(sys.argv[1]); b = json.loads(sys.argv[2])
+print("%s/%s" % (a["lead"]["id"] == b["lead"]["id"], b["merged"]))' "$(cat $J/lead1.json)" "$(cat $J/merge.json)" 2>/dev/null || echo "?")
 chk "…it lands on the existing one"     "True/True" "$SAME"
 # OPEN is the three terminal stages' complement, and `abandoned` is one of them
 # since 0030 — the same list the assignment rotation counts desks with. Left as
@@ -387,7 +402,7 @@ chk "…and each one names its prospect"  "Lakeview Foods Private Limited" "$NAM
 chk "a lead with no way to reach them"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","title":"Unreachable","kind":"organization","name":"Anonymous Ltd","identifiers":[{"type":"cin","value":"U17110MH2019PTC123456"}]}')"
 chk "a source we cannot report on"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"linkedin","title":"Unreportable source","kind":"person","name":"A N Other","identifiers":[{"type":"email","value":"x-'$S'@y.example"}]}')"
 
-LID=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["id"])')
+LID=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["lead"]["id"])' "$(cat $J/lead1.json)")
 chk "move it through the pipeline"      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$LID/stage -H "$H" -d '{"stage":"qualified"}')"
 chk "assign it to the associate"        200 "$(code -b $J/partner.txt -XPUT $API/api/v1/leads/$LID/owner -H "$H" -d "{\"ownerUserId\":\"$(cat $J/associate.id)\"}")"
 chk "not to a client contact"           409 "$(code -b $J/partner.txt -XPUT $API/api/v1/leads/$LID/owner -H "$H" -d "{\"ownerUserId\":\"$(cat $J/client.id)\"}")"
@@ -559,7 +574,7 @@ echo; echo "── 12. Proposals — quoted from the catalogue, and the discount
 SVCV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
 import sys, json
 print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
-PID=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["partyId"])')
+PID=$(python3 -c 'import json,sys;print(json.loads(sys.argv[1])["lead"]["partyId"])' "$(cat $J/lead1.json)")
 
 # NOTE ON QUOTING: every JSON body below is built into a variable FIRST. A
 # backslash-escaped body written inline — -d "{\"a\":\"b\"}" — is unescaped by

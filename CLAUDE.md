@@ -354,6 +354,17 @@ exist yet.
   the front door. When U1 lands, its routes join `PORTAL_PATHS` **and** need record-scope
   (gate 4): a portal user sees only the parties they represent.
 
+**What a portal session is TOLD it may do is empty, whatever role it holds.** Nothing
+refuses a staff role on a `CLIENT_PORTAL` membership — `manager` on a portal login is
+accepted — and that leaks nothing, because gate 2 runs before gate 3 and refuses every staff
+route. But `permissionsOf` used to report the role's four permissions, none of them
+reachable, which breaks the one promise `/auth/me` makes: *a screen offers only what will
+work*. It returns `[]` for a portal session now. That is arithmetic rather than policy —
+gate 2 admits a portal session only to `PORTAL_PATHS`, and none of those needs a permission —
+and `tests/api/portal-permissions.test.ts` reads both tables so the build goes red the day U1
+adds a permission-gated portal route. The real fix, a role that declares its audience, costs
+a migration and belongs with U1.
+
 Handlers read the resolved principal from the request context (`c.get("principal")`) and
 call `scopeOf()` (`api/scope.ts`) when they need a tenant — 401 "not signed in" and 403
 "signed in, but no org chosen" are different answers and both matter.

@@ -52,9 +52,31 @@ export class AuthzService {
    *
    * Empty for a session that has not chosen an org: without a tenant there is no
    * membership, so there is no role and nothing is carried.
+   *
+   * **Empty for a CLIENT_PORTAL session too, whatever role it holds.** Nothing
+   * about that is a policy decision made here — it is the arithmetic of the two
+   * gates. Gate 2 runs BEFORE gate 3 and admits a portal session only to
+   * `PORTAL_PATHS`; every one of those routes requires no permission at all. So
+   * the set of permissions a portal session can actually USE is empty, and
+   * saying otherwise breaks this method's own contract: a screen is supposed to
+   * be able to offer only what will work.
+   *
+   * It matters because nothing stops a firm assigning a staff role to a portal
+   * membership — `manager` on a `CLIENT_PORTAL` login is accepted today. That
+   * leaks nothing (gate 2 refuses every staff route), but it used to make
+   * `/auth/me` report four permissions of which none was reachable, which is
+   * exactly the 403-by-surprise this field exists to prevent.
+   *
+   * **U1 must revisit this.** When the client portal ships, `PORTAL_PATHS` grows
+   * and some of those routes will want a permission — at which point this
+   * blanket empty becomes wrong. It cannot be forgotten: the honest fix is a
+   * role that declares which audience it is for, and
+   * `tests/api/portal-permissions.test.ts` holds the build red the moment a
+   * portal route starts requiring one.
    */
   async permissionsOf(principal: Principal): Promise<readonly Permission[]> {
     if (principal.tenantId === null || principal.role === null) return [];
+    if (principal.audience === "CLIENT_PORTAL") return [];
     return this.deps.permissions.permissionsFor(principal.tenantId, principal.role);
   }
 
