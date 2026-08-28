@@ -752,6 +752,38 @@ open and are recorded above; neither blocks Phase 2.
 - [ ] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
 - [ ] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
 - [ ] `(A)` **G2.3** **Catalogue: `slaDays`, `recurrence`, `pricingNote`.** *Acc: a work item created from an engagement snapshots the SLA in force at creation; a service can recur monthly while being billed quarterly; a service with no list price can say why.* — **§4.8. This one gates `(B)`: T3.1 cannot meet its acceptance without `slaDays`.** The firm's rule is *"task is due from signing of EL"* and *"SLA is per service"*, and a work item copies the value at creation so a later catalogue revision cannot make finished work retroactively late. `recurrence` is not `billingBasis`: the latter says how a service is priced (fixed / hourly / retainer / per_unit), the former how often it recurs, and the EL line's `billing_frequency` (G1.6) defaults from it. `pricingNote` gives `listPrice: null` a reason — "As mutually agreed" currently has no home.
+- [x] `(B)` **T1.6b** **What a portal session is told it may do.** `permissionsOf` returns `[]` for a `CLIENT_PORTAL` session whatever role it holds. *Acc: a `CLIENT_PORTAL` membership carrying `manager` reports no permissions, a STAFF one is unchanged, and a permission-gated portal route fails the build.*
+  > **Found by reading a screen, not a test (2026-08-29).** Nothing refuses `manager` on a
+  > `CLIENT_PORTAL` membership — the roster's Add form offers every published role against
+  > either surface, and the API accepts the pair. **It leaks nothing**: gate 2 runs before
+  > gate 3 and answers 403 to every staff route, verified live against all seven. But
+  > `/auth/me` reported `["party:read","party:write","ledger:read","config:read"]`, and not
+  > one of them was reachable — which is precisely the 403-by-surprise that field exists to
+  > prevent (`CLAUDE.md`: *"so a screen offers only what will work"*).
+  >
+  > The empty set is arithmetic, not policy: gate 2 admits a portal session only to
+  > `PORTAL_PATHS`, and every one of those needs no permission. **U1 breaks that assumption**
+  > the moment it adds a permission-gated portal route, so
+  > `tests/api/portal-permissions.test.ts` reads both tables and goes red when it does,
+  > naming the decision. The real fix is a role that declares its audience; it costs a
+  > migration and belongs with U1, when there is a portal screen to design it against.
+  >
+  > The API still ACCEPTS the pair, deliberately — which roles are portal roles is not a fact
+  > the system records yet, and inventing that rule now would put it in the one place a firm
+  > cannot change. `/admin/people` therefore says so plainly when the surface is Client portal
+  > and the chosen role carries permissions, rather than filtering the dropdown and hiding a
+  > real state from the admin looking at it.
+
+- [x] `(A/B)` **T0.7** **The smoke script runs on Windows.** *Acc: `npm run smoke` reports 125 passed, 0 failed on a Windows checkout.*
+  > `mktemp -d` returns a POSIX path; on Windows the `python3` on PATH is native Windows
+  > Python, which cannot resolve `/tmp/tmp.XXXX`. Three `json.load(open(...))` calls raised
+  > FileNotFoundError, `$LID` came back empty, every later URL became
+  > `/api/v1/leads//stage`, no route matched, and **38 checks reported 403**. It reads as a
+  > permissions failure and it is not one. Same family as `22ffaa1` (the arch test could not
+  > spawn depcruise on Windows) — the second time a Unix assumption has cost real
+  > investigation, so the rule is written beside `J=$(mktemp -d)`: **JSON reaches python on
+  > stdin or as argv, never as a filename.**
+
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
@@ -786,7 +818,9 @@ open and are recorded above; neither blocks Phase 2.
   >
   > **One real bug the smoke walk caught that the tests did not:** `api/domainerr.ts` had no mapping for `StaffGradeError`, so every refusal answered 500 instead of 400/404/409. Unit tests assert on the thrown sentinel and are perfectly happy; only an end-to-end request sees the status code. A new error family needs a line in that file.
   >
-  > Gate: `npm run check` 414 tests · `test:integration` 103 · `smoke` +15 checks, all green. **Note the pre-existing red:** sections 7–9 of the smoke script (leads, proposals, engagement letters) fail 38 checks on `build-plan-2` **before** this work — verified by stashing these changes and re-running against HEAD, which gives the identical 38. That is `(A)`'s lane and is reported, not touched.
+  > Gate: `npm run check` 421 tests · `test:integration` 105 · `smoke` **125 passed, 0 failed**.
+  >
+  > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
 - [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** *Acc: "escalate to this assignee's manager" resolves through the org chart.* — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login. This is **Gate 4 (record-scope)**, which T1.6 deferred to U1; it is pulled forward here because `(B)`'s escalation ladder needs it before the portal does. **Agree the timing rather than assuming it.**
 
 - [ ] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
