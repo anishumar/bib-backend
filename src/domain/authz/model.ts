@@ -41,6 +41,26 @@ export function isPermission(v: string): v is Permission {
 }
 
 /**
+ * What each permission means, in a sentence somebody deciding who gets it can
+ * act on.
+ *
+ * Here rather than on a screen because the meaning of a permission is a domain
+ * fact, and a description that lives in the UI drifts from what the code
+ * actually checks — which on this particular subject is how a firm hands out
+ * more than it meant to. The admin screen reads these; so does anyone reading
+ * this file.
+ */
+export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
+  "party:read": "See the firm's clients, prospects and contacts, and the pipeline.",
+  "party:write": "Create and change clients, contacts, their identifiers and leads.",
+  "ledger:read": "Read the firm's whole audit trail — it names every client the firm has.",
+  "config:read": "See the service catalogue and how the firm's roles are defined.",
+  "tenant:admin":
+    "Administer the firm: who works here, what their roles are, and every configuration " +
+    "setting — including this one.",
+};
+
+/**
  * The permission that can change the permissions.
  *
  * Config writes require exactly this one, and not a `config:write` of their

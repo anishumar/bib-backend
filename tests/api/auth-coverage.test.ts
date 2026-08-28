@@ -393,6 +393,17 @@ describe("gate 3 — role", () => {
     expect(body.error.message).toContain("partner");
   });
 
+  it("does not let a literal route be swallowed by a template", async () => {
+    // /api/v1/config/permissions sits beside /api/v1/config/{kind}, and
+    // "permissions" is deliberately NOT a kind. If the template matched first
+    // this would answer 400 for a perfectly good request — and it would do so
+    // quietly, since 400 looks like a caller mistake.
+    const res = await app(as("partner")).request("/api/v1/config/permissions");
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { permissions: { key: string }[] };
+    expect(body.permissions.map((p) => p.key)).toContain("tenant:admin");
+  });
+
   it("never lets a role reach an unmapped route", async () => {
     const res = await app(as("partner")).request("/api/v1/not-a-real-route");
     expect(res.status).not.toBe(200);

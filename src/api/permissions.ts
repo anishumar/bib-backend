@@ -98,6 +98,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // small thing, when it is the largest thing there is. Naming the permission
   // `tenant:admin` makes the grant say what it actually means at the moment
   // somebody decides to make it.
+  // Literal, and it sorts ahead of the template above by the literal-first rule
+  // in decideRoute — "permissions" is not a kind.
+  [routeKey("GET", "/api/v1/config/permissions"), "config:read" as const],
   [routeKey("GET", "/api/v1/config/{kind}"), "config:read" as const],
   [routeKey("GET", "/api/v1/config/{kind}/{key}"), "config:read" as const],
   [routeKey("POST", "/api/v1/config/{kind}"), "tenant:admin" as const],

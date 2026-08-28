@@ -19,6 +19,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { ConfigKind } from "../../domain/config/model";
+import { PERMISSIONS, PERMISSION_DESCRIPTIONS } from "../../domain/authz/model";
 import type { ConfigService } from "../../usecase/config/service";
 
 export interface ConfigDeps {
@@ -99,7 +100,43 @@ const DefineBody = z
 
 const AddVersionBody = z.object({ body: BodySchema }).openapi("AddConfigVersionRequest");
 
+/**
+ * The permission vocabulary, as data.
+ *
+ * A role body names permissions, so anything that lets somebody EDIT a role has
+ * to offer the set to choose from — and the set is a closed product fact in the
+ * domain, not a firm's configuration. Without this route the only way to build a
+ * permission picker is to retype the list in the frontend, where it would drift
+ * from what the code actually checks. On this subject that drift means a screen
+ * offering a permission that grants nothing, or hiding one that grants
+ * everything.
+ *
+ * Not a config `kind`: these are not rows a firm owns, and they cannot be.
+ */
+const PermissionsResponse = z
+  .object({
+    permissions: z.array(
+      z.object({ key: z.string(), description: z.string() }),
+    ),
+  })
+  .openapi("PermissionVocabulary");
+
 // ── Routes ────────────────────────────────────────────────────────────────
+
+const permissionsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/config/permissions",
+  tags: ["config"],
+  summary: "The permissions a role can be given, and what each one means",
+  responses: {
+    200: {
+      description: "The product's closed permission set",
+      content: { "application/json": { schema: PermissionsResponse } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read config"),
+  },
+});
 
 const listRoute = createRoute({
   method: "get",
@@ -209,6 +246,23 @@ const publishRoute = createRoute({
 // ── Registration ────────────────────────────────────────────────────────────
 
 export function registerConfigRoutes(app: OpenAPIHono<AppEnv>, deps: ConfigDeps): void {
+  // Registered BEFORE /config/{kind}: "permissions" is not a kind, and a
+  // template route would otherwise swallow it and answer 400 for a value that
+  // was never meant to be a kind at all.
+  app.openapi(permissionsRoute, (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    return c.json(
+      {
+        permissions: PERMISSIONS.map((key) => ({
+          key,
+          description: PERMISSION_DESCRIPTIONS[key],
+        })),
+      },
+      200,
+    );
+  });
+
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
