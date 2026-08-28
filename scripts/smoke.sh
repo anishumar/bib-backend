@@ -18,7 +18,7 @@
 # It prints the seeded logins at the end so you can carry on in the UI.
 # Verify the BiB backend end to end. Needs: the API on :8080, a migrated DB.
 set -u
-API=http://localhost:8080
+API=${API:-http://localhost:8080}
 KEY=local-dev-internal-key-not-for-any-real-environment
 H='content-type: application/json'
 A="authorization: Bearer $KEY"
