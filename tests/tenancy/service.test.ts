@@ -104,9 +104,37 @@ describe("createTenant", () => {
     // One event for four roles: eight rows for something that is really one
     // fact would bury the events a person actually caused. And it comes second,
     // because the tenant has to exist before its configuration can.
+    //
+    // `party.created` is third and is the firm's OWN entity, created with the
+    // firm — the party module records the same verb for every other party, and
+    // leaving this one unrecorded would make the firm's own company the single
+    // party in the book with no origin.
     const { service, f } = svc();
     await service.createTenant({ name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR" });
-    expect(f.events.verbs()).toEqual(["tenant.created", "config_registry.seeded"]);
+    expect(f.events.verbs()).toEqual([
+      "tenant.created",
+      "config_registry.seeded",
+      "party.created",
+    ]);
+  });
+
+  it("gives a new firm the entity that will issue its documents", async () => {
+    // `issuing_entity_party_id` is NOT NULL on both documents (migration 0021),
+    // so a firm without this row could not draft a proposal at all. Every
+    // tenant owns one from the moment it exists, exactly as it owns a role set,
+    // and migration 0021 backfilled the firms that predate it.
+    const { service, f } = svc();
+    const t = await service.createTenant({
+      name: "Harbour Point",
+      slug: "harbour-point",
+      reportingCurrency: "INR",
+    });
+    expect(f.issuingEntitySeeder.seeded).toEqual([
+      { tenantId: t.id, firmName: "Harbour Point", partyId: expect.any(String) },
+    ]);
+    const created = f.events.recorded.find((e) => e.verb === "party.created");
+    expect(created?.objectId).toBe(f.issuingEntitySeeder.seeded[0]?.partyId);
+    expect(created?.payload).toMatchObject({ kind: "organization", isFirmSelf: true });
   });
 });
 

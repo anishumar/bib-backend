@@ -30,6 +30,8 @@ import type { Deps } from "../usecase/proposal/service";
 import { FakeIds } from "./ids";
 import { FakeClock, FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
+import { makeDocumentIdentity } from "./document";
+import type { FakePreferenceRepo } from "./document";
 
 export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
@@ -46,7 +48,9 @@ export class FakeProposalRepo implements ProposalRepository {
     const row: Proposal = {
       id: p.id,
       tenantId: p.tenantId,
+      ref: p.ref,
       partyId: p.partyId,
+      issuingEntityPartyId: p.issuingEntityPartyId,
       leadId: p.leadId,
       title: p.title,
       status: "draft",
@@ -146,7 +150,10 @@ export class FakeProposalRepo implements ProposalRepository {
     const lines = this.liveLines(tenantId, proposalId);
     return {
       id: proposal.id,
+      ref: proposal.ref,
       firmName: this.firmName,
+      issuedBy:
+        this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
       addressedTo: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
       title: proposal.title,
       status: proposal.status,
@@ -183,6 +190,11 @@ export class FakeProposalRepo implements ProposalRepository {
         id: proposal.partyId,
         displayName: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
       },
+      issuingEntity: {
+        id: proposal.issuingEntityPartyId,
+        displayName:
+          this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
+      },
       lines: lines.map((l) => ({
         line: stripRemoved(l),
         // Null is a real answer here, not an unresolved join: a proposal line
@@ -217,6 +229,11 @@ export class FakeProposalRepo implements ProposalRepository {
           party: {
             id: proposal.partyId,
             displayName: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
+          },
+          issuingEntity: {
+            id: proposal.issuingEntityPartyId,
+            displayName:
+              this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
           },
           totals: totalsOf(lines, proposal.currency),
           lineCount: lines.length,
@@ -301,12 +318,20 @@ export function makeProposalFakes(): Deps & {
   catalogue: FakeServiceCatalogue;
   policies: FakePolicyDirectory;
   shareTokens: FakeTokenFactory;
+  /** The firm's issuing-entity rule, so a test can change it or empty it. */
+  firmEntities: FakePreferenceRepo;
   events: RecordingEventSink;
 } {
+  // The REAL DocumentService over in-memory ports: quoting must fail here if
+  // the rule that picks an issuing entity stops working, and a stub that
+  // recorded being asked would let it pass.
+  const identity = makeDocumentIdentity();
   return {
     proposals: new FakeProposalRepo(),
     catalogue: new FakeServiceCatalogue(),
     policies: new FakePolicyDirectory(),
+    documents: identity.documents,
+    firmEntities: identity.firmEntities,
     // The identity fake, reused: both ports want the same guarantee, and a
     // second predictable-token fake would be the same class with a new name.
     shareTokens: new FakeTokenFactory(),

@@ -58,7 +58,14 @@ const TotalsSchema = z
 const LetterSchema = z
   .object({
     id: z.string().uuid(),
+    /** The firm's own number for this letter — `EL-2026-0007`. What the client
+     *  quotes back, what an invoice narrates and what a court filing cites. */
+    ref: z.string(),
     partyId: z.string().uuid(),
+    /** Which of the FIRM's own entities is contracting. Not redacted by the fee
+     *  axis: who is bound by this letter is not money, and it is exactly what
+     *  delivery staff need to know whose paper they are working under. */
+    issuingEntityPartyId: z.string().uuid(),
     proposalId: z.string().uuid().nullable(),
     jurisdiction: JurisdictionSchema,
     title: z.string(),
@@ -137,6 +144,9 @@ const LetterRecordSchema = z
   .object({
     letter: LetterSchema,
     party: PartyRefSchema,
+    /** The issuing entity by NAME — the letterhead and the signature block both
+     *  print it. */
+    issuingEntity: PartyRefSchema,
     lines: z.array(LetterLineSchema),
     clauses: z.array(LetterClauseSchema),
     totals: TotalsSchema,
@@ -148,6 +158,7 @@ const LetterSummarySchema = z
   .object({
     letter: LetterSchema,
     party: PartyRefSchema,
+    issuingEntity: PartyRefSchema,
     totals: TotalsSchema,
     lineCount: z.number().int(),
   })
@@ -167,6 +178,11 @@ const DraftLetterRequest = z
   .object({
     partyId: z.string().uuid(),
     proposalId: z.string().uuid().optional(),
+    // WHO is contracting. Optional, and absent is the ordinary case: the
+    // letter's own jurisdiction is where the client is, so the firm's
+    // preference rows answer it and a firm always has a fallback. Naming one
+    // here overrides that for this letter only.
+    issuingEntityPartyId: z.string().uuid().optional(),
     // The letter's OWN jurisdiction, stated rather than inferred: it is not
     // always the client's or the firm's, and a legal document records the one
     // it was written for.
@@ -401,7 +417,9 @@ function toLetterBody(
 ): z.infer<typeof LetterSchema> {
   return {
     id: letter.id,
+    ref: letter.ref,
     partyId: letter.partyId,
+    issuingEntityPartyId: letter.issuingEntityPartyId,
     proposalId: letter.proposalId,
     jurisdiction: letter.jurisdiction,
     title: letter.title,
@@ -439,6 +457,10 @@ function toRecordBody(record: LetterRecord, fees: boolean): z.infer<typeof Lette
   return {
     letter: toLetterBody(record.letter, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
+    issuingEntity: {
+      id: record.issuingEntity.id,
+      displayName: record.issuingEntity.displayName,
+    },
     lines: record.lines.map((l) => ({
       id: l.line.id,
       entityPartyId: l.line.entityPartyId,
@@ -478,6 +500,7 @@ function toSummaryBody(s: LetterSummary, fees: boolean): z.infer<typeof LetterSu
   return {
     letter: toLetterBody(s.letter, fees),
     party: { id: s.party.id, displayName: s.party.displayName },
+    issuingEntity: { id: s.issuingEntity.id, displayName: s.issuingEntity.displayName },
     totals: {
       gross: fees ? s.totals.gross : null,
       discount: fees ? s.totals.discount : null,

@@ -82,7 +82,30 @@ export function isEngagementStatus(v: string): v is EngagementStatus {
 export interface EngagementLetter {
   readonly id: string;
   readonly tenantId: string;
+  /**
+   * What a client quotes back on the phone — `EL-2026-0007`.
+   *
+   * Unique per firm and never reused. On a letter it matters more than on a
+   * proposal: this is the string that appears in the client's own records, in
+   * an invoice's narration and in a court filing, and it is frozen with the
+   * rest of the document at signature.
+   */
+  readonly ref: string;
   readonly partyId: string;
+  /**
+   * Which of the FIRM's own entities is contracting — not the client.
+   *
+   * The letter's `jurisdiction` says WHERE the work is; this says WHO on our
+   * side is bound by it, and the two are not the same question. The letter that
+   * started this review was issued by the US entity and printed Indian law,
+   * and nothing in the schema could have caught it because nothing knew who had
+   * issued it.
+   *
+   * STORED, not derived: the firm's rule for picking an entity may change, and
+   * re-deriving this at read time would silently restate every document already
+   * issued. Same argument as `jurisdiction`, and as the pinned clause versions.
+   */
+  readonly issuingEntityPartyId: string;
   /** The proposal it came from, or null — a renewal or a walk-in has none. */
   readonly proposalId: string | null;
   /** The letter's OWN jurisdiction, chosen when it is drafted. Not derived from
@@ -196,6 +219,12 @@ export function mayActivate(
  * currency. A firm restyling its letter template does not and must not change
  * what the client agreed to.
  *
+ * The REFERENCE and the ISSUING ENTITY are in here for the same reason the
+ * line's entity is. The reference is how the client identifies the document
+ * they signed, so a hash that did not cover it would verify a document nobody
+ * could name. The issuing entity is WHO they contracted with — the most basic
+ * term there is, and the one the original letter got wrong.
+ *
  * The ENTITY is in here because it is a term, and one of the most material: the
  * same service for a different company of the same group is a different
  * agreement at a different price. A signature that did not commit to it would
@@ -205,7 +234,14 @@ export function mayActivate(
 export function canonicalContent(input: {
   readonly letter: Pick<
     EngagementLetter,
-    "jurisdiction" | "title" | "currency" | "fxRate" | "advanceRequired" | "advanceAmount"
+    | "ref"
+    | "issuingEntityPartyId"
+    | "jurisdiction"
+    | "title"
+    | "currency"
+    | "fxRate"
+    | "advanceRequired"
+    | "advanceAmount"
   >;
   readonly lines: readonly Pick<
     LetterLine,
@@ -221,6 +257,8 @@ export function canonicalContent(input: {
 }): string {
   const head = [
     "letter",
+    input.letter.ref,
+    input.letter.issuingEntityPartyId,
     input.letter.title,
     input.letter.jurisdiction,
     input.letter.currency,

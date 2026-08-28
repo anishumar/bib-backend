@@ -31,6 +31,7 @@ import {
   UserNotFound,
 } from "../../domain/tenancy/errors";
 import type {
+  IssuingEntitySeeder,
   MemberRecord,
   MembershipRepository,
   RoleDirectory,
@@ -45,6 +46,9 @@ export interface Deps {
   readonly memberships: MembershipRepository;
   /** A new firm's role definitions, written as its own config rows. */
   readonly roleSeeder: RoleRegistrySeeder;
+  /** A new firm's own entity, and the fallback rule naming it as the issuer of
+   *  its documents. Without it the firm cannot draft anything at all. */
+  readonly issuingEntitySeeder: IssuingEntitySeeder;
   /** What this firm's roles ARE, for the two things administration must refuse:
    *  assigning a role nobody published, and removing the last administrator. */
   readonly roleDirectory: RoleDirectory;
@@ -160,6 +164,36 @@ export class TenancyService {
     // it is preferable to the alternative, which is a firm that appears to work
     // because gate 3 quietly fell back to permissions nobody chose.
     await this.deps.roleSeeder.seedDefaultRoles(tenant.id, actor);
+
+    // And its own entity, with the fallback rule naming it as the issuer of the
+    // firm's documents — for the same reason, one step further on. Both
+    // documents carry `issuing_entity_party_id NOT NULL` (0021), so a firm with
+    // no preference row cannot draft a proposal, and telling a firm to
+    // configure that before it can quote anybody would be a worse first day
+    // than the roles problem above.
+    //
+    // The entity seeded is the firm ITSELF, which is right for the firm that
+    // operates one company and is a starting point for the firm that operates
+    // several — the note on the row says nobody chose it. The same honest limit
+    // as the role seeding applies: two ports with no shared unit of work, so a
+    // failure here leaves an audited tenant with roles and no issuer. That
+    // state is loud (drafting refuses, naming the row that is missing) rather
+    // than silent.
+    const firmEntityPartyId = await this.deps.issuingEntitySeeder.seedFirmEntity(
+      tenant.id,
+      tenant.name,
+    );
+    // A party came into existence, so the ledger says so. The party module
+    // records the same verb for every other party; this one is created by
+    // provisioning rather than by a person, which is exactly why leaving it
+    // unrecorded would make the firm's own entity the one party with no origin.
+    await this.deps.events.recordEvent({
+      tenantId: tenant.id,
+      verb: "party.created",
+      objectId: firmEntityPartyId,
+      actor,
+      payload: { kind: "organization", isFirmSelf: true, ...byline(input.provisionedBy) },
+    });
     return tenant;
   }
 

@@ -138,6 +138,16 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
 
+  // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
+  // configuration registry uses, and for the same reason: this IS firm
+  // configuration. Reading it is `config:read` — an associate drafting a letter
+  // should be able to see which of our companies will be on it. Writing it is
+  // `tenant:admin`, because moving the fallback silently changes the governing
+  // law, the courts and the counterparty on every document issued afterwards,
+  // and that is a decision at the same level as deciding what a role means.
+  [routeKey("GET", "/api/v1/firm-entities/preferences"), "config:read" as const],
+  [routeKey("POST", "/api/v1/firm-entities/preferences"), "tenant:admin" as const],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

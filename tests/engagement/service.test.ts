@@ -22,6 +22,9 @@ import {
   NotAClause,
   ServiceNotQuotable,
 } from "../../src/domain/engagement/errors";
+import { NoIssuingEntity } from "../../src/domain/document/errors";
+import { canonicalContent } from "../../src/domain/engagement/model";
+import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const PARTY = "00000000-0000-0000-0000-0000000000bb";
@@ -36,6 +39,8 @@ const GST = "00000000-0000-0000-0000-0000000000d1";
 const SCOPE_CLAUSE = "00000000-0000-0000-0000-0000000000e1";
 const LIABILITY_IN = "00000000-0000-0000-0000-0000000000e2";
 const LIABILITY_AE = "00000000-0000-0000-0000-0000000000e3";
+/** One of the FIRM's own entities, beside the fallback it is seeded with. */
+const UAE_ENTITY = "00000000-0000-0000-0000-0000000000f2";
 
 function setup(): ReturnType<typeof makeEngagementFakes> & { service: EngagementService } {
   const fakes = makeEngagementFakes();
@@ -99,6 +104,57 @@ async function completeTerms(s: ReturnType<typeof setup>, id: string): Promise<v
 }
 
 describe("drafting", () => {
+  it("gives the letter a number a client can quote back", async () => {
+    // G1.1's acceptance on the letter, which is where it matters most: this is
+    // the string that appears in the client's own records and in a filing.
+    const s = setup();
+    const id = await draft(s);
+    expect((await s.letters.findLetter(TENANT, id))?.ref).toBe("EL-2026-0001");
+    const second = await draft(s);
+    expect((await s.letters.findLetter(TENANT, second))?.ref).toBe("EL-2026-0002");
+  });
+
+  it("names which of the firm's own entities is contracting", async () => {
+    // G1.2's acceptance. The letter says WHERE the work is; this says WHO on
+    // our side is bound, and the two are different questions.
+    const s = setup();
+    const id = await draft(s);
+    const letter = await s.letters.findLetter(TENANT, id);
+    expect(letter?.issuingEntityPartyId).toBe(SEEDED_FIRM_ENTITY);
+    expect(s.events.recorded[0]?.payload).toMatchObject({
+      ref: "EL-2026-0001",
+      issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+    });
+  });
+
+  it("looks the rule up on the letter's own jurisdiction", async () => {
+    // "jahan ka client hota hai, wahan ki entity". The letter already states
+    // where the client is, so that is the key — no second field to keep in step
+    // with the first.
+    const s = setup();
+    await s.firmEntities.set({
+      id: "pref-ae",
+      tenantId: TENANT,
+      clientJurisdiction: "AE",
+      firmEntityPartyId: UAE_ENTITY,
+      note: null,
+    });
+    const uae = await draft(s, { jurisdiction: "AE" });
+    expect((await s.letters.findLetter(TENANT, uae))?.issuingEntityPartyId).toBe(UAE_ENTITY);
+    // A country the firm has no entity in resolves through the FALLBACK ROW.
+    const indian = await draft(s, { jurisdiction: "IN" });
+    expect((await s.letters.findLetter(TENANT, indian))?.issuingEntityPartyId).toBe(
+      SEEDED_FIRM_ENTITY,
+    );
+  });
+
+  it("refuses to draft at all for a firm that has named no entity", async () => {
+    const s = setup();
+    s.firmEntities.seededFallbackPartyId = null;
+    await expect(draft(s)).rejects.toBeInstanceOf(NoIssuingEntity);
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
   it.each([["India"], ["ind"], [""], ["I1"]])("refuses %j as a jurisdiction", async (j) => {
     const s = setup();
     await expect(draft(s, { jurisdiction: j })).rejects.toBeInstanceOf(InvalidJurisdiction);
@@ -466,5 +522,37 @@ describe("the advance-fee gate", () => {
       amount: "10000",
       currency: "INR",
     });
+  });
+});
+
+describe("what the signature commits to", () => {
+  it("covers the reference and the entity that is contracting", () => {
+    // The most basic term there is — who the client contracted with — and the
+    // one the letter that started this review got wrong. A hash that did not
+    // cover it would verify a document without verifying its counterparty.
+    const base = {
+      letter: {
+        ref: "EL-2026-0001",
+        issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+        jurisdiction: "IN",
+        title: "Acme — FY26",
+        currency: "INR",
+        fxRate: "1",
+        advanceRequired: false,
+        advanceAmount: null,
+      },
+      lines: [],
+      clauses: [],
+    };
+    const elsewhere = {
+      ...base,
+      letter: { ...base.letter, issuingEntityPartyId: UAE_ENTITY },
+    };
+    const renumbered = { ...base, letter: { ...base.letter, ref: "EL-2026-0002" } };
+
+    expect(canonicalContent(base)).not.toBe(canonicalContent(elsewhere));
+    expect(canonicalContent(base)).not.toBe(canonicalContent(renumbered));
+    // And it is deterministic, which is the whole point of it.
+    expect(canonicalContent(base)).toBe(canonicalContent({ ...base }));
   });
 });

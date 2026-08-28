@@ -55,16 +55,24 @@ interface ColumnRow {
   readonly category: string;
 }
 
+/** Each probe letter needs its own reference: `UNIQUE (tenant_id, ref)` (0020)
+ *  is real, and two probes sharing one would fail on the constraint rather than
+ *  on the freeze this file is about. */
+let refCounter = 0;
+
 async function insertSignedLetter(tenantId: string, partyId: string): Promise<string> {
+  refCounter += 1;
   // Raw SQL, no service: the freeze exists to hold when the application is
   // bypassed, so the fixture bypasses it too. The trigger is BEFORE UPDATE OR
   // DELETE, so a row may be INSERTed already signed.
   const [row] = await owner<{ id: string }[]>`
     INSERT INTO crm.engagement_letter
-      (tenant_id, party_id, jurisdiction, title, status, currency, fx_rate, fx_rate_date,
+      (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title, status,
+       currency, fx_rate, fx_rate_date,
        advance_required, advance_amount, sent_at, signed_at, signed_by_name,
        signature_method, signature_reference, signed_content_hash)
-    VALUES (${tenantId}, ${partyId}, 'IN', 'Freeze probe — FY26', 'signed', 'INR', 1,
+    VALUES (${tenantId}, ${`EL-2026-${String(refCounter).padStart(4, "0")}`}, ${partyId},
+            ${partyId}, 'IN', 'Freeze probe — FY26', 'signed', 'INR', 1,
             '2026-07-01', true, 5000, now(), now(), 'Priya Menon', 'attested',
             'paper-freeze-probe', ${"a".repeat(64)})
     RETURNING id
@@ -98,8 +106,10 @@ beforeAll(async () => {
 
   const [draft] = await owner<{ id: string }[]>`
     INSERT INTO crm.engagement_letter
-      (tenant_id, party_id, jurisdiction, title, currency, fx_rate, fx_rate_date)
-    VALUES (${tenant.id}, ${party.id}, 'IN', 'Still being written', 'INR', 1, '2026-07-01')
+      (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
+       currency, fx_rate, fx_rate_date)
+    VALUES (${tenant.id}, 'EL-2026-9999', ${party.id}, ${party.id}, 'IN',
+            'Still being written', 'INR', 1, '2026-07-01')
     RETURNING id
   `;
   if (!draft) throw new Error("could not create the draft letter");

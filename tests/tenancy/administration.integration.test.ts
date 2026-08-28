@@ -17,6 +17,7 @@ import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tena
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import {
   PostgresCredentialRepository,
@@ -55,6 +56,10 @@ const tenancy = new TenancyService({
   users,
   memberships,
   roleSeeder: { seedDefaultRoles: (t, a) => config.seedDefaultRoles(t, a) },
+  // Every firm gets its own entity and the fallback naming it as the issuer of
+  // its documents, in the same call — the real adapter, because what this test
+  // provisions has to be a firm that could actually draft a proposal.
+  issuingEntitySeeder: new PostgresDocumentRepository(app),
   roleDirectory: configRepository,
   ids: systemIds,
   events: ledger,

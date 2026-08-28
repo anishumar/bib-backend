@@ -32,6 +32,8 @@ import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
 import { FakeClock } from "./identity";
 import { RecordingEventSink } from "./ledger";
+import { makeDocumentIdentity } from "./document";
+import type { FakePreferenceRepo } from "./document";
 
 export class FakeEngagementRepo implements EngagementRepository {
   readonly letters: EngagementLetter[] = [];
@@ -47,7 +49,9 @@ export class FakeEngagementRepo implements EngagementRepository {
     const row: EngagementLetter = {
       id: l.id,
       tenantId: l.tenantId,
+      ref: l.ref,
       partyId: l.partyId,
+      issuingEntityPartyId: l.issuingEntityPartyId,
       proposalId: l.proposalId,
       jurisdiction: l.jurisdiction,
       title: l.title,
@@ -215,6 +219,10 @@ export class FakeEngagementRepo implements EngagementRepository {
         id: letter.partyId,
         displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
       },
+      issuingEntity: {
+        id: letter.issuingEntityPartyId,
+        displayName: this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
+      },
       // The entity name resolves through the same map the client's does — the
       // fake stands in for the join the Postgres adapter actually makes.
       lines: lines.map((l) => ({
@@ -250,6 +258,11 @@ export class FakeEngagementRepo implements EngagementRepository {
           party: {
             id: letter.partyId,
             displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
+          },
+          issuingEntity: {
+            id: letter.issuingEntityPartyId,
+            displayName:
+              this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
           },
           totals: totals(lines, letter.currency),
           lineCount: lines.length,
@@ -351,11 +364,19 @@ export function makeEngagementFakes(): Deps & {
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
   esign: FakeSigner;
+  /** The firm's issuing-entity rule, so a test can change it or empty it. */
+  firmEntities: FakePreferenceRepo;
   events: RecordingEventSink;
 } {
+  // The REAL DocumentService over in-memory ports — see the note in
+  // testfakes/proposal.ts. The two documents share one seam on purpose, so they
+  // cannot disagree about which entity serves a client.
+  const identity = makeDocumentIdentity();
   return {
     letters: new FakeEngagementRepo(),
     library: new FakeClauseLibrary(),
+    documents: identity.documents,
+    firmEntities: identity.firmEntities,
     esign: new FakeSigner(),
     hasher: new FakeHasher(),
     ids: new FakeIds(),

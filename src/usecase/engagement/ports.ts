@@ -2,6 +2,7 @@
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
 import type { Amount, CurrencyCode } from "../../domain/money/model";
+import type { DocumentType } from "../../domain/document/model";
 import type {
   Engagement,
   EngagementLetter,
@@ -11,10 +12,34 @@ import type {
   LetterStatus,
 } from "../../domain/engagement/model";
 
+
+/**
+ * Who issues this firm's documents, and what the next one is called.
+ *
+ * Narrow on purpose and stated in this use case's vocabulary: quoting does not
+ * want to know what a preference row is or how a counter works, only which of
+ * the firm's entities is offering this and what the document is called. The
+ * document use case satisfies it, so neither module imports the other — the
+ * same seam `ServiceCatalogue` gives the catalogue.
+ *
+ * `clientJurisdiction` may be null: a prospect's country is not always known at
+ * drafting, and "we do not know where they are" resolves through the same
+ * fallback as "we are not there".
+ */
+export interface DocumentIdentity {
+  issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+}
+
 export interface NewLetter {
   readonly id: string;
   readonly tenantId: string;
+  /** Allocated before the row is written — see `DocumentIdentity`. */
+  readonly ref: string;
   readonly partyId: string;
+  /** Which of the firm's own entities is contracting. Resolved once, here, and
+   *  stored: it is a snapshot, not a lookup. */
+  readonly issuingEntityPartyId: string;
   readonly proposalId: string | null;
   readonly jurisdiction: string;
   readonly title: string;
@@ -84,6 +109,9 @@ export interface NewEngagement {
 export interface LetterRecord {
   readonly letter: EngagementLetter;
   readonly party: { readonly id: string; readonly displayName: string };
+  /** Which of the firm's own entities is contracting, by NAME — this is what
+   *  the letterhead and the signature block print. */
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   readonly lines: readonly LetterLineRecord[];
   readonly clauses: readonly LetterClauseRecord[];
   readonly totals: {
@@ -132,6 +160,7 @@ export interface LetterFilters {
 export interface LetterSummary {
   readonly letter: EngagementLetter;
   readonly party: { readonly id: string; readonly displayName: string };
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   readonly totals: LetterRecord["totals"];
   readonly lineCount: number;
 }

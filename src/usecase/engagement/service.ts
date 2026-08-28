@@ -60,6 +60,7 @@ import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type {
   ClauseLibrary,
   ContentHasher,
+  DocumentIdentity,
   ESignProvider,
   EngagementRepository,
   LetterFilters,
@@ -72,6 +73,10 @@ export interface Deps {
   readonly letters: EngagementRepository;
   /** The configuration registry, behind this use case's own narrow interface. */
   readonly library: ClauseLibrary;
+  /** The firm's document reference series, and its rule for which of its own
+   *  entities is contracting. The same seam proposals use, so the two documents
+   *  cannot disagree about who serves a UAE client. */
+  readonly documents: DocumentIdentity;
   readonly esign: ESignProvider;
   readonly hasher: ContentHasher;
   readonly ids: IdGen;
@@ -83,6 +88,15 @@ export interface DraftLetterInput {
   readonly tenantId: string;
   readonly partyId: string;
   readonly proposalId?: string | undefined;
+  /**
+   * Which of the firm's own entities is contracting — the "flexibility to
+   * choose" half of the firm's rule.
+   *
+   * OPTIONAL, and absent is the ordinary case: the letter's own jurisdiction is
+   * where the client is, so the firm's preference rows answer it. Naming one
+   * here overrides that for this letter only.
+   */
+  readonly issuingEntityPartyId?: string | undefined;
   readonly jurisdiction: string;
   readonly title: string;
   readonly currency: string;
@@ -135,10 +149,28 @@ export class EngagementService {
       throw new InvalidAmount("advance amount", input.advanceAmount);
     }
 
+    // WHO is contracting. The letter already states WHERE the work is, so that
+    // is the key the firm's rule is looked up on — "jahan ka client hota hai,
+    // wahan ki entity" — and a country the firm has no entity in lands on the
+    // fallback ROW rather than on an `if` here.
+    const issuingEntityPartyId =
+      input.issuingEntityPartyId ??
+      (await this.deps.documents.issuerFor(input.tenantId, jurisdiction));
+
+    // Drawn before the row is written; the counter commits on its own, so a
+    // draft that fails after this burns its number. See migration 0020.
+    const ref = await this.deps.documents.nextRef(
+      input.tenantId,
+      "engagement_letter",
+      this.deps.clock.now(),
+    );
+
     const letter = await this.deps.letters.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
+      ref,
       partyId: input.partyId,
+      issuingEntityPartyId,
       proposalId: input.proposalId ?? null,
       jurisdiction,
       title: input.title,
@@ -158,7 +190,12 @@ export class EngagementService {
       // proposal's is: it routinely names the client, and this log cannot be
       // erased.
       payload: {
+        ref: letter.ref,
         partyId: letter.partyId,
+        // WHO the firm bound itself through, on the first row of the document's
+        // own timeline. An audit that asks "which of our companies signed this"
+        // gets an answer that predates the signature.
+        issuingEntityPartyId: letter.issuingEntityPartyId,
         proposalId: letter.proposalId,
         jurisdiction: letter.jurisdiction,
         currency: letter.currency,
@@ -364,7 +401,9 @@ export class EngagementService {
       // useful years later — it says which document was signed, verifiably,
       // without containing it.
       payload: {
+        ref: letter.ref,
         partyId: letter.partyId,
+        issuingEntityPartyId: letter.issuingEntityPartyId,
         signatureMethod: this.deps.esign.method,
         contentHash,
         engagementCount: result.engagements.length,

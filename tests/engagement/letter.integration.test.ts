@@ -20,6 +20,7 @@ import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
@@ -31,6 +32,7 @@ import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { DocumentService } from "../../src/usecase/document/service";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -55,9 +57,17 @@ const party = new PartyService({
   events: ledger,
 });
 const letters = new PostgresEngagementRepository(app);
+const documentRepository = new PostgresDocumentRepository(app);
+const documents = new DocumentService({
+  preferences: documentRepository,
+  refs: documentRepository,
+  ids: systemIds,
+  events: ledger,
+});
 const service = new EngagementService({
   letters,
   library: configRepository,
+  documents,
   esign: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
   ids: systemIds,
@@ -69,6 +79,8 @@ const stamp = Date.now().toString(36);
 let tenantA = "";
 let tenantB = "";
 let partyA = "";
+/** The FIRM's own entity — who is contracting on its side of the letter. */
+let firmEntityA = "";
 /** Two of the CLIENT's own companies. An engagement is `service × one legal
  *  entity`, so a letter covering both must fan out into engagements that differ
  *  in exactly this field — the acceptance G0.1 exists for. */
@@ -90,6 +102,13 @@ beforeAll(async () => {
   if (!a || !b) throw new Error("could not create the test tenants");
   tenantA = a.id;
   tenantB = b.id;
+
+  // These tenants are created with raw SQL rather than through createTenant, so
+  // they do not get the fallback issuing entity provisioning seeds. Each firm
+  // gets its own here: `issuing_entity_party_id` is NOT NULL, and a firm that
+  // has named no entity cannot draft a letter at all.
+  firmEntityA = await documentRepository.seedFirmEntity(tenantA, "EL Test A LLP");
+  await documentRepository.seedFirmEntity(tenantB, "EL Test B LLP");
 
   partyA = (
     await party.createOrganization({ tenantId: tenantA, legalName: "Acme Ltd" }, SYSTEM_ACTOR)
@@ -197,6 +216,38 @@ async function signedLetter(advance?: string): Promise<string> {
   );
   return letter.id;
 }
+
+describe("the head a letter prints from", () => {
+  it("carries a reference and names the firm's own entity, by name", async () => {
+    // G1.1 and G1.2, through the whole stack. The read model carries the
+    // issuing entity's NAME because a letterhead prints a name — the rule
+    // CLAUDE.md says has now been learnt several times.
+    const id = await signedLetter();
+    const record = await letters.describeLetter(tenantA, id);
+    expect(record?.letter.ref).toMatch(/^EL-\d{4}-\d{4,}$/);
+    expect(record?.letter.issuingEntityPartyId).toBe(firmEntityA);
+    expect(record?.issuingEntity).toEqual({ id: firmEntityA, displayName: "EL Test A LLP" });
+
+    const [summary] = await letters.listLetters(tenantA, { partyId: partyA });
+    expect(summary?.issuingEntity.displayName).toBe("EL Test A LLP");
+  });
+
+  it("refuses to change the reference or the issuer after signature", async () => {
+    // Raw SQL as the OWNER: both columns are part of what the client agreed to,
+    // and migration 0019 made the freeze cover a column the day it exists
+    // rather than the day somebody remembers to list it.
+    const id = await signedLetter();
+    for (const statement of [
+      owner`UPDATE crm.engagement_letter SET ref = 'EL-2026-9998' WHERE id = ${id}`,
+      owner`
+        UPDATE crm.engagement_letter SET issuing_entity_party_id = ${partyA} WHERE id = ${id}
+      `,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23001"); // restrict_violation
+    }
+  });
+});
 
 describe("the freeze", () => {
   it("refuses to change a signed letter, even as the OWNER role", async () => {

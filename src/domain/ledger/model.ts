@@ -89,6 +89,7 @@ export const EVENT_VERBS = {
   "config_version.published":    { objectType: "config_version",      lane: "platform",   description: "A configuration version took effect and froze. Anything pinned to the version it replaced still reads that one." },
   "config_version.archived":     { objectType: "config_version",      lane: "platform",   description: "A configuration version stopped being what is in force. It stays readable — pins resolve to it forever." },
   "config_registry.seeded":      { objectType: "tenant",              lane: "platform",   description: "A new tenant's configuration registry was initialised from the product defaults. One event, not one per row." },
+  "firm_entity_preference.set":  { objectType: "firm_entity_preference", lane: "platform", description: "The firm said which of its OWN entities issues documents to clients in a country — or set the fallback that answers for every country it has no entity in. A commercial and legal decision (it settles governing law, courts and who the client's counterparty is), so who made it is the point of the record." },
 
   // ── commercial lane (A) · sell → bill → collect ────────────────────────────
   "lead.captured":               { objectType: "lead",                lane: "commercial", description: "A lead entered the pipeline." },

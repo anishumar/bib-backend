@@ -122,3 +122,22 @@ export interface RoleRegistrySeeder {
   /** Returns the role keys written, for the caller's audit trail. */
   seedDefaultRoles(tenantId: string, actor: Actor): Promise<readonly string[]>;
 }
+
+/**
+ * A new firm's own entity, and the rule that names it as the issuer of the
+ * firm's documents.
+ *
+ * The same shape as `RoleRegistrySeeder` and there for the same reason: a
+ * proposal and an engagement letter each carry `issuing_entity_party_id NOT
+ * NULL` (migration 0021), so a firm with no preference row could not draft
+ * anything at all. "Configure this before you can write a proposal" is not a
+ * state to hand a firm on its first day, so every tenant owns a fallback from
+ * the moment it exists — and migration 0021 backfilled the firms that predate
+ * it, exactly as 0005 did for roles.
+ *
+ * Returns the party id of the entity it created, so the caller can record that
+ * a party came into existence rather than leaving it to appear from nowhere.
+ */
+export interface IssuingEntitySeeder {
+  seedFirmEntity(tenantId: string, firmName: string): Promise<string>;
+}

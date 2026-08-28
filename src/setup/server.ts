@@ -30,6 +30,7 @@ import { PostgresConfigRepository } from "../infrastructure/postgres/config-repo
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
+import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
@@ -39,6 +40,7 @@ import { ConfigService } from "../usecase/config/service";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
+import { DocumentService } from "../usecase/document/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -88,6 +90,23 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // ONE adapter over the document tables, serving THREE ports: the reference
+  // counter, the firm's issuing-entity rule, and — for provisioning — the seed
+  // that gives a new firm its own entity. The three are one adapter because
+  // they are one pair of tables, and two adapters over them would eventually
+  // disagree about what the fallback is.
+  const documentRepository = new PostgresDocumentRepository(pools.app);
+
+  // WHO issues the firm's documents, and what they are called. Both documents
+  // ask this and neither of them is a quoting question, so it is answered once
+  // here rather than twice in two modules that would drift.
+  const documents = new DocumentService({
+    preferences: documentRepository,
+    refs: documentRepository,
+    ids: systemIds,
+    events: ledger,
+  });
+
   // Creating a firm now also gives it its own role definitions, in the same
   // call — gate 3 reads those rows and has no built-in table to fall back on,
   // so a tenant without them is a tenant nobody can sign in to. The seam is a
@@ -100,6 +119,13 @@ export function wire(cfg: Config, log: Logger): Wired {
     roleSeeder: {
       seedDefaultRoles: (tenantId, actor) => config.seedDefaultRoles(tenantId, actor),
     },
+    // And its own entity, with the fallback row naming it as the issuer of the
+    // firm's documents. Same seam, same reason: `issuing_entity_party_id` is
+    // NOT NULL on both documents, so a firm without that row could not draft a
+    // proposal at all. The adapter writes the party, the organization and the
+    // preference in one transaction — a firm with some of the three is worse
+    // than a firm with none.
+    issuingEntitySeeder: documentRepository,
     // The other direction of the same relationship: administration has to know
     // which roles this firm actually publishes, so it can refuse to assign one
     // that does not exist and refuse to remove its last administrator. The
@@ -208,6 +234,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     proposals: new PostgresProposalRepository(pools.app),
     catalogue: configRepository,
     policies: configRepository,
+    // The reference series and the issuing-entity rule, behind quoting's own
+    // narrow port. `DocumentService` satisfies it structurally, so neither
+    // module imports the other — the same seam the catalogue arrives through.
+    documents,
     // The same token adapter identity uses for sessions and magic links. Both
     // want 32 bytes from the OS CSPRNG and only the digest at rest; one
     // implementation of that is the right number.
@@ -227,6 +257,9 @@ export function wire(cfg: Config, log: Logger): Wired {
   const engagement = new EngagementService({
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
+    // The SAME instance proposals hold. Two documents of the same firm must not
+    // be able to disagree about which of its entities serves a UAE client.
+    documents,
     esign: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),
     ids: systemIds,
@@ -250,6 +283,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         lead: { service: lead },
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
+        document: { service: documents },
       },
       log,
       {

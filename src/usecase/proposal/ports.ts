@@ -3,6 +3,7 @@
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
 import type { Amount, CurrencyCode } from "../../domain/money/model";
+import type { DocumentType } from "../../domain/document/model";
 import type {
   Proposal,
   ProposalLine,
@@ -10,10 +11,34 @@ import type {
   ProposalTotals,
 } from "../../domain/proposal/model";
 
+
+/**
+ * Who issues this firm's documents, and what the next one is called.
+ *
+ * Narrow on purpose and stated in this use case's vocabulary: quoting does not
+ * want to know what a preference row is or how a counter works, only which of
+ * the firm's entities is offering this and what the document is called. The
+ * document use case satisfies it, so neither module imports the other — the
+ * same seam `ServiceCatalogue` gives the catalogue.
+ *
+ * `clientJurisdiction` may be null: a prospect's country is not always known at
+ * drafting, and "we do not know where they are" resolves through the same
+ * fallback as "we are not there".
+ */
+export interface DocumentIdentity {
+  issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+}
+
 export interface NewProposal {
   readonly id: string;
   readonly tenantId: string;
+  /** Allocated before the row is written — see `DocumentIdentity`. */
+  readonly ref: string;
   readonly partyId: string;
+  /** Which of the firm's own entities is offering this. Resolved once, here,
+   *  and stored: it is a snapshot, not a lookup. */
+  readonly issuingEntityPartyId: string;
   readonly leadId: string | null;
   readonly title: string;
   readonly currency: CurrencyCode;
@@ -56,6 +81,9 @@ export interface ProposalRecord {
   readonly party: { readonly id: string; readonly displayName: string };
   readonly lines: readonly ProposalLineRecord[];
   readonly totals: ProposalTotals;
+  /** Which of the firm's own entities is offering it, by NAME — this is what a
+   *  letterhead prints, and a uuid prints as nothing. */
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   /** Who signed off an over-limit discount, for a screen that has to show it.
    *  Null when nobody has. */
   readonly approvedBy: {
@@ -96,6 +124,7 @@ export interface ProposalLineRecord {
 export interface ProposalSummary {
   readonly proposal: Proposal;
   readonly party: { readonly id: string; readonly displayName: string };
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   readonly totals: ProposalTotals;
   readonly lineCount: number;
 }
@@ -118,8 +147,15 @@ export interface ProposalFilters {
  */
 export interface SharedProposal {
   readonly id: string;
+  /** The number the recipient quotes back. The whole reason it exists is this
+   *  screen and the phone call that follows it. */
+  readonly ref: string;
   /** Who sent it. A document with no sender is not a document. */
   readonly firmName: string;
+  /** Which of the firm's entities is offering — the name on the letterhead. A
+   *  client needs to know which company they would be contracting with, and it
+   *  is not always the group name above. */
+  readonly issuedBy: string;
   readonly addressedTo: string;
   readonly title: string;
   readonly status: ProposalStatus;
