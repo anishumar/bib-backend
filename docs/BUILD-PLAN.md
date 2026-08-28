@@ -1,4 +1,9 @@
-# BiB — Build Plan & Task Board
+# BiB — Build Plan & Task Board  ·  SUPERSEDED
+
+> **This file is history. The live board is [`MERGE_BUILD-PLAN.md`](MERGE_BUILD-PLAN.md)** —
+> this plan plus the work that closes the gap to the approved demo, in one file. Everything
+> below is preserved verbatim; nothing here is tracked any more. Do not tick a box in this
+> file.
 
 The single source of truth for what we're building, who owns it, and what's done.
 Both developers work off this file. Commit changes to it like code.
