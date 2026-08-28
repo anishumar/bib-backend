@@ -116,6 +116,13 @@ with them means a firm can never actually remove a permission, and using them on
 tenant has no rows means the first role a firm publishes locks out everyone holding another.
 A tenant with no role rows is a real fault and gate 3 says so loudly.
 
+**Changing a default role now costs a migration.** `DEFAULT_ROLES` is what a NEW tenant is
+seeded from; every existing firm already holds its roles as rows, and a published version is
+frozen. So adding a permission to a default role means a migration that publishes a new
+version for the firms that have not customised that role — leaving the ones that have alone,
+because a firm that edited its own role made a decision. `tests/config/seed-parity.test.ts`
+holds the build red until the newest seed migration and `DEFAULT_ROLES` agree.
+
 **Writing config requires `tenant:admin`, not a `config:write` of its own.** Whoever can
 publish a role version can grant themselves everything, so the permission has to say that at
 the moment somebody decides to hand it out. Reading is `config:read` — an associate quotes
