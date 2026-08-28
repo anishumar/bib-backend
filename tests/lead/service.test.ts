@@ -581,6 +581,78 @@ describe("a lead has a name of its own — G3.1's first acceptance", () => {
     expect(second.lead.title).toBe("FY27 statutory audit");
     expect(second.lead.id).toBe(first.lead.id);
   });
+
+  it("hands the discarded title back instead of dropping it in silence", async () => {
+    // The merge is right and stays. What was wrong is that the caller typed
+    // "Transfer pricing study", got back a lead called "FY26 statutory audit",
+    // and had no way to learn their words were gone or why. They are the only
+    // party who can act on it — re-title the live lead, close it first, or
+    // recognise their own duplicate — so it comes back to them.
+    const { service } = setup();
+    await service.capture(capture({ title: "FY26 statutory audit" }), ACTOR);
+    const second = await service.capture(capture({ title: "Transfer pricing study" }), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.discardedTitle).toBe("Transfer pricing study");
+    expect(second.lead.title).toBe("FY26 statutory audit");
+  });
+
+  it("reports no discard when the second capture sent the same words", async () => {
+    // Non-null must mean "words were lost", not "you merged". A form submitted
+    // twice with the same title lost nothing: the caller's title IS the lead's
+    // title. Flagging a discard there would train callers to ignore the field.
+    // Compared after trimming, because that is what would have been stored.
+    const { service } = setup();
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    const second = await service.capture(capture({ title: "  FY27 statutory audit  " }), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.discardedTitle).toBeNull();
+  });
+
+  it("reports no discard on a capture that actually created something", async () => {
+    const { service } = setup();
+    const created = await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    expect(created.merged).toBe(false);
+    expect(created.discardedTitle).toBeNull();
+    expect(created.lead.title).toBe("FY27 statutory audit");
+  });
+
+  it("tells the ledger THAT a title was dropped, never what it said", async () => {
+    // Same rule and same shape as `lostReasonRecorded` on lead.stage_changed. A
+    // title names the counterparty and a lead can be about a human being, so
+    // the words are sometimes personal data and this log cannot be erased —
+    // EVENT-CONTRACT §3.4. `findPiiKey` denies KEYS and `title` is not one, so
+    // nothing but this rule would have stopped the words going in.
+    const { service, events } = setup();
+    await service.capture(
+      capture({ kind: "person", name: "Priya Menon", title: "FY26 return" }),
+      ACTOR,
+    );
+    const before = events.recorded.length;
+    const second = await service.capture(
+      capture({ kind: "person", name: "Priya Menon", title: "Priya Menon — capital gains" }),
+      ACTOR,
+    );
+
+    const merged = events.recorded.slice(before).at(-1);
+    expect(merged?.verb).toBe("lead.merged");
+    expect(merged?.payload["titleDiscarded"]).toBe(true);
+    expect(second.discardedTitle).toBe("Priya Menon — capital gains");
+    expect(JSON.stringify(events.recorded)).not.toContain("capital gains");
+  });
+
+  it("records the machine fact as false when the merge lost nothing", async () => {
+    // The boolean is the only record of how often the one-open-lead-per-party
+    // rule costs a DISTINCT piece of work rather than absorbing a duplicate
+    // submission, so it has to be able to say no.
+    const { service, events } = setup();
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    const before = events.recorded.length;
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+
+    expect(events.recorded.slice(before).at(-1)?.payload["titleDiscarded"]).toBe(false);
+  });
 });
 
 describe("a lost deal says why — G3.1's second acceptance", () => {

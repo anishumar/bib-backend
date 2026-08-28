@@ -1,5 +1,6 @@
-// The service catalogue's body (G2.1 / G2.2 / G2.3) — the eleven fields the old
-// services master carried and the first pass dropped.
+// The service catalogue's body (G2.1 / G2.2 / G2.3) — the TEN fields the old
+// services master carried and the first pass dropped. Ten, not the eleven
+// 9ca823f's subject claims: see the count argued on `ServiceBody`.
 //
 // Three things are being proven here, and they are the reasons the fields were
 // worth restoring rather than the fields themselves:

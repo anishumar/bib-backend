@@ -112,6 +112,23 @@ const CaptureResultSchema = z
     matchedExistingParty: z.boolean().openapi({
       description: "True when the prospect was already in the firm's records.",
     }),
+    // The one field this endpoint REQUIRES on every capture and then, on the
+    // merge path, ignores. Answering 200/merged while silently dropping the
+    // caller's words is the discard that had nothing anywhere saying it
+    // happened; this is that, said out loud, to the only party who can act on
+    // it. Null when the titles match, so it means "words were lost" and never
+    // just "you merged".
+    discardedTitle: z.string().nullable().openapi({
+      description:
+        "The title THIS request sent, when the capture merged onto an existing opportunity " +
+        "and that opportunity keeps its own name. Null when nothing was discarded — a new " +
+        "opportunity was created, or the merge target already carries these exact words. " +
+        "A merge never renames a live opportunity: its title was somebody's decision and a " +
+        "duplicate submission is not grounds to undo it. If this is genuinely a second piece " +
+        "of work, the firm holds one live opportunity per client " +
+        "(`lead_one_open_per_party`), so close or convert the existing one first — or " +
+        "re-title it, if these words are the better name.",
+    }),
   })
   .openapi("LeadCaptureResult");
 
@@ -197,9 +214,10 @@ const captureRoute = createRoute({
   description:
     "A capture that names no owner is assigned by the firm's assignment strategy — round " +
     "robin over active staff. Send `ownerUserId: null` to keep it in the unassigned queue " +
-    "instead. A capture that MERGES onto an existing opportunity never reassigns it: the " +
-    "owner on a live lead was somebody's decision and a duplicate form submission is not " +
-    "grounds to undo it.",
+    "instead. A capture that MERGES onto an existing opportunity never reassigns or renames " +
+    "it: the owner and the title on a live lead were somebody's decision and a duplicate " +
+    "form submission is not grounds to undo either. The title the merged capture sent comes " +
+    "back on `discardedTitle` rather than being dropped in silence.",
   request: {
     body: { content: { "application/json": { schema: CaptureLeadBody } }, required: true },
   },
@@ -210,7 +228,9 @@ const captureRoute = createRoute({
     },
     200: {
       description:
-        "The prospect already had a live opportunity; this capture was appended to it and nothing was created",
+        "The prospect already had a live opportunity; this capture was appended to it and " +
+        "nothing was created. The opportunity keeps its own title — read `discardedTitle` " +
+        "to see whether the one you sent was dropped.",
       content: { "application/json": { schema: CaptureResultSchema } },
     },
     400: errorResponse(

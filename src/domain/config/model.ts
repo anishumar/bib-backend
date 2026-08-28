@@ -200,9 +200,13 @@ export const MAX_SLA_DAYS = 3650;
  * config version per client, and the discount would end up on the proposal
  * anyway.
  *
- * This is T2.5's deferral paying off as intended: G2.1–G2.3 restored eleven
- * fields the old services master carried, and every one of them arrives as a new
- * VERSION of each service rather than as a migration.
+ * This is T2.5's deferral paying off as intended: G2.1–G2.3 restored TEN fields
+ * the old services master carried, and every one of them arrives as a new
+ * VERSION of each service rather than as a migration. (9ca823f's subject says
+ * eleven and is immutable history; its eleventh added line is
+ * `StoredServiceBody`'s narrowed re-declaration of `billingBasis`, which is not
+ * a new field. Ten new beside the original six is the sixteen below, and the
+ * sixteen `SERVICE_FIELDS` the validator accepts.)
  *
  * EVERY FIELD BEYOND THE FIRST SIX IS OPTIONAL, and that is not indecision. A
  * published version is FROZEN, so a field made required would strand every

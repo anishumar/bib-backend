@@ -1,6 +1,8 @@
 # Migrations
 
-`NNNN_snake_case.{up,down}.sql` — 4-digit, monotonic. Every `up` has a `down`.
+`NNNN_snake_case.{up,down}.sql` — 4-digit, and each developer's own numbers ascend. Every
+`up` has a `down`. The number is NOT contiguous and is NOT the order the file is applied
+in; both of those are stated below rather than left to be discovered.
 
 ## Numbering is split between the two developers — so there ARE gaps
 
@@ -18,6 +20,45 @@ whatever is unapplied — it does not require contiguity — so a later `0018` s
 after `0040`. **That is only safe while the two ranges stay independent**, which is a real
 obligation on both of us: a migration must not depend on a lower number from the other
 developer's range. If one ever does, it belongs in the range of whoever it depends on.
+
+## The number is not the order — and the obligation that follows
+
+The line above understates it, so here is the whole of it. The migrator applies whatever
+is UNAPPLIED, in filename order. A database that already exists therefore applies each new
+file at the moment that file reaches it, and files reach different databases in different
+orders because they arrive on different branches at different times. So on an existing
+database a LOWER number routinely lands after a HIGHER one — and not only across the two
+ranges. It happens inside one developer's range too, whenever two branches merge in an
+order the numbers do not agree with.
+
+That has already happened here. The local dev database applied `0035`, `0036`, `0030`,
+`0040` — in that order — while a database created from zero today applies `0030`, `0035`,
+`0036`, `0040`. Same files, same migrator, two different orders, and both are correct.
+
+**So a migration must be independent of every migration it does not explicitly depend on,
+because it may be applied before OR after any of them.** Concretely: depend only on
+numbers BELOW yours that you know are already there, never on one that merely happens to
+have run first on your laptop; do not assume the state another in-flight migration leaves
+behind; and if you need one, take a number above it — a dependency is what the ordering
+guarantee is FOR, and the only way to state one is the number.
+
+Worth checking rather than trusting, and cheap:
+
+```bash
+psql -d postgres -c "DROP DATABASE IF EXISTS bib_order_audit" -c "CREATE DATABASE bib_order_audit"
+# a copy of .env with BOTH BIB_DATABASE_URL and BIB_APP_DATABASE_URL repointed at it
+set -a; . /tmp/env.audit; set +a; npm run migrate
+pg_dump --schema-only -d bib             | grep -v '^\\restrict\|^\\unrestrict' > /tmp/dev.sql
+pg_dump --schema-only -d bib_order_audit | grep -v '^\\restrict\|^\\unrestrict' > /tmp/fresh.sql
+diff /tmp/dev.sql /tmp/fresh.sql
+```
+
+Empty on 28 Aug 2026, at `0001`–`0018`, `0030`, `0035`, `0036`, `0040`: the two orders
+above produce byte-identical schemas, grants, owners, constraints, indexes, triggers and
+function bodies included. `--schema-only` because the dev database carries smoke data. A
+non-empty diff is not a patch — it means the schema depends on the order the files
+happened to arrive in, which is the one thing a migration system exists to prevent, and
+what to do about it is a decision.
 
 ## The rules (inherited from the Zaap standard — non-negotiable)
 

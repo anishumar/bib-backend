@@ -141,6 +141,35 @@ export interface CaptureResult {
   readonly merged: boolean;
   /** True when the prospect was already in the firm's records. */
   readonly matchedExistingParty: boolean;
+  /**
+   * The title this capture sent and the merge THREW AWAY — or null when nothing
+   * was thrown away.
+   *
+   * `title` is the only input this API demands on every capture and then, on the
+   * merge path, ignores. Someone types "Transfer pricing study", gets back a
+   * lead called "FY26 statutory audit", and until this field existed there was
+   * nothing anywhere in the response saying their words had been dropped or
+   * why. The merge itself is right — `lead_one_open_per_party` means a firm
+   * holds exactly one live opportunity per client, so appending is the only
+   * correct thing to do — so the fix is to make the loss VISIBLE, not to stop
+   * losing it. Only the caller can act on it: re-title the live lead, close it
+   * first, or recognise their own duplicate submission.
+   *
+   * NULL WHEN THE TITLES MATCH, not merely when nothing merged. If the second
+   * capture sent the words the lead already carries, nothing was lost and the
+   * caller's title IS the lead's title; reporting a discard there would make
+   * every honest duplicate submission look like data loss and teach callers to
+   * ignore the field. Non-null means exactly one thing: words were dropped.
+   *
+   * It sits beside the lead rather than on it because it was never stored and
+   * never will be — `lead.title` is the row, this is what the row refused.
+   *
+   * Only `title`. `source`, `notes` and `ownerUserId` are also not applied by a
+   * merge, but each of them is optional on the wire and the route already says
+   * the owner is never reassigned; this is the one the API insists on and then
+   * discards.
+   */
+  readonly discardedTitle: string | null;
 }
 
 export interface MoveStageInput {
@@ -225,6 +254,13 @@ export class LeadService {
       // duplicate form submission, its name is what gets thrown away here. That
       // is an argument about the index, not about this branch — with one open
       // lead per party, appending is the only correct thing to do.
+      //
+      // So it is thrown away OUT LOUD, in two places at once and deliberately
+      // not the same way in both. `discardedTitle` on the result gives the
+      // caller their own words back, because they are the only party who can do
+      // anything about it. The ledger gets the machine fact and not the words —
+      // see below.
+      const discardedTitle = title === open.title ? null : title;
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "lead.merged",
@@ -235,9 +271,29 @@ export class LeadService {
           capturedSource: source,
           matchedIdentifierTypes: this.typesAt(input, [...match.existingByIndex.keys()]),
           addedIdentifierTypes: added,
+          // WHETHER a title was dropped, never the title itself — the same
+          // shape as `lostReasonRecorded` on lead.stage_changed, for the same
+          // reason and by the same rule. A lead title names the counterparty,
+          // and a lead can be about a human being ("Priya Menon — personal
+          // tax"), so the words are sometimes personal data and the ledger
+          // cannot tell which times. EVENT-CONTRACT §3.4 refuses a person's
+          // name at any depth in any casing, and this log cannot be erased: put
+          // the words here and a DPDP erasure request forces the choice between
+          // breaking the law and breaking the audit trail. `findPiiKey` would
+          // NOT have stopped it — it denies KEYS and `title` is not one — which
+          // is exactly why the rule has to be kept by whoever writes the
+          // payload. lead.captured excludes the title for this reason already.
+          //
+          // The boolean is worth having on its own: it is the only record of
+          // how often a merge loses a DISTINCT piece of work rather than
+          // absorbing a duplicate form submission, which is the evidence
+          // anybody revisiting lead_one_open_per_party would have to go and
+          // reconstruct otherwise. The words themselves are in the response, to
+          // the one person who can act on them, and nowhere else.
+          titleDiscarded: discardedTitle !== null,
         },
       });
-      return { lead: open, merged: true, matchedExistingParty: true };
+      return { lead: open, merged: true, matchedExistingParty: true, discardedTitle };
     }
 
     const created = await this.deps.leads.create({
@@ -288,7 +344,13 @@ export class LeadService {
         identifierTypes: input.identifiers.map((i) => i.type),
       },
     });
-    return { lead, merged: false, matchedExistingParty: existingPartyId !== null };
+    // Nothing was discarded: this capture's title is on the lead it just made.
+    return {
+      lead,
+      merged: false,
+      matchedExistingParty: existingPartyId !== null,
+      discardedTitle: null,
+    };
   }
 
   /**
