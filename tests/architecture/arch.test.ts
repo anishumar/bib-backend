@@ -9,9 +9,15 @@ import { describe, expect, it } from "vitest";
 
 describe("architecture", () => {
   it("import boundaries hold (dependency-cruiser)", () => {
-    const bin = resolve("node_modules/.bin/depcruise");
+    // The package's own entry point rather than node_modules/.bin/depcruise:
+    // that shim is extensionless, which execFileSync cannot spawn on Windows
+    // (ENOENT), and its .cmd sibling needs a shell. Going through node is the
+    // one form that works on every platform without one.
+    const cli = resolve("node_modules/dependency-cruiser/bin/dependency-cruise.mjs");
     try {
-      execFileSync(bin, ["src", "--config", ".dependency-cruiser.cjs"], { stdio: "pipe" });
+      execFileSync(process.execPath, [cli, "src", "--config", ".dependency-cruiser.cjs"], {
+        stdio: "pipe",
+      });
     } catch (err) {
       const e = err as { stdout?: Buffer; stderr?: Buffer };
       const out = `${e.stdout?.toString() ?? ""}\n${e.stderr?.toString() ?? ""}`.trim();
