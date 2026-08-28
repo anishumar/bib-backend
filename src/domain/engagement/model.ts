@@ -115,6 +115,17 @@ export interface LetterLine {
   readonly id: string;
   readonly tenantId: string;
   readonly engagementLetterId: string;
+  /**
+   * WHOSE entity the work is delivered to — the other half of the line, and the
+   * one this model went four tasks without.
+   *
+   * An engagement is `service × ONE LEGAL ENTITY` (the firm's own "Per Company"
+   * rule), so vCFO for a group of four companies is four lines, not one. It is
+   * NOT the client: `EngagementLetter.partyId` is who is billed, this is who the
+   * work is done for, and the compliance calendar keys on the second because an
+   * entity owes GSTR-3B and a client does not.
+   */
+  readonly entityPartyId: string;
   /** The frozen catalogue version. The agreed price may differ from the quoted
    *  one — which is why the money is here — but the SERVICE is the same row. */
   readonly serviceVersionId: string;
@@ -141,7 +152,15 @@ export interface Engagement {
   readonly tenantId: string;
   readonly engagementLetterId: string;
   readonly engagementLetterLineId: string;
+  /** Who is BILLED — the client the letter was written to. */
   readonly partyId: string;
+  /**
+   * Who the work is DELIVERED TO, carried across from the line it fanned out
+   * from. Both, deliberately: invoicing (T3.4) reads the first, the compliance
+   * calendar (T3.2) reads the second, and collapsing them is what left
+   * `core.legal_entity` reachable from nothing downstream.
+   */
+  readonly entityPartyId: string;
   readonly status: EngagementStatus;
   readonly activatedAt: string | null;
   readonly endsOn: string | null;
@@ -173,8 +192,15 @@ export function mayActivate(
  * every signature ever taken.
  *
  * It commits to the TERMS, not to presentation: the money, the pinned service
- * and clause versions, the jurisdiction, the currency. A firm restyling its
- * letter template does not and must not change what the client agreed to.
+ * and clause versions, the entity each line is for, the jurisdiction, the
+ * currency. A firm restyling its letter template does not and must not change
+ * what the client agreed to.
+ *
+ * The ENTITY is in here because it is a term, and one of the most material: the
+ * same service for a different company of the same group is a different
+ * agreement at a different price. A signature that did not commit to it would
+ * leave the one dimension the delivery lane schedules against outside the thing
+ * the hash proves.
  */
 export function canonicalContent(input: {
   readonly letter: Pick<
@@ -183,7 +209,13 @@ export function canonicalContent(input: {
   >;
   readonly lines: readonly Pick<
     LetterLine,
-    "position" | "serviceVersionId" | "description" | "quantity" | "unitAmount" | "discountPercent"
+    | "position"
+    | "entityPartyId"
+    | "serviceVersionId"
+    | "description"
+    | "quantity"
+    | "unitAmount"
+    | "discountPercent"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
@@ -203,6 +235,7 @@ export function canonicalContent(input: {
       [
         "line",
         String(l.position),
+        l.entityPartyId,
         l.serviceVersionId,
         l.description,
         l.quantity,

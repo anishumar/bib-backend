@@ -113,6 +113,10 @@ export interface SendResult {
 export interface AddLineInput {
   readonly tenantId: string;
   readonly proposalId: string;
+  /** Which of the client's entities this line is for. OPTIONAL, unlike the
+   *  engagement letter's: a prospect may hold none yet, and Incorporation is a
+   *  line whose entity is its own output. */
+  readonly entityPartyId?: string | undefined;
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: string;
@@ -197,6 +201,7 @@ export class ProposalService {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       proposalId: proposal.id,
+      entityPartyId: input.entityPartyId ?? null,
       serviceVersionId: input.serviceVersionId,
       description: input.description,
       quantity: input.quantity,

@@ -83,6 +83,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       id: l.id,
       tenantId: l.tenantId,
       engagementLetterId: l.engagementLetterId,
+      entityPartyId: l.entityPartyId,
       serviceVersionId: l.serviceVersionId,
       description: l.description,
       position: live.length + 1,
@@ -164,6 +165,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         engagementLetterId: e.engagementLetterId,
         engagementLetterLineId: e.engagementLetterLineId,
         partyId: e.partyId,
+        entityPartyId: e.entityPartyId,
         status: e.status,
         activatedAt: e.activatedAt,
         endsOn: null,
@@ -213,7 +215,17 @@ export class FakeEngagementRepo implements EngagementRepository {
         id: letter.partyId,
         displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
       },
-      lines: lines.map((l) => ({ line: strip(l), service: null, net: net(l) })),
+      // The entity name resolves through the same map the client's does — the
+      // fake stands in for the join the Postgres adapter actually makes.
+      lines: lines.map((l) => ({
+        line: strip(l),
+        entity: {
+          id: l.entityPartyId,
+          displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
+        },
+        service: null,
+        net: net(l),
+      })),
       clauses: clauses.map((c) => {
         const body = readClauseBody(this.clauseBodies.get(c.clauseVersionId) ?? {});
         return { clause: c, key: c.clauseVersionId, version: 1, title: body.title, text: body.text };

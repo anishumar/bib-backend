@@ -69,6 +69,11 @@ const stamp = Date.now().toString(36);
 let tenantA = "";
 let tenantB = "";
 let partyA = "";
+/** Two of the CLIENT's own companies. An engagement is `service × one legal
+ *  entity`, so a letter covering both must fan out into engagements that differ
+ *  in exactly this field — the acceptance G0.1 exists for. */
+let entityA1 = "";
+let entityA2 = "";
 let gstV1 = "";
 /** The clause published, then superseded — the pin has to survive that. */
 let scopeV1 = "";
@@ -88,6 +93,16 @@ beforeAll(async () => {
 
   partyA = (
     await party.createOrganization({ tenantId: tenantA, legalName: "Acme Ltd" }, SYSTEM_ACTOR)
+  ).partyId;
+
+  entityA1 = (
+    await party.createOrganization({ tenantId: tenantA, legalName: "Acme Foods Ltd" }, SYSTEM_ACTOR)
+  ).partyId;
+  entityA2 = (
+    await party.createOrganization(
+      { tenantId: tenantA, legalName: "Acme Logistics Ltd" },
+      SYSTEM_ACTOR,
+    )
   ).partyId;
 
   const service1 = await config.define(
@@ -157,6 +172,7 @@ async function signedLetter(advance?: string): Promise<string> {
   await service.addLine({
     tenantId: tenantA,
     letterId: letter.id,
+    entityPartyId: entityA1,
     serviceVersionId: gstV1,
     description: "GST filing, 12 months",
     quantity: "12",
@@ -166,6 +182,7 @@ async function signedLetter(advance?: string): Promise<string> {
   await service.addLine({
     tenantId: tenantA,
     letterId: letter.id,
+    entityPartyId: entityA2,
     serviceVersionId: gstV1,
     description: "Annual return",
     quantity: "1",
@@ -233,6 +250,35 @@ describe("the fan-out", () => {
     expect(lineIds.size).toBe(2);
   });
 
+  it("carries the entity from the LINE, and the client from the letter", async () => {
+    // G0.1's acceptance. The two lines name two different companies of the same
+    // client; before this, every engagement got `letter.partyId` and the group's
+    // four companies were indistinguishable from each other on the one object
+    // the compliance calendar generates against.
+    const id = await signedLetter();
+    const engagements = await letters.listEngagements(tenantA, id);
+    expect(new Set(engagements.map((e) => e.entityPartyId))).toEqual(
+      new Set([entityA1, entityA2]),
+    );
+    // And the client is still on every one of them: invoicing needs who is
+    // billed, the calendar needs who the work is for, and both are stored.
+    expect(engagements.every((e) => e.partyId === partyA)).toBe(true);
+  });
+
+  it("the database refuses a letter line with no entity", async () => {
+    // NOT NULL in the schema rather than a check in the service, because a rule
+    // in a service is one an import, a backfill or an agent walks straight past.
+    const err = await withTenant(app, tenantA, (db) =>
+      db`
+        INSERT INTO crm.engagement_letter_line
+          (tenant_id, engagement_letter_id, service_version_id, description, position,
+           quantity, unit_amount, currency, discount_percent)
+        VALUES (${tenantA}, ${crypto.randomUUID()}, ${gstV1}, 'x', 1, 1, 1, 'INR', 0)
+      `,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23502"); // not_null_violation
+  });
+
   it("the database refuses a second engagement for the same line", async () => {
     // The acceptance as a constraint rather than a convention: fanning out
     // twice would double the work and the revenue.
@@ -242,8 +288,10 @@ describe("the fan-out", () => {
     const err = await withTenant(app, tenantA, (db) =>
       db`
         INSERT INTO crm.engagement
-          (tenant_id, engagement_letter_id, engagement_letter_line_id, party_id, status, activated_at)
-        VALUES (${tenantA}, ${id}, ${existing.engagementLetterLineId}, ${partyA}, 'active', now())
+          (tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
+           entity_party_id, status, activated_at)
+        VALUES (${tenantA}, ${id}, ${existing.engagementLetterLineId}, ${partyA},
+                ${entityA1}, 'active', now())
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23505"); // unique_violation

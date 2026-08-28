@@ -18,7 +18,7 @@
 # It prints the seeded logins at the end so you can carry on in the UI.
 # Verify the BiB backend end to end. Needs: the API on :8080, a migrated DB.
 set -u
-API=http://localhost:8080
+API=${API:-http://localhost:8080}
 KEY=local-dev-internal-key-not-for-any-real-environment
 H='content-type: application/json'
 A="authorization: Bearer $KEY"
@@ -230,6 +230,9 @@ chk "an empty proposal cannot be sent"     409 "$(code -b $J/partner.txt -XPOST 
 NOSUCH='{"serviceVersionId":"00000000-0000-0000-0000-0000000000ff","description":"x","unitAmount":"1"}'
 FLOATY='{"serviceVersionId":"'$SVCV1'","description":"x","unitAmount":1499.5}'
 LINE='{"serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"1200.00","discountPercent":"40"}'
+# The entity is OPTIONAL on a proposal and required on an engagement letter: a
+# prospect may hold no company yet, and Incorporation is a line whose entity is
+# its own output. This line deliberately names none.
 chk "a line must pin a real service"       404 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$NOSUCH")"
 chk "an amount given as a number"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$FLOATY")"
 chk "quote a line, 40% off"                201 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$LINE")"
@@ -310,14 +313,26 @@ AEV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/liability-ae | python3
 import sys, json
 print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
 
+# TWO COMPANIES OF THE SAME CLIENT. An engagement is `service x one legal
+# entity` — the firm's own "Per Company" rule — so this letter has to fan out
+# into two engagements that differ in exactly that field. Before G0.1 every
+# engagement carried the CLIENT and the group's companies were indistinguishable
+# on the one object the compliance calendar generates against.
+ENT1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+ENT2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Lakeview Logistics Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+
 # An advance is required, so the fee gate is live for this walk.
 ELDRAFT='{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - FY26 engagement","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true,"advanceAmount":"10000"}'
 EL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$ELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 chk "an advance with no amount is refused"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"x","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true}')"
 chk "an empty letter cannot go out"          409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
 
-ELLINE='{"serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"0"}'
+ELLINE='{"entityPartyId":"'$ENT1'","serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"0"}'
+ELLINE2='{"entityPartyId":"'$ENT2'","serviceVersionId":"'$SVCV1'","description":"GST monthly filing, Logistics","quantity":"12","unitAmount":"1500","discountPercent":"0"}'
+NOENT='{"serviceVersionId":"'$SVCV1'","description":"whose company?","quantity":"1","unitAmount":"1","discountPercent":"0"}'
+chk "a letter line must name an entity"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$NOENT")"
 chk "agree a service"                        201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
+chk "…and one for the sister company"      201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE2")"
 chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
 chk "a UAE clause on an Indian letter"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$AEV'"}')"
 chk "the right clause goes on"               204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}')"
@@ -325,7 +340,17 @@ chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOS
 
 SIGNED=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-001"}')
 chk "the client signs"                       signed "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["letter"]["status"])')"
-chk "…and one engagement per line appears" 1 "$(echo "$SIGNED" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["engagements"]))')"
+chk "…and one engagement per line appears" 2 "$(echo "$SIGNED" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["engagements"]))')"
+# G0.1: the entity comes from the LINE, the client from the LETTER, and both are
+# stored. Invoicing needs who is billed; the calendar needs who the work is for.
+chk "…each naming its own company"         ok "$(echo "$SIGNED" | python3 -c '
+import sys, json
+got = {e["entityPartyId"] for e in json.load(sys.stdin)["engagements"]}
+print("ok" if got == {"'$ENT1'", "'$ENT2'"} else "got %s" % sorted(got))')"
+chk "…and all billed to the client"        "$PID" "$(echo "$SIGNED" | python3 -c '
+import sys, json
+ids = {e["partyId"] for e in json.load(sys.stdin)["engagements"]}
+print(ids.pop() if len(ids) == 1 else "MIXED")')"
 chk "…held back by the advance"            pending_advance "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
 chk "a signed letter cannot be edited"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
 chk "…nor withdrawn"                       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/withdraw -H "$H")"
@@ -342,6 +367,12 @@ import sys, json
 d = json.load(sys.stdin)
 print("%s/%s/%s" % (d["engagements"][0]["status"], len(d["clauses"]), d["clauses"][0]["text"][:8]))')
 chk "the engagement is released, terms pinned" "active/1/The firm" "$ACTIVE"
+# A read model carries NAMES, not ids: this is exactly where a group client's
+# companies have to be told apart, so a column of uuids is what it must not be.
+NAMED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
+import sys, json
+print("|".join(sorted(l["entity"]["displayName"] for l in json.load(sys.stdin)["lines"])))')
+chk "…and the lines name their companies" "Lakeview Foods Private Limited|Lakeview Logistics Private Limited" "$NAMED"
 
 echo; echo "── 10. Firm administration — the roster, and revocation ─────────────"
 chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"

@@ -25,6 +25,10 @@ import {
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const PARTY = "00000000-0000-0000-0000-0000000000bb";
+// The client's own companies. An engagement is `service × one legal entity`, so
+// a letter covering both fans out into engagements that differ in exactly this.
+const ENTITY_A = "00000000-0000-0000-0000-0000000000b1";
+const ENTITY_B = "00000000-0000-0000-0000-0000000000b2";
 const USER = "00000000-0000-0000-0000-0000000000cc";
 const ACTOR = { type: "human" as const, id: USER };
 
@@ -84,6 +88,7 @@ async function completeTerms(s: ReturnType<typeof setup>, id: string): Promise<v
   await s.service.addLine({
     tenantId: TENANT,
     letterId: id,
+    entityPartyId: ENTITY_A,
     serviceVersionId: GST,
     description: "GST filing, 12 months",
     quantity: "12",
@@ -173,6 +178,7 @@ describe("the terms", () => {
       s.service.addLine({
         tenantId: TENANT,
         letterId: id,
+        entityPartyId: ENTITY_A,
         serviceVersionId: "00000000-0000-0000-0000-0000000000d9",
         description: "x",
         quantity: "1",
@@ -199,6 +205,7 @@ describe("sending", () => {
     await s.service.addLine({
       tenantId: TENANT,
       letterId: id,
+      entityPartyId: ENTITY_A,
       serviceVersionId: GST,
       description: "GST filing",
       quantity: "1",
@@ -224,9 +231,13 @@ describe("signature and fan-out", () => {
     const s = setup();
     const id = await draft(s);
     await completeTerms(s, id);
+    // A SECOND COMPANY of the same client, deliberately. The firm's own rule is
+    // "Per Company": vCFO for a group of four is four engagements, and the field
+    // that tells them apart is this one.
     await s.service.addLine({
       tenantId: TENANT,
       letterId: id,
+      entityPartyId: ENTITY_B,
       serviceVersionId: GST,
       description: "Annual return",
       quantity: "1",
@@ -244,6 +255,73 @@ describe("signature and fan-out", () => {
     expect(engagements.every((e) => e.status === "active")).toBe(true);
     // One spawn trigger per engagement — this is what T2.4's scheduler consumes.
     expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(2);
+  });
+
+  it("takes the entity from the LINE and the client from the letter", async () => {
+    // G0.1. Before this, every engagement was spawned with `letter.partyId` and
+    // the entity dimension did not exist anywhere in the commercial chain — so
+    // T3.2's calendar, which keys on an entity because an entity owes GSTR-3B
+    // and a client does not, had no join to generate against.
+    const s = setup();
+    const id = await draft(s);
+    await completeTerms(s, id); // ENTITY_A
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_B,
+      serviceVersionId: GST,
+      description: "Annual return",
+      quantity: "1",
+      unitAmount: "18000",
+      discountPercent: "0",
+    });
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign(
+      { tenantId: TENANT, letterId: id, signedByName: "Priya Menon" },
+      ACTOR,
+    );
+
+    expect(new Set(engagements.map((e) => e.entityPartyId))).toEqual(
+      new Set([ENTITY_A, ENTITY_B]),
+    );
+    // BOTH are kept: invoicing needs who is billed, the calendar needs who the
+    // work is delivered to.
+    expect(engagements.every((e) => e.partyId === PARTY)).toBe(true);
+  });
+
+  it("the signature commits to the entity — it is a term, not metadata", async () => {
+    // Same services, same money, same clauses, different company. If the entity
+    // were outside the canonical rendering, the hash would say these two
+    // agreements are identical, and the one dimension the delivery lane
+    // schedules against would sit outside what the signature proves.
+    const s = setup();
+    const forA = await draft(s);
+    await completeTerms(s, forA); // ENTITY_A
+    await s.service.send(TENANT, forA, ACTOR);
+    const signedA = await s.service.sign(
+      { tenantId: TENANT, letterId: forA, signedByName: "Priya" },
+      ACTOR,
+    );
+
+    const forB = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: forB,
+      entityPartyId: ENTITY_B, // the only difference
+      serviceVersionId: GST,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addClause(TENANT, forB, SCOPE_CLAUSE);
+    await s.service.send(TENANT, forB, ACTOR);
+    const signedB = await s.service.sign(
+      { tenantId: TENANT, letterId: forB, signedByName: "Priya" },
+      ACTOR,
+    );
+
+    expect(signedA.letter.signedContentHash).not.toBe(signedB.letter.signedContentHash);
   });
 
   it("records the method and the hash, and never the signatory's name", async () => {
@@ -297,6 +375,7 @@ describe("signature and fan-out", () => {
     await s.service.addLine({
       tenantId: TENANT,
       letterId: b,
+      entityPartyId: ENTITY_A,
       serviceVersionId: GST,
       description: "GST filing, 12 months",
       quantity: "12",

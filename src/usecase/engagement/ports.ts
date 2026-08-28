@@ -29,6 +29,10 @@ export interface NewLetterLine {
   readonly id: string;
   readonly tenantId: string;
   readonly engagementLetterId: string;
+  /** The entity this line's work is delivered to. Required, because signing
+   *  turns the line into an engagement and an engagement is
+   *  `service × one legal entity`. */
+  readonly entityPartyId: string;
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: Amount;
@@ -59,7 +63,11 @@ export interface NewEngagement {
   readonly tenantId: string;
   readonly engagementLetterId: string;
   readonly engagementLetterLineId: string;
+  /** Who is billed. */
   readonly partyId: string;
+  /** Who the work is for, taken from the LINE rather than the letter — that is
+   *  the whole point of G0.1. */
+  readonly entityPartyId: string;
   /** `active` when the letter needs no advance, `pending_advance` when it does.
    *  Decided by the domain's `mayActivate`, never by the adapter. */
   readonly status: EngagementStatus;
@@ -90,6 +98,15 @@ export interface LetterRecord {
 
 export interface LetterLineRecord {
   readonly line: LetterLine;
+  /**
+   * The entity by NAME, not just the id the line carries.
+   *
+   * The rule CLAUDE.md says has now been learnt five times: a screen that had to
+   * fetch something per row to render it means the join belongs in the query.
+   * A letter's lines are exactly where a group client's four companies have to
+   * be told apart, so a column of uuids is the one thing this must not be.
+   */
+  readonly entity: { readonly id: string; readonly displayName: string } | null;
   readonly service: {
     readonly key: string;
     readonly version: number;
