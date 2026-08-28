@@ -7,10 +7,14 @@
 # then walks the properties the product actually depends on: the provisioning
 # key, the session wall, the audience and role gates, the party model, the
 # effective-dated relationships, the configuration registry (a published
-# version is frozen; a firm cannot strand itself), the lead pipeline (a
-# duplicate capture merges rather than creating), firm administration (a
-# revoked membership stops the very next request), rate limiting, CORS, and
-# the audit trail.
+# version is frozen; a firm cannot strand itself), the catalogue's own words
+# (a Dept is demanded in the form it will be GROUPED BY; an SLA is read off the
+# version a document pinned), whose law a clause names (a code to compare and
+# the words to print, never one without the other), the lead pipeline (a
+# duplicate capture merges rather than creating; an opportunity has its own
+# name, and a closed one says why), whose desk an unclaimed lead lands on,
+# firm administration (a revoked membership stops the very next request),
+# rate limiting, CORS, and the audit trail.
 #
 # Run:  npm run dev   (in another terminal)
 #       npm run smoke
@@ -60,7 +64,7 @@ done
 echo "  (seeded firm ${T:0:8}… with partner, associate, client contact)"
 
 # Fail loudly and early if the seed logins did not take. The usual cause is this
-# script's own rate-limit section (section 9) from a run less than a minute ago:
+# script's own rate-limit section (section 17) from a run less than a minute ago:
 # the sign-in bucket is 10/minute per address, and seeding spends three of them.
 # Without this check every later assertion answers 401 and the output blames a
 # dozen unrelated things for one throttled login.
@@ -161,7 +165,156 @@ curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/role -H "$H" \
   -d '{"key":"rm","body":{"label":"Relationship manager","permissions":["party:read","config:read"]}}'
 chk "a firm can add a role of its own"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/role/rm/versions/1/publish -H "$H")"
 
-echo; echo "── 7. The lead pipeline — dedup before create ──────────────────────"
+echo; echo "── 7. The catalogue's own words — what the firm sells, in full ─────"
+# G2.1-G2.3. `ServiceBody` was six fields while the firm's own services master
+# carried seventeen, so revenue could not be grouped by Dept, a proposal could
+# not cite the firm's service code, and an engagement letter had no words to
+# assemble itself from. NO MIGRATION: a catalogue row is CONFIG, so the ten
+# fields arrive as a new VERSION of a service — which is the one thing the
+# registry's spine was built to make cheap.
+FULLSVC='{"key":"bookkeeping","body":{"name":"Monthly bookkeeping","ref":"A1","description":"Books written up monthly","category":"accounting","module":"FRC","group":"VCFO CONSOLE","jurisdictions":["IN"],"billingBasis":"retainer","recurrence":"monthly","slaDays":30,"listPrice":{"amount":"18000.00","currency":"INR"},"pricingNote":"Plus statutory fees at actuals","scope":"Maintain the books of account monthly.","clientObligations":"Records by the 5th of the following month.","volumeLimits":"Under 1,000 entries; under 8 bank accounts.","exclusions":"Statutory audit is not included."}}'
+chk "a service filed, scoped and priced"    201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$FULLSVC")"
+chk "…and it goes into force"               200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/bookkeeping/versions/1/publish -H "$H")"
+# The read is the whole point. A body is stored VERBATIM, so a field the write
+# accepts and the read cannot hand back is a field that does not exist, in the
+# one way that looks from the outside exactly like a field that does.
+ROUNDTRIP=$(curl -s -b $J/partner.txt $API/api/v1/config/service/bookkeeping | python3 -c '
+import sys, json
+want = {
+    "ref": "A1", "module": "FRC", "group": "VCFO CONSOLE",
+    "recurrence": "monthly", "slaDays": 30,
+    "pricingNote": "Plus statutory fees at actuals",
+    "scope": "Maintain the books of account monthly.",
+    "clientObligations": "Records by the 5th of the following month.",
+    "volumeLimits": "Under 1,000 entries; under 8 bank accounts.",
+    "exclusions": "Statutory audit is not included.",
+}
+b = next(v["body"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1)
+lost = sorted(f for f, v in want.items() if b.get(f) != v)
+print("%d of %d" % (len(want) - len(lost), len(want)) if not lost else "lost %s" % lost)')
+chk "…and every new field reads back"       "10 of 10" "$ROUNDTRIP"
+
+# The two reporting axes are demanded in CANONICAL form at the WRITE, because a
+# body is stored verbatim and the whole job of the field is to be GROUPED BY:
+# "frc" beside "FRC" is one Dept reported as two half-sized ones that both look
+# plausible, and a read-time fix comes long after the SQL has already split it.
+LOWMOD='{"key":"lowmod","body":{"name":"X","billingBasis":"fixed","module":"frc"}}'
+LOWGRP='{"key":"lowgrp","body":{"name":"X","billingBasis":"fixed","group":"Fincompliance"}}'
+chk "a Dept in lower case is refused"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$LOWMOD")"
+chk "…and a delivery team, the same way"    400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$LOWGRP")"
+# A refusal that says "invalid" teaches nobody the form, so it has to name the
+# field, the shape wanted, and what it actually got.
+SAYS=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$LOWMOD" | python3 -c '
+import sys, json
+m = json.load(sys.stdin)["error"]["message"]
+print("/".join(w for w in ("module", "Upper case", "frc") if w in m))')
+chk "…naming the field and the valid form"  "module/Upper case/frc" "$SAYS"
+
+# `recurrence` is how often the work comes round; `billingBasis` is what the
+# price is per. They vary independently — a monthly service is routinely billed
+# quarterly — so a billing basis offered as a recurrence is refused, not coerced.
+BADREC='{"key":"badrec","body":{"name":"X","billingBasis":"fixed","recurrence":"retainer"}}'
+chk "a recurrence that is a billing basis"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$BADREC")"
+
+# Every one of the ten is OPTIONAL, and that is load-bearing rather than
+# lenient: a published version is FROZEN, so a required field would strand every
+# version already published. gst-filing v1 above is one — quoted on a proposal,
+# uneditable, and with no honest value to invent for a field it never stated.
+BARE=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
+import sys, json
+new = ("ref", "module", "group", "recurrence", "slaDays", "pricingNote",
+       "scope", "clientObligations", "volumeLimits", "exclusions")
+b = next(v["body"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1)
+print("%d/%s" % (sum(1 for f in new if f in b), b["name"]))')
+chk "a version older than the fields reads" "0/GST monthly filing" "$BARE"
+
+# THE ONE T3.1 IS BLOCKED ON. A work item copies `slaDays` AT CREATION, off the
+# version the document PINNED, so a later catalogue revision cannot make
+# finished work retroactively late. Revise the SLA, then read it back through a
+# line that pinned the version before the revision.
+BKV2='{"body":{"name":"Monthly bookkeeping","billingBasis":"retainer","recurrence":"monthly","slaDays":90}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/service/bookkeeping/versions -H "$H" -d "$BKV2"
+chk "the firm revises the SLA to 90 days"   200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/bookkeeping/versions/2/publish -H "$H")"
+BKV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/bookkeeping | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+SLAORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Pinecrest Retail Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+SLADRAFT='{"partyId":"'$SLAORG'","title":"Pinecrest - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-06-01","validUntil":"2027-01-31"}'
+SLAPR=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals -H "$H" -d "$SLADRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+SLALINE='{"serviceVersionId":"'$BKV1'","description":"Monthly bookkeeping, 12 months","quantity":"12","unitAmount":"18000.00"}'
+chk "a line pins the version before it"     201 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d "$SLALINE")"
+PIN=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
+import sys, json
+s = json.load(sys.stdin)["lines"][0]["service"]
+print("%s %s" % (s["key"], s["version"]))')
+PINKEY=${PIN%% *}; PINVER=${PIN##* }
+PINNEDSLA=$(curl -s -b $J/partner.txt $API/api/v1/config/service/$PINKEY | python3 -c '
+import sys, json
+vs = json.load(sys.stdin)["versions"]
+pinned = next(v for v in vs if v["version"] == '"$PINVER"')
+live = next(v for v in vs if v["status"] == "published")
+print("%s/%s" % (pinned["body"].get("slaDays"), live["body"].get("slaDays")))')
+chk "…and reads the SLA promised then"      "30/90" "$PINNEDSLA"
+
+echo; echo "── 8. Whose law governs — a clause says it in two halves ───────────"
+# G1.8, the SCHEMA half. A clause could state its terms only in prose, so
+# "governed by the laws of India" on a letter issued by the UAE entity was a
+# sentence no machine could compare — and a human review let exactly that
+# through once, on a letter that reached a client. The code makes the term
+# comparable, the words make it printable, and neither does the other's job.
+#
+# The WIRING half — resolving the law from the ISSUING ENTITY and refusing a
+# mismatch — needs G1.2's issuing entity and is not built. Nothing here asserts
+# it; this section proves only that the two halves can be stated and stored.
+LAWCLAUSE='{"key":"governing-law-in","body":{"title":"Governing law and jurisdiction","text":"This engagement is governed by the laws of the Republic of India.","jurisdictions":["IN"],"governingLaw":{"jurisdiction":"IN","text":"the laws of the Republic of India"},"courts":{"jurisdiction":"IN","text":"the courts at Bengaluru"}}}'
+chk "a clause names its law and its courts" 201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$LAWCLAUSE")"
+chk "…and publishes"                        200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause/governing-law-in/versions/1/publish -H "$H")"
+TERMS=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/governing-law-in | python3 -c '
+import sys, json
+b = next(v["body"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1)
+print("%s %s/%s %s" % (b["governingLaw"]["jurisdiction"], b["governingLaw"]["text"],
+                       b["courts"]["jurisdiction"], b["courts"]["text"]))')
+chk "…and both halves read back"            "IN the laws of the Republic of India/IN the courts at Bengaluru" "$TERMS"
+
+# A HALF term is refused, in both directions. A code with no words prints
+# nothing where a law was supposed to be; words with no code are invisible to
+# the equality test the code exists for.
+HALFCODE='{"key":"half-code","body":{"title":"Governing law","text":"As stated.","governingLaw":{"jurisdiction":"IN"}}}'
+HALFWORD='{"key":"half-word","body":{"title":"Jurisdiction","text":"As stated.","courts":{"text":"the DIFC Courts, Dubai"}}}'
+chk "a code with no words is refused"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$HALFCODE")"
+chk "…and words with no code"               400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$HALFWORD")"
+
+# The code is demanded in canonical UPPER CASE at the write, for the same reason
+# the Dept is: a body is stored verbatim, so "in" is what a comparison gets.
+LOWJUR='{"key":"low-jur","body":{"title":"Governing law","text":"As stated.","governingLaw":{"jurisdiction":"in","text":"the laws of India"}}}'
+chk "a country code in lower case"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$LOWJUR")"
+
+# The other half of OPTIONAL, and the reason it has to be. Every clause
+# published before G1.8 states neither term, is FROZEN, and is PINNED by letters
+# already issued — so the accessor falls back rather than throwing and those
+# letters keep resolving. Proved where it would actually break: on a letter that
+# pins one of each and has to print both.
+PLAINCLAUSE='{"key":"confidentiality","body":{"title":"Confidentiality","text":"Each party keeps the other in confidence.","jurisdictions":[]}}'
+chk "a clause stating neither term"         201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$PLAINCLAUSE")"
+chk "…publishes just the same"              200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause/confidentiality/versions/1/publish -H "$H")"
+LAWV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/governing-law-in | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+PLAINV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/confidentiality | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+LAWORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Harbour Ridge Advisory Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+LAWELDRAFT='{"partyId":"'$LAWORG'","jurisdiction":"IN","title":"Harbour Ridge - terms","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}'
+LAWEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$LAWELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "the clause with both terms goes on"    204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$LAWV'"}')"
+chk "…and so does the one with neither"     204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$PLAINV'"}')"
+PRINTED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$LAWEL | python3 -c '
+import sys, json
+cs = {c["key"]: c["text"] for c in json.load(sys.stdin)["clauses"]}
+print("%s/%s" % (cs["governing-law-in"][:8], cs["confidentiality"][:10]))')
+chk "…and the letter prints both"           "This eng/Each party" "$PRINTED"
+
+echo; echo "── 9. The lead pipeline — dedup before create ──────────────────────"
 PAN2=AAACL5678M
 LEAD1='{"source":"inbound","title":"FY26 statutory audit","kind":"organization","name":"Lakeview Foods Private Limited","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"email","value":"ops-'$S'@lakeview.example"}]}'
 curl -s -o $J/lead1.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD1"
@@ -177,10 +330,14 @@ import json
 a = json.load(open("'$J'/lead1.json")); b = json.load(open("'$J'/merge.json"))
 print("%s/%s" % (a["lead"]["id"] == b["lead"]["id"], b["merged"]))' 2>/dev/null || echo "?")
 chk "…it lands on the existing one"     "True/True" "$SAME"
+# OPEN is the three terminal stages' complement, and `abandoned` is one of them
+# since 0030 — the same list the assignment rotation counts desks with. Left as
+# ("converted","lost") it happens to answer 2 here only because nothing is
+# abandoned yet, which is a check that would go quietly wrong the day one is.
 ONE=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
 import sys, json
 leads = json.load(sys.stdin)["leads"]
-print(len([r for r in leads if r["lead"]["stage"] not in ("converted","lost")]))')
+print(len([r for r in leads if r["lead"]["stage"] not in ("converted","lost","abandoned")]))')
 chk "two captures, two open leads"      2 "$ONE"
 # The pipeline read names its prospect rather than handing a screen a uuid.
 NAMED=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
@@ -204,7 +361,160 @@ import sys, json
 for r in reversed(json.load(sys.stdin)["events"]):
     print("    %-24s %s" % (r["event"]["verb"], json.dumps(r["event"]["payload"])[:64]))'
 
-echo; echo "── 8. Proposals — quoted from the catalogue, and the discount gate ─"
+echo; echo "── 10. A lead has a name, and a closed one says why ────────────────"
+# G3.1. Before `title`, every pipeline row rendered the CLIENT's name, so a firm
+# quoting one client for two things saw the same row twice with nothing to tell
+# them apart.
+#
+# HOW MANY OPPORTUNITIES ONE CLIENT MAY HAVE AT ONCE: exactly one, and that is
+# the schema's answer rather than a limitation of this test.
+# `lead_one_open_per_party` is a UNIQUE index over the OPEN stages, and the
+# capture path enforces the same rule earlier and more kindly by MERGING — which
+# section 9 proves. So a client's second opportunity is a second ROW only once
+# the first has closed, and Lakeview's audit converted up there, which makes its
+# transfer pricing study a real one.
+LKV=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["partyId"])')
+SECOND='{"source":"referral","title":"FY27 transfer pricing study","kind":"organization","name":"Lakeview Foods Private Limited","identifiers":[{"type":"pan","value":"'$PAN2'"}]}'
+chk "a second opportunity, once one closed" 201 \
+  "$(curl -s -o $J/second.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$SECOND")"
+chk "…on the party the firm already had"    "True/False" "$(python3 -c '
+import json
+d = json.load(open("'$J'/second.json"))
+print("%s/%s" % (d["matchedExistingParty"], d["merged"]))')"
+# THE ACCEPTANCE LINE: one client, two opportunities, told apart on the list by
+# what each one is FOR — not by a uuid and not by the client name twice over.
+BOTH=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
+import sys, json
+rs = [r for r in json.load(sys.stdin)["leads"] if r["lead"]["partyId"] == "'$LKV'"]
+print("%d/%d/%d" % (len(rs), len({r["party"]["displayName"] for r in rs}),
+                    len({r["lead"]["title"] for r in rs})))')
+chk "…one client, one name, two titles"     "2/1/2" "$BOTH"
+
+# A title of nothing is the blank row the column was added to prevent, and
+# whitespace satisfies both NOT NULL and the wire's `min(1)` — so the refusal
+# has to come from the RULE. The reason code is checked for exactly that: a 400
+# alone could have been the shape validator agreeing by accident.
+BLANK='{"source":"inbound","title":"   ","kind":"organization","name":"Nameless Ventures Private Limited","identifiers":[{"type":"email","value":"hello-'$S'@nameless.example"}]}'
+chk "a title of nothing but spaces"         400 \
+  "$(curl -s -o $J/blank.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$BLANK")"
+chk "…refused by the rule, not the shape"   BLANK_TITLE \
+  "$(python3 -c 'import json;print(json.load(open("'$J'/blank.json"))["error"]["reason"])')"
+
+# `abandoned` is NOT a synonym for `lost`, and that is the whole point of it: a
+# prospect who went quiet is a FOLLOW-UP problem, one who chose a competitor is
+# a PRICING problem. They are the firm's two fixable failures and they have
+# opposite remedies, so a pipeline that collapses them can report a conversion
+# rate and never say which of the two to go and fix.
+# Both are captured straight into the unassigned queue on purpose (`ownerUserId`
+# null), so closing them says nothing about anybody's desk.
+QUIET='{"source":"inbound","title":"Payroll outsourcing","kind":"organization","name":"Silverbirch Interiors Private Limited","ownerUserId":null,"identifiers":[{"type":"email","value":"admin-'$S'@silverbirch.example"}]}'
+BEATEN='{"source":"outbound","title":"Internal audit retainer","kind":"organization","name":"Cobalt Mills Private Limited","ownerUserId":null,"identifiers":[{"type":"email","value":"cfo-'$S'@cobaltmills.example"}]}'
+QID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$QUIET" | python3 -c 'import sys,json;print(json.load(sys.stdin)["lead"]["id"])')
+BID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$BEATEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["lead"]["id"])')
+chk "an unwon close with no reason"         400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$BID/stage -H "$H" -d '{"stage":"lost"}')"
+GONEQUIET='{"stage":"abandoned","lostReason":"Three calls and two emails since June, no reply."}'
+UNDERCUT='{"stage":"lost","lostReason":"Went with their existing auditor, who quoted under us."}'
+chk "they went quiet — abandoned"           200 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$QID/stage -H "$H" -d "$GONEQUIET")"
+chk "they chose a competitor — lost"        200 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$BID/stage -H "$H" -d "$UNDERCUT")"
+APART=$(curl -s -b $J/partner.txt "$API/api/v1/leads?stage=abandoned" | python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["leads"]
+print("%d/%s" % (len(rs), rs[0]["lead"]["title"] if rs else "none"))')
+chk "…and the two are separate stages"      "1/Payroll outsourcing" "$APART"
+WHY=$(curl -s -b $J/partner.txt $API/api/v1/leads/$BID | python3 -c '
+import sys, json
+l = json.load(sys.stdin)["lead"]
+print("%s/%s/%s" % (l["stage"], l["closedAt"] is not None, l["lostReason"][:15]))')
+chk "…in the closer's own words, read back" "lost/True/Went with their" "$WHY"
+
+# The other direction, and it is the one a CHECK constraint also holds
+# (`lead_lost_reason_scope_chk`): a reason on a lead that did not close unwon is
+# a sentence in a column nothing ever reads. The second Lakeview opportunity is
+# open, so it is the honest place to try it.
+LKVID=$(python3 -c 'import json;print(json.load(open("'$J'/second.json"))["lead"]["id"])')
+NOTLOST='{"stage":"qualified","lostReason":"they said we were expensive"}'
+chk "a reason on a lead that is not closed" 400 \
+  "$(curl -s -o $J/notapp.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads/$LKVID/stage -H "$H" -d "$NOTLOST")"
+chk "…only lost and abandoned take one"     LOST_REASON_NOT_APPLICABLE \
+  "$(python3 -c 'import json;print(json.load(open("'$J'/notapp.json"))["error"]["reason"])')"
+
+echo; echo "── 11. A lead with no owner lands on a desk ────────────────────────"
+# T2.1b. The rotation state is DERIVED, not stored: an unclaimed lead goes to
+# the active staff member with the FEWEST OPEN LEADS, ties broken by user id.
+# A pointer column would go stale the moment somebody joins or leaves — the
+# joiner waits a full lap, the leaver stalls the rotation — while a query cannot.
+#
+# Leads captured earlier in this script are already on desks and count toward
+# "fewest", so the expectation below is computed from the state we are actually
+# in rather than assumed to start at zero.
+PARTNERUID=$(cat $J/partner.id); ASSOCUID=$(cat $J/associate.id); CLIENTUID=$(cat $J/client.id)
+curl -s -o $J/desks-before.json -b $J/partner.txt "$API/api/v1/leads"
+for i in 1 2 3 4; do
+  ROT='{"source":"inbound","title":"Rotation check '$i'","kind":"organization","name":"Rotation Test '$i' Private Limited","identifiers":[{"type":"email","value":"desk'$i'-'$S'@rotation.example"}]}'
+  curl -s -o $J/rot$i.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$ROT"
+done
+curl -s -o $J/desks-after.json -b $J/partner.txt "$API/api/v1/leads"
+chk "a capture naming no owner gets a desk" yes "$(python3 -c '
+import json
+print("yes" if json.load(open("'$J'/rot1.json"))["lead"]["ownerUserId"] else "no")')"
+# WHICH RULE chose, not just who. "The rotation picked Anand" and "the partner
+# picked Anand" are different facts and only the first is evidence about whether
+# assignment is working at all.
+ROTID=$(python3 -c 'import json;print(json.load(open("'$J'/rot1.json"))["lead"]["id"])')
+RULE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/lead/$ROTID/events" | python3 -c '
+import sys, json
+e = next(r["event"] for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "lead.captured")
+print("%s/%s" % (e["payload"]["ownerAssignedBy"], e["payload"]["ownerUserId"] is not None))')
+chk "…and the ledger names the RULE"        "round_robin/True" "$RULE"
+
+# THE ACCEPTANCE LINE: four captures, and the firm's two active staff take two
+# each. The client contact is CLIENT_PORTAL and is not a candidate — a lead on a
+# desk that cannot reach the workspace is an opportunity nobody is working.
+python3 -c '
+import collections, json
+STAFF = ["'$PARTNERUID'", "'$ASSOCUID'"]
+def desks(path):
+    c = collections.Counter({u: 0 for u in STAFF})
+    for r in json.load(open(path))["leads"]:
+        if r["lead"]["stage"] in ("converted", "lost", "abandoned"): continue
+        if r["owner"]: c[r["owner"]["userId"]] += 1
+    return c
+before = desks("'$J'/desks-before.json")
+after = desks("'$J'/desks-after.json")
+# What the rule PROMISES from the desks as they actually stood: hand each of the
+# four to whichever desk is smallest at that moment, ties to the lower user id.
+want = dict(before)
+for _ in range(4):
+    want[min(STAFF, key=lambda u: (want[u], u))] += 1
+print(sorted(after[u] - before[u] for u in STAFF))
+print("as the rule says" if all(after[u] == want[u] for u in STAFF)
+      else "%s, wanted %s" % (dict(after), want))
+print(sum(1 for r in json.load(open("'$J'/desks-after.json"))["leads"]
+          if r["owner"] and r["owner"]["userId"] == "'$CLIENTUID'"))
+print("    desks, before and after: %s -> %s"
+      % ([before[u] for u in STAFF], [after[u] for u in STAFF]))' > $J/desks.txt
+chk "four captures, two to each desk"       "[2, 2]" "$(sed -n 1p $J/desks.txt)"
+chk "…each one to the emptiest desk then"   "as the rule says" "$(sed -n 2p $J/desks.txt)"
+chk "…and never to the client contact"      0 "$(sed -n 3p $J/desks.txt)"
+sed -n 4p $J/desks.txt
+
+# A rotation never overrules a person. Naming an owner at capture consults no
+# strategy at all, and the timeline says so — `requested` is the ABSENCE of a
+# policy, which is a materially different fact from the rotation happening to
+# pick the same colleague.
+PICKED='{"source":"referral","title":"Referral from the bank","kind":"organization","name":"Ridgeway Metals Private Limited","ownerUserId":"'$ASSOCUID'","identifiers":[{"type":"email","value":"finance-'$S'@ridgeway.example"}]}'
+curl -s -o $J/picked.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$PICKED"
+chk "a named owner keeps the lead"          yes "$(python3 -c '
+import json
+d = json.load(open("'$J'/picked.json"))
+print("yes" if d["lead"]["ownerUserId"] == "'$ASSOCUID'" else d["lead"]["ownerUserId"])')"
+PICKEDID=$(python3 -c 'import json;print(json.load(open("'$J'/picked.json"))["lead"]["id"])')
+chk "…and the ledger says a person chose"   requested "$(curl -s -b $J/partner.txt "$API/api/v1/objects/lead/$PICKEDID/events" | python3 -c '
+import sys, json
+e = next(r["event"] for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "lead.captured")
+print(e["payload"]["ownerAssignedBy"])')"
+
+echo; echo "── 12. Proposals — quoted from the catalogue, and the discount gate ─"
 # The catalogue version a line PINS: v1, which the firm has since superseded by
 # v2. A quote reopened later must still read v1's list price, not today's.
 SVCV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
@@ -296,7 +606,7 @@ curl -s -o /dev/null -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK"
 VIEWS=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["viewCount"])' 2>/dev/null || echo "?")
 chk "every open is counted"                2 "$VIEWS"
 
-echo; echo "── 9. Engagement letters — the document that creates obligations ───"
+echo; echo "── 13. Engagement letters — the document that creates obligations ──"
 # Terms come from the clause library, the registry's fourth kind. A clause is
 # PINNED, so a signed letter reads as what was agreed rather than as what the
 # library says today.
@@ -374,7 +684,7 @@ import sys, json
 print("|".join(sorted(l["entity"]["displayName"] for l in json.load(sys.stdin)["lines"])))')
 chk "…and the lines name their companies" "Lakeview Foods Private Limited|Lakeview Logistics Private Limited" "$NAMED"
 
-echo; echo "── 10. Firm administration — the roster, and revocation ─────────────"
+echo; echo "── 14. Firm administration — the roster, and revocation ────────────"
 chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"
 ROSTER=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
 import sys, json
@@ -410,7 +720,7 @@ for m in json.load(sys.stdin)["members"]:
 chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
 chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
 
-echo; echo "── 11. Seniority — the ladder, and who is on it ───────────────────"
+echo; echo "── 15. Seniority — the ladder, and who is on it ────────────────────"
 # Grades are a THIRD axis: role says what somebody may reach, grade says how
 # senior they are, and the firm's review rule ("Manager or above") compares the
 # rank. A firm gets its ladder at creation, so this is not an empty list.
@@ -482,7 +792,7 @@ chk "bring it back"                      200 "$(code -b $J/partner.txt -XPUT $AP
 # administrator can be taken off the ladder; they cannot be demoted.
 chk "the last admin CAN be un-graded"    200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/grade -H "$H" -d '{"gradeId":null}')"
 
-echo; echo "── 12. Archiving a party — hidden from pickers, never removed ──────"
+echo; echo "── 16. Archiving a party — hidden from pickers, never removed ──────"
 # G0.3. Parties are permanent: there is no deleted_at in `core` and no DELETE
 # route. Archiving means "keep this out of the pickers", and the asymmetry
 # below IS the design — the LIST hides an archived party while reading ONE by
@@ -509,18 +819,18 @@ chk "a party a lead points at cannot be archived" 409 "$REFCODE"
 chk "…and the refusal names what refers to it" "yes" \
   "$(python3 -c 'import json;print("yes" if "lead" in json.dumps(json.load(open("'$J'/refused.json"))) else "no")')"
 
-echo; echo "── 13. Rate limiting ───────────────────────────────────────────────"
+echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 14. CORS — the frontend is a separate origin ────────────────────"
+echo; echo "── 18. CORS — the frontend is a separate origin ────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 15. The audit trail, as recorded ────────────────────────────────"
+echo; echo "── 19. The audit trail, as recorded ────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for r in reversed(json.load(sys.stdin)["events"]):
