@@ -28,6 +28,7 @@ import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypt
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
+import { PostgresRoundRobinAssignment } from "../infrastructure/postgres/lead-assignment";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
@@ -190,10 +191,16 @@ export function wire(cfg: Config, log: Logger): Wired {
   // PartyService satisfies it structurally, so neither module imports the other.
   // This line is where they meet, and where a drift in party's inputs would
   // fail — at compile time, in one place.
+  //
+  // ASSIGNMENT is the second seam on this service, and this line is the whole
+  // of the territory decision: round robin is what a firm gets today, and the
+  // day an axis is agreed with the client, a territory strategy is constructed
+  // HERE and no caller changes. That is what the port bought.
   const lead = new LeadService({
     leads: new PostgresLeadRepository(pools.app),
     prospects: party,
     staff: memberships,
+    assignment: new PostgresRoundRobinAssignment(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

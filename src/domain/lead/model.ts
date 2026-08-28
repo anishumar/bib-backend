@@ -201,3 +201,33 @@ export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
   if (isTerminalStage(from)) return false;
   return from !== to;
 }
+
+// ── Assignment ───────────────────────────────────────────────────────────────
+
+/**
+ * How a firm decides whose desk an unclaimed lead lands on.
+ *
+ * ONE member, and that is the honest state of it rather than a stub. Round
+ * robin is buildable against what the schema already holds — the roster and the
+ * pipeline. **Territory is not**, because nothing here has a territory concept
+ * and its axis (geography, industry, service line) has never been chosen with
+ * the client. Inventing one means a mapping table with a firm's data in it
+ * before anybody finds out it is the wrong axis, and a mapping table with rows
+ * in it is far harder to withdraw than an empty seam.
+ *
+ * It is a CLOSED TYPE with one member rather than a bare string so that the day
+ * an axis is agreed, `"territory"` is a one-line change here, the new strategy
+ * names itself on the timeline, and every report that groups leads by how they
+ * were assigned keeps working across the change.
+ */
+export type AssignmentPolicy = "round_robin";
+
+/**
+ * Where a lead's owner came from — recorded on `lead.captured`, so a firm can
+ * ask "did a person put this here, or did the rotation?" a year later.
+ *
+ * `requested` is not a policy; it is the absence of one. Somebody named the
+ * owner at capture and no strategy was consulted, which is a materially
+ * different fact from the rotation happening to pick the same person.
+ */
+export type OwnerSource = "requested" | AssignmentPolicy;

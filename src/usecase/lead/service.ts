@@ -22,7 +22,7 @@ import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
-import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import type { Lead, LeadSource, LeadStage, OwnerSource } from "../../domain/lead/model";
 import {
   DEDUP_IDENTIFIER_TYPES,
   LEAD_SOURCES,
@@ -52,6 +52,7 @@ import {
   SameStage,
 } from "../../domain/lead/errors";
 import type {
+  AssignmentStrategy,
   LeadRecord,
   LeadRepository,
   ProspectDirectory,
@@ -63,6 +64,10 @@ export interface Deps {
   /** The party module, behind this use case's own narrow interface. */
   readonly prospects: ProspectDirectory;
   readonly staff: StaffDirectory;
+  /** Whose desk an unclaimed lead lands on. A port, so the rule a firm actually
+   *  wants — rotation today, territory once its axis is chosen — is a wiring
+   *  change at the composition root rather than an edit to this file. */
+  readonly assignment: AssignmentStrategy;
   readonly ids: IdGen;
   /** For the identifier's valid-from date. Time is a port here for the same
    *  reason it is in identity: a test must be able to fix "today". */
@@ -102,7 +107,26 @@ export interface CaptureLeadInput {
   readonly tradeName?: string | undefined;
   readonly industry?: string | undefined;
   readonly website?: string | undefined;
-  readonly ownerUserId?: string | undefined;
+  /**
+   * Whose desk to put it on. THREE meanings, and they are genuinely different
+   * instructions rather than two spellings of one:
+   *
+   *   absent  — nobody was named, so the firm's assignment strategy chooses.
+   *             This is the everyday web-form capture, and the case the
+   *             acceptance is about: leads arriving with no owner distribute
+   *             evenly instead of piling up in a queue nobody watches.
+   *   null    — an explicit instruction to leave it in the UNASSIGNED QUEUE.
+   *             Triage-first firms work that way, and 0007 called that queue a
+   *             real and useful state; auto-assigning unconditionally would
+   *             quietly abolish it.
+   *   a uuid  — that person, checked as active staff here. No strategy runs: a
+   *             human made the decision and a rotation does not overrule one.
+   *
+   * The same null-vs-absent distinction `AssignOwnerInput` already draws, for
+   * the same reason — one spelling per meaning keeps the generated client
+   * honest.
+   */
+  readonly ownerUserId?: string | null | undefined;
   readonly notes?: string | undefined;
 }
 
@@ -168,8 +192,12 @@ export class LeadService {
     if (!input.identifiers.some((i) => isDedupIdentifier(i.type))) {
       throw new NoContactDetail(DEDUP_IDENTIFIER_TYPES);
     }
-    const ownerUserId = input.ownerUserId ?? null;
-    if (ownerUserId !== null) await this.requireStaff(input.tenantId, ownerUserId);
+    // `undefined` and `null` part company here and stay parted for the rest of
+    // the method: one asks the strategy to choose, the other says do not.
+    const requestedOwner = input.ownerUserId;
+    if (requestedOwner !== undefined && requestedOwner !== null) {
+      await this.requireStaff(input.tenantId, requestedOwner);
+    }
 
     const match = await this.resolve(input.tenantId, input.identifiers);
     if (isAmbiguous(match)) throw new AmbiguousMatch(match.parties);
@@ -212,15 +240,25 @@ export class LeadService {
       return { lead: open, merged: true, matchedExistingParty: true };
     }
 
-    const lead = await this.deps.leads.create({
+    const created = await this.deps.leads.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       title,
       partyId,
       source,
-      ownerUserId,
+      ownerUserId: requestedOwner ?? null,
       notes: input.notes ?? null,
     });
+
+    // ASSIGNMENT, and only when nobody named an owner. It runs AFTER the insert
+    // rather than before it because the strategy has to record its own choice
+    // (see AssignmentStrategy): it cannot claim a desk for a row that does not
+    // exist yet. The cost is that a lead exists unowned for the width of one
+    // statement; the alternative — choose, then write in a second transaction —
+    // is the race the port exists to close.
+    const lead =
+      requestedOwner === undefined ? await this.deps.assignment.assign(created) : created;
+    const ownerAssignedBy = this.ownerSource(requestedOwner, lead);
     // The owner is part of this event rather than a second `lead.owner_assigned`
     // beside it: one action by one person is one row in the timeline.
     //
@@ -240,7 +278,12 @@ export class LeadService {
       payload: {
         partyId,
         source,
-        ownerUserId,
+        ownerUserId: lead.ownerUserId,
+        // HOW the owner got there, never just who. "The rotation chose Anand"
+        // and "the partner chose Anand" are different facts, and only the first
+        // is evidence about whether assignment is working. A machine fact, so
+        // it belongs in a log that cannot be erased.
+        ownerAssignedBy,
         matchedExistingParty: existingPartyId !== null,
         identifierTypes: input.identifiers.map((i) => i.type),
       },
@@ -384,6 +427,19 @@ export class LeadService {
     const lead = await this.deps.leads.findById(tenantId, leadId);
     if (!lead) throw new LeadNotFound(leadId);
     return lead;
+  }
+
+  /**
+   * How the owner on this lead got there, for the timeline.
+   *
+   * Null is not "unknown" — it is the unassigned queue, which is what both a
+   * deliberate `null` at capture and a strategy that declined leave behind. A
+   * reader asking "was this assigned automatically?" gets yes-by-which-rule, no
+   * because a person said so, or no because nobody is on it.
+   */
+  private ownerSource(requested: string | null | undefined, lead: Lead): OwnerSource | null {
+    if (lead.ownerUserId === null) return null;
+    return requested === undefined ? this.deps.assignment.policy : "requested";
   }
 
   private async requireStaff(tenantId: string, userId: string): Promise<void> {

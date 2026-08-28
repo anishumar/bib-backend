@@ -143,7 +143,22 @@ const CaptureLeadBody = z
     tradeName: z.string().min(1).optional(),
     industry: z.string().min(1).optional(),
     website: z.string().min(1).optional(),
-    ownerUserId: z.string().uuid().optional(),
+    // THREE meanings on one field, and every one of them is an instruction
+    // somebody actually gives. Absent: nobody was named, so the firm's
+    // assignment strategy chooses — the everyday web-form capture. Null: leave
+    // it in the unassigned queue on purpose, for a firm that triages first. A
+    // uuid: that person, and no rotation second-guesses a human decision.
+    //
+    // Nullable AND optional, which is rare here and earns it: collapsing the
+    // first two would mean either abolishing the unassigned queue or never
+    // rotating at all.
+    ownerUserId: z.string().uuid().nullable().optional().openapi({
+      description:
+        "Whose desk to put it on. Omit the field to let the firm's assignment strategy " +
+        "choose (round robin over active staff today); send null to leave it in the " +
+        "unassigned queue deliberately; send a user id to assign it to that colleague, " +
+        "who must be active staff at this firm.",
+    }),
     notes: z.string().optional(),
   })
   .openapi("CaptureLeadRequest");
@@ -179,6 +194,12 @@ const captureRoute = createRoute({
   path: "/api/v1/leads",
   tags: ["lead"],
   summary: "Capture a lead, deduplicating on phone, PAN and email first",
+  description:
+    "A capture that names no owner is assigned by the firm's assignment strategy — round " +
+    "robin over active staff. Send `ownerUserId: null` to keep it in the unassigned queue " +
+    "instead. A capture that MERGES onto an existing opportunity never reassigns it: the " +
+    "owner on a live lead was somebody's decision and a duplicate form submission is not " +
+    "grounds to undo it.",
   request: {
     body: { content: { "application/json": { schema: CaptureLeadBody } }, required: true },
   },

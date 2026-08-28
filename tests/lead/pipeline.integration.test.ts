@@ -17,6 +17,7 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
+import { PostgresRoundRobinAssignment } from "../../src/infrastructure/postgres/lead-assignment";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
@@ -46,6 +47,11 @@ const service = new LeadService({
   leads,
   prospects: party,
   staff: new PostgresMembershipRepository(app),
+  // The real rotation. The tenants below hold no memberships at all, so it
+  // declines every capture here and these leads stay unassigned — which is what
+  // this file was always testing. T2.1b's own properties are in
+  // assignment.integration.test.ts, against a firm that has a roster.
+  assignment: new PostgresRoundRobinAssignment(app),
   ids: systemIds,
   clock: systemClock,
   events: ledger,

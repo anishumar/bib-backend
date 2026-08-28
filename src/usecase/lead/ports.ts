@@ -10,7 +10,7 @@ import type {
   PartyKind,
   Person,
 } from "../../domain/party/model";
-import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import type { AssignmentPolicy, Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 
 export interface NewLead {
   readonly id: string;
@@ -98,6 +98,51 @@ export interface LeadRepository {
  */
 export interface StaffDirectory {
   isActiveStaff(tenantId: string, userId: string): Promise<boolean>;
+}
+
+/**
+ * WHOSE DESK an unclaimed lead lands on — the seam a firm's assignment rule
+ * plugs into.
+ *
+ * ## Why the argument is the whole lead
+ *
+ * A strategy is handed the OPPORTUNITY, not a tenant id and a shrug. That is
+ * what lets a territory strategy drop in here without touching a single caller
+ * on the day its axis is finally chosen: whichever axis wins, it is reachable
+ * from what a `Lead` already carries. Geography and industry hang off
+ * `partyId`; service line and campaign hang off `source` or a column a later
+ * migration adds to the lead itself. So the seam commits to no axis and
+ * forecloses none — which is precisely the shape T2.1 deferred territory in
+ * order to keep.
+ *
+ * ## Why it RECORDS the owner rather than returning a name
+ *
+ * The obvious signature is `chooseOwner(lead): Promise<string | null>`, with
+ * the use case writing the answer afterwards. It is wrong, and subtly: any
+ * strategy that divides work between people decides against SHARED STATE — how
+ * loaded the other desks are, whose turn it is — and a decision applied outside
+ * the critical section it was taken in is not a decision, it is a guess that
+ * two simultaneous captures will make identically. Choosing and recording are
+ * one operation or the rotation is not fair, so they are one method.
+ *
+ * The use case still owns the TIMELINE: the strategy writes `owner_user_id` and
+ * nothing else, and `lead.captured` is recorded by the service, once, naming
+ * the policy that chose.
+ *
+ * ## What it returns
+ *
+ * The lead as it now stands. An owner on it means the strategy chose somebody;
+ * `ownerUserId === null` means it declined and the lead stays in the unassigned
+ * queue — a firm with nobody active to give it to, or a strategy with no rule
+ * covering this lead. **Declining is a real answer, not a failure**: a capture
+ * must not be lost because assignment had nobody to pick, and the unassigned
+ * queue is a state this pipeline has supported since migration 0007.
+ */
+export interface AssignmentStrategy {
+  /** Which rule this is, for the timeline. Named by the strategy so a second
+   *  one is self-describing the day it exists. */
+  readonly policy: AssignmentPolicy;
+  assign(lead: Lead): Promise<Lead>;
 }
 
 // ── The party seam ───────────────────────────────────────────────────────────

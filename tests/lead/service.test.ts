@@ -405,9 +405,12 @@ describe("moving through the pipeline", () => {
 });
 
 describe("whose desk it is on", () => {
+  /** An open lead that nobody owns. `ownerUserId: null` is the instruction, not
+   *  an omission: since T2.1b an OMITTED owner is the one the rotation fills
+   *  in, so a test about manual assignment has to ask for the queue by name. */
   async function openLead() {
     const s = setup();
-    const { lead } = await s.service.capture(capture(), ACTOR);
+    const { lead } = await s.service.capture(capture({ ownerUserId: null }), ACTOR);
     return { ...s, lead };
   }
 
@@ -490,7 +493,7 @@ describe("reading the pipeline", () => {
     // Present-and-null, not absent: "nobody is working this" is a real state a
     // board shows differently from "somebody is".
     const { service } = setup();
-    const captured = await service.capture(capture(), ACTOR);
+    const captured = await service.capture(capture({ ownerUserId: null }), ACTOR);
     const record = await service.get(TENANT, captured.lead.id);
     expect(record.owner).toBeNull();
   });
@@ -771,5 +774,191 @@ describe("the vocabulary the wire offers matches the domain's", () => {
     // good — the index that exists to stop duplicates blocking the re-approach.
     expect(TERMINAL_STAGES).toContain("abandoned");
     expect(isOpen("abandoned")).toBe(false);
+  });
+});
+
+// ── T2.1b · the desk an unclaimed lead lands on ──────────────────────────────
+//
+// The acceptance: "N leads captured with no owner distribute evenly." These
+// prove that, and the three instructions the owner field can carry, against the
+// in-memory rotation. The two properties a fake cannot have — that counting and
+// claiming are one atomic act, and that simultaneous captures cannot collide —
+// are in tests/lead/assignment.integration.test.ts against real Postgres, which
+// is the only place they are true.
+describe("assigning a lead nobody named an owner for", () => {
+  const DESKS = [
+    "00000000-0000-4000-8000-0000000000e1",
+    "00000000-0000-4000-8000-0000000000e2",
+    "00000000-0000-4000-8000-0000000000e3",
+  ];
+
+  function firmWithThreeStaff() {
+    const fakes = makeLeadFakes();
+    for (const userId of DESKS) fakes.staff.add(TENANT, userId);
+    return { ...fakes, service: new LeadService(fakes) };
+  }
+
+  /** A distinct prospect each time, so every capture starts a NEW lead rather
+   *  than merging onto the last one — the merge path assigns nobody. */
+  function nth(n: number) {
+    return capture({
+      name: `Prospect ${String(n)} Private Limited`,
+      identifiers: [{ type: "email" as const, value: `p${String(n)}@example.test` }],
+    });
+  }
+
+  /** `from` keeps every prospect distinct across calls — repeating one would
+   *  MERGE onto its existing lead and assign nobody, which is the merge rule
+   *  working, not the rotation failing. */
+  async function captureMany(
+    service: LeadService,
+    count: number,
+    from = 0,
+  ): Promise<string[]> {
+    const owners: string[] = [];
+    for (let n = from; n < from + count; n += 1) {
+      const { lead } = await service.capture(nth(n), ACTOR);
+      owners.push(lead.ownerUserId ?? "unassigned");
+    }
+    return owners;
+  }
+
+  it("distributes N leads evenly over the firm's active staff", async () => {
+    // THE ACCEPTANCE. Nine captures, three desks, three each — not "roughly",
+    // exactly, because the rule is deterministic and a rotation that is only
+    // approximately fair is one nobody can audit.
+    const { service } = firmWithThreeStaff();
+    const owners = await captureMany(service, 9);
+
+    const perDesk = DESKS.map((d) => owners.filter((o) => o === d).length);
+    expect(perDesk).toEqual([3, 3, 3]);
+  });
+
+  it("goes round, rather than filling one desk and moving on", async () => {
+    // Even totals could also be produced by AAA BBB CCC, which is not a
+    // rotation — it is a queue with a batch size, and the third colleague waits
+    // six leads for their first. The ORDER is the property.
+    const { service } = firmWithThreeStaff();
+    expect(await captureMany(service, 6)).toEqual([...DESKS, ...DESKS]);
+  });
+
+  it("gives the next lead to whoever a close has just freed up", async () => {
+    // The rotation is DERIVED from the pipeline rather than stored as a
+    // pointer, so it reflects what is actually on each desk. Close the first
+    // desk's lead and that desk is the emptiest again.
+    const { service, leads } = firmWithThreeStaff();
+    const first = await service.capture(nth(0), ACTOR);
+    await service.capture(nth(1), ACTOR);
+    await service.capture(nth(2), ACTOR);
+    expect(first.lead.ownerUserId).toBe(DESKS[0]);
+
+    await service.moveStage(
+      { tenantId: TENANT, leadId: first.lead.id, stage: "lost", lostReason: "went elsewhere" },
+      ACTOR,
+    );
+    const next = await service.capture(nth(3), ACTOR);
+    expect(next.lead.ownerUserId).toBe(DESKS[0]);
+    expect(leads.rows).toHaveLength(4);
+  });
+
+  it("picks somebody who joined this morning before anybody else", async () => {
+    // The self-healing property, and the one a stored pointer cannot have: a
+    // pointer knows nothing about a colleague who did not exist when it was
+    // last written, so a new joiner waits a full lap for their first lead.
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, DESKS[0] ?? "").add(TENANT, DESKS[1] ?? "");
+    const service = new LeadService(fakes);
+    await service.capture(nth(0), ACTOR);
+    await service.capture(nth(1), ACTOR);
+
+    fakes.staff.add(TENANT, DESKS[2] ?? "");
+    const joiner = await service.capture(nth(2), ACTOR);
+    expect(joiner.lead.ownerUserId).toBe(DESKS[2]);
+  });
+
+  it("stops giving work to somebody who has left", async () => {
+    // The other half of self-healing. `FakeStaffDirectory.remove` is the fake's
+    // stand-in for is_active going false; the real predicate is proved against
+    // Postgres, where the SAME notion also refuses them as a manual owner.
+    const { service, staff } = firmWithThreeStaff();
+    await captureMany(service, 3);
+    staff.remove(TENANT, DESKS[1] ?? "");
+
+    const owners = await captureMany(service, 2, 3);
+    expect(owners).not.toContain(DESKS[1]);
+  });
+
+  it("does not overrule a person who named an owner", async () => {
+    const { service } = firmWithThreeStaff();
+    const { lead } = await service.capture(nth(0), { ...ACTOR });
+    expect(lead.ownerUserId).toBe(DESKS[0]);
+
+    const named = await service.capture(
+      { ...nth(1), ownerUserId: DESKS[2] ?? "" },
+      ACTOR,
+    );
+    // Not the rotation's pick (which would still be DESKS[1]): a human decided.
+    expect(named.lead.ownerUserId).toBe(DESKS[2]);
+  });
+
+  it("leaves it in the unassigned queue when asked to, in so many words", async () => {
+    // null is an INSTRUCTION, absent is a delegation. Collapsing them would
+    // either abolish the triage queue or never rotate at all.
+    const { service } = firmWithThreeStaff();
+    const { lead } = await service.capture({ ...nth(0), ownerUserId: null }, ACTOR);
+    expect(lead.ownerUserId).toBeNull();
+  });
+
+  it("captures the lead anyway when the firm has nobody to give it to", async () => {
+    // Declining is a real answer. A capture lost because assignment had nobody
+    // to pick is strictly worse than a lead sitting in a queue somebody works.
+    const fakes = makeLeadFakes();
+    const { lead } = await new LeadService(fakes).capture(nth(0), ACTOR);
+    expect(lead.ownerUserId).toBeNull();
+  });
+
+  it("refuses a named owner who is not active staff, before the rotation ever runs", async () => {
+    const { service } = firmWithThreeStaff();
+    await expect(
+      service.capture({ ...nth(0), ownerUserId: OUTSIDER }, ACTOR),
+    ).rejects.toBeInstanceOf(OwnerNotStaff);
+  });
+
+  it("says on the timeline HOW the owner got there, not just who", async () => {
+    // "The rotation chose Anand" and "the partner chose Anand" are different
+    // facts, and only the first is evidence about whether assignment works.
+    const { service, events } = firmWithThreeStaff();
+    await service.capture(nth(0), ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBe("round_robin");
+    expect(events.recorded.at(-1)?.payload["ownerUserId"]).toBe(DESKS[0]);
+
+    await service.capture({ ...nth(1), ownerUserId: DESKS[1] ?? "" }, ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBe("requested");
+
+    await service.capture({ ...nth(2), ownerUserId: null }, ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBeNull();
+  });
+
+  it("records the rotation as part of the capture, not as a second action", async () => {
+    // One thing happened — somebody captured a lead — so the timeline gets one
+    // row. A `lead.owner_assigned` beside it would say a colleague reassigned
+    // something a moment after capturing it, which nobody did.
+    const { service, events } = firmWithThreeStaff();
+    await service.capture(nth(0), ACTOR);
+    expect(events.verbs().filter((v) => v.startsWith("lead."))).toEqual(["lead.captured"]);
+  });
+
+  it("never reassigns the live opportunity a duplicate capture lands on", async () => {
+    // The merge appends; it does not redecide. The owner on a live lead was
+    // somebody's decision and a second web-form submission is not grounds to
+    // undo it — and a rotation that fired on every duplicate would hand the
+    // same prospect to a different colleague each time the form was resubmitted.
+    const { service } = firmWithThreeStaff();
+    const first = await service.capture(nth(0), ACTOR);
+    const second = await service.capture(nth(0), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.lead.id).toBe(first.lead.id);
+    expect(second.lead.ownerUserId).toBe(first.lead.ownerUserId);
   });
 });

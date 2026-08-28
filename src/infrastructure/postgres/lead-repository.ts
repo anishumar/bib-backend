@@ -8,7 +8,11 @@ import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 import type { PartyKind } from "../../domain/party/model";
 import type { LeadRecord, LeadRepository, NewLead } from "../../usecase/lead/ports";
 
-interface LeadRow {
+/** The lead columns, as Postgres hands them over. Exported because the
+ *  assignment adapter (lead-assignment.ts) returns a lead from its own UPDATE
+ *  and must map it identically — two mappings of one table is how a column
+ *  added in a migration reaches one read and not the other. */
+export interface LeadRow {
   id: string;
   tenant_id: string;
   title: string;
@@ -48,7 +52,7 @@ function toRecord(r: LeadRecordRow): LeadRecord {
   };
 }
 
-function toLead(r: LeadRow): Lead {
+export function toLead(r: LeadRow): Lead {
   return {
     id: r.id,
     tenantId: r.tenant_id,
