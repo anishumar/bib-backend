@@ -15,6 +15,7 @@ export class TenancyError extends Error {
 
 export type TenancyErrorCode =
   | "INVALID_SLUG"
+  | "INVALID_CURRENCY"
   | "INVALID_AUDIENCE"
   | "SLUG_TAKEN"
   | "EMAIL_TAKEN"
@@ -28,6 +29,19 @@ export type TenancyErrorCode =
 export class InvalidSlug extends TenancyError {
   constructor(slug: string) {
     super("INVALID_SLUG", `tenant slug ${JSON.stringify(slug)} is not url-safe lowercase (2-40 chars)`);
+  }
+}
+export class InvalidCurrency extends TenancyError {
+  constructor(currency: string) {
+    // The valid set here is "any ISO 4217 alphabetic code", which is not a list
+    // worth printing — so the message names the SHAPE and two real examples
+    // rather than 180 codes nobody will read.
+    super(
+      "INVALID_CURRENCY",
+      `reporting currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, ` +
+        `like "INR" or "AED". It is what this firm's books are kept in, and it cannot be changed ` +
+        `afterwards, because every exchange rate stored later is struck against it.`,
+    );
   }
 }
 export class InvalidAudience extends TenancyError {

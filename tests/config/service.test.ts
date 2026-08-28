@@ -196,6 +196,74 @@ describe("body validation, per kind", () => {
     expect((err as Error).message).toContain("party:read");
   });
 
+  it("accepts a service with a list price, and one without", async () => {
+    // Optional is the whole point: an hourly or retainer service often has no
+    // list price until an engagement is scoped, and a firm that has not set one
+    // must be able to say so. Null means "we quote it"; it never means zero.
+    const { service } = setup();
+    await expect(
+      service.define(
+        {
+          tenantId: TENANT,
+          kind: "service",
+          key: "gst-filing",
+          body: { ...GST_FILING, listPrice: { amount: "25000.00", currency: "INR" } },
+        },
+        ACTOR,
+      ),
+    ).resolves.toBeDefined();
+    await expect(
+      service.define(
+        {
+          tenantId: TENANT,
+          kind: "service",
+          key: "advisory",
+          body: { name: "Advisory", billingBasis: "hourly", listPrice: null },
+        },
+        ACTOR,
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses an amount given as a number, and says why", async () => {
+    // A float cannot hold 1499.50 exactly. The error is invisible in one line
+    // and material in a total, so the string is not a formality.
+    const err = await setup()
+      .service.define(
+        {
+          tenantId: TENANT,
+          kind: "service",
+          key: "gst-filing",
+          body: { ...GST_FILING, listPrice: { amount: 1499.5, currency: "INR" } },
+        },
+        ACTOR,
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidBody);
+    expect((err as Error).message).toContain("listPrice.amount");
+    expect((err as Error).message).toContain("float");
+  });
+
+  it.each([
+    [{ amount: "25000" }, "currency"],
+    [{ currency: "INR" }, "amount"],
+    [{ amount: "-500", currency: "INR" }, "amount"],
+    [{ amount: "25000.000005", currency: "INR" }, "amount"],
+    [{ amount: "25000", currency: "rupees" }, "currency"],
+    [{ amount: "25000", currency: "INR", vat: "18" }, "vat"],
+  ])("refuses the half-stated price %j", async (listPrice, field) => {
+    // An amount with no currency is a number nobody can act on; a currency with
+    // no amount says nothing at all. Neither is a price.
+    const err = await setup()
+      .service.define(
+        { tenantId: TENANT, kind: "service", key: "gst-filing", body: { ...GST_FILING, listPrice } },
+        ACTOR,
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidBody);
+    expect((err as Error).message).toContain(field);
+  });
+
   it("accepts a service with only the fields a catalogue row needs", async () => {
     await expect(
       setup().service.define(

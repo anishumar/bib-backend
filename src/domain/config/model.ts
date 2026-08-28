@@ -22,6 +22,8 @@
 // CHECK on config.entry.kind is the other half of that agreement.
 import type { Permission } from "../authz/model";
 import { PERMISSIONS, isPermission } from "../authz/model";
+import type { Money } from "../money/model";
+import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 
 /** The configured things this pass knows about. `workflow_template` and
  *  `rule_pack` join them when T2.7 and T4.3 actually read them — designing
@@ -110,11 +112,20 @@ export const BILLING_BASES: readonly BillingBasis[] = [
 ];
 
 /**
- * A catalogue row: what the firm sells, not what it charged anyone.
+ * A catalogue row: what the firm sells, and what it ASKS for it — never what it
+ * charged any particular client.
  *
- * Deliberately thin. Price belongs to a quote, which is T2.2's to design
- * against a real proposal — and when it does, adding the field is a new
- * VERSION of each service, not a migration. That is what the spine is for.
+ * The list price is the one thing here that makes pinning worth having. A
+ * proposal line stores the `version.id` it was quoted from, so reopening a
+ * proposal sent nine months ago answers both halves of the most useful
+ * commercial question in the object: what our list price was then, and what we
+ * actually charged. The negotiated number lives on the proposal line, with its
+ * own currency, FX rate and discount — putting it here would mean publishing a
+ * config version per client, and the discount would end up on the proposal
+ * anyway.
+ *
+ * This is T2.5's deferral paying off as intended: the field arrives as a new
+ * VERSION of each service, not a migration.
  */
 export interface ServiceBody {
   readonly name: string;
@@ -123,6 +134,16 @@ export interface ServiceBody {
   /** ISO 3166 codes the service is offered in; empty means everywhere. */
   readonly jurisdictions: readonly string[];
   readonly billingBasis: BillingBasis;
+  /**
+   * What the firm asks for this service, per unit of its billing basis — per
+   * hour for `hourly`, per month for `retainer`, per item for `per_unit`, for
+   * the whole engagement for `fixed`.
+   *
+   * OPTIONAL, and that is not laziness: an hourly or retainer service often has
+   * no list price until an engagement is scoped, and a firm that has not set one
+   * must be able to say so. Null means "we quote it"; it never means zero.
+   */
+  readonly listPrice: Money | null;
 }
 
 /**
@@ -170,7 +191,15 @@ function validateRoleBody(body: Record<string, unknown>): string | null {
   return null;
 }
 
-const SERVICE_FIELDS = ["name", "description", "category", "jurisdictions", "billingBasis"];
+const SERVICE_FIELDS = [
+  "name",
+  "description",
+  "category",
+  "jurisdictions",
+  "billingBasis",
+  "listPrice",
+];
+const LIST_PRICE_FIELDS = ["amount", "currency"];
 
 function validateServiceBody(body: Record<string, unknown>): string | null {
   const unknown = unknownFields(body, SERVICE_FIELDS);
@@ -200,6 +229,48 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
   const basis = body["billingBasis"];
   if (typeof basis !== "string" || !(BILLING_BASES as readonly string[]).includes(basis)) {
     return `"billingBasis" must be one of ${BILLING_BASES.join(", ")}, got ${describe(basis)}`;
+  }
+  return validateListPrice(body["listPrice"]);
+}
+
+/**
+ * The list price, when there is one.
+ *
+ * Absent and null are both "we quote it" — a service the firm has not priced is
+ * an ordinary state, not an incomplete row. What is refused is a HALF price:
+ * an amount with no currency is a number nobody can act on, and a currency with
+ * no amount says nothing at all.
+ */
+function validateListPrice(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return (
+      `"listPrice" must be an object like { "amount": "25000.00", "currency": "INR" }, or null ` +
+      `for a service the firm quotes case by case. Got ${describe(raw)}`
+    );
+  }
+  const price = raw as Record<string, unknown>;
+  const unknown = unknownFields(price, LIST_PRICE_FIELDS);
+  if (unknown) return `"listPrice" has ${unknown}`;
+
+  const amount = price["amount"];
+  if (typeof amount !== "string" || !isAmount(amount)) {
+    // A string, not a number, and the message says why: a float cannot hold
+    // 1499.50 exactly, and the error is invisible in one line and material in a
+    // total.
+    return (
+      `"listPrice.amount" must be a non-negative decimal STRING with at most ` +
+      `${String(MAX_AMOUNT_SCALE)} decimal places — "25000", "1499.50" — never a number, because ` +
+      `a float cannot hold 1499.50 exactly. Got ${describe(amount)}`
+    );
+  }
+
+  const currency = price["currency"];
+  if (typeof currency !== "string" || !isCurrencyCode(normalizeCurrency(currency))) {
+    return (
+      `"listPrice.currency" must be an ISO 4217 code — three letters, like "INR" or "AED". ` +
+      `An amount without one is a number nobody can act on. Got ${describe(currency)}`
+    );
   }
   return null;
 }

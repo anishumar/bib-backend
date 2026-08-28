@@ -5,12 +5,21 @@
 import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
 import type { Actor } from "../../domain/ledger/model";
 import type { Permission } from "../../domain/authz/model";
+import type { CurrencyCode } from "../../domain/money/model";
 
 export interface NewTenant {
   readonly id: string;
   readonly slug: string;
   readonly name: string;
+  /** Normalised and validated by the service; the adapter stores it as given.
+   *  No default anywhere in the stack, the column included, so a firm cannot
+   *  come into existence without somebody having said what its books are in. */
+  readonly reportingCurrency: CurrencyCode;
 }
+
+// There is deliberately no updateReportingCurrency, here or anywhere above it.
+// See the field's note on `Tenant`: changing it silently invalidates every rate
+// already stored against it, so the absence is the design, not an omission.
 
 export interface TenantRepository {
   create(t: NewTenant): Promise<Tenant>;

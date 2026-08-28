@@ -36,8 +36,17 @@ chk "no key is refused"        401 "$(code -XPOST $API/internal/v1/tenants -H "$
 chk "wrong key is refused"     401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -H 'authorization: Bearer wrong' -d '{}')"
 chk "an undeclared route is refused" 403 "$(code -XPOST $API/internal/v1/nope -H "$H" -H "$A" -d '{}')"
 
-# Seed a firm: one partner, one associate, one client contact.
-T=$(curl -s -XPOST $API/internal/v1/tenants -H "$H" -H "$A" -d "{\"name\":\"Harbour Point\",\"slug\":\"demo-$S\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "a firm with no reporting currency is refused" 400 \
+  "$(code -XPOST $API/internal/v1/tenants -H "$H" -H "$A" -d "{\"name\":\"No Books\",\"slug\":\"nobooks-$S\"}")"
+
+# Seed a firm: one partner, one associate, one client contact. The reporting
+# currency is required and has no default anywhere — it is what every FX rate
+# stored later is struck against, so it cannot be corrected afterwards.
+TENANT=$(curl -s -XPOST $API/internal/v1/tenants -H "$H" -H "$A" \
+  -d "{\"name\":\"Harbour Point\",\"slug\":\"demo-$S\",\"reportingCurrency\":\"INR\"}")
+T=$(echo "$TENANT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "the firm keeps its reporting currency" INR \
+  "$(echo "$TENANT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["reportingCurrency"])')"
 for spec in "partner:STAFF:true" "associate:STAFF:false" "client:CLIENT_PORTAL:false"; do
   R=${spec%%:*}; rest=${spec#*:}; AUD=${rest%%:*}; VIS=${rest##*:}
   ROLE=$R; [ "$R" = "client" ] && ROLE=client_contact
@@ -99,22 +108,30 @@ done
 echo; echo "── 6. The configuration registry — services and roles are data ─────"
 chk "associate may read the catalogue"     200 "$(code -b $J/associate.txt $API/api/v1/config/service)"
 chk "associate may NOT change it"          403 "$(code -b $J/associate.txt -XPOST $API/api/v1/config/service -H "$H" -d '{"key":"sneaky","body":{"name":"X","billingBasis":"fixed"}}')"
-SVC='{"key":"gst-filing","body":{"name":"GST monthly filing","category":"indirect-tax","jurisdictions":["IN"],"billingBasis":"fixed"}}'
+SVC='{"key":"gst-filing","body":{"name":"GST monthly filing","category":"indirect-tax","jurisdictions":["IN"],"billingBasis":"fixed","listPrice":{"amount":"25000.00","currency":"INR"}}}'
 chk "partner defines a service"            201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$SVC")"
 chk "a misspelt field is refused"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d '{"key":"advisory","body":{"name":"A","billing":"fixed"}}')"
+chk "a price given as a number is refused" 400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d '{"key":"advisory","body":{"name":"A","billingBasis":"fixed","listPrice":{"amount":1499.5,"currency":"INR"}}}')"
 NOTLIVE=$(curl -s -b $J/partner.txt $API/api/v1/config/service | python3 -c 'import sys,json;print(json.load(sys.stdin)["entries"][0]["published"])')
 chk "defining does not put it in force"    None "$NOTLIVE"
 chk "publishing does"                      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/1/publish -H "$H")"
 chk "publishing it twice is refused"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/1/publish -H "$H")"
 
 # A published version is frozen: v2 supersedes it, and v1 keeps the body it had.
-curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions -H "$H" -d '{"body":{"name":"GST monthly filing (2026 scope)","billingBasis":"fixed"}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions -H "$H" -d '{"body":{"name":"GST monthly filing (2026 scope)","billingBasis":"fixed","listPrice":{"amount":"27500.00","currency":"INR"}}}'
 chk "a second version publishes"           200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/2/publish -H "$H")"
 FROZEN=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
 import sys, json
 vs = {v["version"]: v for v in json.load(sys.stdin)["versions"]}
 print("%s/%s" % (vs[1]["status"], vs[1]["body"]["name"] == "GST monthly filing"))')
 chk "the version it replaced is frozen"    "archived/True" "$FROZEN"
+# The half of that which money depends on: a proposal pinned to v1 must still be
+# able to say what our list price WAS, after the catalogue moved on.
+WASPRICE=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
+import sys, json
+vs = {v["version"]: v for v in json.load(sys.stdin)["versions"]}
+print("%s->%s" % (vs[1]["body"]["listPrice"]["amount"], vs[2]["body"]["listPrice"]["amount"]))')
+chk "and keeps the list price it had"      "25000.00->27500.00" "$WASPRICE"
 
 # The role registry is the same machinery — and it refuses to strand the firm.
 # Drafting a partner role with no tenant:admin is fine; PUBLISHING it is not,

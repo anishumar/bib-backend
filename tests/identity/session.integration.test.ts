@@ -63,8 +63,8 @@ let userId = "";
 
 beforeAll(async () => {
   const [tenant] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`identity-test-${stamp}`}, 'Identity Test') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`identity-test-${stamp}`}, 'Identity Test', 'INR') RETURNING id
   `;
   const [user] = await owner<{ id: string }[]>`
     INSERT INTO tenancy.user_account (email) VALUES (${email}) RETURNING id

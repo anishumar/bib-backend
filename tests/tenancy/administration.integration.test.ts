@@ -91,6 +91,7 @@ beforeAll(async () => {
   const tenant = await tenancy.createTenant({
     name: "Harbour Point",
     slug: `admin-test-${stamp}`,
+    reportingCurrency: "INR",
   });
   tenantId = tenant.id;
 
@@ -141,6 +142,7 @@ describe("the roster, against real rows", () => {
     const other = await tenancy.createTenant({
       name: "Somebody Else",
       slug: `admin-test-other-${stamp}`,
+      reportingCurrency: "INR",
     });
     expect(await tenancy.listMembers(other.id)).toEqual([]);
   });

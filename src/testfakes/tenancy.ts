@@ -23,7 +23,13 @@ import type {
 export class FakeTenantRepo implements TenantRepository {
   readonly rows: Tenant[] = [];
   create(t: NewTenant): Promise<Tenant> {
-    const row: Tenant = { id: t.id, slug: t.slug, name: t.name, status: "active" };
+    const row: Tenant = {
+      id: t.id,
+      slug: t.slug,
+      name: t.name,
+      status: "active",
+      reportingCurrency: t.reportingCurrency,
+    };
     this.rows.push(row);
     return Promise.resolve(row);
   }

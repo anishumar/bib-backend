@@ -193,6 +193,50 @@ open and are recorded above; neither blocks Phase 2.
   > **Order:** (1) reporting currency on `tenancy.tenant`; (2) list price into the service body;
   > (3) T2.2 proper; (4) the proposal screen in the same push. Steps 1–2 are about an hour and
   > de-risk the money modelling, which is the expensive part to get wrong.
+  >
+  > **Step 1 done (2026-08-28).** Migration **0009** puts `reporting_currency` on
+  > `tenancy.tenant` — added nullable, backfilled to `INR` for the firms that predate it, then
+  > `NOT NULL` with a `^[A-Z]{3}$` CHECK and **no DEFAULT at any layer**: not on the column, not
+  > in `createTenant`, not on the wire. A default would mean a firm provisioned without anybody
+  > saying what its books are in, which is the same silent-wrong outcome the design is arranged
+  > against — every rate stored later is struck against this code, so it cannot be corrected
+  > afterwards. There is deliberately no route or port method that updates it; changing a firm's
+  > reporting currency is a restatement of history, not an UPDATE.
+  >
+  > `domain/money/model.ts` opens with the currency code — normalise (trim + uppercase, so `inr`
+  > and `INR` cannot split a total in Postgres) and validate. A pattern rather than an enumerated
+  > ISO 4217 list: onboarding a firm that bills in a currency we have not seen must not be a
+  > deploy, and the check worth making — whether an FX source quotes the pair — belongs to an
+  > adapter at conversion time. FX rates land with step 3, against a real priced line.
+  >
+  > `tenant.created` carries the currency in its payload — a machine fact, not personal data —
+  > because the column only ever answers what the currency IS, and the question years from now
+  > is what it WAS on day one. The create-tenant handler now maps field by field rather than
+  > returning the aggregate, and `tests/api/openapi.test.ts` holds its response against the
+  > spec, so `Tenant` is the second route covered by that guard.
+  >
+  > Gate: `npm run check` 291 tests · `test:integration` 61 · `smoke` 61.
+  >
+  > **Step 2 done (2026-08-28).** `ServiceBody` gains `listPrice: Money | null` — **no
+  > migration**, which is the deferral in T2.5 paying off exactly as it was supposed to: the
+  > field arrives as a new VERSION of each service. Optional, because an hourly or retainer
+  > service often has no list price until an engagement is scoped, and a firm that has not set
+  > one must be able to say so; null means "we quote it", never zero. What the validator refuses
+  > is a HALF price — an amount with no currency is a number nobody can act on, a currency with
+  > no amount says nothing.
+  >
+  > **Amounts are decimal STRINGS** (`domain/money/model.ts`: `Amount`, `isAmount`, `Money`),
+  > and the validator says so in the error, because the reason is not obvious: a float cannot
+  > hold 1499.50 exactly, and the discrepancy is invisible in one line and material in a total.
+  > Scale caps at four places, not two — minor units run 0 (JPY) to 3 (KWD), and unit rates
+  > need a fourth. Non-negative, because this validates prices; a credit is a different thing
+  > with its own sign, and allowing "-500" here would make a discount representable twice.
+  >
+  > The smoke walk now publishes v1 at 25000.00, supersedes it at 27500.00, and asserts v1 still
+  > reads 25000.00 — the pinning story told in money, which is what a proposal reopened nine
+  > months later actually needs.
+  >
+  > Gate after step 2: `npm run check` 299 tests · `test:integration` 61 · `smoke` 63.
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 

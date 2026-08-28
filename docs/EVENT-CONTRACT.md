@@ -180,7 +180,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 
 | Verb | Object | Means |
 |---|---|---|
-| `tenant.created` | tenant | A firm was registered as a tenant. |
+| `tenant.created` | tenant | A firm was registered as a tenant. Payload carries `slug` and `reportingCurrency` — the currency its books are kept in, recorded here because it is the one money fact that can never be restated later. |
 | `membership.granted` | membership | A user was given a role in a tenant, for one audience. |
 | `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
 | `membership.restored` | membership | A deactivated membership was reinstated. |

@@ -28,6 +28,7 @@ const TenantSchema = z
     slug: z.string(),
     name: z.string(),
     status: z.enum(["active", "suspended"]),
+    reportingCurrency: z.string().length(3),
   })
   .openapi("Tenant");
 
@@ -72,8 +73,18 @@ const MembersResponse = z.object({ members: z.array(MemberSchema) }).openapi("Me
 
 // ── Request schemas (DTOs) ──────────────────────────────────────────────────
 
+// `reportingCurrency` is required, with no default here or at any layer below.
+// A firm provisioned without stating what its books are in would be given one
+// silently, and the reason this is a column rather than a config row is that it
+// can never be corrected afterwards — every FX rate stored later is struck
+// against it. The shape is checked properly in the domain; this only turns away
+// the obviously-wrong before it reaches a use case.
 const CreateTenantRequest = z
-  .object({ name: z.string().min(1), slug: z.string().min(1) })
+  .object({
+    name: z.string().min(1),
+    slug: z.string().min(1),
+    reportingCurrency: z.string().min(1),
+  })
   .openapi("CreateTenantRequest");
 
 const RegisterUserRequest = z
@@ -290,7 +301,19 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       ...input,
       provisionedBy: c.get("internalClient")?.name,
     });
-    return c.json(tenant, 201);
+    // Mapped field by field rather than returned whole. Forwarding the domain
+    // object is how /auth/me shipped two fields the spec never described for six
+    // tasks, and a frontend generated from that spec cannot see them.
+    return c.json(
+      {
+        id: tenant.id,
+        slug: tenant.slug,
+        name: tenant.name,
+        status: tenant.status,
+        reportingCurrency: tenant.reportingCurrency,
+      },
+      201,
+    );
   });
 
   app.openapi(registerUserRoute, async (c) => {

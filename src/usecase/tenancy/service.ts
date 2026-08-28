@@ -16,9 +16,11 @@ import {
   rosterAfter,
 } from "../../domain/tenancy/model";
 import { ADMIN_PERMISSION } from "../../domain/authz/model";
+import { isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
   EmailTaken,
   InvalidAudience,
+  InvalidCurrency,
   InvalidSlug,
   LastAdministrator,
   MembershipExists,
@@ -99,26 +101,51 @@ export class TenancyService {
   // be traced back to anything, and once more than one integration holds a key
   // that is the only way to answer who created a firm.
 
-  /** Register a firm as a tenant. Slug is validated and must be unique. */
+  /**
+   * Register a firm as a tenant. Slug is validated and must be unique.
+   *
+   * The reporting currency is REQUIRED and has no default at any layer — not on
+   * the wire, not here, not on the column. It is the one fact about a firm's
+   * money that cannot be corrected later without silently invalidating
+   * everything stored against it, so the only safe moment to insist on it is
+   * the one before the firm exists.
+   */
   async createTenant(
-    input: { name: string; slug: string; provisionedBy?: string | undefined },
+    input: {
+      name: string;
+      slug: string;
+      reportingCurrency: string;
+      provisionedBy?: string | undefined;
+    },
     actor: Actor = SYSTEM_ACTOR,
   ): Promise<Tenant> {
     if (!isValidSlug(input.slug)) throw new InvalidSlug(input.slug);
+    // Normalised before it is validated, and stored normalised: "inr" and "INR"
+    // are one currency to a person and two strings to Postgres.
+    const reportingCurrency = normalizeCurrency(input.reportingCurrency);
+    if (!isCurrencyCode(reportingCurrency)) throw new InvalidCurrency(input.reportingCurrency);
     const existing = await this.deps.tenants.findBySlug(input.slug);
     if (existing) throw new SlugTaken(input.slug);
     const tenant = await this.deps.tenants.create({
       id: this.deps.ids.newId(),
       slug: input.slug,
       name: input.name,
+      reportingCurrency,
     });
-    // A tenant's own creation is the first row in its own timeline.
+    // A tenant's own creation is the first row in its own timeline. The currency
+    // rides along because it is a machine fact that can never be restated: when
+    // a total looks wrong years from now, this event is the record of what the
+    // firm's books were denominated in on the first day.
     await this.deps.events.recordEvent({
       tenantId: tenant.id,
       verb: "tenant.created",
       objectId: tenant.id,
       actor,
-      payload: { slug: tenant.slug, ...byline(input.provisionedBy) },
+      payload: {
+        slug: tenant.slug,
+        reportingCurrency: tenant.reportingCurrency,
+        ...byline(input.provisionedBy),
+      },
     });
 
     // Then its roles, in the same call. Gate 3 reads the firm's own role rows

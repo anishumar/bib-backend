@@ -26,7 +26,7 @@ const ACTOR = { type: "human" as const, id: "00000000-0000-4000-8000-0000000000e
 async function firm() {
   const f = makeFakes();
   const service = new TenancyService(f);
-  const tenant = await service.createTenant({ name: "Harbour Point", slug: "harbour-point" });
+  const tenant = await service.createTenant({ name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR" });
   const owner = await service.ensureUser("partner@harbour.example", "Anita Rao");
   const ownerMembership = await service.addMember({
     tenantId: tenant.id,

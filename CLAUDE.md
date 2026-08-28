@@ -177,7 +177,17 @@ Two rules that came out of it, and both are now enforced by tests:
 
 ## Domain non-negotiables (compliance + money)
 
-- Money = amount + currency + FX-rate + rate-date. `numeric`, never float.
+- Money = amount + currency + FX-rate + rate-date. `numeric`, never float. The rate is stored
+  even when the currencies match (1.0, dated), so "did we convert this?" is never inferred.
+  **Amounts cross the wire and sit in JSON bodies as decimal STRINGS** ("1499.50"), because a
+  float cannot hold that value exactly and the error is invisible in one line and material in
+  a total. Only the database adds them up.
+- **A firm's reporting currency is a column on `tenancy.tenant`, not a config row** (0009).
+  Every rate the product stores is struck against it, so changing it later does not restate
+  history — it silently invalidates it, and a Publish button is the wrong affordance for that.
+  Required at creation with no default anywhere in the stack, and nothing updates it.
+  `domain/money/model.ts` holds the shared primitives; normalise a currency code before you
+  compare or store it.
 - Legal-deadline dates are jurisdiction-local, not UTC.
 - Every unique constraint is consciously scoped (state it in the migration comment).
 - Idempotency by derived id (`platform/ids.ts` `derivedId`) on external callbacks.

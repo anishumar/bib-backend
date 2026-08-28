@@ -4,6 +4,7 @@
 //
 // Identity lives above tenant: a UserAccount is global; a Membership is the
 // join that grants a user access to one tenant, in one audience, with one role.
+import type { CurrencyCode } from "../money/model";
 
 /** Which surface a membership grants access to. A product invariant, closed
  *  set — not the firm's to redefine (unlike role). */
@@ -20,6 +21,17 @@ export interface Tenant {
   readonly slug: string;
   readonly name: string;
   readonly status: "active" | "suspended";
+  /**
+   * What this firm's books are denominated in — the currency its pipeline,
+   * targets and revenue read in, whatever it happened to quote a client.
+   *
+   * Set at creation and never changed. Every FX rate the product stores is
+   * struck against this code, so changing it later does not restate history, it
+   * silently invalidates it: the numbers stay, the meaning moves, and nothing
+   * errors. That is why it is a column here rather than a row in the
+   * configuration registry, which is for the things a firm DOES change.
+   */
+  readonly reportingCurrency: CurrencyCode;
 }
 
 export interface UserAccount {

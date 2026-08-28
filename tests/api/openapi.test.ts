@@ -174,6 +174,27 @@ describe("the spec and the wire agree", () => {
     expect(sent).toEqual(documented);
   });
 
+  it("documents exactly the fields a created tenant sends", async () => {
+    // The second route to hold this line, and the reason the handler maps field
+    // by field instead of returning the domain object: `reportingCurrency` was
+    // added to the aggregate and would have reached the wire undocumented, which
+    // in a frontend generated from this spec means invisible.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      components: { schemas: { Tenant: { properties: Record<string, unknown> } } };
+    };
+    const documented = Object.keys(spec.components.schemas.Tenant.properties).sort();
+
+    const res = await app().request("/internal/v1/tenants", {
+      method: "POST",
+      headers: internal,
+      body: JSON.stringify({ name: "Acme", slug: "acme-books", reportingCurrency: "AED" }),
+    });
+    expect(res.status).toBe(201);
+    const sent = Object.keys((await res.json()) as Record<string, unknown>).sort();
+
+    expect(sent).toEqual(documented);
+  });
+
   it("tells the caller what it may do, so a screen need not guess", async () => {
     const me = await app().request("/api/v1/auth/me", {
       headers: { "x-user-id": "00000000-0000-0000-0000-000000000001" },
@@ -205,12 +226,32 @@ describe("happy path", () => {
     const res = await app().request("/internal/v1/tenants", {
       method: "POST",
       headers: internal,
-      body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
+      body: JSON.stringify({
+        name: "Harbour Point",
+        slug: "harbour-point",
+        reportingCurrency: "INR",
+      }),
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as { slug: string; status: string };
     expect(body.slug).toBe("harbour-point");
     expect(body.status).toBe("active");
+  });
+
+  it("refuses to create a firm that has not said what its books are in", async () => {
+    // No default on the wire, in the service, or on the column. A firm given a
+    // reporting currency it never chose is the failure this whole design is
+    // arranged against: every FX rate stored later is struck against it, so it
+    // cannot be corrected afterwards without invalidating them all.
+    const res = await app().request("/internal/v1/tenants", {
+      method: "POST",
+      headers: internal,
+      body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: { code: string; reason?: string } };
+    expect(body.error.code).toBe("VALIDATION");
+    expect(body.error.reason).toContain("reportingCurrency");
   });
 });
 

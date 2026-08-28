@@ -56,12 +56,12 @@ const SERVICE_V1 = {
 
 beforeAll(async () => {
   const [a] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`config-test-a-${stamp}`}, 'Config Test A') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`config-test-a-${stamp}`}, 'Config Test A', 'INR') RETURNING id
   `;
   const [b] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`config-test-b-${stamp}`}, 'Config Test B') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`config-test-b-${stamp}`}, 'Config Test B', 'INR') RETURNING id
   `;
   if (!a || !b) throw new Error("could not create the test tenants");
   tenantA = a.id;

@@ -69,12 +69,12 @@ function nextSuffix(): number {
 
 beforeAll(async () => {
   const [a] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`lead-test-a-${stamp}`}, 'Lead Test A') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`lead-test-a-${stamp}`}, 'Lead Test A', 'INR') RETURNING id
   `;
   const [b] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`lead-test-b-${stamp}`}, 'Lead Test B') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`lead-test-b-${stamp}`}, 'Lead Test B', 'INR') RETURNING id
   `;
   if (!a || !b) throw new Error("could not create the test tenants");
   tenantA = a.id;

@@ -255,7 +255,11 @@ describe("the /internal platform key", () => {
         "content-type": "application/json",
         ...(authorization === undefined ? {} : { authorization }),
       },
-      body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
+      body: JSON.stringify({
+        name: "Harbour Point",
+        slug: "harbour-point",
+        reportingCurrency: "INR",
+      }),
     });
     return res.status;
   }
@@ -526,6 +530,7 @@ describe("the /internal surface authorizes, not just authenticates", () => {
     const res = await call(KEY_TENANTS, "POST", "/internal/v1/tenants", {
       name: "Harbour Point",
       slug: "harbour-point",
+      reportingCurrency: "INR",
     });
     expect(res.status).toBe(201);
   });
@@ -546,6 +551,7 @@ describe("the /internal surface authorizes, not just authenticates", () => {
     const res = await call(KEY_PASSWORD, "POST", "/internal/v1/tenants", {
       name: "Harbour Point",
       slug: "harbour-point",
+      reportingCurrency: "INR",
     });
     expect(res.status).toBe(403);
   });
@@ -572,7 +578,11 @@ describe("the /internal surface authorizes, not just authenticates", () => {
     await app.request("/internal/v1/tenants", {
       method: "POST",
       headers: { authorization: `Bearer ${KEY_TENANTS}`, "content-type": "application/json" },
-      body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
+      body: JSON.stringify({
+        name: "Harbour Point",
+        slug: "harbour-point",
+        reportingCurrency: "INR",
+      }),
     });
     // The router under test wires its own fakes, so assert through the shape the
     // service records rather than reaching into them: covered end to end by the

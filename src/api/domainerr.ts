@@ -52,6 +52,7 @@ export function mapError(err: unknown): MappedError {
   if (err instanceof TenancyError) {
     switch (err.code) {
       case "INVALID_SLUG":
+      case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":

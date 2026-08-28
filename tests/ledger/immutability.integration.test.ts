@@ -34,12 +34,12 @@ let eventId = "";
 
 beforeAll(async () => {
   const [a] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`ledger-test-a-${stamp}`}, 'Ledger Test A') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`ledger-test-a-${stamp}`}, 'Ledger Test A', 'INR') RETURNING id
   `;
   const [b] = await owner<{ id: string }[]>`
-    INSERT INTO tenancy.tenant (slug, name)
-    VALUES (${`ledger-test-b-${stamp}`}, 'Ledger Test B') RETURNING id
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`ledger-test-b-${stamp}`}, 'Ledger Test B', 'INR') RETURNING id
   `;
   if (!a || !b) throw new Error("could not create the test tenants");
   tenantA = a.id;

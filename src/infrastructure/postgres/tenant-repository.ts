@@ -11,10 +11,17 @@ interface TenantRow {
   slug: string;
   name: string;
   status: "active" | "suspended";
+  reporting_currency: string;
 }
 
 function toTenant(r: TenantRow): Tenant {
-  return { id: r.id, slug: r.slug, name: r.name, status: r.status };
+  return {
+    id: r.id,
+    slug: r.slug,
+    name: r.name,
+    status: r.status,
+    reportingCurrency: r.reporting_currency,
+  };
 }
 
 export class PostgresTenantRepository implements TenantRepository {
@@ -22,9 +29,9 @@ export class PostgresTenantRepository implements TenantRepository {
 
   async create(t: NewTenant): Promise<Tenant> {
     const [row] = await this.app<TenantRow[]>`
-      INSERT INTO tenancy.tenant (id, slug, name)
-      VALUES (${t.id}, ${t.slug}, ${t.name})
-      RETURNING id, slug, name, status
+      INSERT INTO tenancy.tenant (id, slug, name, reporting_currency)
+      VALUES (${t.id}, ${t.slug}, ${t.name}, ${t.reportingCurrency})
+      RETURNING id, slug, name, status, reporting_currency
     `;
     if (!row) throw new Error("tenant insert returned no row");
     return toTenant(row);
@@ -32,14 +39,16 @@ export class PostgresTenantRepository implements TenantRepository {
 
   async findBySlug(slug: string): Promise<Tenant | null> {
     const [row] = await this.app<TenantRow[]>`
-      SELECT id, slug, name, status FROM tenancy.tenant WHERE slug = ${slug}
+      SELECT id, slug, name, status, reporting_currency
+      FROM tenancy.tenant WHERE slug = ${slug}
     `;
     return row ? toTenant(row) : null;
   }
 
   async findById(id: string): Promise<Tenant | null> {
     const [row] = await this.app<TenantRow[]>`
-      SELECT id, slug, name, status FROM tenancy.tenant WHERE id = ${id}
+      SELECT id, slug, name, status, reporting_currency
+      FROM tenancy.tenant WHERE id = ${id}
     `;
     return row ? toTenant(row) : null;
   }
