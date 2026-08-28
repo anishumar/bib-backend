@@ -1,0 +1,400 @@
+// Postgres adapter for the configuration registry.
+//
+// ONE class, FIVE ports, deliberately — the same pattern as the
+// users/memberships repositories serving both tenancy and identity.
+// `ConfigRepository` is the registry's own seam; `PermissionSource` is gate 3's;
+// `RoleDirectory` is what firm administration asks (which roles exist here, and
+// which of them can administer the place); `ServiceCatalogue` and
+// `PolicyDirectory` are what quoting asks (resolve this pin, and what is the
+// firm's discount limit right now). All five questions are config reads over the
+// same two tables. Splitting them would put five files' worth of "what published
+// means" over one pair of tables, and the day they disagreed, one of them would
+// be answering an authorization question wrongly.
+//
+// Every method runs under withTenant, so the RLS tenant wall applies to each
+// statement. timestamptz arrives as a Date and leaves as an ISO 8601 string —
+// the door where Postgres types become ours.
+import type { Db } from "../../db/pool";
+import { withTenant } from "../../db/tenant";
+import type { Permission } from "../../domain/authz/model";
+import type {
+  ConfigEntry,
+  ConfigKind,
+  ConfigVersion,
+  PublishedEntry,
+  VersionStatus,
+} from "../../domain/config/model";
+import {
+  DISCOUNT_POLICY_KEY,
+  readMaxDiscountPercent,
+  readRolePermissions,
+} from "../../domain/config/model";
+import type { PermissionSource } from "../../usecase/authz/ports";
+import type { RoleDirectory } from "../../usecase/tenancy/ports";
+import type {
+  ConfigRepository,
+  DefinedEntry,
+  NewEntry,
+  NewVersion,
+  PublishOutcome,
+  SeedRow,
+} from "../../usecase/config/ports";
+import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
+import type { Amount } from "../../domain/money/model";
+
+interface EntryRow {
+  id: string;
+  tenant_id: string;
+  kind: ConfigKind;
+  key: string;
+}
+
+interface VersionRow {
+  id: string;
+  tenant_id: string;
+  entry_id: string;
+  version: number;
+  status: VersionStatus;
+  body: Record<string, unknown>;
+  published_at: Date | null;
+  archived_at: Date | null;
+}
+
+/** entry LEFT JOIN its published version: every entry column, and the version
+ *  columns nullable because an entry with only drafts publishes nothing. */
+interface PublishedRow extends EntryRow {
+  v_id: string | null;
+  v_version: number | null;
+  v_status: VersionStatus | null;
+  v_body: Record<string, unknown> | null;
+  v_published_at: Date | null;
+  v_archived_at: Date | null;
+}
+
+function toEntry(r: EntryRow): ConfigEntry {
+  return { id: r.id, tenantId: r.tenant_id, kind: r.kind, key: r.key };
+}
+
+function toVersion(r: VersionRow): ConfigVersion {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    entryId: r.entry_id,
+    version: r.version,
+    status: r.status,
+    body: r.body,
+    publishedAt: r.published_at?.toISOString() ?? null,
+    archivedAt: r.archived_at?.toISOString() ?? null,
+  };
+}
+
+export class PostgresConfigRepository
+  implements ConfigRepository, PermissionSource, RoleDirectory, ServiceCatalogue, PolicyDirectory
+{
+  constructor(private readonly app: Db) {}
+
+  async define(entry: NewEntry, firstDraft: NewVersion): Promise<DefinedEntry> {
+    return withTenant(this.app, entry.tenantId, async (db) => {
+      const [entryRow] = await db<EntryRow[]>`
+        INSERT INTO config.entry (id, tenant_id, kind, key)
+        VALUES (${entry.id}, ${entry.tenantId}, ${entry.kind}, ${entry.key})
+        RETURNING id, tenant_id, kind, key
+      `;
+      if (!entryRow) throw new Error("config.entry insert returned no row");
+
+      // Version 1 by definition — there is nothing to count yet, so this is the
+      // one insert that does not need the max+1 read the others do.
+      const [versionRow] = await db<VersionRow[]>`
+        INSERT INTO config.version (id, tenant_id, entry_id, version, body)
+        VALUES (${firstDraft.id}, ${firstDraft.tenantId}, ${entry.id}, 1,
+                ${db.json(firstDraft.body as Parameters<typeof db.json>[0])})
+        RETURNING id, tenant_id, entry_id, version, status, body, published_at, archived_at
+      `;
+      if (!versionRow) throw new Error("config.version insert returned no row");
+      return { entry: toEntry(entryRow), draft: toVersion(versionRow) };
+    });
+  }
+
+  async findEntry(tenantId: string, kind: ConfigKind, key: string): Promise<ConfigEntry | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<EntryRow[]>`
+        SELECT id, tenant_id, kind, key
+        FROM config.entry WHERE kind = ${kind} AND key = ${key}
+      `;
+      return row ? toEntry(row) : null;
+    });
+  }
+
+  async listPublished(tenantId: string, kind: ConfigKind): Promise<readonly PublishedEntry[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // LEFT JOIN, not INNER: an entry whose only version is a draft still
+      // belongs in the list, saying plainly that it publishes nothing. Dropping
+      // it would make a half-finished service look like one that was never
+      // created, and the two need different actions.
+      const rows = await db<PublishedRow[]>`
+        SELECT e.id, e.tenant_id, e.kind, e.key,
+               v.id           AS v_id,
+               v.version      AS v_version,
+               v.status       AS v_status,
+               v.body         AS v_body,
+               v.published_at AS v_published_at,
+               v.archived_at  AS v_archived_at
+        FROM config.entry e
+        LEFT JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = ${kind}
+        ORDER BY e.key
+      `;
+      return rows.map((r) => ({
+        entry: toEntry(r),
+        published:
+          r.v_id === null || r.v_version === null || r.v_status === null || r.v_body === null
+            ? null
+            : toVersion({
+                id: r.v_id,
+                tenant_id: r.tenant_id,
+                entry_id: r.id,
+                version: r.v_version,
+                status: r.v_status,
+                body: r.v_body,
+                published_at: r.v_published_at,
+                archived_at: r.v_archived_at,
+              }),
+      }));
+    });
+  }
+
+  async listVersions(tenantId: string, entryId: string): Promise<readonly ConfigVersion[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<VersionRow[]>`
+        SELECT id, tenant_id, entry_id, version, status, body, published_at, archived_at
+        FROM config.version WHERE entry_id = ${entryId} ORDER BY version DESC
+      `;
+      return rows.map(toVersion);
+    });
+  }
+
+  async addVersion(v: NewVersion): Promise<ConfigVersion> {
+    return withTenant(this.app, v.tenantId, async (db) => {
+      // Lock the ENTRY, then count. Two people drafting against the same
+      // service at once would otherwise both read max=2, both insert version 3,
+      // and one would lose to the unique constraint after doing the work. The
+      // lock is on the entry rather than the versions because the thing being
+      // serialised is "the next number for this entry".
+      await db`SELECT id FROM config.entry WHERE id = ${v.entryId} FOR UPDATE`;
+      const [row] = await db<VersionRow[]>`
+        INSERT INTO config.version (id, tenant_id, entry_id, version, body)
+        SELECT ${v.id}, ${v.tenantId}, ${v.entryId},
+               COALESCE(MAX(version), 0) + 1,
+               ${db.json(v.body as Parameters<typeof db.json>[0])}
+        FROM config.version WHERE entry_id = ${v.entryId}
+        RETURNING id, tenant_id, entry_id, version, status, body, published_at, archived_at
+      `;
+      if (!row) throw new Error("config.version insert returned no row");
+      return toVersion(row);
+    });
+  }
+
+  async findVersionById(tenantId: string, versionId: string): Promise<ConfigVersion | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<VersionRow[]>`
+        SELECT id, tenant_id, entry_id, version, status, body, published_at, archived_at FROM config.version WHERE id = ${versionId}
+      `;
+      return row ? toVersion(row) : null;
+    });
+  }
+
+  async publish(tenantId: string, versionId: string): Promise<PublishOutcome> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [target] = await db<{ entry_id: string }[]>`
+        SELECT entry_id FROM config.version WHERE id = ${versionId}
+      `;
+      if (!target) throw new Error(`config.version ${versionId} not found`);
+
+      // Same lock as addVersion, for the neighbouring race: two drafts
+      // published at once would both try to become the single published
+      // version, and the partial unique index would reject one AFTER the other
+      // had already archived what was in force.
+      await db`SELECT id FROM config.entry WHERE id = ${target.entry_id} FOR UPDATE`;
+
+      // Archive first. Reversed, the partial unique index (one published
+      // version per entry) rejects the second statement — and there is no
+      // moment in between when a permission check could see two answers.
+      const [archived] = await db<VersionRow[]>`
+        UPDATE config.version SET status = 'archived', archived_at = now()
+        WHERE entry_id = ${target.entry_id} AND status = 'published'
+        RETURNING id, tenant_id, entry_id, version, status, body, published_at, archived_at
+      `;
+      const [published] = await db<VersionRow[]>`
+        UPDATE config.version SET status = 'published', published_at = now()
+        WHERE id = ${versionId} AND status = 'draft'
+        RETURNING id, tenant_id, entry_id, version, status, body, published_at, archived_at
+      `;
+      if (!published) {
+        // The service checks this first; reaching here means somebody else
+        // published the same draft in the moment between the two.
+        throw new Error(
+          `config.version ${versionId} was not a draft by the time it was published — ` +
+            `another caller published it first. Re-read the entry and try the new draft.`,
+        );
+      }
+      return {
+        published: toVersion(published),
+        archived: archived ? toVersion(archived) : null,
+      };
+    });
+  }
+
+  async seedPublished(
+    tenantId: string,
+    kind: ConfigKind,
+    rows: readonly SeedRow[],
+  ): Promise<readonly ConfigEntry[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const created: ConfigEntry[] = [];
+      for (const row of rows) {
+        const [entryRow] = await db<EntryRow[]>`
+          INSERT INTO config.entry (id, tenant_id, kind, key)
+          VALUES (${row.entryId}, ${tenantId}, ${kind}, ${row.key})
+          RETURNING id, tenant_id, kind, key
+        `;
+        if (!entryRow) throw new Error(`config.entry insert returned no row for ${row.key}`);
+        await db`
+          INSERT INTO config.version
+            (id, tenant_id, entry_id, version, status, body, published_at)
+          VALUES
+            (${row.versionId}, ${tenantId}, ${row.entryId}, 1, 'published',
+             ${db.json(row.body as Parameters<typeof db.json>[0])}, now())
+        `;
+        created.push(toEntry(entryRow));
+      }
+      return created;
+    });
+  }
+
+  // ── PermissionSource — gate 3 reads the registry ───────────────────────────
+  //
+  // HONEST LIMITATION: one indexed query per authenticated request, uncached.
+  // The session guard already makes a round trip to re-check the membership, so
+  // this is a second on the same request rather than the first. It is uncached
+  // on purpose: a cache means a revoked permission stays live for its TTL, and
+  // a firm that takes an access away expects it gone this afternoon. A shared
+  // cache with explicit invalidation on publish is the fix when the traffic
+  // justifies it, and it goes behind this same port.
+
+  async permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ body: Record<string, unknown> }[]>`
+        SELECT v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'role' AND e.key = ${role}
+      `;
+      // No row is the ordinary answer for a role this firm does not define, and
+      // it carries nothing. AuthzService asks knownRoles() to tell that apart
+      // from a role that exists and simply lacks the permission.
+      return row ? readRolePermissions(row.body) : [];
+    });
+  }
+
+  async knownRoles(tenantId: string): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Published only. A role that exists as a draft is not in force, and
+      // listing it would tell someone locked out to use a role that will not
+      // work.
+      const rows = await db<{ key: string }[]>`
+        SELECT e.key
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'role'
+        ORDER BY e.key
+      `;
+      return rows.map((r) => r.key);
+    });
+  }
+
+  /**
+   * The roles carrying one permission — the third port this class satisfies
+   * (`RoleDirectory`, for firm administration).
+   *
+   * One query rather than `knownRoles` followed by `permissionsFor` per role.
+   * The caller — "does this firm still have anyone who can administer it" —
+   * asks on every role change and every deactivation, and it should not cost a
+   * round trip per role to answer.
+   *
+   * `jsonb_exists` over the permissions array asks the question in the database
+   * rather than reading every role body back to filter in TypeScript.
+   */
+  async rolesWith(tenantId: string, permission: Permission): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ key: string }[]>`
+        SELECT e.key
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'role'
+          AND jsonb_exists(v.body -> 'permissions', ${permission})
+        ORDER BY e.key
+      `;
+      return rows.map((r) => r.key);
+    });
+  }
+
+  /**
+   * RESOLVE A PIN — for quoting (`ServiceCatalogue`) and for assembling an
+   * engagement letter's terms (`ClauseLibrary`). Both use cases declared the
+   * same question about the same two tables, so it is answered once.
+   *
+   * Deliberately does NOT filter on status: a proposal line pins the version it
+   * was quoted from, and the whole promise of the registry is that the pin
+   * still resolves after the catalogue moved on and archived it. The CALLER
+   * decides what to do with a draft — the proposal service refuses one, because
+   * a price the firm never put in force must not reach a client's document.
+   */
+  async readPinnedVersion(
+    tenantId: string,
+    versionId: string,
+  ): Promise<{
+    readonly kind: string;
+    readonly status: string;
+    readonly key: string;
+    readonly version: number;
+    readonly body: Record<string, unknown>;
+  } | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<
+        {
+          kind: string;
+          status: string;
+          key: string;
+          version: number;
+          body: Record<string, unknown>;
+        }[]
+      >`
+        SELECT e.kind, v.status, e.key, v.version, v.body
+        FROM config.version v
+        JOIN config.entry e ON e.id = v.entry_id
+        WHERE v.id = ${versionId}
+      `;
+      return row ?? null;
+    });
+  }
+
+  /**
+   * The firm's discount limit, right now (`PolicyDirectory`).
+   *
+   * Published only, and read LIVE rather than pinned — a firm that lowers its
+   * limit expects the new one to apply this afternoon, the same reasoning that
+   * makes roles a live read. Null means no policy is published, which the
+   * domain reads as zero rather than as "no limit".
+   */
+  async maxDiscountPercent(tenantId: string): Promise<Amount | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ body: Record<string, unknown> }[]>`
+        SELECT v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'policy' AND e.key = ${DISCOUNT_POLICY_KEY}
+      `;
+      return row ? readMaxDiscountPercent(row.body) : null;
+    });
+  }
+}

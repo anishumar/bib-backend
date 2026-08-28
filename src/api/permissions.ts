@@ -1,0 +1,218 @@
+// Which permission each route requires — one table, read by one middleware.
+//
+// The alternative is a check inside each handler, and this codebase has already
+// paid for that: three routes shipped with no authentication at all because the
+// check lived in the files rather than in front of them. Gate 3 gets the
+// treatment gates 1 and 2 got.
+//
+// DENY BY DEFAULT. A route with no entry here is refused for everyone, so
+// adding a route without deciding who may reach it fails loudly and
+// immediately, rather than being open until someone notices. A structural test
+// asserts every registered route is either listed here or explicitly exempt.
+import type { Permission } from "../domain/authz/model";
+
+/** `METHOD /path` exactly as the OpenAPI spec names it, templates included. */
+export type RouteKey = string;
+
+export function routeKey(method: string, path: string): RouteKey {
+  return `${method.toUpperCase()} ${path}`;
+}
+
+/**
+ * Routes that need a session but no particular permission.
+ *
+ * Only session management belongs here: a caller must be able to see who they
+ * are, choose an org, and sign out regardless of what their role permits —
+ * otherwise a misconfigured role would lock someone out of the very endpoints
+ * they need to fix it.
+ */
+export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
+  routeKey("GET", "/api/v1/auth/me"),
+  routeKey("POST", "/api/v1/auth/switch-tenant"),
+  routeKey("POST", "/api/v1/auth/logout"),
+  routeKey("GET", "/api/v1/tenancy/me/memberships"),
+]);
+
+/** The permission each business route requires. */
+export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
+  [routeKey("GET", "/api/v1/parties"), "party:read" as const],
+  [routeKey("GET", "/api/v1/parties/{partyId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/parties/organizations"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/persons"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/parties/organizations/{partyId}/legal-entities"),
+    "party:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
+  // The firm's whole audit trail is a partner-and-manager read: it names every
+  // client the firm has, which is more than an associate needs to do their work.
+  [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
+  [routeKey("GET", "/api/v1/objects/{objectType}/{objectId}/events"), "ledger:read" as const],
+
+  // FIRM ADMINISTRATION. `tenant:admin` on all four, including the READ.
+  //
+  // The roster lists colleagues' email addresses, and this is the screen for
+  // running the firm rather than working at it. A general "who works here"
+  // directory is a wider decision — different data, probably a different
+  // permission — and belongs to whichever screen first needs one, not smuggled
+  // in as a side effect of the admin surface.
+  //
+  // The write side is the same `tenant:admin` the config registry uses, and for
+  // the same reason: between them these two surfaces decide what every role
+  // means AND who holds it, which is the whole of access control at a firm.
+  [routeKey("GET", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
+
+  // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
+  // lead:read / lead:write, and that is a decision rather than laziness.
+  //
+  // A lead in this model IS a party — the opportunity is a row about a
+  // counterparty the firm already stores, not a shadow copy of one — so a role
+  // that may read the firm's parties may already see every prospect in it
+  // through /api/v1/parties. A separate permission would look like a boundary
+  // while enforcing none.
+  //
+  // It is also no longer free to add one. Permissions reach existing firms as
+  // config rows, so a new one costs a migration that carries it to every tenant
+  // that has not customised the role. Worth paying when a firm asks to keep the
+  // pipeline from delivery staff; not worth paying for a distinction nobody has
+  // asked for. When they do ask, they can now do most of it themselves: a
+  // custom role, published, no deploy.
+  [routeKey("GET", "/api/v1/leads"), "party:read" as const],
+  [routeKey("GET", "/api/v1/leads/{leadId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/leads"), "party:write" as const],
+  [routeKey("POST", "/api/v1/leads/{leadId}/stage"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/leads/{leadId}/owner"), "party:write" as const],
+
+  // PROPOSALS (T2.2) reuse the party permissions for their CRUD, for the same
+  // reason the pipeline does: a proposal is a document about a party, and a role
+  // that may already read every prospect and every lead gains no boundary from a
+  // `proposal:read` beside them. What money it shows is a different question,
+  // answered by the fee-visibility axis on the membership — which REDACTS the
+  // amounts rather than hiding the document, so "you may not see the fee" never
+  // looks like "there is no proposal".
+  //
+  // The exception is the one capability that is genuinely its own: authorising a
+  // discount past the firm's published limit. That is not `tenant:admin` — the
+  // person who manages logins and the person who may sign off forty percent off
+  // are different people at any real firm — and it is not the fee axis either,
+  // which governs SEEING money rather than authorising a price. So it has its
+  // own permission, and migration 0012 carried it to the firms that already
+  // exist, which is what a new permission costs since T2.5.
+  [routeKey("GET", "/api/v1/proposals"), "party:read" as const],
+  [routeKey("GET", "/api/v1/proposals/{proposalId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/proposals"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/send"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/decision"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/proposals/{proposalId}/discount-approval"),
+    "proposal:approve" as const,
+  ],
+
+  // ENGAGEMENT LETTERS (T2.3) reuse the party permissions, including SIGNING.
+  //
+  // That last part was argued rather than assumed. Recording a signature creates
+  // obligations and spawns work, which is a fair case for its own permission —
+  // but a new one costs a migration to reach every existing firm (T2.5's rule),
+  // and no firm has asked for the distinction. `proposal:approve` is the
+  // precedent for what "asked for" looks like: there, the person who manages
+  // logins is demonstrably not the person who signs off a discount. Here, a firm
+  // that wants signing held back from delivery staff can publish its own role
+  // this afternoon, with no deploy. Revisit when one asks.
+  [routeKey("GET", "/api/v1/engagement-letters"), "party:read" as const],
+  [routeKey("GET", "/api/v1/engagement-letters/{letterId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/engagement-letters"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/lines"), "party:write" as const],
+  [
+    routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/lines/{lineId}"),
+    "party:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
+
+  // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
+  // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
+  // rather than a `config:write` of its own.
+  //
+  // That is deliberate and it is the security decision in this table. One of the
+  // things this surface configures is the ROLE registry, so whoever may publish
+  // here may grant themselves every permission in the product. A separate name
+  // for it would let a firm hand out "just config editing" believing it was a
+  // small thing, when it is the largest thing there is. Naming the permission
+  // `tenant:admin` makes the grant say what it actually means at the moment
+  // somebody decides to make it.
+  // Literal, and it sorts ahead of the template above by the literal-first rule
+  // in decideRoute — "permissions" is not a kind.
+  [routeKey("GET", "/api/v1/config/permissions"), "config:read" as const],
+  [routeKey("GET", "/api/v1/config/{kind}"), "config:read" as const],
+  [routeKey("GET", "/api/v1/config/{kind}/{key}"), "config:read" as const],
+  [routeKey("POST", "/api/v1/config/{kind}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/config/{kind}/{key}/versions"), "tenant:admin" as const],
+  [
+    routeKey("POST", "/api/v1/config/{kind}/{key}/versions/{version}/publish"),
+    "tenant:admin" as const,
+  ],
+]);
+
+// ── Matching a request to its entry ──────────────────────────────────────────
+//
+// The middleware sees a concrete path (/api/v1/parties/9f8b…) and the tables
+// above are keyed by template (/api/v1/parties/{partyId}). Rather than reach
+// into the framework for the matched route pattern — undocumented, and it
+// reports the MIDDLEWARE's pattern at this point in the chain — the templates
+// are compiled to regexes once and matched here. Fifteen regex tests per
+// request is nothing next to the database work that follows.
+
+export type RouteDecision =
+  | { readonly kind: "permission"; readonly permission: Permission }
+  /** Needs a session, no particular permission. */
+  | { readonly kind: "open" }
+  /** No entry in either table — refused, loudly. */
+  | { readonly kind: "unmapped" };
+
+interface CompiledRoute {
+  readonly method: string;
+  readonly pattern: RegExp;
+  readonly literal: boolean;
+  readonly decision: RouteDecision;
+}
+
+function compile(key: RouteKey, decision: RouteDecision): CompiledRoute {
+  const [method = "", path = ""] = key.split(" ");
+  const literal = !path.includes("{");
+  const source = path
+    .split("/")
+    .map((segment) =>
+      segment.startsWith("{") && segment.endsWith("}")
+        ? "[^/]+"
+        : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    )
+    .join("/");
+  return { method, pattern: new RegExp(`^${source}$`), literal, decision };
+}
+
+// Literal routes first: /api/v1/parties/organizations must not be swallowed by
+// /api/v1/parties/{partyId} because a template happened to be checked earlier.
+const COMPILED: readonly CompiledRoute[] = [
+  ...[...NO_PERMISSION_REQUIRED].map((key) => compile(key, { kind: "open" })),
+  ...[...ROUTE_PERMISSIONS].map(([key, permission]) =>
+    compile(key, { kind: "permission", permission }),
+  ),
+].sort((a, b) => Number(b.literal) - Number(a.literal));
+
+/** What this request needs. Unmapped is a refusal, never a pass. */
+export function decideRoute(method: string, path: string): RouteDecision {
+  const wanted = method.toUpperCase();
+  for (const route of COMPILED) {
+    if (route.method === wanted && route.pattern.test(path)) return route.decision;
+  }
+  return { kind: "unmapped" };
+}

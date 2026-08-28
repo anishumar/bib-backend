@@ -14,6 +14,9 @@
 - **New business tables**: `tenant_id uuid NOT NULL` + `ENABLE ROW LEVEL SECURITY` + an
   isolation policy — or an explicit `-- GLOBAL:` comment justifying the exception. This is a
   CI/review gate, not a suggestion.
+- **The `ledger` schema is append-only.** Its default privileges grant `bib_app` SELECT and
+  INSERT and nothing else, so a table added there inherits immutability rather than relying
+  on someone remembering. A table that needs UPDATE does not belong in that schema.
 
 ## Roles are ensured in code, not here
 
