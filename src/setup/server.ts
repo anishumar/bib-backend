@@ -28,12 +28,14 @@ import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
+import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { LeadService } from "../usecase/lead/service";
+import { ProposalService } from "../usecase/proposal/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -194,6 +196,20 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // Quoting meets the configuration registry HERE, and nowhere else. The
+  // proposal use case declares two narrow ports in its own vocabulary —
+  // "resolve this pin" and "what is the discount limit right now" — and the
+  // config adapter satisfies both structurally, so neither module imports the
+  // other. Same seam, same reason, as leads meeting parties above.
+  const proposal = new ProposalService({
+    proposals: new PostgresProposalRepository(pools.app),
+    catalogue: configRepository,
+    policies: configRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   return {
     app: buildRouter(
       {
@@ -208,6 +224,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         ledger: { service: ledger },
         config: { service: config },
         lead: { service: lead },
+        proposal: { service: proposal, authz },
       },
       log,
       {

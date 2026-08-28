@@ -1,13 +1,15 @@
 // Postgres adapter for the configuration registry.
 //
-// ONE class, THREE ports, deliberately — the same pattern as the
+// ONE class, FIVE ports, deliberately — the same pattern as the
 // users/memberships repositories serving both tenancy and identity.
 // `ConfigRepository` is the registry's own seam; `PermissionSource` is gate 3's;
 // `RoleDirectory` is what firm administration asks (which roles exist here, and
-// which of them can administer the place). All three questions are config reads
-// over the same two tables. Splitting them would put three files' worth of "what
-// published means" over one pair of tables, and the day they disagreed, one of
-// them would be answering an authorization question wrongly.
+// which of them can administer the place); `ServiceCatalogue` and
+// `PolicyDirectory` are what quoting asks (resolve this pin, and what is the
+// firm's discount limit right now). All five questions are config reads over the
+// same two tables. Splitting them would put five files' worth of "what published
+// means" over one pair of tables, and the day they disagreed, one of them would
+// be answering an authorization question wrongly.
 //
 // Every method runs under withTenant, so the RLS tenant wall applies to each
 // statement. timestamptz arrives as a Date and leaves as an ISO 8601 string —
@@ -22,7 +24,11 @@ import type {
   PublishedEntry,
   VersionStatus,
 } from "../../domain/config/model";
-import { readRolePermissions } from "../../domain/config/model";
+import {
+  DISCOUNT_POLICY_KEY,
+  readMaxDiscountPercent,
+  readRolePermissions,
+} from "../../domain/config/model";
 import type { PermissionSource } from "../../usecase/authz/ports";
 import type { RoleDirectory } from "../../usecase/tenancy/ports";
 import type {
@@ -33,6 +39,8 @@ import type {
   PublishOutcome,
   SeedRow,
 } from "../../usecase/config/ports";
+import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
+import type { Amount } from "../../domain/money/model";
 
 interface EntryRow {
   id: string;
@@ -81,7 +89,7 @@ function toVersion(r: VersionRow): ConfigVersion {
 }
 
 export class PostgresConfigRepository
-  implements ConfigRepository, PermissionSource, RoleDirectory
+  implements ConfigRepository, PermissionSource, RoleDirectory, ServiceCatalogue, PolicyDirectory
 {
   constructor(private readonly app: Db) {}
 
@@ -327,6 +335,64 @@ export class PostgresConfigRepository
         ORDER BY e.key
       `;
       return rows.map((r) => r.key);
+    });
+  }
+
+  /**
+   * RESOLVE A PIN, for quoting (`ServiceCatalogue`).
+   *
+   * Deliberately does NOT filter on status: a proposal line pins the version it
+   * was quoted from, and the whole promise of the registry is that the pin
+   * still resolves after the catalogue moved on and archived it. The CALLER
+   * decides what to do with a draft — the proposal service refuses one, because
+   * a price the firm never put in force must not reach a client's document.
+   */
+  async readPinnedService(
+    tenantId: string,
+    versionId: string,
+  ): Promise<{
+    readonly kind: string;
+    readonly status: string;
+    readonly key: string;
+    readonly version: number;
+    readonly body: Record<string, unknown>;
+  } | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<
+        {
+          kind: string;
+          status: string;
+          key: string;
+          version: number;
+          body: Record<string, unknown>;
+        }[]
+      >`
+        SELECT e.kind, v.status, e.key, v.version, v.body
+        FROM config.version v
+        JOIN config.entry e ON e.id = v.entry_id
+        WHERE v.id = ${versionId}
+      `;
+      return row ?? null;
+    });
+  }
+
+  /**
+   * The firm's discount limit, right now (`PolicyDirectory`).
+   *
+   * Published only, and read LIVE rather than pinned — a firm that lowers its
+   * limit expects the new one to apply this afternoon, the same reasoning that
+   * makes roles a live read. Null means no policy is published, which the
+   * domain reads as zero rather than as "no limit".
+   */
+  async maxDiscountPercent(tenantId: string): Promise<Amount | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ body: Record<string, unknown> }[]>`
+        SELECT v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'policy' AND e.key = ${DISCOUNT_POLICY_KEY}
+      `;
+      return row ? readMaxDiscountPercent(row.body) : null;
     });
   }
 }

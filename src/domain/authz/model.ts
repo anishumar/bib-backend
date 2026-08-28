@@ -26,6 +26,7 @@ export type Permission =
   | "party:write"
   | "ledger:read"
   | "config:read"
+  | "proposal:approve"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -33,6 +34,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "party:write",
   "ledger:read",
   "config:read",
+  "proposal:approve",
   "tenant:admin",
 ];
 
@@ -55,6 +57,9 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
   "party:write": "Create and change clients, contacts, their identifiers and leads.",
   "ledger:read": "Read the firm's whole audit trail — it names every client the firm has.",
   "config:read": "See the service catalogue and how the firm's roles are defined.",
+  "proposal:approve":
+    "Authorise a discount larger than the firm's published limit. Anyone who can write a " +
+    "proposal can offer a discount within the limit; this is the sign-off for going past it.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -97,7 +102,14 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
   // Owns the client relationship and the commercials.
   partner: {
     label: "Partner",
-    permissions: ["party:read", "party:write", "ledger:read", "config:read", "tenant:admin"],
+    permissions: [
+      "party:read",
+      "party:write",
+      "ledger:read",
+      "config:read",
+      "tenant:admin",
+      "proposal:approve",
+    ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
   manager: {

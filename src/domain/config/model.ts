@@ -22,16 +22,20 @@
 // CHECK on config.entry.kind is the other half of that agreement.
 import type { Permission } from "../authz/model";
 import { PERMISSIONS, isPermission } from "../authz/model";
-import type { Money } from "../money/model";
+import type { Amount, Money } from "../money/model";
 import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 
 /** The configured things this pass knows about. `workflow_template` and
  *  `rule_pack` join them when T2.7 and T4.3 actually read them — designing
  *  those bodies against no consumer is how a schema ends up wrong in a way a
- *  migration has to undo. */
-export type ConfigKind = "service" | "role";
+ *  migration has to undo.
+ *
+ *  `policy` (0010) is the first NON-CATALOGUE kind — a rule the firm sets for
+ *  itself rather than something it sells — which is what makes it the honest
+ *  test of whether this spine generalises. */
+export type ConfigKind = "service" | "role" | "policy";
 
-export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role"];
+export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role", "policy"];
 
 export function isConfigKind(v: string): v is ConfigKind {
   return (CONFIG_KINDS as readonly string[]).includes(v);
@@ -147,6 +151,64 @@ export interface ServiceBody {
 }
 
 /**
+ * A rule the firm sets for itself. The first — and for now the only — one is
+ * the discount limit T2.2 checks.
+ *
+ * One entry per policy, keyed by what it governs (`discount`), rather than one
+ * fat "settings" row: the registry versions and publishes an ENTRY, so a shared
+ * row would mean changing the discount limit republishes every unrelated
+ * setting beside it, and the history of each becomes unreadable.
+ */
+export interface PolicyBody {
+  /**
+   * The largest discount anybody may put on a proposal line without
+   * `proposal:approve` signing it off. A decimal STRING, 0–100, for the same
+   * reason amounts are: "12.5" through a float is not reliably 12.5, and a
+   * limit that is a hair under what it says refuses a discount that should
+   * pass.
+   */
+  readonly maxDiscountPercent: Amount;
+}
+
+const POLICY_FIELDS = ["maxDiscountPercent"];
+
+/** The key of the one policy this product reads today. A firm may define other
+ *  `policy` entries; nothing consults them until something does, and that is
+ *  the honest state rather than a promise. */
+export const DISCOUNT_POLICY_KEY = "discount";
+
+function validatePolicyBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, POLICY_FIELDS);
+  if (unknown) return unknown;
+
+  const max = body["maxDiscountPercent"];
+  if (typeof max !== "string" || !isAmount(max) || Number(max) > 100) {
+    return (
+      `"maxDiscountPercent" must be a decimal STRING between "0" and "100" — "15", "12.5" — ` +
+      `never a number, for the same reason an amount is not: a float does not hold 12.5 ` +
+      `exactly, and a limit a hair under what it says refuses a discount that should pass. ` +
+      `Got ${describe(max)}`
+    );
+  }
+  return null;
+}
+
+/**
+ * The discount limit a stored policy body carries, or null when the firm has
+ * not published one.
+ *
+ * Null is NOT "no limit". The caller treats an unpublished policy as zero — any
+ * discount at all needs approval — because a firm that has never set a limit has
+ * not decided that anything goes, and the fail-open reading of that silence is
+ * the one nobody can audit. See usecase/proposal/service.ts, where the error
+ * says exactly that and how to fix it.
+ */
+export function readMaxDiscountPercent(body: Record<string, unknown>): Amount | null {
+  const max = body["maxDiscountPercent"];
+  return typeof max === "string" && isAmount(max) ? max : null;
+}
+
+/**
  * Validate a body against its kind. Returns the PROBLEM, or null when it is
  * fine — the caller turns the problem into `InvalidBody`, so the message names
  * the field, the bad value and the valid set rather than saying "invalid".
@@ -162,6 +224,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateRoleBody(body);
     case "service":
       return validateServiceBody(body);
+    case "policy":
+      return validatePolicyBody(body);
   }
 }
 

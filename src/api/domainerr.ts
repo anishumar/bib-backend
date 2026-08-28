@@ -13,6 +13,7 @@ import { IdentityError } from "../domain/identity/errors";
 import { AuthzError } from "../domain/authz/errors";
 import { ConfigError } from "../domain/config/errors";
 import { LeadError } from "../domain/lead/errors";
+import { ProposalError } from "../domain/proposal/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -103,6 +104,36 @@ export function mapError(err: unknown): MappedError {
       case "LEAD_CLOSED":
       case "SAME_STAGE":
       case "OWNER_NOT_STAFF":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof ProposalError) {
+    switch (err.code) {
+      // Malformed input: a number where a decimal string belongs, a currency
+      // that is not one, a discount outside 0–100.
+      case "INVALID_QUANTITY":
+      case "INVALID_UNIT_AMOUNT":
+      case "INVALID_DISCOUNT":
+      case "INVALID_FX_RATE":
+      case "INVALID_CURRENCY":
+      case "INVALID_DECISION":
+      case "NOT_A_SERVICE":
+      case "SERVICE_NOT_PUBLISHED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "PROPOSAL_NOT_FOUND":
+      case "LINE_NOT_FOUND":
+      case "SERVICE_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // "The proposal is not in the state this call assumed." None is a
+      // malformed request and resending changes nothing — DISCOUNT_NEEDS_APPROVAL
+      // in particular is answered by a person, not by a retry.
+      case "NOT_A_DRAFT":
+      case "EMPTY_PROPOSAL":
+      case "INVALID_TRANSITION":
+      case "PROPOSAL_EXPIRED":
+      case "DISCOUNT_NEEDS_APPROVAL":
+      case "APPROVAL_NOT_NEEDED":
+      case "ALREADY_APPROVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }

@@ -224,6 +224,8 @@ version is exactly what gets asked about afterwards.
 | `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. |
 | `lead.stage_changed` | lead | A lead moved through the pipeline. Reaching a terminal stage closes it. |
 | `lead.owner_assigned` | lead | A lead was put on somebody's desk, or taken off it. |
+| `proposal.drafted` | proposal | A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out. |
+| `proposal.discount_approved` | proposal | A discount past the firm's published limit was signed off by somebody holding `proposal:approve`. The whole value of the record is WHO. |
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |
 | `proposal.viewed` | proposal | The recipient opened it. |
 | `proposal.accepted` | proposal | Accepted. |

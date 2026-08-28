@@ -237,6 +237,70 @@ open and are recorded above; neither blocks Phase 2.
   > months later actually needs.
   >
   > Gate after step 2: `npm run check` 299 tests · `test:integration` 61 · `smoke` 63.
+  >
+  > **Step 3a done (2026-08-28)** — the aggregate, the pricing, the policy kind and the discount
+  > gate. That is the acceptance criteria: a proposal renders from catalogue rows, and a discount
+  > over the limit blocks on approval. **3b is the public view link and `proposal.viewed`**, kept
+  > as its own step so a new unauthenticated surface is reviewable on its own rather than buried
+  > in a schema commit; **step 4 is the screen.**
+  >
+  > `crm.proposal` + `crm.proposal_line` (0011). A line pins `service_version_id` and carries the
+  > money actually asked for. **One proposal, one currency, one rate** — and the lines are held
+  > to the proposal's currency by a composite foreign key on `(id, tenant_id, currency)`, so a
+  > mixed-currency document is unrepresentable rather than merely unlikely.
+  >
+  > **A DEVIATION from the design recorded above, with its reason.** That note put `fx_rate` and
+  > `fx_rate_date` on the LINE, beside its amount. They are on the PROPOSAL instead: once the
+  > composite key guarantees every line shares the document's currency, per-line rates buy
+  > nothing and cost a total that depends on the order somebody added the lines. The Money value
+  > that must stay together — amount + currency — still does, on the line. The rate is a property
+  > of the document, struck once, and stored even when the currencies match (1.0, dated).
+  >
+  > **The arithmetic lives in the schema** (0013), as two `security_invoker` views:
+  > `proposal_line_amount` holds the discount formula once, `proposal_totals` aggregates it.
+  > `security_invoker` is load-bearing — a plain view runs as its OWNER, which is not subject to
+  > the row policies, so a totals view over a tenant-scoped table would be a hole straight
+  > through the tenant wall. There is an integration test that asserts exactly that.
+  >
+  > **`policy` is the registry's third kind and its first non-catalogue one** (0010) — the fair
+  > test of whether the spine generalises past "things the firm sells", and it did: no new
+  > machinery, one body validator. Read LIVE, because a firm that lowers its limit expects it to
+  > apply this afternoon. **No published policy is read as ZERO, not as "no limit"**: a firm that
+  > never set one has not decided that anything goes, and the fail-open reading of that silence
+  > is the one nobody can audit. The error says so and names the fix.
+  >
+  > **`proposal:approve` is its own permission** (0012), not `tenant:admin` and not the fee axis.
+  > The person who manages logins and the person who may sign off forty percent are different
+  > people at any real firm; and the fee axis governs SEEING money, not authorising a price. It
+  > cost a migration to reach existing firms — the T2.5 rule working as intended, including the
+  > firm in the local database sitting on an unpublished draft v2, which got v3 rather than a
+  > unique-constraint failure. Only `partner` gets it; a firm that wants managers approving
+  > publishes its own role, no deploy.
+  >
+  > **The fee axis has its first real consumer.** Proposals redact money rather than hiding the
+  > document: an associate without commercial visibility sees the client, the services and the
+  > quantities, and nulls where the amounts are. Honest note — the handler uses
+  > `AuthzService.seesFees()` with an explicit field-by-field mapping rather than
+  > `withFeeVisibility()`, because that helper returns `Record<string, unknown>` and does not fit
+  > a typed OpenAPI response. The helper is still without a consumer.
+  >
+  > **Two bugs the end-to-end walk caught that the tests did not**, both worth recording because
+  > they say what each layer is for. (1) A bare parameter inside a `CASE` whose other branch is
+  > `NULL` has no type to infer, so Postgres called it text and refused to assign it to a
+  > `timestamptz` — it only fired on the status transitions, and the integration test drafted and
+  > priced without ever SENDING anything. Coverage added. (2) A second discount approval
+  > succeeded, recording two sign-offs in a log that cannot be corrected for one decision a
+  > person made once.
+  >
+  > And one in the smoke script itself: a JSON body written inline as `-d "{\"a\":\"b\"}"`
+  > inside `"$(code ...)"` is unescaped by the OUTER quotes before the substitution runs, and
+  > bash then brace-expands what is left — curl silently receives several mangled URLs. It
+  > happens to work for a single-field body, which is why the pattern survived seven sections.
+  > Bodies are built into variables first now, with a note saying why.
+  >
+  > **Still not done on this line:** send/track's TRACK half (3b), and the screen (4).
+  >
+  > Gate after step 3a: `npm run check` 329 tests · `test:integration` 73 · `smoke` 80.
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 

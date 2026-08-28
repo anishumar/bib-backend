@@ -94,8 +94,8 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Two kinds ship today, `service` and
-`role`; `workflow_template` and `rule_pack` join them when T2.7 and T4.3 actually read them.
+`config.version` is what it said at a point in time. Three kinds ship today — `service`, `role` and
+`policy`; `workflow_template` and `rule_pack` join them when T2.7 and T4.3 actually read them.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
 
@@ -340,10 +340,38 @@ data** (refused at the write — the log cannot be erased). Record the event *af
 change it describes has committed. The full contract is `docs/EVENT-CONTRACT.md`; read it
 before emitting your first event.
 
+## Proposals — the first module that stores money (T2.2)
+
+A proposal is a document about a party, built from catalogue rows. Three rules shape it and
+none is negotiable without a conversation:
+
+- **The catalogue row is PINNED; the quoted money belongs to the proposal.** A
+  `proposal_line` holds `service_version_id` — the frozen `config.version` — plus the amount
+  actually asked for. That is what lets a quote reopened nine months later answer both halves
+  of the only commercial question anyone asks: what our list price was then, and what we
+  charged.
+- **One proposal, one currency, one rate.** The rate is struck once, on the proposal, and the
+  lines are held to its currency by a composite foreign key — a mixed-currency document is
+  unrepresentable, not merely discouraged. The rate is stored even when the currencies match.
+- **The arithmetic is in the schema** (`crm.proposal_line_amount`, `crm.proposal_totals`,
+  migration 0013), written once, in `numeric`. Both are `security_invoker` views: a plain view
+  runs as its owner, which is not subject to the row policies, so a totals view over a
+  tenant-scoped table would be a hole straight through the tenant wall.
+
+The discount limit is a `policy` config row read LIVE. **No published policy means ZERO, not
+"no limit"** — a firm that never set one has not decided that anything goes. Going past it
+needs `proposal:approve`, which is its own permission rather than `tenant:admin` (the person
+who manages logins is not automatically the person who may sign off forty percent off) and
+is not the fee axis (that governs SEEING money, not authorising a price).
+
+Proposals are also the fee axis's first real consumer: money is **redacted**, so an associate
+without commercial visibility sees the client, the services and the quantities, and nulls
+where the amounts are.
+
 ## First module
 
-`tenancy`, `party`, the `ledger`, the `config` registry and the `lead` pipeline are built.
-Next: the rest of `crm` (proposals, engagement letters), then `billing` — the flagship slice.
+`tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline and `proposals`
+are built. Next: engagement letters (T2.3), then `billing` — the flagship slice.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves

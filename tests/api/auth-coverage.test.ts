@@ -27,6 +27,7 @@ import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
+import { ProposalService } from "../../src/usecase/proposal/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
@@ -41,6 +42,7 @@ import { makePartyFakes } from "../../src/testfakes/party";
 import { makeLedgerFakes } from "../../src/testfakes/ledger";
 import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
+import { makeProposalFakes } from "../../src/testfakes/proposal";
 import {
   FakeClock,
   FakeCredentialRepo,
@@ -87,6 +89,10 @@ function deps(): RouterDeps {
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },
     lead: { service: new LeadService(makeLeadFakes()) },
+    proposal: {
+      service: new ProposalService(makeProposalFakes()),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+    },
     auth: {
       service: new IdentityService({
         users: fakes.users,

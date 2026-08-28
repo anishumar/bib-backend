@@ -34,7 +34,9 @@ import type { LedgerDeps } from "./handler/ledger";
 import { registerConfigRoutes } from "./handler/config";
 import type { ConfigDeps } from "./handler/config";
 import { registerLeadRoutes } from "./handler/lead";
+import { registerProposalRoutes } from "./handler/proposal";
 import type { LeadDeps } from "./handler/lead";
+import type { ProposalDeps } from "./handler/proposal";
 import { registerAuthRoutes } from "./handler/auth";
 import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
@@ -62,6 +64,7 @@ export interface RouterDeps {
   readonly ledger: LedgerDeps;
   readonly config: ConfigDeps;
   readonly lead: LeadDeps;
+  readonly proposal: ProposalDeps;
   readonly auth: AuthDeps;
 }
 
@@ -147,6 +150,7 @@ export function buildRouter(
   registerLedgerRoutes(app, deps.ledger);
   registerConfigRoutes(app, deps.config);
   registerLeadRoutes(app, deps.lead);
+  registerProposalRoutes(app, deps.proposal);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

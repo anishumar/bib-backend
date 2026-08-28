@@ -87,6 +87,33 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/leads/{leadId}/stage"), "party:write" as const],
   [routeKey("PUT", "/api/v1/leads/{leadId}/owner"), "party:write" as const],
 
+  // PROPOSALS (T2.2) reuse the party permissions for their CRUD, for the same
+  // reason the pipeline does: a proposal is a document about a party, and a role
+  // that may already read every prospect and every lead gains no boundary from a
+  // `proposal:read` beside them. What money it shows is a different question,
+  // answered by the fee-visibility axis on the membership — which REDACTS the
+  // amounts rather than hiding the document, so "you may not see the fee" never
+  // looks like "there is no proposal".
+  //
+  // The exception is the one capability that is genuinely its own: authorising a
+  // discount past the firm's published limit. That is not `tenant:admin` — the
+  // person who manages logins and the person who may sign off forty percent off
+  // are different people at any real firm — and it is not the fee axis either,
+  // which governs SEEING money rather than authorising a price. So it has its
+  // own permission, and migration 0012 carried it to the firms that already
+  // exist, which is what a new permission costs since T2.5.
+  [routeKey("GET", "/api/v1/proposals"), "party:read" as const],
+  [routeKey("GET", "/api/v1/proposals/{proposalId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/proposals"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/send"), "party:write" as const],
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/decision"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/proposals/{proposalId}/discount-approval"),
+    "proposal:approve" as const,
+  ],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

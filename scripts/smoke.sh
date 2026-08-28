@@ -188,7 +188,73 @@ import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):
     print("    %-24s %s" % (e["verb"], json.dumps(e["payload"])[:64]))'
 
-echo; echo "── 8. Firm administration — the roster, and revocation ─────────────"
+echo; echo "── 8. Proposals — quoted from the catalogue, and the discount gate ─"
+# The catalogue version a line PINS: v1, which the firm has since superseded by
+# v2. A quote reopened later must still read v1's list price, not today's.
+SVCV1=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+PID=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["partyId"])')
+
+# NOTE ON QUOTING: every JSON body below is built into a variable FIRST. A
+# backslash-escaped body written inline — -d "{\"a\":\"b\"}" — is unescaped by
+# the OUTER quotes of "$(code ...)" before the command substitution runs, and
+# bash then brace-expands the {a,b} that is left. curl silently receives several
+# mangled URLs. It happens to work for a single-field body, which is why the
+# pattern survived this long.
+
+# Per-country quoting: the client is billed in AED, the firm's books are in INR
+# (the reporting currency it was created with), and the rate is struck once.
+DRAFT='{"partyId":"'$PID'","title":"Lakeview - FY26 compliance","currency":"AED","fxRate":"23.4500","fxRateDate":"2026-06-01","validUntil":"2027-01-31"}'
+PROP=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals -H "$H" -d "$DRAFT")
+PRID=$(echo "$PROP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "partner drafts a proposal in AED"     AED "$(echo "$PROP" | python3 -c 'import sys,json;print(json.load(sys.stdin)["currency"])')"
+chk "an empty proposal cannot be sent"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+
+NOSUCH='{"serviceVersionId":"00000000-0000-0000-0000-0000000000ff","description":"x","unitAmount":"1"}'
+FLOATY='{"serviceVersionId":"'$SVCV1'","description":"x","unitAmount":1499.5}'
+LINE='{"serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"1200.00","discountPercent":"40"}'
+chk "a line must pin a real service"       404 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$NOSUCH")"
+chk "an amount given as a number"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$FLOATY")"
+chk "quote a line, 40% off"                201 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$LINE")"
+
+# The firm has published no discount policy, so silence is not permission: any
+# discount at all needs sign-off until somebody sets a limit.
+chk "no policy means any discount blocks"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+POLICY='{"key":"discount","body":{"maxDiscountPercent":"15"}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/policy -H "$H" -d "$POLICY"
+chk "the firm publishes a discount limit"  200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/policy/discount/versions/1/publish -H "$H")"
+chk "40% is still past the 15% limit"      409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+chk "the associate may not sign it off"    403 "$(code -b $J/associate.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
+chk "the partner may"                      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
+chk "…nothing to approve a second time"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
+chk "now it sends"                         200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+MORE='{"serviceVersionId":"'$SVCV1'","description":"one more","unitAmount":"1"}'
+chk "a sent proposal cannot be edited"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$MORE")"
+
+# The pin, and the arithmetic, as a screen reads them: 12 x 1200.00 = 14400.00
+# gross, 40% off = 8640.00 net — computed in numeric, never in JavaScript.
+QUOTED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c '
+import sys, json
+p = json.load(sys.stdin); l = p["lines"][0]
+print("%s/%s/%s" % (l["service"]["listPrice"]["amount"], p["totals"]["gross"], p["totals"]["net"]))')
+chk "list price then, and what we charged" "25000.00/14400.0000/8640.0000" "$QUOTED"
+
+# The FIFTH axis. The associate has no commercial visibility, so they see the
+# document and not the money — redacted, never a 403, because "you may not see
+# the fee" and "there is no proposal" are different answers.
+REDACTED=$(curl -s -b $J/associate.txt $API/api/v1/proposals/$PRID | python3 -c '
+import sys, json
+p = json.load(sys.stdin)
+print("%s/%s/%s" % (p["totals"]["net"], p["totals"]["currency"], p["lines"][0]["description"][:3]))')
+chk "an associate sees the work, not the money" "None/AED/GST" "$REDACTED"
+
+ACCEPT='{"decision":"accepted"}'
+REJECT='{"decision":"rejected"}'
+chk "the client accepts it"                200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$ACCEPT")"
+chk "and cannot change their mind here"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$REJECT")"
+
+echo; echo "── 9. Firm administration — the roster, and revocation ─────────────"
 chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"
 ROSTER=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
 import sys, json
@@ -224,18 +290,18 @@ for m in json.load(sys.stdin)["members"]:
 chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
 chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
 
-echo; echo "── 9. Rate limiting ────────────────────────────────────────────────"
+echo; echo "── 10. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 10. CORS — the frontend is a separate origin ─────────────────────"
+echo; echo "── 11. CORS — the frontend is a separate origin ────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 11. The audit trail, as recorded ─────────────────────────────────"
+echo; echo "── 12. The audit trail, as recorded ────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):

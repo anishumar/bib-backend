@@ -128,8 +128,18 @@ describe("a published version is frozen", () => {
   });
 
   it("refuses a TRUNCATE — the row trigger's blind spot", async () => {
+    // TWO independent defences, and which one fires has changed once already.
+    // A row trigger never sees a TRUNCATE, so 0005 added a statement-level one
+    // (23001, restrict_violation). Since 0011 gave config.version a composite
+    // key for crm.proposal_line to reference, Postgres refuses the TRUNCATE
+    // earlier still, for being referenced by a foreign key (0A000).
+    //
+    // The property under test is "a TRUNCATE cannot empty this table", not
+    // which guard says so — but both are asserted by name rather than by a
+    // bare "it threw", because a DIFFERENT error here (a permission fault, a
+    // syntax slip) would pass a laxer test while proving nothing.
     const err = await owner`TRUNCATE config.version`.catch((e: unknown) => e);
-    expect((err as { code?: string }).code).toBe("23001");
+    expect(["23001", "0A000"]).toContain((err as { code?: string }).code);
   });
 
   it("refuses to move an archived version back into force", async () => {
