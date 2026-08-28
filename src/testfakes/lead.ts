@@ -10,13 +10,20 @@
 // stops recording party.created — none of which the lead use case implements,
 // and all of which its correctness depends on.
 //
-// It does NOT enforce RLS, or the one-open-lead-per-party index: those are
+// It does NOT enforce RLS, the one-open-lead-per-party index, or the CHECKs
+// that hold a title non-blank and a lost reason to an unwon stage: those are
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
-import type { Lead, LeadStage } from "../domain/lead/model";
+import type { AssignmentPolicy, Lead, LeadStage } from "../domain/lead/model";
 import type { PartyKind } from "../domain/party/model";
 import { isOpen } from "../domain/lead/model";
-import type { LeadRecord, LeadRepository, NewLead, StaffDirectory } from "../usecase/lead/ports";
+import type {
+  AssignmentStrategy,
+  LeadRecord,
+  LeadRepository,
+  NewLead,
+  StaffDirectory,
+} from "../usecase/lead/ports";
 import type { Deps } from "../usecase/lead/service";
 import { PartyService } from "../usecase/party/service";
 import { FakePartyRepo, makePartyFakes } from "./party";
@@ -37,11 +44,15 @@ export class FakeLeadRepo implements LeadRepository {
     const row: Lead = {
       id: l.id,
       tenantId: l.tenantId,
+      title: l.title,
       partyId: l.partyId,
       source: l.source,
       stage: "new",
       ownerUserId: l.ownerUserId,
       notes: l.notes,
+      // A lead is captured OPEN, so it has nothing to explain yet. The real
+      // table says the same with lead_lost_reason_scope_chk.
+      lostReason: null,
       capturedAt: at,
       closedAt: null,
     };
@@ -104,8 +115,14 @@ export class FakeLeadRepo implements LeadRepository {
     leadId: string,
     stage: LeadStage,
     closedAt: string | null,
+    lostReason: string | null,
   ): Promise<Lead> {
-    return Promise.resolve(this.replace(tenantId, leadId, (r) => ({ ...r, stage, closedAt })));
+    // All three together, exactly as the adapter's single UPDATE does — a fake
+    // that let them drift apart would make the service look correct against a
+    // shape the database would refuse.
+    return Promise.resolve(
+      this.replace(tenantId, leadId, (r) => ({ ...r, stage, closedAt, lostReason })),
+    );
   }
 
   setOwner(tenantId: string, leadId: string, ownerUserId: string | null): Promise<Lead> {
@@ -133,8 +150,80 @@ export class FakeStaffDirectory implements StaffDirectory {
     return this;
   }
 
+  /** Somebody left, or had their access revoked. The fake's stand-in for
+   *  `is_active` going false — one flag, so this port and the rotation cannot
+   *  disagree about who works here, which is the property the real predicate
+   *  has to hold too. */
+  remove(tenantId: string, userId: string): this {
+    this.staff.delete(`${tenantId}:${userId}`);
+    return this;
+  }
+
   isActiveStaff(tenantId: string, userId: string): Promise<boolean> {
     return Promise.resolve(this.staff.has(`${tenantId}:${userId}`));
+  }
+
+  /**
+   * The firm's roster, for the rotation to divide work between.
+   *
+   * NOT on the StaffDirectory port, deliberately. The real rotation never lists
+   * anybody — it counts and claims in one statement, because listing and then
+   * choosing is the race the port exists to close (see AssignmentStrategy).
+   * Widening the port to fit this fake would put a method on the interface that
+   * the production adapter has no use for and that a future strategy would be
+   * tempted to reach for.
+   */
+  roster(tenantId: string): readonly string[] {
+    const prefix = `${tenantId}:`;
+    return [...this.staff]
+      .filter((k) => k.startsWith(prefix))
+      .map((k) => k.slice(prefix.length))
+      .sort();
+  }
+}
+
+/**
+ * The rotation, in memory: the emptiest desk wins, ties by user id.
+ *
+ * The SAME RULE as PostgresRoundRobinAssignment, written a second time, which
+ * is a cost worth naming. It buys unit tests that can show the DISTRIBUTION
+ * property — capture N, count the desks — without a database, and it cannot
+ * show the two properties that only Postgres has: that the counts and the claim
+ * are one atomic act, and that two simultaneous captures cannot land on the
+ * same person. Those are proved in tests/lead/assignment.integration.test.ts,
+ * against the real adapter. This fake is single-threaded and could never fail
+ * that test, so it is never asked to.
+ */
+export class FakeRoundRobinAssignment implements AssignmentStrategy {
+  readonly policy: AssignmentPolicy = "round_robin";
+
+  constructor(
+    private readonly leads: FakeLeadRepo,
+    private readonly staff: FakeStaffDirectory,
+  ) {}
+
+  async assign(lead: Lead): Promise<Lead> {
+    const roster = this.staff.roster(lead.tenantId);
+    if (roster.length === 0) return lead;
+
+    const current = await this.leads.findById(lead.tenantId, lead.id);
+    // Somebody claimed it in between. A person's decision outranks a rotation,
+    // exactly as `AND owner_user_id IS NULL` says in the adapter.
+    if (current === null || current.ownerUserId !== null) return current ?? lead;
+
+    const load = new Map<string, number>(roster.map((userId) => [userId, 0]));
+    for (const row of this.leads.rows) {
+      if (row.tenantId !== lead.tenantId || row.ownerUserId === null) continue;
+      if (!isOpen(row.stage)) continue;
+      const held = load.get(row.ownerUserId);
+      if (held !== undefined) load.set(row.ownerUserId, held + 1);
+    }
+
+    const chosen = [...load.entries()].sort(
+      (a, b) => a[1] - b[1] || a[0].localeCompare(b[0]),
+    )[0];
+    if (chosen === undefined) return lead;
+    return this.leads.setOwner(lead.tenantId, lead.id, chosen[0]);
   }
 }
 
@@ -143,6 +232,7 @@ export class FakeStaffDirectory implements StaffDirectory {
 export function makeLeadFakes(): Deps & {
   leads: FakeLeadRepo;
   staff: FakeStaffDirectory;
+  assignment: FakeRoundRobinAssignment;
   events: RecordingEventSink;
   /** The real party module the pipeline is built on, for a test that wants to
    *  read back the prospect capture created. */
@@ -172,6 +262,10 @@ export function makeLeadFakes(): Deps & {
     leads,
     prospects: party,
     staff,
+    // Rotates over whoever the test registered on `staff`. A test that has
+    // registered nobody therefore captures leads into the unassigned queue,
+    // which is why the tests written before T2.1b still mean what they meant.
+    assignment: new FakeRoundRobinAssignment(leads, staff),
     ids,
     clock: new FakeClock(new Date("2026-03-01T10:00:00Z")),
     events,

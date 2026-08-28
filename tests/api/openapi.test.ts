@@ -207,6 +207,36 @@ describe("the spec and the wire agree", () => {
     expect(sent).toEqual(documented);
   });
 
+  it("documents exactly the fields a lead sends", async () => {
+    // The third route to hold this line, and G3.1 is why it is here: `title` and
+    // `lostReason` were added to the aggregate, and a field on the wire that the
+    // spec does not describe is one the generated frontend client cannot see —
+    // so a titled lead would have rendered as an untitled one and nothing would
+    // have failed. zod-openapi documents a response without validating it, so
+    // only a comparison like this notices.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      components: { schemas: { Lead: { properties: Record<string, unknown> } } };
+    };
+    const documented = Object.keys(spec.components.schemas.Lead.properties).sort();
+
+    // A real lead from the real service, not a literal — a literal would just
+    // be this list written twice.
+    const fakes = makeLeadFakes();
+    const captured = await new LeadService(fakes).capture(
+      {
+        tenantId: "00000000-0000-4000-8000-0000000000c1",
+        source: "inbound",
+        title: "FY27 statutory audit",
+        kind: "organization",
+        name: "Meridian Textiles Private Limited",
+        identifiers: [{ type: "email", value: "priya@meridian.example" }],
+      },
+      { type: "human", id: "00000000-0000-4000-8000-0000000000d1" },
+    );
+
+    expect(Object.keys(captured.lead).sort()).toEqual(documented);
+  });
+
   it("tells the caller what it may do, so a screen need not guess", async () => {
     const me = await app().request("/api/v1/auth/me", {
       headers: { "x-user-id": "00000000-0000-0000-0000-000000000001" },

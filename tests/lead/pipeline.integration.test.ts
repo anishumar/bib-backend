@@ -17,6 +17,7 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
+import { PostgresRoundRobinAssignment } from "../../src/infrastructure/postgres/lead-assignment";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
@@ -46,6 +47,11 @@ const service = new LeadService({
   leads,
   prospects: party,
   staff: new PostgresMembershipRepository(app),
+  // The real rotation. The tenants below hold no memberships at all, so it
+  // declines every capture here and these leads stay unassigned — which is what
+  // this file was always testing. T2.1b's own properties are in
+  // assignment.integration.test.ts, against a firm that has a roster.
+  assignment: new PostgresRoundRobinAssignment(app),
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -84,6 +90,7 @@ beforeAll(async () => {
     {
       tenantId: tenantA,
       source: "inbound",
+      title: "FY27 statutory audit",
       kind: "organization",
       name: "Meridian Textiles Private Limited",
       identifiers: [{ type: "email", value: EMAIL }],
@@ -104,8 +111,8 @@ describe("one open lead per party", () => {
     // one prospect means two people ringing them and two forecasts counting it.
     const err = await withTenant(app, tenantA, (db) =>
       db`
-        INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-        VALUES (${tenantA}, ${partyId}, 'outbound', 'contacted')
+        INSERT INTO crm.lead (tenant_id, title, party_id, source, stage)
+        VALUES (${tenantA}, 'a rival opportunity', ${partyId}, 'outbound', 'contacted')
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23505"); // unique_violation
@@ -114,11 +121,15 @@ describe("one open lead per party", () => {
   it("allows a second one once the first is closed", async () => {
     // A prospect who went cold in March and came back in September is two
     // opportunities, and should be counted as two.
-    await service.moveStage({ tenantId: tenantA, leadId, stage: "lost" }, SYSTEM_ACTOR);
+    await service.moveStage(
+      { tenantId: tenantA, leadId, stage: "lost", lostReason: "went with the incumbent" },
+      SYSTEM_ACTOR,
+    );
     const again = await service.capture(
       {
         tenantId: tenantA,
         source: "referral",
+        title: "FY28 statutory audit",
         kind: "organization",
         name: "Meridian Textiles Private Limited",
         identifiers: [{ type: "email", value: EMAIL }],
@@ -140,6 +151,7 @@ describe("a closed lead always has a closing date", () => {
       {
         tenantId: tenantA,
         source: "outbound",
+        title: "constraint check",
         kind: "organization",
         name: `Check Test ${String(Math.round(Date.parse("2026-03-01") / 1000))}`,
         identifiers: [{ type: "email", value: `check-${stamp}-${String(nextSuffix())}@x.example` }],
@@ -213,8 +225,8 @@ describe("the tenant wall covers the pipeline", () => {
     );
     const err = await withTenant(app, tenantB, (db) =>
       db`
-        INSERT INTO crm.lead (tenant_id, party_id, source)
-        VALUES (${tenantB}, ${spare.partyId}, 'outbound')
+        INSERT INTO crm.lead (tenant_id, title, party_id, source)
+        VALUES (${tenantB}, 'across the wall', ${spare.partyId}, 'outbound')
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23503"); // foreign_key_violation
@@ -223,8 +235,8 @@ describe("the tenant wall covers the pipeline", () => {
   it("an insert cannot be addressed to another tenant", async () => {
     const err = await withTenant(app, tenantB, (db) =>
       db`
-        INSERT INTO crm.lead (tenant_id, party_id, source)
-        VALUES (${tenantA}, ${partyId}, 'outbound')
+        INSERT INTO crm.lead (tenant_id, title, party_id, source)
+        VALUES (${tenantA}, 'addressed elsewhere', ${partyId}, 'outbound')
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("42501"); // RLS WITH CHECK violation
@@ -237,6 +249,7 @@ describe("the tenant wall covers the pipeline", () => {
       {
         tenantId: tenantB,
         source: "inbound",
+        title: "FY27 statutory audit",
         kind: "organization",
         name: "Meridian Textiles Private Limited",
         identifiers: [{ type: "email", value: EMAIL }],
@@ -246,6 +259,197 @@ describe("the tenant wall covers the pipeline", () => {
     expect(elsewhere.merged).toBe(false);
     expect(elsewhere.matchedExistingParty).toBe(false);
     expect(elsewhere.lead.partyId).not.toBe(partyId);
+  });
+});
+
+describe("G3.1's columns hold when the service is bypassed", () => {
+  // Every assertion below is raw SQL through withTenant — no LeadService. That
+  // is the whole point of a database constraint: a rule that only lives in
+  // TypeScript is one an import, a backfill or a psql session walks past, and
+  // these three columns are the ones a bulk lead import would touch first.
+
+  /** A prospect nobody else in this file is using, with one open lead. */
+  async function freshLead(): Promise<{ leadId: string; partyId: string }> {
+    const captured = await service.capture(
+      {
+        tenantId: tenantA,
+        source: "outbound",
+        title: "constraint check",
+        kind: "organization",
+        name: `Constraint Test ${String(nextSuffix())}`,
+        identifiers: [{ type: "email", value: `chk-${stamp}-${String(nextSuffix())}@x.example` }],
+      },
+      SYSTEM_ACTOR,
+    );
+    return { leadId: captured.lead.id, partyId: captured.lead.partyId };
+  }
+
+  it("refuses a lead with no title at all", async () => {
+    const { partyId: freshParty } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`
+        INSERT INTO crm.lead (tenant_id, party_id, source, stage, closed_at)
+        VALUES (${tenantA}, ${freshParty}, 'outbound', 'lost', now())
+      `,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23502"); // not_null_violation
+  });
+
+  it("refuses a title that is only whitespace", async () => {
+    // NOT NULL alone buys nothing: "   " satisfies it and renders as the blank
+    // row the column was added to prevent.
+    const { partyId: freshParty } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`
+        INSERT INTO crm.lead (tenant_id, title, party_id, source, stage, closed_at)
+        VALUES (${tenantA}, '   ', ${freshParty}, 'outbound', 'lost', now())
+      `,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514"); // check_violation
+  });
+
+  it("gave every lead written before the column existed the name its list showed", async () => {
+    // The backfill: display_name, because that is literally what every list
+    // rendered for those rows. Asserted as a property of the whole table rather
+    // than of one row — a NULL or blank title anywhere means the migration or a
+    // later writer left a lead a screen cannot label.
+    const [row] = await owner<{ untitled: string }[]>`
+      SELECT count(*)::text AS untitled FROM crm.lead WHERE title IS NULL OR btrim(title) = ''
+    `;
+    expect(row?.untitled).toBe("0");
+  });
+
+  it("refuses a closing reason on a lead that closed WON", async () => {
+    // A won deal has nothing to explain, and a column that accepted a reason on
+    // one would collect notes nothing ever reads.
+    const { leadId: id } = await freshLead();
+    await service.moveStage({ tenantId: tenantA, leadId: id, stage: "converted" }, SYSTEM_ACTOR);
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET lost_reason = 'we won on price' WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+  });
+
+  it("refuses a closing reason on a lead that is still open", async () => {
+    const { leadId: id } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET lost_reason = 'too early to say' WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+  });
+
+  it("refuses a blank closing reason on a lead that is lost", async () => {
+    const { leadId: id } = await freshLead();
+    await service.moveStage(
+      { tenantId: tenantA, leadId: id, stage: "lost", lostReason: "beaten on fee" },
+      SYSTEM_ACTOR,
+    );
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET lost_reason = '  ' WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+  });
+
+  it("counts abandoned as terminal, so it must carry a closing date", async () => {
+    const { leadId: id } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET stage = 'abandoned' WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+  });
+
+  it("still refuses a stage the pipeline does not have", async () => {
+    // Widening the CHECK for `abandoned` must not have opened it to anything.
+    const { leadId: id } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET stage = 'nurturing', closed_at = now() WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+  });
+
+  it("lets an abandoned prospect be approached again — the index treats it as closed", async () => {
+    // THE ONE THAT WOULD HAVE BEEN SILENTLY WRONG. Had 0030 added `abandoned`
+    // to the stage CHECK and left lead_one_open_per_party alone, an abandoned
+    // lead would still have counted as OPEN and its prospect could never enter
+    // the pipeline again — the index that exists to stop duplicates locking the
+    // firm out of its own re-approach. Raw INSERT, because the index is what is
+    // being asserted, not the service's decision to merge.
+    const { leadId: id, partyId: freshParty } = await freshLead();
+    await service.moveStage(
+      {
+        tenantId: tenantA,
+        leadId: id,
+        stage: "abandoned",
+        lostReason: "three follow-ups, no reply",
+      },
+      SYSTEM_ACTOR,
+    );
+
+    await expect(
+      withTenant(app, tenantA, (db) =>
+        db`
+          INSERT INTO crm.lead (tenant_id, title, party_id, source, stage)
+          VALUES (${tenantA}, 'the re-approach', ${freshParty}, 'outbound', 'new')
+        `,
+      ),
+    ).resolves.toBeDefined();
+
+    // And the abandoned one is still there, still saying why.
+    const [row] = await owner<{ stage: string; lost_reason: string | null }[]>`
+      SELECT stage, lost_reason FROM crm.lead WHERE id = ${id}
+    `;
+    expect(row?.stage).toBe("abandoned");
+    expect(row?.lost_reason).toBe("three follow-ups, no reply");
+  });
+
+  it("still refuses a SECOND open lead once the re-approach is live", async () => {
+    // The merge rule is unchanged for open leads; 0030 only moved where the
+    // line is drawn between open and closed.
+    const { partyId: freshParty } = await freshLead();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`
+        INSERT INTO crm.lead (tenant_id, title, party_id, source, stage)
+        VALUES (${tenantA}, 'a rival opportunity', ${freshParty}, 'outbound', 'contacted')
+      `,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23505"); // unique_violation
+  });
+
+  it("writes the stage, the closing date and the reason in one statement", async () => {
+    // Set separately there would be a moment where a lost lead has no reason,
+    // and each CHECK would reject whichever half arrived first.
+    const { leadId: id } = await freshLead();
+    await service.moveStage(
+      {
+        tenantId: tenantA,
+        leadId: id,
+        stage: "lost",
+        lostReason: "their CFO went with his old audit partner",
+      },
+      SYSTEM_ACTOR,
+    );
+    const [row] = await owner<
+      { stage: string; closed_at: Date | null; lost_reason: string | null }[]
+    >`SELECT stage, closed_at, lost_reason FROM crm.lead WHERE id = ${id}`;
+    expect(row?.stage).toBe("lost");
+    expect(row?.closed_at).not.toBeNull();
+    expect(row?.lost_reason).toBe("their CFO went with his old audit partner");
+  });
+
+  it("keeps the closing reason out of the ledger it caused an event in", async () => {
+    // The reason is a sentence about a named human being, in a column that can
+    // be erased. The ledger cannot be, so it carries only whether one exists.
+    const { leadId: id } = await freshLead();
+    const REASON = `Priya said the board had already picked Deloitte ${stamp}`;
+    await service.moveStage(
+      { tenantId: tenantA, leadId: id, stage: "lost", lostReason: REASON },
+      SYSTEM_ACTOR,
+    );
+    const timeline = await ledger.forObject(tenantA, "lead", id);
+    const dump = JSON.stringify(timeline.map((r) => r.event));
+    expect(dump).not.toContain(REASON);
+    expect(dump).not.toContain("Deloitte");
+    expect(dump).toContain("lostReasonRecorded");
   });
 });
 

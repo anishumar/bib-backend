@@ -98,9 +98,16 @@ export function mapError(err: unknown): MappedError {
   }
   if (err instanceof LeadError) {
     switch (err.code) {
+      // Malformed input, all of it: a source or a stage that does not exist, no
+      // way to reach the prospect, no name, a close with no explanation, and an
+      // explanation attached to a stage that has nothing to explain. None is a
+      // statement about the pipeline's current state, so none is a 409.
       case "INVALID_SOURCE":
       case "INVALID_STAGE":
       case "NO_CONTACT_DETAIL":
+      case "BLANK_TITLE":
+      case "LOST_REASON_REQUIRED":
+      case "LOST_REASON_NOT_APPLICABLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LEAD_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
