@@ -224,10 +224,16 @@ resolve. So the LIST hides archived parties and takes a flag to include them, wh
 party by id ALWAYS returns it, archived or not — that asymmetry is the whole design, and it is
 why this is one column on one table rather than `deleted_at` across `core` behind a filter every
 read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
-proposal, an engagement letter, a letter line's entity or an engagement still points at the
-party, and the refusal names them. A trigger rather than a service check because an import or an
-agent walks straight past a service, and it costs nothing on ordinary writes: `BEFORE UPDATE OF
-archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so a rename fires nothing.
+proposal, a proposal line's entity, an engagement letter, a letter line's entity or an engagement
+still points at the party, and the refusal names them. A trigger rather than a service check
+because an import or an agent walks straight past a service, and it costs nothing on ordinary
+writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
+a rename fires nothing. **Read that guard as "you cannot put away a client you are still working
+with", not as "an archived party is unreferenced"** — it is checked at the moment of archiving and
+is not an invariant afterwards. Nothing stops a NEW reference being made to an archived party, and
+lead capture in particular resolves by identifier without consulting `archived_at`, so a capture
+carrying an archived party's PAN attaches to it. Making that the stronger invariant is a decision
+nobody has taken; it is on the board as an open item, not an oversight.
 
 ## Migrations
 

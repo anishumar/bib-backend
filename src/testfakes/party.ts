@@ -10,7 +10,12 @@ import type {
   PartyRelationship,
   Person,
 } from "../domain/party/model";
-import { PartyHasReferences, PartyNotFound } from "../domain/party/errors";
+import {
+  PartyAlreadyArchived,
+  PartyHasReferences,
+  PartyNotArchived,
+  PartyNotFound,
+} from "../domain/party/errors";
 import type { Deps } from "../usecase/party/service";
 import type {
   IdentifierRepository,
@@ -148,6 +153,10 @@ export class FakePartyRepo implements PartyRepository {
     if (refs && refs.length > 0) {
       return Promise.reject(new PartyHasReferences(partyId, refs));
     }
+    // The port requires the TRANSITION to be atomic, not merely the write: the
+    // real adapter gets that from `AND archived_at IS NULL` on the UPDATE, and
+    // this refuses on the same condition so the contract reads the same from
+    // both sides.
     return this.setArchivedAt(tenantId, partyId, this.archiveStamp);
   }
 
@@ -162,6 +171,12 @@ export class FakePartyRepo implements PartyRepository {
   ): Promise<Party> {
     const party = this.parties.find((p) => p.tenantId === tenantId && p.id === partyId);
     if (!party) return Promise.reject(new PartyNotFound(partyId));
+    if (archivedAt !== null && party.archivedAt !== null) {
+      return Promise.reject(new PartyAlreadyArchived(partyId));
+    }
+    if (archivedAt === null && party.archivedAt === null) {
+      return Promise.reject(new PartyNotArchived(partyId));
+    }
     const updated: Party = { ...party, archivedAt };
     this.parties = this.parties.map((p) => (p === party ? updated : p));
     return Promise.resolve(updated);

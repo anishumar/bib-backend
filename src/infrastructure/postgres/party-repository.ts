@@ -20,7 +20,12 @@ import type {
   NewPerson,
   PartyRepository,
 } from "../../usecase/party/ports";
-import { PartyHasReferences, PartyNotFound } from "../../domain/party/errors";
+import {
+  PartyAlreadyArchived,
+  PartyHasReferences,
+  PartyNotArchived,
+  PartyNotFound,
+} from "../../domain/party/errors";
 
 interface PartyRow {
   id: string;
@@ -250,37 +255,71 @@ export class PostgresPartyRepository implements PartyRepository {
    * belongs to the transaction that made the change, and every other stamp on
    * this table (`created_at`, `updated_at`) is struck the same way.
    *
-   * THE REFUSAL IS NOT WRITTEN HERE. `trg_party_archive_guard` (0035) raises
-   * `restrict_violation` when a lead, proposal, engagement letter, letter line
-   * or engagement still points at the party, and names them in DETAIL. All this
-   * method does is put our own error round it — so the same rule holds for an
-   * import, an agent or a psql session, none of which pass through this file.
+   * THE REFUSAL IS NOT WRITTEN HERE. `trg_party_archive_guard` (0035, body
+   * replaced by 0036) raises `restrict_violation` when a lead, proposal,
+   * proposal line, engagement letter, letter line or engagement still points at
+   * the party, and names them in DETAIL. All this method does is put our own
+   * error round it — so the same rule holds for an import, an agent or a psql
+   * session, none of which pass through this file.
+   *
+   * `AND archived_at IS NULL` MAKES THE TRANSITION ITSELF THE LOCK, the way
+   * `signAndFanOut` uses `AND status = 'sent'` and `recordAdvance` uses `AND
+   * advance_recorded_at IS NULL`. The service checks first, but a check and an
+   * UPDATE are two statements and two callers fit between them; the trigger
+   * cannot close that gap because it deliberately does not fire on NOT NULL →
+   * NOT NULL. Without the predicate both writers win, the timestamp moves, and
+   * a SECOND `party.archived` lands in a log that can never be corrected. With
+   * it the loser gets no row.
    */
   async archive(tenantId: string, partyId: string): Promise<Party> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<PartyRow[]>`
         UPDATE core.party SET archived_at = now()
-        WHERE id = ${partyId}
+        WHERE id = ${partyId} AND archived_at IS NULL
         RETURNING id, tenant_id, kind, display_name, archived_at
       `.catch((err: unknown) => {
         throw isArchiveRefusal(err) ? new PartyHasReferences(partyId, referrersOf(err)) : err;
       });
       const row = rows[0];
-      if (!row) throw new PartyNotFound(partyId);
+      if (!row) throw await this.explainMissedUpdate(db, partyId, "archive");
       return toParty(row);
     });
   }
 
+  /** The same lock in the other direction: `AND archived_at IS NOT NULL`, so two
+   *  concurrent restores produce one event rather than two. */
   async unarchive(tenantId: string, partyId: string): Promise<Party> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<PartyRow[]>`
         UPDATE core.party SET archived_at = NULL
-        WHERE id = ${partyId}
+        WHERE id = ${partyId} AND archived_at IS NOT NULL
         RETURNING id, tenant_id, kind, display_name, archived_at
       `;
-      if (!row) throw new PartyNotFound(partyId);
+      if (!row) throw await this.explainMissedUpdate(db, partyId, "unarchive");
       return toParty(row);
     });
+  }
+
+  /**
+   * Why a guarded UPDATE matched nothing: the party is not there, or somebody
+   * else got there first. Both are the caller's answer and neither is a 500 —
+   * losing the race means the party is already in the state that was asked for,
+   * which is the same 409 the service's own pre-check gives.
+   *
+   * One extra read, on the failure path only.
+   */
+  private async explainMissedUpdate(
+    db: Db,
+    partyId: string,
+    action: "archive" | "unarchive",
+  ): Promise<Error> {
+    const [row] = await db<{ archived_at: Date | null }[]>`
+      SELECT archived_at FROM core.party WHERE id = ${partyId}
+    `;
+    if (!row) return new PartyNotFound(partyId);
+    return action === "archive"
+      ? new PartyAlreadyArchived(partyId)
+      : new PartyNotArchived(partyId);
   }
 }
 
