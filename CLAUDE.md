@@ -209,7 +209,25 @@ Two rules that came out of it, and both are now enforced by tests:
 - Every unique constraint is consciously scoped (state it in the migration comment).
 - Idempotency by derived id (`platform/ids.ts` `derivedId`) on external callbacks.
 - PII stays out of any append-only log (erasability).
-- Soft delete only. Every state transition writes an event naming its actor.
+- **Nothing is hard-deleted, and nothing in `core` is soft-deleted either.** `bib_app` holds
+  no DELETE grant on a single table in this database, so removal is impossible at the
+  database level rather than merely unimplemented. The only soft delete in the product is
+  `removed_at` on `crm.proposal_line` and `crm.engagement_letter_line` — a line struck off a
+  document before it went out. Every state transition writes an event naming its actor.
+
+**Parties are permanent — there is no `deleted_at` in `core` and there never will be (G0.3).**
+A client created by mistake is ARCHIVED, not removed: `core.party.archived_at` (migration 0035)
+means "keep this out of the pickers and lists", and nothing more. A real company's lifecycle is
+answered by the ledger and by `core.legal_entity.status`, which knows the states a registrar
+recognises. The reason is one sentence: a signed engagement letter's counterparty must always
+resolve. So the LIST hides archived parties and takes a flag to include them, while reading ONE
+party by id ALWAYS returns it, archived or not — that asymmetry is the whole design, and it is
+why this is one column on one table rather than `deleted_at` across `core` behind a filter every
+read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
+proposal, an engagement letter, a letter line's entity or an engagement still points at the
+party, and the refusal names them. A trigger rather than a service check because an import or an
+agent walks straight past a service, and it costs nothing on ordinary writes: `BEFORE UPDATE OF
+archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so a rename fires nothing.
 
 ## Migrations
 

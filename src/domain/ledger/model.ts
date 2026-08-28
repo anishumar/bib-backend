@@ -75,6 +75,8 @@ export const EVENT_VERBS = {
   "membership.role_changed":     { objectType: "membership",          lane: "platform",   description: "A member's role at a firm changed, and with it everything gate 3 lets them do." },
   "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user's session became active in THIS tenant — at login, or when the org switcher selected it." },
   "party.created":               { objectType: "party",               lane: "platform",   description: "An organization or person party was created." },
+  "party.archived":              { objectType: "party",               lane: "platform",   description: "A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035)." },
+  "party.unarchived":            { objectType: "party",               lane: "platform",   description: "An archived party was brought back into the pickers and lists." },
   "legal_entity.registered":     { objectType: "legal_entity",        lane: "platform",   description: "An organization was registered as a legal entity in a jurisdiction." },
   "party_identifier.added":      { objectType: "party_identifier",    lane: "platform",   description: "A PAN / GSTIN / handle was attached to a party." },
   "party_relationship.recorded": { objectType: "party_relationship",  lane: "platform",   description: "An effective-dated relationship between two parties was recorded." },

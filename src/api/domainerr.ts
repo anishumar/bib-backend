@@ -78,7 +78,14 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "PARTY_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Each of these is "the party is not in the state this call assumed", and
+      // none is a malformed request. PARTY_HAS_REFERENCES in particular is the
+      // firm's own records disagreeing with the request — the caller fixes it
+      // by closing what points at the party, not by resending.
       case "DUPLICATE_IDENTIFIER":
+      case "PARTY_ALREADY_ARCHIVED":
+      case "PARTY_NOT_ARCHIVED":
+      case "PARTY_HAS_REFERENCES":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
       case "INVALID_IDENTIFIER":
