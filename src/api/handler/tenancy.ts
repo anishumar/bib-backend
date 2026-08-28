@@ -32,6 +32,29 @@ const TenantSchema = z
   })
   .openapi("Tenant");
 
+/** Who binds the firm — the "Yours sincerely, …, Director" block on every
+ *  letter it sends. Null when the firm has not named anybody. */
+const FirmSignatorySchema = z
+  .object({
+    userId: z.string().uuid(),
+    displayName: z.string().nullable().openapi({
+      description: "Null when nobody has named the account — show the roster entry instead.",
+    }),
+    title: z.string(),
+  })
+  .openapi("FirmSignatory");
+
+const FirmSignatoryResponse = z
+  .object({ signatory: FirmSignatorySchema.nullable() })
+  .openapi("FirmSignatoryResponse");
+
+const SetFirmSignatoryRequest = z
+  .object({
+    userId: z.string().uuid(),
+    title: z.string().min(1).max(120),
+  })
+  .openapi("SetFirmSignatoryRequest");
+
 const UserAccountSchema = z
   .object({
     id: z.string().uuid(),
@@ -277,6 +300,58 @@ const setMemberActiveRoute = createRoute({
   },
 });
 
+// ── Who binds the firm ──────────────────────────────────────────────────────
+//
+// One signatory for the whole firm, whichever of its entities issues the
+// document — "unki ek hi signature rahegi". These two routes are the only
+// reason it is a row rather than a constant: a rule nobody can change is a
+// hardcode with extra steps, and a successor should be an UPDATE.
+//
+// The split matches the firm-entity rule (G1.2), for the same reason. READING
+// is `config:read` — an associate drafting a letter should be able to see whose
+// signature will be on it. WRITING is `tenant:admin`, because naming who binds
+// the firm is a decision at the same level as deciding what a role means.
+
+const firmSignatoryRoute = createRoute({
+  method: "get",
+  path: "/api/v1/tenancy/firm-signatory",
+  tags: ["tenancy"],
+  summary: "Who signs this firm's engagement letters",
+  description:
+    "Snapshotted onto each letter when it is SENT, so changing it here never restates a " +
+    "letter already issued. Null means the firm has not named anybody and its letters go " +
+    "out with no signature block.",
+  responses: {
+    200: {
+      description: "The standing signatory, or null",
+      content: { "application/json": { schema: FirmSignatoryResponse } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role does not permit it"),
+  },
+});
+
+const setFirmSignatoryRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/firm-signatory",
+  tags: ["tenancy"],
+  summary: "Name who binds the firm",
+  description:
+    "The person must have an active STAFF membership here: authority to bind the firm is the " +
+    "strongest thing anyone holds in this product, and `tenancy.user_account` is global, so " +
+    "no foreign key can say it. Letters already sent keep the block they went out with.",
+  request: {
+    body: { content: { "application/json": { schema: SetFirmSignatoryRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Named", content: { "application/json": { schema: FirmSignatorySchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("That person has no active staff membership at this firm"),
+  },
+});
+
 const myMembershipsRoute = createRoute({
   method: "get",
   path: "/api/v1/tenancy/me/memberships",
@@ -372,6 +447,27 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(membership, 200);
   });
 
+  app.openapi(firmSignatoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const signatory = await deps.service.firmSignatory(s.tenantId);
+    return c.json({ signatory: signatory === null ? null : { ...signatory } }, 200);
+  });
+
+  app.openapi(setFirmSignatoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { userId, title } = c.req.valid("json");
+    const signatory = await deps.service.setFirmSignatory(
+      { tenantId: s.tenantId, userId, title },
+      s.actor,
+    );
+    return c.json(
+      { userId: signatory.userId, displayName: signatory.displayName, title: signatory.title },
+      200,
+    );
+  });
+
   app.openapi(myMembershipsRoute, async (c) => {
     const principal = c.get("principal");
     if (!principal) {
@@ -396,4 +492,6 @@ export const tenancyRoutes = {
   inviteMember: inviteMemberRoute,
   changeMemberRole: changeMemberRoleRoute,
   setMemberActive: setMemberActiveRoute,
+  firmSignatory: firmSignatoryRoute,
+  setFirmSignatory: setFirmSignatoryRoute,
 } as const;

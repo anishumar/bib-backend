@@ -30,10 +30,14 @@ import {
   canTransition,
   canonicalContent,
   clauseApplies,
+  engagementState,
+  isDay,
   isEditable,
   isJurisdiction,
   mayActivate,
   normalizeJurisdiction,
+  resolveEffectiveFrom,
+  utcDay,
 } from "../../domain/engagement/model";
 import { readClauseBody } from "../../domain/config/model";
 import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
@@ -41,16 +45,19 @@ import {
   AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
   AdvanceNotRequired,
+  AlreadySuperseded,
   ClauseNotFound,
   ClauseNotPublished,
   ClauseWrongJurisdiction,
   EmptyLetter,
   InvalidAmount,
+  InvalidDate,
   InvalidJurisdiction,
   InvalidLetterTransition,
   LetterLineNotFound,
   LetterNotEditable,
   LetterNotFound,
+  LetterNotSupersedable,
   NoClauses,
   NotAClause,
   ServiceNotQuotable,
@@ -62,10 +69,13 @@ import type {
   ContentHasher,
   DocumentIdentity,
   ESignProvider,
+  EngagementRecord,
   EngagementRepository,
+  FirmSignatory,
+  FirmSignatureRecord,
   LetterFilters,
-  LetterRecord,
   LetterSummary,
+  LetterView,
   NewEngagement,
 } from "./ports";
 
@@ -77,6 +87,10 @@ export interface Deps {
    *  entities is contracting. The same seam proposals use, so the two documents
    *  cannot disagree about who serves a UAE client. */
   readonly documents: DocumentIdentity;
+  /** Who signs the firm's letters. One signatory for the whole firm, held as a
+   *  row on the tenant so a successor is an UPDATE — tenancy satisfies this at
+   *  the composition root. */
+  readonly firm: FirmSignatory;
   readonly esign: ESignProvider;
   readonly hasher: ContentHasher;
   readonly ids: IdGen;
@@ -104,6 +118,20 @@ export interface DraftLetterInput {
   readonly fxRateDate: string;
   readonly advanceRequired: boolean;
   readonly advanceAmount?: string | undefined;
+  /** The opening paragraph — why this client is buying this. Optional, and the
+   *  only chance to write it: a letter is editable while it is a draft and
+   *  there is deliberately no route that rewrites a sent one. */
+  readonly background?: string | undefined;
+  /** The named individual the letter is written to, care-of the client. */
+  readonly addressedToPartyId?: string | undefined;
+  /** The date printed under the letterhead. Defaults to the day it is SENT —
+   *  see `send` — because a document nobody dated is dated when it went out. */
+  readonly issuedOn?: string | undefined;
+  /** The SIGNED letter this one replaces. */
+  readonly supersedesId?: string | undefined;
+  /** When the engagements this letter opens begin. Null/absent means the
+   *  signature date. */
+  readonly effectiveFrom?: string | undefined;
 }
 
 export interface AddLetterLineInput {
@@ -117,6 +145,8 @@ export interface AddLetterLineInput {
   readonly quantity: string;
   readonly unitAmount: string;
   readonly discountPercent: string;
+  /** When THIS line starts, when that is not the letter's date. */
+  readonly effectiveFrom?: string | undefined;
 }
 
 export interface SignInput {
@@ -124,6 +154,10 @@ export interface SignInput {
   readonly letterId: string;
   /** Who signed, as attested by whoever is recording it. */
   readonly signedByName: string;
+  /** The capacity they signed in — "Director". Optional: it is not always known
+   *  when a wet signature is attested afterwards, and a letter recorded without
+   *  it is still verifiable. */
+  readonly signedByTitle?: string | undefined;
   /** The provider's own reference, or the firm's for a paper copy. */
   readonly reference?: string | undefined;
 }
@@ -147,6 +181,22 @@ export class EngagementService {
     }
     if (input.advanceAmount !== undefined && !isAmount(input.advanceAmount)) {
       throw new InvalidAmount("advance amount", input.advanceAmount);
+    }
+
+    for (const [field, value] of [
+      ["issue date", input.issuedOn],
+      ["effective date", input.effectiveFrom],
+    ] as const) {
+      if (value !== undefined && !isDay(value)) throw new InvalidDate(field, value);
+    }
+
+    // SUPERSESSION, checked before anything is written. The rule is that only a
+    // SIGNED letter is superseded — a draft is edited, an unsigned sent letter
+    // is withdrawn — and it is checked here as well as by the trigger in 0022,
+    // because a caller deserves a sentence rather than a constraint name. The
+    // trigger is what makes it true when this code is bypassed.
+    if (input.supersedesId !== undefined) {
+      await this.requireSupersedable(input.tenantId, input.supersedesId);
     }
 
     // WHO is contracting. The letter already states WHERE the work is, so that
@@ -179,6 +229,11 @@ export class EngagementService {
       fxRateDate: input.fxRateDate,
       advanceRequired: input.advanceRequired,
       advanceAmount: input.advanceRequired ? (input.advanceAmount ?? null) : null,
+      background: blankToNull(input.background),
+      addressedToPartyId: input.addressedToPartyId ?? null,
+      issuedOn: input.issuedOn ?? null,
+      supersedesId: input.supersedesId ?? null,
+      effectiveFrom: input.effectiveFrom ?? null,
     });
 
     await this.deps.events.recordEvent({
@@ -200,6 +255,13 @@ export class EngagementService {
         jurisdiction: letter.jurisdiction,
         currency: letter.currency,
         advanceRequired: letter.advanceRequired,
+        // LINEAGE, on the first row of the successor's timeline. "Why does this
+        // client have two engagement letters for the same year" is answered
+        // here and not by comparing dates. The BACKGROUND and the ADDRESSEE are
+        // absent for the reason the title is: one is prose about a named client
+        // and the other is a person, and this log cannot be erased.
+        supersedesId: letter.supersedesId,
+        effectiveFrom: letter.effectiveFrom,
       },
     });
     return letter;
@@ -214,6 +276,9 @@ export class EngagementService {
     if (!isAmount(input.unitAmount)) throw new InvalidAmount("unit amount", input.unitAmount);
     if (!isAmount(input.discountPercent) || Number(input.discountPercent) > 100) {
       throw new InvalidAmount("discount", input.discountPercent);
+    }
+    if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
+      throw new InvalidDate("effective date", input.effectiveFrom);
     }
 
     const pinned = await this.deps.library.readPinnedVersion(
@@ -242,6 +307,7 @@ export class EngagementService {
       unitAmount: input.unitAmount,
       currency: letter.currency,
       discountPercent: input.discountPercent,
+      effectiveFrom: input.effectiveFrom ?? null,
     });
   }
 
@@ -282,29 +348,67 @@ export class EngagementService {
     });
   }
 
-  async describe(tenantId: string, letterId: string): Promise<LetterRecord> {
+  async describe(tenantId: string, letterId: string): Promise<LetterView> {
     const record = await this.deps.letters.describeLetter(tenantId, letterId);
     if (record === null) throw new LetterNotFound(letterId);
-    return record;
+    // The one thing the repository could not answer: what each engagement is
+    // doing TODAY. The rows say when work begins; the clock says whether it
+    // has.
+    return { ...record, engagements: this.withState(record.engagements) };
   }
 
   async list(tenantId: string, filters: LetterFilters): Promise<readonly LetterSummary[]> {
     return this.deps.letters.listLetters(tenantId, filters);
   }
 
-  /** Send it for signature. Refuses a letter that commits nobody to anything,
-   *  and one with no terms at all. */
+  /**
+   * Send it for signature. Refuses a letter that commits nobody to anything,
+   * and one with no terms at all.
+   *
+   * THIS IS ALSO WHERE THE FIRM SIGNS. A real engagement letter goes out
+   * already carrying "Yours sincerely, <name>, Director" and comes back with
+   * the client's acceptance underneath it — the firm commits first, which is
+   * what makes it an offer the client can accept. So the firm's block is
+   * snapshotted here, from the standing signatory on the tenant, and is frozen
+   * with everything else once the client signs.
+   *
+   * A firm that has named NO signatory still sends: the block does not print,
+   * exactly as today. Refusing would be defensible — a letter with a blank
+   * signature block is not really a letter — but it would lock every existing
+   * firm out of a flow they use now, and that is a product decision nobody has
+   * made. It is recorded as an open question rather than assumed here.
+   */
   async send(tenantId: string, letterId: string, actor: Actor): Promise<EngagementLetter> {
+    // `editableOrThrow` is the whole gate: a letter is editable only while it is
+    // a draft, and a draft's only forward move is `sent`. A second
+    // `canTransition` check here would be unreachable.
     const letter = await this.editableOrThrow(tenantId, letterId);
     await this.requireCompleteTerms(tenantId, letterId);
 
-    const sent = await this.moveTo(letter, "sent");
+    const now = this.deps.clock.now();
+    const at = now.toISOString();
+    const standing = await this.deps.firm.firmSignatory(tenantId);
+    const firm: FirmSignatureRecord | null =
+      standing === null ? null : { userId: standing.userId, title: standing.title, signedAt: at };
+
+    const sent = await this.deps.letters.markSent(tenantId, letter.id, at, utcDay(now), firm);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "engagement_letter.sent",
       objectId: letter.id,
       actor,
-      payload: { partyId: letter.partyId, jurisdiction: letter.jurisdiction },
+      // WHO BOUND THE FIRM, beside the actor rather than instead of it. The
+      // actor is whoever pressed send — that is who OPERATED the system, and
+      // the ledger has always recorded it. This is a different question, and
+      // the one an audit asks: on whose authority did the firm commit? A single
+      // field could not answer both, because they are routinely two people.
+      payload: {
+        partyId: letter.partyId,
+        jurisdiction: letter.jurisdiction,
+        issuedOn: sent.issuedOn,
+        firmSignatoryUserId: sent.firmSignatoryUserId,
+        firmSignatoryTitle: sent.firmSignatoryTitle,
+      },
     });
     return sent;
   }
@@ -337,7 +441,7 @@ export class EngagementService {
   async sign(
     input: SignInput,
     actor: Actor,
-  ): Promise<{ letter: EngagementLetter; engagements: readonly Engagement[] }> {
+  ): Promise<{ letter: EngagementLetter; engagements: readonly EngagementRecord[] }> {
     const letter = await this.findOrThrow(input.tenantId, input.letterId);
     if (!canTransition(letter.status, "signed")) {
       throw new InvalidLetterTransition(letter.status, "signed");
@@ -357,9 +461,23 @@ export class EngagementService {
       reference: input.reference,
     });
 
-    const at = this.deps.clock.now().toISOString();
+    const now = this.deps.clock.now();
+    const at = now.toISOString();
+    // WHEN THE WORK BEGINS, resolved once per line and then stored. Null on the
+    // line means the letter's date; null on the letter means today's signature.
+    // Resolved HERE rather than read back through two joins later, because the
+    // letter freezes at this moment and the answer can therefore never change.
+    const signatureDay = utcDay(now);
     // The fee gate, decided ONCE by the domain and carried into every
     // engagement the letter creates.
+    //
+    // The DATE gate is deliberately not a second status. `active` means the
+    // commercial gates are open — signed, and paid when an advance was
+    // required; whether work has STARTED is `effectiveFrom` against the
+    // calendar, reported as `pending_start` by `engagementState`. Storing that
+    // as a status would need something to move the row on the day, and nothing
+    // here runs on a timer: a state nothing can leave is worse than a date
+    // nothing has reached. See migration 0022.
     const releasedNow = mayActivate(letter);
     // BOTH parties, and from different places on purpose. The CLIENT comes from
     // the letter — it is who the firm is billing, and it is the same for every
@@ -376,6 +494,11 @@ export class EngagementService {
       entityPartyId: line.entityPartyId,
       status: releasedNow ? ("active" as const) : ("pending_advance" as const),
       activatedAt: releasedNow ? at : null,
+      effectiveFrom: resolveEffectiveFrom(
+        line.effectiveFrom,
+        letter.effectiveFrom,
+        signatureDay,
+      ),
     }));
 
     const result = await this.deps.letters.signAndFanOut(
@@ -384,6 +507,7 @@ export class EngagementService {
       {
         signedAt: at,
         signedByName: input.signedByName.trim(),
+        signedByTitle: blankToNull(input.signedByTitle),
         signatureMethod: this.deps.esign.method,
         signatureReference: provider.reference,
         signedContentHash: contentHash,
@@ -417,7 +541,7 @@ export class EngagementService {
     for (const engagement of result.engagements) {
       if (engagement.status === "active") await this.recordActivation(engagement, actor);
     }
-    return result;
+    return { letter: result.letter, engagements: this.withState(result.engagements) };
   }
 
   /**
@@ -433,7 +557,7 @@ export class EngagementService {
     letterId: string,
     recordedByUserId: string,
     actor: Actor,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }> {
+  ): Promise<{ letter: EngagementLetter; released: readonly EngagementRecord[] }> {
     const letter = await this.findOrThrow(tenantId, letterId);
     if (!letter.advanceRequired) throw new AdvanceNotRequired();
     if (letter.advanceRecordedAt !== null) {
@@ -457,15 +581,42 @@ export class EngagementService {
       },
     });
     for (const engagement of result.released) await this.recordActivation(engagement, actor);
-    return result;
+    return { letter: result.letter, released: this.withState(result.released) };
   }
 
-  async listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]> {
+  async listEngagements(tenantId: string, letterId: string): Promise<readonly EngagementRecord[]> {
     await this.findOrThrow(tenantId, letterId);
-    return this.deps.letters.listEngagements(tenantId, letterId);
+    return this.withState(await this.deps.letters.listEngagements(tenantId, letterId));
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
+
+  /** The stored rows, each narrowed against today. The clock lives here and
+   *  nowhere below: repositories return what is stored, and "has this started
+   *  yet" is a rule. */
+  private withState(engagements: readonly Engagement[]): readonly EngagementRecord[] {
+    const today = utcDay(this.deps.clock.now());
+    return engagements.map((engagement) => ({
+      engagement,
+      state: engagementState(engagement, today),
+    }));
+  }
+
+  /**
+   * The letter being replaced must be one the client actually signed, and must
+   * not already have a live replacement.
+   *
+   * Both are enforced in the database too (a trigger and a partial unique
+   * index, 0022) — this is here so the caller gets a sentence naming what to do
+   * instead, rather than a constraint name.
+   */
+  private async requireSupersedable(tenantId: string, letterId: string): Promise<void> {
+    const target = await this.deps.letters.findLetter(tenantId, letterId);
+    if (target === null) throw new LetterNotFound(letterId);
+    if (target.status !== "signed") throw new LetterNotSupersedable(target.status);
+    const existing = await this.deps.letters.findSuccessor(tenantId, letterId);
+    if (existing !== null) throw new AlreadySuperseded(existing.ref);
+  }
 
   private async findOrThrow(tenantId: string, letterId: string): Promise<EngagementLetter> {
     const letter = await this.deps.letters.findLetter(tenantId, letterId);
@@ -535,7 +686,38 @@ export class EngagementService {
         // company it was scheduling for would be reading the one fact the
         // trigger exists to deliver out of a second table.
         entityPartyId: engagement.entityPartyId,
+        // AND THE DATE THE WORK BEGINS (G1.5). This event fires when the
+        // COMMERCIAL gates open, which is not always when work starts: a letter
+        // signed in September can open engagements that begin in October.
+        //
+        // It is emitted then rather than held until the date, deliberately.
+        // Holding it would need a timer this service does not have, and would
+        // leave a September-signed October engagement invisible to the delivery
+        // lane with nothing to make it visible later. Carrying the date instead
+        // gives the scheduler — the component that owns a clock, and that
+        // already plans future periods for any recurring service — what it
+        // needs to plan the FIRST period correctly. That is what stops the firm
+        // being issued August's filings for work it has not taken on, which is
+        // the whole point of the field.
+        //
+        // CONSUMERS MUST READ IT. Scheduling from the event's own timestamp is
+        // the bug this field exists to prevent.
+        effectiveFrom: engagement.effectiveFrom,
       },
     });
   }
+}
+
+/**
+ * Optional prose, as a nullable column wants it.
+ *
+ * A body that arrives as "" or "   " is somebody clearing a field, not somebody
+ * writing an empty paragraph — and the database refuses blank prose outright
+ * (`el_background_not_blank_chk`, 0022). Trimmed rather than stored as typed,
+ * because trailing whitespace in a document that gets hashed is a difference
+ * nobody can see and every signature would commit to.
+ */
+function blankToNull(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
 }

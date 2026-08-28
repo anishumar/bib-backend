@@ -30,6 +30,10 @@ export class FakeTenantRepo implements TenantRepository {
       name: t.name,
       status: "active",
       reportingCurrency: t.reportingCurrency,
+      // A new firm has named nobody. What the product does about that is the
+      // service's business, not the store's.
+      firmSignatoryUserId: null,
+      firmSignatoryTitle: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -39,6 +43,18 @@ export class FakeTenantRepo implements TenantRepository {
   }
   findById(id: string): Promise<Tenant | null> {
     return Promise.resolve(this.rows.find((r) => r.id === id) ?? null);
+  }
+  setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
+    const index = this.rows.findIndex((r) => r.id === tenantId);
+    const current = this.rows[index];
+    if (index === -1 || current === undefined) throw new Error(`fake: no tenant ${tenantId}`);
+    const updated: Tenant = {
+      ...current,
+      firmSignatoryUserId: userId,
+      firmSignatoryTitle: title,
+    };
+    this.rows[index] = updated;
+    return Promise.resolve(updated);
   }
 }
 

@@ -91,6 +91,9 @@ const ProposalSchema = z
     // withholding it from delivery staff would serve nobody.
     firstViewedAt: z.string().nullable(),
     viewCount: z.number().int(),
+    /** WHY the client said no. Null on every other status — the schema says so
+     *  too, so a reason can never sit on a proposal that was accepted. */
+    declinedReason: z.string().nullable(),
   })
   .openapi("Proposal");
 
@@ -257,7 +260,14 @@ const ViewSharedRequest = z
   .openapi("ViewSharedProposalRequest");
 
 const DecisionRequest = z
-  .object({ decision: z.enum(["accepted", "rejected"]) })
+  .object({
+    decision: z.enum(["accepted", "rejected"]),
+    declinedReason: z.string().min(1).max(2000).optional().openapi({
+      description:
+        "Why they said no, in the firm's own words. Recorded only on a rejection — the status " +
+        "already says THAT a quote was lost, and this is the half worth anything later.",
+    }),
+  })
   .openapi("ProposalDecisionRequest");
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -474,6 +484,10 @@ function toProposalBody(
     discountApprovedAt: proposal.discountApprovedAt,
     firstViewedAt: proposal.firstViewedAt,
     viewCount: proposal.viewCount,
+    // NOT redacted by the fee axis: why a client said no is a pipeline fact,
+    // not a price. It is on the STAFF model only — SharedProposal is a separate
+    // shape, so it can never reach the recipient's own screen.
+    declinedReason: proposal.declinedReason,
   };
 }
 
@@ -678,8 +692,14 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
-    const { decision } = c.req.valid("json");
-    const decided = await deps.service.decide(s.tenantId, proposalId, decision, s.actor);
+    const { decision, declinedReason } = c.req.valid("json");
+    const decided = await deps.service.decide(
+      s.tenantId,
+      proposalId,
+      decision,
+      s.actor,
+      declinedReason,
+    );
     return c.json(toProposalBody(decided, seesFees(c.get("principal"))), 200);
   });
 }

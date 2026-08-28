@@ -64,6 +64,7 @@ export class FakeProposalRepo implements ProposalRepository {
       discountApprovedAt: null,
       firstViewedAt: null,
       viewCount: 0,
+      declinedReason: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -110,6 +111,7 @@ export class FakeProposalRepo implements ProposalRepository {
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal> {
     return Promise.resolve(
       this.replace(tenantId, proposalId, (p) => ({
@@ -117,6 +119,7 @@ export class FakeProposalRepo implements ProposalRepository {
         status,
         sentAt: status === "draft" ? null : (p.sentAt ?? at),
         decidedAt: ["accepted", "rejected", "expired"].includes(status) ? at : null,
+        declinedReason,
       })),
     );
   }

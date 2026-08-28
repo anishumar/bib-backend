@@ -443,6 +443,10 @@ export class ProposalService {
     proposalId: string,
     decision: string,
     actor: Actor,
+    // WHY, when the answer is no. Last and optional rather than beside
+    // `decision`, so the four existing call sites read unchanged — and it is
+    // meaningless on an acceptance, which is what the schema says too.
+    declinedReason?: string,
   ): Promise<Proposal> {
     if (!isProposalDecision(decision)) throw new InvalidDecision(decision);
     const proposal = await this.findOrThrow(tenantId, proposalId);
@@ -458,13 +462,26 @@ export class ProposalService {
       throw new InvalidTransition(proposal.status, decision);
     }
 
-    const decided = await this.moveTo(proposal, decision);
+    // A reason is recorded only on a rejection. Attaching one to an acceptance
+    // would put a sentence about why the client declined onto a proposal they
+    // signed, and the CHECK in 0022 refuses it anyway.
+    const reason = decision === "rejected" ? blankToNull(declinedReason) : null;
+    const decided = await this.moveTo(proposal, decision, reason);
     await this.deps.events.recordEvent({
       tenantId,
       verb: decision === "accepted" ? "proposal.accepted" : "proposal.rejected",
       objectId: proposal.id,
       actor,
-      payload: { partyId: proposal.partyId, decision: decision satisfies ProposalDecision },
+      // WHETHER a reason was given, never the reason itself. It is free text a
+      // person wrote about a client relationship, this log cannot be erased,
+      // and the row keeps it somewhere it can be — the same call the
+      // firm-entity preference's `note` gets. The boolean is still worth
+      // recording: "we stopped writing down why we lose" is a real finding.
+      payload: {
+        partyId: proposal.partyId,
+        decision: decision satisfies ProposalDecision,
+        declinedReasonRecorded: reason !== null,
+      },
     });
     return decided;
   }
@@ -485,7 +502,11 @@ export class ProposalService {
     return proposal;
   }
 
-  private async moveTo(proposal: Proposal, to: ProposalStatus): Promise<Proposal> {
+  private async moveTo(
+    proposal: Proposal,
+    to: ProposalStatus,
+    declinedReason: string | null = null,
+  ): Promise<Proposal> {
     if (!canTransition(proposal.status, to)) {
       throw new InvalidTransition(proposal.status, to);
     }
@@ -494,6 +515,7 @@ export class ProposalService {
       proposal.id,
       to,
       this.deps.clock.now().toISOString(),
+      declinedReason,
     );
   }
 
@@ -507,4 +529,15 @@ export class ProposalService {
       payload: { partyId: proposal.partyId, validUntil: proposal.validUntil },
     });
   }
+}
+
+/**
+ * Optional prose, as a nullable column wants it.
+ *
+ * "" and "   " are somebody clearing a field, not a reason — and the database
+ * refuses blank prose outright (`proposal_declined_reason_not_blank_chk`).
+ */
+function blankToNull(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
 }

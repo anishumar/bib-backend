@@ -73,6 +73,11 @@ export function mapError(err: unknown): MappedError {
       case "ROLE_NOT_DEFINED":
       case "LAST_ADMINISTRATOR":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 404 rather than 403: the caller is not being refused permission, they
+      // named somebody who is not on this firm's roster. Same answer as
+      // MEMBERSHIP_NOT_FOUND above, because it is the same fact.
+      case "SIGNATORY_NOT_A_MEMBER":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
     }
   }
   if (err instanceof PartyError) {
@@ -158,6 +163,7 @@ export function mapError(err: unknown): MappedError {
       case "SERVICE_NOT_QUOTABLE":
       case "SIGNATURE_INCOMPLETE":
       case "ADVANCE_AMOUNT_REQUIRED":
+      case "INVALID_DATE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LETTER_NOT_FOUND":
       case "LETTER_LINE_NOT_FOUND":
@@ -167,6 +173,9 @@ export function mapError(err: unknown): MappedError {
       // "The letter is not in the state this call assumed." None is a malformed
       // request and resending changes nothing — LETTER_NOT_EDITABLE on a SIGNED
       // letter in particular is answered by drafting a new one, not by retrying.
+      // The two supersession refusals belong here for the same reason: one is
+      // answered by signing the letter being replaced (or by editing the draft
+      // instead), the other by withdrawing the replacement already in place.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -175,6 +184,8 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
       case "ENGAGEMENT_NOT_ACTIVE":
+      case "LETTER_NOT_SUPERSEDABLE":
+      case "ALREADY_SUPERSEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }

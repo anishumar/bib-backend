@@ -200,13 +200,21 @@ export interface ProposalRepository {
   /** The live lines, in document order. */
   listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]>;
 
-  /** Move the status and stamp whichever date goes with it, in one statement,
-   *  so a row can never claim to be sent with no sent_at. */
+  /**
+   * Move the status and stamp whichever date goes with it, in one statement, so
+   * a row can never claim to be sent with no sent_at.
+   *
+   * `declinedReason` travels with the status for the same reason the dates do:
+   * `proposal_declined_reason_when_rejected_chk` (0022) ties the two together,
+   * so writing them separately would not merely be untidy — the first statement
+   * would be refused. Null for every transition but a rejection.
+   */
   setStatus(
     tenantId: string,
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal>;
 
   /** Attach the share link's digest as part of sending. Never at draft: a quote

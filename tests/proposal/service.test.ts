@@ -664,3 +664,70 @@ async function addGst(
     discountPercent,
   });
 }
+
+// ── G1.3 · a lost quote records WHY ────────────────────────────────────────
+
+describe("why the client said no", () => {
+  it("records the reason on a rejection", async () => {
+    // `status = 'rejected'` records THAT a quote was lost, which is the half
+    // worth nothing later: a pipeline that can only count losses cannot say
+    // whether the firm loses on price, on scope or on timing.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+
+    const rejected = await s.service.decide(
+      TENANT,
+      id,
+      "rejected",
+      ACTOR,
+      "Went with their existing CA on price.",
+    );
+    expect(rejected.status).toBe("rejected");
+    expect(rejected.declinedReason).toBe("Went with their existing CA on price.");
+  });
+
+  it("keeps the reason out of the append-only log, and says one was given", async () => {
+    // The same call the firm-entity preference's `note` gets: free text a
+    // person wrote about a client relationship, in a log that cannot be erased.
+    // The BOOLEAN is still worth recording — "we stopped writing down why we
+    // lose" is a real finding.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.decide(TENANT, id, "rejected", ACTOR, "Budget pulled in the restructure.");
+
+    const event = s.events.recorded.find((e) => e.verb === "proposal.rejected");
+    expect(event?.payload).toEqual({
+      partyId: PARTY,
+      decision: "rejected",
+      declinedReasonRecorded: true,
+    });
+    expect(JSON.stringify(event?.payload)).not.toContain("restructure");
+  });
+
+  it("ignores a reason attached to an acceptance", async () => {
+    // A sentence about why a client declined, sitting on a proposal they
+    // signed, reads as fact to whoever finds it — and the CHECK in 0022 refuses
+    // it anyway.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    const accepted = await s.service.decide(TENANT, id, "accepted", ACTOR, "they liked us");
+    expect(accepted.declinedReason).toBeNull();
+    const event = s.events.recorded.find((e) => e.verb === "proposal.accepted");
+    expect(event?.payload).toMatchObject({ declinedReasonRecorded: false });
+  });
+
+  it("treats blank as no reason at all", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    const rejected = await s.service.decide(TENANT, id, "rejected", ACTOR, "   ");
+    expect(rejected.declinedReason).toBeNull();
+  });
+});

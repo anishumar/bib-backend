@@ -25,6 +25,15 @@ export interface TenantRepository {
   create(t: NewTenant): Promise<Tenant>;
   findBySlug(slug: string): Promise<Tenant | null>;
   findById(id: string): Promise<Tenant | null>;
+  /**
+   * Name who binds the firm. Both fields together, because the schema will not
+   * hold one without the other.
+   *
+   * There IS an update here, unlike `reportingCurrency` above, and the
+   * difference is the point: a successor restates nothing, because every letter
+   * already sent carries the signature block it went out with.
+   */
+  setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant>;
 }
 
 export interface NewUser {

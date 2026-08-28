@@ -19,6 +19,8 @@ import type {
   ContentHasher,
   ESignProvider,
   EngagementRepository,
+  FirmSignatory,
+  FirmSignatureRecord,
   LetterFilters,
   LetterRecord,
   LetterSummary,
@@ -44,6 +46,9 @@ export class FakeEngagementRepo implements EngagementRepository {
    *  actually agreed rather than an empty string. Keyed by version id. */
   readonly clauseBodies = new Map<string, Record<string, unknown>>();
   partyNames = new Map<string, string>();
+  /** The accounts behind a firm signatory, so the read model can join a name
+   *  the way the Postgres adapter does. */
+  userNames = new Map<string, string>();
 
   create(l: NewLetter): Promise<EngagementLetter> {
     const row: EngagementLetter = {
@@ -69,7 +74,16 @@ export class FakeEngagementRepo implements EngagementRepository {
       signatureMethod: null,
       signatureReference: null,
       signedContentHash: null,
+      signedByTitle: null,
       withdrawnAt: null,
+      background: l.background,
+      addressedToPartyId: l.addressedToPartyId,
+      issuedOn: l.issuedOn,
+      supersedesId: l.supersedesId,
+      effectiveFrom: l.effectiveFrom,
+      firmSignatoryUserId: null,
+      firmSignatoryTitle: null,
+      firmSignedAt: null,
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -95,6 +109,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       unitAmount: l.unitAmount,
       currency: l.currency,
       discountPercent: l.discountPercent,
+      effectiveFrom: l.effectiveFrom,
       removed: false,
     };
     this.lines.push(row);
@@ -147,6 +162,36 @@ export class FakeEngagementRepo implements EngagementRepository {
     );
   }
 
+  markSent(
+    tenantId: string,
+    letterId: string,
+    at: string,
+    issuedOnFallback: string,
+    firm: FirmSignatureRecord | null,
+  ): Promise<EngagementLetter> {
+    return Promise.resolve(
+      this.replace(tenantId, letterId, (l) => ({
+        ...l,
+        status: "sent" as const,
+        sentAt: l.sentAt ?? at,
+        // The same coalesce the SQL does: a letter the drafter dated keeps its
+        // date, one they did not is dated the day it went out.
+        issuedOn: l.issuedOn ?? issuedOnFallback,
+        firmSignatoryUserId: firm?.userId ?? null,
+        firmSignatoryTitle: firm?.title ?? null,
+        firmSignedAt: firm?.signedAt ?? null,
+      })),
+    );
+  }
+
+  findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
+    return Promise.resolve(
+      this.letters.find(
+        (l) => l.tenantId === tenantId && l.supersedesId === letterId && l.status !== "withdrawn",
+      ) ?? null,
+    );
+  }
+
   signAndFanOut(
     tenantId: string,
     letterId: string,
@@ -161,6 +206,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       signatureMethod: signature.signatureMethod,
       signatureReference: signature.signatureReference,
       signedContentHash: signature.signedContentHash,
+      signedByTitle: signature.signedByTitle,
     }));
     const created = engagements.map((e) => {
       const row: Engagement = {
@@ -172,6 +218,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         entityPartyId: e.entityPartyId,
         status: e.status,
         activatedAt: e.activatedAt,
+        effectiveFrom: e.effectiveFrom,
         endsOn: null,
       };
       this.engagements.push(row);
@@ -223,6 +270,35 @@ export class FakeEngagementRepo implements EngagementRepository {
         id: letter.issuingEntityPartyId,
         displayName: this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
       },
+      addressedTo:
+        letter.addressedToPartyId === null
+          ? null
+          : {
+              id: letter.addressedToPartyId,
+              displayName:
+                this.partyNames.get(letter.addressedToPartyId) ?? letter.addressedToPartyId,
+            },
+      // The three firm-signature columns move together in the schema, so one
+      // check settles the block here too.
+      firmSignatory:
+        letter.firmSignatoryUserId === null ||
+        letter.firmSignatoryTitle === null ||
+        letter.firmSignedAt === null
+          ? null
+          : {
+              userId: letter.firmSignatoryUserId,
+              displayName: this.userNames.get(letter.firmSignatoryUserId) ?? null,
+              title: letter.firmSignatoryTitle,
+              signedAt: letter.firmSignedAt,
+            },
+      supersedes: this.refOf(tenantId, letter.supersedesId),
+      supersededBy: this.refOf(
+        tenantId,
+        this.letters.find(
+          (l) =>
+            l.tenantId === tenantId && l.supersedesId === letter.id && l.status !== "withdrawn",
+        )?.id ?? null,
+      ),
       // The entity name resolves through the same map the client's does — the
       // fake stands in for the join the Postgres adapter actually makes.
       lines: lines.map((l) => ({
@@ -269,6 +345,13 @@ export class FakeEngagementRepo implements EngagementRepository {
         };
       }),
     );
+  }
+
+  /** A letter identified the way lineage prints it. Null in, null out. */
+  private refOf(tenantId: string, letterId: string | null): { id: string; ref: string } | null {
+    if (letterId === null) return null;
+    const letter = this.letters.find((l) => l.tenantId === tenantId && l.id === letterId);
+    return letter === undefined ? null : { id: letter.id, ref: letter.ref };
   }
 
   private liveLines(tenantId: string, letterId: string): (LetterLine & { removed: boolean })[] {
@@ -329,6 +412,24 @@ export class FakeClauseLibrary implements ClauseLibrary {
   }
 }
 
+/**
+ * The firm's standing signatory, as a test controls it.
+ *
+ * Starts empty, because that is the state every firm is in until somebody names
+ * one — and a letter sent by a firm that has named nobody must still go out.
+ */
+export class FakeFirmSignatory implements FirmSignatory {
+  private current: { userId: string; title: string } | null = null;
+
+  name(userId: string, title: string): void {
+    this.current = { userId, title };
+  }
+
+  firmSignatory(_tenantId: string): Promise<{ userId: string; title: string } | null> {
+    return Promise.resolve(this.current);
+  }
+}
+
 /** A signer a test can make fail — because "the provider was down" must not
  *  leave a letter recorded as signed. */
 export class FakeSigner implements ESignProvider {
@@ -366,6 +467,8 @@ export function makeEngagementFakes(): Deps & {
   esign: FakeSigner;
   /** The firm's issuing-entity rule, so a test can change it or empty it. */
   firmEntities: FakePreferenceRepo;
+  /** Who binds the firm, so a test can name one — or leave nobody. */
+  firm: FakeFirmSignatory;
   events: RecordingEventSink;
 } {
   // The REAL DocumentService over in-memory ports — see the note in
@@ -377,6 +480,7 @@ export function makeEngagementFakes(): Deps & {
     library: new FakeClauseLibrary(),
     documents: identity.documents,
     firmEntities: identity.firmEntities,
+    firm: new FakeFirmSignatory(),
     esign: new FakeSigner(),
     hasher: new FakeHasher(),
     ids: new FakeIds(),

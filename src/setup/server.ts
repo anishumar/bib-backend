@@ -260,6 +260,11 @@ export function wire(cfg: Config, log: Logger): Wired {
     // The SAME instance proposals hold. Two documents of the same firm must not
     // be able to disagree about which of its entities serves a UAE client.
     documents,
+    // WHO BINDS THE FIRM, snapshotted onto the letter when it is sent. Tenancy
+    // owns the standing signatory (a column on the tenant row) and satisfies
+    // this port structurally, so neither module imports the other — the same
+    // seam the catalogue and the reference series arrive through.
+    firm: tenancy,
     esign: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),
     ids: systemIds,

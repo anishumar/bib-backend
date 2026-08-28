@@ -32,6 +32,26 @@ export interface Tenant {
    * configuration registry, which is for the things a firm DOES change.
    */
   readonly reportingCurrency: CurrencyCode;
+  /**
+   * Who signs this firm's engagement letters, and in what capacity — "unki ek
+   * hi signature rahegi".
+   *
+   * ONE signatory for the whole firm, whichever of its entities issues the
+   * document. A ROW rather than a hardcode, so a successor is an UPDATE and it
+   * is still true for the second tenant on the installation. Each letter
+   * SNAPSHOTS it when it goes out, so naming a successor never restates who
+   * signed a letter last year.
+   *
+   * Both fields or neither (`tenant_firm_signatory_is_whole_chk`, 0022): a name
+   * with no capacity cannot be printed under "Yours sincerely", and a capacity
+   * with no name is nobody. Null on both is a firm that has not named one yet,
+   * which is a state it operates in perfectly well — the block does not print.
+   *
+   * Unlike `reportingCurrency` this is freely changeable, because changing it
+   * restates nothing: the letters keep what they were sent with.
+   */
+  readonly firmSignatoryUserId: string | null;
+  readonly firmSignatoryTitle: string | null;
 }
 
 export interface UserAccount {

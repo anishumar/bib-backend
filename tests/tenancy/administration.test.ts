@@ -17,6 +17,7 @@ import {
   MembershipExists,
   MembershipNotFound,
   RoleNotDefined,
+  SignatoryNotAMember,
 } from "../../src/domain/tenancy/errors";
 
 const ACTOR = { type: "human" as const, id: "00000000-0000-4000-8000-0000000000e1" };
@@ -332,5 +333,131 @@ describe("revoking and restoring access", () => {
     const dump = JSON.stringify(f.events.recorded);
     expect(dump).not.toContain("rahul@harbour.example");
     expect(f.events.recorded.at(-1)?.payload["userId"]).toBe(member.userId);
+  });
+});
+
+// ── Who binds the firm (G1.4) ──────────────────────────────────────────────
+//
+// "Unki ek hi signature rahegi" — one signatory for the whole firm, whichever
+// of its entities issues the document. A ROW rather than a hardcode, so a
+// successor is an UPDATE and it is still true for the second tenant on the
+// installation.
+
+describe("the firm's standing signatory", () => {
+  it("is nobody until somebody says otherwise", async () => {
+    // A new firm has named no signatory, and that is a state it operates in
+    // perfectly well — its letters simply go out with no signature block.
+    const { service, tenant } = await firm();
+    expect(await service.firmSignatory(tenant.id)).toBeNull();
+  });
+
+  it("names a person and the capacity they sign in", async () => {
+    const { service, tenant, owner } = await firm();
+    const named = await service.setFirmSignatory(
+      { tenantId: tenant.id, userId: owner.id, title: "Director" },
+      ACTOR,
+    );
+    expect(named).toEqual({ userId: owner.id, displayName: "Anita Rao", title: "Director" });
+    expect(await service.firmSignatory(tenant.id)).toEqual(named);
+  });
+
+  it("records the decision, without the person's name or address", async () => {
+    // The id and the CAPACITY are machine facts about the firm's own
+    // configuration. The name and the email are personal data, and this log
+    // cannot be erased.
+    const { service, f, tenant, owner } = await firm();
+    await service.setFirmSignatory(
+      { tenantId: tenant.id, userId: owner.id, title: "Director" },
+      ACTOR,
+    );
+    const event = f.events.recorded.find((e) => e.verb === "firm_signatory.set");
+    expect(event?.objectId).toBe(tenant.id);
+    expect(event?.actorId).toBe(ACTOR.id);
+    expect(event?.payload).toEqual({ userId: owner.id, title: "Director" });
+  });
+
+  it("refuses somebody who does not work here", async () => {
+    // `tenancy.user_account` is GLOBAL, so the foreign key would happily accept
+    // a login at another firm. Authority to bind is the strongest thing anybody
+    // holds in this product and the one requirement worth stating is that they
+    // work here.
+    const { service, tenant } = await firm();
+    const stranger = await service.ensureUser("someone@elsewhere.example");
+    await expect(
+      service.setFirmSignatory(
+        { tenantId: tenant.id, userId: stranger.id, title: "Director" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotAMember);
+  });
+
+  it("refuses somebody whose access was revoked", async () => {
+    // Somebody who used to work here cannot bind the firm today.
+    const { service, tenant } = await firm();
+    const second = await service.inviteMember(
+      {
+        tenantId: tenant.id,
+        email: "manager@harbour.example",
+        audience: "STAFF",
+        role: "partner",
+        commercialVisibility: true,
+      },
+      ACTOR,
+    );
+    await service.setMemberActive(
+      { tenantId: tenant.id, membershipId: second.id, isActive: false },
+      ACTOR,
+    );
+    await expect(
+      service.setFirmSignatory(
+        { tenantId: tenant.id, userId: second.userId, title: "Director" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotAMember);
+  });
+
+  it("refuses a client-portal member", async () => {
+    // A CLIENT_PORTAL membership is a client of the firm, not a person who can
+    // commit it to anything.
+    const { service, tenant } = await firm();
+    const client = await service.inviteMember(
+      {
+        tenantId: tenant.id,
+        email: "contact@acme.example",
+        audience: "CLIENT_PORTAL",
+        role: "partner",
+        commercialVisibility: false,
+      },
+      ACTOR,
+    );
+    await expect(
+      service.setFirmSignatory(
+        { tenantId: tenant.id, userId: client.userId, title: "Director" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(SignatoryNotAMember);
+  });
+
+  it("lets a successor take over, which is the whole reason it is a row", async () => {
+    const { service, tenant, owner } = await firm();
+    await service.setFirmSignatory(
+      { tenantId: tenant.id, userId: owner.id, title: "Director" },
+      ACTOR,
+    );
+    const successor = await service.inviteMember(
+      {
+        tenantId: tenant.id,
+        email: "successor@harbour.example",
+        audience: "STAFF",
+        role: "partner",
+        commercialVisibility: true,
+      },
+      ACTOR,
+    );
+    await service.setFirmSignatory(
+      { tenantId: tenant.id, userId: successor.userId, title: "Managing Partner" },
+      ACTOR,
+    );
+    expect((await service.firmSignatory(tenant.id))?.userId).toBe(successor.userId);
   });
 });

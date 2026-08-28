@@ -6,6 +6,7 @@ import type { DocumentType } from "../../domain/document/model";
 import type {
   Engagement,
   EngagementLetter,
+  EngagementState,
   EngagementStatus,
   LetterClause,
   LetterLine,
@@ -31,6 +32,25 @@ export interface DocumentIdentity {
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
 }
 
+/**
+ * Who signs the firm's letters — "unki ek hi signature rahegi".
+ *
+ * ONE signatory for the whole firm, whichever of its entities issues the
+ * document, held as a row on `tenancy.tenant` so that a successor is an UPDATE
+ * rather than a deploy. Tenancy satisfies this port at the composition root, so
+ * neither module imports the other — the same seam `DocumentIdentity` is.
+ *
+ * Null is a real answer and not an error: a firm that has not named a signatory
+ * yet still sends letters, and the block simply does not print. Refusing to
+ * send would lock every existing firm out of the flow they use today, which is
+ * a bigger decision than this task (see the note on `EngagementService.send`).
+ */
+export interface FirmSignatory {
+  firmSignatory(
+    tenantId: string,
+  ): Promise<{ readonly userId: string; readonly title: string } | null>;
+}
+
 export interface NewLetter {
   readonly id: string;
   readonly tenantId: string;
@@ -48,6 +68,16 @@ export interface NewLetter {
   readonly fxRateDate: string;
   readonly advanceRequired: boolean;
   readonly advanceAmount: Amount | null;
+  /** The opening paragraph, the addressee and the document's own date — the
+   *  three things a letter is written with and this model went four tasks
+   *  without. All optional; all frozen at signature like everything else. */
+  readonly background: string | null;
+  readonly addressedToPartyId: string | null;
+  readonly issuedOn: string | null;
+  /** The SIGNED letter this one replaces, checked before it gets here. */
+  readonly supersedesId: string | null;
+  /** When the engagements it opens begin. Null means the signature date. */
+  readonly effectiveFrom: string | null;
 }
 
 export interface NewLetterLine {
@@ -64,6 +94,8 @@ export interface NewLetterLine {
   readonly unitAmount: Amount;
   readonly currency: CurrencyCode;
   readonly discountPercent: Amount;
+  /** When THIS line starts, when it is not the letter's date. */
+  readonly effectiveFrom: string | null;
 }
 
 export interface NewLetterClause {
@@ -77,9 +109,25 @@ export interface NewLetterClause {
 export interface SignatureRecord {
   readonly signedAt: string;
   readonly signedByName: string;
+  /** The capacity the client signed in. Optional — see the note on the
+   *  field: it is not always known when a wet signature is attested. */
+  readonly signedByTitle: string | null;
   readonly signatureMethod: string;
   readonly signatureReference: string | null;
   readonly signedContentHash: string;
+}
+
+/**
+ * The FIRM's half of the signature block, written when the letter goes out.
+ *
+ * All three together or not at all, mirroring `el_firm_signature_is_whole_chk`
+ * (0022): the type makes the same statement the constraint does, so a caller
+ * cannot assemble half a block and find out at the database.
+ */
+export interface FirmSignatureRecord {
+  readonly userId: string;
+  readonly title: string;
+  readonly signedAt: string;
 }
 
 /** One engagement to create at signature — one per live line. */
@@ -97,6 +145,23 @@ export interface NewEngagement {
    *  Decided by the domain's `mayActivate`, never by the adapter. */
   readonly status: EngagementStatus;
   readonly activatedAt: string | null;
+  /** Resolved once, here, from line → letter → signature date. NOT NULL in the
+   *  schema: an engagement that cannot say when it starts is one the delivery
+   *  lane has to guess about. */
+  readonly effectiveFrom: string;
+}
+
+/**
+ * An engagement, plus what it is doing TODAY.
+ *
+ * The state is COMPUTED against the clock (`engagementState`), never stored, so
+ * an engagement effective in October reads as `pending_start` today and as
+ * `active` on the day with nothing having to run in between. The service owns
+ * the clock; the repository returns rows.
+ */
+export interface EngagementRecord {
+  readonly engagement: Engagement;
+  readonly state: EngagementState;
 }
 
 /**
@@ -112,6 +177,31 @@ export interface LetterRecord {
   /** Which of the firm's own entities is contracting, by NAME — this is what
    *  the letterhead and the signature block print. */
   readonly issuingEntity: { readonly id: string; readonly displayName: string };
+  /** The addressee by NAME — "Mr R Sharma", care-of `party` above. Null when
+   *  the letter names no individual, which is a real answer and not a missing
+   *  join. */
+  readonly addressedTo: { readonly id: string; readonly displayName: string } | null;
+  /**
+   * Who bound the firm, by NAME and capacity — the "Yours sincerely" block.
+   *
+   * The name is a JOIN, not a stored field, for the reason the ledger's actor
+   * name is: an erased account stops resolving and the letter survives. The
+   * TITLE is stored on the letter, because it is what the document said at the
+   * time and a promotion must not restate it.
+   */
+  readonly firmSignatory: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly title: string;
+    readonly signedAt: string;
+  } | null;
+  /** The signed letter this one replaces, by REFERENCE — a uuid is not lineage
+   *  anybody can follow. Null for an original. */
+  readonly supersedes: { readonly id: string; readonly ref: string } | null;
+  /** And the other direction: the live letter that replaced THIS one, if there
+   *  is one. Without it, "is this still the agreement?" is a question the
+   *  screen showing the agreement cannot answer. */
+  readonly supersededBy: { readonly id: string; readonly ref: string } | null;
   readonly lines: readonly LetterLineRecord[];
   readonly clauses: readonly LetterClauseRecord[];
   readonly totals: {
@@ -120,8 +210,24 @@ export interface LetterRecord {
     readonly net: Amount;
     readonly currency: CurrencyCode;
   };
-  /** The engagements this letter created, once it has been signed. */
+  /** The engagements this letter created, once it has been signed. Rows, as the
+   *  repository read them; the service narrows each one against the clock
+   *  before it leaves the use case — see `LetterView`. */
   readonly engagements: readonly Engagement[];
+}
+
+/**
+ * A letter as the USE CASE hands it out: the repository's read model with each
+ * engagement narrowed against today's date.
+ *
+ * The split is where the clock lives. A repository returns what is stored; "is
+ * this engagement started yet" is a rule, it needs a clock, and rules with
+ * clocks belong in the use case. Screens get `state`, so an engagement that
+ * begins in October reads as `pending_start` today without any row having been
+ * written to say so.
+ */
+export interface LetterView extends Omit<LetterRecord, "engagements"> {
+  readonly engagements: readonly EngagementRecord[];
 }
 
 export interface LetterLineRecord {
@@ -184,6 +290,29 @@ export interface EngagementRepository {
     status: LetterStatus,
     at: string,
   ): Promise<EngagementLetter>;
+
+  /**
+   * Send it: the status, the date the document carries, and the firm's own
+   * signature — in ONE statement.
+   *
+   * Its own method rather than a flag on `setStatus`, because sending is the
+   * moment the firm commits itself and three separate writes could leave a
+   * letter that went out with a blank signature block or a date it never had.
+   * `issuedOn` is the fallback: a letter the drafter dated keeps its date, and
+   * one they did not is dated the day it went out.
+   */
+  markSent(
+    tenantId: string,
+    letterId: string,
+    at: string,
+    issuedOnFallback: string,
+    firm: FirmSignatureRecord | null,
+  ): Promise<EngagementLetter>;
+
+  /** The live letter that supersedes this one, if any. Read before drafting a
+   *  replacement so that a second one is refused by name rather than by a
+   *  unique index surfacing as a 500. */
+  findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null>;
 
   /**
    * THE FAN-OUT, and it is one transaction on purpose.

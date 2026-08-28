@@ -16,8 +16,8 @@ import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { EngagementService } from "../../usecase/engagement/service";
-import type { LetterRecord, LetterSummary } from "../../usecase/engagement/ports";
-import type { EngagementStatus, LetterStatus } from "../../domain/engagement/model";
+import type { EngagementRecord, LetterSummary, LetterView } from "../../usecase/engagement/ports";
+import type { EngagementState, EngagementStatus, LetterStatus } from "../../domain/engagement/model";
 
 export interface EngagementDeps {
   readonly service: EngagementService;
@@ -38,6 +38,20 @@ export const ENGAGEMENT_STATUS_VALUES = [
   "completed",
   "cancelled",
 ] as const satisfies readonly EngagementStatus[];
+
+/**
+ * What an engagement is doing TODAY — the stored status, narrowed by the
+ * effective date.
+ *
+ * `pending_start` appears here and in no CHECK constraint anywhere, which is
+ * the design: it is computed against the clock, never written, so an engagement
+ * that begins in October reads as `pending_start` today and as `active` on the
+ * day without anything having to run in between. See migration 0022.
+ */
+export const ENGAGEMENT_STATE_VALUES = [
+  ...ENGAGEMENT_STATUS_VALUES,
+  "pending_start",
+] as const satisfies readonly EngagementState[];
 
 const AmountSchema = z.string().regex(/^\d{1,15}(?:\.\d{1,4})?$/);
 const CurrencySchema = z.string().length(3);
@@ -81,10 +95,29 @@ const LetterSchema = z
     signedByName: z.string().nullable(),
     signatureMethod: z.string().nullable(),
     signatureReference: z.string().nullable(),
+    /** The capacity the client signed in. Optional at signature — it is not
+     *  always known when a wet signature is attested. */
+    signedByTitle: z.string().nullable(),
     // The document's fingerprint. On the wire because verifying a signature is
     // something a firm should be able to do without a database session.
     signedContentHash: z.string().nullable(),
     withdrawnAt: z.string().nullable(),
+    /** The opening paragraph — why this client is buying this. */
+    background: z.string().nullable(),
+    /** The named individual the letter is written to, care-of `partyId`. */
+    addressedToPartyId: z.string().uuid().nullable(),
+    /** The document's own date, distinct from `sentAt`. */
+    issuedOn: DaySchema.nullable(),
+    /** The signed letter this one replaces. */
+    supersedesId: z.string().uuid().nullable(),
+    /** When the engagements it opens begin. Null means the signature date. */
+    effectiveFrom: DaySchema.nullable(),
+    /** WHO BOUND THE FIRM, and in what capacity — the "Yours sincerely" half of
+     *  the signature block. Not redacted by the fee axis: who committed the firm
+     *  is not money. All three move together or not at all. */
+    firmSignatoryUserId: z.string().uuid().nullable(),
+    firmSignatoryTitle: z.string().nullable(),
+    firmSignedAt: z.string().nullable(),
   })
   .openapi("EngagementLetter");
 
@@ -106,6 +139,8 @@ const LetterLineSchema = z
     currency: CurrencySchema,
     discountPercent: AmountSchema.nullable(),
     net: AmountSchema.nullable(),
+    /** When THIS line's work begins. Null means whatever the letter says. */
+    effectiveFrom: DaySchema.nullable(),
   })
   .openapi("EngagementLetterLine");
 
@@ -132,13 +167,24 @@ const EngagementSchema = z
     partyId: z.string().uuid(),
     /** Who the work is delivered to — `service × one legal entity`. */
     entityPartyId: z.string().uuid(),
+    /** The COMMERCIAL gates: `pending_advance` until the advance is recorded,
+     *  then `active`. It does not say whether work has begun. */
     status: z.enum(ENGAGEMENT_STATUS_VALUES),
+    /** What it is doing TODAY — `status`, narrowed to `pending_start` while the
+     *  effective date is still in the future. Computed, never stored. */
+    state: z.enum(ENGAGEMENT_STATE_VALUES),
     activatedAt: z.string().nullable(),
+    /** The day work begins, resolved at signature from line, then letter, then
+     *  the signature date. This is what a scheduler plans from. */
+    effectiveFrom: DaySchema,
     endsOn: DaySchema.nullable(),
   })
   .openapi("Engagement");
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
+
+/** A letter identified the way a person identifies one: by its reference. */
+const DocumentRefSchema = z.object({ id: z.string().uuid(), ref: z.string() });
 
 const LetterRecordSchema = z
   .object({
@@ -147,6 +193,25 @@ const LetterRecordSchema = z
     /** The issuing entity by NAME — the letterhead and the signature block both
      *  print it. */
     issuingEntity: PartyRefSchema,
+    /** The addressee by NAME, care-of `party`. Null when the letter names no
+     *  individual. */
+    addressedTo: PartyRefSchema.nullable(),
+    /** The firm's own signature block, resolved to a name. The NAME is a join
+     *  (an erased account stops resolving); the TITLE is what the document
+     *  said. */
+    firmSignatory: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        title: z.string(),
+        signedAt: z.string(),
+      })
+      .nullable(),
+    /** Lineage, both directions, by REFERENCE — a uuid is not something anybody
+     *  can follow. `supersededBy` is how a screen answers "is this still the
+     *  agreement?". */
+    supersedes: DocumentRefSchema.nullable(),
+    supersededBy: DocumentRefSchema.nullable(),
     lines: z.array(LetterLineSchema),
     clauses: z.array(LetterClauseSchema),
     totals: TotalsSchema,
@@ -193,6 +258,24 @@ const DraftLetterRequest = z
     fxRateDate: DaySchema,
     advanceRequired: z.boolean().default(false),
     advanceAmount: AmountSchema.optional(),
+    // THE PROSE. Settable here and nowhere else, because a letter is editable
+    // only while it is a draft and there is deliberately no route that rewrites
+    // a sent one — the client has it as it was sent.
+    background: z.string().min(1).max(20000).optional(),
+    addressedToPartyId: z.string().uuid().optional(),
+    issuedOn: DaySchema.optional().openapi({
+      description: "The date printed on the document. Defaults to the day it is SENT.",
+    }),
+    supersedesId: z.string().uuid().optional().openapi({
+      description:
+        "The SIGNED letter this one replaces. A draft is edited instead; a letter that went " +
+        "out and was never signed is withdrawn.",
+    }),
+    effectiveFrom: DaySchema.optional().openapi({
+      description:
+        "When the engagements this letter opens begin. Omit for the signature date, which is " +
+        "the ordinary case. A line may override it.",
+    }),
   })
   .openapi("DraftEngagementLetterRequest");
 
@@ -204,6 +287,10 @@ const AddLineRequest = z
     quantity: AmountSchema.default("1"),
     unitAmount: AmountSchema,
     discountPercent: AmountSchema.default("0"),
+    effectiveFrom: DaySchema.optional().openapi({
+      description:
+        "When THIS line starts, if that is not the letter's date. Omit for the letter's.",
+    }),
   })
   .openapi("AddEngagementLetterLineRequest");
 
@@ -214,6 +301,10 @@ const AddClauseRequest = z
 const SignRequest = z
   .object({
     signedByName: z.string().min(1),
+    /** The capacity they signed in. Optional: it is not always known when a wet
+     *  signature is attested afterwards, and the letter is verifiable without
+     *  it. */
+    signedByTitle: z.string().min(1).max(120).optional(),
     reference: z.string().optional(),
   })
   .openapi("SignEngagementLetterRequest");
@@ -412,7 +503,7 @@ const advanceRoute = createRoute({
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
 function toLetterBody(
-  letter: LetterRecord["letter"],
+  letter: LetterView["letter"],
   fees: boolean,
 ): z.infer<typeof LetterSchema> {
   return {
@@ -435,25 +526,42 @@ function toLetterBody(
     signedByName: letter.signedByName,
     signatureMethod: letter.signatureMethod,
     signatureReference: letter.signatureReference,
+    signedByTitle: letter.signedByTitle,
     signedContentHash: letter.signedContentHash,
     withdrawnAt: letter.withdrawnAt,
+    background: letter.background,
+    addressedToPartyId: letter.addressedToPartyId,
+    issuedOn: letter.issuedOn,
+    supersedesId: letter.supersedesId,
+    effectiveFrom: letter.effectiveFrom,
+    // NOT redacted by the fee axis. Who bound the firm, and in what capacity,
+    // is not money — and it is exactly what delivery staff need in order to
+    // know whose paper they are working under.
+    firmSignatoryUserId: letter.firmSignatoryUserId,
+    firmSignatoryTitle: letter.firmSignatoryTitle,
+    firmSignedAt: letter.firmSignedAt,
   };
 }
 
-function toEngagementBody(e: LetterRecord["engagements"][number]): z.infer<typeof EngagementSchema> {
+function toEngagementBody(r: EngagementRecord): z.infer<typeof EngagementSchema> {
   return {
-    id: e.id,
-    engagementLetterId: e.engagementLetterId,
-    engagementLetterLineId: e.engagementLetterLineId,
-    partyId: e.partyId,
-    entityPartyId: e.entityPartyId,
-    status: e.status,
-    activatedAt: e.activatedAt,
-    endsOn: e.endsOn,
+    id: r.engagement.id,
+    engagementLetterId: r.engagement.engagementLetterId,
+    engagementLetterLineId: r.engagement.engagementLetterLineId,
+    partyId: r.engagement.partyId,
+    entityPartyId: r.engagement.entityPartyId,
+    status: r.engagement.status,
+    // BOTH, and they are different questions. `status` is the commercial gate
+    // the row stores; `state` is what it is doing today. A screen shows the
+    // second and an audit of "when did we take this on" reads the first.
+    state: r.state,
+    activatedAt: r.engagement.activatedAt,
+    effectiveFrom: r.engagement.effectiveFrom,
+    endsOn: r.engagement.endsOn,
   };
 }
 
-function toRecordBody(record: LetterRecord, fees: boolean): z.infer<typeof LetterRecordSchema> {
+function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterRecordSchema> {
   return {
     letter: toLetterBody(record.letter, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
@@ -461,6 +569,10 @@ function toRecordBody(record: LetterRecord, fees: boolean): z.infer<typeof Lette
       id: record.issuingEntity.id,
       displayName: record.issuingEntity.displayName,
     },
+    addressedTo: record.addressedTo === null ? null : { ...record.addressedTo },
+    firmSignatory: record.firmSignatory === null ? null : { ...record.firmSignatory },
+    supersedes: record.supersedes === null ? null : { ...record.supersedes },
+    supersededBy: record.supersededBy === null ? null : { ...record.supersededBy },
     lines: record.lines.map((l) => ({
       id: l.line.id,
       entityPartyId: l.line.entityPartyId,
@@ -474,6 +586,7 @@ function toRecordBody(record: LetterRecord, fees: boolean): z.infer<typeof Lette
       currency: l.line.currency,
       discountPercent: fees ? l.line.discountPercent : null,
       net: fees ? l.net : null,
+      effectiveFrom: l.line.effectiveFrom,
     })),
     // NOT redacted. What the firm undertook is the work, and somebody delivering
     // it needs the scope and the limits even when they may not see the fee.
@@ -565,6 +678,7 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
         currency: line.currency,
         discountPercent: fees ? line.discountPercent : null,
         net: null,
+        effectiveFrom: line.effectiveFrom,
       },
       201,
     );

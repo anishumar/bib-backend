@@ -42,6 +42,7 @@ interface ProposalRow {
   discount_approved_at: Date | null;
   first_viewed_at: Date | null;
   view_count: number;
+  declined_reason: string | null;
 }
 
 interface LineRow {
@@ -95,6 +96,7 @@ function toProposal(r: ProposalRow): Proposal {
     discountApprovedAt: r.discount_approved_at?.toISOString() ?? null,
     firstViewedAt: r.first_viewed_at?.toISOString() ?? null,
     viewCount: r.view_count,
+    declinedReason: r.declined_reason,
   };
 }
 
@@ -142,7 +144,8 @@ export class PostgresProposalRepository implements ProposalRepository {
            ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil})
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error("proposal insert returned no row");
       return toProposal(row);
@@ -154,7 +157,8 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [row] = await db<ProposalRow[]>`
         SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-               discount_approved_by, discount_approved_at, first_viewed_at, view_count
+               discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
         FROM crm.proposal WHERE id = ${proposalId}
       `;
       return row ? toProposal(row) : null;
@@ -175,7 +179,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count,
+               p.first_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                approver.display_name AS approver_display_name,
@@ -284,7 +288,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count,
+               p.first_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
@@ -362,6 +366,7 @@ export class PostgresProposalRepository implements ProposalRepository {
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal> {
     return withTenant(this.app, tenantId, async (db) => {
       // The status and its date move in ONE statement. The CHECK constraints in
@@ -383,11 +388,17 @@ export class PostgresProposalRepository implements ProposalRepository {
                               WHEN ${status} IN ('accepted', 'rejected', 'expired')
                               THEN ${at}::timestamptz
                               ELSE NULL
-                            END
+                            END,
+               -- In the SAME statement as the status, because
+               -- proposal_declined_reason_when_rejected_chk (0022) holds the
+               -- two together: a reason written a moment before or after the
+               -- status it belongs to would be refused by the constraint.
+               declined_reason = ${declinedReason}
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-transition`);
       return toProposal(row);
@@ -519,7 +530,8 @@ export class PostgresProposalRepository implements ProposalRepository {
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-approval`);
       return toProposal(row);

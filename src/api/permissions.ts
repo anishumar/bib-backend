@@ -66,6 +66,19 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
 
+  // WHO BINDS THE FIRM (G1.4). The same split the firm-entity rule and the
+  // configuration registry use, and for the same reason: this IS firm
+  // configuration. Reading is `config:read` — an associate drafting a letter
+  // should be able to see whose signature will appear on it, and the client is
+  // about to read that name anyway. Writing is `tenant:admin`, because naming
+  // the person who commits the firm to every engagement it signs is a decision
+  // at the same level as deciding what a role means.
+  //
+  // Literal paths, and they sort ahead of /members/{membershipId} by the
+  // literal-first rule in decideRoute.
+  [routeKey("GET", "/api/v1/tenancy/firm-signatory"), "config:read" as const],
+  [routeKey("PUT", "/api/v1/tenancy/firm-signatory"), "tenant:admin" as const],
+
   // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
   // lead:read / lead:write, and that is a decision rather than laziness.
   //

@@ -555,3 +555,50 @@ describe("the tenant wall", () => {
     expect((err as { code?: string }).code).toBe("42501"); // insufficient_privilege
   });
 });
+
+// ── G1.3 · why a quote was lost ────────────────────────────────────────────
+
+describe("the declined reason", () => {
+  it("is stored on a rejection and comes back on the read", async () => {
+    // "A write with no read is not a stored fact" — so the round trip is the
+    // test, not the write.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "25000",
+      discountPercent: "0",
+    });
+    await service.send(tenantA, id, SYSTEM_ACTOR);
+    await service.decide(
+      tenantA,
+      id,
+      "rejected",
+      SYSTEM_ACTOR,
+      "Went with their existing CA on price.",
+    );
+
+    const record = await service.describe(tenantA, id);
+    expect(record.proposal.status).toBe("rejected");
+    expect(record.proposal.declinedReason).toBe("Went with their existing CA on price.");
+    const [summary] = await service.list(tenantA, { partyId: partyA, status: "rejected" });
+    expect(summary?.proposal.declinedReason).toBe("Went with their existing CA on price.");
+  });
+
+  it("cannot sit on a proposal that was not declined — as the OWNER role", async () => {
+    // A sentence about why a client said no, on a proposal they accepted, reads
+    // as fact to whoever finds it later. The constraint is in the schema rather
+    // than in the service because that is the reader who would be misled.
+    const id = await draft();
+    for (const statement of [
+      owner`UPDATE crm.proposal SET declined_reason = 'they hated it' WHERE id = ${id}`,
+      owner`UPDATE crm.proposal SET declined_reason = '   ' WHERE id = ${id}`,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23514"); // check_violation
+    }
+  });
+});

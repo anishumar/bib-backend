@@ -114,6 +114,20 @@ export interface Proposal {
    */
   readonly firstViewedAt: string | null;
   readonly viewCount: number;
+  /**
+   * WHY the client said no.
+   *
+   * `status = 'rejected'` records THAT they did, which is the half of a lost
+   * quote worth nothing later: a pipeline that can only count losses cannot say
+   * whether the firm loses on price, on scope or on timing. Free text, because
+   * the real reasons ("went with their existing CA", "budget pulled in the
+   * restructure") do not fit a picklist anybody could guess at now.
+   *
+   * Null on every other status, and the database says so
+   * (`proposal_declined_reason_when_rejected_chk`, 0022): a reason on an
+   * accepted proposal reads as fact to whoever finds it.
+   */
+  readonly declinedReason: string | null;
 }
 
 /**
