@@ -99,6 +99,22 @@ REL=$(printf '{"fromPartyId":"%s","toPartyId":"%s","type":"director_of","validFr
 chk "record a directorship"    201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/relationships -H "$H" -d "$REL")"
 chk "malformed JSON is 400, not 500" 400 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/relationships -H "$H" -d '{not json')"
 
+# Party 360, as a screen has to read it. All three of these were unreachable
+# through any route until the client screen had to render them: the subtype
+# detail, the legal entities (a write with NO read — registerLegalEntity had no
+# counterpart at all), and the name of the party at the other end of a
+# relationship instead of its uuid.
+PROFILE=$(curl -s -b $J/partner.txt $API/api/v1/parties/$ORG | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+rel = d["relationships"][0]
+print("%s/%s/%s/%s" % (
+    d["organization"]["legalName"],
+    len(d["legalEntities"]),
+    rel["counterparty"]["displayName"],
+    rel["direction"]))')
+chk "the 360 carries what the form captured"   "Meridian Textiles Private Limited/1/Priya Menon/incoming" "$PROFILE"
+
 echo "  who was a director on a given date (effective dating):"
 for D in 2020-06-01 2025-06-01; do
   N=$(curl -s -b $J/partner.txt "$API/api/v1/parties/$ORG?asOf=$D" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["relationships"]))')

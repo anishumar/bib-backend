@@ -31,6 +31,7 @@ import {
 import type {
   IdentifierRepository,
   PartyRepository,
+  RelationshipRecord,
   RelationshipRepository,
 } from "./ports";
 
@@ -93,10 +94,27 @@ export interface AddRelationshipInput {
   readonly attributes?: Record<string, unknown> | undefined;
 }
 
+/**
+ * Party 360 — everything the firm knows about one counterparty.
+ *
+ * `organization` and `person` are the subtype detail, and exactly one is set,
+ * by kind. They were absent until a screen had to render this: the legal name,
+ * the trade name, the industry, the date of birth were all captured at creation
+ * and then unreachable through any read, so the detail page could show a
+ * display name and nothing else.
+ *
+ * `legalEntities` is the same story with a sharper edge — `registerLegalEntity`
+ * had no counterpart at all, so a jurisdiction and a financial-year end could be
+ * written and never read back. A write with no read is not a stored fact.
+ */
 export interface PartyProfile {
   readonly party: Party;
+  readonly organization: Organization | null;
+  readonly person: Person | null;
+  readonly legalEntities: readonly LegalEntity[];
   readonly identifiers: readonly PartyIdentifier[];
-  readonly relationships: readonly PartyRelationship[];
+  /** Joined to the party at the other end — see RelationshipRecord. */
+  readonly relationships: readonly RelationshipRecord[];
 }
 
 export class PartyService {
@@ -271,14 +289,33 @@ export class PartyService {
   async partyProfile(tenantId: string, partyId: string, asOf?: string): Promise<PartyProfile> {
     const party = await this.deps.parties.findParty(tenantId, partyId);
     if (!party) throw new PartyNotFound(partyId);
-    const [identifiers, relationships] = await Promise.all([
+
+    // The subtype is fetched by KIND rather than both-and-discard: a person has
+    // no organization row and asking for one is a query that can only ever
+    // return nothing.
+    const [organization, person, legalEntities, identifiers, relationships] = await Promise.all([
+      party.kind === "organization"
+        ? this.deps.parties.findOrganization(tenantId, partyId)
+        : Promise.resolve(null),
+      party.kind === "person"
+        ? this.deps.parties.findPerson(tenantId, partyId)
+        : Promise.resolve(null),
+      party.kind === "organization"
+        ? this.deps.parties.listLegalEntities(tenantId, partyId)
+        : Promise.resolve([]),
       this.deps.identifiers.listForParty(tenantId, partyId),
       this.deps.relationships.listForParty(tenantId, partyId),
     ]);
+
     return {
       party,
+      organization,
+      person,
+      legalEntities,
       identifiers,
-      relationships: asOf ? relationships.filter((r) => isInForceOn(r, asOf)) : relationships,
+      relationships: asOf
+        ? relationships.filter((r) => isInForceOn(r.relationship, asOf))
+        : relationships,
     };
   }
 

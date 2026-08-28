@@ -373,6 +373,26 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Walked end to end against the running API, including the awkward case: 1499.50 × 12 less
   > 12.5% comes back exactly 15744.75.
+  > **Catching up the screens that predate the rule (2026-08-28).** `parties` and `leads` had
+  > working APIs and no UI at all — they shipped before "build the screen alongside the module"
+  > existed. `/clients`, `/clients/[partyId]` and `/leads` close that, and building them found
+  > three API gaps that five modules of tests had not:
+  >
+  > **(1) `registerLegalEntity` was a WRITE WITH NO READ.** A jurisdiction, an incorporation
+  > date and a financial-year end could be stored and then returned by no route in the product.
+  > That is the most serious of the three and the least visible: every test passed, because a
+  > test asserts on what the writer returned.
+  > **(2) Party 360 omitted the subtype.** Legal name, trade name, industry, nationality, date
+  > of birth — all captured by the create form, all unreachable afterwards, so a client page
+  > could render a display name and nothing else.
+  > **(3) Relationships carried uuids.** `director_of → 2b9d5209-…`. The fifth time this
+  > codebase has learnt that a read model needs names; `RelationshipRecord` now joins the
+  > counterparty and says which END the party asked about is standing at, because "Priya is a
+  > director of Meridian" and "Meridian has Priya as a director" are one row read two ways.
+  >
+  > No migration — the data was always there. Gate: `npm run check` 342 · `test:integration` 77
+  > · `smoke` 86.
+  >
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 

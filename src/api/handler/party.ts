@@ -98,11 +98,36 @@ const RelationshipSchema = z
   })
   .openapi("PartyRelationship");
 
+/** A relationship with the party at the OTHER end of it, and which end this
+ *  one is standing at. A bare relationship carries two uuids, which is right
+ *  for the aggregate and renders as two uuids. */
+const RelationshipRecordSchema = z
+  .object({
+    relationship: RelationshipSchema,
+    counterparty: z.object({
+      id: z.string().uuid(),
+      kind: z.enum(["organization", "person"]),
+      displayName: z.string(),
+    }),
+    direction: z.enum(["outgoing", "incoming"]),
+  })
+  .openapi("PartyRelationshipRecord");
+
 const PartyProfileSchema = z
   .object({
     party: PartySchema,
+    // Exactly one of these is set, by kind. They are here because a screen that
+    // had to render this could otherwise show a display name and nothing else —
+    // the legal name, trade name, industry and date of birth were all captured
+    // at creation and then unreachable through any read.
+    organization: OrganizationSchema.nullable(),
+    person: PersonSchema.nullable(),
+    // The counterpart registerLegalEntity never had. A jurisdiction and a
+    // financial-year end that can be written and never read back is not a
+    // stored fact.
+    legalEntities: z.array(LegalEntitySchema),
     identifiers: z.array(IdentifierSchema),
-    relationships: z.array(RelationshipSchema),
+    relationships: z.array(RelationshipRecordSchema),
   })
   .openapi("PartyProfile");
 
@@ -357,11 +382,20 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const { partyId } = c.req.valid("param");
     const { asOf } = c.req.valid("query");
     const profile = await deps.service.partyProfile(s.tenantId, partyId, asOf);
+    // Mapped field by field, like every other handler here: forwarding the read
+    // model is how a field reaches the wire without reaching the spec.
     return c.json(
       {
-        party: profile.party,
-        identifiers: [...profile.identifiers],
-        relationships: [...profile.relationships],
+        party: { ...profile.party },
+        organization: profile.organization === null ? null : { ...profile.organization },
+        person: profile.person === null ? null : { ...profile.person },
+        legalEntities: profile.legalEntities.map((e) => ({ ...e })),
+        identifiers: profile.identifiers.map((i) => ({ ...i })),
+        relationships: profile.relationships.map((r) => ({
+          relationship: { ...r.relationship },
+          counterparty: { ...r.counterparty },
+          direction: r.direction,
+        })),
       },
       200,
     );

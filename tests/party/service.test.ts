@@ -210,13 +210,81 @@ describe("partyProfile (the compliance as-of question)", () => {
     await service.addRelationship({ tenantId: TENANT, fromPartyId: b.partyId, toPartyId: org.partyId, type: "director_of", validFrom: "2022-04-01" }, ACTOR);
 
     const on2021 = await service.partyProfile(TENANT, org.partyId, "2021-03-31");
-    expect(on2021.relationships.map((r) => r.fromPartyId)).toEqual([a.partyId]);
+    expect(on2021.relationships.map((r) => r.relationship.fromPartyId)).toEqual([a.partyId]);
 
     const on2023 = await service.partyProfile(TENANT, org.partyId, "2023-03-31");
-    expect(on2023.relationships.map((r) => r.fromPartyId)).toEqual([b.partyId]);
+    expect(on2023.relationships.map((r) => r.relationship.fromPartyId)).toEqual([b.partyId]);
 
     const all = await service.partyProfile(TENANT, org.partyId);
     expect(all.relationships).toHaveLength(2);
+  });
+
+  it("names the party at the other end, rather than handing a screen a uuid", async () => {
+    // The fifth time this codebase has learnt it: an aggregate carries ids,
+    // which is right for the aggregate and useless for anything that has to
+    // SHOW it. `director_of -> 2b9d5209-…` is what the screen rendered before.
+    const { service } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Meridian" }, ACTOR);
+    const priya = await service.createPerson({ tenantId: TENANT, fullName: "Priya Menon" }, ACTOR);
+    await service.addRelationship(
+      {
+        tenantId: TENANT,
+        fromPartyId: priya.partyId,
+        toPartyId: org.partyId,
+        type: "director_of",
+        validFrom: "2020-04-01",
+      },
+      ACTOR,
+    );
+
+    // Read from the person's end: outgoing, and the counterparty is the company.
+    const hers = await service.partyProfile(TENANT, priya.partyId);
+    expect(hers.relationships[0]?.counterparty.displayName).toBe("Meridian");
+    expect(hers.relationships[0]?.direction).toBe("outgoing");
+
+    // The same row read from the company's end is the other way round. Both
+    // sentences are true and a screen has to know which one it is writing.
+    const theirs = await service.partyProfile(TENANT, org.partyId);
+    expect(theirs.relationships[0]?.counterparty.displayName).toBe("Priya Menon");
+    expect(theirs.relationships[0]?.direction).toBe("incoming");
+  });
+
+  it("carries the subtype detail and the legal entities the create form captured", async () => {
+    // Both were write-only until a screen had to render them: the legal name,
+    // trade name and industry were reachable nowhere, and registerLegalEntity
+    // had no counterpart at all. A write with no read is not a stored fact.
+    const { service } = svc();
+    const org = await service.createOrganization(
+      { tenantId: TENANT, legalName: "Meridian Textiles Private Limited", tradeName: "Meridian", industry: "textiles" },
+      ACTOR,
+    );
+    await service.registerLegalEntity(
+      {
+        tenantId: TENANT,
+        organizationPartyId: org.partyId,
+        jurisdiction: "IN",
+        entityType: "private_limited",
+      },
+      ACTOR,
+    );
+
+    const profile = await service.partyProfile(TENANT, org.partyId);
+    expect(profile.organization?.legalName).toBe("Meridian Textiles Private Limited");
+    expect(profile.organization?.industry).toBe("textiles");
+    expect(profile.legalEntities).toHaveLength(1);
+    expect(profile.legalEntities[0]?.jurisdiction).toBe("IN");
+    // A person's slot is empty on an organization, and vice versa — exactly one
+    // is set, by kind.
+    expect(profile.person).toBeNull();
+
+    const priya = await service.createPerson(
+      { tenantId: TENANT, fullName: "Priya Menon", nationality: "IN" },
+      ACTOR,
+    );
+    const hers = await service.partyProfile(TENANT, priya.partyId);
+    expect(hers.person?.nationality).toBe("IN");
+    expect(hers.organization).toBeNull();
+    expect(hers.legalEntities).toEqual([]);
   });
 
   it("throws for a missing party", async () => {

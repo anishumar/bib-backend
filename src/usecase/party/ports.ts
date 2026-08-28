@@ -50,6 +50,17 @@ export interface PartyRepository {
   addLegalEntity(e: NewLegalEntity): Promise<LegalEntity>;
   findParty(tenantId: string, partyId: string): Promise<Party | null>;
   findOrganization(tenantId: string, partyId: string): Promise<Organization | null>;
+  findPerson(tenantId: string, partyId: string): Promise<Person | null>;
+  /**
+   * The legal entities registered against an organization.
+   *
+   * Added because `addLegalEntity` had no counterpart: a jurisdiction, an
+   * incorporation date and a financial-year end could be written and then never
+   * read back through any route. A write with no read is not a stored fact, it
+   * is a discarded one — and the screen that had to render it is what made that
+   * obvious.
+   */
+  listLegalEntities(tenantId: string, partyId: string): Promise<LegalEntity[]>;
   listParties(tenantId: string): Promise<Party[]>;
 }
 
@@ -84,10 +95,34 @@ export interface NewRelationship {
   readonly attributes: Record<string, unknown>;
 }
 
+/**
+ * A relationship with the party at the OTHER end of it.
+ *
+ * A bare `PartyRelationship` carries `fromPartyId` and `toPartyId`, which is
+ * right for the aggregate and useless for anything that has to show it: a
+ * screen renders "director_of → 2b9d5209-…". The same joined-read-model shape as
+ * `MemberRecord` and `LeadRecord`, for the same reason, and the fifth time this
+ * codebase has learnt it.
+ *
+ * `direction` says which end the party asked about is on, because "Priya is a
+ * director of Meridian" and "Meridian has Priya as a director" are the same row
+ * read from two sides and a screen has to know which it is looking at.
+ */
+export interface RelationshipRecord {
+  readonly relationship: PartyRelationship;
+  readonly counterparty: {
+    readonly id: string;
+    readonly kind: Party["kind"];
+    readonly displayName: string;
+  };
+  readonly direction: "outgoing" | "incoming";
+}
+
 export interface RelationshipRepository {
   add(r: NewRelationship): Promise<PartyRelationship>;
   /** relationship_type is a GLOBAL product lookup — a non-tenant read. */
   relationshipTypeExists(code: string): Promise<boolean>;
-  /** Every relationship the party is on either side of. */
-  listForParty(tenantId: string, partyId: string): Promise<PartyRelationship[]>;
+  /** Every relationship the party is on either side of, each with the party at
+   *  the other end — one query, not one per row. */
+  listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]>;
 }

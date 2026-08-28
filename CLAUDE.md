@@ -166,6 +166,15 @@ asks the questions tests do not.
 
 Two rules that came out of it, and both are now enforced by tests:
 
+- **A read model carries names, not just ids** — and this has now been learnt five times
+  (`MemberRecord`, `LeadRecord`, `ProposalRecord`, and Party 360's relationships). If a
+  screen would have to fetch something per row to render it, the join belongs in the query.
+- **A write with no read is not a stored fact.** `registerLegalEntity` wrote a jurisdiction,
+  an incorporation date and a financial-year end that no route could ever return; the same
+  360 read omitted the organization/person subtype, so a client page could show a display
+  name and nothing else. Both were found by building the screen, not by a test — tests are
+  perfectly happy asserting on what the writer returned. When you add a write, name the read
+  that proves it.
 - **Handlers map field by field; they never forward a domain object.** `role` and
   `commercialVisibility` were on the wire for six tasks while `/auth/me`'s schema documented
   four fields, because the handler returned the Principal straight through and zod-openapi

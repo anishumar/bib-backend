@@ -19,6 +19,7 @@ import type {
   NewPerson,
   NewRelationship,
   PartyRepository,
+  RelationshipRecord,
   RelationshipRepository,
 } from "../usecase/party/ports";
 import { FakeIds } from "./ids";
@@ -105,6 +106,18 @@ export class FakePartyRepo implements PartyRepository {
     );
   }
 
+  findPerson(tenantId: string, partyId: string): Promise<Person | null> {
+    return Promise.resolve(
+      this.persons.find((p) => p.tenantId === tenantId && p.partyId === partyId) ?? null,
+    );
+  }
+
+  listLegalEntities(tenantId: string, partyId: string): Promise<LegalEntity[]> {
+    return Promise.resolve(
+      this.legalEntities.filter((e) => e.tenantId === tenantId && e.partyId === partyId),
+    );
+  }
+
   listParties(tenantId: string): Promise<Party[]> {
     return Promise.resolve(this.parties.filter((p) => p.tenantId === tenantId));
   }
@@ -168,20 +181,44 @@ export class FakeRelationshipRepo implements RelationshipRepository {
     return Promise.resolve(RELATIONSHIP_TYPES.has(code));
   }
 
-  listForParty(tenantId: string, partyId: string): Promise<PartyRelationship[]> {
+  /** The counterparty join the real adapter does in SQL. Set `parties` so the
+   *  fake resolves the same names the database would; without it a test would
+   *  pass on a read model the product cannot actually produce. */
+  parties: FakePartyRepo | null = null;
+
+  listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]> {
+    const mine = this.rows.filter(
+      (r) => r.tenantId === tenantId && (r.fromPartyId === partyId || r.toPartyId === partyId),
+    );
     return Promise.resolve(
-      this.rows.filter(
-        (r) => r.tenantId === tenantId && (r.fromPartyId === partyId || r.toPartyId === partyId),
-      ),
+      mine.map((r) => {
+        const otherId = r.fromPartyId === partyId ? r.toPartyId : r.fromPartyId;
+        const other = this.parties?.parties.find((p) => p.id === otherId);
+        return {
+          relationship: r,
+          counterparty: {
+            id: otherId,
+            kind: other?.kind ?? ("organization" as const),
+            displayName: other?.displayName ?? otherId,
+          },
+          direction: r.fromPartyId === partyId ? ("outgoing" as const) : ("incoming" as const),
+        };
+      }),
     );
   }
 }
 
 export function makePartyFakes(): Deps {
+  const parties = new FakePartyRepo();
+  const relationships = new FakeRelationshipRepo();
+  // The relationship fake resolves counterparty names out of the same in-memory
+  // party repo they were created in, so a joined read returns what the database
+  // would rather than what this fake invented.
+  relationships.parties = parties;
   return {
-    parties: new FakePartyRepo(),
+    parties,
     identifiers: new FakeIdentifierRepo(),
-    relationships: new FakeRelationshipRepo(),
+    relationships,
     ids: new FakeIds(),
     events: new RecordingEventSink(),
   };

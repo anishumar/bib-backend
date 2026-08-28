@@ -168,6 +168,33 @@ export class PostgresPartyRepository implements PartyRepository {
     });
   }
 
+  async findPerson(tenantId: string, partyId: string): Promise<Person | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<PersonRow[]>`
+        SELECT party_id, tenant_id, full_name, nationality,
+               date_of_birth::text AS date_of_birth
+        FROM core.person WHERE party_id = ${partyId}
+      `;
+      return row ? toPerson(row) : null;
+    });
+  }
+
+  /** The counterpart `addLegalEntity` never had. Ordered by jurisdiction so an
+   *  organization registered in three places reads the same way every time. */
+  async listLegalEntities(tenantId: string, partyId: string): Promise<LegalEntity[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<LegalEntityRow[]>`
+        SELECT party_id, tenant_id, jurisdiction, entity_type,
+               incorporated_on::text AS incorporated_on,
+               financial_year_end, registered_address, status
+        FROM core.legal_entity
+        WHERE party_id = ${partyId}
+        ORDER BY jurisdiction
+      `;
+      return rows.map(toLegalEntity);
+    });
+  }
+
   async listParties(tenantId: string): Promise<Party[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<PartyRow[]>`

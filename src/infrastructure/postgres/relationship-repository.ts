@@ -4,8 +4,12 @@
 // strings; attributes is jsonb, written as a JSON string cast to ::jsonb.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { PartyRelationship } from "../../domain/party/model";
-import type { NewRelationship, RelationshipRepository } from "../../usecase/party/ports";
+import type { Party, PartyRelationship } from "../../domain/party/model";
+import type {
+  NewRelationship,
+  RelationshipRecord,
+  RelationshipRepository,
+} from "../../usecase/party/ports";
 
 interface RelationshipRow {
   id: string;
@@ -57,16 +61,48 @@ export class PostgresRelationshipRepository implements RelationshipRepository {
     return row !== undefined;
   }
 
-  async listForParty(tenantId: string, partyId: string): Promise<PartyRelationship[]> {
+  /**
+   * Every relationship this party is on either side of, each joined to the
+   * party at the OTHER end.
+   *
+   * The join is here rather than a lookup per row: a director with eight
+   * directorships would otherwise be nine queries, and a screen that skipped
+   * them would render uuids — which is exactly what it did before this method
+   * existed.
+   */
+  async listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<RelationshipRow[]>`
-        SELECT id, tenant_id, from_party_id, to_party_id, type,
-               valid_from::text AS valid_from, valid_to::text AS valid_to, attributes
-        FROM core.party_relationship
-        WHERE from_party_id = ${partyId} OR to_party_id = ${partyId}
-        ORDER BY valid_from DESC
+      const rows = await db<
+        (RelationshipRow & {
+          counterparty_id: string;
+          counterparty_kind: Party["kind"];
+          counterparty_display_name: string;
+        })[]
+      >`
+        SELECT r.id, r.tenant_id, r.from_party_id, r.to_party_id, r.type,
+               r.valid_from::text AS valid_from, r.valid_to::text AS valid_to, r.attributes,
+               other.id AS counterparty_id,
+               other.kind AS counterparty_kind,
+               other.display_name AS counterparty_display_name
+        FROM core.party_relationship r
+        JOIN core.party other
+          ON other.id = CASE WHEN r.from_party_id = ${partyId} THEN r.to_party_id
+                             ELSE r.from_party_id END
+        WHERE r.from_party_id = ${partyId} OR r.to_party_id = ${partyId}
+        ORDER BY r.valid_from DESC
       `;
-      return rows.map(toRelationship);
+      return rows.map((r) => ({
+        relationship: toRelationship(r),
+        counterparty: {
+          id: r.counterparty_id,
+          kind: r.counterparty_kind,
+          displayName: r.counterparty_display_name,
+        },
+        // "Priya is a director OF Meridian" and "Meridian HAS Priya as a
+        // director" are one row read from two ends, and a screen has to know
+        // which end it is standing at.
+        direction: r.from_party_id === partyId ? ("outgoing" as const) : ("incoming" as const),
+      }));
     });
   }
 }
