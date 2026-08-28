@@ -45,6 +45,14 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   ],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
+  // Archiving reuses `party:write` rather than inventing party:archive. It is
+  // not a delete — the row stays, it still resolves by id, and un-archiving is
+  // one call away — so it is no more destructive than renaming a client, which
+  // this permission already allows. A new permission is also no longer free:
+  // permissions reach existing firms as config rows, so one costs a migration
+  // that carries it to every tenant that has not customised its roles.
+  [routeKey("POST", "/api/v1/parties/{partyId}/archive"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/unarchive"), "party:write" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],

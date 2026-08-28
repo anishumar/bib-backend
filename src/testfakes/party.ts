@@ -10,6 +10,7 @@ import type {
   PartyRelationship,
   Person,
 } from "../domain/party/model";
+import { PartyHasReferences, PartyNotFound } from "../domain/party/errors";
 import type { Deps } from "../usecase/party/service";
 import type {
   IdentifierRepository,
@@ -36,10 +37,27 @@ const RELATIONSHIP_TYPES = new Set([
 ]);
 
 export class FakePartyRepo implements PartyRepository {
-  readonly parties: Party[] = [];
+  parties: Party[] = [];
   readonly organizations: Organization[] = [];
   readonly persons: Person[] = [];
   readonly legalEntities: LegalEntity[] = [];
+
+  /**
+   * What refers to a party, by party id — the thing migration 0035's trigger
+   * knows and no in-memory fake can: the crm tables are a different module and
+   * this repo does not have them.
+   *
+   * So the fake models the PORT's contract rather than pretending to reimplement
+   * the rule: put names in here and `archive` refuses exactly as the database
+   * does. The rule itself is proved where it actually lives, against real
+   * Postgres and with raw SQL that never touches this code
+   * (`tests/party/archive.integration.test.ts`).
+   */
+  readonly referrers = new Map<string, readonly string[]>();
+
+  /** The database stamps `archived_at` from its own clock; this stands in for
+   *  it, fixed so assertions can name the value. */
+  archiveStamp = "2026-08-28T10:00:00.000Z";
 
   createOrganization(o: NewOrganization): Promise<Organization> {
     this.parties.push({
@@ -47,6 +65,7 @@ export class FakePartyRepo implements PartyRepository {
       tenantId: o.tenantId,
       kind: "organization",
       displayName: o.displayName,
+      archivedAt: null,
     });
     const org: Organization = {
       partyId: o.partyId,
@@ -67,6 +86,7 @@ export class FakePartyRepo implements PartyRepository {
       tenantId: p.tenantId,
       kind: "person",
       displayName: p.displayName,
+      archivedAt: null,
     });
     const person: Person = {
       partyId: p.partyId,
@@ -118,8 +138,33 @@ export class FakePartyRepo implements PartyRepository {
     );
   }
 
-  listParties(tenantId: string): Promise<Party[]> {
-    return Promise.resolve(this.parties.filter((p) => p.tenantId === tenantId));
+  listParties(tenantId: string, includeArchived: boolean): Promise<Party[]> {
+    const mine = this.parties.filter((p) => p.tenantId === tenantId);
+    return Promise.resolve(includeArchived ? mine : mine.filter((p) => p.archivedAt === null));
+  }
+
+  archive(tenantId: string, partyId: string): Promise<Party> {
+    const refs = this.referrers.get(partyId);
+    if (refs && refs.length > 0) {
+      return Promise.reject(new PartyHasReferences(partyId, refs));
+    }
+    return this.setArchivedAt(tenantId, partyId, this.archiveStamp);
+  }
+
+  unarchive(tenantId: string, partyId: string): Promise<Party> {
+    return this.setArchivedAt(tenantId, partyId, null);
+  }
+
+  private setArchivedAt(
+    tenantId: string,
+    partyId: string,
+    archivedAt: string | null,
+  ): Promise<Party> {
+    const party = this.parties.find((p) => p.tenantId === tenantId && p.id === partyId);
+    if (!party) return Promise.reject(new PartyNotFound(partyId));
+    const updated: Party = { ...party, archivedAt };
+    this.parties = this.parties.map((p) => (p === party ? updated : p));
+    return Promise.resolve(updated);
   }
 }
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { PartyService } from "../../src/usecase/party/service";
 import { makePartyFakes } from "../../src/testfakes/party";
+import type { FakePartyRepo } from "../../src/testfakes/party";
 import type { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   DuplicateIdentifier,
@@ -8,6 +9,9 @@ import {
   InvalidIdentifier,
   InvalidRelationshipType,
   NotAnOrganization,
+  PartyAlreadyArchived,
+  PartyHasReferences,
+  PartyNotArchived,
   PartyNotFound,
   SelfRelationship,
 } from "../../src/domain/party/errors";
@@ -295,6 +299,146 @@ describe("partyProfile (the compliance as-of question)", () => {
   });
 });
 
+
+/**
+ * Archiving — and the fact that there is no delete to test.
+ *
+ * `core` has no `deleted_at` and `bib_app` holds no DELETE grant on any core
+ * table, so "remove this party" is not a thing this service can be asked to do.
+ * `archived_at` means only "keep this out of the pickers", and the two rules
+ * below are the whole of what the SERVICE owns:
+ *
+ *   · the state machine — the party exists, and is not already in the state
+ *     being asked for;
+ *   · the event, written after the change and never before it.
+ *
+ * THE REFUSAL ITSELF IS THE DATABASE'S (migration 0035's trigger). What is
+ * asserted here is that the service surfaces it and records nothing when it
+ * fires; that it actually holds is proved against real Postgres, with raw SQL
+ * that never touches this code, in tests/party/archive.integration.test.ts.
+ */
+describe("archiving a party", () => {
+  it("hides it from the list, and still resolves it by id", async () => {
+    // The asymmetry is the entire design. A list is a picker; a document
+    // pointing at this id has to render its counterparty either way.
+    const { service } = svc();
+    const org = await service.createOrganization(
+      { tenantId: TENANT, legalName: "Dormant Holdings Private Limited" },
+      ACTOR,
+    );
+    const live = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+
+    const archived = await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    expect(archived.archivedAt).not.toBeNull();
+
+    const list = await service.listParties(TENANT);
+    expect(list.map((p) => p.id)).toEqual([live.partyId]);
+
+    // Still there, still readable, still carrying its whole profile.
+    const profile = await service.partyProfile(TENANT, org.partyId);
+    expect(profile.party.id).toBe(org.partyId);
+    expect(profile.party.archivedAt).toBe(archived.archivedAt);
+    expect(profile.organization?.legalName).toBe("Dormant Holdings Private Limited");
+  });
+
+  it("includes archived parties when the caller asks for them", async () => {
+    const { service } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+    await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+
+    expect(await service.listParties(TENANT)).toHaveLength(0);
+    expect(await service.listParties(TENANT, true)).toHaveLength(1);
+  });
+
+  it("brings one back, and the list has it again", async () => {
+    const { service } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+    await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    const restored = await service.unarchiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+
+    expect(restored.archivedAt).toBeNull();
+    expect(await service.listParties(TENANT)).toHaveLength(1);
+  });
+
+  it("refuses to archive twice, and to restore what is not archived", async () => {
+    // Both are "the party is not in the state this call assumed" — a 409, not a
+    // quiet success that leaves the caller believing something else happened.
+    const { service } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+
+    await expect(
+      service.unarchiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR),
+    ).rejects.toBeInstanceOf(PartyNotArchived);
+
+    await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    await expect(
+      service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR),
+    ).rejects.toBeInstanceOf(PartyAlreadyArchived);
+  });
+
+  it("refuses both actions for a party that does not exist", async () => {
+    const { service } = svc();
+    const missing = "44444444-4444-4444-4444-444444444444";
+    await expect(
+      service.archiveParty({ tenantId: TENANT, partyId: missing }, ACTOR),
+    ).rejects.toBeInstanceOf(PartyNotFound);
+    await expect(
+      service.unarchiveParty({ tenantId: TENANT, partyId: missing }, ACTOR),
+    ).rejects.toBeInstanceOf(PartyNotFound);
+  });
+
+  it("surfaces the database's refusal, naming what refers to the party", async () => {
+    const { service, fakes } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+    const parties = fakes.parties as FakePartyRepo;
+    parties.referrers.set(org.partyId, ["a lead", "an engagement letter"]);
+
+    const err = await service
+      .archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PartyHasReferences);
+    expect((err as PartyHasReferences).referrers).toEqual(["a lead", "an engagement letter"]);
+    // Refused means unchanged: it is still in the picker.
+    expect(await service.listParties(TENANT)).toHaveLength(1);
+  });
+
+  it("records archive and unarchive with the actor, and nothing when refused", async () => {
+    const { service, events, fakes } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
+    const archived = await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    await service.unarchiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+
+    expect(events.verbs()).toEqual(["party.created", "party.archived", "party.unarchived"]);
+    const [, archivedEvent, restoredEvent] = events.recorded;
+    expect(archivedEvent?.objectType).toBe("party");
+    expect(archivedEvent?.objectId).toBe(org.partyId);
+    expect(archivedEvent?.actorId).toBe(ACTOR.id);
+    // Ids and machine facts only — never the display name, which for a person
+    // party IS their name, in a log that can never be erased.
+    expect(archivedEvent?.payload).toEqual({ kind: "organization" });
+    // Unarchiving closes the interval the archive opened, without a join.
+    expect(restoredEvent?.payload).toEqual({
+      kind: "organization",
+      archivedAt: archived.archivedAt,
+    });
+
+    // A refused archive records nothing at all.
+    const parties = fakes.parties as FakePartyRepo;
+    parties.referrers.set(org.partyId, ["a proposal"]);
+    await expect(
+      service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR),
+    ).rejects.toBeInstanceOf(PartyHasReferences);
+    expect(events.verbs()).toEqual(["party.created", "party.archived", "party.unarchived"]);
+  });
+
+  it("keeps a person's name out of the archive events", async () => {
+    const { service, events } = svc();
+    const priya = await service.createPerson({ tenantId: TENANT, fullName: "Priya Menon" }, ACTOR);
+    await service.archiveParty({ tenantId: TENANT, partyId: priya.partyId }, ACTOR);
+    await service.unarchiveParty({ tenantId: TENANT, partyId: priya.partyId }, ACTOR);
+    expect(JSON.stringify(events.recorded)).not.toContain("Priya Menon");
+  });
+});
 
 describe("the audit trail", () => {
   it("records one event per write, naming the actor", async () => {

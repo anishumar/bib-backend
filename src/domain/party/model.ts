@@ -10,6 +10,17 @@ export interface Party {
   readonly tenantId: string;
   readonly kind: PartyKind;
   readonly displayName: string;
+  /**
+   * When this party was put away, or null while it is live. ISO 8601 with an
+   * offset.
+   *
+   * IT IS NOT A DELETE, and there is deliberately no `deleted_at` anywhere in
+   * `core` to mistake it for. Parties are permanent: an archived one still
+   * resolves by id forever, so a signed engagement letter's counterparty never
+   * renders blank. All it means is "keep this out of pickers and lists"
+   * (migration 0035, and the paragraph in CLAUDE.md).
+   */
+  readonly archivedAt: string | null;
 }
 
 export interface Organization {
@@ -130,6 +141,13 @@ export function isValidIdentifier(type: IdentifierType, normalized: string): boo
     default:
       return true;
   }
+}
+
+/** Whether a party is currently hidden from pickers and lists. A one-line
+ *  predicate so the question is asked the same way everywhere and nobody has to
+ *  decide again whether null or a timestamp is the live state. */
+export function isArchived(party: Pick<Party, "archivedAt">): boolean {
+  return party.archivedAt !== null;
 }
 
 /** Effective-dating predicate: was this relationship in force on `onDate`?
