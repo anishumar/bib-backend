@@ -492,7 +492,37 @@ open and are recorded above; neither blocks Phase 2.
   > received by a person, and that is replaced by the payments module later. Same shape as
   > T2.1's manual assignment: the gap is the trade, recorded, not an oversight.
   >
-  > **OPEN QUESTIONS — none answerable from the code:**
+  > **ANSWERED (2026-08-28), and the reasoning, so a later disagreement has something to argue
+  > with:**
+  > **(a) Clauses are PLAIN TEXT.** Templating means a rendering engine and an escaping story,
+  > and a placeholder syntax invented before anyone has asked for one is a vocabulary nobody
+  > chose. The T2.5-shaped answer: text now, templates when a firm asks. **The risk is stated:
+  > if in practice every letter interpolates the client's name, this is wrong on day one** —
+  > and it is a new clause VERSION to fix, not a migration, which is exactly why it is a safe
+  > bet to take.
+  > **(b) The letter stores its OWN jurisdiction**, defaulted from the client's legal entity
+  > when there is one. Not derived at read time from the relationship, for the same reason the
+  > proposal stores its own currency: a legal document has to record the jurisdiction it was
+  > WRITTEN for, permanently, and deriving it later from a mutable row would silently restate
+  > it. This also sidesteps the Dubai-client-of-an-Indian-firm case rather than guessing at it —
+  > whoever drafts says which.
+  > **(c) `party:write`, not a new permission.** A new one costs a migration to reach existing
+  > firms (T2.5's rule), and the distinction nobody has asked for is not worth paying it for. A
+  > firm that wants signing held back from delivery staff can publish its own role this
+  > afternoon. Revisit when one asks — `proposal:approve` is the precedent for what "asked for"
+  > looks like.
+  > **(d) A change after signature is a NEW LETTER.** Signature freezes, so an amendment is a
+  > new document that supersedes the old one, and the old one stays readable as what was
+  > actually signed. **Firms do issue addenda in practice**, and this is the answer most likely
+  > to be revisited — but a superseding letter can represent an addendum, whereas a mutable
+  > signed document cannot represent anything safely.
+  >
+  > One consequence worth naming: **T2.3 writes `contract.activated`, not T2.4.** That verb has
+  > been registered with no writer since T1.1, and this is the module that causes it — T2.4 is
+  > the CONSUMER side (the scheduler reacting to it). Same treatment the four proposal verbs
+  > got.
+  >
+  > **The questions as they were asked, kept for the record:**
   > **(a)** Does a clause body hold finished text, or a template with placeholders? Templating
   > means a rendering engine and an escaping story; plain text now, templates when a firm asks,
   > is the T2.5-shaped answer — but if every EL needs the client's name interpolated, plain text
