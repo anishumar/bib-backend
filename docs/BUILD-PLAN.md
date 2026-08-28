@@ -160,6 +160,39 @@ open and are recorded above; neither blocks Phase 2.
   `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
   captured with no owner distribute evenly; a territory rule overrides the rotation.*
 - [ ] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
+  > **Agreed design, before building (2026-08-28).** Settled in discussion; recorded here because
+  > it decides the schema and money is the area CLAUDE.md is strictest about.
+  >
+  > **The catalogue row is pinned; the quoted money belongs to the proposal.** A
+  > `proposal_line` holds `service_version_id` (FK to the frozen `config.version`) plus its own
+  > `unit_amount, currency, fx_rate, fx_rate_date` and discount. The alternative — versioning
+  > the whole priced line in the registry — collapses on one example: a negotiated discount for
+  > one client would mean publishing a config version per client, and the discount would end up
+  > on the proposal anyway.
+  >
+  > **The service body gains an optional list price**, and that is what makes the pin worth
+  > having: reopening a proposal sent nine months ago answers "what was our list price then, and
+  > what did we actually charge?" — the most useful commercial fact in the object, free from the
+  > frozen version. Optional because an hourly or retainer service may have no list price until
+  > an engagement is scoped. This is T2.5's deferral paying off exactly as intended: adding the
+  > field is **a new version of each service, not a migration**.
+  >
+  > **PREREQUISITE — no tenant has a reporting currency, and nothing in the schema has a currency
+  > at all.** "Per-country quoting" means quoting in AED and reporting in INR; an FX rate is
+  > meaningless without knowing *converted to what*. It goes as a **column on `tenancy.tenant`,
+  > set at creation — NOT a config row.** The registry is for what a firm changes, and a
+  > reporting currency changed after the fact silently invalidates every historical conversion,
+  > because every stored rate was struck against it. That is a property of the firm's books, and
+  > a Publish button is the wrong affordance for it. Store the rate even when the currencies
+  > match (1.0, dated), so rows are uniform and "did we convert this?" is never inferred.
+  >
+  > **The discount limit IS config** — it differs per firm and changes — so it needs a new
+  > registry kind (`policy`, `{ maxDiscountPercent }`). That gives the spine its third consumer
+  > and its first non-catalogue one, which is a fair test of whether it generalises.
+  >
+  > **Order:** (1) reporting currency on `tenancy.tenant`; (2) list price into the service body;
+  > (3) T2.2 proper; (4) the proposal screen in the same push. Steps 1–2 are about an hour and
+  > de-risk the money modelling, which is the expensive part to get wrong.
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
