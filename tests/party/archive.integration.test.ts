@@ -188,8 +188,11 @@ describe("archiving is refused while anything points at the party", () => {
     await withTenant(app, tenant, async (db) => {
       await db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
                VALUES (${tenant}, ${partyId}, 'referral', 'qualified', 'Group restructuring')`;
-      await db`INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
-               VALUES (${tenant}, ${partyId}, 'FY26 compliance', 'INR', 1, '2026-08-28')`;
+      await db`INSERT INTO crm.proposal
+                 (tenant_id, party_id, title, currency, fx_rate, fx_rate_date,
+                  ref, issuing_entity_party_id)
+               VALUES (${tenant}, ${partyId}, 'FY26 compliance', 'INR', 1, '2026-08-28',
+                       'PR-2026-9001', ${partyId})`;
     });
 
     const err = await service
@@ -256,8 +259,11 @@ describe("archiving is refused while anything points at the party", () => {
       // That is the whole shape this probe exists for — a group's quote, with
       // the work delivered to one of its companies.
       const [proposal] = await db<{ id: string }[]>`
-        INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
-        VALUES (${tenant}, ${client}, 'Group FY26', 'INR', 1, '2026-08-28') RETURNING id
+        INSERT INTO crm.proposal
+          (tenant_id, party_id, title, currency, fx_rate, fx_rate_date,
+           ref, issuing_entity_party_id)
+        VALUES (${tenant}, ${client}, 'Group FY26', 'INR', 1, '2026-08-28',
+                'PR-2026-9002', ${client}) RETURNING id
       `;
       await db`
         INSERT INTO crm.proposal_line

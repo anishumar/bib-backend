@@ -64,6 +64,7 @@ import {
   ServiceNotPublished,
 } from "../../domain/proposal/errors";
 import type {
+  DocumentIdentity,
   PolicyDirectory,
   ProposalFilters,
   ProposalRecord,
@@ -79,6 +80,10 @@ export interface Deps {
   /** The configuration registry, behind this use case's own narrow interface. */
   readonly catalogue: ServiceCatalogue;
   readonly policies: PolicyDirectory;
+  /** The firm's document reference series, and its rule for which of its own
+   *  entities is offering. Both are shared with engagement letters, so both
+   *  live behind one seam rather than being answered twice. */
+  readonly documents: DocumentIdentity;
   /** Mints the share link and hashes it. Only the digest is ever stored. */
   readonly shareTokens: ShareLinkTokens;
   readonly ids: IdGen;
@@ -90,6 +95,26 @@ export interface DraftProposalInput {
   readonly tenantId: string;
   readonly partyId: string;
   readonly leadId?: string | undefined;
+  /**
+   * Which of the firm's own entities is offering this — the "flexibility to
+   * choose" half of the firm's rule.
+   *
+   * OPTIONAL, and absent is the ordinary case: the firm's preference rows
+   * answer it, keyed on where the client is. Naming one here overrides that for
+   * this document only, which is what a partner does when a group wants to
+   * contract with a particular company of ours.
+   */
+  readonly issuingEntityPartyId?: string | undefined;
+  /**
+   * Where the CLIENT is, when it is known — the key the firm's rule is looked
+   * up on ("jahan ka client hota hai, wahan ki entity").
+   *
+   * Not stored: what gets stored is the DECISION it produced. A prospect's
+   * country is often unknown when a quote is drafted, and absent resolves
+   * through the same fallback as a country the firm has no entity in, because
+   * from the firm's side those are the same answer.
+   */
+  readonly clientJurisdiction?: string | undefined;
   readonly title: string;
   readonly currency: string;
   readonly fxRate: string;
@@ -144,10 +169,29 @@ export class ProposalService {
       throw new InvalidFxRate(input.fxRate);
     }
 
+    // WHO is offering, before anything is written. Named by the caller, or
+    // resolved from the firm's own rule — never guessed here, and never left
+    // out: a document that cannot say who is contracting is not a document.
+    const issuingEntityPartyId =
+      input.issuingEntityPartyId ??
+      (await this.deps.documents.issuerFor(input.tenantId, input.clientJurisdiction ?? null));
+
+    // The reference is drawn BEFORE the row is written, and its counter commits
+    // on its own — so a draft that fails after this line burns its number. That
+    // is what a document reference wants (a gap is honest) and the opposite of
+    // what an invoice number will need. See migration 0020.
+    const ref = await this.deps.documents.nextRef(
+      input.tenantId,
+      "proposal",
+      this.deps.clock.now(),
+    );
+
     const proposal = await this.deps.proposals.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
+      ref,
       partyId: input.partyId,
+      issuingEntityPartyId,
       leadId: input.leadId ?? null,
       title: input.title,
       currency,
@@ -165,7 +209,9 @@ export class ProposalService {
       // routinely titled "Acme Ltd — FY26 audit", and the ledger cannot be
       // erased. The party is here by id, which is erasable where this is not.
       payload: {
+        ref: proposal.ref,
         partyId: proposal.partyId,
+        issuingEntityPartyId: proposal.issuingEntityPartyId,
         leadId: proposal.leadId,
         currency: proposal.currency,
         fxRate: proposal.fxRate,
@@ -397,6 +443,10 @@ export class ProposalService {
     proposalId: string,
     decision: string,
     actor: Actor,
+    // WHY, when the answer is no. Last and optional rather than beside
+    // `decision`, so the four existing call sites read unchanged — and it is
+    // meaningless on an acceptance, which is what the schema says too.
+    declinedReason?: string,
   ): Promise<Proposal> {
     if (!isProposalDecision(decision)) throw new InvalidDecision(decision);
     const proposal = await this.findOrThrow(tenantId, proposalId);
@@ -412,13 +462,26 @@ export class ProposalService {
       throw new InvalidTransition(proposal.status, decision);
     }
 
-    const decided = await this.moveTo(proposal, decision);
+    // A reason is recorded only on a rejection. Attaching one to an acceptance
+    // would put a sentence about why the client declined onto a proposal they
+    // signed, and the CHECK in 0022 refuses it anyway.
+    const reason = decision === "rejected" ? blankToNull(declinedReason) : null;
+    const decided = await this.moveTo(proposal, decision, reason);
     await this.deps.events.recordEvent({
       tenantId,
       verb: decision === "accepted" ? "proposal.accepted" : "proposal.rejected",
       objectId: proposal.id,
       actor,
-      payload: { partyId: proposal.partyId, decision: decision satisfies ProposalDecision },
+      // WHETHER a reason was given, never the reason itself. It is free text a
+      // person wrote about a client relationship, this log cannot be erased,
+      // and the row keeps it somewhere it can be — the same call the
+      // firm-entity preference's `note` gets. The boolean is still worth
+      // recording: "we stopped writing down why we lose" is a real finding.
+      payload: {
+        partyId: proposal.partyId,
+        decision: decision satisfies ProposalDecision,
+        declinedReasonRecorded: reason !== null,
+      },
     });
     return decided;
   }
@@ -439,7 +502,11 @@ export class ProposalService {
     return proposal;
   }
 
-  private async moveTo(proposal: Proposal, to: ProposalStatus): Promise<Proposal> {
+  private async moveTo(
+    proposal: Proposal,
+    to: ProposalStatus,
+    declinedReason: string | null = null,
+  ): Promise<Proposal> {
     if (!canTransition(proposal.status, to)) {
       throw new InvalidTransition(proposal.status, to);
     }
@@ -448,6 +515,7 @@ export class ProposalService {
       proposal.id,
       to,
       this.deps.clock.now().toISOString(),
+      declinedReason,
     );
   }
 
@@ -461,4 +529,15 @@ export class ProposalService {
       payload: { partyId: proposal.partyId, validUntil: proposal.validUntil },
     });
   }
+}
+
+/**
+ * Optional prose, as a nullable column wants it.
+ *
+ * "" and "   " are somebody clearing a field, not a reason — and the database
+ * refuses blank prose outright (`proposal_declined_reason_not_blank_chk`).
+ */
+function blankToNull(value: string | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? null : trimmed;
 }

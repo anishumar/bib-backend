@@ -25,6 +25,15 @@ export interface TenantRepository {
   create(t: NewTenant): Promise<Tenant>;
   findBySlug(slug: string): Promise<Tenant | null>;
   findById(id: string): Promise<Tenant | null>;
+  /**
+   * Name who binds the firm. Both fields together, because the schema will not
+   * hold one without the other.
+   *
+   * There IS an update here, unlike `reportingCurrency` above, and the
+   * difference is the point: a successor restates nothing, because every letter
+   * already sent carries the signature block it went out with.
+   */
+  setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant>;
 }
 
 export interface NewUser {
@@ -183,4 +192,23 @@ export interface RoleDirectory {
 export interface RoleRegistrySeeder {
   /** Returns the role keys written, for the caller's audit trail. */
   seedDefaultRoles(tenantId: string, actor: Actor): Promise<readonly string[]>;
+}
+
+/**
+ * A new firm's own entity, and the rule that names it as the issuer of the
+ * firm's documents.
+ *
+ * The same shape as `RoleRegistrySeeder` and there for the same reason: a
+ * proposal and an engagement letter each carry `issuing_entity_party_id NOT
+ * NULL` (migration 0021), so a firm with no preference row could not draft
+ * anything at all. "Configure this before you can write a proposal" is not a
+ * state to hand a firm on its first day, so every tenant owns a fallback from
+ * the moment it exists — and migration 0021 backfilled the firms that predate
+ * it, exactly as 0005 did for roles.
+ *
+ * Returns the party id of the entity it created, so the caller can record that
+ * a party came into existence rather than leaving it to appear from nowhere.
+ */
+export interface IssuingEntitySeeder {
+  seedFirmEntity(tenantId: string, firmName: string): Promise<string>;
 }

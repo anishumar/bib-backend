@@ -28,12 +28,16 @@ import {
   ShareLinkUnknown,
   ServiceNotPublished,
 } from "../../src/domain/proposal/errors";
+import { NoIssuingEntity } from "../../src/domain/document/errors";
+import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const PARTY = "00000000-0000-0000-0000-0000000000bb";
 const PARTNER = "00000000-0000-0000-0000-0000000000cc";
 const ACTOR = { type: "human" as const, id: PARTNER };
 const GST_VERSION = "00000000-0000-0000-0000-0000000000d1";
+/** One of the FIRM's own entities, beside the fallback it is seeded with. */
+const US_ENTITY = "00000000-0000-0000-0000-0000000000e2";
 
 function setup(): ReturnType<typeof makeProposalFakes> & { service: ProposalService } {
   const fakes = makeProposalFakes();
@@ -65,6 +69,100 @@ async function draftWith(
 }
 
 describe("drafting", () => {
+  it("gives the document a number a client can quote back", async () => {
+    // G1.1's acceptance. The id is the system's name for this document; the ref
+    // is the firm's, and it is what somebody reads down the phone.
+    const s = setup();
+    const p = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "Acme — FY26",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    // The clock the fakes carry is fixed at 2026-06-01.
+    expect(p.ref).toBe("PR-2026-0001");
+    const second = await draftWith(s);
+    expect((await s.proposals.findById(TENANT, second))?.ref).toBe("PR-2026-0002");
+  });
+
+  it("names which of the firm's own entities is offering", async () => {
+    // G1.2's acceptance, on the proposal side. Resolved through the firm's
+    // fallback ROW — the one every tenant is seeded with — and then STORED,
+    // because the rule may change and an issued document must always say who
+    // actually issued it.
+    const s = setup();
+    const p = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "Acme — FY26",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    expect(p.issuingEntityPartyId).toBe(SEEDED_FIRM_ENTITY);
+    expect(s.events.recorded[0]?.payload).toMatchObject({
+      ref: "PR-2026-0001",
+      issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+    });
+  });
+
+  it("lets a partner name the entity for this document only", async () => {
+    // "with flexibility to choose" — the override, which does not touch the
+    // firm's standing rule.
+    const s = setup();
+    await s.firmEntities.set({
+      id: "pref-us",
+      tenantId: TENANT,
+      clientJurisdiction: "US",
+      firmEntityPartyId: US_ENTITY,
+      note: null,
+    });
+    const chosen = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        issuingEntityPartyId: US_ENTITY,
+        title: "Acme — FY26",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    expect(chosen.issuingEntityPartyId).toBe(US_ENTITY);
+    // And the client's country picks the same entity when nobody says.
+    const byRule = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        clientJurisdiction: "US",
+        title: "Acme — FY26 (2)",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    expect(byRule.issuingEntityPartyId).toBe(US_ENTITY);
+  });
+
+  it("refuses to draft at all for a firm that has named no entity", async () => {
+    // A document that cannot say who is contracting is not a document, so this
+    // fails closed and the message names the row that is missing.
+    const s = setup();
+    s.firmEntities.seededFallbackPartyId = null;
+    await expect(draftWith(s)).rejects.toBeInstanceOf(NoIssuingEntity);
+    expect(s.proposals.rows).toHaveLength(0);
+  });
+
   it("fixes the currency and the rate at the top of the document", async () => {
     const s = setup();
     const p = await s.service.draft(
@@ -566,3 +664,70 @@ async function addGst(
     discountPercent,
   });
 }
+
+// ── G1.3 · a lost quote records WHY ────────────────────────────────────────
+
+describe("why the client said no", () => {
+  it("records the reason on a rejection", async () => {
+    // `status = 'rejected'` records THAT a quote was lost, which is the half
+    // worth nothing later: a pipeline that can only count losses cannot say
+    // whether the firm loses on price, on scope or on timing.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+
+    const rejected = await s.service.decide(
+      TENANT,
+      id,
+      "rejected",
+      ACTOR,
+      "Went with their existing CA on price.",
+    );
+    expect(rejected.status).toBe("rejected");
+    expect(rejected.declinedReason).toBe("Went with their existing CA on price.");
+  });
+
+  it("keeps the reason out of the append-only log, and says one was given", async () => {
+    // The same call the firm-entity preference's `note` gets: free text a
+    // person wrote about a client relationship, in a log that cannot be erased.
+    // The BOOLEAN is still worth recording — "we stopped writing down why we
+    // lose" is a real finding.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.decide(TENANT, id, "rejected", ACTOR, "Budget pulled in the restructure.");
+
+    const event = s.events.recorded.find((e) => e.verb === "proposal.rejected");
+    expect(event?.payload).toEqual({
+      partyId: PARTY,
+      decision: "rejected",
+      declinedReasonRecorded: true,
+    });
+    expect(JSON.stringify(event?.payload)).not.toContain("restructure");
+  });
+
+  it("ignores a reason attached to an acceptance", async () => {
+    // A sentence about why a client declined, sitting on a proposal they
+    // signed, reads as fact to whoever finds it — and the CHECK in 0022 refuses
+    // it anyway.
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    const accepted = await s.service.decide(TENANT, id, "accepted", ACTOR, "they liked us");
+    expect(accepted.declinedReason).toBeNull();
+    const event = s.events.recorded.find((e) => e.verb === "proposal.accepted");
+    expect(event?.payload).toMatchObject({ declinedReasonRecorded: false });
+  });
+
+  it("treats blank as no reason at all", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    await s.service.send(TENANT, id, ACTOR);
+    const rejected = await s.service.decide(TENANT, id, "rejected", ACTOR, "   ");
+    expect(rejected.declinedReason).toBeNull();
+  });
+});

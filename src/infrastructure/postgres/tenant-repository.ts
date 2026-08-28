@@ -12,6 +12,8 @@ interface TenantRow {
   name: string;
   status: "active" | "suspended";
   reporting_currency: string;
+  firm_signatory_user_id: string | null;
+  firm_signatory_title: string | null;
 }
 
 function toTenant(r: TenantRow): Tenant {
@@ -21,6 +23,8 @@ function toTenant(r: TenantRow): Tenant {
     name: r.name,
     status: r.status,
     reportingCurrency: r.reporting_currency,
+    firmSignatoryUserId: r.firm_signatory_user_id,
+    firmSignatoryTitle: r.firm_signatory_title,
   };
 }
 
@@ -31,7 +35,8 @@ export class PostgresTenantRepository implements TenantRepository {
     const [row] = await this.app<TenantRow[]>`
       INSERT INTO tenancy.tenant (id, slug, name, reporting_currency)
       VALUES (${t.id}, ${t.slug}, ${t.name}, ${t.reportingCurrency})
-      RETURNING id, slug, name, status, reporting_currency
+      RETURNING id, slug, name, status, reporting_currency,
+                firm_signatory_user_id, firm_signatory_title
     `;
     if (!row) throw new Error("tenant insert returned no row");
     return toTenant(row);
@@ -39,7 +44,8 @@ export class PostgresTenantRepository implements TenantRepository {
 
   async findBySlug(slug: string): Promise<Tenant | null> {
     const [row] = await this.app<TenantRow[]>`
-      SELECT id, slug, name, status, reporting_currency
+      SELECT id, slug, name, status, reporting_currency,
+             firm_signatory_user_id, firm_signatory_title
       FROM tenancy.tenant WHERE slug = ${slug}
     `;
     return row ? toTenant(row) : null;
@@ -47,9 +53,24 @@ export class PostgresTenantRepository implements TenantRepository {
 
   async findById(id: string): Promise<Tenant | null> {
     const [row] = await this.app<TenantRow[]>`
-      SELECT id, slug, name, status, reporting_currency
+      SELECT id, slug, name, status, reporting_currency,
+             firm_signatory_user_id, firm_signatory_title
       FROM tenancy.tenant WHERE id = ${id}
     `;
     return row ? toTenant(row) : null;
+  }
+
+  /** Both columns in one statement, because the constraint holds them together
+   *  and two statements would let a crash leave a name with no capacity. */
+  async setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
+    const [row] = await this.app<TenantRow[]>`
+      UPDATE tenancy.tenant
+         SET firm_signatory_user_id = ${userId}, firm_signatory_title = ${title}
+       WHERE id = ${tenantId}
+      RETURNING id, slug, name, status, reporting_currency,
+                firm_signatory_user_id, firm_signatory_title
+    `;
+    if (!row) throw new Error(`tenant ${tenantId} vanished while naming its signatory`);
+    return toTenant(row);
   }
 }

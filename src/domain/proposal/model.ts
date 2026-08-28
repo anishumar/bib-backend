@@ -60,8 +60,28 @@ export function isProposalDecision(v: string): v is ProposalDecision {
 export interface Proposal {
   readonly id: string;
   readonly tenantId: string;
+  /**
+   * What a client quotes back on the phone — `PR-2026-0007`.
+   *
+   * Unique per firm and never reused, allocated once when the proposal is
+   * drafted. The id is the system's name for this document; this is the
+   * firm's, and the two are not interchangeable: a uuid is neither quotable nor
+   * citable, and an audit cites the reference.
+   */
+  readonly ref: string;
   /** Who it is for. A party, like everything with a counterparty here. */
   readonly partyId: string;
+  /**
+   * Which of the FIRM's own entities is offering this — not the client.
+   *
+   * A SNAPSHOT, resolved once at drafting from the firm's rule (see
+   * `domain/document/model.ts`) and stored, because the rule may change and an
+   * issued document must always say who actually issued it. Everything that
+   * follows from it — governing law, courts, tax treatment, who the client's
+   * counterparty is — follows from this column and not from a lookup done at
+   * read time.
+   */
+  readonly issuingEntityPartyId: string;
   /** The opportunity it came out of, or null — a firm quoting an existing
    *  client for more work has no lead, and inventing one would put rows in the
    *  pipeline nobody is working. */
@@ -94,6 +114,20 @@ export interface Proposal {
    */
   readonly firstViewedAt: string | null;
   readonly viewCount: number;
+  /**
+   * WHY the client said no.
+   *
+   * `status = 'rejected'` records THAT they did, which is the half of a lost
+   * quote worth nothing later: a pipeline that can only count losses cannot say
+   * whether the firm loses on price, on scope or on timing. Free text, because
+   * the real reasons ("went with their existing CA", "budget pulled in the
+   * restructure") do not fit a picklist anybody could guess at now.
+   *
+   * Null on every other status, and the database says so
+   * (`proposal_declined_reason_when_rejected_chk`, 0022): a reason on an
+   * accepted proposal reads as fact to whoever finds it.
+   */
+  readonly declinedReason: string | null;
 }
 
 /**

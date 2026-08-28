@@ -67,7 +67,14 @@ const TotalsSchema = z
 const ProposalSchema = z
   .object({
     id: z.string().uuid(),
+    /** The firm's own number for this document — `PR-2026-0007`. What a client
+     *  quotes back and what an audit cites; the id is the system's name for it
+     *  and this is the firm's. */
+    ref: z.string(),
     partyId: z.string().uuid(),
+    /** Which of the FIRM's own entities is offering. Not redacted by the fee
+     *  axis: who is contracting is not money, and delivery staff need it. */
+    issuingEntityPartyId: z.string().uuid(),
     leadId: z.string().uuid().nullable(),
     title: z.string(),
     status: z.enum(STATUS_VALUES),
@@ -84,6 +91,9 @@ const ProposalSchema = z
     // withholding it from delivery staff would serve nobody.
     firstViewedAt: z.string().nullable(),
     viewCount: z.number().int(),
+    /** WHY the client said no. Null on every other status — the schema says so
+     *  too, so a reason can never sit on a proposal that was accepted. */
+    declinedReason: z.string().nullable(),
   })
   .openapi("Proposal");
 
@@ -130,6 +140,8 @@ const ProposalRecordSchema = z
   .object({
     proposal: ProposalSchema,
     party: PartyRefSchema,
+    /** The issuing entity by NAME — a letterhead prints a name, not a uuid. */
+    issuingEntity: PartyRefSchema,
     lines: z.array(ProposalLineSchema),
     totals: TotalsSchema,
     approvedBy: ApproverSchema,
@@ -140,6 +152,7 @@ const ProposalSummarySchema = z
   .object({
     proposal: ProposalSchema,
     party: PartyRefSchema,
+    issuingEntity: PartyRefSchema,
     totals: TotalsSchema,
     lineCount: z.number().int(),
   })
@@ -166,7 +179,13 @@ const SentProposalSchema = z
 const SharedProposalSchema = z
   .object({
     id: z.string().uuid(),
+    /** The number the recipient quotes back down the phone. */
+    ref: z.string(),
     firmName: z.string(),
+    /** Which of the firm's companies is offering. A client is entitled to know
+     *  which one they would be contracting with, and it is not always the group
+     *  name above it. */
+    issuedBy: z.string(),
     addressedTo: z.string(),
     title: z.string(),
     status: z.enum(STATUS_VALUES),
@@ -201,6 +220,11 @@ const DraftProposalRequest = z
   .object({
     partyId: z.string().uuid(),
     leadId: z.string().uuid().optional(),
+    // WHO is offering, and the key the firm's own rule is looked up on when
+    // nobody says. Both optional, and both absent is the ordinary case: the
+    // firm's preference rows answer it, and a firm always has a fallback.
+    issuingEntityPartyId: z.string().uuid().optional(),
+    clientJurisdiction: z.string().length(2).optional(),
     title: z.string().min(1),
     // The quote currency and the rate back to the firm's reporting currency.
     // Both required, and the rate is "1" when they match — stored rather than
@@ -236,7 +260,14 @@ const ViewSharedRequest = z
   .openapi("ViewSharedProposalRequest");
 
 const DecisionRequest = z
-  .object({ decision: z.enum(["accepted", "rejected"]) })
+  .object({
+    decision: z.enum(["accepted", "rejected"]),
+    declinedReason: z.string().min(1).max(2000).optional().openapi({
+      description:
+        "Why they said no, in the firm's own words. Recorded only on a rejection — the status " +
+        "already says THAT a quote was lost, and this is the half worth anything later.",
+    }),
+  })
   .openapi("ProposalDecisionRequest");
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -435,7 +466,9 @@ function toProposalBody(
 ): z.infer<typeof ProposalSchema> {
   return {
     id: proposal.id,
+    ref: proposal.ref,
     partyId: proposal.partyId,
+    issuingEntityPartyId: proposal.issuingEntityPartyId,
     leadId: proposal.leadId,
     title: proposal.title,
     status: proposal.status,
@@ -451,6 +484,10 @@ function toProposalBody(
     discountApprovedAt: proposal.discountApprovedAt,
     firstViewedAt: proposal.firstViewedAt,
     viewCount: proposal.viewCount,
+    // NOT redacted by the fee axis: why a client said no is a pipeline fact,
+    // not a price. It is on the STAFF model only — SharedProposal is a separate
+    // shape, so it can never reach the recipient's own screen.
+    declinedReason: proposal.declinedReason,
   };
 }
 
@@ -472,6 +509,10 @@ function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof Pro
   return {
     proposal: toProposalBody(record.proposal, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
+    issuingEntity: {
+      id: record.issuingEntity.id,
+      displayName: record.issuingEntity.displayName,
+    },
     lines: record.lines.map((l) => ({
       id: l.line.id,
       entityPartyId: l.line.entityPartyId,
@@ -510,6 +551,10 @@ function toSummaryBody(
   return {
     proposal: toProposalBody(summary.proposal, fees),
     party: { id: summary.party.id, displayName: summary.party.displayName },
+    issuingEntity: {
+      id: summary.issuingEntity.id,
+      displayName: summary.issuingEntity.displayName,
+    },
     totals: toTotalsBody(summary.totals, fees),
     lineCount: summary.lineCount,
   };
@@ -621,7 +666,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     return c.json(
       {
         id: shared.id,
+        ref: shared.ref,
         firmName: shared.firmName,
+        issuedBy: shared.issuedBy,
         addressedTo: shared.addressedTo,
         title: shared.title,
         status: shared.status,
@@ -645,8 +692,14 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
-    const { decision } = c.req.valid("json");
-    const decided = await deps.service.decide(s.tenantId, proposalId, decision, s.actor);
+    const { decision, declinedReason } = c.req.valid("json");
+    const decided = await deps.service.decide(
+      s.tenantId,
+      proposalId,
+      decision,
+      s.actor,
+      declinedReason,
+    );
     return c.json(toProposalBody(decided, seesFees(c.get("principal"))), 200);
   });
 }

@@ -30,11 +30,13 @@ import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
+import { DocumentService } from "../../src/usecase/document/service";
 import { FakeProposalRepo } from "../../src/testfakes/proposal";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { systemIds } from "../../src/platform/ids";
@@ -61,10 +63,20 @@ const party = new PartyService({
   events: ledger,
 });
 const proposals = new PostgresProposalRepository(app);
+const documentRepository = new PostgresDocumentRepository(app);
+// The real reference counter and the real issuing-entity rule: a proposal
+// cannot be drafted without either, and both are database behaviour.
+const documents = new DocumentService({
+  preferences: documentRepository,
+  refs: documentRepository,
+  ids: systemIds,
+  events: ledger,
+});
 const service = new ProposalService({
   proposals,
   catalogue: configRepository,
   policies: configRepository,
+  documents,
   shareTokens: new RandomTokenFactory(),
   ids: systemIds,
   clock: systemClock,
@@ -76,6 +88,8 @@ let tenantA = "";
 let tenantB = "";
 let partyA = "";
 let partyB = "";
+/** Firm A's OWN entity — who is offering, on its side of every proposal. */
+let issuerA = "";
 /** The published GST service — v1 at 25000, superseded by v2 at 27500. */
 let gstV1 = "";
 let gstV2 = "";
@@ -105,6 +119,14 @@ beforeAll(async () => {
       SYSTEM_ACTOR,
     )
   ).partyId;
+
+  // These tenants are created with raw SQL rather than through createTenant, so
+  // they do not get the fallback issuing entity that provisioning seeds. Each
+  // firm gets its own here, because `issuing_entity_party_id` is NOT NULL and a
+  // firm that has named no entity cannot draft anything — which is the rule,
+  // proven separately.
+  issuerA = await documentRepository.seedFirmEntity(tenantA, "Proposal Test A LLP");
+  await documentRepository.seedFirmEntity(tenantB, "Proposal Test B LLP");
 
   const defined = await config.define(
     {
@@ -194,7 +216,9 @@ describe("the money adds up, in numeric", () => {
     await fake.create({
       id,
       tenantId: tenantA,
+      ref: fromDb.proposal.ref,
       partyId: partyA,
+      issuingEntityPartyId: fromDb.proposal.issuingEntityPartyId,
       leadId: null,
       title: "x",
       currency: "INR",
@@ -493,8 +517,11 @@ describe("the tenant wall", () => {
   it("a proposal cannot be about another firm's party", async () => {
     const err = await withTenant(app, tenantA, (db) =>
       db`
-        INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
-        VALUES (${tenantA}, ${partyB}, 'cross-firm', 'INR', 1, '2026-06-01')
+        INSERT INTO crm.proposal
+          (tenant_id, ref, party_id, issuing_entity_party_id, title, currency,
+           fx_rate, fx_rate_date)
+        VALUES (${tenantA}, 'PR-2026-9001', ${partyB}, ${issuerA}, 'cross-firm', 'INR', 1,
+                '2026-06-01')
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23503");
@@ -526,5 +553,52 @@ describe("the tenant wall", () => {
       db`DELETE FROM crm.proposal WHERE id = ${id}`,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("42501"); // insufficient_privilege
+  });
+});
+
+// ── G1.3 · why a quote was lost ────────────────────────────────────────────
+
+describe("the declined reason", () => {
+  it("is stored on a rejection and comes back on the read", async () => {
+    // "A write with no read is not a stored fact" — so the round trip is the
+    // test, not the write.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "25000",
+      discountPercent: "0",
+    });
+    await service.send(tenantA, id, SYSTEM_ACTOR);
+    await service.decide(
+      tenantA,
+      id,
+      "rejected",
+      SYSTEM_ACTOR,
+      "Went with their existing CA on price.",
+    );
+
+    const record = await service.describe(tenantA, id);
+    expect(record.proposal.status).toBe("rejected");
+    expect(record.proposal.declinedReason).toBe("Went with their existing CA on price.");
+    const [summary] = await service.list(tenantA, { partyId: partyA, status: "rejected" });
+    expect(summary?.proposal.declinedReason).toBe("Went with their existing CA on price.");
+  });
+
+  it("cannot sit on a proposal that was not declined — as the OWNER role", async () => {
+    // A sentence about why a client said no, on a proposal they accepted, reads
+    // as fact to whoever finds it later. The constraint is in the schema rather
+    // than in the service because that is the reader who would be misled.
+    const id = await draft();
+    for (const statement of [
+      owner`UPDATE crm.proposal SET declined_reason = 'they hated it' WHERE id = ${id}`,
+      owner`UPDATE crm.proposal SET declined_reason = '   ' WHERE id = ${id}`,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23514"); // check_violation
+    }
   });
 });

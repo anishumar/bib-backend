@@ -7,6 +7,7 @@
 //   /api/v1/tenancy/...                app-facing (user principal)
 //   /api/v1/config/...                 the firm's own services and roles (T2.5)
 //   /api/v1/leads/...                  the commercial pipeline (T2.1)
+//   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
 //   /openapi.json, /docs               generated spec + Swagger UI (gated)
 //
 // Per-module routes live in their handler module's registrar (registerTenancy…)
@@ -38,9 +39,11 @@ import type { ConfigDeps } from "./handler/config";
 import { registerLeadRoutes } from "./handler/lead";
 import { registerProposalRoutes } from "./handler/proposal";
 import { registerEngagementRoutes } from "./handler/engagement";
+import { registerDocumentRoutes } from "./handler/document";
 import type { LeadDeps } from "./handler/lead";
 import type { ProposalDeps } from "./handler/proposal";
 import type { EngagementDeps } from "./handler/engagement";
+import type { DocumentDeps } from "./handler/document";
 import { registerAuthRoutes } from "./handler/auth";
 import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
@@ -71,6 +74,7 @@ export interface RouterDeps {
   readonly lead: LeadDeps;
   readonly proposal: ProposalDeps;
   readonly engagement: EngagementDeps;
+  readonly document: DocumentDeps;
   readonly auth: AuthDeps;
 }
 
@@ -159,6 +163,7 @@ export function buildRouter(
   registerLeadRoutes(app, deps.lead);
   registerProposalRoutes(app, deps.proposal);
   registerEngagementRoutes(app, deps.engagement);
+  registerDocumentRoutes(app, deps.document);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

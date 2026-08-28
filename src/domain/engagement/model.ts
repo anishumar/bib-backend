@@ -82,7 +82,30 @@ export function isEngagementStatus(v: string): v is EngagementStatus {
 export interface EngagementLetter {
   readonly id: string;
   readonly tenantId: string;
+  /**
+   * What a client quotes back on the phone — `EL-2026-0007`.
+   *
+   * Unique per firm and never reused. On a letter it matters more than on a
+   * proposal: this is the string that appears in the client's own records, in
+   * an invoice's narration and in a court filing, and it is frozen with the
+   * rest of the document at signature.
+   */
+  readonly ref: string;
   readonly partyId: string;
+  /**
+   * Which of the FIRM's own entities is contracting — not the client.
+   *
+   * The letter's `jurisdiction` says WHERE the work is; this says WHO on our
+   * side is bound by it, and the two are not the same question. The letter that
+   * started this review was issued by the US entity and printed Indian law,
+   * and nothing in the schema could have caught it because nothing knew who had
+   * issued it.
+   *
+   * STORED, not derived: the firm's rule for picking an entity may change, and
+   * re-deriving this at read time would silently restate every document already
+   * issued. Same argument as `jurisdiction`, and as the pinned clause versions.
+   */
+  readonly issuingEntityPartyId: string;
   /** The proposal it came from, or null — a renewal or a walk-in has none. */
   readonly proposalId: string | null;
   /** The letter's OWN jurisdiction, chosen when it is drafted. Not derived from
@@ -108,7 +131,80 @@ export interface EngagementLetter {
   /** SHA-256 of the canonical rendering at the moment of signing. The pins make
    *  the document reconstructible; this makes it verifiable. */
   readonly signedContentHash: string | null;
+  /**
+   * The capacity the CLIENT signed in — "Director", "Authorised Signatory".
+   *
+   * Optional, unlike the rest of the signature: it is not always known when a
+   * wet signature is attested afterwards, and a letter recorded without it is
+   * still verifiable. That is why it is not part of 0017's whole-signature
+   * check.
+   */
+  readonly signedByTitle: string | null;
   readonly withdrawnAt: string | null;
+
+  // ── The prose the client actually reads (G1.3) ────────────────────────────
+
+  /**
+   * The BACKGROUND paragraph — why THIS client is buying THIS, in prose.
+   *
+   * Every real letter opens with one, and it is the first thing the client
+   * reads. It is a TERM in the sense that matters here: it frames what the firm
+   * is agreeing to do, so it is inside `canonicalContent` and frozen with the
+   * rest of the document at signature.
+   */
+  readonly background: string | null;
+  /**
+   * Who the letter is written TO — a named person, care-of the client
+   * organization.
+   *
+   * NOT `partyId`, which is who is BILLED and is unchanged. Until G1.3 the API
+   * exposed a computed `addressedTo` STRING (the party's display name), so the
+   * document could not address an individual at all: there was no individual to
+   * store.
+   */
+  readonly addressedToPartyId: string | null;
+  /** The document's OWN date — what is printed under the letterhead. Distinct
+   *  from `sentAt`, which is when this system transmitted it. */
+  readonly issuedOn: string | null;
+  /**
+   * The signed letter this one REPLACES.
+   *
+   * The model has always refused to edit a signed letter and told the caller to
+   * "supersede it with a new letter instead"; this is where that instruction is
+   * finally recorded. Only a SIGNED letter may be superseded (a draft is
+   * edited, an unsigned sent letter is withdrawn), which is enforced by a
+   * trigger in migration 0022 and is also what makes a lineage cycle
+   * impossible — every edge points at a row that was already frozen.
+   */
+  readonly supersedesId: string | null;
+
+  // ── When the work begins (G1.5) ───────────────────────────────────────────
+
+  /** When the engagements this letter opens actually begin. NULL means the
+   *  signature date, which is the ordinary case. A line may override it. */
+  readonly effectiveFrom: string | null;
+
+  // ── The firm's own signature block (G1.4) ─────────────────────────────────
+
+  /**
+   * Who bound the FIRM, in what capacity, and when — the "Yours sincerely,
+   * <name>, Director" half that was never modelled.
+   *
+   * A SNAPSHOT taken when the letter goes out, copied from the firm's standing
+   * signatory on `tenancy.tenant`. Snapshot for the same reason
+   * `issuingEntityPartyId` is one: naming a successor next year must not
+   * restate who signed a letter in 2026.
+   *
+   * All three or none of them (`el_firm_signature_is_whole_chk`, 0022) — half a
+   * signature block is worse than none, because it looks complete.
+   *
+   * This is a different fact from WHO OPERATED THE SYSTEM. The ledger records
+   * the operator as the event's actor and keeps doing so; authority to bind is
+   * an audit question about the firm, not about the session.
+   */
+  readonly firmSignatoryUserId: string | null;
+  readonly firmSignatoryTitle: string | null;
+  readonly firmSignedAt: string | null;
 }
 
 export interface LetterLine {
@@ -135,6 +231,15 @@ export interface LetterLine {
   readonly unitAmount: Amount;
   readonly currency: CurrencyCode;
   readonly discountPercent: Amount;
+  /**
+   * When THIS line's work begins, when it differs from the rest of the letter.
+   *
+   * Null means "whatever the letter says". Per line as well as per document
+   * because per line can express a single shared date and the reverse cannot:
+   * an Incorporation line starts the day it is signed while the GST line beside
+   * it starts next period.
+   */
+  readonly effectiveFrom: string | null;
 }
 
 export interface LetterClause {
@@ -161,8 +266,25 @@ export interface Engagement {
    * `core.legal_entity` reachable from nothing downstream.
    */
   readonly entityPartyId: string;
+  /**
+   * The COMMERCIAL gates: `pending_advance` until the letter's advance is
+   * recorded, then `active`. It does NOT say whether work has begun — see
+   * `effectiveFrom` and `engagementState`.
+   */
   readonly status: EngagementStatus;
+  /** When the commercial gates opened — signature, or the moment the advance
+   *  was recorded. Not when work starts. */
   readonly activatedAt: string | null;
+  /**
+   * When work on this engagement BEGINS, resolved once at signature from
+   * line → letter → signature date and then stored.
+   *
+   * Stored rather than re-derived through two joins because it is a term of a
+   * FROZEN contract: the letter can never change, so neither can the answer,
+   * and the delivery lane should not have to reconstruct it. It travels on
+   * `contract.activated` for exactly that reason.
+   */
+  readonly effectiveFrom: string;
   readonly endsOn: string | null;
 }
 
@@ -183,6 +305,79 @@ export function mayActivate(
 }
 
 /**
+ * What an engagement is doing TODAY.
+ *
+ * `EngagementStatus` is what is STORED, and it answers the commercial
+ * question — has the client signed, and has the advance been paid. Whether work
+ * has BEGUN is a different question, answered by the calendar: an engagement
+ * whose letter says the work starts in October is agreed, paid for and not
+ * started.
+ *
+ * `pending_start` is therefore a state and never a status: it is computed, it
+ * is never written to a row, and nothing has to transition out of it. That is
+ * deliberate. A stored `pending_start` would need something to move it to
+ * `active` on the day, and nothing in this service runs on a timer — the same
+ * constraint that makes `proposal.expired` lazy. A stored state nothing can
+ * leave would silently strand every future-dated engagement, which is worse
+ * than the problem it was added to fix.
+ */
+export type EngagementState = EngagementStatus | "pending_start";
+
+/**
+ * The stored status, narrowed by the effective date.
+ *
+ * Only `active` narrows: an engagement still waiting on its advance is
+ * `pending_advance` whatever the calendar says (the money gate comes first, and
+ * saying "starting soon" about work nobody has paid for would be the wrong
+ * reassurance), and paused / completed / cancelled are decisions that outrank a
+ * date.
+ *
+ * Dates are ISO days, so a lexicographic comparison IS a chronological one.
+ */
+export function engagementState(
+  engagement: Pick<Engagement, "status" | "effectiveFrom">,
+  today: string,
+): EngagementState {
+  if (engagement.status === "active" && engagement.effectiveFrom > today) return "pending_start";
+  return engagement.status;
+}
+
+/**
+ * When one line's work begins: the line, or the letter, or the signature.
+ *
+ * Stated here rather than inline at the fan-out because it is the rule G1.5 is
+ * about, and because "null on the line means the letter, null on the letter
+ * means the signature date" is the kind of two-level default that gets written
+ * differently the second time somebody needs it.
+ */
+export function resolveEffectiveFrom(
+  lineEffectiveFrom: string | null,
+  letterEffectiveFrom: string | null,
+  signatureDay: string,
+): string {
+  return lineEffectiveFrom ?? letterEffectiveFrom ?? signatureDay;
+}
+
+/** An ISO calendar day, as this product stores and compares one. */
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+export function isDay(v: string): boolean {
+  return DAY_PATTERN.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+}
+
+/**
+ * The UTC day of an instant.
+ *
+ * UTC and not the server's zone, for the same reason `refYear` is: two pods in
+ * two regions must not disagree about which day a contract started. The cost is
+ * the same and is equally visible — a letter signed late on 31 December in
+ * Sydney starts on 1 January.
+ */
+export function utcDay(at: Date): string {
+  return at.toISOString().slice(0, 10);
+}
+
+/**
  * The canonical rendering of a letter, for hashing.
  *
  * Deterministic and boring on purpose: this is what `signedContentHash`
@@ -196,6 +391,12 @@ export function mayActivate(
  * currency. A firm restyling its letter template does not and must not change
  * what the client agreed to.
  *
+ * The REFERENCE and the ISSUING ENTITY are in here for the same reason the
+ * line's entity is. The reference is how the client identifies the document
+ * they signed, so a hash that did not cover it would verify a document nobody
+ * could name. The issuing entity is WHO they contracted with — the most basic
+ * term there is, and the one the original letter got wrong.
+ *
  * The ENTITY is in here because it is a term, and one of the most material: the
  * same service for a different company of the same group is a different
  * agreement at a different price. A signature that did not commit to it would
@@ -205,7 +406,21 @@ export function mayActivate(
 export function canonicalContent(input: {
   readonly letter: Pick<
     EngagementLetter,
-    "jurisdiction" | "title" | "currency" | "fxRate" | "advanceRequired" | "advanceAmount"
+    | "ref"
+    | "issuingEntityPartyId"
+    | "jurisdiction"
+    | "title"
+    | "currency"
+    | "fxRate"
+    | "advanceRequired"
+    | "advanceAmount"
+    | "background"
+    | "addressedToPartyId"
+    | "issuedOn"
+    | "supersedesId"
+    | "effectiveFrom"
+    | "firmSignatoryUserId"
+    | "firmSignatoryTitle"
   >;
   readonly lines: readonly Pick<
     LetterLine,
@@ -216,17 +431,40 @@ export function canonicalContent(input: {
     | "quantity"
     | "unitAmount"
     | "discountPercent"
+    | "effectiveFrom"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
   const head = [
     "letter",
+    input.letter.ref,
+    input.letter.issuingEntityPartyId,
     input.letter.title,
     input.letter.jurisdiction,
     input.letter.currency,
     input.letter.fxRate,
     String(input.letter.advanceRequired),
     input.letter.advanceAmount ?? "",
+    // G1.3–G1.5, and every one of them is a TERM rather than presentation.
+    // The background frames what the firm agreed to do; the addressee is who
+    // the promise was made to; the issue date is the document's own date; the
+    // superseded letter says which agreement this one replaces, which is as
+    // material as anything on the page; the effective date is when the
+    // obligations start. A signature that did not commit to them would verify
+    // a document that could still have any of them changed underneath it.
+    //
+    // The firm's SIGNATORY and their CAPACITY are here for the same reason the
+    // issuing entity is: who bound the firm, and on what authority. The
+    // TIMESTAMP of that signature is deliberately absent — it is metadata about
+    // the act, not a term, and the same letter signed a minute later is the
+    // same agreement.
+    input.letter.background ?? "",
+    input.letter.addressedToPartyId ?? "",
+    input.letter.issuedOn ?? "",
+    input.letter.supersedesId ?? "",
+    input.letter.effectiveFrom ?? "",
+    input.letter.firmSignatoryUserId ?? "",
+    input.letter.firmSignatoryTitle ?? "",
   ].join("\t");
 
   const lines = [...input.lines]
@@ -241,6 +479,9 @@ export function canonicalContent(input: {
         l.quantity,
         l.unitAmount,
         l.discountPercent,
+        // A line that starts three months after the rest of the letter is a
+        // different agreement from one that starts with it.
+        l.effectiveFrom ?? "",
       ].join("\t"),
     );
 

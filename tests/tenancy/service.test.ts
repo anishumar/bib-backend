@@ -101,16 +101,21 @@ describe("createTenant", () => {
   });
 
   it("records each seeding as one fact, after the tenant's own creation", async () => {
-    // One event for four roles and one for ten rungs: fourteen rows for what
-    // are really two facts would bury the events a person actually caused. And
-    // both come after the tenant, because it has to exist before anything can
-    // be configured against it.
+    // One event for four roles, one for ten rungs, one for the firm's own
+    // entity: sixteen rows for what are really three facts would bury the
+    // events a person actually caused. All three come after the tenant, because
+    // it has to exist before anything can be configured against it.
+    //
+    // `party.created` is the firm's OWN entity — the party module records the
+    // same verb for every other party, and leaving this one unrecorded would
+    // make the firm's own company the single party in the book with no origin.
     const { service, f } = svc();
     await service.createTenant({ name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR" });
     expect(f.events.verbs()).toEqual([
       "tenant.created",
       "config_registry.seeded",
       "grade_ladder.seeded",
+      "party.created",
     ]);
   });
 
@@ -131,6 +136,23 @@ describe("createTenant", () => {
     // Every rung arrives in use — a firm starts by promoting through all of them
     // and retires the ones it does not want.
     expect(ladder.every((g) => g.isActive)).toBe(true);
+  });
+
+  it("gives a new firm the entity that will issue its documents", async () => {
+    // `issuing_entity_party_id` is NOT NULL on both documents (migration 0021),
+    // so a firm without this row could not draft a proposal at all. Every
+    // tenant owns one from the moment it exists, exactly as it owns a role set,
+    // and migration 0021 backfilled the firms that predate it.
+    const { service, f } = svc();
+    const t = await service.createTenant({
+      name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR",
+    });
+    expect(f.issuingEntitySeeder.seeded).toEqual([
+      { tenantId: t.id, firmName: "Harbour Point", partyId: expect.any(String) },
+    ]);
+    const created = f.events.recorded.find((e) => e.verb === "party.created");
+    expect(created?.objectId).toBe(f.issuingEntitySeeder.seeded[0]?.partyId);
+    expect(created?.payload).toMatchObject({ kind: "organization", isFirmSelf: true });
   });
 });
 

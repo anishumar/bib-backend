@@ -26,7 +26,9 @@ import type {
 interface ProposalRow {
   id: string;
   tenant_id: string;
+  ref: string;
   party_id: string;
+  issuing_entity_party_id: string;
   lead_id: string | null;
   title: string;
   status: ProposalStatus;
@@ -40,6 +42,7 @@ interface ProposalRow {
   discount_approved_at: Date | null;
   first_viewed_at: Date | null;
   view_count: number;
+  declined_reason: string | null;
 }
 
 interface LineRow {
@@ -77,7 +80,9 @@ function toProposal(r: ProposalRow): Proposal {
   return {
     id: r.id,
     tenantId: r.tenant_id,
+    ref: r.ref,
     partyId: r.party_id,
+    issuingEntityPartyId: r.issuing_entity_party_id,
     leadId: r.lead_id,
     title: r.title,
     status: r.status,
@@ -91,6 +96,7 @@ function toProposal(r: ProposalRow): Proposal {
     discountApprovedAt: r.discount_approved_at?.toISOString() ?? null,
     firstViewedAt: r.first_viewed_at?.toISOString() ?? null,
     viewCount: r.view_count,
+    declinedReason: r.declined_reason,
   };
 }
 
@@ -130,13 +136,16 @@ export class PostgresProposalRepository implements ProposalRepository {
       // that is not the caller's to state.
       const [row] = await db<ProposalRow[]>`
         INSERT INTO crm.proposal
-          (id, tenant_id, party_id, lead_id, title, currency, fx_rate, fx_rate_date, valid_until)
+          (id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title,
+           currency, fx_rate, fx_rate_date, valid_until)
         VALUES
-          (${p.id}, ${p.tenantId}, ${p.partyId}, ${p.leadId}, ${p.title},
+          (${p.id}, ${p.tenantId}, ${p.ref}, ${p.partyId}, ${p.issuingEntityPartyId},
+           ${p.leadId}, ${p.title},
            ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil})
-        RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
-                  fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
+                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error("proposal insert returned no row");
       return toProposal(row);
@@ -146,9 +155,10 @@ export class PostgresProposalRepository implements ProposalRepository {
   async findById(tenantId: string, proposalId: string): Promise<Proposal | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<ProposalRow[]>`
-        SELECT id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
-               fx_rate_date, valid_until, sent_at, decided_at,
-               discount_approved_by, discount_approved_at, first_viewed_at, view_count
+        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
+               currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
+               discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
         FROM crm.proposal WHERE id = ${proposalId}
       `;
       return row ? toProposal(row) : null;
@@ -160,19 +170,26 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [head] = await db<
         (ProposalRow & {
           party_display_name: string;
+          issuer_display_name: string;
           approver_display_name: string | null;
           approver_email: string | null;
         })[]
       >`
-        SELECT p.id, p.tenant_id, p.party_id, p.lead_id, p.title, p.status, p.currency,
+        SELECT p.id, p.tenant_id, p.ref, p.party_id, p.issuing_entity_party_id, p.lead_id,
+               p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count,
+               p.first_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
+               issuer.display_name AS issuer_display_name,
                approver.display_name AS approver_display_name,
                approver.email AS approver_email
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
+        -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the
+        -- column is NOT NULL and carries the tenant, so a proposal with no
+        -- resolvable issuer is corruption rather than a state to render.
+        JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
         LEFT JOIN tenancy.user_account approver ON approver.id = p.discount_approved_by
         WHERE p.id = ${proposalId}
       `;
@@ -218,6 +235,10 @@ export class PostgresProposalRepository implements ProposalRepository {
       return {
         proposal: toProposal(head),
         party: { id: head.party_id, displayName: head.party_display_name },
+        issuingEntity: {
+          id: head.issuing_entity_party_id,
+          displayName: head.issuer_display_name,
+        },
         lines: lines.map(
           (r): ProposalLineRecord => ({
             line: toLine(r),
@@ -256,20 +277,24 @@ export class PostgresProposalRepository implements ProposalRepository {
       const rows = await db<
         (ProposalRow & {
           party_display_name: string;
+          issuer_display_name: string;
           gross: string | null;
           discount: string | null;
           net: string | null;
           line_count: string;
         })[]
       >`
-        SELECT p.id, p.tenant_id, p.party_id, p.lead_id, p.title, p.status, p.currency,
+        SELECT p.id, p.tenant_id, p.ref, p.party_id, p.issuing_entity_party_id, p.lead_id,
+               p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count,
+               p.first_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
+               issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
+        JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
         -- LEFT, because a proposal with no lines has no row in the view at all:
         -- SUM over nothing is null, and the mapper reads that as zero.
         LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
@@ -281,6 +306,7 @@ export class PostgresProposalRepository implements ProposalRepository {
         (r): ProposalSummary => ({
           proposal: toProposal(r),
           party: { id: r.party_id, displayName: r.party_display_name },
+          issuingEntity: { id: r.issuing_entity_party_id, displayName: r.issuer_display_name },
           totals: toTotals(r, r.currency),
           lineCount: Number(r.line_count),
         }),
@@ -340,6 +366,7 @@ export class PostgresProposalRepository implements ProposalRepository {
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal> {
     return withTenant(this.app, tenantId, async (db) => {
       // The status and its date move in ONE statement. The CHECK constraints in
@@ -361,11 +388,17 @@ export class PostgresProposalRepository implements ProposalRepository {
                               WHEN ${status} IN ('accepted', 'rejected', 'expired')
                               THEN ${at}::timestamptz
                               ELSE NULL
-                            END
+                            END,
+               -- In the SAME statement as the status, because
+               -- proposal_declined_reason_when_rejected_chk (0022) holds the
+               -- two together: a reason written a moment before or after the
+               -- status it belongs to would be refused by the constraint.
+               declined_reason = ${declinedReason}
          WHERE id = ${proposalId}
-        RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
-                  fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
+                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-transition`);
       return toProposal(row);
@@ -392,24 +425,31 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [head] = await db<
         {
           id: string;
+          ref: string;
           title: string;
           status: ProposalStatus;
           currency: string;
           valid_until: Date | null;
           sent_at: Date | null;
           firm_name: string;
+          issuer_display_name: string;
           party_display_name: string;
           gross: string | null;
           discount: string | null;
           net: string | null;
         }[]
       >`
-        SELECT p.id, p.title, p.status, p.currency, p.valid_until, p.sent_at,
+        SELECT p.id, p.ref, p.title, p.status, p.currency, p.valid_until, p.sent_at,
                firm.name AS firm_name,
+               issuer.display_name AS issuer_display_name,
                party.display_name AS party_display_name,
                t.gross, t.discount, t.net
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
+        -- The recipient is told which of our companies is offering. It is not
+        -- always the group name above it, and a client is entitled to know
+        -- which company they would be contracting with.
+        JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
         JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
         WHERE p.share_token_digest = ${digest}
@@ -434,7 +474,9 @@ export class PostgresProposalRepository implements ProposalRepository {
 
       return {
         id: head.id,
+        ref: head.ref,
         firmName: head.firm_name,
+        issuedBy: head.issuer_display_name,
         addressedTo: head.party_display_name,
         title: head.title,
         status: head.status,
@@ -486,9 +528,10 @@ export class PostgresProposalRepository implements ProposalRepository {
         UPDATE crm.proposal
            SET discount_approved_by = ${approvedByUserId}, discount_approved_at = ${at}
          WHERE id = ${proposalId}
-        RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
-                  fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
+                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-approval`);
       return toProposal(row);

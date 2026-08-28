@@ -189,6 +189,8 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |
 | `staff_grade.updated` | staff_grade | A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something. |
 | `grade_ladder.seeded` | tenant | A new tenant's seniority ladder was initialised from the product defaults. One event, not one per rung. |
+| `firm_signatory.set` | tenant | The firm named who binds it — the person and the capacity printed under "Yours sincerely" on every letter it sends from now on. Authority to bind is an audit question and a DIFFERENT fact from who operated the system, which is this event's actor. |
+| `firm_entity_preference.set` | firm_entity_preference | The firm said which of its OWN entities issues documents to clients in a country — or set the fallback that answers for every country it has no entity in. A commercial and legal decision (it settles governing law, courts and who the client's counterparty is), so who made it is the point of the record. |
 | `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
 | `party.archived` | party | A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035). |

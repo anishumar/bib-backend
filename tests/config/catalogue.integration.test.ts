@@ -34,6 +34,8 @@ import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
+import { DocumentService } from "../../src/usecase/document/service";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
@@ -59,10 +61,21 @@ const party = new PartyService({
   ids: systemIds,
   events: ledger,
 });
+// G1.1/G1.2: a proposal now carries a reference and names the entity issuing
+// it, both behind quoting's own narrow port. The real adapter, because a
+// proposal that cannot be drafted proves nothing about the catalogue.
+const documentRepository = new PostgresDocumentRepository(app);
+const documents = new DocumentService({
+  preferences: documentRepository,
+  refs: documentRepository,
+  ids: systemIds,
+  events: ledger,
+});
 const proposals = new ProposalService({
   proposals: new PostgresProposalRepository(app),
   catalogue: configRepository,
   policies: configRepository,
+  documents,
   shareTokens: new RandomTokenFactory(),
   ids: systemIds,
   clock: systemClock,
@@ -135,6 +148,12 @@ beforeAll(async () => {
   if (!t) throw new Error("could not create the test tenant");
   tenant = t.id;
   await config.seedDefaultRoles(tenant, SYSTEM_ACTOR);
+  // G1.2: `issuing_entity_party_id` is NOT NULL on a proposal, so a firm with no
+  // entity of its own and no fallback cannot draft one at all. This tenant is
+  // made by raw SQL rather than through TenancyService, so it does not get the
+  // seeding provisioning does — and a catalogue test that cannot quote anything
+  // would be testing nothing.
+  await documentRepository.seedFirmEntity(tenant, "Catalogue Test");
 
   client = (
     await party.createOrganization(

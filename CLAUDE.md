@@ -501,11 +501,17 @@ difference makes everything here stricter than its proposal counterpart.
   engagements is a client committed to work nobody scheduled; engagements with no signature is
   work nobody agreed to. `UNIQUE (engagement_letter_line_id)` makes a double fan-out
   impossible rather than unlikely.
-- **The freeze has two shapes, and only one of them is automatic.** The line and clause
+- **The freeze names what may still MOVE, never what is protected.** The line and clause
   triggers refuse *any* write to a signed letter's children. The letter's own
-  (`crm.refuse_signed_change`, 0017) compares an **enumerated list of columns** — so a column
-  added later is silently editable after signature until somebody adds it to that list. **Add
-  a column to `crm.engagement_letter`, add it to the trigger.**
+  (`crm.refuse_signed_change`) once compared an **enumerated list of columns**, so a column
+  added later was silently editable after signature until somebody remembered to add it —
+  and six already were. Migration **0019** inverted it: the trigger compares the whole row
+  (`to_jsonb(NEW) - mutable` vs `to_jsonb(OLD) - mutable`) and exempts only the short
+  allow-list published by `crm.signed_letter_mutable_columns()` — today
+  `advance_recorded_at`, `advance_recorded_by`, `updated_at`. **A new column on
+  `crm.engagement_letter` is frozen the day it exists; adding a FOURTH exemption is the thing
+  that needs an argument**, and `tests/architecture/signed-letter-freeze.integration.test.ts`
+  asks the catalogue for every column and holds the build red until somebody makes it.
 - **Once real signed letters exist, no NOT NULL column can be added to a letter line again.**
   The freeze refuses the backfill, by design, and there is no honest value to write into a
   document that never said it. A new required field on an issued document is then a nullable

@@ -29,6 +29,7 @@ import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { DocumentService } from "../../src/usecase/document/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
@@ -46,6 +47,7 @@ import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeDocumentFakes } from "../../src/testfakes/document";
 import {
   FakeClock,
   FakeCredentialRepo,
@@ -107,6 +109,7 @@ function deps(): RouterDeps {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
+    document: { service: new DocumentService(makeDocumentFakes()) },
     auth: {
       service: new IdentityService({
         users: fakes.users,

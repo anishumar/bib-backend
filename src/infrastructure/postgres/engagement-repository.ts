@@ -19,6 +19,7 @@ import type {
 import { readClauseBody } from "../../domain/config/model";
 import type {
   EngagementRepository,
+  FirmSignatureRecord,
   LetterClauseRecord,
   LetterFilters,
   LetterLineRecord,
@@ -34,7 +35,9 @@ import type {
 interface LetterRow {
   id: string;
   tenant_id: string;
+  ref: string;
   party_id: string;
+  issuing_entity_party_id: string;
   proposal_id: string | null;
   jurisdiction: string;
   title: string;
@@ -52,7 +55,16 @@ interface LetterRow {
   signature_method: string | null;
   signature_reference: string | null;
   signed_content_hash: string | null;
+  signed_by_title: string | null;
   withdrawn_at: Date | null;
+  background: string | null;
+  addressed_to_party_id: string | null;
+  issued_on: Date | null;
+  supersedes_id: string | null;
+  effective_from: Date | null;
+  firm_signatory_user_id: string | null;
+  firm_signatory_title: string | null;
+  firm_signed_at: Date | null;
 }
 
 interface LineRow {
@@ -67,6 +79,7 @@ interface LineRow {
   unit_amount: string;
   currency: string;
   discount_percent: string;
+  effective_from: Date | null;
 }
 
 interface ClauseRow {
@@ -86,6 +99,7 @@ interface EngagementRow {
   entity_party_id: string;
   status: EngagementStatus;
   activated_at: Date | null;
+  effective_from: Date;
   ends_on: Date | null;
 }
 
@@ -102,7 +116,9 @@ function toLetter(r: LetterRow): EngagementLetter {
   return {
     id: r.id,
     tenantId: r.tenant_id,
+    ref: r.ref,
     partyId: r.party_id,
+    issuingEntityPartyId: r.issuing_entity_party_id,
     proposalId: r.proposal_id,
     jurisdiction: r.jurisdiction,
     title: r.title,
@@ -120,7 +136,16 @@ function toLetter(r: LetterRow): EngagementLetter {
     signatureMethod: r.signature_method,
     signatureReference: r.signature_reference,
     signedContentHash: r.signed_content_hash,
+    signedByTitle: r.signed_by_title,
     withdrawnAt: r.withdrawn_at?.toISOString() ?? null,
+    background: r.background,
+    addressedToPartyId: r.addressed_to_party_id,
+    issuedOn: r.issued_on === null ? null : toDay(r.issued_on),
+    supersedesId: r.supersedes_id,
+    effectiveFrom: r.effective_from === null ? null : toDay(r.effective_from),
+    firmSignatoryUserId: r.firm_signatory_user_id,
+    firmSignatoryTitle: r.firm_signatory_title,
+    firmSignedAt: r.firm_signed_at?.toISOString() ?? null,
   };
 }
 
@@ -137,6 +162,7 @@ function toLine(r: LineRow): LetterLine {
     unitAmount: r.unit_amount,
     currency: r.currency,
     discountPercent: r.discount_percent,
+    effectiveFrom: r.effective_from === null ? null : toDay(r.effective_from),
   };
 }
 
@@ -160,6 +186,7 @@ function toEngagement(r: EngagementRow): Engagement {
     entityPartyId: r.entity_party_id,
     status: r.status,
     activatedAt: r.activated_at?.toISOString() ?? null,
+    effectiveFrom: toDay(r.effective_from),
     endsOn: r.ends_on === null ? null : toDay(r.ends_on),
   };
 }
@@ -171,15 +198,21 @@ export class PostgresEngagementRepository implements EngagementRepository {
     return withTenant(this.app, l.tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
         INSERT INTO crm.engagement_letter
-          (id, tenant_id, party_id, proposal_id, jurisdiction, title,
-           currency, fx_rate, fx_rate_date, advance_required, advance_amount)
+          (id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id, jurisdiction,
+           title, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+           background, addressed_to_party_id, issued_on, supersedes_id, effective_from)
         VALUES
-          (${l.id}, ${l.tenantId}, ${l.partyId}, ${l.proposalId}, ${l.jurisdiction}, ${l.title},
-           ${l.currency}, ${l.fxRate}, ${l.fxRateDate}, ${l.advanceRequired}, ${l.advanceAmount})
-        RETURNING id, tenant_id, party_id, proposal_id, jurisdiction, title, status,
-                  currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+          (${l.id}, ${l.tenantId}, ${l.ref}, ${l.partyId}, ${l.issuingEntityPartyId},
+           ${l.proposalId}, ${l.jurisdiction}, ${l.title},
+           ${l.currency}, ${l.fxRate}, ${l.fxRateDate}, ${l.advanceRequired}, ${l.advanceAmount},
+           ${l.background}, ${l.addressedToPartyId}, ${l.issuedOn}, ${l.supersedesId},
+           ${l.effectiveFrom})
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, withdrawn_at
+                  signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
       `;
       if (!row) throw new Error("engagement letter insert returned no row");
       return toLetter(row);
@@ -189,10 +222,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
   async findLetter(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
-        SELECT id, tenant_id, party_id, proposal_id, jurisdiction, title, status,
-               currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+               jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-               signature_method, signature_reference, signed_content_hash, withdrawn_at
+               signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
         FROM crm.engagement_letter WHERE id = ${letterId}
       `;
       return row ? toLetter(row) : null;
@@ -201,15 +236,57 @@ export class PostgresEngagementRepository implements EngagementRepository {
 
   async describeLetter(tenantId: string, letterId: string): Promise<LetterRecord | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [head] = await db<(LetterRow & { party_display_name: string })[]>`
-        SELECT l.id, l.tenant_id, l.party_id, l.proposal_id, l.jurisdiction, l.title, l.status,
+      const [head] = await db<
+        (LetterRow & {
+          party_display_name: string;
+          issuer_display_name: string;
+          addressee_display_name: string | null;
+          firm_signatory_display_name: string | null;
+          supersedes_ref: string | null;
+          superseded_by_id: string | null;
+          superseded_by_ref: string | null;
+        })[]
+      >`
+        SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
+               l.proposal_id, l.jurisdiction, l.title, l.status,
                l.currency, l.fx_rate, l.fx_rate_date, l.advance_required, l.advance_amount,
                l.advance_recorded_at, l.advance_recorded_by, l.sent_at, l.signed_at,
                l.signed_by_name, l.signature_method, l.signature_reference,
-               l.signed_content_hash, l.withdrawn_at,
-               party.display_name AS party_display_name
+               l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
+               l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
+               l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
+               l.firm_signed_at,
+               party.display_name AS party_display_name,
+               issuer.display_name AS issuer_display_name,
+               addressee.display_name AS addressee_display_name,
+               signatory.display_name AS firm_signatory_display_name,
+               previous.ref AS supersedes_ref,
+               successor.id  AS superseded_by_id,
+               successor.ref AS superseded_by_ref
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
+        -- WHICH OF OUR COMPANIES is contracting, by name — the letterhead and
+        -- the signature block both print it. An inner join: the column is NOT
+        -- NULL and carries the tenant, so an unresolvable issuer is corruption
+        -- rather than a state to render.
+        JOIN core.party issuer ON issuer.id = l.issuing_entity_party_id
+        -- WHO the letter is written to, by name. LEFT: a letter addressed to no
+        -- individual is ordinary, and the c/o organization is the client above.
+        LEFT JOIN core.party addressee ON addressee.id = l.addressed_to_party_id
+        -- WHO BOUND THE FIRM, by name. The name is a JOIN and not a stored
+        -- field, for the reason the ledger's actor name is: an erased account
+        -- stops resolving and the letter survives. The TITLE is stored on the
+        -- letter, because it is what the document said and a promotion must not
+        -- restate it.
+        LEFT JOIN tenancy.user_account signatory ON signatory.id = l.firm_signatory_user_id
+        -- LINEAGE, both directions. Backwards: which agreement this replaced.
+        -- Forwards: whether this one is still the agreement — the question the
+        -- screen showing a signed letter cannot otherwise answer. A withdrawn
+        -- successor does not count, which is exactly the predicate
+        -- el_one_live_successor_per_letter uses to keep it single.
+        LEFT JOIN crm.engagement_letter previous ON previous.id = l.supersedes_id
+        LEFT JOIN crm.engagement_letter successor
+               ON successor.supersedes_id = l.id AND successor.status <> 'withdrawn'
         WHERE l.id = ${letterId}
       `;
       if (!head) return null;
@@ -226,6 +303,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         SELECT l.id, l.tenant_id, l.engagement_letter_id, l.entity_party_id,
                l.service_version_id, l.description,
                l.position, l.quantity, l.unit_amount, l.currency, l.discount_percent,
+               l.effective_from,
                round(l.unit_amount * l.quantity * (1 - l.discount_percent / 100), 4) AS net,
                e.key AS service_key, v.version AS service_version, v.body AS service_body,
                entity.display_name AS entity_display_name
@@ -268,13 +346,46 @@ export class PostgresEngagementRepository implements EngagementRepository {
 
       const engagements = await db<EngagementRow[]>`
         SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               entity_party_id, status, activated_at, ends_on
+               entity_party_id, status, activated_at, effective_from, ends_on
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
       `;
 
       return {
         letter: toLetter(head),
         party: { id: head.party_id, displayName: head.party_display_name },
+        issuingEntity: {
+          id: head.issuing_entity_party_id,
+          displayName: head.issuer_display_name,
+        },
+        addressedTo:
+          head.addressed_to_party_id === null
+            ? null
+            : {
+                id: head.addressed_to_party_id,
+                displayName: head.addressee_display_name ?? head.addressed_to_party_id,
+              },
+        // All three columns move together (el_firm_signature_is_whole_chk), so
+        // one check settles the block. The display name may still be null — an
+        // erased account — and the caller is told so rather than shown a uuid.
+        firmSignatory:
+          head.firm_signatory_user_id === null ||
+          head.firm_signatory_title === null ||
+          head.firm_signed_at === null
+            ? null
+            : {
+                userId: head.firm_signatory_user_id,
+                displayName: head.firm_signatory_display_name,
+                title: head.firm_signatory_title,
+                signedAt: head.firm_signed_at.toISOString(),
+              },
+        supersedes:
+          head.supersedes_id === null || head.supersedes_ref === null
+            ? null
+            : { id: head.supersedes_id, ref: head.supersedes_ref },
+        supersededBy:
+          head.superseded_by_id === null || head.superseded_by_ref === null
+            ? null
+            : { id: head.superseded_by_id, ref: head.superseded_by_ref },
         lines: lines.map(
           (r): LetterLineRecord => ({
             line: toLine(r),
@@ -314,21 +425,28 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const rows = await db<
         (LetterRow & {
           party_display_name: string;
+          issuer_display_name: string;
           gross: string | null;
           discount: string | null;
           net: string | null;
           line_count: string;
         })[]
       >`
-        SELECT l.id, l.tenant_id, l.party_id, l.proposal_id, l.jurisdiction, l.title, l.status,
+        SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
+               l.proposal_id, l.jurisdiction, l.title, l.status,
                l.currency, l.fx_rate, l.fx_rate_date, l.advance_required, l.advance_amount,
                l.advance_recorded_at, l.advance_recorded_by, l.sent_at, l.signed_at,
                l.signed_by_name, l.signature_method, l.signature_reference,
-               l.signed_content_hash, l.withdrawn_at,
+               l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
+               l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
+               l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
+               l.firm_signed_at,
                party.display_name AS party_display_name,
+               issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
+        JOIN core.party issuer ON issuer.id = l.issuing_entity_party_id
         LEFT JOIN LATERAL (
           SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
                  coalesce(sum(round(unit_amount * quantity, 4)
@@ -348,6 +466,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         (r): LetterSummary => ({
           letter: toLetter(r),
           party: { id: r.party_id, displayName: r.party_display_name },
+          issuingEntity: { id: r.issuing_entity_party_id, displayName: r.issuer_display_name },
           totals: {
             gross: r.gross ?? "0",
             discount: r.discount ?? "0",
@@ -367,15 +486,16 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db<LineRow[]>`
         INSERT INTO crm.engagement_letter_line
           (id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-           description, position, quantity, unit_amount, currency, discount_percent)
+           description, position, quantity, unit_amount, currency, discount_percent, effective_from)
         SELECT ${l.id}, ${l.tenantId}, ${l.engagementLetterId}, ${l.entityPartyId},
                ${l.serviceVersionId},
                ${l.description}, coalesce(max(position), 0) + 1,
-               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent}
+               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
+               ${l.effectiveFrom}
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = ${l.engagementLetterId} AND removed_at IS NULL
         RETURNING id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-                  description, position, quantity, unit_amount, currency, discount_percent
+                  description, position, quantity, unit_amount, currency, discount_percent, effective_from
       `;
       if (!row) throw new Error("engagement letter line insert returned no row");
       return toLine(row);
@@ -395,7 +515,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<LineRow[]>`
         SELECT id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
-               description, position, quantity, unit_amount, currency, discount_percent
+               description, position, quantity, unit_amount, currency, discount_percent, effective_from
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
         ORDER BY position
@@ -450,13 +570,89 @@ export class PostgresEngagementRepository implements EngagementRepository {
                withdrawn_at = CASE WHEN ${status} = 'withdrawn' THEN ${at}::timestamptz
                                    ELSE NULL END
          WHERE id = ${letterId}
-        RETURNING id, tenant_id, party_id, proposal_id, jurisdiction, title, status,
-                  currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, withdrawn_at
+                  signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
       `;
       if (!row) throw new Error(`engagement letter ${letterId} vanished mid-transition`);
       return toLetter(row);
+    });
+  }
+
+  /**
+   * SEND IT: the status, the date the document carries, and the firm's own
+   * signature, in ONE statement.
+   *
+   * `coalesce(issued_on, ...)` is the whole reason this is not `setStatus`: a
+   * letter the drafter dated keeps its date, and one they did not is dated the
+   * day it went out. Doing that as a read-then-write would leave a window in
+   * which two people sending the same draft could date it differently.
+   *
+   * The firm's three signature columns are written together or not at all,
+   * which is what the null-object parameter buys — `el_firm_signature_is_whole_chk`
+   * (0022) would refuse anything else, and refusing at the constraint is a 500.
+   */
+  async markSent(
+    tenantId: string,
+    letterId: string,
+    at: string,
+    issuedOnFallback: string,
+    firm: FirmSignatureRecord | null,
+  ): Promise<EngagementLetter> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LetterRow[]>`
+        UPDATE crm.engagement_letter
+           SET status = 'sent',
+               sent_at = coalesce(sent_at, ${at}::timestamptz),
+               issued_on = coalesce(issued_on, ${issuedOnFallback}::date),
+               firm_signatory_user_id = ${firm?.userId ?? null},
+               firm_signatory_title   = ${firm?.title ?? null},
+               firm_signed_at         = ${firm?.signedAt ?? null}::timestamptz
+         WHERE id = ${letterId} AND status = 'draft'
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
+                  signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+      `;
+      // `AND status = 'draft'` makes the transition its own lock, the same
+      // trick the signature uses: two people sending one draft cannot both find
+      // it there, so the second gets no row rather than a second signature
+      // block stamped over the first.
+      if (!row) {
+        throw new Error(
+          `engagement letter ${letterId} was not a draft when it was sent — ` +
+            `it may have been sent or withdrawn concurrently`,
+        );
+      }
+      return toLetter(row);
+    });
+  }
+
+  /**
+   * The live letter that supersedes this one.
+   *
+   * `status <> 'withdrawn'` matches the partial unique index exactly, which is
+   * what makes "the live successor" a single row rather than the first of
+   * several: a replacement that was drafted and pulled is not a replacement.
+   */
+  async findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LetterRow[]>`
+        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+               jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+               advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
+               signature_method, signature_reference, signed_content_hash, signed_by_title,
+               withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+               effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+        FROM crm.engagement_letter
+        WHERE supersedes_id = ${letterId} AND status <> 'withdrawn'
+      `;
+      return row ? toLetter(row) : null;
     });
   }
 
@@ -478,14 +674,17 @@ export class PostgresEngagementRepository implements EngagementRepository {
            SET status = 'signed',
                signed_at = ${signature.signedAt}::timestamptz,
                signed_by_name = ${signature.signedByName},
+               signed_by_title = ${signature.signedByTitle},
                signature_method = ${signature.signatureMethod},
                signature_reference = ${signature.signatureReference},
                signed_content_hash = ${signature.signedContentHash}
          WHERE id = ${letterId} AND status = 'sent'
-        RETURNING id, tenant_id, party_id, proposal_id, jurisdiction, title, status,
-                  currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, withdrawn_at
+                  signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
       `;
       // `AND status = 'sent'` makes the transition itself the lock: two
       // concurrent signatures cannot both find the row in that state, so the
@@ -502,12 +701,13 @@ export class PostgresEngagementRepository implements EngagementRepository {
         const [row] = await db<EngagementRow[]>`
           INSERT INTO crm.engagement
             (id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-             entity_party_id, status, activated_at)
+             entity_party_id, status, activated_at, effective_from)
           VALUES
             (${e.id}, ${e.tenantId}, ${e.engagementLetterId}, ${e.engagementLetterLineId},
-             ${e.partyId}, ${e.entityPartyId}, ${e.status}, ${e.activatedAt}::timestamptz)
+             ${e.partyId}, ${e.entityPartyId}, ${e.status}, ${e.activatedAt}::timestamptz,
+             ${e.effectiveFrom})
           RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                    entity_party_id, status, activated_at, ends_on
+                    entity_party_id, status, activated_at, effective_from, ends_on
         `;
         if (!row) throw new Error("engagement insert returned no row");
         created.push(toEngagement(row));
@@ -527,10 +727,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
         UPDATE crm.engagement_letter
            SET advance_recorded_at = ${at}::timestamptz, advance_recorded_by = ${recordedByUserId}
          WHERE id = ${letterId} AND advance_recorded_at IS NULL
-        RETURNING id, tenant_id, party_id, proposal_id, jurisdiction, title, status,
-                  currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, withdrawn_at
+                  signature_method, signature_reference, signed_content_hash, signed_by_title,
+                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
       `;
       // Same trick as the signature: `advance_recorded_at IS NULL` is the lock,
       // so two clicks cannot both release the engagements.
@@ -543,7 +745,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
            SET status = 'active', activated_at = ${at}::timestamptz
          WHERE engagement_letter_id = ${letterId} AND status = 'pending_advance'
         RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                  entity_party_id, status, activated_at, ends_on
+                  entity_party_id, status, activated_at, effective_from, ends_on
       `;
       return { letter: toLetter(letter), released: released.map(toEngagement) };
     });
@@ -553,7 +755,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<EngagementRow[]>`
         SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               entity_party_id, status, activated_at, ends_on
+               entity_party_id, status, activated_at, effective_from, ends_on
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
         ORDER BY created_at
       `;
