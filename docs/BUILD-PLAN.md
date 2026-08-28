@@ -434,6 +434,78 @@ open and are recorded above; neither blocks Phase 2.
 > Gate: `npm run check` 344 · `test:integration` 81 · `smoke` 87.
 
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
+  > **PROPOSED design, not yet agreed (2026-08-28).** Written before building, the way T2.2's
+  > was. Six decisions and four open questions; the questions are marked and none of them is
+  > answerable from the code.
+  >
+  > **What an engagement letter IS here.** A proposal is what the firm OFFERED. An engagement
+  > letter is what both sides AGREED, and it is the document that creates obligations — which
+  > makes it the first object in this product with legal weight rather than commercial weight.
+  > Everything below follows from that one difference.
+  >
+  > **(1) TWO tables, because a letter and the work it sells are different lifetimes.**
+  > `crm.engagement_letter` is the document; `crm.engagement` is one ongoing piece of work sold
+  > by it. Signing fans one letter out into one engagement PER LINE — that is the acceptance —
+  > and it is the engagement, not the letter, that the delivery lane schedules against from T2.4
+  > on. A letter is signed once and never changes; an engagement runs for a year, is paused,
+  > renewed, or closed.
+  >
+  > **(2) The EL is BUILT FROM a proposal but does not depend on one.** `proposal_id` is
+  > nullable: a renewal or a walk-in engagement has no proposal, and inventing one to satisfy a
+  > column would put rows in the pipeline nobody is working — the same reasoning that makes a
+  > proposal's `lead_id` nullable. Each EL line pins the same frozen `service_version_id` the
+  > proposal line did and carries its OWN money, because the agreed price may differ from the
+  > quoted one and both facts have to survive.
+  >
+  > **(3) The clause library is the registry's fourth kind (`clause`).** Body:
+  > `{ title, text, jurisdictions[] }`, versioned and published like everything else, and **the
+  > EL pins the clause versions it was assembled from**. Pinning's third real consumer, and the
+  > one where it matters most: "what exactly did they sign" is a question a court asks, and a
+  > live read would answer it with today's wording.
+  >
+  > **(4) SIGNATURE FREEZES, by a trigger.** Not a status check in the service. The precedent is
+  > migration 0005's config freeze, and the reason is stronger here: an application-level rule
+  > protects against the application, and "what did they sign" must also be protected against a
+  > migration, a backfill and a 2 a.m. psql session. A `signed_content_hash` is stored alongside
+  > the pins so the document is both reconstructible AND verifiable — no PDF, because document
+  > storage does not exist yet and pretending otherwise would be the stub-that-lies.
+  >
+  > **(5) The e-sign port, and THE STUB REGISTRY.** `ESignProvider` is a port; the fake records
+  > a signature that staff attest to ("signed on paper", "signed via <provider>, ref X") — which
+  > is not a toy, it is how most Indian firms actually sign today. CLAUDE.md's honest registry
+  > says the dev auth resolver and the logging mailer are the only stubs and *"do not add a
+  > third without the same treatment"*: so this one is config-gated and `validateServer` refuses
+  > to boot a production-like environment with it. That rule is the reason this is stated here
+  > rather than discovered in review. The provider callback is external, so it is idempotent by
+  > derived id.
+  >
+  > **This keeps the public surface at FOUR paths.** A client-facing signing ceremony would be a
+  > fifth `PUBLIC_PATH`, and the proposal share link's paragraph sets the bar. Staff-recorded
+  > signature clears it without a new unauthenticated surface; the real ceremony arrives with a
+  > real provider or with U1.
+  >
+  > **(6) The advance-fee gate, and its honest limit.** Engagements fan out as
+  > `pending_advance`, not `active`, when the letter requires one — and **T2.4's
+  > `contract.activated` is not emitted until the advance is recorded**, so the gate is real
+  > rather than advisory: no advance, no jobs. What T2.3 CANNOT do is confirm the money
+  > arrived, because billing (T3.4) and payments (T3.5) do not exist. So the advance is marked
+  > received by a person, and that is replaced by the payments module later. Same shape as
+  > T2.1's manual assignment: the gap is the trade, recorded, not an oversight.
+  >
+  > **OPEN QUESTIONS — none answerable from the code:**
+  > **(a)** Does a clause body hold finished text, or a template with placeholders? Templating
+  > means a rendering engine and an escaping story; plain text now, templates when a firm asks,
+  > is the T2.5-shaped answer — but if every EL needs the client's name interpolated, plain text
+  > is wrong on day one.
+  > **(b)** Which jurisdiction selects the clauses — the client's `legal_entity` jurisdiction,
+  > or the firm's? For a Dubai client of an Indian firm these differ and the answer decides
+  > whether the EL references a legal entity or just a party.
+  > **(c)** Is recording a signature its own permission, or `party:write`? It creates
+  > contractual obligations and spawns work, which argues for its own; a new permission costs a
+  > migration to reach existing firms (T2.5's rule), which argues for reuse until a firm asks.
+  > **(d)** Can an engagement be amended after signature, or is a change a NEW letter? A new
+  > letter is the legally clean answer and the one this codebase's instincts favour; firms in
+  > practice issue addenda.
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
 ### Lane B — the engine
