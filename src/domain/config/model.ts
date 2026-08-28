@@ -33,9 +33,9 @@ import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from ".
  *  `policy` (0010) is the first NON-CATALOGUE kind — a rule the firm sets for
  *  itself rather than something it sells — which is what makes it the honest
  *  test of whether this spine generalises. */
-export type ConfigKind = "service" | "role" | "policy";
+export type ConfigKind = "service" | "role" | "policy" | "clause";
 
-export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role", "policy"];
+export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role", "policy", "clause"];
 
 export function isConfigKind(v: string): v is ConfigKind {
   return (CONFIG_KINDS as readonly string[]).includes(v);
@@ -209,6 +209,72 @@ export function readMaxDiscountPercent(body: Record<string, unknown>): Amount | 
 }
 
 /**
+ * One clause of an engagement letter.
+ *
+ * PLAIN TEXT, not a template. A substitution syntax invented before anybody has
+ * asked for one is a vocabulary nobody chose, and it drags a rendering engine
+ * and an escaping story in behind it. If it turns out every letter needs the
+ * client's name interpolated, the fix is a new clause VERSION — not a
+ * migration — which is exactly why plain text is a safe bet to take first.
+ *
+ * `jurisdictions` is the same shape services use: ISO 3166 codes, empty meaning
+ * everywhere. The LETTER decides which jurisdiction it is written for and picks
+ * clauses accordingly; this only says where a clause is applicable.
+ */
+export interface ClauseBody {
+  readonly title: string;
+  readonly text: string;
+  readonly jurisdictions: readonly string[];
+}
+
+const CLAUSE_FIELDS = ["title", "text", "jurisdictions"];
+
+function validateClauseBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, CLAUSE_FIELDS);
+  if (unknown) return unknown;
+
+  const title = body["title"];
+  if (typeof title !== "string" || title.trim() === "") {
+    return `"title" must be a non-empty string, got ${describe(title)}`;
+  }
+  const text = body["text"];
+  if (typeof text !== "string" || text.trim() === "") {
+    // An empty clause would publish, pin, and appear on a signed document as
+    // nothing — a term the client agreed to that says nothing at all.
+    return `"text" must be a non-empty string — a clause with no words is a term the client ` +
+      `would be agreeing to that says nothing. Got ${describe(text)}`;
+  }
+  const jurisdictions = body["jurisdictions"];
+  if (jurisdictions !== undefined) {
+    if (!Array.isArray(jurisdictions)) {
+      return `"jurisdictions" must be an array of ISO country codes, got ${describe(jurisdictions)}`;
+    }
+    for (const j of jurisdictions) {
+      if (typeof j !== "string" || j.trim() === "") {
+        return `"jurisdictions" contains ${describe(j)}; each entry is a code like "IN" or "AE"`;
+      }
+    }
+  }
+  return null;
+}
+
+/** A stored clause body, read back for assembly onto a letter. Falls back
+ *  rather than throwing: a pinned version always resolves, and a body that
+ *  somehow lacks a field should not make a signed document unreadable. */
+export function readClauseBody(body: Record<string, unknown>): ClauseBody {
+  const title = body["title"];
+  const text = body["text"];
+  const jurisdictions = body["jurisdictions"];
+  return {
+    title: typeof title === "string" ? title : "",
+    text: typeof text === "string" ? text : "",
+    jurisdictions: Array.isArray(jurisdictions)
+      ? jurisdictions.filter((j): j is string => typeof j === "string")
+      : [],
+  };
+}
+
+/**
  * Validate a body against its kind. Returns the PROBLEM, or null when it is
  * fine — the caller turns the problem into `InvalidBody`, so the message names
  * the field, the bad value and the valid set rather than saying "invalid".
@@ -226,6 +292,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateServiceBody(body);
     case "policy":
       return validatePolicyBody(body);
+    case "clause":
+      return validateClauseBody(body);
   }
 }
 

@@ -114,6 +114,30 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "proposal:approve" as const,
   ],
 
+  // ENGAGEMENT LETTERS (T2.3) reuse the party permissions, including SIGNING.
+  //
+  // That last part was argued rather than assumed. Recording a signature creates
+  // obligations and spawns work, which is a fair case for its own permission —
+  // but a new one costs a migration to reach every existing firm (T2.5's rule),
+  // and no firm has asked for the distinction. `proposal:approve` is the
+  // precedent for what "asked for" looks like: there, the person who manages
+  // logins is demonstrably not the person who signs off a discount. Here, a firm
+  // that wants signing held back from delivery staff can publish its own role
+  // this afternoon, with no deploy. Revisit when one asks.
+  [routeKey("GET", "/api/v1/engagement-letters"), "party:read" as const],
+  [routeKey("GET", "/api/v1/engagement-letters/{letterId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/engagement-letters"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/lines"), "party:write" as const],
+  [
+    routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/lines/{lineId}"),
+    "party:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

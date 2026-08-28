@@ -24,11 +24,13 @@ import {
   PostgresSessionRepository,
 } from "../infrastructure/postgres/identity-repository";
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
-import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
+import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
+import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
+import { AttestedSigner } from "../infrastructure/esign/attested-signer";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
@@ -36,6 +38,7 @@ import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
+import { EngagementService } from "../usecase/engagement/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -214,6 +217,23 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // Engagement letters meet the configuration registry the same way proposals
+  // do — one narrow port, satisfied structurally, so neither module imports the
+  // other. The clause library and the service catalogue are the same two tables.
+  //
+  // HONEST REGISTRY: `AttestedSigner` is the third stub in this codebase, and
+  // `validateServer` has already refused this config in any production-like
+  // environment by the time this line runs.
+  const engagement = new EngagementService({
+    letters: new PostgresEngagementRepository(pools.app),
+    library: configRepository,
+    esign: new AttestedSigner(),
+    hasher: new Sha256ContentHasher(),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   return {
     app: buildRouter(
       {
@@ -229,6 +249,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         config: { service: config },
         lead: { service: lead },
         proposal: { service: proposal, authz },
+        engagement: { service: engagement, authz },
       },
       log,
       {

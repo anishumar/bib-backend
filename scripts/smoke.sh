@@ -293,7 +293,57 @@ curl -s -o /dev/null -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK"
 VIEWS=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["viewCount"])' 2>/dev/null || echo "?")
 chk "every open is counted"                2 "$VIEWS"
 
-echo; echo "── 9. Firm administration — the roster, and revocation ─────────────"
+echo; echo "── 9. Engagement letters — the document that creates obligations ───"
+# Terms come from the clause library, the registry's fourth kind. A clause is
+# PINNED, so a signed letter reads as what was agreed rather than as what the
+# library says today.
+SCOPE='{"key":"scope","body":{"title":"Scope of work","text":"The firm will perform the services listed above.","jurisdictions":[]}}'
+AECLAUSE='{"key":"liability-ae","body":{"title":"Liability (UAE)","text":"As permitted by UAE law.","jurisdictions":["AE"]}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$SCOPE"
+chk "publish a clause"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause/scope/versions/1/publish -H "$H")"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$AECLAUSE"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause/liability-ae/versions/1/publish -H "$H"
+SCOPEV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/scope | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+AEV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/liability-ae | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+
+# An advance is required, so the fee gate is live for this walk.
+ELDRAFT='{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - FY26 engagement","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true,"advanceAmount":"10000"}'
+EL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$ELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "an advance with no amount is refused"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"x","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true}')"
+chk "an empty letter cannot go out"          409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+
+ELLINE='{"serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"0"}'
+chk "agree a service"                        201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
+chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+chk "a UAE clause on an Indian letter"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$AEV'"}')"
+chk "the right clause goes on"               204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}')"
+chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+
+SIGNED=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-001"}')
+chk "the client signs"                       signed "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["letter"]["status"])')"
+chk "…and one engagement per line appears" 1 "$(echo "$SIGNED" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["engagements"]))')"
+chk "…held back by the advance"            pending_advance "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
+chk "a signed letter cannot be edited"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
+chk "…nor withdrawn"                       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/withdraw -H "$H")"
+
+# Nothing may spawn while the advance is outstanding — the gate is real.
+BEFORE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/engagement_letter/$EL/events" | python3 -c '
+import sys, json
+print(sum(1 for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "contract.activated"))')
+chk "no spawn trigger before the advance"    0 "$BEFORE"
+chk "record the advance"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
+chk "…and it cannot be recorded twice"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
+ACTIVE=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print("%s/%s/%s" % (d["engagements"][0]["status"], len(d["clauses"]), d["clauses"][0]["text"][:8]))')
+chk "the engagement is released, terms pinned" "active/1/The firm" "$ACTIVE"
+
+echo; echo "── 10. Firm administration — the roster, and revocation ─────────────"
 chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"
 ROSTER=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
 import sys, json
@@ -329,18 +379,18 @@ for m in json.load(sys.stdin)["members"]:
 chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
 chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
 
-echo; echo "── 10. Rate limiting ───────────────────────────────────────────────"
+echo; echo "── 11. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 11. CORS — the frontend is a separate origin ────────────────────"
+echo; echo "── 12. CORS — the frontend is a separate origin ────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 12. The audit trail, as recorded ────────────────────────────────"
+echo; echo "── 13. The audit trail, as recorded ────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for r in reversed(json.load(sys.stdin)["events"]):

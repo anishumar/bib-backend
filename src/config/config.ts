@@ -41,6 +41,12 @@ const EnvSchema = z.object({
   // sending it. The enum grows when a real transport lands; production-like
   // refuses to boot on 'log'.
   BIB_MAIL_TRANSPORT: z.enum(["log"]).default("log"),
+  // How an engagement letter gets signed. Only `attested` exists — a person at
+  // the firm records that the client signed, on paper or in a provider the firm
+  // already uses. It records an assertion, not a signature, so a production-like
+  // environment refuses to boot on it (validate.ts). A real provider adapter
+  // becomes a second value here.
+  BIB_ESIGN_PROVIDER: z.enum(["attested"]).default("attested"),
   // The provisioning callers, as JSON: [{name, key, capabilities[]}]. Each
   // caller has its OWN key carrying only what it needs — one key that opens
   // every route is an escalation path (create a user, grant them partner, set
@@ -84,6 +90,7 @@ export interface AuthConfig {
   /** Whether the dev x-user-id principal resolver is registered. */
   readonly devAuthEnabled: boolean;
   readonly mailTransport: "log";
+  readonly esignProvider: "attested";
   /** The provisioning callers. Each key carries only its own capabilities. */
   readonly internalClients: readonly InternalClient[];
 }
@@ -161,6 +168,7 @@ export function load(): Config {
           ? env.BIB_DEV_AUTH_ENABLED === "true"
           : !productionLike,
       mailTransport: env.BIB_MAIL_TRANSPORT,
+      esignProvider: env.BIB_ESIGN_PROVIDER,
       internalClients: parseInternalClients(env.BIB_INTERNAL_KEYS),
     },
     cors: {

@@ -185,7 +185,7 @@ export class ProposalService {
 
     // Resolve the pin BEFORE writing, so a bad version id is a 400 naming the
     // id rather than a foreign-key violation surfacing as a 500.
-    const pinned = await this.deps.catalogue.readPinnedService(
+    const pinned = await this.deps.catalogue.readPinnedVersion(
       input.tenantId,
       input.serviceVersionId,
     );

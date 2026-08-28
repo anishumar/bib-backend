@@ -30,7 +30,12 @@ export interface ConfigDeps {
 // value that is not a ConfigKind a compile error here; a unit test asserts the
 // two lists are the same length, so a kind added to the domain and forgotten
 // here fails the build rather than 400ing at runtime.
-export const KIND_VALUES = ["service", "role", "policy"] as const satisfies readonly ConfigKind[];
+export const KIND_VALUES = [
+  "service",
+  "role",
+  "policy",
+  "clause",
+] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────
 

@@ -202,8 +202,12 @@ export interface ProposalRepository {
 export interface ServiceCatalogue {
   /** RESOLVE A PIN. Returns null when the id is not this firm's. `status` comes
    *  back because a draft was never in force and must not be quoted, while an
-   *  ARCHIVED version is exactly what a pin is supposed to resolve to. */
-  readPinnedService(
+   *  ARCHIVED version is exactly what a pin is supposed to resolve to.
+   *
+   *  The same signature the engagement use case declares for its clause
+   *  library — two use cases arriving independently at one question about one
+   *  pair of tables, which is why the config adapter implements it once. */
+  readPinnedVersion(
     tenantId: string,
     versionId: string,
   ): Promise<{

@@ -433,7 +433,7 @@ open and are recorded above; neither blocks Phase 2.
 >
 > Gate: `npm run check` 344 · `test:integration` 81 · `smoke` 87.
 
-- [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
+- [x] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
   > **PROPOSED design, not yet agreed (2026-08-28).** Written before building, the way T2.2's
   > was. Six decisions and four open questions; the questions are marked and none of them is
   > answerable from the code.
@@ -521,6 +521,32 @@ open and are recorded above; neither blocks Phase 2.
   > been registered with no writer since T1.1, and this is the module that causes it — T2.4 is
   > the CONSUMER side (the scheduler reacting to it). Same treatment the four proposal verbs
   > got.
+  >
+  > **DONE (2026-08-28), to the design above.** Migrations **0016** (the `clause` kind) and
+  > **0017** (four tables, two freeze triggers). The acceptance holds as a CONSTRAINT rather
+  > than a convention: `UNIQUE (engagement_letter_line_id)` makes a second fan-out impossible,
+  > and the signature plus its engagements are one transaction, because a signature with no
+  > engagements is a client committed to work nobody scheduled.
+  >
+  > The freeze is proven against the OWNER role — the role migrations run as — which is the
+  > whole reason it is a trigger. The pin is proven by rewriting and republishing a clause and
+  > checking the signed letter still reads the old wording.
+  >
+  > **The third stub got the treatment CLAUDE.md demands, and then some.** `AttestedSigner`
+  > records that somebody at the firm SAYS the client signed; `validateServer` refuses a
+  > production-like boot on it. Writing that gate exposed that the OTHER TWO gates had no test
+  > either — dev auth and the logging mailer could both have been deleted and the build would
+  > have stayed green, because a gate that stops refusing breaks nothing. `boot-gates.test.ts`
+  > covers all three, and was checked by inverting one and watching it go red.
+  >
+  > **What the end-to-end walk found:** `ADVANCE_AMOUNT_REQUIRED` answered 409 when it should
+  > answer 400. It had been filed with the other advance errors, but "advanceRequired with no
+  > amount" is a malformed REQUEST and not a state the letter is in — there is no letter yet.
+  >
+  > `contract.activated` now has a writer, as agreed. **T2.4 is the consumer side only**, which
+  > makes it smaller than the board implies.
+  >
+  > Gate: `npm run check` 373 · `test:integration` 92 · `smoke` 104.
   >
   > **The questions as they were asked, kept for the record:**
   > **(a)** Does a clause body hold finished text, or a template with placeholders? Templating

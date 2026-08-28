@@ -230,8 +230,12 @@ version is exactly what gets asked about afterwards.
 | `proposal.viewed` | proposal | The recipient opened it from its share link. Recorded ONCE, on the first open; the running count lives on `crm.proposal.view_count`, because a client refreshing a page is not fifty facts about the business. The actor is `system` — the recipient has no account, and inventing a user id for somebody who has never logged in would be worse than saying plainly that a link was opened. |
 | `proposal.accepted` | proposal | Accepted. |
 | `proposal.rejected` | proposal | Declined or expired. |
-| `engagement_letter.signed` | engagement_letter | The client signed. |
-| `contract.activated` | engagement | **The spawn trigger the scheduler consumes (T2.4).** |
+| `engagement_letter.drafted` | engagement_letter | An engagement letter was drafted — the first row in the timeline of a document that will create obligations. |
+| `engagement_letter.sent` | engagement_letter | It went to the client for signature. |
+| `engagement_letter.withdrawn` | engagement_letter | Pulled before signature. A SIGNED letter is never withdrawn — it is superseded by a new one. |
+| `engagement_letter.signed` | engagement_letter | The client signed. The letter freezes at this moment (a trigger, 0017) and one engagement is created per line. Payload carries the signature METHOD and the content hash, never the signer's name — that is personal data and lives in the erasable row. |
+| `engagement_letter.advance_recorded` | engagement_letter | The advance fee was recorded as received, releasing every engagement the letter created. Recorded by a person until payments (T3.5) can confirm it. |
+| `contract.activated` | engagement | An engagement became active and work may begin. **The spawn trigger the scheduler consumes (T2.4)** — written by T2.3, which is the module that causes it. Held back until the advance is recorded when the letter requires one. |
 | `invoice.issued` | invoice | An invoice was issued and its number frozen. |
 | `invoice.cancelled` | invoice | Cancelled by credit note; the number is never reused. |
 | `payment.recorded` | payment | A payment was received and applied. |

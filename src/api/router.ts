@@ -35,8 +35,10 @@ import { registerConfigRoutes } from "./handler/config";
 import type { ConfigDeps } from "./handler/config";
 import { registerLeadRoutes } from "./handler/lead";
 import { registerProposalRoutes } from "./handler/proposal";
+import { registerEngagementRoutes } from "./handler/engagement";
 import type { LeadDeps } from "./handler/lead";
 import type { ProposalDeps } from "./handler/proposal";
+import type { EngagementDeps } from "./handler/engagement";
 import { registerAuthRoutes } from "./handler/auth";
 import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
@@ -65,6 +67,7 @@ export interface RouterDeps {
   readonly config: ConfigDeps;
   readonly lead: LeadDeps;
   readonly proposal: ProposalDeps;
+  readonly engagement: EngagementDeps;
   readonly auth: AuthDeps;
 }
 
@@ -151,6 +154,7 @@ export function buildRouter(
   registerConfigRoutes(app, deps.config);
   registerLeadRoutes(app, deps.lead);
   registerProposalRoutes(app, deps.proposal);
+  registerEngagementRoutes(app, deps.engagement);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

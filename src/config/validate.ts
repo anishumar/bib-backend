@@ -104,6 +104,24 @@ export function validateServer(cfg: Config): void {
           `transport (infrastructure/mail) and set BIB_MAIL_TRANSPORT to it before deploying.`,
       );
     }
+
+    // The THIRD stub, and it gets the same treatment as the first two — which
+    // is the rule CLAUDE.md's honest registry states, not a convention.
+    //
+    // `attested` records that a member of staff says the client signed. That is
+    // a real product behaviour and it is how most firms in this market sign
+    // today, but it is not a signature: nothing in it can be verified against
+    // the client. An engagement letter creates obligations, so a public
+    // environment must not rely on a colleague's word for one.
+    if (cfg.auth.esignProvider === "attested") {
+      throw new Error(
+        `BIB_ESIGN_PROVIDER=attested while BIB_ENVIRONMENT=${cfg.environment} ` +
+          `(production-like). The attested signer records that somebody at the firm SAYS the ` +
+          `client signed; it cannot prove it, and an engagement letter creates obligations. ` +
+          `Register a real provider (infrastructure/esign) and set BIB_ESIGN_PROVIDER to it ` +
+          `before deploying.`,
+      );
+    }
   }
 }
 

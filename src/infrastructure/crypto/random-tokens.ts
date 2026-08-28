@@ -11,8 +11,23 @@
 // against — no dictionary, no reuse across sites, nothing to guess.
 import { createHash, randomBytes } from "node:crypto";
 import type { TokenFactory } from "../../usecase/identity/ports";
+import type { ContentHasher } from "../../usecase/engagement/ports";
 
 const TOKEN_BYTES = 32;
+
+/**
+ * SHA-256 over arbitrary content — the engagement letter's canonical rendering.
+ *
+ * Its own class rather than a method on the token factory, because the two want
+ * different things: a token digest protects a secret, this one commits to a
+ * document. Same primitive, different contract, and a shared class would
+ * eventually tempt somebody to "improve" one and break the other.
+ */
+export class Sha256ContentHasher implements ContentHasher {
+  hash(content: string): string {
+    return createHash("sha256").update(content, "utf8").digest("hex");
+  }
+}
 
 export class RandomTokenFactory implements TokenFactory {
   newToken(): string {

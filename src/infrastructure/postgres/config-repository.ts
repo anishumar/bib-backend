@@ -339,7 +339,9 @@ export class PostgresConfigRepository
   }
 
   /**
-   * RESOLVE A PIN, for quoting (`ServiceCatalogue`).
+   * RESOLVE A PIN — for quoting (`ServiceCatalogue`) and for assembling an
+   * engagement letter's terms (`ClauseLibrary`). Both use cases declared the
+   * same question about the same two tables, so it is answered once.
    *
    * Deliberately does NOT filter on status: a proposal line pins the version it
    * was quoted from, and the whole promise of the registry is that the pin
@@ -347,7 +349,7 @@ export class PostgresConfigRepository
    * decides what to do with a draft — the proposal service refuses one, because
    * a price the firm never put in force must not reach a client's document.
    */
-  async readPinnedService(
+  async readPinnedVersion(
     tenantId: string,
     versionId: string,
   ): Promise<{

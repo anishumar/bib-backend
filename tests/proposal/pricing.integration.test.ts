@@ -278,7 +278,7 @@ describe("the pin", () => {
     expect(line?.service?.listPrice?.amount).toBe("25000.00");
     expect(line?.line.unitAmount).toBe("22500.0000");
     // …while the catalogue itself has moved on.
-    const live = await configRepository.readPinnedService(tenantA, gstV2);
+    const live = await configRepository.readPinnedVersion(tenantA, gstV2);
     expect(live?.status).toBe("published");
   });
 });

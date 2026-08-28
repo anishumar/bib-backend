@@ -313,9 +313,11 @@ digest at rest and only ever leaves in an httpOnly cookie — never in a respons
 a user with several memberships must call `POST /api/v1/auth/switch-tenant`. Anything that
 needs a tenant checks for it; nothing guesses.
 
-HONEST REGISTRY: the dev `x-user-id` resolver and the logging mailer are the only stubs
-left, both gated on config, and `validateServer` refuses to boot a production-like
-environment with either. Do not add a third without the same treatment.
+HONEST REGISTRY: the dev `x-user-id` resolver, the logging mailer and the **attested e-sign
+signer** are the only stubs, all three gated on config, and `validateServer` refuses to boot a
+production-like environment with any of them. `tests/config/boot-gates.test.ts` proves each
+refusal — a gate that stops refusing breaks nothing and is therefore silent. Do not add a
+fourth without the same treatment.
 
 ## CORS — the frontend is a separate origin
 
@@ -405,10 +407,37 @@ holds the build red until somebody writes it.
 A view is **a count and one event**: `view_count` rises on every open, `proposal.viewed` is
 recorded once. Per-view analytics does not belong in an append-only log.
 
+## Engagement letters — the document that creates obligations (T2.3)
+
+A proposal is what the firm OFFERED; an engagement letter is what both sides AGREED. That one
+difference makes everything here stricter than its proposal counterpart.
+
+- **Signature FREEZES, by a trigger** (0017), not a check in the service — because "what did
+  they sign" is a question a court asks, and an application rule cannot answer it against a
+  migration or a psql session. A change after signature is a NEW LETTER; the old one stays
+  readable as what was actually agreed.
+- **Clauses are the registry's fourth kind and are PINNED.** Pinning's best argument: a live
+  read would answer "what exactly did they agree to" with today's wording. A clause scoped to
+  another jurisdiction is refused rather than quietly included.
+- **The letter stores its OWN jurisdiction**, chosen at drafting. Not derived from the
+  client's registrations at read time — a legal document records the jurisdiction it was
+  written FOR, permanently.
+- **A letter needs lines AND clauses before it can go out.** No lines commits nobody to
+  anything; no clauses is the dangerous one, because a signed contract with no terms is
+  enforceable as whatever a court reads into it.
+- **Signing fans out one engagement per line, in ONE transaction.** A signature with no
+  engagements is a client committed to work nobody scheduled; engagements with no signature is
+  work nobody agreed to. `UNIQUE (engagement_letter_line_id)` makes a double fan-out
+  impossible rather than unlikely.
+- **The advance-fee gate is real.** Engagements start `pending_advance`, and
+  `contract.activated` — the trigger T2.4's scheduler consumes — is not emitted until the
+  advance is recorded. **Its honest limit:** a person attests the money arrived, because
+  payments (T3.5) do not exist. The gate is enforced; its confirmation is an attestation.
+
 ## First module
 
-`tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline and `proposals`
-are built. Next: engagement letters (T2.3), then `billing` — the flagship slice.
+`tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals` and
+`engagement letters` are built. Next: T2.4's spawn bridge, then `billing`.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves

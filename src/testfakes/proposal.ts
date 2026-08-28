@@ -261,7 +261,7 @@ export class FakeServiceCatalogue implements ServiceCatalogue {
     this.versions.set(versionId, row);
   }
 
-  readPinnedService(
+  readPinnedVersion(
     _tenantId: string,
     versionId: string,
   ): Promise<{
