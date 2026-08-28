@@ -20,6 +20,7 @@ import type {
   ProposalRecord,
   ProposalRepository,
   ProposalSummary,
+  SharedProposal,
 } from "../../usecase/proposal/ports";
 
 interface ProposalRow {
@@ -37,6 +38,8 @@ interface ProposalRow {
   decided_at: Date | null;
   discount_approved_by: string | null;
   discount_approved_at: Date | null;
+  first_viewed_at: Date | null;
+  view_count: number;
 }
 
 interface LineRow {
@@ -85,6 +88,8 @@ function toProposal(r: ProposalRow): Proposal {
     decidedAt: r.decided_at?.toISOString() ?? null,
     discountApprovedBy: r.discount_approved_by,
     discountApprovedAt: r.discount_approved_at?.toISOString() ?? null,
+    firstViewedAt: r.first_viewed_at?.toISOString() ?? null,
+    viewCount: r.view_count,
   };
 }
 
@@ -129,7 +134,7 @@ export class PostgresProposalRepository implements ProposalRepository {
            ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil})
         RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
                   fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
       `;
       if (!row) throw new Error("proposal insert returned no row");
       return toProposal(row);
@@ -141,7 +146,7 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [row] = await db<ProposalRow[]>`
         SELECT id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
                fx_rate_date, valid_until, sent_at, decided_at,
-               discount_approved_by, discount_approved_at
+               discount_approved_by, discount_approved_at, first_viewed_at, view_count
         FROM crm.proposal WHERE id = ${proposalId}
       `;
       return row ? toProposal(row) : null;
@@ -160,6 +165,7 @@ export class PostgresProposalRepository implements ProposalRepository {
         SELECT p.id, p.tenant_id, p.party_id, p.lead_id, p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
+               p.first_viewed_at, p.view_count,
                party.display_name AS party_display_name,
                approver.display_name AS approver_display_name,
                approver.email AS approver_email
@@ -247,6 +253,7 @@ export class PostgresProposalRepository implements ProposalRepository {
         SELECT p.id, p.tenant_id, p.party_id, p.lead_id, p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
+               p.first_viewed_at, p.view_count,
                party.display_name AS party_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count
         FROM crm.proposal p
@@ -345,10 +352,113 @@ export class PostgresProposalRepository implements ProposalRepository {
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
                   fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-transition`);
       return toProposal(row);
+    });
+  }
+
+  async attachShareToken(tenantId: string, proposalId: string, digest: string): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`
+        UPDATE crm.proposal SET share_token_digest = ${digest} WHERE id = ${proposalId}
+      `;
+    });
+  }
+
+  /**
+   * Resolve a share link, inside the tenant its token named.
+   *
+   * An ordinary withTenant read — which is the entire point of putting the
+   * tenant in the token (0014). Looking a digest up across every firm would
+   * need a query RLS does not scope, on a table that holds money.
+   */
+  async findShared(tenantId: string, digest: string): Promise<SharedProposal | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [head] = await db<
+        {
+          id: string;
+          title: string;
+          status: ProposalStatus;
+          currency: string;
+          valid_until: Date | null;
+          sent_at: Date | null;
+          firm_name: string;
+          party_display_name: string;
+          gross: string | null;
+          discount: string | null;
+          net: string | null;
+        }[]
+      >`
+        SELECT p.id, p.title, p.status, p.currency, p.valid_until, p.sent_at,
+               firm.name AS firm_name,
+               party.display_name AS party_display_name,
+               t.gross, t.discount, t.net
+        FROM crm.proposal p
+        JOIN core.party party ON party.id = p.party_id
+        JOIN tenancy.tenant firm ON firm.id = p.tenant_id
+        LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
+        WHERE p.share_token_digest = ${digest}
+      `;
+      if (!head) return null;
+
+      const lines = await db<
+        {
+          description: string;
+          quantity: string;
+          unit_amount: string;
+          discount_percent: string;
+          net: string;
+        }[]
+      >`
+        SELECT l.description, l.quantity, l.unit_amount, l.discount_percent, a.net
+        FROM crm.proposal_line l
+        JOIN crm.proposal_line_amount a ON a.id = l.id
+        WHERE l.proposal_id = ${head.id} AND l.removed_at IS NULL
+        ORDER BY l.position
+      `;
+
+      return {
+        id: head.id,
+        firmName: head.firm_name,
+        addressedTo: head.party_display_name,
+        title: head.title,
+        status: head.status,
+        currency: head.currency,
+        validUntil: head.valid_until === null ? null : toDay(head.valid_until),
+        sentAt: head.sent_at?.toISOString() ?? null,
+        lines: lines.map((l) => ({
+          description: l.description,
+          quantity: l.quantity,
+          unitAmount: l.unit_amount,
+          discountPercent: l.discount_percent,
+          net: l.net,
+        })),
+        totals: {
+          gross: head.gross ?? "0",
+          discount: head.discount ?? "0",
+          net: head.net ?? "0",
+          currency: head.currency,
+        },
+      };
+    });
+  }
+
+  async recordView(tenantId: string, proposalId: string, at: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // One statement: the count and the first-view date move together, which
+      // is what the CHECK in 0014 requires, and `first_viewed_at IS NULL`
+      // before the update is what makes the returned flag true exactly once
+      // even if two opens land at the same moment.
+      const [row] = await db<{ was_first: boolean }[]>`
+        UPDATE crm.proposal
+           SET view_count = view_count + 1,
+               first_viewed_at = coalesce(first_viewed_at, ${at}::timestamptz)
+         WHERE id = ${proposalId}
+        RETURNING (view_count = 1) AS was_first
+      `;
+      return row?.was_first ?? false;
     });
   }
 
@@ -365,7 +475,7 @@ export class PostgresProposalRepository implements ProposalRepository {
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, party_id, lead_id, title, status, currency, fx_rate,
                   fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at
+                  discount_approved_by, discount_approved_at, first_viewed_at, view_count
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-approval`);
       return toProposal(row);

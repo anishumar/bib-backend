@@ -24,10 +24,11 @@ import type {
   ProposalRepository,
   ProposalSummary,
   ServiceCatalogue,
+  SharedProposal,
 } from "../usecase/proposal/ports";
 import type { Deps } from "../usecase/proposal/service";
 import { FakeIds } from "./ids";
-import { FakeClock } from "./identity";
+import { FakeClock, FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
 
 export class FakeProposalRepo implements ProposalRepository {
@@ -36,6 +37,10 @@ export class FakeProposalRepo implements ProposalRepository {
   /** Display names for the parties a test quotes, so a joined read returns
    *  something a screen could render rather than a uuid. */
   partyNames = new Map<string, string>();
+  /** The digests attachShareToken has issued, and what they open. */
+  readonly shareDigests = new Map<string, string>();
+  /** The firm's name, as it appears on the document a recipient reads. */
+  firmName = "Harbour Point Advisory";
 
   create(p: NewProposal): Promise<Proposal> {
     const row: Proposal = {
@@ -53,6 +58,8 @@ export class FakeProposalRepo implements ProposalRepository {
       decidedAt: null,
       discountApprovedBy: null,
       discountApprovedAt: null,
+      firstViewedAt: null,
+      viewCount: 0,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -122,6 +129,47 @@ export class FakeProposalRepo implements ProposalRepository {
         discountApprovedAt: at,
       })),
     );
+  }
+
+  attachShareToken(tenantId: string, proposalId: string, digest: string): Promise<void> {
+    this.replace(tenantId, proposalId, (p) => p);
+    this.shareDigests.set(digest, proposalId);
+    return Promise.resolve();
+  }
+
+  async findShared(tenantId: string, digest: string): Promise<SharedProposal | null> {
+    const proposalId = this.shareDigests.get(digest);
+    if (proposalId === undefined) return null;
+    const proposal = await this.findById(tenantId, proposalId);
+    if (proposal === null) return null;
+    const lines = this.liveLines(tenantId, proposalId);
+    return {
+      id: proposal.id,
+      firmName: this.firmName,
+      addressedTo: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
+      title: proposal.title,
+      status: proposal.status,
+      currency: proposal.currency,
+      validUntil: proposal.validUntil,
+      sentAt: proposal.sentAt,
+      lines: lines.map((l) => ({
+        description: l.description,
+        quantity: l.quantity,
+        unitAmount: l.unitAmount,
+        discountPercent: l.discountPercent,
+        net: netOf(l),
+      })),
+      totals: totalsOf(lines, proposal.currency),
+    };
+  }
+
+  recordView(tenantId: string, proposalId: string, at: string): Promise<boolean> {
+    let wasFirst = false;
+    this.replace(tenantId, proposalId, (p) => {
+      wasFirst = p.viewCount === 0;
+      return { ...p, viewCount: p.viewCount + 1, firstViewedAt: p.firstViewedAt ?? at };
+    });
+    return Promise.resolve(wasFirst);
   }
 
   async describe(tenantId: string, proposalId: string): Promise<ProposalRecord | null> {
@@ -242,12 +290,16 @@ export function makeProposalFakes(): Deps & {
   proposals: FakeProposalRepo;
   catalogue: FakeServiceCatalogue;
   policies: FakePolicyDirectory;
+  shareTokens: FakeTokenFactory;
   events: RecordingEventSink;
 } {
   return {
     proposals: new FakeProposalRepo(),
     catalogue: new FakeServiceCatalogue(),
     policies: new FakePolicyDirectory(),
+    // The identity fake, reused: both ports want the same guarantee, and a
+    // second predictable-token fake would be the same class with a new name.
+    shareTokens: new FakeTokenFactory(),
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-06-01T09:00:00Z")),
     events: new RecordingEventSink(),

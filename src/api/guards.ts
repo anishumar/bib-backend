@@ -51,13 +51,34 @@ export interface AppEnv {
  *
  * An exact-match allowlist, never a prefix: `/api/v1/auth/` as a prefix would
  * have silently exempted every future auth route, including ones that act on an
- * existing session. Three routes exist to OBTAIN a session; that is the entire
- * justification, and anything else added here needs its own.
+ * existing session. Three routes exist to OBTAIN a session; that is their
+ * entire justification, and anything else added here needs its own.
+ *
+ * THE FOURTH ONE, and why it earns its place (T2.2b). A proposal goes to
+ * somebody who has no login and will not get one — that is what a proposal IS,
+ * the document that comes before the relationship. Requiring a session would
+ * mean provisioning an account for every prospect a firm quotes, which is both
+ * absurd and a worse security posture than a bearer link: it would leave real
+ * accounts lying around for people who never became clients.
+ *
+ * What makes it safe to be here, rather than merely necessary:
+ *
+ *   · the token is 256 bits from the OS CSPRNG, stored only as a SHA-256 digest
+ *   · it carries its own tenant, so resolving it is an ordinary `withTenant`
+ *     read and needs no RLS exception (migration 0014)
+ *   · it arrives in the BODY, not the path, so it does not land in access logs,
+ *     browser history or a Referer header
+ *   · it is READ-ONLY: the recipient cannot accept, reject or change anything
+ *   · it answers one way for malformed, unknown and withdrawn, so it cannot be
+ *     used to enumerate anything
+ *   · being in this set puts it in the tight rate-limit bucket automatically —
+ *     see the note in router.ts, which derives that bucket from this list
  */
 export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/login",
   "/api/v1/auth/magic-link",
   "/api/v1/auth/magic-link/redeem",
+  "/api/v1/proposals/shared",
 ]);
 
 /**

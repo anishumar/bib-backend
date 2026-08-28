@@ -301,6 +301,47 @@ open and are recorded above; neither blocks Phase 2.
   > **Still not done on this line:** send/track's TRACK half (3b), and the screen (4).
   >
   > Gate after step 3a: `npm run check` 329 tests · `test:integration` 73 · `smoke` 80.
+  >
+  > **Step 3b done (2026-08-28)** — send/track's TRACK half. `POST /api/v1/proposals/shared` is
+  > the **fourth entry in `PUBLIC_PATHS`**, and the first whose justification is not "this exists
+  > to obtain a session". A proposal goes to somebody who has no login and will not get one —
+  > that is what a proposal IS. Requiring a session would mean creating an account for every
+  > prospect a firm quotes, which is absurd AND a worse posture than a bearer link: it leaves
+  > real accounts lying around for people who never became clients.
+  >
+  > **The token carries its own tenant** (`<tenant_id>.<secret>`, migration 0014), and that is
+  > the decision the rest rests on. Resolving a link has no session and therefore no
+  > `app.tenant_id`, so the obvious design — find the proposal by digest across all firms — needs
+  > a read RLS does not scope, on a table that holds money. Putting the tenant in the token makes
+  > it an ordinary `withTenant` read instead. The uuid is not a secret: whoever holds the token
+  > already holds a capability into that firm. An integration test presents a real digest under
+  > another firm's scope and gets nothing.
+  >
+  > The rest of what makes it safe rather than merely necessary: 256 bits from the OS CSPRNG,
+  > SHA-256 digest at rest (so the send response is the only place the link is ever readable), in
+  > the **body rather than the path** so it does not land in access logs, browser history or a
+  > Referer, read-only, one answer for malformed / unknown / withdrawn, and the tight rate-limit
+  > bucket automatically — the router derives that bucket from `PUBLIC_PATHS`, so the two cannot
+  > drift.
+  >
+  > **`SharedProposal` is its own read model, not the staff one with fields nulled.** A field
+  > added for colleagues then cannot reach a client's screen by default. No party id, no lead, no
+  > exchange rate, no approver, no catalogue version.
+  >
+  > **A view is a count and one event.** `view_count` rises on every open, because "they have
+  > looked at it four times" is real commercial signal; `proposal.viewed` is recorded once, on the
+  > first, because the ledger holds state transitions and a client refreshing a page is not fifty
+  > facts about the business. The actor is `system` — the recipient has no account, and inventing
+  > a user id for somebody who has never logged in would be worse.
+  >
+  > **Deliberately NOT built: accepting from the link.** Binding a firm to a click on an
+  > unauthenticated link is a bigger decision than this task, so staff record the decision. Said
+  > here rather than left as a silent omission.
+  >
+  > All five proposal verbs now have a writer. When T2.2 started, four of them had none.
+  >
+  > Gate after step 3b: `npm run check` 340 tests · `test:integration` 77 · `smoke` 85.
+  > **Remaining on this line: step 4, the proposal screen.**
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 

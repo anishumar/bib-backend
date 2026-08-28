@@ -84,6 +84,50 @@ export interface Proposal {
    *  neither — an approval with no approver answers nothing. */
   readonly discountApprovedBy: string | null;
   readonly discountApprovedAt: string | null;
+  /**
+   * When the recipient first opened it, and how many times they have.
+   *
+   * The count rises on every open because "they have looked at it four times"
+   * is real commercial signal; only the FIRST view writes a `proposal.viewed`
+   * event, because the ledger holds state transitions and a client refreshing a
+   * page is not fifty facts about the business.
+   */
+  readonly firstViewedAt: string | null;
+  readonly viewCount: number;
+}
+
+/**
+ * A share link's token: `<tenant_id>.<secret>`.
+ *
+ * The tenant travels IN the token so that opening a link is still a tenant-
+ * scoped read. Looking a proposal up by digest across every firm would need a
+ * query RLS does not scope — on a table that holds money — and the tenant wall
+ * exists precisely to have no such query. The uuid half is not a secret:
+ * whoever holds the token already holds a capability into that firm.
+ *
+ * The whole string is what gets hashed, so the two halves cannot be recombined
+ * into a link for a different proposal.
+ */
+export function composeShareToken(tenantId: string, secret: string): string {
+  return `${tenantId}.${secret}`;
+}
+
+const TENANT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Split a share token back into the tenant it belongs to and the rest.
+ *
+ * Returns null for anything malformed, and the caller answers exactly as it
+ * would for a token that is well-formed and unknown — a link that tells the
+ * difference tells somebody probing which firms exist.
+ */
+export function parseShareToken(token: string): { tenantId: string; secret: string } | null {
+  const separator = token.indexOf(".");
+  if (separator <= 0) return null;
+  const tenantId = token.slice(0, separator);
+  const secret = token.slice(separator + 1);
+  if (!TENANT_PATTERN.test(tenantId) || secret === "") return null;
+  return { tenantId, secret };
 }
 
 export interface ProposalLine {

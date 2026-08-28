@@ -9,6 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
+import { parseShareToken } from "../../src/domain/proposal/model";
 import {
   AlreadyApproved,
   ApprovalNotNeeded,
@@ -24,6 +25,7 @@ import {
   ProposalExpired,
   ProposalNotFound,
   ServiceNotFound,
+  ShareLinkUnknown,
   ServiceNotPublished,
 } from "../../src/domain/proposal/errors";
 
@@ -292,7 +294,7 @@ describe("the discount gate", () => {
     s.policies.maxPercent = "15";
     const id = await draftWith(s);
     await addGst(s, id, "10");
-    const sent = await s.service.send(TENANT, id, ACTOR);
+    const { proposal: sent } = await s.service.send(TENANT, id, ACTOR);
     expect(sent.status).toBe("sent");
     expect(sent.sentAt).not.toBeNull();
   });
@@ -311,7 +313,7 @@ describe("the discount gate", () => {
     const approved = await s.service.approveDiscount(TENANT, id, PARTNER, ACTOR);
     expect(approved.discountApprovedBy).toBe(PARTNER);
 
-    const sent = await s.service.send(TENANT, id, ACTOR);
+    const { proposal: sent } = await s.service.send(TENANT, id, ACTOR);
     expect(sent.status).toBe("sent");
   });
 
@@ -445,6 +447,107 @@ describe("sending and deciding", () => {
     await expect(
       s.service.describe(TENANT, "00000000-0000-0000-0000-00000000beef"),
     ).rejects.toBeInstanceOf(ProposalNotFound);
+  });
+});
+
+describe("the share link", () => {
+  async function sent(s: ReturnType<typeof setup>): Promise<{ id: string; token: string }> {
+    s.policies.maxPercent = "15";
+    const id = await draftWith(s);
+    await addGst(s, id, "0");
+    const result = await s.service.send(TENANT, id, ACTOR);
+    return { id, token: result.shareToken };
+  }
+
+  it("is issued at SEND, and carries the tenant it belongs to", async () => {
+    // The tenant travels in the token so that opening it is still an ordinary
+    // tenant-scoped read. Looking a digest up across every firm would need a
+    // query RLS does not scope, on a table that holds money.
+    const s = setup();
+    const { token } = await sent(s);
+    expect(parseShareToken(token)?.tenantId).toBe(TENANT);
+    expect(parseShareToken(token)?.secret).not.toBe("");
+  });
+
+  it("stores only the digest, never the token", async () => {
+    const s = setup();
+    const { token } = await sent(s);
+    // The fake keeps what the adapter keeps: digests, keyed to proposals.
+    expect([...s.proposals.shareDigests.keys()]).toEqual([s.shareTokens.hash(token)]);
+    expect(JSON.stringify([...s.proposals.rows])).not.toContain(token);
+  });
+
+  it("shows the recipient the document, and nothing about the firm's insides", async () => {
+    const s = setup();
+    const { token } = await sent(s);
+    const shared = await s.service.viewShared(token, { type: "system", id: null });
+    expect(shared.firmName).not.toBe("");
+    expect(shared.lines).toHaveLength(1);
+    // Its own read model, not the staff one with fields nulled — so these are
+    // absent rather than null, and a field added for colleagues cannot arrive
+    // here by default.
+    const keys = Object.keys(shared);
+    for (const internal of ["partyId", "leadId", "fxRate", "discountApprovedBy"]) {
+      expect(keys).not.toContain(internal);
+    }
+    expect(JSON.stringify(shared)).not.toContain(GST_VERSION);
+  });
+
+  it("counts every open and records only the first", async () => {
+    // The count is commercial signal; the event is a state transition. A client
+    // refreshing a page is not fifty facts about the business.
+    const s = setup();
+    const { id, token } = await sent(s);
+    const anon = { type: "system" as const, id: null };
+    await s.service.viewShared(token, anon);
+    await s.service.viewShared(token, anon);
+    await s.service.viewShared(token, anon);
+
+    const after = await s.proposals.findById(TENANT, id);
+    expect(after?.viewCount).toBe(3);
+    expect(after?.firstViewedAt).not.toBeNull();
+    expect(s.events.recorded.filter((e) => e.verb === "proposal.viewed")).toHaveLength(1);
+  });
+
+  it.each([["not-a-token"], [""], ["...."], ["00000000-0000-0000-0000-000000000001.nope"]])(
+    "answers %j the same way it answers an unknown link",
+    async (token) => {
+      // One answer for malformed, unknown and withdrawn. Telling them apart
+      // lets somebody probing learn which firms exist and which links used to,
+      // and a real recipient cannot act on the difference anyway.
+      const s = setup();
+      await expect(
+        s.service.viewShared(token, { type: "system", id: null }),
+      ).rejects.toBeInstanceOf(ShareLinkUnknown);
+    },
+  );
+
+  it("expires a lapsed proposal when the recipient opens it", async () => {
+    const s = setup();
+    s.policies.maxPercent = "15";
+    const id = await draftWith(s, { validUntil: "2026-05-01" }); // the fake clock is June
+    await addGst(s, id, "0");
+    const { shareToken } = await s.service.send(TENANT, id, ACTOR);
+
+    await expect(
+      s.service.viewShared(shareToken, { type: "system", id: null }),
+    ).rejects.toBeInstanceOf(ProposalExpired);
+    const after = await s.proposals.findById(TENANT, id);
+    expect(after?.status).toBe("expired");
+    // Not counted: they never saw it.
+    expect(after?.viewCount).toBe(0);
+  });
+
+  it("keeps working after the client's decision is recorded", async () => {
+    // A client who accepted still needs to be able to re-read what they agreed
+    // to. Only expiry closes the link.
+    const s = setup();
+    const { id, token } = await sent(s);
+    await s.service.decide(TENANT, id, "accepted", ACTOR);
+
+    const shared = await s.service.viewShared(token, { type: "system", id: null });
+    expect(shared.id).toBe(id);
+    expect(shared.status).toBe("accepted");
   });
 });
 

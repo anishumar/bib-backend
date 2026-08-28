@@ -25,6 +25,7 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { ProposalService } from "../../usecase/proposal/service";
 import type { ProposalRecord, ProposalSummary } from "../../usecase/proposal/ports";
 import type { ProposalStatus } from "../../domain/proposal/model";
+import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 
 export interface ProposalDeps {
   readonly service: ProposalService;
@@ -78,6 +79,11 @@ const ProposalSchema = z
     decidedAt: z.string().nullable(),
     discountApprovedBy: z.string().uuid().nullable(),
     discountApprovedAt: z.string().nullable(),
+    // The TRACK half of send/track. Not money — whether the client has opened
+    // the document is exactly what the person chasing it needs to know, and
+    // withholding it from delivery staff would serve nobody.
+    firstViewedAt: z.string().nullable(),
+    viewCount: z.number().int(),
   })
   .openapi("Proposal");
 
@@ -134,6 +140,52 @@ const ProposalSummarySchema = z
   })
   .openapi("ProposalSummary");
 
+const SentProposalSchema = z
+  .object({
+    proposal: ProposalSchema,
+    /**
+     * The share link's token, returned EXACTLY ONCE.
+     *
+     * Only its digest is stored, so this response is the only place it can ever
+     * be read — the same contract sessions and magic links keep, for the same
+     * reason. A firm that loses it re-sends, which issues a new one.
+     */
+    shareToken: z.string(),
+  })
+  .openapi("SentProposal");
+
+/** What the RECIPIENT reads. Its own shape, not the staff model with fields
+ *  nulled, so a field added for colleagues cannot reach a client's screen by
+ *  default — no party id, no lead, no exchange rate, no approver, and no
+ *  catalogue version. */
+const SharedProposalSchema = z
+  .object({
+    id: z.string().uuid(),
+    firmName: z.string(),
+    addressedTo: z.string(),
+    title: z.string(),
+    status: z.enum(STATUS_VALUES),
+    currency: CurrencySchema,
+    validUntil: DaySchema.nullable(),
+    sentAt: z.string().nullable(),
+    lines: z.array(
+      z.object({
+        description: z.string(),
+        quantity: AmountSchema,
+        unitAmount: AmountSchema,
+        discountPercent: AmountSchema,
+        net: AmountSchema,
+      }),
+    ),
+    totals: z.object({
+      gross: AmountSchema,
+      discount: AmountSchema,
+      net: AmountSchema,
+      currency: CurrencySchema,
+    }),
+  })
+  .openapi("SharedProposal");
+
 const ProposalsResponse = z
   .object({ proposals: z.array(ProposalSummarySchema) })
   .openapi("ProposalsResponse");
@@ -164,6 +216,18 @@ const AddLineRequest = z
     discountPercent: AmountSchema.default("0"),
   })
   .openapi("AddProposalLineRequest");
+
+/**
+ * The token arrives in a BODY, not in the path.
+ *
+ * A share token is a bearer capability, and a path lands in access logs, error
+ * logs, browser history and any Referer the page sends. A body does not. The
+ * method is POST for the same reason it is honest: opening a link RECORDS a
+ * view, so it was never a safe idempotent read.
+ */
+const ViewSharedRequest = z
+  .object({ token: z.string().min(1).max(512) })
+  .openapi("ViewSharedProposalRequest");
 
 const DecisionRequest = z
   .object({ decision: z.enum(["accepted", "rejected"]) })
@@ -294,11 +358,39 @@ const sendRoute = createRoute({
     "holding `proposal:approve` has signed it off.",
   request: { params: z.object({ proposalId: z.string().uuid() }) },
   responses: {
-    200: { description: "Sent", content: { "application/json": { schema: ProposalSchema } } },
+    200: {
+      description: "Sent, with the share link — returned once and never again",
+      content: { "application/json": { schema: SentProposalSchema } },
+    },
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
     409: errorResponse("Not a draft, empty, or an unapproved over-limit discount"),
+  },
+});
+
+const viewSharedRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/shared",
+  tags: ["proposals"],
+  summary: "Open a proposal from its share link",
+  description:
+    "PUBLIC — no session. A proposal goes to somebody who has no login and will not get one, " +
+    "so the link is a bearer capability rather than a session. The token carries the tenant it " +
+    "belongs to, which is what keeps this an ordinary tenant-scoped read. Read-only: the " +
+    "recipient cannot accept from here.",
+  request: {
+    body: { content: { "application/json": { schema: ViewSharedRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "The proposal, as its recipient reads it",
+      content: { "application/json": { schema: SharedProposalSchema } },
+    },
+    400: errorResponse("Request failed validation"),
+    404: errorResponse("Not a link we recognise — malformed, unknown and withdrawn are one answer"),
+    409: errorResponse("The proposal has expired"),
+    429: errorResponse("Too many attempts from this address"),
   },
 });
 
@@ -351,6 +443,8 @@ function toProposalBody(
     decidedAt: proposal.decidedAt,
     discountApprovedBy: proposal.discountApprovedBy,
     discountApprovedAt: proposal.discountApprovedAt,
+    firstViewedAt: proposal.firstViewedAt,
+    viewCount: proposal.viewCount,
   };
 }
 
@@ -499,8 +593,41 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
-    const sent = await deps.service.send(s.tenantId, proposalId, s.actor);
-    return c.json(toProposalBody(sent, seesFees(c.get("principal"))), 200);
+    const { proposal, shareToken } = await deps.service.send(s.tenantId, proposalId, s.actor);
+    return c.json(
+      { proposal: toProposalBody(proposal, seesFees(c.get("principal"))), shareToken },
+      200,
+    );
+  });
+
+  app.openapi(viewSharedRoute, async (c) => {
+    // No principal, by design — this route is in PUBLIC_PATHS. The recipient
+    // has no account, so the event names the SYSTEM actor with the route in its
+    // payload; inventing a user id for somebody who has never logged in would
+    // be worse than saying plainly that a link was opened.
+    const { token } = c.req.valid("json");
+    const shared = await deps.service.viewShared(token, SYSTEM_ACTOR);
+    return c.json(
+      {
+        id: shared.id,
+        firmName: shared.firmName,
+        addressedTo: shared.addressedTo,
+        title: shared.title,
+        status: shared.status,
+        currency: shared.currency,
+        validUntil: shared.validUntil,
+        sentAt: shared.sentAt,
+        lines: shared.lines.map((l) => ({
+          description: l.description,
+          quantity: l.quantity,
+          unitAmount: l.unitAmount,
+          discountPercent: l.discountPercent,
+          net: l.net,
+        })),
+        totals: { ...shared.totals },
+      },
+      200,
+    );
   });
 
   app.openapi(decideRoute, async (c) => {

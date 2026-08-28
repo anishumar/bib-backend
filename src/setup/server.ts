@@ -205,6 +205,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     proposals: new PostgresProposalRepository(pools.app),
     catalogue: configRepository,
     policies: configRepository,
+    // The same token adapter identity uses for sessions and magic links. Both
+    // want 32 bytes from the OS CSPRNG and only the digest at rest; one
+    // implementation of that is the right number.
+    shareTokens: new RandomTokenFactory(),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

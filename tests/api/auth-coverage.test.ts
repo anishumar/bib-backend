@@ -231,12 +231,40 @@ describe("every route is accounted for", () => {
   });
 
   it("keeps the public list short and justified", () => {
-    // Each of these exists to OBTAIN a session; nothing else belongs here.
+    // This test exists to make adding a fourth entry a DECISION rather than an
+    // edit. Three of these exist to OBTAIN a session.
+    //
+    // The fourth is the proposal share link, and its justification is different
+    // in kind: a proposal goes to somebody who has no login and will not get
+    // one. Requiring a session would mean creating an account for every prospect
+    // a firm quotes — absurd, and a worse posture than a bearer link, because it
+    // leaves real accounts lying around for people who never became clients.
+    //
+    // What makes it safe rather than merely necessary is spelled out on
+    // PUBLIC_PATHS in api/guards.ts: 256-bit token, digest at rest, its own
+    // tenant inside it so the read is still tenant-scoped, in the BODY rather
+    // than the path, read-only, and one answer for malformed / unknown /
+    // withdrawn. A fifth entry needs its own paragraph like that one.
     expect([...PUBLIC_PATHS].sort()).toEqual([
       "/api/v1/auth/login",
       "/api/v1/auth/magic-link",
       "/api/v1/auth/magic-link/redeem",
+      "/api/v1/proposals/shared",
     ]);
+  });
+
+  it("the share link route is reachable without a session, and only that one", async () => {
+    // The public route answers on its own merits — a 404 for an unknown token,
+    // never a 401 — while its siblings under the same prefix still refuse.
+    const res = await app().request("/api/v1/proposals/shared", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ token: "not-a-real-token" }),
+    });
+    expect(res.status).toBe(404);
+
+    const sibling = await app().request("/api/v1/proposals", { method: "GET" });
+    expect(sibling.status).toBe(401);
   });
 
   it("answers 401 before validation, so an anonymous caller learns nothing about the shape", async () => {

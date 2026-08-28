@@ -98,7 +98,7 @@ export const EVENT_VERBS = {
   "proposal.drafted":            { objectType: "proposal",            lane: "commercial", description: "A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out." },
   "proposal.discount_approved":  { objectType: "proposal",            lane: "commercial", description: "A discount past the firm's published limit was signed off, by somebody holding proposal:approve. The whole value of the record is WHO." },
   "proposal.sent":               { objectType: "proposal",            lane: "commercial", description: "A proposal was sent to a prospect." },
-  "proposal.viewed":             { objectType: "proposal",            lane: "commercial", description: "The recipient opened the proposal." },
+  "proposal.viewed":             { objectType: "proposal",            lane: "commercial", description: "The recipient opened the proposal from its share link. Recorded ONCE, on the first open; the running count lives on the row, because a client refreshing a page is not fifty facts about the business." },
   "proposal.accepted":           { objectType: "proposal",            lane: "commercial", description: "A proposal was accepted." },
   "proposal.rejected":           { objectType: "proposal",            lane: "commercial", description: "A proposal was declined by the recipient." },
   "proposal.expired":            { objectType: "proposal",            lane: "commercial", description: "A proposal passed its validity date. Written LAZILY — nothing here runs on a timer, so it is recorded the first time somebody tries to act on the proposal." },

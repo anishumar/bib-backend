@@ -368,6 +368,19 @@ Proposals are also the fee axis's first real consumer: money is **redacted**, so
 without commercial visibility sees the client, the services and the quantities, and nulls
 where the amounts are.
 
+**The share link is the fourth `PUBLIC_PATH`, and the first that is not about obtaining a
+session.** A proposal goes to somebody who has no login and will not get one. The token is
+`<tenant_id>.<secret>` — the tenant travels inside it so that resolving a link is still an
+ordinary `withTenant` read, because the alternative is a digest lookup across every firm on a
+table that holds money. Only the SHA-256 digest is stored, the token arrives in the BODY (a
+path lands in access logs and Referer headers), the route is read-only, and malformed,
+unknown and withdrawn all answer the same way so it cannot enumerate anything. Adding a fifth
+entry to that set needs a paragraph as good as this one — `tests/api/auth-coverage.test.ts`
+holds the build red until somebody writes it.
+
+A view is **a count and one event**: `view_count` rises on every open, `proposal.viewed` is
+recorded once. Per-view analytics does not belong in an append-only log.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline and `proposals`

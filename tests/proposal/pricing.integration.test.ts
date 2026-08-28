@@ -36,6 +36,7 @@ import { PartyService } from "../../src/usecase/party/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { FakeProposalRepo } from "../../src/testfakes/proposal";
+import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -64,6 +65,7 @@ const service = new ProposalService({
   proposals,
   catalogue: configRepository,
   policies: configRepository,
+  shareTokens: new RandomTokenFactory(),
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -353,7 +355,7 @@ describe("the transitions, against the real CHECK constraints", () => {
       discountPercent: "10",
     });
 
-    const sent = await service.send(tenantA, id, SYSTEM_ACTOR);
+    const { proposal: sent } = await service.send(tenantA, id, SYSTEM_ACTOR);
     expect(sent.status).toBe("sent");
     expect(sent.sentAt).not.toBeNull();
     expect(sent.decidedAt).toBeNull();
@@ -392,8 +394,90 @@ describe("the transitions, against the real CHECK constraints", () => {
     ).rejects.toMatchObject({ code: "ALREADY_APPROVED" });
 
     await expect(service.send(tenantA, id, SYSTEM_ACTOR)).resolves.toMatchObject({
-      status: "sent",
+      proposal: { status: "sent" },
     });
+  });
+});
+
+describe("the share link", () => {
+  // The claim that has to hold against real RLS: resolving a share token is an
+  // ORDINARY tenant-scoped read. The token carries its tenant precisely so
+  // there is no cross-tenant digest lookup anywhere in the product.
+  it("opens inside its own tenant, and is inert against another", async () => {
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "25000.00",
+      discountPercent: "0",
+    });
+    const { shareToken } = await service.send(tenantA, id, SYSTEM_ACTOR);
+
+    const shared = await service.viewShared(shareToken, SYSTEM_ACTOR);
+    expect(shared.id).toBe(id);
+    expect(shared.firmName).toBe("Proposal Test A");
+    expect(shared.addressedTo).toBe("Meridian Textiles Private Limited");
+    expect(Number(shared.totals.net)).toBe(25000);
+
+    // The digest, presented under the OTHER firm's scope, finds nothing — which
+    // is what makes putting the tenant in the token safe rather than merely
+    // convenient.
+    const digest = new RandomTokenFactory().hash(shareToken);
+    expect(await proposals.findShared(tenantB, digest)).toBeNull();
+  });
+
+  it("stores only the digest", async () => {
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "100",
+      discountPercent: "0",
+    });
+    const { shareToken } = await service.send(tenantA, id, SYSTEM_ACTOR);
+
+    const [row] = await owner<{ share_token_digest: string }[]>`
+      SELECT share_token_digest FROM crm.proposal WHERE id = ${id}
+    `;
+    expect(row?.share_token_digest).toBe(new RandomTokenFactory().hash(shareToken));
+    expect(row?.share_token_digest).not.toContain(shareToken);
+  });
+
+  it("counts every open and stamps the first, as the CHECK requires", async () => {
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "100",
+      discountPercent: "0",
+    });
+    const { shareToken } = await service.send(tenantA, id, SYSTEM_ACTOR);
+    await service.viewShared(shareToken, SYSTEM_ACTOR);
+    await service.viewShared(shareToken, SYSTEM_ACTOR);
+
+    const after = await proposals.findById(tenantA, id);
+    expect(after?.viewCount).toBe(2);
+    expect(after?.firstViewedAt).not.toBeNull();
+  });
+
+  it("the database refuses a draft that carries a link", async () => {
+    // Issuing the token at SEND rather than at draft means a quote that never
+    // went out never had a reachable link. The CHECK in 0014 is what makes that
+    // true of the data and not merely of the code path.
+    const id = await draft();
+    const err = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.proposal SET share_token_digest = repeat('a', 64) WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514"); // check_violation
   });
 });
 

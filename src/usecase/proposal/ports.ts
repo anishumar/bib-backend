@@ -99,6 +99,50 @@ export interface ProposalFilters {
   readonly partyId?: string | undefined;
 }
 
+/**
+ * What the RECIPIENT sees — a different read model from the staff one, and
+ * deliberately not a redaction of it.
+ *
+ * A client opening a proposal must not learn the firm's internal shape: which
+ * lead it came from, which colleague signed off a discount, what exchange rate
+ * the firm books it at, or which catalogue version it was quoted from. Those
+ * are all on `ProposalRecord`, which is why this is its own type rather than
+ * the same one with fields nulled — a field added to the staff model then
+ * cannot reach a client's screen by default.
+ */
+export interface SharedProposal {
+  readonly id: string;
+  /** Who sent it. A document with no sender is not a document. */
+  readonly firmName: string;
+  readonly addressedTo: string;
+  readonly title: string;
+  readonly status: ProposalStatus;
+  readonly currency: CurrencyCode;
+  readonly validUntil: string | null;
+  readonly sentAt: string | null;
+  readonly lines: readonly {
+    readonly description: string;
+    readonly quantity: Amount;
+    readonly unitAmount: Amount;
+    readonly discountPercent: Amount;
+    readonly net: Amount;
+  }[];
+  readonly totals: ProposalTotals;
+}
+
+/**
+ * Minting and hashing a share token.
+ *
+ * Its own port rather than reaching into identity's `TokenFactory`, so quoting
+ * does not import the identity use case for a type. The composition root
+ * satisfies both with one adapter — which is right, because the two want the
+ * same guarantee: 32 bytes from the OS CSPRNG, and only the digest at rest.
+ */
+export interface ShareLinkTokens {
+  newToken(): string;
+  hash(token: string): string;
+}
+
 export interface ProposalRepository {
   create(p: NewProposal): Promise<Proposal>;
   findById(tenantId: string, proposalId: string): Promise<Proposal | null>;
@@ -122,6 +166,21 @@ export interface ProposalRepository {
     status: ProposalStatus,
     at: string,
   ): Promise<Proposal>;
+
+  /** Attach the share link's digest as part of sending. Never at draft: a quote
+   *  that never went out should never have had a reachable link. */
+  attachShareToken(tenantId: string, proposalId: string, digest: string): Promise<void>;
+
+  /** Resolve a share link, inside the tenant the token named. Returns the
+   *  recipient's view, not the staff one. */
+  findShared(tenantId: string, digest: string): Promise<SharedProposal | null>;
+
+  /**
+   * Count an open. Returns true when it was the FIRST — the caller records
+   * `proposal.viewed` only then, because the ledger holds state transitions and
+   * a client refreshing a page is not fifty facts about the business.
+   */
+  recordView(tenantId: string, proposalId: string, at: string): Promise<boolean>;
 
   recordDiscountApproval(
     tenantId: string,

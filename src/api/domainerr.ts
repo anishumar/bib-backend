@@ -120,9 +120,14 @@ export function mapError(err: unknown): MappedError {
       case "NOT_A_SERVICE":
       case "SERVICE_NOT_PUBLISHED":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // SHARE_LINK_UNKNOWN sits with these on purpose: a link that is
+      // malformed, one that is unknown, and one whose proposal has gone all
+      // answer the same way. A different status for each would let somebody
+      // probing learn which firms exist and which links used to.
       case "PROPOSAL_NOT_FOUND":
       case "LINE_NOT_FOUND":
       case "SERVICE_NOT_FOUND":
+      case "SHARE_LINK_UNKNOWN":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The proposal is not in the state this call assumed." None is a
       // malformed request and resending changes nothing — DISCOUNT_NEEDS_APPROVAL

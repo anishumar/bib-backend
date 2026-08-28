@@ -23,6 +23,7 @@ export type ProposalErrorCode =
   | "DISCOUNT_NEEDS_APPROVAL"
   | "APPROVAL_NOT_NEEDED"
   | "ALREADY_APPROVED"
+  | "SHARE_LINK_UNKNOWN"
   | "NOT_A_SERVICE"
   | "SERVICE_NOT_FOUND"
   | "SERVICE_NOT_PUBLISHED"
@@ -169,6 +170,20 @@ export class ServiceNotPublished extends ProposalError {
       `configuration version ${JSON.stringify(versionId)} is still a draft and was never in ` +
         `force, so it cannot be quoted. Publish it first. (A version that has since been ` +
         `superseded is fine — that is what a pinned quote is supposed to resolve to.)`,
+    );
+  }
+}
+
+export class ShareLinkUnknown extends ProposalError {
+  constructor() {
+    // ONE message for a malformed token, an unknown one, and one whose proposal
+    // has gone. Telling them apart would let somebody probing learn which firms
+    // exist and which links used to, and the recipient of a real link cannot
+    // act on the distinction anyway.
+    super(
+      "SHARE_LINK_UNKNOWN",
+      `this link is not one we recognise. It may have been mistyped, or the proposal may have ` +
+        `been withdrawn — ask whoever sent it for a new one.`,
     );
   }
 }

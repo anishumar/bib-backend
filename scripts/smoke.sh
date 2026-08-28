@@ -228,7 +228,11 @@ chk "40% is still past the 15% limit"      409 "$(code -b $J/partner.txt -XPOST 
 chk "the associate may not sign it off"    403 "$(code -b $J/associate.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
 chk "the partner may"                      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
 chk "…nothing to approve a second time"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/discount-approval -H "$H")"
-chk "now it sends"                         200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")"
+SENT=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/send -H "$H")
+chk "now it sends"                         sent "$(echo "$SENT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["status"])')"
+# The link, returned ONCE — only its digest is stored, so this response is the
+# only place it can ever be read.
+SHARE=$(echo "$SENT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["shareToken"])')
 MORE='{"serviceVersionId":"'$SVCV1'","description":"one more","unitAmount":"1"}'
 chk "a sent proposal cannot be edited"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/lines -H "$H" -d "$MORE")"
 
@@ -253,6 +257,25 @@ ACCEPT='{"decision":"accepted"}'
 REJECT='{"decision":"rejected"}'
 chk "the client accepts it"                200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$ACCEPT")"
 chk "and cannot change their mind here"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$REJECT")"
+
+# The share link: the one route in this product with no session behind it. A
+# proposal goes to somebody who has no login and will not get one.
+BADTOK='{"token":"not-a-link"}'
+GOODTOK='{"token":"'$SHARE'"}'
+chk "an unknown link tells you nothing"    404 "$(code -XPOST $API/api/v1/proposals/shared -H "$H" -d "$BADTOK")"
+SEEN=$(curl -s -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK")
+chk "the recipient opens it, with no session" "Harbour Point" "$(echo "$SEEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["firmName"])')"
+chk "…and reads what they were quoted"    8640.0000 "$(echo "$SEEN" | python3 -c 'import sys,json;print(json.load(sys.stdin)["totals"]["net"])')"
+# Its own read model, not the staff one with fields nulled: a field added for
+# colleagues cannot reach a client's screen by default.
+INSIDES=$(echo "$SEEN" | python3 -c '
+import sys, json
+k = json.load(sys.stdin).keys()
+print(",".join(sorted(f for f in ("partyId","leadId","fxRate","discountApprovedBy") if f in k)) or "none")')
+chk "the client sees none of the firm's insides" none "$INSIDES"
+curl -s -o /dev/null -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK"
+VIEWS=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["viewCount"])' 2>/dev/null || echo "?")
+chk "every open is counted"                2 "$VIEWS"
 
 echo; echo "── 9. Firm administration — the roster, and revocation ─────────────"
 chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"

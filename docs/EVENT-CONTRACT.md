@@ -227,7 +227,7 @@ version is exactly what gets asked about afterwards.
 | `proposal.drafted` | proposal | A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out. |
 | `proposal.discount_approved` | proposal | A discount past the firm's published limit was signed off by somebody holding `proposal:approve`. The whole value of the record is WHO. |
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |
-| `proposal.viewed` | proposal | The recipient opened it. |
+| `proposal.viewed` | proposal | The recipient opened it from its share link. Recorded ONCE, on the first open; the running count lives on `crm.proposal.view_count`, because a client refreshing a page is not fifty facts about the business. The actor is `system` — the recipient has no account, and inventing a user id for somebody who has never logged in would be worse than saying plainly that a link was opened. |
 | `proposal.accepted` | proposal | Accepted. |
 | `proposal.rejected` | proposal | Declined or expired. |
 | `engagement_letter.signed` | engagement_letter | The client signed. |

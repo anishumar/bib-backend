@@ -34,10 +34,12 @@ import type {
 } from "../../domain/proposal/model";
 import {
   canTransition,
+  composeShareToken,
   isPastValidity,
   isProposalDecision,
   largestDiscount,
   needsDiscountApproval,
+  parseShareToken,
 } from "../../domain/proposal/model";
 import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
@@ -58,6 +60,7 @@ import {
   ProposalExpired,
   ProposalNotFound,
   ServiceNotFound,
+  ShareLinkUnknown,
   ServiceNotPublished,
 } from "../../domain/proposal/errors";
 import type {
@@ -67,6 +70,8 @@ import type {
   ProposalRepository,
   ProposalSummary,
   ServiceCatalogue,
+  ShareLinkTokens,
+  SharedProposal,
 } from "./ports";
 
 export interface Deps {
@@ -74,6 +79,8 @@ export interface Deps {
   /** The configuration registry, behind this use case's own narrow interface. */
   readonly catalogue: ServiceCatalogue;
   readonly policies: PolicyDirectory;
+  /** Mints the share link and hashes it. Only the digest is ever stored. */
+  readonly shareTokens: ShareLinkTokens;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -88,6 +95,19 @@ export interface DraftProposalInput {
   readonly fxRate: string;
   readonly fxRateDate: string;
   readonly validUntil?: string | undefined;
+}
+
+/**
+ * What sending returns: the proposal, and the link — ONCE.
+ *
+ * The token is not readable again, because only its digest is stored. A firm
+ * that loses it re-sends, which issues a new one; that is the same trade
+ * sessions and magic links make, and it is the reason a leaked backup contains
+ * no link anyone can open.
+ */
+export interface SendResult {
+  readonly proposal: Proposal;
+  readonly shareToken: string;
 }
 
 export interface AddLineInput {
@@ -263,7 +283,7 @@ export class ProposalService {
    * Send it. The gate the acceptance criteria names: an over-limit discount
    * blocks here until it has been approved.
    */
-  async send(tenantId: string, proposalId: string, actor: Actor): Promise<Proposal> {
+  async send(tenantId: string, proposalId: string, actor: Actor): Promise<SendResult> {
     const proposal = await this.draftOrThrow(tenantId, proposalId);
     const lines = await this.deps.proposals.listLines(tenantId, proposalId);
     if (lines.length === 0) throw new EmptyProposal();
@@ -276,6 +296,20 @@ export class ProposalService {
     }
 
     const sent = await this.moveTo(proposal, "sent");
+
+    // The link is minted HERE, at the moment of sending, and returned exactly
+    // once. Only its digest is stored, so this is the only time anybody can
+    // read it — the same contract as a magic link, for the same reason: a
+    // leaked backup then contains nothing anyone can open.
+    //
+    // The tenant travels inside the token so that opening it is still a
+    // tenant-scoped read. See composeShareToken.
+    const shareToken = composeShareToken(tenantId, this.deps.shareTokens.newToken());
+    await this.deps.proposals.attachShareToken(
+      tenantId,
+      proposalId,
+      this.deps.shareTokens.hash(shareToken),
+    );
     await this.deps.events.recordEvent({
       tenantId,
       verb: "proposal.sent",
@@ -289,7 +323,60 @@ export class ProposalService {
         validUntil: proposal.validUntil,
       },
     });
-    return sent;
+    return { proposal: sent, shareToken };
+  }
+
+  /**
+   * Open a share link. The one path in this product with no session behind it.
+   *
+   * Three things it deliberately does NOT do:
+   *
+   *   It does not distinguish a malformed token, an unknown one, and a
+   *   proposal that has gone. One answer for all three, because telling them
+   *   apart lets somebody probing learn which firms exist and which links used
+   *   to — and a real recipient cannot act on the difference anyway.
+   *
+   *   It does not let the recipient ACCEPT. Binding a firm to a client's click
+   *   on an unauthenticated link is a bigger decision than this task; staff
+   *   record the decision, and the board says so rather than this quietly
+   *   deciding it.
+   *
+   *   It does not return the staff read model with fields nulled. `SharedProposal`
+   *   is its own shape, so a field added for colleagues cannot reach a client's
+   *   screen by default.
+   */
+  async viewShared(token: string, actor: Actor): Promise<SharedProposal> {
+    const parsed = parseShareToken(token);
+    if (parsed === null) throw new ShareLinkUnknown();
+
+    const digest = this.deps.shareTokens.hash(token);
+    const shared = await this.deps.proposals.findShared(parsed.tenantId, digest);
+    if (shared === null) throw new ShareLinkUnknown();
+
+    const now = this.deps.clock.now().toISOString();
+    if (shared.status === "sent" && isPastValidity(shared.validUntil, now)) {
+      // Lazy expiry, the same rule the staff path uses — the link is simply the
+      // other place somebody first touches a lapsed proposal.
+      const proposal = await this.deps.proposals.findById(parsed.tenantId, shared.id);
+      if (proposal !== null) await this.expire(proposal, actor);
+      throw new ProposalExpired(shared.validUntil ?? now.slice(0, 10));
+    }
+
+    // Counted every time; recorded once. See the note on Proposal.viewCount.
+    const wasFirst = await this.deps.proposals.recordView(parsed.tenantId, shared.id, now);
+    if (wasFirst) {
+      await this.deps.events.recordEvent({
+        tenantId: parsed.tenantId,
+        verb: "proposal.viewed",
+        objectId: shared.id,
+        // The recipient has no account, so there is no human to name. `system`
+        // with the route in the payload is the honest answer; inventing a user
+        // id for somebody who has never logged in would be worse.
+        actor,
+        payload: { via: "share_link" },
+      });
+    }
+    return { ...shared, status: shared.status };
   }
 
   /**
