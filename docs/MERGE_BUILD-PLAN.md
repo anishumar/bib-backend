@@ -773,7 +773,43 @@ open and are recorded above; neither blocks Phase 2.
   > one on the line, all of them terms, and every one of them caught by G1.0's structural freeze
   > test until it was added to the trigger. That is the forcing function working exactly once
   > as designed.
-- [ ] `(A)` **G1.6** **Line detail.** On both line tables: `jurisdiction text`, `billing_frequency text`, the four overrides (`scope_override`, `client_obligations_override`, `volume_limits_override`, `exclusions_override`), `oop_estimate_min` / `oop_estimate_max` / `oop_currency`, `pricing_note text`, **and relax `unit_amount` to nullable.** *Acc: a line can say "as mutually agreed" with a reason instead of a price; editing one client's scope wording does not touch the catalogue; a line carries an out-of-pocket range separate from the fee.* — **§4.6.** Two of these are sharper than the rest. `unit_amount numeric NOT NULL CHECK (>= 0)` makes an unpriced line **unrepresentable** — it has to be quoted as zero, which says something different to a client, and several real lines are genuinely "as mutually agreed". The four overrides are what make an issued document reproducible: the letter carries its own wording, so a later catalogue revision cannot change what a signed document says.
+- [x] `(A)` **G1.6** **Line detail.** On both line tables: `jurisdiction text`, `billing_frequency text`, the four overrides (`scope_override`, `client_obligations_override`, `volume_limits_override`, `exclusions_override`), `oop_estimate_min` / `oop_estimate_max` / `oop_currency`, `pricing_note text`, **and relax `unit_amount` to nullable.** *Acc: a line can say "as mutually agreed" with a reason instead of a price; editing one client's scope wording does not touch the catalogue; a line carries an out-of-pocket range separate from the fee.* — **§4.6.** Two of these are sharper than the rest. `unit_amount numeric NOT NULL CHECK (>= 0)` makes an unpriced line **unrepresentable** — it has to be quoted as zero, which says something different to a client, and several real lines are genuinely "as mutually agreed". The four overrides are what make an issued document reproducible: the letter carries its own wording, so a later catalogue revision cannot change what a signed document says.
+  > **Done (2026-08-29), migrations 0023 and 0024.** The nine columns are the easy half. The
+  > hard half was `unit_amount`, and the answer is on the board because it changes what a
+  > number on a screen MEANS.
+  >
+  > **A total is no longer one number.** `sum()` skips a NULL price, so the figure is exact for
+  > what it covers and silently UNDERSTATES the document. Coalescing to zero is worse — the
+  > line is then *in* the total at a price nobody agreed. So `unpricedLineCount` rides beside
+  > `net` everywhere: the totals view, both read models, the wire, and the recipient's shared
+  > view. Non-zero means `net` is a **floor**. The deciding case is the wholly-unpriced
+  > document: three "as mutually agreed" lines sum to zero, and the count is the only thing
+  > between that zero and a partner reading it as free work. Per line, `net` is NULL and not 0,
+  > and `priced: boolean` sits beside `unitAmount` UNREDACTED — without it a colleague who
+  > cannot see money reads every line as "as mutually agreed".
+  >
+  > A line with no price must carry a `pricingNote` saying why, and a discount off an unpriced
+  > line is refused — it would otherwise hold a proposal at the approval gate over a discount
+  > that does not exist.
+  >
+  > **The OOP range takes no composite currency FK**, and that is the point of it: if the
+  > estimate had to be in the document's currency it would already be in `currency`. It exists
+  > because it routinely is not — which also settles the arithmetic, since the `fx_rate` is
+  > struck for the fee currency and an OOP range is therefore never summed into anything.
+  >
+  > **Migration 0024 was not planned, and it closes a real hole in 0017.**
+  > `crm.refuse_signed_child_change` resolved the parent letter from `NEW` on UPDATE — so
+  > repointing a **signed** letter's line at a draft letter of the same firm and currency
+  > SUCCEEDED: a term silently removed from a signed agreement, totals changed, nothing raised.
+  > Found by extending G1.0's catalogue-driven freeze sweep to the LINE table, which nothing
+  > covered. Verified against the live schema before and after. 0024 checks both parents.
+  >
+  > **`canonicalContent` changed**, so a `signed_content_hash` taken before this cannot be
+  > re-derived. Nothing in the product re-derives one and the freeze is what actually holds a
+  > signed letter still — but the alternative was a signature that did not cover the client's
+  > own scope wording, which is worse.
+  >
+  > Gate: `npm run check` 643 · `test:integration` 204 · `smoke` 182.
 - [ ] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
 - [ ] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
   > **[~] Schema half done (2026-08-28); the wiring half is still open.** `ClauseBody` gains
@@ -877,7 +913,14 @@ open and are recorded above; neither blocks Phase 2.
   > up two API gaps: nothing published the PERMISSION VOCABULARY, so a picker could only be
   > built by retyping the list; and `/auth/me` still cannot tell a screen what the session may
   > do. The first is fixed; the second is above.
-- [~] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
+- [x] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
+  > **Closed (2026-08-29) by the read-model half.** The fields were always stored; nothing
+  > served them. `ProposalLineRecord.service` / `LetterLineRecord.service` now carry `ref`,
+  > `module`, `group`, `billingBasis`, `recurrence`, `slaDays`, `listPrice`, `pricingNote` and
+  > the four prose blocks, resolved through `readServiceBody` off the body the repositories
+  > were already selecting. **This is what unblocked `(B)`'s T3.1** — a work item snapshots the
+  > SLA in force at creation, and until now no single call returned it. Smoke asserts the line
+  > says 30 while the live catalogue says 90.
   > **CORRECTED after review (was ticked; now `[~]`).** `ref`, `module` and `group` are stored,
   > validated and read back — but the acceptance's second clause is *"a proposal CITES the
   > firm's own service code"*, and no proposal read model, mapper or route ever returns `ref`.
@@ -895,7 +938,12 @@ open and are recorded above; neither blocks Phase 2.
   > demanded in CANONICAL form at the WRITE, because the whole job of the field is to be
   > `GROUP BY`-ed and `frc` beside `FRC` splits one Dept into two half-sized ones that both
   > look plausible. A body is stored verbatim, so the read is too late to fix it.
-- [~] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
+- [x] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
+  > **Closed (2026-08-29) with G1.6.** The four blocks now have both halves: the catalogue's
+  > words on `service`, and the per-document override beside them, resolved in ONE place with
+  > **which one won** visible to the caller. That last part is the whole value — a screen that
+  > cannot tell a standard scope from a negotiated one has not assembled a document, it has
+  > printed one.
   > **CORRECTED after review (was ticked; now `[~]`).** The four blocks are stored and
   > validated, and a grep for them across `src/` returns nothing outside `domain/config/model.ts`
   > — zero consumers. The acceptance is *"an engagement letter is ASSEMBLED from the catalogue's
