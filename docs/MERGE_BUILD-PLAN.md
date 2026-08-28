@@ -948,10 +948,14 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
 - **G0.3** — soft delete on `core`, or a written decision that parties are permanent.
 - **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
-- **G0.1** — must an EL line name an entity the firm has already incorporated? If yes, its
-  foreign key tightens from `core.party` to `core.legal_entity` and needs a composite key on
-  that table first. Left at `core.party` deliberately: that is a product decision, not a
-  schema one.
+- ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled
+  (2026-08-28): no.** The key stays on `core.party`, and Incorporation is why. That service
+  sells the CREATION of the entity, so a letter for it has no `legal_entity` row to name yet
+  — the firm records a `proposed` organization party, the line names that, and the
+  `core.legal_entity` row is added to the SAME party once the company exists. The entity
+  therefore keeps one identity from quote to compliance calendar. Tightening the key to
+  `core.legal_entity` would make an Incorporation engagement letter unwritable, which is the
+  opposite of the trade it looked like.
 - ~~Where obligation templates live~~ — **settled**: their own tables, owned by `(B)`. See
   T3.2. The versioning the registry would have given free is now built by hand, and the
   deviation is written into `CLAUDE.md`.
