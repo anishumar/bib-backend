@@ -197,6 +197,61 @@ describe("exactly one version is in force", () => {
   });
 });
 
+describe("a list says what is waiting, not only what is in force", () => {
+  // The gap this closes was found by a SCREEN, not by a test: once an entry had
+  // a published version, its pending draft was invisible from the list — so a
+  // firm could draft a revision and have nowhere to publish it from. The fix is
+  // the join, because asking again per entry is the per-row lookup CLAUDE.md
+  // names as the signal that a join belongs in the query.
+  it("carries the newest draft sitting beside the published version", async () => {
+    await service.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "gst-filing",
+      body: { name: "GST monthly filing (draft revision)", billingBasis: "fixed" },
+    });
+
+    const row = (await service.list(tenantA, "service")).find(
+      (e) => e.entry.key === "gst-filing",
+    );
+    expect(row?.published?.status).toBe("published");
+    expect(row?.pendingDraft?.status).toBe("draft");
+    // Both, and they are different versions — a list that showed one OR the
+    // other would make "revise a service" look like "replace it".
+    expect(row?.pendingDraft?.version).toBeGreaterThan(row?.published?.version ?? 0);
+  });
+
+  it("carries the NEWEST draft when several are waiting", async () => {
+    // 0005's unique index is partial on `published`, so any number of drafts may
+    // sit beside it. The one a screen is about to publish is the last written —
+    // and a plain LEFT JOIN would have returned the entry once per draft and
+    // quietly repeated it in the list.
+    const before = (await service.list(tenantA, "service")).filter(
+      (e) => e.entry.key === "gst-filing",
+    );
+    expect(before).toHaveLength(1);
+
+    const newest = await service.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "gst-filing",
+      body: { name: "GST monthly filing (later draft)", billingBasis: "fixed" },
+    });
+
+    const after = (await service.list(tenantA, "service")).filter(
+      (e) => e.entry.key === "gst-filing",
+    );
+    expect(after).toHaveLength(1);
+    expect(after[0]?.pendingDraft?.id).toBe(newest.id);
+  });
+
+  it("says null when nothing is waiting, rather than omitting it", async () => {
+    const row = (await service.list(tenantA, "role")).find((e) => e.entry.key === "partner");
+    expect(row).toBeDefined();
+    expect(row?.pendingDraft).toBeNull();
+  });
+});
+
 describe("a pin outlives what it points at", () => {
   it("resolves the archived version, with the body it had when it was in force", async () => {
     // The promise the whole table pair exists to make: a job that started three

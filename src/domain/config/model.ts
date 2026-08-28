@@ -68,6 +68,19 @@ export interface ConfigVersion {
 export interface PublishedEntry {
   readonly entry: ConfigEntry;
   readonly published: ConfigVersion | null;
+  /**
+   * The newest DRAFT sitting beside what is in force, or null when there is
+   * none. Newest rather than "the" draft, because 0005's unique index is
+   * partial on `published` — any number of drafts may sit beside it — and the
+   * one a screen is about to publish is the last one written.
+   *
+   * It is here because a list that omitted it made the screen fetch each entry
+   * again to find out whether anything was waiting, which is precisely the
+   * per-row lookup CLAUDE.md says means the join belongs in the query. Worse,
+   * once an entry HAD a published version its draft was invisible, so a firm
+   * could draft a revision and have nowhere to publish it from.
+   */
+  readonly pendingDraft: ConfigVersion | null;
 }
 
 /**
