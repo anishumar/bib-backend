@@ -184,6 +184,18 @@ describe("the tenant wall covers the pipeline", () => {
     expect(await service.list(tenantB)).toEqual([]);
   });
 
+  it("the joined read stays inside the tenant wall", async () => {
+    // The read joins core.party and tenancy.user_account. The party side is
+    // under RLS and filtered with the lead; if that ever stopped being true,
+    // one firm's board would start naming another firm's prospects.
+    // By party, not by position: earlier blocks capture their own leads and the
+    // list is newest-first, so [0] is whichever ran last.
+    const rows = await service.list(tenantA);
+    const meridian = rows.find((r) => r.party.id === partyId);
+    expect(meridian?.party.displayName).toBe("Meridian Textiles Private Limited");
+    expect(meridian?.lead.tenantId).toBe(tenantA);
+  });
+
   it("a lead cannot be about another firm's party", async () => {
     // The composite foreign key. Without the tenant travelling with the
     // reference, firm B could open an opportunity on firm A's client — RLS

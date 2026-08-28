@@ -5,7 +5,8 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
-import type { LeadRepository, NewLead } from "../../usecase/lead/ports";
+import type { PartyKind } from "../../domain/party/model";
+import type { LeadRecord, LeadRepository, NewLead } from "../../usecase/lead/ports";
 
 interface LeadRow {
   id: string;
@@ -17,6 +18,32 @@ interface LeadRow {
   notes: string | null;
   captured_at: Date;
   closed_at: Date | null;
+}
+
+/** A lead joined to the party it is about and the colleague who owns it. */
+interface LeadRecordRow extends LeadRow {
+  party_kind: PartyKind;
+  party_display_name: string;
+  owner_display_name: string | null;
+  owner_email: string | null;
+}
+
+function toRecord(r: LeadRecordRow): LeadRecord {
+  return {
+    lead: toLead(r),
+    party: { id: r.party_id, kind: r.party_kind, displayName: r.party_display_name },
+    // The LEFT JOIN yields nulls for an unassigned lead. owner_email is the
+    // discriminator rather than owner_user_id, because an account always has an
+    // email and may have no name.
+    owner:
+      r.owner_user_id === null || r.owner_email === null
+        ? null
+        : {
+            userId: r.owner_user_id,
+            displayName: r.owner_display_name,
+            email: r.owner_email,
+          },
+  };
 }
 
 function toLead(r: LeadRow): Lead {
@@ -78,21 +105,54 @@ export class PostgresLeadRepository implements LeadRepository {
     });
   }
 
-  async list(tenantId: string, stage: LeadStage | null): Promise<readonly Lead[]> {
+  // The next three reads share a shape: the lead, the party it is about, and the
+  // colleague who owns it. core.party is under RLS and filtered along with the
+  // lead; tenancy.user_account is global, and only the owner's name and address
+  // are taken from it — never anything about their access. Written out rather
+  // than assembled from a fragment, like every other query in this codebase.
+
+  async list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows =
         stage === null
-          ? await db<LeadRow[]>`
-              SELECT id, tenant_id, party_id, source, stage, owner_user_id, notes,
-                     captured_at, closed_at
-              FROM crm.lead ORDER BY captured_at DESC
+          ? await db<LeadRecordRow[]>`
+              SELECT l.id, l.tenant_id, l.party_id, l.source, l.stage, l.owner_user_id,
+                     l.notes, l.captured_at, l.closed_at,
+                     p.kind AS party_kind, p.display_name AS party_display_name,
+                     u.display_name AS owner_display_name, u.email::text AS owner_email
+              FROM crm.lead l
+              JOIN core.party p ON p.id = l.party_id
+              LEFT JOIN tenancy.user_account u ON u.id = l.owner_user_id
+              ORDER BY l.captured_at DESC
             `
-          : await db<LeadRow[]>`
-              SELECT id, tenant_id, party_id, source, stage, owner_user_id, notes,
-                     captured_at, closed_at
-              FROM crm.lead WHERE stage = ${stage} ORDER BY captured_at DESC
+          : await db<LeadRecordRow[]>`
+              SELECT l.id, l.tenant_id, l.party_id, l.source, l.stage, l.owner_user_id,
+                     l.notes, l.captured_at, l.closed_at,
+                     p.kind AS party_kind, p.display_name AS party_display_name,
+                     u.display_name AS owner_display_name, u.email::text AS owner_email
+              FROM crm.lead l
+              JOIN core.party p ON p.id = l.party_id
+              LEFT JOIN tenancy.user_account u ON u.id = l.owner_user_id
+              WHERE l.stage = ${stage}
+              ORDER BY l.captured_at DESC
             `;
-      return rows.map(toLead);
+      return rows.map(toRecord);
+    });
+  }
+
+  async findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LeadRecordRow[]>`
+        SELECT l.id, l.tenant_id, l.party_id, l.source, l.stage, l.owner_user_id,
+               l.notes, l.captured_at, l.closed_at,
+               p.kind AS party_kind, p.display_name AS party_display_name,
+               u.display_name AS owner_display_name, u.email::text AS owner_email
+        FROM crm.lead l
+        JOIN core.party p ON p.id = l.party_id
+        LEFT JOIN tenancy.user_account u ON u.id = l.owner_user_id
+        WHERE l.id = ${leadId}
+      `;
+      return row ? toRecord(row) : null;
     });
   }
 

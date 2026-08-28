@@ -105,6 +105,7 @@ function deps(): RouterDeps {
       }),
       cookieName: "bib_session",
       cookieSecure: false,
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
   };
 }

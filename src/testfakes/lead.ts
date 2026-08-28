@@ -14,11 +14,12 @@
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
 import type { Lead, LeadStage } from "../domain/lead/model";
+import type { PartyKind } from "../domain/party/model";
 import { isOpen } from "../domain/lead/model";
-import type { LeadRepository, NewLead, StaffDirectory } from "../usecase/lead/ports";
+import type { LeadRecord, LeadRepository, NewLead, StaffDirectory } from "../usecase/lead/ports";
 import type { Deps } from "../usecase/lead/service";
 import { PartyService } from "../usecase/party/service";
-import { makePartyFakes } from "./party";
+import { FakePartyRepo, makePartyFakes } from "./party";
 import { FakeIds } from "./ids";
 import { FakeClock } from "./identity";
 import { RecordingEventSink } from "./ledger";
@@ -61,12 +62,41 @@ export class FakeLeadRepo implements LeadRepository {
     );
   }
 
-  list(tenantId: string, stage: LeadStage | null): Promise<readonly Lead[]> {
+  /** The people a lead refers to, for the joined reads. Populated by
+   *  makeLeadFakes from the same in-memory party repo the real capture writes
+   *  to, so a test sees the prospect it actually created. */
+  parties: { find(partyId: string): { kind: PartyKind; displayName: string } | null } | null = null;
+  staff: Map<string, { displayName: string | null; email: string }> = new Map();
+
+  private record(lead: Lead): LeadRecord {
+    const party = this.parties?.find(lead.partyId);
+    const owner = lead.ownerUserId === null ? null : this.staff.get(lead.ownerUserId);
+    return {
+      lead,
+      party: {
+        id: lead.partyId,
+        kind: party?.kind ?? "organization",
+        displayName: party?.displayName ?? lead.partyId,
+      },
+      owner:
+        lead.ownerUserId === null || owner === undefined || owner === null
+          ? null
+          : { userId: lead.ownerUserId, displayName: owner.displayName, email: owner.email },
+    };
+  }
+
+  list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]> {
     return Promise.resolve(
       this.rows
         .filter((r) => r.tenantId === tenantId && (stage === null || r.stage === stage))
-        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt)),
+        .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
+        .map((lead) => this.record(lead)),
     );
+  }
+
+  findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null> {
+    const lead = this.rows.find((r) => r.tenantId === tenantId && r.id === leadId);
+    return Promise.resolve(lead ? this.record(lead) : null);
   }
 
   moveStage(
@@ -126,6 +156,17 @@ export function makeLeadFakes(): Deps & {
   const party = new PartyService({ ...partyFakes, ids, events });
 
   const leads = new FakeLeadRepo();
+  // The fake reads prospects out of the same in-memory party repo capture wrote
+  // them to, so a joined read returns the display name the party module derived
+  // rather than one this fake invented.
+  leads.parties = {
+    find: (partyId) => {
+      const party = partyFakes.parties instanceof FakePartyRepo
+        ? partyFakes.parties.parties.find((p) => p.id === partyId)
+        : undefined;
+      return party ? { kind: party.kind, displayName: party.displayName } : null;
+    },
+  };
   const staff = new FakeStaffDirectory();
   return {
     leads,

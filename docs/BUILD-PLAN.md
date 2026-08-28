@@ -355,13 +355,26 @@ sandbox access + credentials. **Not on any demo's critical path.**
   it is the step that completes the escalation path. Provisioning events now carry
   `provisionedBy`, because "system did it" cannot be traced to a system.
 
-- [ ] **`/auth/me` should carry the caller's permissions.** It returns the role but not what
-  the role carries, so the frontend cannot tell what a session may DO — the admin links are
-  shown to everyone and somebody without `tenant:admin` meets the API's 403 on the screen.
-  Accurate, but not the same as not offering it. Gate 3 already resolves the permissions on
-  every request (`AuthzService.can`), so this is a field on an existing response, not new work
-  — it needs a decision about whether a caller should be told the shape of what it cannot do.
-  Found building the admin screens (2026-08-28).
+- [x] **`/auth/me` carries the caller's permissions** — done. It also documented only four of
+  the six fields it was already sending (`role` and `commercialVisibility` reached the wire
+  undocumented for six tasks, because the handler forwarded the domain Principal and
+  zod-openapi documents a response without validating it). Handlers now map field by field,
+  and `tests/api/openapi.test.ts` compares the spec's Principal against what the route
+  actually sends. The frontend gates its admin links on the permissions rather than showing
+  them to everyone.
+
+- [x] **Lead reads name their prospect** — done, same pass. `GET /api/v1/leads` returned
+  `partyId` and `ownerUserId` and nothing renderable; it now returns a joined read model, the
+  shape the roster already uses. The owner carries an email as well as a name, which is the
+  first real answer to the staff-directory question the roster's admin-only read deferred —
+  revisit the two together when a directory screen exists.
+
+- [ ] **Response shapes are documented but not VERIFIED.** zod-openapi describes a response
+  without validating it, so a handler can send a field its schema never mentions — which is
+  exactly how `/auth/me` shipped two undocumented fields for six tasks. One test now checks
+  that route; nothing checks the other thirty. A general assertion — every route's response
+  parsed against its own schema in strict mode — would close the class rather than the
+  instance. Found the hard way (2026-08-28).
 
 - [ ] **Composite tenant keys across `core`** — `core.organization`, `core.person`,
   `core.legal_entity`, `core.party_identifier` and `core.party_relationship` still reference

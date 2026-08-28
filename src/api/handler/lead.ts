@@ -17,6 +17,7 @@ import { scopeOf } from "../scope";
 import { IdentifierTypeSchema } from "./party";
 import type { LeadSource, LeadStage } from "../../domain/lead/model";
 import type { LeadService } from "../../usecase/lead/service";
+import type { LeadRecord } from "../../usecase/lead/ports";
 
 export interface LeadDeps {
   readonly service: LeadService;
@@ -57,6 +58,37 @@ const LeadSchema = z
     closedAt: z.string().nullable(),
   })
   .openapi("Lead");
+
+/**
+ * A lead with the people it refers to.
+ *
+ * The list and the single read both return this rather than the bare lead: a
+ * board rendering `partyId` and `ownerUserId` shows two uuids per card, or
+ * fetches a party and an account per row. The roster answers the same problem
+ * the same way.
+ *
+ * `owner` is null for a lead in the unassigned queue, and carries an email
+ * because an account may have no name — "owned by 3f9c…" helps nobody. This
+ * surface is staff-only (gate 2 keeps client-portal sessions off it), so that
+ * discloses a colleague's address to colleagues.
+ */
+const LeadRecordSchema = z
+  .object({
+    lead: LeadSchema,
+    party: z.object({
+      id: z.string().uuid(),
+      kind: z.enum(["organization", "person"]),
+      displayName: z.string(),
+    }),
+    owner: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string().email(),
+      })
+      .nullable(),
+  })
+  .openapi("LeadRecord");
 
 const CaptureResultSchema = z
   .object({
@@ -147,7 +179,7 @@ const listRoute = createRoute({
       description: "Leads",
       content: {
         "application/json": {
-          schema: z.object({ leads: z.array(LeadSchema) }).openapi("LeadList"),
+          schema: z.object({ leads: z.array(LeadRecordSchema) }).openapi("LeadList"),
         },
       },
     },
@@ -164,7 +196,10 @@ const getRoute = createRoute({
   summary: "One lead. Its history is GET /api/v1/objects/lead/{leadId}/events",
   request: { params: LeadParam },
   responses: {
-    200: { description: "The lead", content: { "application/json": { schema: LeadSchema } } },
+    200: {
+      description: "The lead, with the prospect and the owner",
+      content: { "application/json": { schema: LeadRecordSchema } },
+    },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not read parties"),
     404: errorResponse("No such lead in this firm"),
@@ -213,6 +248,16 @@ const assignOwnerRoute = createRoute({
 
 // ── Registration ────────────────────────────────────────────────────────────
 
+/** Named field by field rather than forwarded, so a field added to the read
+ *  model cannot reach the wire without also reaching the spec. */
+function toRecordBody(record: LeadRecord): z.infer<typeof LeadRecordSchema> {
+  return {
+    lead: { ...record.lead },
+    party: { ...record.party },
+    owner: record.owner === null ? null : { ...record.owner },
+  };
+}
+
 export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): void {
   app.openapi(captureRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -230,14 +275,14 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     if (!s.ok) return c.json(s.deny, s.status);
     const { stage } = c.req.valid("query");
     const leads = await deps.service.list(s.tenantId, stage);
-    return c.json({ leads: [...leads] }, 200);
+    return c.json({ leads: leads.map(toRecordBody) }, 200);
   });
 
   app.openapi(getRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
-    return c.json(await deps.service.get(s.tenantId, leadId), 200);
+    return c.json(toRecordBody(await deps.service.get(s.tenantId, leadId)), 200);
   });
 
   app.openapi(moveStageRoute, async (c) => {

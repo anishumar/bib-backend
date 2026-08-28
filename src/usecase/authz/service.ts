@@ -42,6 +42,22 @@ export class AuthzService {
     }
   }
 
+  /**
+   * Everything this principal may do.
+   *
+   * For telling a CALLER what it can do, so a screen can offer only what will
+   * work rather than discovering the answer from a 403. It reports what the
+   * caller HOLDS and never the vocabulary it does not — the full permission set
+   * is its own route, behind `config:read`.
+   *
+   * Empty for a session that has not chosen an org: without a tenant there is no
+   * membership, so there is no role and nothing is carried.
+   */
+  async permissionsOf(principal: Principal): Promise<readonly Permission[]> {
+    if (principal.tenantId === null || principal.role === null) return [];
+    return this.deps.permissions.permissionsFor(principal.tenantId, principal.role);
+  }
+
   /** The same question without the throw, for a handler deciding what to show
    *  rather than whether to serve. */
   async can(principal: Principal, permission: Permission): Promise<boolean> {

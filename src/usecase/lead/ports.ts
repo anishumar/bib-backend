@@ -3,7 +3,13 @@
 // infrastructure/ implement them, and one of them is satisfied by another use
 // case at the composition root.
 import type { Actor } from "../../domain/ledger/model";
-import type { IdentifierType, Organization, PartyIdentifier, Person } from "../../domain/party/model";
+import type {
+  IdentifierType,
+  Organization,
+  PartyIdentifier,
+  PartyKind,
+  Person,
+} from "../../domain/party/model";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 
 export interface NewLead {
@@ -13,6 +19,35 @@ export interface NewLead {
   readonly source: LeadSource;
   readonly ownerUserId: string | null;
   readonly notes: string | null;
+}
+
+/**
+ * A lead with the people it refers to — the pipeline READ.
+ *
+ * `Lead` alone carries `partyId` and `ownerUserId`, which is right for the
+ * aggregate and useless for a screen: a board rendering it shows two uuids per
+ * card, or fetches a party and an account per row. The same joined-read-model
+ * shape the roster uses (`MemberRecord`), for the same reason.
+ *
+ * The owner carries an email as well as a name, because an account may have no
+ * name and "owned by 3f9c…" helps nobody. That does disclose a colleague's
+ * address to anybody with `party:read` — acceptable here because this surface is
+ * staff-only (gate 2 keeps client-portal sessions off it entirely), and it is
+ * the first real answer to the staff-directory question the roster deferred.
+ * Recorded on the board so the two are revisited together.
+ */
+export interface LeadRecord {
+  readonly lead: Lead;
+  readonly party: {
+    readonly id: string;
+    readonly kind: PartyKind;
+    readonly displayName: string;
+  };
+  readonly owner: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
 }
 
 export interface LeadRepository {
@@ -25,8 +60,11 @@ export interface LeadRepository {
    * makes that true, rather than this query's ORDER BY.
    */
   findOpenForParty(tenantId: string, partyId: string): Promise<Lead | null>;
-  /** The pipeline, newest first. Filtered by stage when one is named. */
-  list(tenantId: string, stage: LeadStage | null): Promise<readonly Lead[]>;
+  /** The pipeline, newest first, with the people each lead refers to. Filtered
+   *  by stage when one is named. */
+  list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]>;
+  /** One lead, with the same joins. */
+  findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null>;
   /** Moves the stage and sets/clears closed_at together, so the two can never
    *  disagree — the database CHECK is the backstop, not the mechanism. */
   moveStage(tenantId: string, leadId: string, stage: LeadStage, closedAt: string | null): Promise<Lead>;

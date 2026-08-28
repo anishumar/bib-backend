@@ -47,6 +47,7 @@ import {
   SameStage,
 } from "../../domain/lead/errors";
 import type {
+  LeadRecord,
   LeadRepository,
   ProspectDirectory,
   StaffDirectory,
@@ -249,13 +250,21 @@ export class LeadService {
     return assigned;
   }
 
-  /** The pipeline, newest first, optionally one stage of it. */
-  async list(tenantId: string, stage?: string): Promise<readonly Lead[]> {
+  /**
+   * The pipeline, newest first, optionally one stage of it.
+   *
+   * Returns the READ MODEL — each lead with the prospect it is about and the
+   * colleague who owns it. The aggregate alone carries two uuids, which is right
+   * for a lead and useless for anything that has to show one.
+   */
+  async list(tenantId: string, stage?: string): Promise<readonly LeadRecord[]> {
     return this.deps.leads.list(tenantId, stage === undefined ? null : this.parseStage(stage));
   }
 
-  async get(tenantId: string, leadId: string): Promise<Lead> {
-    return this.leadOrThrow(tenantId, leadId);
+  async get(tenantId: string, leadId: string): Promise<LeadRecord> {
+    const record = await this.deps.leads.findRecord(tenantId, leadId);
+    if (!record) throw new LeadNotFound(leadId);
+    return record;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────

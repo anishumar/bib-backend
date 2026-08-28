@@ -199,6 +199,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       {
         auth: {
           service: identity,
+          authz,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
         },

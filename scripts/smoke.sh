@@ -147,8 +147,13 @@ chk "…it lands on the existing one"     "True/True" "$SAME"
 ONE=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
 import sys, json
 leads = json.load(sys.stdin)["leads"]
-print(len([l for l in leads if l["stage"] not in ("converted","lost")]))')
+print(len([r for r in leads if r["lead"]["stage"] not in ("converted","lost")]))')
 chk "two captures, two open leads"      2 "$ONE"
+# The pipeline read names its prospect rather than handing a screen a uuid.
+NAMED=$(curl -s -b $J/partner.txt "$API/api/v1/leads" | python3 -c '
+import sys, json
+print(sorted(r["party"]["displayName"] for r in json.load(sys.stdin)["leads"])[0])')
+chk "…and each one names its prospect"  "Lakeview Foods Private Limited" "$NAMED"
 
 chk "a lead with no way to reach them"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","kind":"organization","name":"Anonymous Ltd","identifiers":[{"type":"cin","value":"U17110MH2019PTC123456"}]}')"
 chk "a source we cannot report on"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"linkedin","kind":"person","name":"A N Other","identifiers":[{"type":"email","value":"x-'$S'@y.example"}]}')"

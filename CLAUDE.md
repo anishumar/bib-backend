@@ -152,6 +152,29 @@ Two guards, and between them they cover both routes to the same unrecoverable st
 All four routes are `tenant:admin`, the read included — the roster lists colleagues' email
 addresses, and a general staff directory is a wider decision than this screen.
 
+## Lists return read models, not aggregates
+
+An aggregate carries ids — `partyId`, `ownerUserId`, `userId` — which is right for the
+aggregate and useless for anything that has to SHOW it. A list endpoint therefore returns a
+joined read model: `MemberRecord` (membership + email + name), `LeadRecord` (lead + party +
+owner). The alternative is a lookup per row, and screens that render uuids.
+
+This was learnt the expensive way. Five modules shipped before anything had to render any of
+them, and every list was designed against tests, which are perfectly happy with uuids. **Build
+the screen alongside the module**, as the build plan already says — it is the only thing that
+asks the questions tests do not.
+
+Two rules that came out of it, and both are now enforced by tests:
+
+- **Handlers map field by field; they never forward a domain object.** `role` and
+  `commercialVisibility` were on the wire for six tasks while `/auth/me`'s schema documented
+  four fields, because the handler returned the Principal straight through and zod-openapi
+  documents a response without validating it. In a codebase whose frontend generates its
+  whole client from that spec, an undocumented field is one the browser cannot see.
+- **A caller is told what it may do.** `/auth/me` carries the permissions its role holds — what
+  it HOLDS, never the vocabulary it does not — so a screen offers only what will work instead
+  of discovering the answer from a 403.
+
 ## Domain non-negotiables (compliance + money)
 
 - Money = amount + currency + FX-rate + rate-date. `numeric`, never float.

@@ -93,7 +93,12 @@ function deps(): RouterDeps {
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },
     lead: { service: new LeadService(makeLeadFakes()) },
-    auth: { service: identityService(), cookieName: "bib_session", cookieSecure: false },
+    auth: {
+      service: identityService(),
+      authz: new AuthzService({ permissions }),
+      cookieName: "bib_session",
+      cookieSecure: false,
+    },
   };
 }
 
@@ -144,6 +149,40 @@ describe("OpenAPI spec", () => {
       principalOf: devPrincipal,
     }).request("/openapi.json");
     expect(res.status).toBe(404);
+  });
+});
+
+describe("the spec and the wire agree", () => {
+  it("documents exactly the fields /auth/me actually sends", async () => {
+    // This is the failure that motivated the test. `role` and
+    // `commercialVisibility` were on the wire for six tasks while the spec
+    // described four fields, because the handler forwarded the domain Principal
+    // and zod-openapi documents a response without validating it. In a codebase
+    // whose entire frontend client is generated from this spec, an undocumented
+    // field is one the browser cannot see and a removed one breaks at runtime.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      components: { schemas: { Principal: { properties: Record<string, unknown> } } };
+    };
+    const documented = Object.keys(spec.components.schemas.Principal.properties).sort();
+
+    const me = await app().request("/api/v1/auth/me", {
+      headers: { "x-user-id": "00000000-0000-0000-0000-000000000001" },
+    });
+    expect(me.status).toBe(200);
+    const sent = Object.keys((await me.json()) as Record<string, unknown>).sort();
+
+    expect(sent).toEqual(documented);
+  });
+
+  it("tells the caller what it may do, so a screen need not guess", async () => {
+    const me = await app().request("/api/v1/auth/me", {
+      headers: { "x-user-id": "00000000-0000-0000-0000-000000000001" },
+    });
+    const body = (await me.json()) as { permissions: string[]; tenantId: string | null };
+    // This session has not chosen an org, so it holds no membership and
+    // therefore carries nothing — present and empty, not absent.
+    expect(body.tenantId).toBeNull();
+    expect(body.permissions).toEqual([]);
   });
 });
 

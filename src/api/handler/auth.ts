@@ -12,24 +12,48 @@ import type { AppEnv } from "../guards";
 import { setCookie } from "hono/cookie";
 import { z, errorResponse } from "../openapi";
 import { toEnvelope } from "../httpresp";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 import { SESSION_TTL_DAYS } from "../../domain/identity/model";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
 import { tokenFrom } from "../principal";
 
 export interface AuthDeps {
   readonly service: IdentityService;
+  /** So the caller can be told what it may DO, not only who it is. A screen
+   *  that cannot ask has to offer everything and let the API refuse. */
+  readonly authz: AuthzService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
 }
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
 
+/**
+ * What the caller is told about itself.
+ *
+ * `role` and `commercialVisibility` were on the wire long before they were in
+ * this schema — the handler returned the domain Principal straight through, and
+ * zod-openapi documents a response without validating it, so the spec quietly
+ * described four fields while six were sent. In a codebase whose frontend
+ * generates its entire client from this spec, that is the seam failing silently.
+ * Every field is now named here AND named again by the mapper below, so the two
+ * cannot drift: adding one to the domain Principal no longer puts it on the wire
+ * by itself.
+ */
 const PrincipalSchema = z
   .object({
     userId: z.string().uuid(),
     sessionId: z.string().uuid(),
     tenantId: z.string().uuid().nullable(),
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]).nullable(),
+    /** Null until an org is chosen — a session can belong to several firms. */
+    role: z.string().nullable(),
+    commercialVisibility: z.boolean().nullable(),
+    /** What this caller may do, so a screen can offer only what will work.
+     *  What it HOLDS, never the vocabulary it does not — the full set is
+     *  GET /api/v1/config/permissions, behind config:read. */
+    permissions: z.array(z.string()),
   })
   .openapi("Principal");
 
@@ -190,8 +214,28 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     });
   };
 
-  const signInBody = (result: SignInResult): z.infer<typeof SignInSchema> => ({
-    principal: result.principal,
+  /**
+   * The wire shape of a principal, field by field.
+   *
+   * Named explicitly rather than forwarding the domain object: that is what let
+   * `role` and `commercialVisibility` reach the wire undocumented. A mapper is
+   * a compile error when the schema and the domain disagree; a pass-through is
+   * a silent one.
+   */
+  const principalBody = async (
+    principal: Principal,
+  ): Promise<z.infer<typeof PrincipalSchema>> => ({
+    userId: principal.userId,
+    sessionId: principal.sessionId,
+    tenantId: principal.tenantId,
+    audience: principal.audience,
+    role: principal.role,
+    commercialVisibility: principal.commercialVisibility,
+    permissions: [...(await deps.authz.permissionsOf(principal))],
+  });
+
+  const signInBody = async (result: SignInResult): Promise<z.infer<typeof SignInSchema>> => ({
+    principal: await principalBody(result.principal),
     memberships: result.memberships.map((m) => ({
       id: m.id,
       tenantId: m.tenantId,
@@ -204,7 +248,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     const { email, password } = c.req.valid("json");
     const result = await deps.service.login(email, password);
     issue(c, result);
-    return c.json(signInBody(result), 200);
+    return c.json(await signInBody(result), 200);
   });
 
   app.openapi(magicLinkRoute, async (c) => {
@@ -217,16 +261,16 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     const { token } = c.req.valid("json");
     const result = await deps.service.redeemMagicLink(token);
     issue(c, result);
-    return c.json(signInBody(result), 200);
+    return c.json(await signInBody(result), 200);
   });
 
   // The guard has already refused an unauthenticated caller on these two, so
   // the null branch is unreachable in practice — but the type says nullable and
   // an unreachable branch that returns 401 is cheaper than a cast that lies.
-  app.openapi(meRoute, (c) => {
+  app.openapi(meRoute, async (c) => {
     const principal = c.get("principal");
     if (!principal) return c.json(unauthorized("no authenticated session"), 401);
-    return c.json(principal, 200);
+    return c.json(await principalBody(principal), 200);
   });
 
   app.openapi(switchTenantRoute, async (c) => {
@@ -238,7 +282,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       principal.userId,
       tenantId,
     );
-    return c.json(switched, 200);
+    // Rebuilt after the switch, not before: the caller's role — and therefore
+    // everything it may do — belongs to the membership at the firm it just
+    // moved to, and is usually different from the one it left.
+    return c.json(await principalBody(switched), 200);
   });
 
   app.openapi(logoutRoute, async (c) => {

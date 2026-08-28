@@ -455,7 +455,26 @@ describe("reading the pipeline", () => {
 
     expect(await service.list(TENANT)).toHaveLength(2);
     const qualified = await service.list(TENANT, "qualified");
-    expect(qualified.map((l) => l.id)).toEqual([first.lead.id]);
+    expect(qualified.map((r) => r.lead.id)).toEqual([first.lead.id]);
+  });
+
+  it("names the prospect, so a board does not render a uuid", async () => {
+    // The gap that made the pipeline endpoint unusable by any screen: a lead
+    // carries partyId and ownerUserId, and both are meaningless to look at.
+    const { service } = setup();
+    await service.capture(capture({ ownerUserId: STAFF }), ACTOR);
+    const [row] = await service.list(TENANT);
+    expect(row?.party.displayName).toBe("Meridian Textiles Private Limited");
+    expect(row?.party.kind).toBe("organization");
+  });
+
+  it("returns no owner for a lead in the unassigned queue", async () => {
+    // Present-and-null, not absent: "nobody is working this" is a real state a
+    // board shows differently from "somebody is".
+    const { service } = setup();
+    const captured = await service.capture(capture(), ACTOR);
+    const record = await service.get(TENANT, captured.lead.id);
+    expect(record.owner).toBeNull();
   });
 
   it("refuses a stage filter the pipeline does not have", async () => {
