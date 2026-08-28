@@ -20,7 +20,10 @@ export type LeadErrorCode =
   | "LEAD_NOT_FOUND"
   | "LEAD_CLOSED"
   | "SAME_STAGE"
-  | "OWNER_NOT_STAFF";
+  | "OWNER_NOT_STAFF"
+  | "LOST_REASON_REQUIRED"
+  | "LOST_REASON_NOT_APPLICABLE"
+  | "BLANK_TITLE";
 
 export class InvalidSource extends LeadError {
   constructor(source: string, valid: readonly string[]) {
@@ -100,6 +103,40 @@ export class OwnerNotStaff extends LeadError {
       "OWNER_NOT_STAFF",
       `user ${JSON.stringify(userId)} is not active staff at this firm, so a lead cannot be ` +
         `assigned to them. An owner who cannot sign in is an opportunity nobody is working.`,
+    );
+  }
+}
+
+export class LostReasonRequired extends LeadError {
+  constructor(stage: string) {
+    super(
+      "LOST_REASON_REQUIRED",
+      `closing a lead as ${stage} needs a reason, in your own words. It is the one fact that is ` +
+        `obvious today and unrecoverable in a month, and it is what makes "${stage} — why?" a ` +
+        `question the pipeline can answer at all. Free text on purpose: a dropdown of five ` +
+        `reasons produces five reasons, and the useful one is always the sixth.`,
+    );
+  }
+}
+
+export class LostReasonNotApplicable extends LeadError {
+  constructor(stage: string, valid: readonly string[]) {
+    super(
+      "LOST_REASON_NOT_APPLICABLE",
+      `a lead moving to ${JSON.stringify(stage)} carries no lost reason — only ${valid.join(" and ")} ` +
+        `do. A won deal in particular has nothing to explain, and a column that accepted a reason ` +
+        `on it would collect notes nothing ever reads.`,
+    );
+  }
+}
+
+export class BlankTitle extends LeadError {
+  constructor() {
+    super(
+      "BLANK_TITLE",
+      `a lead needs a title with something in it. Whitespace satisfies NOT NULL and renders as ` +
+        `the blank row the field exists to prevent — name the opportunity, not the client, ` +
+        `because the list already shows the client beside it.`,
     );
   }
 }

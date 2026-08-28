@@ -14,12 +14,15 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../domain/engagement/model";
-import { readClauseBody } from "../domain/config/model";
+import { readClauseBody, readServiceBody } from "../domain/config/model";
+import { resolveTerms } from "../domain/document/model";
 import type {
   ClauseLibrary,
   ContentHasher,
   ESignProvider,
   EngagementRepository,
+  FirmSignatory,
+  FirmSignatureRecord,
   LetterFilters,
   LetterRecord,
   LetterSummary,
@@ -27,11 +30,14 @@ import type {
   NewLetter,
   NewLetterClause,
   NewLetterLine,
+  PinnedService,
   SignatureRecord,
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
+import { makeDocumentIdentity } from "./document";
+import type { FakePreferenceRepo } from "./document";
 
 export class FakeEngagementRepo implements EngagementRepository {
   readonly letters: EngagementLetter[] = [];
@@ -41,13 +47,30 @@ export class FakeEngagementRepo implements EngagementRepository {
   /** Pinned clause bodies, so `describeLetter` returns the wording that was
    *  actually agreed rather than an empty string. Keyed by version id. */
   readonly clauseBodies = new Map<string, Record<string, unknown>>();
+  /**
+   * The library the SERVICE pins resolve against, so `describeLetter` returns
+   * the pinned catalogue row the way the Postgres adapter's join does instead of
+   * a null that says "this fake does not do that part".
+   *
+   * The SAME instance the use case drafts from (`makeEngagementFakes` wires
+   * one), so a service a test publishes is the one a line's pin cites — a fake
+   * that could disagree with the adapter about which version resolved would be
+   * worse than no fake at all. Left null when a test builds the repo by hand:
+   * `service: null` is a real answer the port already allows.
+   */
+  catalogue: FakeClauseLibrary | null = null;
   partyNames = new Map<string, string>();
+  /** The accounts behind a firm signatory, so the read model can join a name
+   *  the way the Postgres adapter does. */
+  userNames = new Map<string, string>();
 
   create(l: NewLetter): Promise<EngagementLetter> {
     const row: EngagementLetter = {
       id: l.id,
       tenantId: l.tenantId,
+      ref: l.ref,
       partyId: l.partyId,
+      issuingEntityPartyId: l.issuingEntityPartyId,
       proposalId: l.proposalId,
       jurisdiction: l.jurisdiction,
       title: l.title,
@@ -65,7 +88,16 @@ export class FakeEngagementRepo implements EngagementRepository {
       signatureMethod: null,
       signatureReference: null,
       signedContentHash: null,
+      signedByTitle: null,
       withdrawnAt: null,
+      background: l.background,
+      addressedToPartyId: l.addressedToPartyId,
+      issuedOn: l.issuedOn,
+      supersedesId: l.supersedesId,
+      effectiveFrom: l.effectiveFrom,
+      firmSignatoryUserId: null,
+      firmSignatoryTitle: null,
+      firmSignedAt: null,
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -91,6 +123,15 @@ export class FakeEngagementRepo implements EngagementRepository {
       unitAmount: l.unitAmount,
       currency: l.currency,
       discountPercent: l.discountPercent,
+      effectiveFrom: l.effectiveFrom,
+      jurisdiction: l.jurisdiction,
+      billingFrequency: l.billingFrequency,
+      scopeOverride: l.scopeOverride,
+      clientObligationsOverride: l.clientObligationsOverride,
+      volumeLimitsOverride: l.volumeLimitsOverride,
+      exclusionsOverride: l.exclusionsOverride,
+      oopEstimate: l.oopEstimate,
+      pricingNote: l.pricingNote,
       removed: false,
     };
     this.lines.push(row);
@@ -143,6 +184,36 @@ export class FakeEngagementRepo implements EngagementRepository {
     );
   }
 
+  markSent(
+    tenantId: string,
+    letterId: string,
+    at: string,
+    issuedOnFallback: string,
+    firm: FirmSignatureRecord | null,
+  ): Promise<EngagementLetter> {
+    return Promise.resolve(
+      this.replace(tenantId, letterId, (l) => ({
+        ...l,
+        status: "sent" as const,
+        sentAt: l.sentAt ?? at,
+        // The same coalesce the SQL does: a letter the drafter dated keeps its
+        // date, one they did not is dated the day it went out.
+        issuedOn: l.issuedOn ?? issuedOnFallback,
+        firmSignatoryUserId: firm?.userId ?? null,
+        firmSignatoryTitle: firm?.title ?? null,
+        firmSignedAt: firm?.signedAt ?? null,
+      })),
+    );
+  }
+
+  findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
+    return Promise.resolve(
+      this.letters.find(
+        (l) => l.tenantId === tenantId && l.supersedesId === letterId && l.status !== "withdrawn",
+      ) ?? null,
+    );
+  }
+
   signAndFanOut(
     tenantId: string,
     letterId: string,
@@ -157,6 +228,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       signatureMethod: signature.signatureMethod,
       signatureReference: signature.signatureReference,
       signedContentHash: signature.signedContentHash,
+      signedByTitle: signature.signedByTitle,
     }));
     const created = engagements.map((e) => {
       const row: Engagement = {
@@ -168,6 +240,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         entityPartyId: e.entityPartyId,
         status: e.status,
         activatedAt: e.activatedAt,
+        effectiveFrom: e.effectiveFrom,
         endsOn: null,
       };
       this.engagements.push(row);
@@ -215,6 +288,39 @@ export class FakeEngagementRepo implements EngagementRepository {
         id: letter.partyId,
         displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
       },
+      issuingEntity: {
+        id: letter.issuingEntityPartyId,
+        displayName: this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
+      },
+      addressedTo:
+        letter.addressedToPartyId === null
+          ? null
+          : {
+              id: letter.addressedToPartyId,
+              displayName:
+                this.partyNames.get(letter.addressedToPartyId) ?? letter.addressedToPartyId,
+            },
+      // The three firm-signature columns move together in the schema, so one
+      // check settles the block here too.
+      firmSignatory:
+        letter.firmSignatoryUserId === null ||
+        letter.firmSignatoryTitle === null ||
+        letter.firmSignedAt === null
+          ? null
+          : {
+              userId: letter.firmSignatoryUserId,
+              displayName: this.userNames.get(letter.firmSignatoryUserId) ?? null,
+              title: letter.firmSignatoryTitle,
+              signedAt: letter.firmSignedAt,
+            },
+      supersedes: this.refOf(tenantId, letter.supersedesId),
+      supersededBy: this.refOf(
+        tenantId,
+        this.letters.find(
+          (l) =>
+            l.tenantId === tenantId && l.supersedesId === letter.id && l.status !== "withdrawn",
+        )?.id ?? null,
+      ),
       // The entity name resolves through the same map the client's does — the
       // fake stands in for the join the Postgres adapter actually makes.
       lines: lines.map((l) => ({
@@ -223,7 +329,19 @@ export class FakeEngagementRepo implements EngagementRepository {
           id: l.entityPartyId,
           displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
         },
-        service: null,
+        service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        // The SAME `resolveTerms` the Postgres adapter calls, over the same
+        // pinned body — a second override-else-catalogue rule in here would
+        // disagree with the adapter on the case the rule exists for.
+        terms: resolveTerms(
+          {
+            scope: l.scopeOverride,
+            clientObligations: l.clientObligationsOverride,
+            volumeLimits: l.volumeLimitsOverride,
+            exclusions: l.exclusionsOverride,
+          },
+          pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        ),
         net: net(l),
       })),
       clauses: clauses.map((c) => {
@@ -251,11 +369,23 @@ export class FakeEngagementRepo implements EngagementRepository {
             id: letter.partyId,
             displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
           },
+          issuingEntity: {
+            id: letter.issuingEntityPartyId,
+            displayName:
+              this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
+          },
           totals: totals(lines, letter.currency),
           lineCount: lines.length,
         };
       }),
     );
+  }
+
+  /** A letter identified the way lineage prints it. Null in, null out. */
+  private refOf(tenantId: string, letterId: string | null): { id: string; ref: string } | null {
+    if (letterId === null) return null;
+    const letter = this.letters.find((l) => l.tenantId === tenantId && l.id === letterId);
+    return letter === undefined ? null : { id: letter.id, ref: letter.ref };
   }
 
   private liveLines(tenantId: string, letterId: string): (LetterLine & { removed: boolean })[] {
@@ -302,6 +432,15 @@ export class FakeClauseLibrary implements ClauseLibrary {
     this.versions.set(versionId, row);
   }
 
+  /** The same lookup `readPinnedVersion` does, without the promise — so
+   *  `FakeEngagementRepo.describeLetter` can resolve each line's pin the way a
+   *  JOIN does rather than awaiting once per line. */
+  pinned(
+    versionId: string,
+  ): { key: string; version: number; body: Record<string, unknown> } | null {
+    return this.versions.get(versionId) ?? null;
+  }
+
   readPinnedVersion(
     _tenantId: string,
     versionId: string,
@@ -313,6 +452,24 @@ export class FakeClauseLibrary implements ClauseLibrary {
     readonly body: Record<string, unknown>;
   } | null> {
     return Promise.resolve(this.versions.get(versionId) ?? null);
+  }
+}
+
+/**
+ * The firm's standing signatory, as a test controls it.
+ *
+ * Starts empty, because that is the state every firm is in until somebody names
+ * one — and a letter sent by a firm that has named nobody must still go out.
+ */
+export class FakeFirmSignatory implements FirmSignatory {
+  private current: { userId: string; title: string } | null = null;
+
+  name(userId: string, title: string): void {
+    this.current = { userId, title };
+  }
+
+  firmSignatory(_tenantId: string): Promise<{ userId: string; title: string } | null> {
+    return Promise.resolve(this.current);
   }
 }
 
@@ -351,11 +508,27 @@ export function makeEngagementFakes(): Deps & {
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
   esign: FakeSigner;
+  /** The firm's issuing-entity rule, so a test can change it or empty it. */
+  firmEntities: FakePreferenceRepo;
+  /** Who binds the firm, so a test can name one — or leave nobody. */
+  firm: FakeFirmSignatory;
   events: RecordingEventSink;
 } {
+  // The REAL DocumentService over in-memory ports — see the note in
+  // testfakes/proposal.ts. The two documents share one seam on purpose, so they
+  // cannot disagree about which entity serves a client.
+  const identity = makeDocumentIdentity();
+  // ONE library, wired into both the use case and the read model, so a service a
+  // test publishes is the same one a line's pin resolves to.
+  const library = new FakeClauseLibrary();
+  const letters = new FakeEngagementRepo();
+  letters.catalogue = library;
   return {
-    letters: new FakeEngagementRepo(),
-    library: new FakeClauseLibrary(),
+    letters,
+    library,
+    documents: identity.documents,
+    firmEntities: identity.firmEntities,
+    firm: new FakeFirmSignatory(),
     esign: new FakeSigner(),
     hasher: new FakeHasher(),
     ids: new FakeIds(),
@@ -383,18 +556,28 @@ function mul(a: bigint, b: bigint): bigint {
   return (a * b + UNIT / 2n) / UNIT;
 }
 
-function grossOf(l: Pick<LetterLine, "unitAmount" | "quantity">): bigint {
+// AN UNPRICED LINE IS NOT ZERO HERE EITHER: `null` in, `null` out, and the line
+// is COUNTED instead — so this fake agrees with the SQL in the Postgres adapter
+// about what a letter's totals leave out.
+
+function grossOf(l: Pick<LetterLine, "unitAmount" | "quantity">): bigint | null {
+  if (l.unitAmount === null) return null;
   return mul(scaled(l.unitAmount), scaled(l.quantity));
 }
 
 function netScaled(
   l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">,
-): bigint {
-  return mul(mul(grossOf(l), scaled("100") - scaled(l.discountPercent)), scaled("0.01"));
+): bigint | null {
+  const gross = grossOf(l);
+  if (gross === null) return null;
+  return mul(mul(gross, scaled("100") - scaled(l.discountPercent)), scaled("0.01"));
 }
 
-function net(l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">): string {
-  return unscaled(netScaled(l));
+function net(
+  l: Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">,
+): string | null {
+  const value = netScaled(l);
+  return value === null ? null : unscaled(value);
 }
 
 function totals(
@@ -403,11 +586,57 @@ function totals(
 ): LetterRecord["totals"] {
   let gross = 0n;
   let n = 0n;
+  let unpriced = 0;
   for (const line of lines) {
-    gross += grossOf(line);
-    n += netScaled(line);
+    const lineGross = grossOf(line);
+    const lineNet = netScaled(line);
+    if (lineGross === null || lineNet === null) {
+      unpriced += 1;
+      continue;
+    }
+    gross += lineGross;
+    n += lineNet;
   }
-  return { gross: unscaled(gross), discount: unscaled(gross - n), net: unscaled(n), currency };
+  return {
+    gross: unscaled(gross),
+    discount: unscaled(gross - n),
+    net: unscaled(n),
+    currency,
+    unpricedLineCount: unpriced,
+  };
+}
+
+/**
+ * A line's pinned catalogue row, read the way the Postgres adapter reads it:
+ * through `readServiceBody`, the one reader for `kind='service'`. Sharing that
+ * function is the point — a fake that mapped the frozen jsonb itself would be a
+ * second interpretation of it, and the two would disagree exactly where a body
+ * predates a field.
+ */
+function pinnedServiceOf(
+  catalogue: FakeClauseLibrary | null,
+  versionId: string,
+): PinnedService | null {
+  const row = catalogue?.pinned(versionId);
+  if (row === null || row === undefined) return null;
+  const stored = readServiceBody(row.body);
+  return {
+    key: row.key,
+    version: row.version,
+    ref: stored.ref,
+    name: stored.name === "" ? row.key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
+  };
 }
 
 function strip(l: LetterLine & { removed: boolean }): LetterLine {

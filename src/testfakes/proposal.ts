@@ -16,9 +16,12 @@
 //   real Postgres.
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import { readServiceBody } from "../domain/config/model";
+import { resolveTerms } from "../domain/document/model";
 import type {
   NewProposal,
   NewProposalLine,
+  PinnedService,
   PolicyDirectory,
   ProposalFilters,
   ProposalRecord,
@@ -31,10 +34,24 @@ import type { Deps } from "../usecase/proposal/service";
 import { FakeIds } from "./ids";
 import { FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
+import { makeDocumentIdentity } from "./document";
+import type { FakePreferenceRepo } from "./document";
 
 export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
   readonly lines: (ProposalLine & { removed: boolean })[] = [];
+  /**
+   * The catalogue the pins resolve against, so `describe` returns the PINNED
+   * service the way the Postgres adapter's join does instead of a null that
+   * says "this fake does not do that part".
+   *
+   * The SAME instance the use case quotes from (`makeProposalFakes` wires one),
+   * so a test registers a service in one place and the read model cites it — and
+   * a fake that could disagree with the adapter about which version a line
+   * resolved to would be worse than no fake at all. Left null when a test builds
+   * the repo by hand: `service: null` is a real answer the port already allows.
+   */
+  catalogue: FakeServiceCatalogue | null = null;
   /** Display names for the parties a test quotes, so a joined read returns
    *  something a screen could render rather than a uuid. */
   partyNames = new Map<string, string>();
@@ -47,7 +64,9 @@ export class FakeProposalRepo implements ProposalRepository {
     const row: Proposal = {
       id: p.id,
       tenantId: p.tenantId,
+      ref: p.ref,
       partyId: p.partyId,
+      issuingEntityPartyId: p.issuingEntityPartyId,
       leadId: p.leadId,
       title: p.title,
       status: "draft",
@@ -61,6 +80,7 @@ export class FakeProposalRepo implements ProposalRepository {
       discountApprovedAt: null,
       firstViewedAt: null,
       viewCount: 0,
+      declinedReason: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -86,6 +106,14 @@ export class FakeProposalRepo implements ProposalRepository {
       unitAmount: l.unitAmount,
       currency: l.currency,
       discountPercent: l.discountPercent,
+      jurisdiction: l.jurisdiction,
+      billingFrequency: l.billingFrequency,
+      scopeOverride: l.scopeOverride,
+      clientObligationsOverride: l.clientObligationsOverride,
+      volumeLimitsOverride: l.volumeLimitsOverride,
+      exclusionsOverride: l.exclusionsOverride,
+      oopEstimate: l.oopEstimate,
+      pricingNote: l.pricingNote,
       removed: false,
     };
     this.lines.push(row);
@@ -107,6 +135,7 @@ export class FakeProposalRepo implements ProposalRepository {
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal> {
     return Promise.resolve(
       this.replace(tenantId, proposalId, (p) => ({
@@ -114,6 +143,7 @@ export class FakeProposalRepo implements ProposalRepository {
         status,
         sentAt: status === "draft" ? null : (p.sentAt ?? at),
         decidedAt: ["accepted", "rejected", "expired"].includes(status) ? at : null,
+        declinedReason,
       })),
     );
   }
@@ -147,7 +177,10 @@ export class FakeProposalRepo implements ProposalRepository {
     const lines = this.liveLines(tenantId, proposalId);
     return {
       id: proposal.id,
+      ref: proposal.ref,
       firmName: this.firmName,
+      issuedBy:
+        this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
       addressedTo: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
       title: proposal.title,
       status: proposal.status,
@@ -160,6 +193,10 @@ export class FakeProposalRepo implements ProposalRepository {
         unitAmount: l.unitAmount,
         discountPercent: l.discountPercent,
         net: netOf(l),
+        // The recipient reads the reason where the figure would be.
+        pricingNote: l.pricingNote,
+        billingFrequency: l.billingFrequency,
+        oopEstimate: l.oopEstimate,
       })),
       totals: totalsOf(lines, proposal.currency),
     };
@@ -184,6 +221,11 @@ export class FakeProposalRepo implements ProposalRepository {
         id: proposal.partyId,
         displayName: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
       },
+      issuingEntity: {
+        id: proposal.issuingEntityPartyId,
+        displayName:
+          this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
+      },
       lines: lines.map((l) => ({
         line: stripRemoved(l),
         // Null is a real answer here, not an unresolved join: a proposal line
@@ -195,7 +237,19 @@ export class FakeProposalRepo implements ProposalRepository {
                 id: l.entityPartyId,
                 displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
               },
-        service: null,
+        service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        // The SAME `resolveTerms` the Postgres adapter calls, over the same
+        // pinned body: a fake with its own override-else-catalogue rule would
+        // disagree with the adapter on the one case the rule exists for.
+        terms: resolveTerms(
+          {
+            scope: l.scopeOverride,
+            clientObligations: l.clientObligationsOverride,
+            volumeLimits: l.volumeLimitsOverride,
+            exclusions: l.exclusionsOverride,
+          },
+          pinnedServiceOf(this.catalogue, l.serviceVersionId),
+        ),
         net: netOf(l),
       })),
       totals: totalsOf(lines, proposal.currency),
@@ -218,6 +272,11 @@ export class FakeProposalRepo implements ProposalRepository {
           party: {
             id: proposal.partyId,
             displayName: this.partyNames.get(proposal.partyId) ?? proposal.partyId,
+          },
+          issuingEntity: {
+            id: proposal.issuingEntityPartyId,
+            displayName:
+              this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
           },
           totals: totalsOf(lines, proposal.currency),
           lineCount: lines.length,
@@ -272,6 +331,15 @@ export class FakeServiceCatalogue implements ServiceCatalogue {
     this.versions.set(versionId, row);
   }
 
+  /** The same lookup `readPinnedVersion` does, without the promise — so
+   *  `FakeProposalRepo.describe` can resolve a line's pin the way a JOIN does,
+   *  in one pass, rather than awaiting once per line. */
+  pinned(
+    versionId: string,
+  ): { key: string; version: number; body: Record<string, unknown> } | null {
+    return this.versions.get(versionId) ?? null;
+  }
+
   readPinnedVersion(
     _tenantId: string,
     versionId: string,
@@ -302,12 +370,26 @@ export function makeProposalFakes(): Deps & {
   catalogue: FakeServiceCatalogue;
   policies: FakePolicyDirectory;
   shareTokens: FakeTokenFactory;
+  /** The firm's issuing-entity rule, so a test can change it or empty it. */
+  firmEntities: FakePreferenceRepo;
   events: RecordingEventSink;
 } {
+  // The REAL DocumentService over in-memory ports: quoting must fail here if
+  // the rule that picks an issuing entity stops working, and a stub that
+  // recorded being asked would let it pass.
+  const identity = makeDocumentIdentity();
+  // ONE catalogue, wired into both the use case and the read model, so a service
+  // a test publishes is the same one a line's pin resolves to. Two instances
+  // would let the fake read model cite a version the use case never saw.
+  const catalogue = new FakeServiceCatalogue();
+  const proposals = new FakeProposalRepo();
+  proposals.catalogue = catalogue;
   return {
-    proposals: new FakeProposalRepo(),
-    catalogue: new FakeServiceCatalogue(),
+    proposals,
+    catalogue,
     policies: new FakePolicyDirectory(),
+    documents: identity.documents,
+    firmEntities: identity.firmEntities,
     // The identity fake, reused: both ports want the same guarantee, and a
     // second predictable-token fake would be the same class with a new name.
     shareTokens: new FakeTokenFactory(),
@@ -345,19 +427,31 @@ function mulRound(a: bigint, b: bigint): bigint {
   return (product + half) / UNIT;
 }
 
-function grossOf(l: Pick<ProposalLine, "unitAmount" | "quantity">): bigint {
+// AN UNPRICED LINE IS NOT ZERO HERE EITHER. `null` in, `null` out — matching
+// `numeric` NULL through `crm.proposal_line_amount` — and the line is COUNTED
+// instead, so this fake and the view agree about what a total leaves out. A
+// fake that quietly treated it as zero would make the unit tests green on
+// exactly the number the migration exists to stop anybody printing.
+
+function grossOf(l: Pick<ProposalLine, "unitAmount" | "quantity">): bigint | null {
+  if (l.unitAmount === null) return null;
   return mulRound(toScaled(l.unitAmount), toScaled(l.quantity));
 }
 
 function netScaled(
   l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">,
-): bigint {
+): bigint | null {
+  const gross = grossOf(l);
+  if (gross === null) return null;
   const keep = toScaled("100") - toScaled(l.discountPercent);
-  return mulRound(mulRound(grossOf(l), keep), toScaled("0.01"));
+  return mulRound(mulRound(gross, keep), toScaled("0.01"));
 }
 
-function netOf(l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">): string {
-  return fromScaled(netScaled(l));
+function netOf(
+  l: Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent">,
+): string | null {
+  const net = netScaled(l);
+  return net === null ? null : fromScaled(net);
 }
 
 function totalsOf(
@@ -366,15 +460,57 @@ function totalsOf(
 ): ProposalRecord["totals"] {
   let gross = 0n;
   let net = 0n;
+  let unpriced = 0;
   for (const line of lines) {
-    gross += grossOf(line);
-    net += netScaled(line);
+    const lineGross = grossOf(line);
+    const lineNet = netScaled(line);
+    if (lineGross === null || lineNet === null) {
+      unpriced += 1;
+      continue;
+    }
+    gross += lineGross;
+    net += lineNet;
   }
   return {
     gross: fromScaled(gross),
     discount: fromScaled(gross - net),
     net: fromScaled(net),
     currency,
+    unpricedLineCount: unpriced,
+  };
+}
+
+/**
+ * A line's pinned catalogue row, read the way the Postgres adapter reads it:
+ * through `readServiceBody`, the one reader for `kind='service'`.
+ *
+ * Sharing that function is the whole value of doing it here — a fake that
+ * mapped the body itself would be a second interpretation of a frozen jsonb, and
+ * the two would disagree exactly where a body predates a field.
+ */
+function pinnedServiceOf(
+  catalogue: FakeServiceCatalogue | null,
+  versionId: string,
+): PinnedService | null {
+  const row = catalogue?.pinned(versionId);
+  if (row === null || row === undefined) return null;
+  const stored = readServiceBody(row.body);
+  return {
+    key: row.key,
+    version: row.version,
+    ref: stored.ref,
+    name: stored.name === "" ? row.key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
   };
 }
 

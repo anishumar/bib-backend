@@ -17,6 +17,7 @@ import type {
   MembershipRepository,
   NewMembership,
   NewTenant,
+  IssuingEntitySeeder,
   NewUser,
   RoleDirectory,
   RoleRegistrySeeder,
@@ -33,6 +34,10 @@ export class FakeTenantRepo implements TenantRepository {
       name: t.name,
       status: "active",
       reportingCurrency: t.reportingCurrency,
+      // A new firm has named nobody. What the product does about that is the
+      // service's business, not the store's.
+      firmSignatoryUserId: null,
+      firmSignatoryTitle: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -42,6 +47,18 @@ export class FakeTenantRepo implements TenantRepository {
   }
   findById(id: string): Promise<Tenant | null> {
     return Promise.resolve(this.rows.find((r) => r.id === id) ?? null);
+  }
+  setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
+    const index = this.rows.findIndex((r) => r.id === tenantId);
+    const current = this.rows[index];
+    if (index === -1 || current === undefined) throw new Error(`fake: no tenant ${tenantId}`);
+    const updated: Tenant = {
+      ...current,
+      firmSignatoryUserId: userId,
+      firmSignatoryTitle: title,
+    };
+    this.rows[index] = updated;
+    return Promise.resolve(updated);
   }
 }
 
@@ -163,6 +180,7 @@ export function makeFakes(): {
   users: FakeUserRepo;
   memberships: FakeMembershipRepo;
   roleSeeder: RoleRegistrySeeder;
+  issuingEntitySeeder: FakeIssuingEntitySeeder;
   roleDirectory: RoleDirectory;
   gradeSeeder: GradeLadderSeeder;
   gradeDirectory: GradeDirectory;
@@ -204,9 +222,28 @@ export function makeFakes(): {
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".
     roleSeeder: new ConfigService({ registry: config, holders: memberships, ids, events }),
+    // Every firm owns an issuing entity from the moment it exists, exactly as
+    // it owns a role set. A tenancy test therefore fails if provisioning stops
+    // giving a new firm one, which is the thing that would leave it unable to
+    // draft a proposal at all.
+    issuingEntitySeeder: new FakeIssuingEntitySeeder(ids),
     roleDirectory: config,
     config,
     ids,
     events,
   };
+}
+
+/** The firm's own entity, created with the firm. Records what it made so a
+ *  test can assert the tenant got one rather than trusting that it did. */
+export class FakeIssuingEntitySeeder implements IssuingEntitySeeder {
+  readonly seeded: { tenantId: string; firmName: string; partyId: string }[] = [];
+
+  constructor(private readonly ids: FakeIds) {}
+
+  seedFirmEntity(tenantId: string, firmName: string): Promise<string> {
+    const partyId = this.ids.newId();
+    this.seeded.push({ tenantId, firmName, partyId });
+    return Promise.resolve(partyId);
+  }
 }

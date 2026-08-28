@@ -69,6 +69,10 @@ interface PublishedRow extends EntryRow {
   v_body: Record<string, unknown> | null;
   v_published_at: Date | null;
   v_archived_at: Date | null;
+  d_id: string | null;
+  d_version: number | null;
+  d_status: VersionStatus | null;
+  d_body: Record<string, unknown> | null;
 }
 
 function toEntry(r: EntryRow): ConfigEntry {
@@ -131,6 +135,15 @@ export class PostgresConfigRepository
       // belongs in the list, saying plainly that it publishes nothing. Dropping
       // it would make a half-finished service look like one that was never
       // created, and the two need different actions.
+      // The pending draft joins here rather than being fetched per row. A screen
+      // needs to know whether anything is waiting, and asking again once per
+      // entry is the per-row lookup CLAUDE.md warns about — it also left a draft
+      // UNPUBLISHABLE from a list once its entry had something in force.
+      //
+      // LATERAL with LIMIT 1 and not a second plain LEFT JOIN: several drafts
+      // may sit beside a published version (0005's unique index is partial), and
+      // a plain join would multiply the entry into one row per draft and quietly
+      // repeat it in the list.
       const rows = await db<PublishedRow[]>`
         SELECT e.id, e.tenant_id, e.kind, e.key,
                v.id           AS v_id,
@@ -138,9 +151,20 @@ export class PostgresConfigRepository
                v.status       AS v_status,
                v.body         AS v_body,
                v.published_at AS v_published_at,
-               v.archived_at  AS v_archived_at
+               v.archived_at  AS v_archived_at,
+               d.id           AS d_id,
+               d.version      AS d_version,
+               d.status       AS d_status,
+               d.body         AS d_body
         FROM config.entry e
         LEFT JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        LEFT JOIN LATERAL (
+          SELECT id, version, status, body
+          FROM config.version
+          WHERE entry_id = e.id AND status = 'draft'
+          ORDER BY version DESC
+          LIMIT 1
+        ) d ON true
         WHERE e.kind = ${kind}
         ORDER BY e.key
       `;
@@ -158,6 +182,21 @@ export class PostgresConfigRepository
                 body: r.v_body,
                 published_at: r.v_published_at,
                 archived_at: r.v_archived_at,
+              }),
+        // A draft has neither date by definition — 0005's coherence CHECK says
+        // so — which is why they are not selected above.
+        pendingDraft:
+          r.d_id === null || r.d_version === null || r.d_status === null || r.d_body === null
+            ? null
+            : toVersion({
+                id: r.d_id,
+                tenant_id: r.tenant_id,
+                entry_id: r.id,
+                version: r.d_version,
+                status: r.d_status,
+                body: r.d_body,
+                published_at: null,
+                archived_at: null,
               }),
       }));
     });

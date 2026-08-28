@@ -21,7 +21,10 @@ export type PartyErrorCode =
   | "INVALID_RELATIONSHIP_TYPE"
   | "INVALID_DATE_RANGE"
   | "SELF_RELATIONSHIP"
-  | "DUPLICATE_IDENTIFIER";
+  | "DUPLICATE_IDENTIFIER"
+  | "PARTY_ALREADY_ARCHIVED"
+  | "PARTY_NOT_ARCHIVED"
+  | "PARTY_HAS_REFERENCES";
 
 export class PartyNotFound extends PartyError {
   constructor(ref: string) {
@@ -66,6 +69,39 @@ export class DuplicateIdentifier extends PartyError {
     super(
       "DUPLICATE_IDENTIFIER",
       `identifier ${type} ${JSON.stringify(value)} already exists for this tenant`,
+    );
+  }
+}
+export class PartyAlreadyArchived extends PartyError {
+  constructor(ref: string) {
+    super("PARTY_ALREADY_ARCHIVED", `party ${JSON.stringify(ref)} is already archived`);
+  }
+}
+export class PartyNotArchived extends PartyError {
+  constructor(ref: string) {
+    super(
+      "PARTY_NOT_ARCHIVED",
+      `party ${JSON.stringify(ref)} is not archived, so there is nothing to restore`,
+    );
+  }
+}
+/**
+ * Archiving was refused because something still points at the party.
+ *
+ * The refusal itself is the DATABASE's (migration 0035,
+ * `trg_party_archive_guard`) — this is what the adapter translates it into, so
+ * the API can name what refers to the party instead of surfacing a raw driver
+ * error. Nothing here is a delete: the party stays, and un-archiving is always
+ * available.
+ */
+export class PartyHasReferences extends PartyError {
+  constructor(
+    ref: string,
+    readonly referrers: readonly string[],
+  ) {
+    super(
+      "PARTY_HAS_REFERENCES",
+      `party ${JSON.stringify(ref)} cannot be archived: it is still referenced by ${referrers.join(", ")}`,
     );
   }
 }

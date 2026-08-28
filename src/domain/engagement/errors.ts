@@ -30,6 +30,13 @@ export type EngagementErrorCode =
   | "ADVANCE_ALREADY_RECORDED"
   | "ADVANCE_AMOUNT_REQUIRED"
   | "INVALID_AMOUNT"
+  | "UNPRICED_LINE_NEEDS_REASON"
+  | "UNPRICED_LINE_HAS_DISCOUNT"
+  | "INVALID_BILLING_FREQUENCY"
+  | "INVALID_OOP_ESTIMATE"
+  | "INVALID_DATE"
+  | "LETTER_NOT_SUPERSEDABLE"
+  | "ALREADY_SUPERSEDED"
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_NOT_ACTIVE"
   | "SIGNATURE_INCOMPLETE";
@@ -193,6 +200,84 @@ export class InvalidAmount extends EngagementError {
       `${field} ${JSON.stringify(value)} must be a non-negative decimal STRING with at most ` +
         `four decimal places — "25000", "1499.50" — never a number, because a float cannot ` +
         `hold 1499.50 exactly.`,
+    );
+  }
+}
+
+export class UnpricedLineNeedsReason extends EngagementError {
+  constructor() {
+    super(
+      "UNPRICED_LINE_NEEDS_REASON",
+      `a line with no unit amount has to say WHY — "As mutually agreed". Send a "pricingNote" ` +
+        `with it. On a letter this is a TERM: the signature commits to it, and a blank where a ` +
+        `price belongs is a term nobody can read afterwards.`,
+    );
+  }
+}
+
+export class UnpricedLineHasDiscount extends EngagementError {
+  constructor(percent: string) {
+    super(
+      "UNPRICED_LINE_HAS_DISCOUNT",
+      `a line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
+        `percentage off "as mutually agreed" is not a number. Price the line, or send "0".`,
+    );
+  }
+}
+
+export class InvalidLineBillingFrequency extends EngagementError {
+  constructor(value: string, allowed: readonly string[]) {
+    super(
+      "INVALID_BILLING_FREQUENCY",
+      `billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
+        `how often this DEAL is invoiced, which is not how often the work comes round.`,
+    );
+  }
+}
+
+export class InvalidOutOfPocketEstimate extends EngagementError {
+  constructor(reason: string) {
+    super(
+      "INVALID_OOP_ESTIMATE",
+      `out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+        `from the fee, so all three travel together or none of them do.`,
+    );
+  }
+}
+
+export class InvalidDate extends EngagementError {
+  constructor(field: string, value: string) {
+    super(
+      "INVALID_DATE",
+      `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD — "2026-10-01". ` +
+        `A day, not an instant: an engagement that begins on 1 October begins on the client's ` +
+        `1 October, and midnight UTC is somebody else's evening.`,
+    );
+  }
+}
+
+export class LetterNotSupersedable extends EngagementError {
+  constructor(status: string) {
+    // The rule the freeze's own message has been giving for three tasks, now
+    // with somewhere to record it — and with the two cases it does NOT cover
+    // named, because those are the ones somebody reaches for it by mistake.
+    super(
+      "LETTER_NOT_SUPERSEDABLE",
+      `only a SIGNED letter can be superseded, and this one is ${status}. A draft is edited in ` +
+        `place; a letter that went out and was never signed is withdrawn. Superseding exists for ` +
+        `the agreement the client actually made, which is the one thing that can never be edited.`,
+    );
+  }
+}
+
+export class AlreadySuperseded extends EngagementError {
+  constructor(ref: string) {
+    super(
+      "ALREADY_SUPERSEDED",
+      `${ref} already supersedes that letter. Two live letters replacing one agreement leaves ` +
+        `nobody able to say which is in force. Withdraw ${ref} first if it is the wrong ` +
+        `replacement, or amend it while it is still a draft.`,
     );
   }
 }

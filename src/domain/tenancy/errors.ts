@@ -24,7 +24,8 @@ export type TenancyErrorCode =
   | "MEMBERSHIP_NOT_FOUND"
   | "MEMBERSHIP_EXISTS"
   | "ROLE_NOT_DEFINED"
-  | "LAST_ADMINISTRATOR";
+  | "LAST_ADMINISTRATOR"
+  | "SIGNATORY_NOT_A_MEMBER";
 
 export class InvalidSlug extends TenancyError {
   constructor(slug: string) {
@@ -102,6 +103,21 @@ export class RoleNotDefined extends TenancyError {
     );
   }
 }
+export class SignatoryNotAMember extends TenancyError {
+  constructor(userId: string) {
+    // A foreign key cannot say this: tenancy.user_account is GLOBAL, so the
+    // column can point at any login on the installation. Authority to bind the
+    // firm is the strongest thing a person can hold here, and the one check
+    // that matters is that they actually work here.
+    super(
+      "SIGNATORY_NOT_A_MEMBER",
+      `user ${JSON.stringify(userId)} has no active staff membership at this firm, so they ` +
+        `cannot be named as the person who binds it. Whoever signs the firm's engagement ` +
+        `letters has to work here — add them to the roster first, or reinstate their access.`,
+    );
+  }
+}
+
 export class LastAdministrator extends TenancyError {
   constructor(adminPermission: string) {
     super(

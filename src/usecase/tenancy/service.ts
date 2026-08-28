@@ -26,6 +26,7 @@ import {
   MembershipExists,
   MembershipNotFound,
   RoleNotDefined,
+  SignatoryNotAMember,
   SlugTaken,
   TenantNotFound,
   UserNotFound,
@@ -38,6 +39,7 @@ import type {
   GradeDirectory,
   GradeLadderSeeder,
   MemberGrade,
+  IssuingEntitySeeder,
   MemberRecord,
   MembershipRepository,
   RoleDirectory,
@@ -52,6 +54,9 @@ export interface Deps {
   readonly memberships: MembershipRepository;
   /** A new firm's role definitions, written as its own config rows. */
   readonly roleSeeder: RoleRegistrySeeder;
+  /** A new firm's own entity, and the fallback rule naming it as the issuer of
+   *  its documents. Without it the firm cannot draft anything at all. */
+  readonly issuingEntitySeeder: IssuingEntitySeeder;
   /** What this firm's roles ARE, for the two things administration must refuse:
    *  assigning a role nobody published, and removing the last administrator. */
   readonly roleDirectory: RoleDirectory;
@@ -103,6 +108,22 @@ export interface ChangeMemberGradeInput {
   readonly membershipId: string;
   /** `null` takes them off the ladder — a real answer, not an omission. */
   readonly gradeId: string | null;
+}
+
+export interface SetFirmSignatoryInput {
+  readonly tenantId: string;
+  /** Whoever binds the firm. Must have an active STAFF membership here. */
+  readonly userId: string;
+  /** The capacity they sign in — "Director", "Managing Partner". Printed under
+   *  their name on every letter the firm sends from now on. */
+  readonly title: string;
+}
+
+/** The firm's standing signatory, with the name a letterhead prints. */
+export interface FirmSignatoryRecord {
+  readonly userId: string;
+  readonly displayName: string | null;
+  readonly title: string;
 }
 
 export class TenancyService {
@@ -192,6 +213,35 @@ export class TenancyService {
     // the screen. The reverse — a ladder nobody can reach because gate 3
     // refuses every request — cannot be fixed from inside the product.
     await this.deps.gradeSeeder.seedDefaultGrades(tenant.id, actor);
+    // And its own entity, with the fallback rule naming it as the issuer of the
+    // firm's documents — for the same reason, one step further on. Both
+    // documents carry `issuing_entity_party_id NOT NULL` (0021), so a firm with
+    // no preference row cannot draft a proposal, and telling a firm to
+    // configure that before it can quote anybody would be a worse first day
+    // than the roles problem above.
+    //
+    // The entity seeded is the firm ITSELF, which is right for the firm that
+    // operates one company and is a starting point for the firm that operates
+    // several — the note on the row says nobody chose it. The same honest limit
+    // as the role seeding applies: two ports with no shared unit of work, so a
+    // failure here leaves an audited tenant with roles and no issuer. That
+    // state is loud (drafting refuses, naming the row that is missing) rather
+    // than silent.
+    const firmEntityPartyId = await this.deps.issuingEntitySeeder.seedFirmEntity(
+      tenant.id,
+      tenant.name,
+    );
+    // A party came into existence, so the ledger says so. The party module
+    // records the same verb for every other party; this one is created by
+    // provisioning rather than by a person, which is exactly why leaving it
+    // unrecorded would make the firm's own entity the one party with no origin.
+    await this.deps.events.recordEvent({
+      tenantId: tenant.id,
+      verb: "party.created",
+      objectId: firmEntityPartyId,
+      actor,
+      payload: { kind: "organization", isFirmSelf: true, ...byline(input.provisionedBy) },
+    });
     return tenant;
   }
 
@@ -456,6 +506,85 @@ export class TenancyService {
       },
     });
     return updated;
+  }
+
+  // ── Who binds the firm ──────────────────────────────────────────────────────
+  //
+  // "Unki ek hi signature rahegi" — one signatory for the whole firm, whichever
+  // of its entities issues the document. It lives on the tenant row rather than
+  // in the configuration registry because there is exactly one current answer
+  // and no version history worth keeping: the history that matters is on the
+  // LETTERS, each of which snapshots the block it went out with.
+  //
+  // This is deliberately NOT the same fact as who operated the system. The
+  // ledger records the operator as an event's actor and always will; authority
+  // to bind is an audit question about the firm, and a firm where the person
+  // who presses send is the person who signs is a coincidence, not a rule.
+
+  /** Who signs this firm's letters, with the name a letterhead prints. Null
+   *  when the firm has not named anyone — a state it operates in perfectly
+   *  well, with the signature block simply not printing. */
+  async firmSignatory(tenantId: string): Promise<FirmSignatoryRecord | null> {
+    const tenant = await this.deps.tenants.findById(tenantId);
+    if (!tenant) throw new TenantNotFound(tenantId);
+    if (tenant.firmSignatoryUserId === null || tenant.firmSignatoryTitle === null) return null;
+    // The NAME is a read-time join, like the ledger's actor: an erased account
+    // stops resolving and the letters that named it survive.
+    const user = await this.deps.users.findById(tenant.firmSignatoryUserId);
+    return {
+      userId: tenant.firmSignatoryUserId,
+      displayName: user?.displayName ?? null,
+      title: tenant.firmSignatoryTitle,
+    };
+  }
+
+  /**
+   * Name the person who binds the firm.
+   *
+   * Checked against the ROSTER, not just against `user_account`: that table is
+   * global, so the foreign key would happily accept a login at another firm.
+   * Authority to bind is the strongest thing a person holds in this product and
+   * the one requirement worth stating is that they work here.
+   *
+   * STAFF only, and active only. A client-portal membership is a client, and a
+   * revoked one is somebody who used to work here.
+   *
+   * There is no way to CLEAR it, deliberately: a firm that has named a
+   * signatory and then unnames one has letters going out with a blank block
+   * again, which is the defect this exists to fix. A successor is an UPDATE,
+   * which is the whole reason it is a row.
+   */
+  async setFirmSignatory(input: SetFirmSignatoryInput, actor: Actor): Promise<FirmSignatoryRecord> {
+    const tenant = await this.deps.tenants.findById(input.tenantId);
+    if (!tenant) throw new TenantNotFound(input.tenantId);
+
+    const title = input.title.trim();
+    if (title === "") throw new SignatoryNotAMember(input.userId);
+
+    const roster = await this.deps.memberships.listMembers(input.tenantId);
+    const member = roster.find(
+      (m) =>
+        m.membership.userId === input.userId &&
+        m.membership.audience === "STAFF" &&
+        m.membership.isActive,
+    );
+    if (!member) throw new SignatoryNotAMember(input.userId);
+
+    await this.deps.tenants.setFirmSignatory(input.tenantId, input.userId, title);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "firm_signatory.set",
+      objectId: input.tenantId,
+      actor,
+      // userId and the CAPACITY, never the name or the address: the first two
+      // are machine facts about the firm's own configuration and the last two
+      // are personal data in a log that cannot be erased.
+      payload: { userId: input.userId, title },
+    });
+    // The name comes back with the write — the roster read above is already
+    // holding it, and the caller is a screen that has to render what it just
+    // changed.
+    return { userId: input.userId, displayName: member.displayName, title };
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

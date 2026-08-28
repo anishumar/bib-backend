@@ -30,11 +30,13 @@ import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
+import { DocumentService } from "../../src/usecase/document/service";
 import { FakeProposalRepo } from "../../src/testfakes/proposal";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { systemIds } from "../../src/platform/ids";
@@ -61,10 +63,20 @@ const party = new PartyService({
   events: ledger,
 });
 const proposals = new PostgresProposalRepository(app);
+const documentRepository = new PostgresDocumentRepository(app);
+// The real reference counter and the real issuing-entity rule: a proposal
+// cannot be drafted without either, and both are database behaviour.
+const documents = new DocumentService({
+  preferences: documentRepository,
+  refs: documentRepository,
+  ids: systemIds,
+  events: ledger,
+});
 const service = new ProposalService({
   proposals,
   catalogue: configRepository,
   policies: configRepository,
+  documents,
   shareTokens: new RandomTokenFactory(),
   ids: systemIds,
   clock: systemClock,
@@ -76,6 +88,8 @@ let tenantA = "";
 let tenantB = "";
 let partyA = "";
 let partyB = "";
+/** Firm A's OWN entity — who is offering, on its side of every proposal. */
+let issuerA = "";
 /** The published GST service — v1 at 25000, superseded by v2 at 27500. */
 let gstV1 = "";
 let gstV2 = "";
@@ -105,6 +119,14 @@ beforeAll(async () => {
       SYSTEM_ACTOR,
     )
   ).partyId;
+
+  // These tenants are created with raw SQL rather than through createTenant, so
+  // they do not get the fallback issuing entity that provisioning seeds. Each
+  // firm gets its own here, because `issuing_entity_party_id` is NOT NULL and a
+  // firm that has named no entity cannot draft anything — which is the rule,
+  // proven separately.
+  issuerA = await documentRepository.seedFirmEntity(tenantA, "Proposal Test A LLP");
+  await documentRepository.seedFirmEntity(tenantB, "Proposal Test B LLP");
 
   const defined = await config.define(
     {
@@ -194,7 +216,9 @@ describe("the money adds up, in numeric", () => {
     await fake.create({
       id,
       tenantId: tenantA,
+      ref: fromDb.proposal.ref,
       partyId: partyA,
+      issuingEntityPartyId: fromDb.proposal.issuingEntityPartyId,
       leadId: null,
       title: "x",
       currency: "INR",
@@ -214,6 +238,18 @@ describe("the money adds up, in numeric", () => {
         unitAmount: l.line.unitAmount,
         currency: "INR",
         discountPercent: l.line.discountPercent,
+        // G1.6's line detail, copied across so the fake is comparing the same
+        // line the database holds — an unpriced line in particular has to reach
+        // the fake unpriced, or the two arithmetics are not being compared at
+        // all.
+        jurisdiction: l.line.jurisdiction,
+        billingFrequency: l.line.billingFrequency,
+        scopeOverride: l.line.scopeOverride,
+        clientObligationsOverride: l.line.clientObligationsOverride,
+        volumeLimitsOverride: l.line.volumeLimitsOverride,
+        exclusionsOverride: l.line.exclusionsOverride,
+        oopEstimate: l.line.oopEstimate,
+        pricingNote: l.line.pricingNote,
       });
     }
     const fromFake = await fake.describe(tenantA, id);
@@ -256,6 +292,217 @@ describe("the money adds up, in numeric", () => {
     expect(lines).toEqual([]);
     expect(Number(totals.net)).toBe(0);
     expect(totals.currency).toBe("INR");
+    // Nothing to leave out, either — which is what makes the count below
+    // readable at all.
+    expect(totals.unpricedLineCount).toBe(0);
+  });
+});
+
+describe("a line with no price — what the total MEANS then (G1.6)", () => {
+  it("sums the priced lines and counts the ones it left out", async () => {
+    // THE ANSWER, in the place that computes it. `unit_amount` is nullable now,
+    // so `round(NULL * quantity, 4)` is NULL in crm.proposal_line_amount and
+    // `sum()` skips it — which is exactly right per line and a LIE as a total
+    // unless something says how many lines the figure does not cover.
+    // crm.proposal_totals.unpriced_line_count is that something.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "25000.00",
+      discountPercent: "0",
+    });
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "Group restructuring",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+
+    const { totals, lines } = await service.describe(tenantA, id);
+    expect(Number(totals.net)).toBe(300000);
+    expect(totals.unpricedLineCount).toBe(1);
+    // Per line, NULL and not zero: there is no net of an amount that does not
+    // exist.
+    expect(lines[1]?.line.unitAmount).toBeNull();
+    expect(lines[1]?.net).toBeNull();
+    expect(lines[1]?.line.pricingNote).toBe("As mutually agreed");
+
+    // And the view itself says so, which is where every other consumer will
+    // read it from.
+    const [row] = await withTenant(app, tenantA, (db) =>
+      db<{ line_count: string; unpriced_line_count: string; net: string }[]>`
+        SELECT line_count, unpriced_line_count, net
+        FROM crm.proposal_totals WHERE proposal_id = ${id}
+      `,
+    );
+    // `line_count` still counts every live line — it answers "how big is this
+    // document". The two numbers are different questions.
+    expect(Number(row?.line_count)).toBe(2);
+    expect(Number(row?.unpriced_line_count)).toBe(1);
+  });
+
+  it("a wholly unpriced proposal reads zero, and says why it is zero", async () => {
+    // The case that is a lie on its own. Every line "as mutually agreed" sums
+    // to nothing, and net alone would tell a partner the client agreed to pay
+    // zero for the work.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "Advisory retainer",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+    const { totals } = await service.describe(tenantA, id);
+    expect(Number(totals.net)).toBe(0);
+    expect(totals.unpricedLineCount).toBe(1);
+  });
+
+  it("the fake and the database agree about what a total leaves out", async () => {
+    // The fake computes totals with scaled BigInts and is a SECOND
+    // implementation of the same formula — so it has to agree with `numeric`
+    // about the unpriced line too, not just about rounding. A fake that
+    // silently treated it as zero would make every unit test green on the one
+    // number this task exists to stop anybody printing.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "Priced",
+      quantity: "3",
+      unitAmount: "1499.50",
+      discountPercent: "12.5",
+    });
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "Unpriced",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+    const fromDb = await service.describe(tenantA, id);
+
+    const fake = new FakeProposalRepo();
+    await fake.create({
+      id,
+      tenantId: tenantA,
+      ref: fromDb.proposal.ref,
+      partyId: partyA,
+      issuingEntityPartyId: fromDb.proposal.issuingEntityPartyId,
+      leadId: null,
+      title: "x",
+      currency: "INR",
+      fxRate: "1",
+      fxRateDate: "2026-06-01",
+      validUntil: null,
+    });
+    for (const l of fromDb.lines) {
+      await fake.addLine({
+        id: l.line.id,
+        tenantId: tenantA,
+        proposalId: id,
+        entityPartyId: l.line.entityPartyId,
+        serviceVersionId: l.line.serviceVersionId,
+        description: l.line.description,
+        quantity: l.line.quantity,
+        unitAmount: l.line.unitAmount,
+        currency: "INR",
+        discountPercent: l.line.discountPercent,
+        jurisdiction: l.line.jurisdiction,
+        billingFrequency: l.line.billingFrequency,
+        scopeOverride: l.line.scopeOverride,
+        clientObligationsOverride: l.line.clientObligationsOverride,
+        volumeLimitsOverride: l.line.volumeLimitsOverride,
+        exclusionsOverride: l.line.exclusionsOverride,
+        oopEstimate: l.line.oopEstimate,
+        pricingNote: l.line.pricingNote,
+      });
+    }
+    const fromFake = await fake.describe(tenantA, id);
+    expect(Number(fromDb.totals.net)).toBe(Number(fromFake?.totals.net));
+    expect(fromDb.totals.unpricedLineCount).toBe(fromFake?.totals.unpricedLineCount);
+    expect(fromFake?.lines[1]?.net).toBeNull();
+  });
+
+  it("the database refuses a price-less line with no reason — as the OWNER role", async () => {
+    // The service refuses it too, with a message. This is the same rule where
+    // an import or a psql session cannot walk past it.
+    const id = await draft();
+    const err = await owner`
+      INSERT INTO crm.proposal_line
+        (tenant_id, proposal_id, service_version_id, description, position, quantity, currency)
+      VALUES (${tenantA}, ${id}, ${gstV1}, 'Nothing said about the price', 1, 1, 'INR')
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+    expect((err as Error).message).toContain("unpriced_needs_reason");
+  });
+
+  it("the database refuses a discount off a price that does not exist", async () => {
+    const id = await draft();
+    const err = await owner`
+      INSERT INTO crm.proposal_line
+        (tenant_id, proposal_id, service_version_id, description, position, quantity, currency,
+         pricing_note, discount_percent)
+      VALUES (${tenantA}, ${id}, ${gstV1}, 'As mutually agreed, less 15%', 1, 1, 'INR',
+              'As mutually agreed', 15)
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+    expect((err as Error).message).toContain("unpriced_has_no_discount");
+  });
+
+  it("the database refuses half an out-of-pocket range", async () => {
+    // All three columns or none: a range with one end is not a range, and an
+    // amount with no currency is the one shape this product never stores.
+    const id = await draft();
+    const err = await owner`
+      INSERT INTO crm.proposal_line
+        (tenant_id, proposal_id, service_version_id, description, position, quantity, currency,
+         unit_amount, oop_estimate_min)
+      VALUES (${tenantA}, ${id}, ${gstV1}, 'Half a range', 1, 1, 'INR', 1000, 5000)
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+    expect((err as Error).message).toContain("oop_is_whole");
+  });
+
+  it("keeps an out-of-pocket range in a currency the document is not in", async () => {
+    // The reason it carries a currency at all, and the reason it has no
+    // composite key to the document's: a client quoted in INR still faces a
+    // filing fee in USD. It is never converted and never summed — the
+    // document's fx_rate is struck for the FEE currency and says nothing about
+    // a third one.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "US filings",
+      quantity: "1",
+      unitAmount: "50000.00",
+      discountPercent: "0",
+      oopEstimate: { min: "5000", max: "6000", currency: "USD" },
+      jurisdiction: "US",
+    });
+    const { totals, lines } = await service.describe(tenantA, id);
+    expect(lines[0]?.line.oopEstimate).toEqual({
+      min: "5000.0000",
+      max: "6000.0000",
+      currency: "USD",
+    });
+    expect(lines[0]?.line.jurisdiction).toBe("US");
+    expect(totals.currency).toBe("INR");
+    expect(Number(totals.net)).toBe(50000);
   });
 });
 
@@ -493,8 +740,11 @@ describe("the tenant wall", () => {
   it("a proposal cannot be about another firm's party", async () => {
     const err = await withTenant(app, tenantA, (db) =>
       db`
-        INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
-        VALUES (${tenantA}, ${partyB}, 'cross-firm', 'INR', 1, '2026-06-01')
+        INSERT INTO crm.proposal
+          (tenant_id, ref, party_id, issuing_entity_party_id, title, currency,
+           fx_rate, fx_rate_date)
+        VALUES (${tenantA}, 'PR-2026-9001', ${partyB}, ${issuerA}, 'cross-firm', 'INR', 1,
+                '2026-06-01')
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23503");
@@ -526,5 +776,52 @@ describe("the tenant wall", () => {
       db`DELETE FROM crm.proposal WHERE id = ${id}`,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("42501"); // insufficient_privilege
+  });
+});
+
+// ── G1.3 · why a quote was lost ────────────────────────────────────────────
+
+describe("the declined reason", () => {
+  it("is stored on a rejection and comes back on the read", async () => {
+    // "A write with no read is not a stored fact" — so the round trip is the
+    // test, not the write.
+    const id = await draft();
+    await service.addLine({
+      tenantId: tenantA,
+      proposalId: id,
+      serviceVersionId: gstV1,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "25000",
+      discountPercent: "0",
+    });
+    await service.send(tenantA, id, SYSTEM_ACTOR);
+    await service.decide(
+      tenantA,
+      id,
+      "rejected",
+      SYSTEM_ACTOR,
+      "Went with their existing CA on price.",
+    );
+
+    const record = await service.describe(tenantA, id);
+    expect(record.proposal.status).toBe("rejected");
+    expect(record.proposal.declinedReason).toBe("Went with their existing CA on price.");
+    const [summary] = await service.list(tenantA, { partyId: partyA, status: "rejected" });
+    expect(summary?.proposal.declinedReason).toBe("Went with their existing CA on price.");
+  });
+
+  it("cannot sit on a proposal that was not declined — as the OWNER role", async () => {
+    // A sentence about why a client said no, on a proposal they accepted, reads
+    // as fact to whoever finds it later. The constraint is in the schema rather
+    // than in the service because that is the reader who would be misled.
+    const id = await draft();
+    for (const statement of [
+      owner`UPDATE crm.proposal SET declined_reason = 'they hated it' WHERE id = ${id}`,
+      owner`UPDATE crm.proposal SET declined_reason = '   ' WHERE id = ${id}`,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23514"); // check_violation
+    }
   });
 });

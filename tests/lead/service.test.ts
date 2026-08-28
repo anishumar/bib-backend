@@ -12,14 +12,23 @@ import { LeadService } from "../../src/usecase/lead/service";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import type { FakeLeadRepo, FakeStaffDirectory } from "../../src/testfakes/lead";
 import type { RecordingEventSink } from "../../src/testfakes/ledger";
-import { LEAD_SOURCES, LEAD_STAGES, canMoveStage } from "../../src/domain/lead/model";
+import {
+  LEAD_SOURCES,
+  LEAD_STAGES,
+  TERMINAL_STAGES,
+  canMoveStage,
+  isOpen,
+} from "../../src/domain/lead/model";
 import { SOURCE_VALUES, STAGE_VALUES } from "../../src/api/handler/lead";
 import {
   AmbiguousMatch,
+  BlankTitle,
   InvalidSource,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
+  LostReasonNotApplicable,
+  LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
   SameStage,
@@ -50,11 +59,14 @@ function setup(): {
   };
 }
 
+const TITLE = "FY27 statutory audit";
+
 /** The everyday capture: a company with an email and a PAN. */
 function capture(over: Record<string, unknown> = {}) {
   return {
     tenantId: TENANT,
     source: "inbound",
+    title: TITLE,
     kind: "organization" as const,
     name: "Meridian Textiles Private Limited",
     identifiers: [
@@ -214,7 +226,10 @@ describe("a prospect who comes back", () => {
     // took nine months. This is what the partial index leaves room for.
     const { service, leads } = setup();
     const first = await service.capture(capture(), ACTOR);
-    await service.moveStage({ tenantId: TENANT, leadId: first.lead.id, stage: "lost" }, ACTOR);
+    await service.moveStage(
+      { tenantId: TENANT, leadId: first.lead.id, stage: "lost", lostReason: "went with PwC" },
+      ACTOR,
+    );
 
     const second = await service.capture(capture(), ACTOR);
     expect(second.merged).toBe(false);
@@ -355,7 +370,10 @@ describe("moving through the pipeline", () => {
 
   it("refuses to reopen a finished lead", async () => {
     const { service, lead } = await openLead();
-    await service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "lost" }, ACTOR);
+    await service.moveStage(
+      { tenantId: TENANT, leadId: lead.id, stage: "lost", lostReason: "went with PwC" },
+      ACTOR,
+    );
     await expect(
       service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "contacted" }, ACTOR),
     ).rejects.toBeInstanceOf(LeadClosed);
@@ -387,9 +405,12 @@ describe("moving through the pipeline", () => {
 });
 
 describe("whose desk it is on", () => {
+  /** An open lead that nobody owns. `ownerUserId: null` is the instruction, not
+   *  an omission: since T2.1b an OMITTED owner is the one the rotation fills
+   *  in, so a test about manual assignment has to ask for the queue by name. */
   async function openLead() {
     const s = setup();
-    const { lead } = await s.service.capture(capture(), ACTOR);
+    const { lead } = await s.service.capture(capture({ ownerUserId: null }), ACTOR);
     return { ...s, lead };
   }
 
@@ -472,13 +493,330 @@ describe("reading the pipeline", () => {
     // Present-and-null, not absent: "nobody is working this" is a real state a
     // board shows differently from "somebody is".
     const { service } = setup();
-    const captured = await service.capture(capture(), ACTOR);
+    const captured = await service.capture(capture({ ownerUserId: null }), ACTOR);
     const record = await service.get(TENANT, captured.lead.id);
     expect(record.owner).toBeNull();
   });
 
   it("refuses a stage filter the pipeline does not have", async () => {
     await expect(setup().service.list(TENANT, "nurturing")).rejects.toBeInstanceOf(InvalidStage);
+  });
+});
+
+describe("a lead has a name of its own — G3.1's first acceptance", () => {
+  it("keeps the title the capture gave it, distinct from the party's name", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture({ title: "GST registration, Pune plant" }), ACTOR);
+    const record = await service.get(TENANT, lead.id);
+
+    expect(record.lead.title).toBe("GST registration, Pune plant");
+    // The point of the field: the list shows both, and they are not the same
+    // string. Before 0030 the second was the only one there was.
+    expect(record.party.displayName).toBe("Meridian Textiles Private Limited");
+  });
+
+  it("makes two opportunities for one client tell themselves apart in a list", async () => {
+    // THE ACCEPTANCE. The first is closed so the second may be opened at all —
+    // one open lead per party — but both stay in the list, and it is the title
+    // that says which is which. Rendering the party would print the same row
+    // twice.
+    const { service } = setup();
+    const first = await service.capture(capture({ title: "GST registration" }), ACTOR);
+    await service.moveStage(
+      { tenantId: TENANT, leadId: first.lead.id, stage: "converted" },
+      ACTOR,
+    );
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+
+    const rows = await service.list(TENANT);
+    expect(rows.map((r) => r.party.displayName)).toEqual([
+      "Meridian Textiles Private Limited",
+      "Meridian Textiles Private Limited",
+    ]);
+    expect([...rows.map((r) => r.lead.title)].sort()).toEqual([
+      "FY27 statutory audit",
+      "GST registration",
+    ]);
+  });
+
+  it("refuses a title that is only whitespace", async () => {
+    // NOT NULL is satisfied by "   " and renders as the blank row the column
+    // was added to prevent.
+    const { service, leads, events } = setup();
+    await expect(service.capture(capture({ title: "   " }), ACTOR)).rejects.toBeInstanceOf(
+      BlankTitle,
+    );
+    // Refused before anything is written, like every other capture refusal.
+    expect(leads.rows).toEqual([]);
+    expect(events.recorded).toEqual([]);
+  });
+
+  it("trims it once, in the service, so every caller stores the same thing", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture({ title: "  FY27 audit \n" }), ACTOR);
+    expect(lead.title).toBe("FY27 audit");
+  });
+
+  it("keeps the title out of the ledger, because it can name a person", async () => {
+    // A lead's title names the counterparty, and a lead can be about a human
+    // being. `findPiiKey` denies KEYS and `title` is not one of them, so nothing
+    // would have stopped this — the payload carries partyId and the erasable
+    // row carries the words.
+    const { service, events } = setup();
+    await service.capture(
+      capture({ kind: "person", name: "Priya Menon", title: "Priya Menon — personal tax" }),
+      ACTOR,
+    );
+    expect(JSON.stringify(events.recorded)).not.toContain("Priya Menon");
+  });
+
+  it("does not let a duplicate capture rename the live opportunity", async () => {
+    // A duplicate web-form submission is not grounds to rename somebody's deal,
+    // for the same reason it does not reassign it.
+    const { service } = setup();
+    const first = await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    const second = await service.capture(capture({ title: "web form enquiry" }), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.lead.title).toBe("FY27 statutory audit");
+    expect(second.lead.id).toBe(first.lead.id);
+  });
+
+  it("hands the discarded title back instead of dropping it in silence", async () => {
+    // The merge is right and stays. What was wrong is that the caller typed
+    // "Transfer pricing study", got back a lead called "FY26 statutory audit",
+    // and had no way to learn their words were gone or why. They are the only
+    // party who can act on it — re-title the live lead, close it first, or
+    // recognise their own duplicate — so it comes back to them.
+    const { service } = setup();
+    await service.capture(capture({ title: "FY26 statutory audit" }), ACTOR);
+    const second = await service.capture(capture({ title: "Transfer pricing study" }), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.discardedTitle).toBe("Transfer pricing study");
+    expect(second.lead.title).toBe("FY26 statutory audit");
+  });
+
+  it("reports no discard when the second capture sent the same words", async () => {
+    // Non-null must mean "words were lost", not "you merged". A form submitted
+    // twice with the same title lost nothing: the caller's title IS the lead's
+    // title. Flagging a discard there would train callers to ignore the field.
+    // Compared after trimming, because that is what would have been stored.
+    const { service } = setup();
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    const second = await service.capture(capture({ title: "  FY27 statutory audit  " }), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.discardedTitle).toBeNull();
+  });
+
+  it("reports no discard on a capture that actually created something", async () => {
+    const { service } = setup();
+    const created = await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    expect(created.merged).toBe(false);
+    expect(created.discardedTitle).toBeNull();
+    expect(created.lead.title).toBe("FY27 statutory audit");
+  });
+
+  it("tells the ledger THAT a title was dropped, never what it said", async () => {
+    // Same rule and same shape as `lostReasonRecorded` on lead.stage_changed. A
+    // title names the counterparty and a lead can be about a human being, so
+    // the words are sometimes personal data and this log cannot be erased —
+    // EVENT-CONTRACT §3.4. `findPiiKey` denies KEYS and `title` is not one, so
+    // nothing but this rule would have stopped the words going in.
+    const { service, events } = setup();
+    await service.capture(
+      capture({ kind: "person", name: "Priya Menon", title: "FY26 return" }),
+      ACTOR,
+    );
+    const before = events.recorded.length;
+    const second = await service.capture(
+      capture({ kind: "person", name: "Priya Menon", title: "Priya Menon — capital gains" }),
+      ACTOR,
+    );
+
+    const merged = events.recorded.slice(before).at(-1);
+    expect(merged?.verb).toBe("lead.merged");
+    expect(merged?.payload["titleDiscarded"]).toBe(true);
+    expect(second.discardedTitle).toBe("Priya Menon — capital gains");
+    expect(JSON.stringify(events.recorded)).not.toContain("capital gains");
+  });
+
+  it("records the machine fact as false when the merge lost nothing", async () => {
+    // The boolean is the only record of how often the one-open-lead-per-party
+    // rule costs a DISTINCT piece of work rather than absorbing a duplicate
+    // submission, so it has to be able to say no.
+    const { service, events } = setup();
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+    const before = events.recorded.length;
+    await service.capture(capture({ title: "FY27 statutory audit" }), ACTOR);
+
+    expect(events.recorded.slice(before).at(-1)?.payload["titleDiscarded"]).toBe(false);
+  });
+});
+
+describe("a lost deal says why — G3.1's second acceptance", () => {
+  async function openLead() {
+    const s = setup();
+    const { lead } = await s.service.capture(capture(), ACTOR);
+    return { ...s, lead };
+  }
+
+  it("records the closer's own words on the lead", async () => {
+    const { service, lead } = await openLead();
+    const closed = await service.moveStage(
+      {
+        tenantId: TENANT,
+        leadId: lead.id,
+        stage: "lost",
+        lostReason: "their CFO went with his old audit partner; fee was never discussed",
+      },
+      ACTOR,
+    );
+    expect(closed.lostReason).toBe(
+      "their CFO went with his old audit partner; fee was never discussed",
+    );
+    expect(closed.closedAt).not.toBeNull();
+  });
+
+  it("refuses to close a deal as lost with no explanation", async () => {
+    // The one fact that is obvious today and unrecoverable in a month.
+    const { service, lead } = await openLead();
+    await expect(
+      service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "lost" }, ACTOR),
+    ).rejects.toBeInstanceOf(LostReasonRequired);
+  });
+
+  it("refuses a whitespace reason, which is the same as none", async () => {
+    const { service, lead } = await openLead();
+    await expect(
+      service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "lost", lostReason: " " }, ACTOR),
+    ).rejects.toBeInstanceOf(LostReasonRequired);
+  });
+
+  it("asks abandoned for a reason too, so neither stage is the cheap one", async () => {
+    // Making it optional here would put a friction gradient between the two
+    // unwon stages, and the cheapest way past a text box is to file a
+    // competitor loss as "went quiet" — destroying the exact signal G3.1 adds.
+    const { service, lead } = await openLead();
+    await expect(
+      service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "abandoned" }, ACTOR),
+    ).rejects.toBeInstanceOf(LostReasonRequired);
+  });
+
+  it("refuses a reason on a stage that has nothing to explain", async () => {
+    const { service, lead } = await openLead();
+    await expect(
+      service.moveStage(
+        { tenantId: TENANT, leadId: lead.id, stage: "converted", lostReason: "we won on price" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(LostReasonNotApplicable);
+    await expect(
+      service.moveStage(
+        { tenantId: TENANT, leadId: lead.id, stage: "qualified", lostReason: "not yet" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(LostReasonNotApplicable);
+  });
+
+  it("leaves a converted lead with no reason at all", async () => {
+    const { service, lead } = await openLead();
+    const won = await service.moveStage(
+      { tenantId: TENANT, leadId: lead.id, stage: "converted" },
+      ACTOR,
+    );
+    expect(won.lostReason).toBeNull();
+  });
+
+  it("puts whether it was explained in the ledger, never the explanation", async () => {
+    // A closing reason is a sentence about a named human being, written into a
+    // column that can be erased. This log cannot be.
+    const { service, events, lead } = await openLead();
+    const REASON = "Priya said their board had already picked Deloitte";
+    await service.moveStage(
+      { tenantId: TENANT, leadId: lead.id, stage: "lost", lostReason: REASON },
+      ACTOR,
+    );
+
+    const last = events.recorded.at(-1);
+    expect(last?.verb).toBe("lead.stage_changed");
+    expect(last?.payload["lostReasonRecorded"]).toBe(true);
+    expect(JSON.stringify(events.recorded)).not.toContain(REASON);
+    expect(JSON.stringify(events.recorded)).not.toContain("Deloitte");
+  });
+});
+
+describe("went quiet and chose a competitor are different rows — the third acceptance", () => {
+  it("closes one lead abandoned and another lost, and the list keeps them apart", async () => {
+    const { service } = setup();
+    const quiet = await service.capture(capture({ title: "Q1 vCFO retainer" }), ACTOR);
+    await service.moveStage(
+      {
+        tenantId: TENANT,
+        leadId: quiet.lead.id,
+        stage: "abandoned",
+        lostReason: "three follow-ups over five weeks, no reply after the scoping call",
+      },
+      ACTOR,
+    );
+    const beaten = await service.capture(
+      capture({
+        title: "FY27 statutory audit",
+        name: "Other Ltd",
+        identifiers: [{ type: "phone", value: PHONE }],
+      }),
+      ACTOR,
+    );
+    await service.moveStage(
+      {
+        tenantId: TENANT,
+        leadId: beaten.lead.id,
+        stage: "lost",
+        lostReason: "beaten on fee by roughly 20 percent",
+      },
+      ACTOR,
+    );
+
+    // A follow-up problem and a pricing problem, filed as what they are. One
+    // stage for both would have made these the same row.
+    const abandoned = await service.list(TENANT, "abandoned");
+    const lost = await service.list(TENANT, "lost");
+    expect(abandoned.map((r) => r.lead.id)).toEqual([quiet.lead.id]);
+    expect(lost.map((r) => r.lead.id)).toEqual([beaten.lead.id]);
+    expect(abandoned[0]?.lead.lostReason).toContain("no reply");
+    expect(lost[0]?.lead.lostReason).toContain("beaten on fee");
+  });
+
+  it("closes the lead, so an abandoned prospect can be approached again", async () => {
+    // The failure this would have had if `abandoned` were left open: the
+    // one-open-lead-per-party index would count it as live and the prospect
+    // could never be captured again.
+    const { service, leads } = setup();
+    const first = await service.capture(capture(), ACTOR);
+    await service.moveStage(
+      { tenantId: TENANT, leadId: first.lead.id, stage: "abandoned", lostReason: "went quiet" },
+      ACTOR,
+    );
+    expect(first.lead.id).toBeTruthy();
+
+    const again = await service.capture(capture({ title: "FY28 statutory audit" }), ACTOR);
+    expect(again.merged).toBe(false);
+    expect(again.matchedExistingParty).toBe(true);
+    expect(again.lead.partyId).toBe(first.lead.partyId);
+    expect(leads.rows).toHaveLength(2);
+  });
+
+  it("will not reopen an abandoned lead, any more than a lost one", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture(), ACTOR);
+    await service.moveStage(
+      { tenantId: TENANT, leadId: lead.id, stage: "abandoned", lostReason: "went quiet" },
+      ACTOR,
+    );
+    await expect(
+      service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "contacted" }, ACTOR),
+    ).rejects.toBeInstanceOf(LeadClosed);
   });
 });
 
@@ -492,9 +830,207 @@ describe("the vocabulary the wire offers matches the domain's", () => {
   });
 
   it("never lets a finished lead move", () => {
-    for (const to of LEAD_STAGES) {
-      expect(canMoveStage("converted", to), `converted -> ${to}`).toBe(false);
-      expect(canMoveStage("lost", to), `lost -> ${to}`).toBe(false);
+    // Every terminal stage, read from the domain rather than listed here, so a
+    // sixth one added next month is covered the day it exists — which is how
+    // `abandoned` would otherwise have shipped as a reopenable stage.
+    for (const from of TERMINAL_STAGES) {
+      for (const to of LEAD_STAGES) {
+        expect(canMoveStage(from, to), `${from} -> ${to}`).toBe(false);
+      }
     }
+  });
+
+  it("counts abandoned as finished, not as a sixth open stage", () => {
+    // If `abandoned` were open, the party would keep its live opportunity and
+    // lead_one_open_per_party would lock the prospect out of the pipeline for
+    // good — the index that exists to stop duplicates blocking the re-approach.
+    expect(TERMINAL_STAGES).toContain("abandoned");
+    expect(isOpen("abandoned")).toBe(false);
+  });
+});
+
+// ── T2.1b · the desk an unclaimed lead lands on ──────────────────────────────
+//
+// The acceptance: "N leads captured with no owner distribute evenly." These
+// prove that, and the three instructions the owner field can carry, against the
+// in-memory rotation. The two properties a fake cannot have — that counting and
+// claiming are one atomic act, and that simultaneous captures cannot collide —
+// are in tests/lead/assignment.integration.test.ts against real Postgres, which
+// is the only place they are true.
+describe("assigning a lead nobody named an owner for", () => {
+  const DESKS = [
+    "00000000-0000-4000-8000-0000000000e1",
+    "00000000-0000-4000-8000-0000000000e2",
+    "00000000-0000-4000-8000-0000000000e3",
+  ];
+
+  function firmWithThreeStaff() {
+    const fakes = makeLeadFakes();
+    for (const userId of DESKS) fakes.staff.add(TENANT, userId);
+    return { ...fakes, service: new LeadService(fakes) };
+  }
+
+  /** A distinct prospect each time, so every capture starts a NEW lead rather
+   *  than merging onto the last one — the merge path assigns nobody. */
+  function nth(n: number) {
+    return capture({
+      name: `Prospect ${String(n)} Private Limited`,
+      identifiers: [{ type: "email" as const, value: `p${String(n)}@example.test` }],
+    });
+  }
+
+  /** `from` keeps every prospect distinct across calls — repeating one would
+   *  MERGE onto its existing lead and assign nobody, which is the merge rule
+   *  working, not the rotation failing. */
+  async function captureMany(
+    service: LeadService,
+    count: number,
+    from = 0,
+  ): Promise<string[]> {
+    const owners: string[] = [];
+    for (let n = from; n < from + count; n += 1) {
+      const { lead } = await service.capture(nth(n), ACTOR);
+      owners.push(lead.ownerUserId ?? "unassigned");
+    }
+    return owners;
+  }
+
+  it("distributes N leads evenly over the firm's active staff", async () => {
+    // THE ACCEPTANCE. Nine captures, three desks, three each — not "roughly",
+    // exactly, because the rule is deterministic and a rotation that is only
+    // approximately fair is one nobody can audit.
+    const { service } = firmWithThreeStaff();
+    const owners = await captureMany(service, 9);
+
+    const perDesk = DESKS.map((d) => owners.filter((o) => o === d).length);
+    expect(perDesk).toEqual([3, 3, 3]);
+  });
+
+  it("goes round, rather than filling one desk and moving on", async () => {
+    // Even totals could also be produced by AAA BBB CCC, which is not a
+    // rotation — it is a queue with a batch size, and the third colleague waits
+    // six leads for their first. The ORDER is the property.
+    const { service } = firmWithThreeStaff();
+    expect(await captureMany(service, 6)).toEqual([...DESKS, ...DESKS]);
+  });
+
+  it("gives the next lead to whoever a close has just freed up", async () => {
+    // The rotation is DERIVED from the pipeline rather than stored as a
+    // pointer, so it reflects what is actually on each desk. Close the first
+    // desk's lead and that desk is the emptiest again.
+    const { service, leads } = firmWithThreeStaff();
+    const first = await service.capture(nth(0), ACTOR);
+    await service.capture(nth(1), ACTOR);
+    await service.capture(nth(2), ACTOR);
+    expect(first.lead.ownerUserId).toBe(DESKS[0]);
+
+    await service.moveStage(
+      { tenantId: TENANT, leadId: first.lead.id, stage: "lost", lostReason: "went elsewhere" },
+      ACTOR,
+    );
+    const next = await service.capture(nth(3), ACTOR);
+    expect(next.lead.ownerUserId).toBe(DESKS[0]);
+    expect(leads.rows).toHaveLength(4);
+  });
+
+  it("picks somebody who joined this morning before anybody else", async () => {
+    // The self-healing property, and the one a stored pointer cannot have: a
+    // pointer knows nothing about a colleague who did not exist when it was
+    // last written, so a new joiner waits a full lap for their first lead.
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, DESKS[0] ?? "").add(TENANT, DESKS[1] ?? "");
+    const service = new LeadService(fakes);
+    await service.capture(nth(0), ACTOR);
+    await service.capture(nth(1), ACTOR);
+
+    fakes.staff.add(TENANT, DESKS[2] ?? "");
+    const joiner = await service.capture(nth(2), ACTOR);
+    expect(joiner.lead.ownerUserId).toBe(DESKS[2]);
+  });
+
+  it("stops giving work to somebody who has left", async () => {
+    // The other half of self-healing. `FakeStaffDirectory.remove` is the fake's
+    // stand-in for is_active going false; the real predicate is proved against
+    // Postgres, where the SAME notion also refuses them as a manual owner.
+    const { service, staff } = firmWithThreeStaff();
+    await captureMany(service, 3);
+    staff.remove(TENANT, DESKS[1] ?? "");
+
+    const owners = await captureMany(service, 2, 3);
+    expect(owners).not.toContain(DESKS[1]);
+  });
+
+  it("does not overrule a person who named an owner", async () => {
+    const { service } = firmWithThreeStaff();
+    const { lead } = await service.capture(nth(0), { ...ACTOR });
+    expect(lead.ownerUserId).toBe(DESKS[0]);
+
+    const named = await service.capture(
+      { ...nth(1), ownerUserId: DESKS[2] ?? "" },
+      ACTOR,
+    );
+    // Not the rotation's pick (which would still be DESKS[1]): a human decided.
+    expect(named.lead.ownerUserId).toBe(DESKS[2]);
+  });
+
+  it("leaves it in the unassigned queue when asked to, in so many words", async () => {
+    // null is an INSTRUCTION, absent is a delegation. Collapsing them would
+    // either abolish the triage queue or never rotate at all.
+    const { service } = firmWithThreeStaff();
+    const { lead } = await service.capture({ ...nth(0), ownerUserId: null }, ACTOR);
+    expect(lead.ownerUserId).toBeNull();
+  });
+
+  it("captures the lead anyway when the firm has nobody to give it to", async () => {
+    // Declining is a real answer. A capture lost because assignment had nobody
+    // to pick is strictly worse than a lead sitting in a queue somebody works.
+    const fakes = makeLeadFakes();
+    const { lead } = await new LeadService(fakes).capture(nth(0), ACTOR);
+    expect(lead.ownerUserId).toBeNull();
+  });
+
+  it("refuses a named owner who is not active staff, before the rotation ever runs", async () => {
+    const { service } = firmWithThreeStaff();
+    await expect(
+      service.capture({ ...nth(0), ownerUserId: OUTSIDER }, ACTOR),
+    ).rejects.toBeInstanceOf(OwnerNotStaff);
+  });
+
+  it("says on the timeline HOW the owner got there, not just who", async () => {
+    // "The rotation chose Anand" and "the partner chose Anand" are different
+    // facts, and only the first is evidence about whether assignment works.
+    const { service, events } = firmWithThreeStaff();
+    await service.capture(nth(0), ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBe("round_robin");
+    expect(events.recorded.at(-1)?.payload["ownerUserId"]).toBe(DESKS[0]);
+
+    await service.capture({ ...nth(1), ownerUserId: DESKS[1] ?? "" }, ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBe("requested");
+
+    await service.capture({ ...nth(2), ownerUserId: null }, ACTOR);
+    expect(events.recorded.at(-1)?.payload["ownerAssignedBy"]).toBeNull();
+  });
+
+  it("records the rotation as part of the capture, not as a second action", async () => {
+    // One thing happened — somebody captured a lead — so the timeline gets one
+    // row. A `lead.owner_assigned` beside it would say a colleague reassigned
+    // something a moment after capturing it, which nobody did.
+    const { service, events } = firmWithThreeStaff();
+    await service.capture(nth(0), ACTOR);
+    expect(events.verbs().filter((v) => v.startsWith("lead."))).toEqual(["lead.captured"]);
+  });
+
+  it("never reassigns the live opportunity a duplicate capture lands on", async () => {
+    // The merge appends; it does not redecide. The owner on a live lead was
+    // somebody's decision and a second web-form submission is not grounds to
+    // undo it — and a rotation that fired on every duplicate would hand the
+    // same prospect to a different colleague each time the form was resubmitted.
+    const { service } = firmWithThreeStaff();
+    const first = await service.capture(nth(0), ACTOR);
+    const second = await service.capture(nth(0), ACTOR);
+
+    expect(second.merged).toBe(true);
+    expect(second.lead.id).toBe(first.lead.id);
+    expect(second.lead.ownerUserId).toBe(first.lead.ownerUserId);
   });
 });

@@ -16,6 +16,7 @@ import { ConfigError } from "../domain/config/errors";
 import { LeadError } from "../domain/lead/errors";
 import { ProposalError } from "../domain/proposal/errors";
 import { EngagementError } from "../domain/engagement/errors";
+import { DocumentError } from "../domain/document/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -73,6 +74,11 @@ export function mapError(err: unknown): MappedError {
       case "ROLE_NOT_DEFINED":
       case "LAST_ADMINISTRATOR":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 404 rather than 403: the caller is not being refused permission, they
+      // named somebody who is not on this firm's roster. Same answer as
+      // MEMBERSHIP_NOT_FOUND above, because it is the same fact.
+      case "SIGNATORY_NOT_A_MEMBER":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
     }
   }
   if (err instanceof StaffGradeError) {
@@ -96,7 +102,14 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "PARTY_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Each of these is "the party is not in the state this call assumed", and
+      // none is a malformed request. PARTY_HAS_REFERENCES in particular is the
+      // firm's own records disagreeing with the request — the caller fixes it
+      // by closing what points at the party, not by resending.
       case "DUPLICATE_IDENTIFIER":
+      case "PARTY_ALREADY_ARCHIVED":
+      case "PARTY_NOT_ARCHIVED":
+      case "PARTY_HAS_REFERENCES":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
       case "INVALID_IDENTIFIER":
@@ -109,9 +122,16 @@ export function mapError(err: unknown): MappedError {
   }
   if (err instanceof LeadError) {
     switch (err.code) {
+      // Malformed input, all of it: a source or a stage that does not exist, no
+      // way to reach the prospect, no name, a close with no explanation, and an
+      // explanation attached to a stage that has nothing to explain. None is a
+      // statement about the pipeline's current state, so none is a 409.
       case "INVALID_SOURCE":
       case "INVALID_STAGE":
       case "NO_CONTACT_DETAIL":
+      case "BLANK_TITLE":
+      case "LOST_REASON_REQUIRED":
+      case "LOST_REASON_NOT_APPLICABLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LEAD_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
@@ -130,8 +150,18 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       // Malformed input: a number where a decimal string belongs, a currency
       // that is not one, a discount outside 0–100.
+      //
+      // G1.6's line detail joins them, the two about an unpriced line included:
+      // "no price and no reason" and "a discount off no price" are both things
+      // the caller SENT, not states the proposal is in, and both are fixed by
+      // sending something different.
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
+      case "UNPRICED_LINE_NEEDS_REASON":
+      case "UNPRICED_LINE_HAS_DISCOUNT":
+      case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_LINE_JURISDICTION":
+      case "INVALID_OOP_ESTIMATE":
       case "INVALID_DISCOUNT":
       case "INVALID_FX_RATE":
       case "INVALID_CURRENCY":
@@ -167,14 +197,20 @@ export function mapError(err: unknown): MappedError {
       // advance errors below: "advanceRequired with no amount" is a malformed
       // REQUEST, not a state the letter is in — there is no letter yet. It sat
       // in the wrong group until the end-to-end walk asked for a 400.
+      // G1.6's line detail joins these, same reasoning as on a proposal.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
+      case "UNPRICED_LINE_NEEDS_REASON":
+      case "UNPRICED_LINE_HAS_DISCOUNT":
+      case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_OOP_ESTIMATE":
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":
       case "CLAUSE_WRONG_JURISDICTION":
       case "SERVICE_NOT_QUOTABLE":
       case "SIGNATURE_INCOMPLETE":
       case "ADVANCE_AMOUNT_REQUIRED":
+      case "INVALID_DATE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LETTER_NOT_FOUND":
       case "LETTER_LINE_NOT_FOUND":
@@ -184,6 +220,9 @@ export function mapError(err: unknown): MappedError {
       // "The letter is not in the state this call assumed." None is a malformed
       // request and resending changes nothing — LETTER_NOT_EDITABLE on a SIGNED
       // letter in particular is answered by drafting a new one, not by retrying.
+      // The two supersession refusals belong here for the same reason: one is
+      // answered by signing the letter being replaced (or by editing the draft
+      // instead), the other by withdrawing the replacement already in place.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -192,6 +231,22 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
       case "ENGAGEMENT_NOT_ACTIVE":
+      case "LETTER_NOT_SUPERSEDABLE":
+      case "ALREADY_SUPERSEDED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof DocumentError) {
+    switch (err.code) {
+      case "INVALID_JURISDICTION":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "FIRM_ENTITY_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // NO_ISSUING_ENTITY is a CONFLICT rather than a validation failure: the
+      // request is well formed and resending it changes nothing. What is
+      // missing is a row in the firm's own configuration, and the message names
+      // the call that adds it.
+      case "NO_ISSUING_ENTITY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }

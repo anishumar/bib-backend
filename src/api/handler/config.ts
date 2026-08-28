@@ -68,6 +68,12 @@ const PublishedEntrySchema = z
     // so "not published yet" and "not returned by this route" stay different
     // answers on the wire.
     published: ConfigVersionSchema.nullable(),
+    // The newest draft waiting beside what is in force, or null. Here rather
+    // than behind a second request per entry: a screen has to know whether
+    // anything is pending, and until this field existed a draft was invisible —
+    // and therefore unpublishable — from a list as soon as its entry had a
+    // published version.
+    pendingDraft: ConfigVersionSchema.nullable(),
   })
   .openapi("PublishedConfigEntry");
 
@@ -273,7 +279,16 @@ export function registerConfigRoutes(app: OpenAPIHono<AppEnv>, deps: ConfigDeps)
     if (!s.ok) return c.json(s.deny, s.status);
     const { kind } = c.req.valid("param");
     const entries = await deps.service.list(s.tenantId, kind);
-    return c.json({ entries: entries.map((e) => ({ entry: e.entry, published: e.published })) }, 200);
+    return c.json(
+      {
+        entries: entries.map((e) => ({
+          entry: e.entry,
+          published: e.published,
+          pendingDraft: e.pendingDraft,
+        })),
+      },
+      200,
+    );
   });
 
   app.openapi(describeRoute, async (c) => {

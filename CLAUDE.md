@@ -248,7 +248,31 @@ Two rules that came out of it, and both are now enforced by tests:
 - Every unique constraint is consciously scoped (state it in the migration comment).
 - Idempotency by derived id (`platform/ids.ts` `derivedId`) on external callbacks.
 - PII stays out of any append-only log (erasability).
-- Soft delete only. Every state transition writes an event naming its actor.
+- **Nothing is hard-deleted, and nothing in `core` is soft-deleted either.** `bib_app` holds
+  no DELETE grant on a single table in this database, so removal is impossible at the
+  database level rather than merely unimplemented. The only soft delete in the product is
+  `removed_at` on `crm.proposal_line` and `crm.engagement_letter_line` — a line struck off a
+  document before it went out. Every state transition writes an event naming its actor.
+
+**Parties are permanent — there is no `deleted_at` in `core` and there never will be (G0.3).**
+A client created by mistake is ARCHIVED, not removed: `core.party.archived_at` (migration 0035)
+means "keep this out of the pickers and lists", and nothing more. A real company's lifecycle is
+answered by the ledger and by `core.legal_entity.status`, which knows the states a registrar
+recognises. The reason is one sentence: a signed engagement letter's counterparty must always
+resolve. So the LIST hides archived parties and takes a flag to include them, while reading ONE
+party by id ALWAYS returns it, archived or not — that asymmetry is the whole design, and it is
+why this is one column on one table rather than `deleted_at` across `core` behind a filter every
+read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
+proposal, a proposal line's entity, an engagement letter, a letter line's entity or an engagement
+still points at the party, and the refusal names them. A trigger rather than a service check
+because an import or an agent walks straight past a service, and it costs nothing on ordinary
+writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
+a rename fires nothing. **Read that guard as "you cannot put away a client you are still working
+with", not as "an archived party is unreferenced"** — it is checked at the moment of archiving and
+is not an invariant afterwards. Nothing stops a NEW reference being made to an archived party, and
+lead capture in particular resolves by identifier without consulting `archived_at`, so a capture
+carrying an archived party's PAN attaches to it. Making that the stronger invariant is a decision
+nobody has taken; it is on the board as an open item, not an oversight.
 
 ## Migrations
 
@@ -488,11 +512,17 @@ difference makes everything here stricter than its proposal counterpart.
   engagements is a client committed to work nobody scheduled; engagements with no signature is
   work nobody agreed to. `UNIQUE (engagement_letter_line_id)` makes a double fan-out
   impossible rather than unlikely.
-- **The freeze has two shapes, and only one of them is automatic.** The line and clause
+- **The freeze names what may still MOVE, never what is protected.** The line and clause
   triggers refuse *any* write to a signed letter's children. The letter's own
-  (`crm.refuse_signed_change`, 0017) compares an **enumerated list of columns** — so a column
-  added later is silently editable after signature until somebody adds it to that list. **Add
-  a column to `crm.engagement_letter`, add it to the trigger.**
+  (`crm.refuse_signed_change`) once compared an **enumerated list of columns**, so a column
+  added later was silently editable after signature until somebody remembered to add it —
+  and six already were. Migration **0019** inverted it: the trigger compares the whole row
+  (`to_jsonb(NEW) - mutable` vs `to_jsonb(OLD) - mutable`) and exempts only the short
+  allow-list published by `crm.signed_letter_mutable_columns()` — today
+  `advance_recorded_at`, `advance_recorded_by`, `updated_at`. **A new column on
+  `crm.engagement_letter` is frozen the day it exists; adding a FOURTH exemption is the thing
+  that needs an argument**, and `tests/architecture/signed-letter-freeze.integration.test.ts`
+  asks the catalogue for every column and holds the build red until somebody makes it.
 - **Once real signed letters exist, no NOT NULL column can be added to a letter line again.**
   The freeze refuses the backfill, by design, and there is no honest value to write into a
   document that never said it. A new required field on an issued document is then a nullable

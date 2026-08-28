@@ -14,6 +14,7 @@ import type {
   Person,
 } from "../../domain/party/model";
 import {
+  isArchived,
   isInForceOn,
   isValidDateRange,
   isValidIdentifier,
@@ -25,6 +26,8 @@ import {
   InvalidIdentifier,
   InvalidRelationshipType,
   NotAnOrganization,
+  PartyAlreadyArchived,
+  PartyNotArchived,
   PartyNotFound,
   SelfRelationship,
 } from "../../domain/party/errors";
@@ -82,6 +85,11 @@ export interface AddIdentifierInput {
   readonly isPrimary?: boolean | undefined;
   readonly validFrom: string;
   readonly validTo?: string | undefined;
+}
+
+export interface ArchivePartyInput {
+  readonly tenantId: string;
+  readonly partyId: string;
 }
 
 export interface AddRelationshipInput {
@@ -283,9 +291,77 @@ export class PartyService {
     return relationship;
   }
 
+  // ── The party lifecycle: archived, never deleted ──────────────────────────
+  //
+  // There is no delete on this service and there is no `deleted_at` in `core`
+  // to build one on. A party is permanent, because a signed engagement letter
+  // has to name a counterparty that still resolves years later; a real
+  // company's lifecycle is answered by the ledger and by
+  // `core.legal_entity.status`. `archived_at` says only "keep this out of the
+  // pickers", and the two methods below are its whole surface.
+  //
+  // THE REFUSAL LIVES IN THE DATABASE, not here. `archive()` on the port is
+  // refused by the trigger (0035, body replaced by 0036) while anything still
+  // points at the party, so an import or an agent is stopped by the same rule
+  // this call is. What this service owns is the state machine around it — the
+  // party exists, and it is not already in the state being asked for — and the
+  // event.
+  //
+  // The check below is the FRIENDLY answer, not the guarantee: it and the write
+  // are two statements, so the port is required to make the transition itself
+  // atomic and refuse the loser of a race. Otherwise two clicks put two
+  // `party.archived` rows in a log that can never be corrected.
+
+  /** Hide a party from pickers and lists. Refused by the database while a lead,
+   *  proposal, engagement letter, letter line's entity or engagement still
+   *  points at it; the port translates that into `PartyHasReferences`. */
+  async archiveParty(input: ArchivePartyInput, actor: Actor): Promise<Party> {
+    const party = await this.deps.parties.findParty(input.tenantId, input.partyId);
+    if (!party) throw new PartyNotFound(input.partyId);
+    if (isArchived(party)) throw new PartyAlreadyArchived(input.partyId);
+
+    const archived = await this.deps.parties.archive(input.tenantId, input.partyId);
+    // The KIND, never the display name — a party's display name routinely IS a
+    // person's name, and the ledger cannot be erased.
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.archived",
+      objectId: archived.id,
+      actor,
+      payload: { kind: archived.kind },
+    });
+    return archived;
+  }
+
+  /** Bring an archived party back into the pickers and lists. Never refused:
+   *  restoring a party cannot orphan anything. */
+  async unarchiveParty(input: ArchivePartyInput, actor: Actor): Promise<Party> {
+    const party = await this.deps.parties.findParty(input.tenantId, input.partyId);
+    if (!party) throw new PartyNotFound(input.partyId);
+    if (!isArchived(party)) throw new PartyNotArchived(input.partyId);
+
+    const restored = await this.deps.parties.unarchive(input.tenantId, input.partyId);
+    // How long it was away is a machine fact worth keeping: the ledger already
+    // holds the archive event, and this closes the interval without a join.
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.unarchived",
+      objectId: restored.id,
+      actor,
+      payload: { kind: restored.kind, archivedAt: party.archivedAt },
+    });
+    return restored;
+  }
+
   /** A small Party 360: the party, its identifiers, and its relationships —
    *  optionally filtered to those in force on `asOf` (the compliance question,
-   *  "who was a director on 31 March"). */
+   *  "who was a director on 31 March").
+   *
+   *  READING ONE PARTY BY ID ALWAYS RESOLVES, archived or not. That asymmetry
+   *  with `listParties` is deliberate and load-bearing: the list is a picker
+   *  and an archived party has no business in it, but a proposal, a letter or
+   *  an engagement pointing at this id has to render its counterparty, and a
+   *  document whose client goes blank is worse than one nobody can tidy up. */
   async partyProfile(tenantId: string, partyId: string, asOf?: string): Promise<PartyProfile> {
     const party = await this.deps.parties.findParty(tenantId, partyId);
     if (!party) throw new PartyNotFound(partyId);
@@ -319,8 +395,14 @@ export class PartyService {
     };
   }
 
-  async listParties(tenantId: string): Promise<readonly Party[]> {
-    return this.deps.parties.listParties(tenantId);
+  /** The firm's parties. ARCHIVED ONES ARE HIDDEN unless explicitly asked for —
+   *  the other half of the asymmetry `partyProfile` documents.
+   *
+   *  `includeArchived` has no default, deliberately, and the port says the same
+   *  thing: a default is how "the archive is hidden" quietly stops being true,
+   *  and every caller of this should have had to decide. */
+  async listParties(tenantId: string, includeArchived: boolean): Promise<readonly Party[]> {
+    return this.deps.parties.listParties(tenantId, includeArchived);
   }
 
   /** The dedup entry point (phone + PAN + email): find the party holding an

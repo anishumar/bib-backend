@@ -29,6 +29,11 @@ export type ProposalErrorCode =
   | "SERVICE_NOT_PUBLISHED"
   | "INVALID_QUANTITY"
   | "INVALID_UNIT_AMOUNT"
+  | "UNPRICED_LINE_NEEDS_REASON"
+  | "UNPRICED_LINE_HAS_DISCOUNT"
+  | "INVALID_BILLING_FREQUENCY"
+  | "INVALID_LINE_JURISDICTION"
+  | "INVALID_OOP_ESTIMATE"
   | "INVALID_DISCOUNT"
   | "INVALID_FX_RATE"
   | "INVALID_CURRENCY";
@@ -206,6 +211,63 @@ export class InvalidUnitAmount extends ProposalError {
       `unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
         `four decimal places — "25000", "1499.50" — never a number, because a float cannot hold ` +
         `1499.50 exactly and the error is invisible in one line and material in a total.`,
+    );
+  }
+}
+
+export class UnpricedLineNeedsReason extends ProposalError {
+  constructor() {
+    super(
+      "UNPRICED_LINE_NEEDS_REASON",
+      `a line with no unit amount has to say WHY — "As mutually agreed", "Quoted on receipt of ` +
+        `the registrar's schedule". Send a "pricingNote" with it. Leaving a price blank with no ` +
+        `reason is indistinguishable on the client's document from a figure somebody forgot to ` +
+        `type, and quoting it as "0" says something different again.`,
+    );
+  }
+}
+
+export class UnpricedLineHasDiscount extends ProposalError {
+  constructor(percent: string) {
+    super(
+      "UNPRICED_LINE_HAS_DISCOUNT",
+      `a line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
+        `percentage off "as mutually agreed" is not a number. It would also count towards the ` +
+        `largest discount on the proposal and hold it at the approval gate over a discount that ` +
+        `does not exist. Price the line, or send "0".`,
+    );
+  }
+}
+
+export class InvalidLineBillingFrequency extends ProposalError {
+  constructor(value: string, allowed: readonly string[]) {
+    super(
+      "INVALID_BILLING_FREQUENCY",
+      `billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
+        `how often this DEAL is invoiced, which is not how often the work comes round — a ` +
+        `monthly service billed quarterly is why it is a field at all.`,
+    );
+  }
+}
+
+export class InvalidLineJurisdiction extends ProposalError {
+  constructor(value: string) {
+    super(
+      "INVALID_LINE_JURISDICTION",
+      `line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
+        `letters, like "IN" or "AE". It is where the WORK is, stated rather than inferred.`,
+    );
+  }
+}
+
+export class InvalidOutOfPocketEstimate extends ProposalError {
+  constructor(reason: string) {
+    super(
+      "INVALID_OOP_ESTIMATE",
+      `out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+        `from the fee, so all three travel together or none of them do. Its currency need not be ` +
+        `the document's: a client quoted in INR still faces a filing fee in USD.`,
     );
   }
 }

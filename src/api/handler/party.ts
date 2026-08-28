@@ -33,6 +33,13 @@ const PartySchema = z
     tenantId: z.string().uuid(),
     kind: z.enum(["organization", "person"]),
     displayName: z.string(),
+    // Null while the party is live. NOT a delete marker — there is no
+    // `deleted_at` in `core` and never will be (migration 0035). An archived
+    // party is out of the pickers and still resolves by id forever, which is
+    // what lets a signed document keep rendering its counterparty. Documented
+    // here because zod-openapi documents a response without validating it: a
+    // field the spec omits is one the generated client cannot see.
+    archivedAt: z.string().nullable(),
   })
   .openapi("Party");
 
@@ -289,10 +296,62 @@ const listPartiesRoute = createRoute({
   path: "/api/v1/parties",
   tags: ["party"],
   summary: "List the tenant's parties",
+  request: {
+    query: z.object({
+      // The list is a picker, so it hides archived parties by default and takes
+      // an explicit flag to include them. Reading ONE party by id is the
+      // opposite and always resolves — see GET /api/v1/parties/{partyId}.
+      includeArchived: z
+        .enum(["true", "false"])
+        .optional()
+        .openapi({ description: "Include archived parties in the list. Default false." }),
+    }),
+  },
   responses: {
     200: { description: "Parties", content: { "application/json": { schema: z.object({ parties: z.array(PartySchema) }).openapi("PartyList") } } },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org"),
+  },
+});
+
+// ARCHIVE / UNARCHIVE, and there is deliberately no DELETE beside them.
+//
+// Parties are permanent: `core` has no `deleted_at`, `bib_app` holds no DELETE
+// grant on any core table, and a real company's lifecycle is the ledger plus
+// `core.legal_entity.status`. Archiving only means "keep this out of the
+// pickers", which is why it is a POST of an intent rather than an HTTP DELETE
+// that would read as a removal to anyone generating a client from this spec.
+const archivePartyRoute = createRoute({
+  method: "post",
+  path: "/api/v1/parties/{partyId}/archive",
+  tags: ["party"],
+  summary: "Archive a party — hide it from pickers and lists. Not a delete.",
+  request: { params: PartyParam },
+  responses: {
+    200: { description: "Party archived", content: { "application/json": { schema: PartySchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
+    404: errorResponse("Party not found"),
+    409: errorResponse(
+      "Already archived, or something still refers to the party — a lead, a proposal, an engagement letter, a letter line's entity or an engagement. The message names them.",
+    ),
+  },
+});
+
+const unarchivePartyRoute = createRoute({
+  method: "post",
+  path: "/api/v1/parties/{partyId}/unarchive",
+  tags: ["party"],
+  summary: "Bring an archived party back into pickers and lists",
+  request: { params: PartyParam },
+  responses: {
+    200: { description: "Party restored", content: { "application/json": { schema: PartySchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
+    404: errorResponse("Party not found"),
+    409: errorResponse("The party is not archived"),
   },
 });
 
@@ -301,6 +360,8 @@ const partyProfileRoute = createRoute({
   path: "/api/v1/parties/{partyId}",
   tags: ["party"],
   summary: "Party 360 — the party, its identifiers and relationships",
+  description:
+    "Always resolves, archived or not: a document pointing at this party has to render its counterparty.",
   request: {
     params: PartyParam,
     query: z.object({
@@ -369,11 +430,28 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     return c.json(relationship, 201);
   });
 
+  app.openapi(archivePartyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const party = await deps.service.archiveParty({ tenantId: s.tenantId, partyId }, s.actor);
+    return c.json({ ...party }, 200);
+  });
+
+  app.openapi(unarchivePartyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const party = await deps.service.unarchiveParty({ tenantId: s.tenantId, partyId }, s.actor);
+    return c.json({ ...party }, 200);
+  });
+
   app.openapi(listPartiesRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const parties = await deps.service.listParties(s.tenantId);
-    return c.json({ parties: [...parties] }, 200);
+    const { includeArchived } = c.req.valid("query");
+    const parties = await deps.service.listParties(s.tenantId, includeArchived === "true");
+    return c.json({ parties: parties.map((p) => ({ ...p })) }, 200);
   });
 
   app.openapi(partyProfileRoute, async (c) => {

@@ -20,10 +20,13 @@ import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
+import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
+import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { AttestedSigner } from "../../src/infrastructure/esign/attested-signer";
 import { Sha256ContentHasher } from "../../src/infrastructure/crypto/random-tokens";
@@ -31,6 +34,10 @@ import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { TenancyService } from "../../src/usecase/tenancy/service";
+import { DocumentService } from "../../src/usecase/document/service";
+import { StaffGradeService } from "../../src/usecase/staffgrade/service";
+import { PostgresStaffGradeRepository } from "../../src/infrastructure/postgres/staff-grade-repository";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -55,9 +62,43 @@ const party = new PartyService({
   events: ledger,
 });
 const letters = new PostgresEngagementRepository(app);
+const memberships = new PostgresMembershipRepository(app);
+// The real tenancy service, because the firm's standing signatory is a column
+// on the tenant row and G1.4's whole point is that it is a ROW: a fake here
+// would be asserting its own behaviour rather than the schema's.
+// G3.3's seniority ladder. A tenant is seeded with one at creation, so this
+// test's firms have to be provisioned the same way the product provisions them
+// — otherwise it is exercising a firm that could not exist.
+const staffGradeRepository = new PostgresStaffGradeRepository(app);
+const staffGrades = new StaffGradeService({
+  grades: staffGradeRepository,
+  ids: systemIds,
+  events: ledger,
+});
+const tenancy = new TenancyService({
+  tenants: new PostgresTenantRepository(app),
+  users: new PostgresUserRepository(app),
+  memberships,
+  roleSeeder: { seedDefaultRoles: (tenantId, actor) => config.seedDefaultRoles(tenantId, actor) },
+  issuingEntitySeeder: { seedFirmEntity: (t, n) => documentRepository.seedFirmEntity(t, n) },
+  roleDirectory: configRepository,
+  gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
+  gradeDirectory: staffGradeRepository,
+  ids: systemIds,
+  events: ledger,
+});
+const documentRepository = new PostgresDocumentRepository(app);
+const documents = new DocumentService({
+  preferences: documentRepository,
+  refs: documentRepository,
+  ids: systemIds,
+  events: ledger,
+});
 const service = new EngagementService({
   letters,
   library: configRepository,
+  documents,
+  firm: tenancy,
   esign: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
   ids: systemIds,
@@ -69,11 +110,15 @@ const stamp = Date.now().toString(36);
 let tenantA = "";
 let tenantB = "";
 let partyA = "";
+/** The FIRM's own entity — who is contracting on its side of the letter. */
+let firmEntityA = "";
 /** Two of the CLIENT's own companies. An engagement is `service × one legal
  *  entity`, so a letter covering both must fan out into engagements that differ
  *  in exactly this field — the acceptance G0.1 exists for. */
 let entityA1 = "";
 let entityA2 = "";
+/** The named individual a letter is addressed to, care-of the client. */
+let contactA = "";
 let gstV1 = "";
 /** The clause published, then superseded — the pin has to survive that. */
 let scopeV1 = "";
@@ -91,6 +136,13 @@ beforeAll(async () => {
   tenantA = a.id;
   tenantB = b.id;
 
+  // These tenants are created with raw SQL rather than through createTenant, so
+  // they do not get the fallback issuing entity provisioning seeds. Each firm
+  // gets its own here: `issuing_entity_party_id` is NOT NULL, and a firm that
+  // has named no entity cannot draft a letter at all.
+  firmEntityA = await documentRepository.seedFirmEntity(tenantA, "EL Test A LLP");
+  await documentRepository.seedFirmEntity(tenantB, "EL Test B LLP");
+
   partyA = (
     await party.createOrganization({ tenantId: tenantA, legalName: "Acme Ltd" }, SYSTEM_ACTOR)
   ).partyId;
@@ -103,6 +155,10 @@ beforeAll(async () => {
       { tenantId: tenantA, legalName: "Acme Logistics Ltd" },
       SYSTEM_ACTOR,
     )
+  ).partyId;
+
+  contactA = (
+    await party.createPerson({ tenantId: tenantA, fullName: "R Sharma" }, SYSTEM_ACTOR)
   ).partyId;
 
   const service1 = await config.define(
@@ -154,6 +210,105 @@ afterAll(async () => {
   await Promise.all([app.end({ timeout: 5 }), owner.end({ timeout: 5 })]);
 });
 
+/** A fresh number for each raw-SQL probe: `UNIQUE (tenant_id, ref)` is real, and
+ *  two probes sharing one would fail on that constraint rather than on the rule
+ *  the test is about. */
+let probes = 0;
+function refProbe(): number {
+  probes += 1;
+  return probes;
+}
+
+/** A party at the OTHER firm, for the cross-tenant probes. Created lazily so the
+ *  ordinary tests do not pay for it. */
+let partyBId = "";
+async function partyAtB(): Promise<string> {
+  if (partyBId === "") {
+    partyBId = (
+      await party.createOrganization({ tenantId: tenantB, legalName: "Other Firm Client" }, SYSTEM_ACTOR)
+    ).partyId;
+  }
+  return partyBId;
+}
+
+/**
+ * A signed letter with EVERY field G1.3–G1.5 added actually filled in — a
+ * background, an addressee, an issue date, a lineage link, an effective date,
+ * both signature blocks and the capacity each side signed in.
+ *
+ * It exists because a freeze that compares rows is only exercised by columns
+ * that hold something: "set a null column to null" is not a change and is
+ * rightly allowed.
+ */
+async function fullyFilledSignedLetter(): Promise<string> {
+  const previous = await signedLetter();
+  await nameTheFirmSignatory();
+  const letter = await service.draft(
+    {
+      tenantId: tenantA,
+      partyId: partyA,
+      jurisdiction: "IN",
+      title: "Acme — FY27, replacing FY26",
+      currency: "INR",
+      fxRate: "1",
+      fxRateDate: "2026-07-01",
+      advanceRequired: false,
+      background: "Acme has separated its logistics arm and needs both entities filed for.",
+      addressedToPartyId: contactA,
+      issuedOn: "2026-09-01",
+      supersedesId: previous,
+      effectiveFrom: "2026-10-01",
+    },
+    SYSTEM_ACTOR,
+  );
+  await service.addLine({
+    tenantId: tenantA,
+    letterId: letter.id,
+    entityPartyId: entityA1,
+    serviceVersionId: gstV1,
+    description: "GST filing, 12 months",
+    quantity: "12",
+    unitAmount: "2000",
+    discountPercent: "0",
+    effectiveFrom: "2026-12-01",
+  });
+  await service.addClause(tenantA, letter.id, scopeV1);
+  await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+  await service.sign(
+    {
+      tenantId: tenantA,
+      letterId: letter.id,
+      signedByName: "Priya Menon",
+      signedByTitle: "Director",
+      reference: "paper-full",
+    },
+    SYSTEM_ACTOR,
+  );
+  return letter.id;
+}
+
+/** Give firm A a standing signatory, once. The membership is inserted directly
+ *  because this tenant was created with raw SQL and has no seeded roles — what
+ *  is being exercised is the signature block, not the invite flow. */
+let signatoryNamed = false;
+async function nameTheFirmSignatory(): Promise<void> {
+  if (signatoryNamed) return;
+  const [user] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.user_account (email, display_name)
+    VALUES (${`firm-signatory-${stamp}@example.test`}, 'Siddharth Jain') RETURNING id
+  `;
+  if (!user) throw new Error("could not create the firm's signatory");
+  await owner`
+    INSERT INTO tenancy.membership (tenant_id, user_id, audience, role, commercial_visibility)
+    VALUES (${tenantA}, ${user.id}, 'STAFF', 'partner', true)
+  `;
+  await tenancy.setFirmSignatory(
+    { tenantId: tenantA, userId: user.id, title: "Director" },
+    SYSTEM_ACTOR,
+  );
+  signatoryNamed = true;
+}
+
 async function signedLetter(advance?: string): Promise<string> {
   const letter = await service.draft(
     {
@@ -197,6 +352,92 @@ async function signedLetter(advance?: string): Promise<string> {
   );
   return letter.id;
 }
+
+describe("the head a letter prints from", () => {
+  it("carries a reference and names the firm's own entity, by name", async () => {
+    // G1.1 and G1.2, through the whole stack. The read model carries the
+    // issuing entity's NAME because a letterhead prints a name — the rule
+    // CLAUDE.md says has now been learnt several times.
+    const id = await signedLetter();
+    const record = await letters.describeLetter(tenantA, id);
+    expect(record?.letter.ref).toMatch(/^EL-\d{4}-\d{4,}$/);
+    expect(record?.letter.issuingEntityPartyId).toBe(firmEntityA);
+    expect(record?.issuingEntity).toEqual({ id: firmEntityA, displayName: "EL Test A LLP" });
+
+    const [summary] = await letters.listLetters(tenantA, { partyId: partyA });
+    expect(summary?.issuingEntity.displayName).toBe("EL Test A LLP");
+  });
+
+  it("freezes every column G1.3-G1.5 added, the day they exist", async () => {
+    // The structural sweep in tests/architecture/signed-letter-freeze.integration.test.ts
+    // already covers these WITHOUT naming them — it asks the catalogue — which
+    // is why nobody had to remember to extend the trigger for nine new columns.
+    // This names them anyway, because "the background, the addressee and the
+    // effective date are part of what the client agreed to" is an acceptance,
+    // and an acceptance nobody can read in a test file is one that quietly
+    // stops being true.
+    //
+    // The letter is filled COMPLETELY first, and that is the point of the
+    // fixture rather than an accident of it: the freeze compares rows, so
+    // setting an already-null column to NULL changes nothing and is correctly
+    // allowed. A probe that did that would pass while proving nothing — which
+    // is exactly the trap `probeValueFor` exists to avoid in the structural
+    // sweep, met here from the other direction.
+    //
+    // Verified the other way round while writing this: adding a column to
+    // `crm.signed_letter_mutable_columns()` makes the structural test fail on
+    // its pinned allow-list, so widening the freeze cannot happen quietly.
+    const id = await fullyFilledSignedLetter();
+    const [before] = await owner<{ row: Record<string, unknown> }[]>`
+      SELECT to_jsonb(l) AS row FROM crm.engagement_letter l WHERE id = ${id}
+    `;
+    const columns = [
+      "background",
+      "addressed_to_party_id",
+      "issued_on",
+      "supersedes_id",
+      "effective_from",
+      "signed_by_title",
+      "firm_signatory_user_id",
+      "firm_signatory_title",
+      "firm_signed_at",
+    ];
+    // The fixture is only worth anything if it actually filled them.
+    expect(columns.filter((c) => before?.row[c] === null || before?.row[c] === undefined)).toEqual(
+      [],
+    );
+
+    const escaped: string[] = [];
+    for (const column of columns) {
+      const outcome = await owner
+        .unsafe(`UPDATE crm.engagement_letter SET "${column}" = NULL WHERE id = $1`, [id])
+        .then(() => `${column}: the UPDATE SUCCEEDED after signature`)
+        .catch((e: unknown) =>
+          (e as { code?: string }).code === "23001"
+            ? null
+            : `${column}: refused with ${(e as { code?: string }).code ?? "(none)"}`,
+        );
+      if (outcome) escaped.push(outcome);
+    }
+    expect(escaped).toEqual([]);
+  });
+
+  it("refuses to change the reference or the issuer after signature", async () => {
+    // Raw SQL as the OWNER: both columns are part of what the client agreed to,
+    // and migration 0019 made the freeze cover a column the day it exists
+    // rather than the day somebody remembers to list it.
+    const id = await signedLetter();
+    for (const statement of [
+      owner`UPDATE crm.engagement_letter SET ref = 'EL-2026-9998' WHERE id = ${id}`,
+      owner`
+        UPDATE crm.engagement_letter SET issuing_entity_party_id = ${partyA} WHERE id = ${id}
+      `,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23001"); // restrict_violation
+    }
+  });
+});
 
 describe("the freeze", () => {
   it("refuses to change a signed letter, even as the OWNER role", async () => {
@@ -289,9 +530,9 @@ describe("the fan-out", () => {
       db`
         INSERT INTO crm.engagement
           (tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-           entity_party_id, status, activated_at)
+           entity_party_id, status, activated_at, effective_from)
         VALUES (${tenantA}, ${id}, ${existing.engagementLetterLineId}, ${partyA},
-                ${entityA1}, 'active', now())
+                ${entityA1}, 'active', now(), current_date)
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23505"); // unique_violation
@@ -312,6 +553,245 @@ describe("the pin", () => {
     // …while the library itself has moved on.
     const live = await configRepository.readPinnedVersion(tenantA, scopeV1);
     expect(live?.status).toBe("archived");
+  });
+
+  it("serves the catalogue the line CITES, as that version stated it", async () => {
+    // G2.2 says a letter is "ASSEMBLED from the catalogue's own words", and until
+    // this join existed a grep for the four scope blocks outside the config model
+    // returned nothing — zero consumers. The same read carries `slaDays`, which
+    // is what T3.1 snapshots onto a work item at creation and the reason a
+    // LETTER pins a service version at all rather than reading the catalogue
+    // live: work already agreed must not become retroactively late.
+    const defined = await config.define(
+      {
+        tenantId: tenantA,
+        kind: "service",
+        key: "vcfo",
+        body: {
+          name: "Virtual CFO",
+          ref: "V2",
+          module: "RAA",
+          group: "VCFO CONSOLE",
+          billingBasis: "retainer",
+          recurrence: "monthly",
+          slaDays: 10,
+          listPrice: { amount: "90000.00", currency: "INR" },
+          scope: "Monthly management accounts, cash forecast and a board pack.",
+          clientObligations: "Bank statements and ledgers by the 7th.",
+          volumeLimits: "One entity; under 8 bank accounts.",
+          exclusions: "Statutory audit and transfer-pricing studies.",
+        },
+      },
+      SYSTEM_ACTOR,
+    );
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "vcfo", version: 1 },
+      SYSTEM_ACTOR,
+    );
+
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — vCFO",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: defined.draft.id,
+      description: "Virtual CFO, 12 months",
+      quantity: "12",
+      unitAmount: "85000",
+      discountPercent: "0",
+    });
+
+    // The firm rewrites the service AFTER the letter was drafted.
+    await config.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "vcfo",
+      body: {
+        name: "Virtual CFO",
+        ref: "V2",
+        billingBasis: "retainer",
+        recurrence: "quarterly",
+        slaDays: 30,
+        scope: "REWRITTEN 2027: quarterly management accounts only.",
+      },
+    });
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "vcfo", version: 2 },
+      SYSTEM_ACTOR,
+    );
+
+    const record = await service.describe(tenantA, letter.id);
+    const pinnedService = record.lines[0]?.service;
+    expect(pinnedService?.slaDays).toBe(10);
+    expect(pinnedService?.recurrence).toBe("monthly");
+    expect(pinnedService?.version).toBe(1);
+    // The firm's own code, on the letter, with no registry call per line.
+    expect(pinnedService?.ref).toBe("V2");
+    expect(pinnedService?.module).toBe("RAA");
+    // The words the letter is assembled FROM — as the version it cites stated
+    // them, not as the catalogue reads today.
+    expect(pinnedService?.scope).toBe(
+      "Monthly management accounts, cash forecast and a board pack.",
+    );
+    expect(pinnedService?.scope).not.toContain("REWRITTEN");
+    expect(pinnedService?.volumeLimits).toBe("One entity; under 8 bank accounts.");
+    // The other half of "list 90,000, agreed 85,000" — which migration 0017
+    // says is the reason a letter line pins a version.
+    expect(pinnedService?.listPrice).toEqual({ amount: "90000.00", currency: "INR" });
+    expect(record.lines[0]?.line.unitAmount).toBe("85000.0000");
+  });
+
+  it("keeps THIS client's own wording after the catalogue is rewritten", async () => {
+    // G1.6's second half, and the reason the overrides exist at all: without
+    // them, tailoring one client's scope means editing the catalogue, which
+    // silently rewrites the standard scope for every document issued
+    // afterwards. With them the letter carries its own words, so a revision
+    // next year cannot change what a signed document says.
+    const defined = await config.define(
+      {
+        tenantId: tenantA,
+        kind: "service",
+        key: "payroll",
+        body: {
+          name: "Payroll processing",
+          billingBasis: "fixed",
+          recurrence: "monthly",
+          scope: "Monthly payroll run for up to 50 employees.",
+          clientObligations: "Attendance inputs by the 25th.",
+          volumeLimits: "Up to 50 employees.",
+          exclusions: "Payroll tax litigation.",
+        },
+      },
+      SYSTEM_ACTOR,
+    );
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "payroll", version: 1 },
+      SYSTEM_ACTOR,
+    );
+
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — payroll",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: defined.draft.id,
+      description: "Payroll, 12 months",
+      quantity: "12",
+      unitAmount: "12000",
+      discountPercent: "0",
+      scopeOverride: "Monthly payroll run for up to 120 employees ACROSS BOTH ENTITIES.",
+      jurisdiction: "IN",
+      billingFrequency: "quarterly",
+      oopEstimate: { min: "5000", max: "6000", currency: "USD" },
+    });
+    // A second line the two sides genuinely have not priced. On a letter that
+    // is a TERM, not a gap.
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA2,
+      serviceVersionId: defined.draft.id,
+      description: "Group restructuring support",
+      quantity: "1",
+      pricingNote: "As mutually agreed",
+      discountPercent: "0",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    await service.sign(
+      {
+        tenantId: tenantA,
+        letterId: letter.id,
+        signedByName: "Priya Menon",
+        reference: "paper-g16",
+      },
+      SYSTEM_ACTOR,
+    );
+
+    // The catalogue is rewritten AFTER the client signed.
+    await config.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "payroll",
+      body: {
+        name: "Payroll processing",
+        billingBasis: "fixed",
+        recurrence: "annually",
+        scope: "REWRITTEN 2027: payroll for up to 20 employees.",
+        exclusions: "REWRITTEN 2027: everything else.",
+      },
+    });
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "payroll", version: 2 },
+      SYSTEM_ACTOR,
+    );
+
+    const record = await service.describe(tenantA, letter.id);
+    const line = record.lines[0];
+    // The tailored block is THIS letter's, and it says so.
+    expect(line?.terms.scope).toEqual({
+      text: "Monthly payroll run for up to 120 employees ACROSS BOTH ENTITIES.",
+      tailored: true,
+    });
+    // The blocks nobody tailored come from the version the line PINNED — not
+    // from the catalogue as it reads now.
+    expect(line?.terms.exclusions).toEqual({
+      text: "Payroll tax litigation.",
+      tailored: false,
+    });
+    expect(line?.terms.exclusions.text).not.toContain("REWRITTEN");
+    // A monthly service billed quarterly, which is the arrangement a derived
+    // billing frequency would have made unrepresentable.
+    expect(line?.line.billingFrequency).toBe("quarterly");
+    expect(line?.service?.recurrence).toBe("monthly");
+    // Out-of-pockets in a currency the letter is not in, outside the money.
+    expect(line?.line.oopEstimate).toEqual({
+      min: "5000.0000",
+      max: "6000.0000",
+      currency: "USD",
+    });
+
+    // AND THE TOTALS SAY WHAT THEY DO NOT COVER. 12 × 12,000 is the whole of
+    // the priced work; the second line is agreed and unpriced, and a figure
+    // that did not admit it would be a number a partner acts on.
+    expect(Number(record.totals.net)).toBe(144000);
+    expect(record.totals.unpricedLineCount).toBe(1);
+    expect(record.lines[1]?.line.unitAmount).toBeNull();
+    expect(record.lines[1]?.net).toBeNull();
+    expect(record.lines[1]?.line.pricingNote).toBe("As mutually agreed");
+
+    // And the wording cannot be edited out from under the signature — as the
+    // OWNER role, which is where an application rule would not reach.
+    const err = await owner`
+      UPDATE crm.engagement_letter_line
+         SET scope_override = 'quietly narrowed'
+       WHERE id = ${line?.line.id ?? ""}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
   });
 
   it("records a verifiable fingerprint of what was signed", async () => {
@@ -337,7 +817,7 @@ describe("the advance gate", () => {
 
     const { released } = await service.recordAdvance(tenantA, id, user.id, SYSTEM_ACTOR);
     expect(released).toHaveLength(2);
-    expect(released.every((e) => e.status === "active")).toBe(true);
+    expect(released.every((e) => e.engagement.status === "active")).toBe(true);
   });
 });
 
@@ -355,5 +835,316 @@ describe("the tenant wall", () => {
       db`DELETE FROM crm.engagement WHERE engagement_letter_id = ${id}`,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("42501"); // insufficient_privilege
+  });
+});
+
+// ── G1.3 · lineage, and why it cannot loop ─────────────────────────────────
+//
+// `supersedes_id` is the one self-reference in this schema, so the question it
+// always has to answer is whether a cycle is representable. It is not, and the
+// argument is structural rather than a check somebody runs: an edge A→B can
+// only be created when B is already SIGNED, a signed letter is FROZEN so its
+// own edge can never change afterwards, and a letter cannot point at itself.
+// Every edge therefore points at a row that was frozen before the edge existed.
+// These tests exercise each leg of that argument against real Postgres, as the
+// OWNER role, because an application-level version of it protects against the
+// application only.
+
+describe("superseding, in the database", () => {
+  it("refuses to supersede a letter nobody signed — as the OWNER role", async () => {
+    const draft = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — still being written",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    const err = await owner`
+      INSERT INTO crm.engagement_letter
+        (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
+         currency, fx_rate, fx_rate_date, supersedes_id)
+      VALUES (${tenantA}, ${`EL-2026-8${String(refProbe()).padStart(3, "0")}`}, ${partyA},
+              ${firmEntityA}, 'IN', 'Replacement', 'INR', 1, '2026-07-01', ${draft.id})
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001"); // restrict_violation
+    expect((err as Error).message).toContain("only a SIGNED letter is superseded");
+  });
+
+  it("makes a two-letter cycle impossible", async () => {
+    // B supersedes A, legally: A is signed. Turning A round to point at B is
+    // the cycle, and it is refused — by the FREEZE, because A is signed, which
+    // is precisely why the DAG argument holds without a recursive check.
+    const a = await signedLetter();
+    const b = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — FY26, replacing the first",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        supersedesId: a,
+      },
+      SYSTEM_ACTOR,
+    );
+
+    const err = await owner`
+      UPDATE crm.engagement_letter SET supersedes_id = ${b.id} WHERE id = ${a}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+    expect((err as Error).message).toContain("frozen");
+  });
+
+  it("refuses a letter that supersedes itself", async () => {
+    const id = await signedLetter();
+    const err = await owner`
+      UPDATE crm.engagement_letter SET supersedes_id = id WHERE id = ${id}
+    `.catch((e: unknown) => e);
+    // The freeze gets there first on a signed letter, which is the right
+    // complaint; the CHECK is what covers a draft, below.
+    expect((err as { code?: string }).code).toBe("23001");
+  });
+
+  it("refuses a DRAFT that points at itself, where the freeze does not apply", async () => {
+    // The trigger gets here first — a BEFORE trigger runs ahead of the CHECK —
+    // and it refuses for the more specific reason: a draft is not a signed
+    // letter, so it is not something to supersede. `el_supersedes_not_self_chk`
+    // stays as the backstop underneath it: if the trigger's rule is ever
+    // relaxed (superseding a `sent` letter, say), a letter pointing at itself
+    // is still unrepresentable without anybody having to remember why.
+    const draft = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — pointing at itself",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    const err = await owner`
+      UPDATE crm.engagement_letter SET supersedes_id = id WHERE id = ${draft.id}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23001");
+
+    // And the backstop is really there, rather than being a line in a migration
+    // nobody applied.
+    const [constraint] = await owner<{ name: string }[]>`
+      SELECT conname AS name FROM pg_constraint
+      WHERE conrelid = 'crm.engagement_letter'::regclass
+        AND conname = 'el_supersedes_not_self_chk'
+    `;
+    expect(constraint?.name).toBe("el_supersedes_not_self_chk");
+  });
+
+  it("allows only one LIVE successor, and a withdrawn one frees the slot", async () => {
+    const original = await signedLetter();
+    const first = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Replacement",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        supersedesId: original,
+      },
+      SYSTEM_ACTOR,
+    );
+
+    // The service refuses the second one by name. The INDEX is what makes that
+    // true when the service is bypassed, so it is asserted with raw SQL.
+    const err = await owner`
+      INSERT INTO crm.engagement_letter
+        (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
+         currency, fx_rate, fx_rate_date, supersedes_id)
+      VALUES (${tenantA}, ${`EL-2026-7${String(refProbe()).padStart(3, "0")}`}, ${partyA},
+              ${firmEntityA}, 'IN', 'Rival replacement', 'INR', 1, '2026-07-01', ${original})
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23505"); // unique_violation
+
+    // Drafting a replacement, pulling it, and drafting a better one is an
+    // ordinary afternoon — a total unique index would block it forever.
+    await service.withdraw(tenantA, first.id, SYSTEM_ACTOR);
+    const second = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "The replacement we meant",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        supersedesId: original,
+      },
+      SYSTEM_ACTOR,
+    );
+    const record = await service.describe(tenantA, original);
+    expect(record.supersededBy).toEqual({ id: second.id, ref: second.ref });
+  });
+
+  it("refuses to supersede another firm's letter", async () => {
+    // The composite foreign key, not RLS: a foreign-key check runs as a system
+    // operation RLS does not filter, so an id-only reference would let one
+    // firm's letter claim to replace another firm's contract.
+    const ours = await signedLetter();
+    const err = await owner`
+      INSERT INTO crm.engagement_letter
+        (tenant_id, ref, party_id, issuing_entity_party_id, jurisdiction, title,
+         currency, fx_rate, fx_rate_date, supersedes_id)
+      VALUES (${tenantB}, ${`EL-2026-6${String(refProbe()).padStart(3, "0")}`},
+              ${await partyAtB()}, ${await partyAtB()}, 'IN', 'Not yours to replace',
+              'INR', 1, '2026-07-01', ${ours})
+    `.catch((e: unknown) => e);
+    // The trigger looks the target up WITHIN the tenant and finds nothing, so
+    // it refuses before the key does. Either way it never lands.
+    expect((err as { code?: string }).code).toBe("23001");
+  });
+});
+
+// ── G1.4 · half a signature block is unrepresentable ───────────────────────
+
+describe("the firm's signature block, in the database", () => {
+  it("refuses a name with no capacity and no date", async () => {
+    // 0017 gave the CLIENT's signature this property; 0022 gives the firm's
+    // half the same one. A block that looks signed and proves nothing is worse
+    // than none, because it reads as evidence.
+    const draft = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — half a signature",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    const [signatory] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email)
+      VALUES (${`signatory-${stamp}-${String(refProbe())}@example.test`}) RETURNING id
+    `;
+    if (!signatory) throw new Error("could not create the signatory");
+
+    for (const statement of [
+      owner`
+        UPDATE crm.engagement_letter SET firm_signatory_user_id = ${signatory.id}
+        WHERE id = ${draft.id}
+      `,
+      owner`
+        UPDATE crm.engagement_letter SET firm_signatory_title = 'Director' WHERE id = ${draft.id}
+      `,
+      owner`
+        UPDATE crm.engagement_letter
+           SET firm_signatory_user_id = ${signatory.id}, firm_signatory_title = 'Director'
+         WHERE id = ${draft.id}
+      `,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23514"); // check_violation
+    }
+
+    // All three together is the only shape that lands.
+    await owner`
+      UPDATE crm.engagement_letter
+         SET firm_signatory_user_id = ${signatory.id},
+             firm_signatory_title = 'Director',
+             firm_signed_at = now()
+       WHERE id = ${draft.id}
+    `;
+    const record = await service.describe(tenantA, draft.id);
+    expect(record.firmSignatory?.title).toBe("Director");
+  });
+});
+
+// ── G1.5 · the dates, through the whole stack ──────────────────────────────
+
+describe("effective dates", () => {
+  it("carries the resolved start date onto every engagement", async () => {
+    // The acceptance, end to end: a letter signed today opening work that
+    // begins in October, with one line that begins later still.
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — FY27, starting October",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        effectiveFrom: "2026-10-01",
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: gstV1,
+      description: "GST filing, from October",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA2,
+      serviceVersionId: gstV1,
+      description: "Annual return, from December",
+      quantity: "1",
+      unitAmount: "18000",
+      discountPercent: "0",
+      effectiveFrom: "2026-12-01",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    const { engagements } = await service.sign(
+      { tenantId: tenantA, letterId: letter.id, signedByName: "Priya Menon" },
+      SYSTEM_ACTOR,
+    );
+
+    const byEntity = new Map(engagements.map((e) => [e.engagement.entityPartyId, e]));
+    expect(byEntity.get(entityA1)?.engagement.effectiveFrom).toBe("2026-10-01");
+    expect(byEntity.get(entityA2)?.engagement.effectiveFrom).toBe("2026-12-01");
+    // Signed and paid for, and not started — which is the distinction the
+    // whole task exists for.
+    expect(engagements.every((e) => e.engagement.status === "active")).toBe(true);
+    expect(engagements.every((e) => e.state === "pending_start")).toBe(true);
+  });
+
+  it("refuses an engagement with no start date at all", async () => {
+    // NOT NULL in the schema rather than a default in the service, because a
+    // scheduler that has to guess when work begins will guess today.
+    const id = await signedLetter();
+    const [existing] = await letters.listEngagements(tenantA, id);
+    if (!existing) throw new Error("expected an engagement");
+    const err = await withTenant(app, tenantA, (db) =>
+      db`
+        INSERT INTO crm.engagement
+          (tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
+           entity_party_id, status, activated_at)
+        VALUES (${tenantA}, ${id}, ${existing.engagementLetterLineId}, ${partyA},
+                ${entityA1}, 'active', now())
+      `,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23502"); // not_null_violation
   });
 });

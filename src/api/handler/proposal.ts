@@ -25,6 +25,7 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { ProposalService } from "../../usecase/proposal/service";
 import type { ProposalRecord, ProposalSummary } from "../../usecase/proposal/ports";
 import type { ProposalStatus } from "../../domain/proposal/model";
+import type { BillingFrequency } from "../../domain/document/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 
 export interface ProposalDeps {
@@ -53,6 +54,105 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
 
+const JurisdictionSchema = z.string().length(2);
+
+/** The closed set lives in the domain; zod needs a literal tuple, so `satisfies`
+ *  makes a value that is not a billing frequency a compile error here. */
+export const BILLING_FREQUENCY_VALUES = [
+  "one_time",
+  "monthly",
+  "quarterly",
+  "annually",
+  "custom",
+] as const satisfies readonly BillingFrequency[];
+
+/**
+ * OUT-OF-POCKET EXPENSES — a range, in its own currency.
+ *
+ * All three or none, which is what the database says too
+ * (`proposal_line_oop_is_whole_chk`): a range with one end is not a range and an
+ * amount with no currency is the one shape this product never stores. Its
+ * currency is deliberately NOT held to the document's — a client quoted in INR
+ * still faces a filing fee in USD, and that is the whole reason the field
+ * carries a currency of its own. It is never folded into a total: the document's
+ * FX rate is struck for the fee currency and says nothing about a third one.
+ */
+const OopEstimateSchema = z
+  .object({ min: AmountSchema, max: AmountSchema, currency: CurrencySchema })
+  .openapi("OutOfPocketEstimate");
+
+/**
+ * ONE OF THE FOUR SCOPE BLOCKS, RESOLVED — the words that print, and whether
+ * this document wrote them.
+ *
+ * `tailored` is the half a screen cannot do without: an editor that cannot tell
+ * "our standard scope" from "what we agreed with this client" is one where
+ * somebody edits the catalogue to fix a single letter. `text: null` means
+ * neither the document nor the catalogue version it pinned states this block —
+ * a real answer, and a renderer should print nothing rather than an empty
+ * heading.
+ */
+const ResolvedTermSchema = z
+  .object({ text: z.string().nullable(), tailored: z.boolean() })
+  .openapi("ResolvedTerm");
+
+const DocumentTermsSchema = z
+  .object({
+    scope: ResolvedTermSchema,
+    clientObligations: ResolvedTermSchema,
+    volumeLimits: ResolvedTermSchema,
+    exclusions: ResolvedTermSchema,
+  })
+  .openapi("DocumentTerms");
+
+/**
+ * THE CATALOGUE ROW THIS LINE CITES, as it was PINNED.
+ *
+ * G2.1's acceptance is "a proposal CITES the firm's own service code", and until
+ * this schema carried `ref` a screen had to call the config registry once per
+ * line to print `A1` — the per-row lookup CLAUDE.md names as the sign that a
+ * join belongs in the query. `slaDays` is the same gap and the one T3.1 walks
+ * into: a work item snapshots the SLA in force when it was created, off the
+ * version the document PINNED, and nothing served it.
+ *
+ * Everything but `key`, `version` and `name` is nullable because the CATALOGUE
+ * is: a published version is frozen, so a body published before a field existed
+ * can never carry it, and null means "the firm never stated this". A screen must
+ * not turn that into a default — `slaDays: null` is not a zero-day SLA.
+ *
+ * The four prose blocks are the CATALOGUE's words. G1.6 adds per-document
+ * overrides of exactly these; they will arrive beside this object rather than
+ * inside it, so "what does our catalogue say" and "what does this document say"
+ * stay two answers.
+ */
+const PinnedServiceSchema = z
+  .object({
+    key: z.string(),
+    version: z.number().int(),
+    /** The firm's OWN code — "A1". Not the registry key, which is lowercase and
+     *  url-safe by rule. */
+    ref: z.string().nullable(),
+    name: z.string(),
+    /** The revenue axis and the delivery axis. Independent dimensions. */
+    module: z.string().nullable(),
+    group: z.string().nullable(),
+    /** What the amounts are PER — per hour, per month, per item, or for the
+     *  whole engagement. */
+    billingBasis: z.string().nullable(),
+    /** How often the WORK comes round, which is not how often it is billed. */
+    recurrence: z.string().nullable(),
+    /** The turnaround promised by THIS version, in whole days from signing. */
+    slaDays: z.number().int().nullable(),
+    /** Redacted by the fee axis, with the rest of the money. */
+    listPrice: MoneySchema.nullable(),
+    pricingNote: z.string().nullable(),
+    scope: z.string().nullable(),
+    clientObligations: z.string().nullable(),
+    volumeLimits: z.string().nullable(),
+    exclusions: z.string().nullable(),
+  })
+  .openapi("PinnedService");
+
 const TotalsSchema = z
   .object({
     // Nullable because of the fee axis: a caller without commercial visibility
@@ -61,13 +161,34 @@ const TotalsSchema = z
     discount: AmountSchema.nullable(),
     net: AmountSchema.nullable(),
     currency: CurrencySchema,
+    /**
+     * HOW MANY LIVE LINES THE THREE FIGURES ABOVE DO NOT COVER.
+     *
+     * A line with no price contributes nothing to a sum, so without this the
+     * total would quietly understate the document and nothing on the wire would
+     * say so. Non-zero means the figures are a FLOOR — "this much, plus whatever
+     * is agreed for N further lines" — and a screen that renders the money
+     * without this field prints a number that is not the price of this document.
+     *
+     * NOT redacted by the fee axis, and that is the point: it is a count of
+     * lines, not an amount, and somebody who may not see the money still has to
+     * know the document is not fully priced.
+     */
+    unpricedLineCount: z.number().int(),
   })
   .openapi("ProposalTotals");
 
 const ProposalSchema = z
   .object({
     id: z.string().uuid(),
+    /** The firm's own number for this document — `PR-2026-0007`. What a client
+     *  quotes back and what an audit cites; the id is the system's name for it
+     *  and this is the firm's. */
+    ref: z.string(),
     partyId: z.string().uuid(),
+    /** Which of the FIRM's own entities is offering. Not redacted by the fee
+     *  axis: who is contracting is not money, and delivery staff need it. */
+    issuingEntityPartyId: z.string().uuid(),
     leadId: z.string().uuid().nullable(),
     title: z.string(),
     status: z.enum(STATUS_VALUES),
@@ -84,6 +205,9 @@ const ProposalSchema = z
     // withholding it from delivery staff would serve nobody.
     firstViewedAt: z.string().nullable(),
     viewCount: z.number().int(),
+    /** WHY the client said no. Null on every other status — the schema says so
+     *  too, so a reason can never sit on a proposal that was accepted. */
+    declinedReason: z.string().nullable(),
   })
   .openapi("Proposal");
 
@@ -100,21 +224,47 @@ const ProposalLineSchema = z
     // The PIN, on the wire, because a screen showing "list 25,000 / quoted
     // 22,500" needs to be able to say which catalogue version it is quoting.
     serviceVersionId: z.string().uuid(),
-    service: z
-      .object({
-        key: z.string(),
-        version: z.number().int(),
-        name: z.string(),
-        listPrice: MoneySchema.nullable(),
-      })
-      .nullable(),
+    service: PinnedServiceSchema.nullable(),
+    /** THE FOUR SCOPE BLOCKS, RESOLVED: this line's override where it has one,
+     *  the pinned catalogue version's words where it does not, and which of the
+     *  two won. `service` above still carries the catalogue's own words, so an
+     *  editor can show what was standard beside what this document changed. */
+    terms: DocumentTermsSchema,
     description: z.string(),
     position: z.number().int(),
     quantity: AmountSchema,
+    /**
+     * NULL FOR TWO DIFFERENT REASONS, which is why `priced` sits beside it: the
+     * fee axis redacts a price this caller may not see, and G1.6 allows a line
+     * that HAS no price. Read them together.
+     */
     unitAmount: AmountSchema.nullable(),
+    /**
+     * WHETHER THIS LINE HAS A PRICE AT ALL — false means "as mutually agreed",
+     * and `pricingNote` says why.
+     *
+     * NOT redacted by the fee axis. It is a fact about the document, not an
+     * amount, and without it a delivery associate would see `unitAmount: null`
+     * on every line and could not tell a redacted fee from an unpriced one —
+     * so every line would read as "as mutually agreed" to exactly the people
+     * who most need to know which lines really are.
+     */
+    priced: z.boolean(),
     currency: CurrencySchema,
     discountPercent: AmountSchema.nullable(),
     net: AmountSchema.nullable(),
+    /** Where the WORK is. */
+    jurisdiction: z.string().nullable(),
+    /** How often this DEAL is billed — defaulted from the pinned service's
+     *  recurrence at the moment the line was quoted, and freely different. */
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    /** WHY there is no amount. Not redacted by the fee axis: it is the sentence
+     *  that prints where a figure would, and hiding it leaves a line showing
+     *  neither a price nor a reason. */
+    pricingNote: z.string().nullable(),
+    /** Out-of-pocket expenses, separate from the fee and never in the totals.
+     *  Redacted with the money — it is an amount the firm expects to bill on. */
+    oopEstimate: OopEstimateSchema.nullable(),
   })
   .openapi("ProposalLine");
 
@@ -130,6 +280,8 @@ const ProposalRecordSchema = z
   .object({
     proposal: ProposalSchema,
     party: PartyRefSchema,
+    /** The issuing entity by NAME — a letterhead prints a name, not a uuid. */
+    issuingEntity: PartyRefSchema,
     lines: z.array(ProposalLineSchema),
     totals: TotalsSchema,
     approvedBy: ApproverSchema,
@@ -140,6 +292,7 @@ const ProposalSummarySchema = z
   .object({
     proposal: ProposalSchema,
     party: PartyRefSchema,
+    issuingEntity: PartyRefSchema,
     totals: TotalsSchema,
     lineCount: z.number().int(),
   })
@@ -166,7 +319,13 @@ const SentProposalSchema = z
 const SharedProposalSchema = z
   .object({
     id: z.string().uuid(),
+    /** The number the recipient quotes back down the phone. */
+    ref: z.string(),
     firmName: z.string(),
+    /** Which of the firm's companies is offering. A client is entitled to know
+     *  which one they would be contracting with, and it is not always the group
+     *  name above it. */
+    issuedBy: z.string(),
     addressedTo: z.string(),
     title: z.string(),
     status: z.enum(STATUS_VALUES),
@@ -177,9 +336,18 @@ const SharedProposalSchema = z
       z.object({
         description: z.string(),
         quantity: AmountSchema,
-        unitAmount: AmountSchema,
+        /** Null for "as mutually agreed". There is no fee axis on this route —
+         *  the recipient sees the money by definition — so unlike the staff
+         *  model, null here has exactly one meaning and needs no companion
+         *  flag. */
+        unitAmount: AmountSchema.nullable(),
         discountPercent: AmountSchema,
-        net: AmountSchema,
+        net: AmountSchema.nullable(),
+        /** What the client reads where the figure would be. */
+        pricingNote: z.string().nullable(),
+        billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+        /** What they are told to expect to reimburse, separate from the fee. */
+        oopEstimate: OopEstimateSchema.nullable(),
       }),
     ),
     totals: z.object({
@@ -187,6 +355,10 @@ const SharedProposalSchema = z
       discount: AmountSchema,
       net: AmountSchema,
       currency: CurrencySchema,
+      /** The recipient is told the same thing a partner is: how many lines this
+       *  figure does not cover. A client reading a total that quietly omits two
+       *  "as mutually agreed" lines is the worst place for this to go wrong. */
+      unpricedLineCount: z.number().int(),
     }),
   })
   .openapi("SharedProposal");
@@ -201,6 +373,11 @@ const DraftProposalRequest = z
   .object({
     partyId: z.string().uuid(),
     leadId: z.string().uuid().optional(),
+    // WHO is offering, and the key the firm's own rule is looked up on when
+    // nobody says. Both optional, and both absent is the ordinary case: the
+    // firm's preference rows answer it, and a firm always has a fallback.
+    issuingEntityPartyId: z.string().uuid().optional(),
+    clientJurisdiction: z.string().length(2).optional(),
     title: z.string().min(1),
     // The quote currency and the rate back to the firm's reporting currency.
     // Both required, and the rate is "1" when they match — stored rather than
@@ -218,8 +395,34 @@ const AddLineRequest = z
     serviceVersionId: z.string().uuid(),
     description: z.string().min(1),
     quantity: AmountSchema.default("1"),
-    unitAmount: AmountSchema,
+    /**
+     * OPTIONAL since G1.6 — omit it for a line that is genuinely "as mutually
+     * agreed", and send `pricingNote` saying so.
+     *
+     * OMITTING IT IS NOT SENDING "0". Zero is a price the firm committed to; the
+     * schema could not express the difference until now, and quoting an unpriced
+     * line at zero says something completely different to a client.
+     */
+    unitAmount: AmountSchema.optional(),
     discountPercent: AmountSchema.default("0"),
+    /** Where the WORK is — the country the user picked. Not derived. */
+    jurisdiction: JurisdictionSchema.optional(),
+    /** How often this DEAL is billed. Omit and it defaults from the PINNED
+     *  service's `recurrence`; state it to bill a monthly service quarterly. */
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    /** THIS DOCUMENT'S OWN WORDING for any of the four scope blocks. Omit any of
+     *  them and the pinned catalogue version's words print — which is what makes
+     *  tailoring one client's scope stop meaning "edit the catalogue". */
+    scopeOverride: z.string().min(1).optional(),
+    clientObligationsOverride: z.string().min(1).optional(),
+    volumeLimitsOverride: z.string().min(1).optional(),
+    exclusionsOverride: z.string().min(1).optional(),
+    /** Out-of-pocket expenses: a RANGE, in its own currency, reimbursed at
+     *  actuals. Its currency need not be the document's, and it is never added
+     *  into the totals. */
+    oopEstimate: OopEstimateSchema.optional(),
+    /** WHY there is no amount — REQUIRED when `unitAmount` is omitted. */
+    pricingNote: z.string().min(1).optional(),
   })
   .openapi("AddProposalLineRequest");
 
@@ -236,7 +439,14 @@ const ViewSharedRequest = z
   .openapi("ViewSharedProposalRequest");
 
 const DecisionRequest = z
-  .object({ decision: z.enum(["accepted", "rejected"]) })
+  .object({
+    decision: z.enum(["accepted", "rejected"]),
+    declinedReason: z.string().min(1).max(2000).optional().openapi({
+      description:
+        "Why they said no, in the firm's own words. Recorded only on a rejection — the status " +
+        "already says THAT a quote was lost, and this is the half worth anything later.",
+    }),
+  })
   .openapi("ProposalDecisionRequest");
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -435,7 +645,9 @@ function toProposalBody(
 ): z.infer<typeof ProposalSchema> {
   return {
     id: proposal.id,
+    ref: proposal.ref,
     partyId: proposal.partyId,
+    issuingEntityPartyId: proposal.issuingEntityPartyId,
     leadId: proposal.leadId,
     title: proposal.title,
     status: proposal.status,
@@ -451,6 +663,48 @@ function toProposalBody(
     discountApprovedAt: proposal.discountApprovedAt,
     firstViewedAt: proposal.firstViewedAt,
     viewCount: proposal.viewCount,
+    // NOT redacted by the fee axis: why a client said no is a pipeline fact,
+    // not a price. It is on the STAFF model only — SharedProposal is a separate
+    // shape, so it can never reach the recipient's own screen.
+    declinedReason: proposal.declinedReason,
+  };
+}
+
+/**
+ * The pinned catalogue row, field by field — never the port object forwarded.
+ *
+ * Only the PRICE half is redacted by the fee axis. The code, the Dept, the
+ * delivery team, the SLA and the four scope blocks are what the firm SELLS and
+ * what it UNDERTOOK; a delivery associate without commercial visibility is
+ * precisely the person who needs to read them, and hiding the scope of the work
+ * from whoever does the work would be the fee axis answering a question nobody
+ * asked it. `pricingNote` stays with them and not with the money on purpose: it
+ * is the sentence that PRINTS on the document where an amount would ("As
+ * mutually agreed"), so redacting it would leave a line showing neither a price
+ * nor a reason, which reads as data missing rather than as a decision.
+ */
+function toPinnedServiceBody(
+  service: NonNullable<ProposalRecord["lines"][number]["service"]>,
+  fees: boolean,
+): z.infer<typeof PinnedServiceSchema> {
+  return {
+    key: service.key,
+    version: service.version,
+    ref: service.ref,
+    name: service.name,
+    module: service.module,
+    group: service.group,
+    billingBasis: service.billingBasis,
+    recurrence: service.recurrence,
+    slaDays: service.slaDays,
+    // The list price is the firm's own commercial data, so it goes with the rest
+    // of the money.
+    listPrice: fees && service.listPrice !== null ? { ...service.listPrice } : null,
+    pricingNote: service.pricingNote,
+    scope: service.scope,
+    clientObligations: service.clientObligations,
+    volumeLimits: service.volumeLimits,
+    exclusions: service.exclusions,
   };
 }
 
@@ -465,6 +719,9 @@ function toTotalsBody(
     // The CURRENCY stays. It is not a fee, and a document labelled AED is
     // information a delivery associate legitimately needs.
     currency: totals.currency,
+    // And so does the COUNT of what the money leaves out. It is not an amount,
+    // and "this document is not fully priced" is a fact about the work.
+    unpricedLineCount: totals.unpricedLineCount,
   };
 }
 
@@ -472,31 +729,33 @@ function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof Pro
   return {
     proposal: toProposalBody(record.proposal, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
+    issuingEntity: {
+      id: record.issuingEntity.id,
+      displayName: record.issuingEntity.displayName,
+    },
     lines: record.lines.map((l) => ({
       id: l.line.id,
       entityPartyId: l.line.entityPartyId,
       entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
-      service:
-        l.service === null
-          ? null
-          : {
-              key: l.service.key,
-              version: l.service.version,
-              name: l.service.name,
-              // The list price is the firm's own commercial data, so it goes
-              // with the rest of the money.
-              listPrice: fees && l.service.listPrice !== null ? { ...l.service.listPrice } : null,
-            },
+      service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
+      terms: { ...l.terms },
       description: l.line.description,
       position: l.line.position,
       // Quantity is not money. "Three registrations" is what the work IS, and a
       // delivery associate needs it.
       quantity: l.line.quantity,
       unitAmount: fees ? l.line.unitAmount : null,
+      // Computed BEFORE the redaction, from the line itself: it is what makes
+      // the null above readable.
+      priced: l.line.unitAmount !== null,
       currency: l.line.currency,
       discountPercent: fees ? l.line.discountPercent : null,
       net: fees ? l.net : null,
+      jurisdiction: l.line.jurisdiction,
+      billingFrequency: l.line.billingFrequency,
+      pricingNote: l.line.pricingNote,
+      oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
     })),
     totals: toTotalsBody(record.totals, fees),
     approvedBy: record.approvedBy === null ? null : { ...record.approvedBy },
@@ -510,6 +769,10 @@ function toSummaryBody(
   return {
     proposal: toProposalBody(summary.proposal, fees),
     party: { id: summary.party.id, displayName: summary.party.displayName },
+    issuingEntity: {
+      id: summary.issuingEntity.id,
+      displayName: summary.issuingEntity.displayName,
+    },
     totals: toTotalsBody(summary.totals, fees),
     lineCount: summary.lineCount,
   };
@@ -564,13 +827,38 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
         // The pinned service is a join the write path does not do; the read
         // route carries it. Null here says "not loaded", which is what it is.
         service: null,
+        // Same as `service`: resolving the four blocks needs the pinned body,
+        // which is a join the write path does not make. The line's own
+        // overrides are what it wrote, so they are reported as written and
+        // `tailored` is exactly right; the catalogue's fallback is null here
+        // and the read route is what fills it in.
+        terms: {
+          scope: { text: line.scopeOverride, tailored: line.scopeOverride !== null },
+          clientObligations: {
+            text: line.clientObligationsOverride,
+            tailored: line.clientObligationsOverride !== null,
+          },
+          volumeLimits: {
+            text: line.volumeLimitsOverride,
+            tailored: line.volumeLimitsOverride !== null,
+          },
+          exclusions: {
+            text: line.exclusionsOverride,
+            tailored: line.exclusionsOverride !== null,
+          },
+        },
         description: line.description,
         position: line.position,
         quantity: line.quantity,
         unitAmount: fees ? line.unitAmount : null,
+        priced: line.unitAmount !== null,
         currency: line.currency,
         discountPercent: fees ? line.discountPercent : null,
         net: null,
+        jurisdiction: line.jurisdiction,
+        billingFrequency: line.billingFrequency,
+        pricingNote: line.pricingNote,
+        oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
       },
       201,
     );
@@ -621,7 +909,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     return c.json(
       {
         id: shared.id,
+        ref: shared.ref,
         firmName: shared.firmName,
+        issuedBy: shared.issuedBy,
         addressedTo: shared.addressedTo,
         title: shared.title,
         status: shared.status,
@@ -634,6 +924,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
           unitAmount: l.unitAmount,
           discountPercent: l.discountPercent,
           net: l.net,
+          pricingNote: l.pricingNote,
+          billingFrequency: l.billingFrequency,
+          oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
         })),
         totals: { ...shared.totals },
       },
@@ -645,8 +938,14 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
-    const { decision } = c.req.valid("json");
-    const decided = await deps.service.decide(s.tenantId, proposalId, decision, s.actor);
+    const { decision, declinedReason } = c.req.valid("json");
+    const decided = await deps.service.decide(
+      s.tenantId,
+      proposalId,
+      decision,
+      s.actor,
+      declinedReason,
+    );
     return c.json(toProposalBody(decided, seesFees(c.get("principal"))), 200);
   });
 }

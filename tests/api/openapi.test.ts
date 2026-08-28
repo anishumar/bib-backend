@@ -13,6 +13,7 @@ import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { DocumentService } from "../../src/usecase/document/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
@@ -36,6 +37,7 @@ import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeDocumentFakes } from "../../src/testfakes/document";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
   FakeCredentialRepo,
@@ -125,6 +127,7 @@ function deps(): RouterDeps {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions }),
     },
+    document: { service: new DocumentService(makeDocumentFakes()) },
     auth: {
       service: identityService(),
       authz: new AuthzService({ permissions }),
@@ -225,6 +228,36 @@ describe("the spec and the wire agree", () => {
     const sent = Object.keys((await res.json()) as Record<string, unknown>).sort();
 
     expect(sent).toEqual(documented);
+  });
+
+  it("documents exactly the fields a lead sends", async () => {
+    // The third route to hold this line, and G3.1 is why it is here: `title` and
+    // `lostReason` were added to the aggregate, and a field on the wire that the
+    // spec does not describe is one the generated frontend client cannot see —
+    // so a titled lead would have rendered as an untitled one and nothing would
+    // have failed. zod-openapi documents a response without validating it, so
+    // only a comparison like this notices.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      components: { schemas: { Lead: { properties: Record<string, unknown> } } };
+    };
+    const documented = Object.keys(spec.components.schemas.Lead.properties).sort();
+
+    // A real lead from the real service, not a literal — a literal would just
+    // be this list written twice.
+    const fakes = makeLeadFakes();
+    const captured = await new LeadService(fakes).capture(
+      {
+        tenantId: "00000000-0000-4000-8000-0000000000c1",
+        source: "inbound",
+        title: "FY27 statutory audit",
+        kind: "organization",
+        name: "Meridian Textiles Private Limited",
+        identifiers: [{ type: "email", value: "priya@meridian.example" }],
+      },
+      { type: "human", id: "00000000-0000-4000-8000-0000000000d1" },
+    );
+
+    expect(Object.keys(captured.lead).sort()).toEqual(documented);
   });
 
   it("tells the caller what it may do, so a screen need not guess", async () => {

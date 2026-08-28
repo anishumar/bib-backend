@@ -22,11 +22,12 @@ import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
-import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import type { Lead, LeadSource, LeadStage, OwnerSource } from "../../domain/lead/model";
 import {
   DEDUP_IDENTIFIER_TYPES,
   LEAD_SOURCES,
   LEAD_STAGES,
+  CLOSED_UNWON_STAGES,
   canMoveStage,
   isAmbiguous,
   isDedupIdentifier,
@@ -34,19 +35,24 @@ import {
   isLeadStage,
   isTerminalStage,
   matchedParty,
+  recordsLostReason,
 } from "../../domain/lead/model";
 import type { DedupMatch } from "../../domain/lead/model";
 import {
   AmbiguousMatch,
+  BlankTitle,
   InvalidSource,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
+  LostReasonNotApplicable,
+  LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
   SameStage,
 } from "../../domain/lead/errors";
 import type {
+  AssignmentStrategy,
   LeadRecord,
   LeadRepository,
   ProspectDirectory,
@@ -58,6 +64,10 @@ export interface Deps {
   /** The party module, behind this use case's own narrow interface. */
   readonly prospects: ProspectDirectory;
   readonly staff: StaffDirectory;
+  /** Whose desk an unclaimed lead lands on. A port, so the rule a firm actually
+   *  wants — rotation today, territory once its axis is chosen — is a wiring
+   *  change at the composition root rather than an edit to this file. */
+  readonly assignment: AssignmentStrategy;
   readonly ids: IdGen;
   /** For the identifier's valid-from date. Time is a port here for the same
    *  reason it is in identity: a test must be able to fix "today". */
@@ -76,6 +86,18 @@ export interface CaptureIdentifier {
 export interface CaptureLeadInput {
   readonly tenantId: string;
   readonly source: string;
+  /**
+   * What to call this opportunity — "FY27 statutory audit", "GST registration
+   * for the Pune plant".
+   *
+   * REQUIRED, and not derived from the party's name when it is missing. A
+   * derived title would be identical for every opportunity a client ever has,
+   * which is the state before 0030 with a NOT NULL column in front of it: the
+   * read model already carries `party.displayName`, so a title that repeated it
+   * would add a column and no information. Somebody capturing a lead knows what
+   * it is for; the field asks them to say it once.
+   */
+  readonly title: string;
   /** Whether the prospect is a company or a human being. */
   readonly kind: PartyKind;
   /** The legal name of the organization, or the person's full name. */
@@ -85,7 +107,26 @@ export interface CaptureLeadInput {
   readonly tradeName?: string | undefined;
   readonly industry?: string | undefined;
   readonly website?: string | undefined;
-  readonly ownerUserId?: string | undefined;
+  /**
+   * Whose desk to put it on. THREE meanings, and they are genuinely different
+   * instructions rather than two spellings of one:
+   *
+   *   absent  — nobody was named, so the firm's assignment strategy chooses.
+   *             This is the everyday web-form capture, and the case the
+   *             acceptance is about: leads arriving with no owner distribute
+   *             evenly instead of piling up in a queue nobody watches.
+   *   null    — an explicit instruction to leave it in the UNASSIGNED QUEUE.
+   *             Triage-first firms work that way, and 0007 called that queue a
+   *             real and useful state; auto-assigning unconditionally would
+   *             quietly abolish it.
+   *   a uuid  — that person, checked as active staff here. No strategy runs: a
+   *             human made the decision and a rotation does not overrule one.
+   *
+   * The same null-vs-absent distinction `AssignOwnerInput` already draws, for
+   * the same reason — one spelling per meaning keeps the generated client
+   * honest.
+   */
+  readonly ownerUserId?: string | null | undefined;
   readonly notes?: string | undefined;
 }
 
@@ -100,12 +141,52 @@ export interface CaptureResult {
   readonly merged: boolean;
   /** True when the prospect was already in the firm's records. */
   readonly matchedExistingParty: boolean;
+  /**
+   * The title this capture sent and the merge THREW AWAY — or null when nothing
+   * was thrown away.
+   *
+   * `title` is the only input this API demands on every capture and then, on the
+   * merge path, ignores. Someone types "Transfer pricing study", gets back a
+   * lead called "FY26 statutory audit", and until this field existed there was
+   * nothing anywhere in the response saying their words had been dropped or
+   * why. The merge itself is right — `lead_one_open_per_party` means a firm
+   * holds exactly one live opportunity per client, so appending is the only
+   * correct thing to do — so the fix is to make the loss VISIBLE, not to stop
+   * losing it. Only the caller can act on it: re-title the live lead, close it
+   * first, or recognise their own duplicate submission.
+   *
+   * NULL WHEN THE TITLES MATCH, not merely when nothing merged. If the second
+   * capture sent the words the lead already carries, nothing was lost and the
+   * caller's title IS the lead's title; reporting a discard there would make
+   * every honest duplicate submission look like data loss and teach callers to
+   * ignore the field. Non-null means exactly one thing: words were dropped.
+   *
+   * It sits beside the lead rather than on it because it was never stored and
+   * never will be — `lead.title` is the row, this is what the row refused.
+   *
+   * Only `title`. `source`, `notes` and `ownerUserId` are also not applied by a
+   * merge, but each of them is optional on the wire and the route already says
+   * the owner is never reassigned; this is the one the API insists on and then
+   * discards.
+   */
+  readonly discardedTitle: string | null;
 }
 
 export interface MoveStageInput {
   readonly tenantId: string;
   readonly leadId: string;
   readonly stage: string;
+  /**
+   * Why it did not close won. Required moving to `lost` or `abandoned`, refused
+   * on every other stage.
+   *
+   * REQUIRED for BOTH unwon stages, symmetrically and on purpose. Making it
+   * optional on `abandoned` — "went quiet is its own reason" — would put a
+   * friction gradient between the two, and the cheapest way past a text box is
+   * to file a competitor loss as "went quiet". That is the exact signal G3.1
+   * exists to protect, so neither stage is the easy one.
+   */
+  readonly lostReason?: string | undefined;
 }
 
 export interface AssignOwnerInput {
@@ -133,14 +214,19 @@ export class LeadService {
    */
   async capture(input: CaptureLeadInput, actor: Actor): Promise<CaptureResult> {
     const source = this.parseSource(input.source);
+    const title = this.parseTitle(input.title);
 
     // Everything that can be refused without writing is refused first — a
     // capture that fails halfway leaves a party nobody asked for.
     if (!input.identifiers.some((i) => isDedupIdentifier(i.type))) {
       throw new NoContactDetail(DEDUP_IDENTIFIER_TYPES);
     }
-    const ownerUserId = input.ownerUserId ?? null;
-    if (ownerUserId !== null) await this.requireStaff(input.tenantId, ownerUserId);
+    // `undefined` and `null` part company here and stay parted for the rest of
+    // the method: one asks the strategy to choose, the other says do not.
+    const requestedOwner = input.ownerUserId;
+    if (requestedOwner !== undefined && requestedOwner !== null) {
+      await this.requireStaff(input.tenantId, requestedOwner);
+    }
 
     const match = await this.resolve(input.tenantId, input.identifiers);
     if (isAmbiguous(match)) throw new AmbiguousMatch(match.parties);
@@ -157,10 +243,24 @@ export class LeadService {
       : await this.deps.leads.findOpenForParty(input.tenantId, existingPartyId);
 
     if (open) {
-      // THE MERGE. Nothing is overwritten: the source, owner and notes on the
-      // live opportunity were somebody's decision, and a duplicate web-form
+      // THE MERGE. Nothing is overwritten: the title, source, owner and notes on
+      // the live opportunity were somebody's decision, and a duplicate web-form
       // submission is not grounds to undo it. What the second capture brought
       // goes into the timeline, where it can be read and acted on.
+      //
+      // The discarded TITLE is the one real cost of the merge, and it is the
+      // sharp end of the open-question on lead_one_open_per_party (see below):
+      // if the second capture was genuinely a second piece of work rather than a
+      // duplicate form submission, its name is what gets thrown away here. That
+      // is an argument about the index, not about this branch — with one open
+      // lead per party, appending is the only correct thing to do.
+      //
+      // So it is thrown away OUT LOUD, in two places at once and deliberately
+      // not the same way in both. `discardedTitle` on the result gives the
+      // caller their own words back, because they are the only party who can do
+      // anything about it. The ledger gets the machine fact and not the words —
+      // see below.
+      const discardedTitle = title === open.title ? null : title;
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "lead.merged",
@@ -171,21 +271,61 @@ export class LeadService {
           capturedSource: source,
           matchedIdentifierTypes: this.typesAt(input, [...match.existingByIndex.keys()]),
           addedIdentifierTypes: added,
+          // WHETHER a title was dropped, never the title itself — the same
+          // shape as `lostReasonRecorded` on lead.stage_changed, for the same
+          // reason and by the same rule. A lead title names the counterparty,
+          // and a lead can be about a human being ("Priya Menon — personal
+          // tax"), so the words are sometimes personal data and the ledger
+          // cannot tell which times. EVENT-CONTRACT §3.4 refuses a person's
+          // name at any depth in any casing, and this log cannot be erased: put
+          // the words here and a DPDP erasure request forces the choice between
+          // breaking the law and breaking the audit trail. `findPiiKey` would
+          // NOT have stopped it — it denies KEYS and `title` is not one — which
+          // is exactly why the rule has to be kept by whoever writes the
+          // payload. lead.captured excludes the title for this reason already.
+          //
+          // The boolean is worth having on its own: it is the only record of
+          // how often a merge loses a DISTINCT piece of work rather than
+          // absorbing a duplicate form submission, which is the evidence
+          // anybody revisiting lead_one_open_per_party would have to go and
+          // reconstruct otherwise. The words themselves are in the response, to
+          // the one person who can act on them, and nowhere else.
+          titleDiscarded: discardedTitle !== null,
         },
       });
-      return { lead: open, merged: true, matchedExistingParty: true };
+      return { lead: open, merged: true, matchedExistingParty: true, discardedTitle };
     }
 
-    const lead = await this.deps.leads.create({
+    const created = await this.deps.leads.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
+      title,
       partyId,
       source,
-      ownerUserId,
+      ownerUserId: requestedOwner ?? null,
       notes: input.notes ?? null,
     });
+
+    // ASSIGNMENT, and only when nobody named an owner. It runs AFTER the insert
+    // rather than before it because the strategy has to record its own choice
+    // (see AssignmentStrategy): it cannot claim a desk for a row that does not
+    // exist yet. The cost is that a lead exists unowned for the width of one
+    // statement; the alternative — choose, then write in a second transaction —
+    // is the race the port exists to close.
+    const lead =
+      requestedOwner === undefined ? await this.deps.assignment.assign(created) : created;
+    const ownerAssignedBy = this.ownerSource(requestedOwner, lead);
     // The owner is part of this event rather than a second `lead.owner_assigned`
     // beside it: one action by one person is one row in the timeline.
+    //
+    // THE TITLE IS NOT IN THIS PAYLOAD, and that was a decision, not an
+    // omission. A title names the counterparty — "Priya Menon — personal tax",
+    // for a lead whose `kind` is `person` — so it is sometimes personal data
+    // and the ledger cannot tell which times. `findPiiKey` cannot help: it
+    // denies KEYS, and `title` is not one, so nothing would have stopped it.
+    // The rule is the one the event contract states (§3.4): the payload carries
+    // ids and machine facts, the erasable row carries the words. `partyId` is
+    // already here and resolves to the name for anyone entitled to it.
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "lead.captured",
@@ -194,29 +334,66 @@ export class LeadService {
       payload: {
         partyId,
         source,
-        ownerUserId,
+        ownerUserId: lead.ownerUserId,
+        // HOW the owner got there, never just who. "The rotation chose Anand"
+        // and "the partner chose Anand" are different facts, and only the first
+        // is evidence about whether assignment is working. A machine fact, so
+        // it belongs in a log that cannot be erased.
+        ownerAssignedBy,
         matchedExistingParty: existingPartyId !== null,
         identifierTypes: input.identifiers.map((i) => i.type),
       },
     });
-    return { lead, merged: false, matchedExistingParty: existingPartyId !== null };
+    // Nothing was discarded: this capture's title is on the lead it just made.
+    return {
+      lead,
+      merged: false,
+      matchedExistingParty: existingPartyId !== null,
+      discardedTitle: null,
+    };
   }
 
-  /** Move a lead through the pipeline. Reaching a terminal stage closes it. */
+  /**
+   * Move a lead through the pipeline. Reaching a terminal stage closes it, and
+   * an unwon close records why.
+   *
+   * `lost` and `abandoned` are the two ways an opportunity ends without a win
+   * and they are NOT the same finding: went quiet is a follow-up problem, chose
+   * a competitor is a pricing problem, and a firm that cannot tell them apart
+   * cannot tell which of its two fixable failures it has.
+   */
   async moveStage(input: MoveStageInput, actor: Actor): Promise<Lead> {
     const to = this.parseStage(input.stage);
+    const lostReason = this.parseLostReason(to, input.lostReason);
     const lead = await this.leadOrThrow(input.tenantId, input.leadId);
     if (lead.stage === to) throw new SameStage(lead.stage);
     if (!canMoveStage(lead.stage, to)) throw new LeadClosed(lead.id, lead.stage);
 
     const closedAt = isTerminalStage(to) ? this.deps.clock.now().toISOString() : null;
-    const moved = await this.deps.leads.moveStage(input.tenantId, lead.id, to, closedAt);
+    const moved = await this.deps.leads.moveStage(
+      input.tenantId,
+      lead.id,
+      to,
+      closedAt,
+      lostReason,
+    );
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "lead.stage_changed",
       objectId: lead.id,
       actor,
-      payload: { from: lead.stage, to, closed: closedAt !== null, partyId: lead.partyId },
+      payload: {
+        from: lead.stage,
+        to,
+        closed: closedAt !== null,
+        partyId: lead.partyId,
+        // WHETHER a reason was recorded, never the reason itself. A closer
+        // writes "their CFO went with his old audit partner" — a sentence about
+        // a named human being — into a column that can be erased on request,
+        // and this log cannot be. The machine fact ("did anybody explain this
+        // loss?") is what a timeline needs; the sentence lives on crm.lead.
+        lostReasonRecorded: lostReason !== null,
+      },
     });
     return moved;
   }
@@ -279,10 +456,52 @@ export class LeadService {
     return stage;
   }
 
+  /** Trimmed here rather than at the door, so every caller — the handler, a
+   *  future importer, a test — stores the same thing. `lead_title_present_chk`
+   *  is the backstop for the paths that do not come through here at all. */
+  private parseTitle(title: string): string {
+    const trimmed = title.trim();
+    if (trimmed === "") throw new BlankTitle();
+    return trimmed;
+  }
+
+  /**
+   * The reason, checked against the stage it is being written with.
+   *
+   * Both directions are refused, because both are silent data loss: an unwon
+   * close with no reason is the gap this field was added to close, and a reason
+   * on any other stage is a sentence in a column nothing reads. The database
+   * agrees on the second half (`lead_lost_reason_scope_chk`) and deliberately
+   * not on the first — leads closed before 0030 have no honest reason to
+   * backfill, so NULL there means "nobody was asked", which is true.
+   */
+  private parseLostReason(to: LeadStage, reason: string | undefined): string | null {
+    const trimmed = reason?.trim() ?? "";
+    if (!recordsLostReason(to)) {
+      if (trimmed !== "") throw new LostReasonNotApplicable(to, CLOSED_UNWON_STAGES);
+      return null;
+    }
+    if (trimmed === "") throw new LostReasonRequired(to);
+    return trimmed;
+  }
+
   private async leadOrThrow(tenantId: string, leadId: string): Promise<Lead> {
     const lead = await this.deps.leads.findById(tenantId, leadId);
     if (!lead) throw new LeadNotFound(leadId);
     return lead;
+  }
+
+  /**
+   * How the owner on this lead got there, for the timeline.
+   *
+   * Null is not "unknown" — it is the unassigned queue, which is what both a
+   * deliberate `null` at capture and a strategy that declined leave behind. A
+   * reader asking "was this assigned automatically?" gets yes-by-which-rule, no
+   * because a person said so, or no because nobody is on it.
+   */
+  private ownerSource(requested: string | null | undefined, lead: Lead): OwnerSource | null {
+    if (lead.ownerUserId === null) return null;
+    return requested === undefined ? this.deps.assignment.policy : "requested";
   }
 
   private async requireStaff(tenantId: string, userId: string): Promise<void> {

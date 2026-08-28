@@ -119,7 +119,37 @@ lanes' schema work genuinely parallel. Revisit when either range runs low.
 - [x] `(A)` **T1.3** **Party model**: `party` / `organization` / `person` / `legal_entity`, all effective-dated, with RLS from line one. *Acc: create a company + a director as parties; RLS isolates across tenants.* — migration `0002_party`, `core` schema, full vertical slice (domain/usecase/repos/API); RLS proven live (Firm A's org → 404 under Firm B, B's party list empty).
 - [x] `(A)` **T1.4** **`party_relationship`** (from, to, type, valid_from, valid_to, attributes) — directorship, employment, shareholding, client-of. *Acc: "who was a director on 31 Mar" resolves by date.* — `isInForceOn` + as-of `partyProfile`; verified in unit tests and live.
 - [x] `(A)` **T1.5** **`party_identifier`** — PAN, GSTIN (many per entity), TRN, CIN, effective-dated. *Acc: an entity holds ≥2 GSTINs; lookup by identifier works.* — closed-set CHECK, PAN/GSTIN validation + normalization, dedup lookup; verified holding 2 state GSTINs live.
-- [ ] `(A)` **G0.3** **Decide soft delete on `core`.** `CLAUDE.md` says *"Soft delete only"*, but no `core` table has `deleted_at` and no `DELETE` route exists — so a client created by mistake can be neither removed nor archived. Either add the column across `core` and filter every read, or write down that parties are permanent and the ledger plus `legal_entity.status` is the answer. *Acc: either the column exists and reads filter it, or the decision is a paragraph in `CLAUDE.md`.* — **§4.1.** Lower stakes than it looks; the honest answer may well be "permanent". What is not acceptable is a stated rule the schema does not implement, because the next person reads the rule and assumes the column.
+- [x] `(A)` **G0.3** **Decide soft delete on `core`** — decided: **parties are permanent.** No `deleted_at` anywhere in `core`, and the decision is a paragraph in `CLAUDE.md`. *Acc: the decision is written down — and the column that answers the real complaint exists.* — **§4.1.**
+  > **Both halves, because the binary the task offered was the wrong one.** The written decision
+  > was the honest answer, but it left the actual complaint — *a client created by mistake* —
+  > unanswered, so `core.party.archived_at` (migration **0035**) landed beside it. One column on
+  > one table, not `deleted_at` across seven behind a filter every read from now on has to
+  > remember to write. It means *keep this out of the pickers*, and nothing more.
+  >
+  > **The asymmetry IS the design.** The LIST hides archived parties and takes a flag to include
+  > them; reading ONE party by id **always** resolves, archived or not. A signed engagement
+  > letter's counterparty has to render forever — the same principle 0017's freeze protects.
+  >
+  > **Archiving is refused by a TRIGGER, not by the service**, while a lead, a proposal, a
+  > proposal line's entity, a letter, a letter line's entity or an engagement still points at
+  > the party — and the refusal NAMES them, in document-chain order, so the person reading it
+  > knows what to close first. A service check is one an import, an agent or a psql session
+  > walks straight past. It costs nothing on ordinary writes: `BEFORE UPDATE OF archived_at`
+  > with a `WHEN` clause on the NULL → NOT NULL transition, so a rename fires nothing at all.
+  >
+  > **Found by review, not by building, and both are now fixed.** The guard first shipped with
+  > five probes and missed `crm.proposal_line.entity_party_id` — one field at three stages of one
+  > document chain, with the first stage unprotected, giving a rule nobody could state. Migration
+  > **0036** adds it; it is the *cheapest* of the six, since `idx_proposal_line_entity` has
+  > existed since 0018. And the archive `UPDATE` carried no `archived_at IS NULL` predicate, so
+  > two concurrent archives both succeeded and wrote **two** `party.archived` events for one
+  > archive, into a log that cannot be corrected. The transition is now the lock, the way
+  > `signAndFanOut` and `recordAdvance` already do it.
+  >
+  > `bib_app` still holds **no DELETE grant on any table in this database**, so removal remains
+  > impossible at the database level rather than merely unimplemented.
+  >
+  > Gate: `npm run check` 386 · `test:integration` 111 · `smoke` 119.
 - [x] `(B)` **T1.6** **RBAC + fee-visibility axis**: role on membership enforced; commercial visibility is a separate boolean gate. *Acc: a delivery role sees a work item but not its fee, proven in a test.* — all three parts done. **Gate 2 (audience)** shipped first because it was a live hole, not scheduled work: a `CLIENT_PORTAL` login could read the firm's whole client book. **Gate 3 (role)** is a seeded four-role matrix behind a `PermissionSource` port, enforced by prefix middleware against one central route table — **deny by default**, so a route with no declared permission is refused for everyone and a structural test fails if one is added. **The fee axis** is a flag on membership, never derived from a role, with `withFeeVisibility()` redacting money in place. *Acceptance note, stated rather than reinterpreted:* the criterion names a `work_item`, which is T3.1 — the mechanism is proven against a representative fee-bearing record and applies unchanged when the real table exists. Gate 4 (record-scope) needs the user-to-party link and lands with U1.
 - [x] `(B)` **T1.7** **Real principal adapter** (session) replacing the dev `x-user-id` stub; client-portal audience wired. *Acc: prod boot refuses the dev resolver (honest registry).* — migration `0004_identity` (credential / session / magic_link, GLOBAL per ADR-02). Password (scrypt, no dependency) **and** magic link, both behind ports; server-side revocable sessions in an httpOnly cookie, token never in a response body. `Principal` now carries `sessionId + tenantId + audience`, with the org switch (`POST /auth/switch-tenant`) re-checking the membership. Verified live end to end, and **the acceptance holds twice**: a `BIB_ENVIRONMENT=qa` boot refuses `BIB_DEV_AUTH_ENABLED` *and* the logging mailer, by name.
 - [x] `(A/B)` **T1.8** **Frontend foundation** (separate app — "clean separation"): Next.js shell, auth flow against the session adapter, design system/tokens, and a **typed API client generated from `/openapi.json`**. Runs in parallel with the backend spine — whoever has slack. *Acc: the app boots, authenticates, and calls a real endpoint (e.g. `me/memberships`) through the generated client; regenerating the client after an API change is one command.* — **its own repo: `../bib-frontend`.** Next 16 + React 19, `openapi-typescript` + `openapi-fetch` (`npm run api:generate` is the one command), design tokens in `globals.css`, login → httpOnly session cookie → authenticated calls. **No dev proxy on purpose** — the app talks cross-origin locally exactly as it will in production, which is what surfaced the backend's missing CORS. Verified against the running API: login 200 + cookie, `/auth/me` 200, `/tenancy/me/memberships` 200, `/parties` 200 (5 rows). *Caveat:* driven with node's fetch replicating browser headers, not a real browser.
@@ -186,10 +216,56 @@ open and are recorded above; neither blocks Phase 2.
   > by deferring workflow templates.
   >
   > Gate: `npm run check` 252 tests · `test:integration` 44 · `smoke` 46.
-- [ ] `(A)` **G3.1** **Lead: name it, and learn from it.** `title text NOT NULL` on `crm.lead`; `lost_reason text`; add `abandoned` to the stage CHECK and to the terminal-stage constraint. *Acc: two opportunities with the same client are distinguishable in a list; a lost deal records why in the closer's own words; "went quiet" and "chose a competitor" are different rows.* — **§4.4.** A lead has no name at all today, so every list renders the party instead. `lost_reason` is deliberately free text: a dropdown of five reasons produces five reasons, and the useful one is always the sixth. Collapsing `abandoned` into `lost` destroys the only signal separating a **pricing** problem from a **follow-up** problem. While here, confirm `lead_one_open_per_party` is intended — it stops a firm opening a second lead to quote an existing client for unrelated work.
-- [ ] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
+- [x] `(A)` **G3.1** **Lead: name it, and learn from it.** `title text NOT NULL` on `crm.lead`; `lost_reason text`; add `abandoned` to the stage CHECK and to the terminal-stage constraint. *Acc: two opportunities with the same client are distinguishable in a list; a lost deal records why in the closer's own words; "went quiet" and "chose a competitor" are different rows.* — **§4.4.** A lead has no name at all today, so every list renders the party instead. `lost_reason` is deliberately free text: a dropdown of five reasons produces five reasons, and the useful one is always the sixth. Collapsing `abandoned` into `lost` destroys the only signal separating a **pricing** problem from a **follow-up** problem. While here, confirm `lead_one_open_per_party` is intended — it stops a firm opening a second lead to quote an existing client for unrelated work.
+  > **Done (2026-08-28), migration 0030.** `title` arrived add-nullable → backfill from the
+  > party's display name → `SET NOT NULL`, with **no default**, deliberately: a default is
+  > both permanent and meaningless, and every future insert that omitted a title would get
+  > it silently. It is a SNAPSHOT, not a view — a title tracking `display_name` would rewrite
+  > history when a client renames.
+  >
+  > `lost_reason` is free text, and that is the decision rather than laziness. Scoped by CHECK
+  > to `lost` / `abandoned` and refused blank. **`abandoned` is a real terminal stage**, in the
+  > stage CHECK, in the closed-date constraint, and — the easy one to miss — inside
+  > `lead_one_open_per_party`'s `WHERE`, so an abandoned lead stops holding its client's slot.
+  >
+  > **`lead_one_open_per_party` is confirmed intended**, and it changes what the acceptance
+  > line means: a firm may hold exactly ONE live opportunity per client, so two opportunities
+  > are distinguishable by title only once the first has closed. Recorded rather than changed.
+  > **One gap found by smoke and left open:** a duplicate capture returns `200 / merged: true`
+  > carrying the EXISTING title and silently discards the new one — nothing in the response
+  > says a title was dropped. The service comment acknowledges the cost; the response shape
+  > does not surface it.
+- [~] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
   `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
   captured with no owner distribute evenly; a territory rule overrides the rotation.*
+  > **CORRECTED after review (was ticked; now `[~]`).** Round-robin is built, tested and
+  > merged — but the acceptance line has two halves and reads *"a territory rule OVERRIDES the
+  > rotation"*. Nothing implements, selects between, or asserts a territory override: the port
+  > seam exists and the prose explaining the absence exists, and that is all. The reason is
+  > still the right one — the axis has never been chosen with the client — but a task whose
+  > acceptance is half unbuilt is not done, and ticking it made this board say something untrue.
+  > **Done (2026-08-28), and no migration — that is the result, not an omission.** An
+  > `AssignmentStrategy` port with one implementation: round-robin over active STAFF.
+  >
+  > **The rotation state lives nowhere.** It is DERIVED — the lead goes to the active staff
+  > member with the fewest OPEN leads, ties broken by user id so the choice is total. A stored
+  > pointer is a second source of truth about a fact `crm.lead` already holds exactly, and it
+  > goes stale the moment the roster moves: the person it points at leaves and the rotation
+  > stalls; somebody joins on Monday and waits a full lap. Deriving it self-heals.
+  >
+  > **Stated honestly:** this routes by CURRENT DESK LOAD, not lifetime turn. On a level
+  > pipeline they are identical, which is the acceptance; they diverge when somebody closes
+  > faster and their emptier desk receives more. That is capacity routing, and it is a choice —
+  > strict lifetime rotation is a different strategy behind the same port.
+  >
+  > Fairness under concurrency is a per-tenant transaction-scoped advisory lock plus
+  > `AND owner_user_id IS NULL`, so a manual assignment landing in between wins — a rotation
+  > never overrules a person. Six simultaneous claims divide 2/2/2; with the lock removed the
+  > same test gives 4/6/5, which is how it was checked.
+  >
+  > **Territory is still not built, and still for the reason T2.1 gave:** its axis — geography,
+  > industry, service line — has never been chosen with the client. The port is shaped so it
+  > drops in without touching a caller.
 - [x] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
   > **Agreed design, before building (2026-08-28).** Settled in discussion; recorded here because
   > it decides the schema and money is the area CLAUDE.md is strictest about.
@@ -653,16 +729,104 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Gate: `npm run check` 375 tests · `test:integration` 94 · `smoke` 109.
 
-- [ ] `(A)` **G1.0** **The freeze trigger enumerates columns — extend it with every field G1 adds.** `crm.refuse_signed_change()` (0017) compares an explicit list of `engagement_letter` columns; a column not in that list is **silently editable after signature**. G1.1–G1.5 add at least eight (`ref`, `issuing_entity_party_id`, `background`, `addressed_to_party_id`, `issued_on`, `effective_from`, the firm signatory block), and every one of them is part of what the client agreed to. *Acc: a test updates each new column on a signed letter and expects `restrict_violation`; adding a column to `engagement_letter` without adding it to the trigger fails the build.* — Found while building G0.1. The line and clause triggers refuse ANY change so they need nothing; only the head's does this column by column, and the asymmetry is easy to miss because the same migration defines both.
+- [x] `(A)` **G1.0** **The freeze trigger enumerates columns — extend it with every field G1 adds.** `crm.refuse_signed_change()` (0017) compares an explicit list of `engagement_letter` columns; a column not in that list is **silently editable after signature**. G1.1–G1.5 add at least eight (`ref`, `issuing_entity_party_id`, `background`, `addressed_to_party_id`, `issued_on`, `effective_from`, the firm signatory block), and every one of them is part of what the client agreed to. *Acc: a test updates each new column on a signed letter and expects `restrict_violation`; adding a column to `engagement_letter` without adding it to the trigger fails the build.* — Found while building G0.1. The line and clause triggers refuse ANY change so they need nothing; only the head's does this column by column, and the asymmetry is easy to miss because the same migration defines both.
+  > **Done (2026-08-28), migration 0019 — and the fix inverts the rule rather than extending it.**
+  > `crm.refuse_signed_change()` compared an ENUMERATED list, so a column added later was
+  > silently editable after signature until somebody remembered — and six already were. 0019
+  > compares the WHOLE ROW (`to_jsonb(NEW) - mutable` vs `to_jsonb(OLD) - mutable`) and exempts
+  > only the short allow-list published by `crm.signed_letter_mutable_columns()`: today
+  > `advance_recorded_at`, `advance_recorded_by`, `updated_at`.
+  >
+  > **A new column on `crm.engagement_letter` is now frozen the day it exists**, and adding a
+  > FOURTH exemption is the thing that needs an argument. `tests/architecture/
+  > signed-letter-freeze.integration.test.ts` asks the CATALOGUE for every column and holds the
+  > build red until somebody makes it — which is what caught the twelve columns G1.1–G1.5 then
+  > added, on the run after they landed.
 
-- [ ] `(A)` **G1.1** **Document reference.** `ref text NOT NULL`, `UNIQUE (tenant_id, ref)` on proposal and engagement letter — `EL-US-2026-0007`. *Acc: a letter has a number a client can quote back on the phone, and two letters cannot share it.* — **§4.5.** Neither document has any human-facing identifier. Decide the generator alongside: per-entity per-year is the shape the demo used, and the same reasoning applies as in T3.4 — a sequence keeps its number on rollback.
-- [ ] `(A)` **G1.2** **Issuing entity, and the rule that picks it.** `issuing_entity_party_id uuid NOT NULL` on both documents, plus a `firm_entity_preference` table (`client_jurisdiction` including `'*'`, `firm_entity_party_id`, `note`) holding the fallback and any deliberate exception. *Acc: a letter names which of the firm's own entities is contracting; a client in a country the firm has no entity in resolves through the fallback, not through an `if`.* — **§4.5, §4.7.** The firm's rule is *"jahan ka client hota hai, wahan ki entity"*, with *"flexibility to choose. But mostly UAE"* where it has none. The letter carries a bare `jurisdiction text` today, which says **where** but never **who**. Stored rather than derived, because it is a snapshot: the client's default may change and an issued letter must always say who actually issued it.
-- [ ] `(A)` **G1.3** **The prose a letter opens and closes with.** `background text`, `addressed_to_party_id uuid`, `issued_on date`, `declined_reason text`, `supersedes_id uuid`. *Acc: a letter addresses a named person care-of the client organization, opens with why this client is buying this, and a rejected proposal records why.* — **§4.5.** `addressedTo` is currently a computed string (the party's display name), so the document cannot address an individual. `supersedes_id` matters more than it looks: the model already refuses to edit a signed letter — *"supersede it with a new letter instead"* — and gives that instruction nowhere to be recorded.
-- [ ] `(A)` **G1.4** **The firm's own signature block.** `firm_signatory_user_id`, `firm_signatory_title`, `firm_signed_at` on the letter; `signed_by_title` beside the existing `signed_by_name`; `firm_signatory_user_id` + `firm_signatory_title` on `tenancy.tenant` as the default. *Acc: a letter prints both signatures — the client's acceptance and "Yours sincerely, …, Director" — and records who bound the firm.* — **§4.5, §4.9.** Only the client's half is modelled, so the firm's block renders as a blank line. Authority to bind is an audit question, and a different fact from who operated the system — the ledger already records the second. One signatory for the whole firm (*"unki ek hi signature rahegi"*), as a row rather than a hardcode, so a successor is an `UPDATE`.
-- [ ] `(A)` **G1.5** **Effective dates.** `effective_from date` on the letter **and** on the line. *Acc: a letter signed in September can open engagements that begin in October, and one line on it can begin on a different date from the rest.* — **§4.5, §4.6.** Signing currently starts everything immediately, so a letter agreeing that the outgoing accountant finishes August cannot be written down — the firm is issued August's filings and tasks for work it has not taken on. Per line as well as per document, because per line can express a single shared date and the reverse cannot; null on the line means "whatever the letter says", null on the letter means the signature date.
-- [ ] `(A)` **G1.6** **Line detail.** On both line tables: `jurisdiction text`, `billing_frequency text`, the four overrides (`scope_override`, `client_obligations_override`, `volume_limits_override`, `exclusions_override`), `oop_estimate_min` / `oop_estimate_max` / `oop_currency`, `pricing_note text`, **and relax `unit_amount` to nullable.** *Acc: a line can say "as mutually agreed" with a reason instead of a price; editing one client's scope wording does not touch the catalogue; a line carries an out-of-pocket range separate from the fee.* — **§4.6.** Two of these are sharper than the rest. `unit_amount numeric NOT NULL CHECK (>= 0)` makes an unpriced line **unrepresentable** — it has to be quoted as zero, which says something different to a client, and several real lines are genuinely "as mutually agreed". The four overrides are what make an issued document reproducible: the letter carries its own wording, so a later catalogue revision cannot change what a signed document says.
+- [x] `(A)` **G1.1** **Document reference.** `ref text NOT NULL`, `UNIQUE (tenant_id, ref)` on proposal and engagement letter — `EL-US-2026-0007`. *Acc: a letter has a number a client can quote back on the phone, and two letters cannot share it.* — **§4.5.** Neither document has any human-facing identifier. Decide the generator alongside: per-entity per-year is the shape the demo used, and the same reasoning applies as in T3.4 — a sequence keeps its number on rollback.
+  > **Done, migration 0020 — and it REFUSES rather than backfilling.** `PR-YYYY-NNNN` /
+  > `EL-YYYY-NNNN`, `UNIQUE (tenant_id, ref)`, shape enforced by CHECK, minted from a sequence
+  > so a rollback burns a number instead of reissuing one. Gaps are honest here and fatal in
+  > T3.4 — an invoice series must be gapless, which is a different and harder problem, and 0020
+  > deliberately does not solve it.
+  >
+  > The refusal is the interesting part: a signed letter is frozen, and **no document already
+  > sent carries a number the client could quote back**, so minting one now would put a
+  > reference on our copy that appears nowhere on theirs. The migration says so by name and
+  > says what to do instead. Both dev databases were rebuilt from zero.
+- [x] `(A)` **G1.2** **Issuing entity, and the rule that picks it.** `issuing_entity_party_id uuid NOT NULL` on both documents, plus a `firm_entity_preference` table (`client_jurisdiction` including `'*'`, `firm_entity_party_id`, `note`) holding the fallback and any deliberate exception. *Acc: a letter names which of the firm's own entities is contracting; a client in a country the firm has no entity in resolves through the fallback, not through an `if`.* — **§4.5, §4.7.** The firm's rule is *"jahan ka client hota hai, wahan ki entity"*, with *"flexibility to choose. But mostly UAE"* where it has none. The letter carries a bare `jurisdiction text` today, which says **where** but never **who**. Stored rather than derived, because it is a snapshot: the client's default may change and an issued letter must always say who actually issued it.
+  > **Done, migration 0021.** `issuing_entity_party_id NOT NULL` on both documents, plus
+  > `firm_entity_preference` (`client_jurisdiction` including `'*'`) holding the fallback and
+  > any deliberate exception — so a client in a country the firm has no entity in resolves
+  > through a ROW, not through an `if`.
+  >
+  > **Every tenant is seeded with its own entity and that fallback at creation**, beside its
+  > roles and its ladder, because `NOT NULL` means a firm without the row could not draft a
+  > proposal at all — and telling a firm to configure that before it can quote anybody is a
+  > worse first day than the problem it solves. The entity seeded is the firm ITSELF, right for
+  > a firm operating one company and a starting point for one operating several; the note on
+  > the row says nobody chose it.
+- [x] `(A)` **G1.3** **The prose a letter opens and closes with.** `background text`, `addressed_to_party_id uuid`, `issued_on date`, `declined_reason text`, `supersedes_id uuid`. *Acc: a letter addresses a named person care-of the client organization, opens with why this client is buying this, and a rejected proposal records why.* — **§4.5.** `addressedTo` is currently a computed string (the party's display name), so the document cannot address an individual. `supersedes_id` matters more than it looks: the model already refuses to edit a signed letter — *"supersede it with a new letter instead"* — and gives that instruction nowhere to be recorded.
+- [x] `(A)` **G1.4** **The firm's own signature block.** `firm_signatory_user_id`, `firm_signatory_title`, `firm_signed_at` on the letter; `signed_by_title` beside the existing `signed_by_name`; `firm_signatory_user_id` + `firm_signatory_title` on `tenancy.tenant` as the default. *Acc: a letter prints both signatures — the client's acceptance and "Yours sincerely, …, Director" — and records who bound the firm.* — **§4.5, §4.9.** Only the client's half is modelled, so the firm's block renders as a blank line. Authority to bind is an audit question, and a different fact from who operated the system — the ledger already records the second. One signatory for the whole firm (*"unki ek hi signature rahegi"*), as a row rather than a hardcode, so a successor is an `UPDATE`.
+- [x] `(A)` **G1.5** **Effective dates.** `effective_from date` on the letter **and** on the line. *Acc: a letter signed in September can open engagements that begin in October, and one line on it can begin on a different date from the rest.* — **§4.5, §4.6.** Signing currently starts everything immediately, so a letter agreeing that the outgoing accountant finishes August cannot be written down — the firm is issued August's filings and tasks for work it has not taken on. Per line as well as per document, because per line can express a single shared date and the reverse cannot; null on the line means "whatever the letter says", null on the letter means the signature date.
+  > **G1.3, G1.4 and G1.5 landed together in migration 0022** — twelve columns on the letter and
+  > one on the line, all of them terms, and every one of them caught by G1.0's structural freeze
+  > test until it was added to the trigger. That is the forcing function working exactly once
+  > as designed.
+- [x] `(A)` **G1.6** **Line detail.** On both line tables: `jurisdiction text`, `billing_frequency text`, the four overrides (`scope_override`, `client_obligations_override`, `volume_limits_override`, `exclusions_override`), `oop_estimate_min` / `oop_estimate_max` / `oop_currency`, `pricing_note text`, **and relax `unit_amount` to nullable.** *Acc: a line can say "as mutually agreed" with a reason instead of a price; editing one client's scope wording does not touch the catalogue; a line carries an out-of-pocket range separate from the fee.* — **§4.6.** Two of these are sharper than the rest. `unit_amount numeric NOT NULL CHECK (>= 0)` makes an unpriced line **unrepresentable** — it has to be quoted as zero, which says something different to a client, and several real lines are genuinely "as mutually agreed". The four overrides are what make an issued document reproducible: the letter carries its own wording, so a later catalogue revision cannot change what a signed document says.
+  > **Done (2026-08-29), migrations 0023 and 0024.** The nine columns are the easy half. The
+  > hard half was `unit_amount`, and the answer is on the board because it changes what a
+  > number on a screen MEANS.
+  >
+  > **A total is no longer one number.** `sum()` skips a NULL price, so the figure is exact for
+  > what it covers and silently UNDERSTATES the document. Coalescing to zero is worse — the
+  > line is then *in* the total at a price nobody agreed. So `unpricedLineCount` rides beside
+  > `net` everywhere: the totals view, both read models, the wire, and the recipient's shared
+  > view. Non-zero means `net` is a **floor**. The deciding case is the wholly-unpriced
+  > document: three "as mutually agreed" lines sum to zero, and the count is the only thing
+  > between that zero and a partner reading it as free work. Per line, `net` is NULL and not 0,
+  > and `priced: boolean` sits beside `unitAmount` UNREDACTED — without it a colleague who
+  > cannot see money reads every line as "as mutually agreed".
+  >
+  > A line with no price must carry a `pricingNote` saying why, and a discount off an unpriced
+  > line is refused — it would otherwise hold a proposal at the approval gate over a discount
+  > that does not exist.
+  >
+  > **The OOP range takes no composite currency FK**, and that is the point of it: if the
+  > estimate had to be in the document's currency it would already be in `currency`. It exists
+  > because it routinely is not — which also settles the arithmetic, since the `fx_rate` is
+  > struck for the fee currency and an OOP range is therefore never summed into anything.
+  >
+  > **Migration 0024 was not planned, and it closes a real hole in 0017.**
+  > `crm.refuse_signed_child_change` resolved the parent letter from `NEW` on UPDATE — so
+  > repointing a **signed** letter's line at a draft letter of the same firm and currency
+  > SUCCEEDED: a term silently removed from a signed agreement, totals changed, nothing raised.
+  > Found by extending G1.0's catalogue-driven freeze sweep to the LINE table, which nothing
+  > covered. Verified against the live schema before and after. 0024 checks both parents.
+  >
+  > **`canonicalContent` changed**, so a `signed_content_hash` taken before this cannot be
+  > re-derived. Nothing in the product re-derives one and the freeze is what actually holds a
+  > signed letter still — but the alternative was a signature that did not cover the client's
+  > own scope wording, which is worse.
+  >
+  > Gate: `npm run check` 643 · `test:integration` 204 · `smoke` 182.
 - [ ] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
 - [ ] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
+  > **[~] Schema half done (2026-08-28); the wiring half is still open.** `ClauseBody` gains
+  > `governingLaw` and `courts`, each a `JurisdictionalTerm | null` — an ISO 3166-1 code AND
+  > the words the document prints. **Both halves, because neither does the other's job:** "the
+  > laws of the State of Delaware" does not follow from `US`, and "the DIFC Courts, Dubai" does
+  > not follow from `AE`; while prose alone is invisible to the machine comparison this task's
+  > acceptance actually asks for — a human review already let this letter out once. Validated
+  > together (a half term is refused), demanded in canonical upper case at the write, optional
+  > so that clause versions already published and pinned by issued letters still read.
+  >
+  > **What is NOT built, and it is the acceptance line itself:** resolving the law from the
+  > ISSUING ENTITY (G1.2) and refusing a mismatch. Two things are needed. G1.2 is in flight in
+  > the engagement lane. And `LetterClauseRecord` — `{clause, key, version, title, text}` —
+  > currently DISCARDS both terms, so the structured law cannot reach a document renderer at
+  > all; found by smoke rather than by building. **G1.8 stays open until a letter issued by the
+  > US entity cannot print Indian governing law.**
 
 > **Milestone G1 (inside Phase 2):** an engagement letter generated from this system is the
 > letter the firm actually sends — numbered, issued by a named entity, addressed to a person,
@@ -753,9 +917,53 @@ open and are recorded above; neither blocks Phase 2.
   > up two API gaps: nothing published the PERMISSION VOCABULARY, so a picker could only be
   > built by retyping the list; and `/auth/me` still cannot tell a screen what the session may
   > do. The first is fixed; the second is above.
-- [ ] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
-- [ ] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
-- [ ] `(A)` **G2.3** **Catalogue: `slaDays`, `recurrence`, `pricingNote`.** *Acc: a work item created from an engagement snapshots the SLA in force at creation; a service can recur monthly while being billed quarterly; a service with no list price can say why.* — **§4.8. This one gates `(B)`: T3.1 cannot meet its acceptance without `slaDays`.** The firm's rule is *"task is due from signing of EL"* and *"SLA is per service"*, and a work item copies the value at creation so a later catalogue revision cannot make finished work retroactively late. `recurrence` is not `billingBasis`: the latter says how a service is priced (fixed / hourly / retainer / per_unit), the former how often it recurs, and the EL line's `billing_frequency` (G1.6) defaults from it. `pricingNote` gives `listPrice: null` a reason — "As mutually agreed" currently has no home.
+- [x] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
+  > **Done (2026-08-28); acceptance only reached on 2026-08-29.** `ref` is settled onto the
+  > BODY, not `config.entry.key`: a key is lowercase by rule while the code is `A1`, and the
+  > key is the pin target every issued document resolves through, while a services-master
+  > renumber is an ordinary Tuesday. `module` and `group` are independent dimensions, not a
+  > hierarchy — FINCOMPLIANCE delivers under both FRC and TRC, so nesting would force a
+  > duplicate row per Dept and count its revenue twice. Both are free-form firm codes (this
+  > product is sold to many firms) but demanded in CANONICAL form at the WRITE, because the
+  > whole job of the field is to be `GROUP BY`-ed and `frc` beside `FRC` splits one Dept into
+  > two half-sized ones that both look plausible. A body is stored verbatim, so a read-time
+  > fix would come too late for the SQL that groups.
+  >
+  > **It was ticked a day early and taken back.** Storing the fields is not the acceptance —
+  > *"a proposal CITES the firm's own service code"* is, and no read model returned `ref`, so
+  > a screen still needed a registry call per line. The read-model half closes it:
+  > `ProposalLineRecord.service` / `LetterLineRecord.service` now carry `ref`, `module`,
+  > `group`, `billingBasis`, `recurrence`, `slaDays`, `listPrice`, `pricingNote` and the four
+  > prose blocks, resolved through `readServiceBody` off the body the repositories were
+  > already selecting. **The same gap covered `slaDays`, and closing it is what unblocked
+  > `(B)`'s T3.1** — smoke asserts the line says 30 while the live catalogue says 90.
+
+- [x] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
+  > **Done (2026-08-28); acceptance only reached on 2026-08-29 with G1.6.** Prose, exactly as
+  > the firm states it — *"under 1,000 entries; under 8 bank accounts"* — and deliberately NOT
+  > parsed into typed limits: nothing is metered, and a client who exceeds a ceiling gets the
+  > engagement re-assessed rather than auto-charged.
+  >
+  > **Also ticked a day early and taken back**, for the same reason as G2.1: a grep for the
+  > four blocks across `src/` returned nothing outside `domain/config/model.ts` — zero
+  > consumers, while the acceptance says a letter is ASSEMBLED from them. Both halves exist
+  > now: the catalogue's words on `service`, and G1.6's per-document override beside them,
+  > resolved in ONE place with **which one won** visible to the caller. That last part is the
+  > value — a screen that cannot tell a standard scope from a negotiated one has not assembled
+  > a document, it has printed one.
+
+- [x] `(A)` **G2.3** **Catalogue: `slaDays`, `recurrence`, `pricingNote`.** *Acc: a work item created from an engagement snapshots the SLA in force at creation; a service can recur monthly while being billed quarterly; a service with no list price can say why.* — **§4.8. This one gates `(B)`: T3.1 cannot meet its acceptance without `slaDays`.** The firm's rule is *"task is due from signing of EL"* and *"SLA is per service"*, and a work item copies the value at creation so a later catalogue revision cannot make finished work retroactively late. `recurrence` is not `billingBasis`: the latter says how a service is priced (fixed / hourly / retainer / per_unit), the former how often it recurs, and the EL line's `billing_frequency` (G1.6) defaults from it. `pricingNote` gives `listPrice: null` a reason — "As mutually agreed" currently has no home.
+  > **Done (2026-08-28) — this is the one that unblocked `(B)`'s T3.1.** `slaDays` is whole
+  > days from signing of the EL, read off a PINNED version, so a later catalogue revision
+  > cannot make finished work retroactively late. `recurrence` (one_time / monthly / quarterly
+  > / annually / custom) is NOT `billingBasis`: one says how often work comes round, the other
+  > what the price is a price OF. `pricingNote` gives `listPrice: null` a reason.
+  >
+  > **Every one of the ten fields is OPTIONAL, and that is load-bearing.** A published config
+  > version is FROZEN, so a required field would strand every version already published —
+  > which cannot be edited to carry it and has no honest value to invent. Absence reads as
+  > null, never as a default. **No migration:** these arrive as a new VERSION of each service,
+  > which is precisely what T2.5's deferral was deferred for.
 - [x] `(B)` **T1.6b** **What a portal session is told it may do.** `permissionsOf` returns `[]` for a `CLIENT_PORTAL` session whatever role it holds. *Acc: a `CLIENT_PORTAL` membership carrying `manager` reports no permissions, a STAFF one is unchanged, and a permission-gated portal route fails the build.*
   > **Found by reading a screen, not a test (2026-08-29).** Nothing refuses `manager` on a
   > `CLIENT_PORTAL` membership — the roster's Add form offers every published role against
@@ -777,7 +985,6 @@ open and are recorded above; neither blocks Phase 2.
   > cannot change. `/admin/people` therefore says so plainly when the surface is Client portal
   > and the chosen role carries permissions, rather than filtering the dropdown and hiding a
   > real state from the admin looking at it.
-
 - [x] `(A/B)` **T0.7** **The smoke script runs on Windows.** *Acc: `npm run smoke` reports 125 passed, 0 failed on a Windows checkout.*
   > `mktemp -d` returns a POSIX path; on Windows the `python3` on PATH is native Windows
   > Python, which cannot resolve `/tmp/tmp.XXXX`. Three `json.load(open(...))` calls raised
@@ -1051,7 +1258,17 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
 - Product name; which prior-vendor data (if any) migrates.
 - Real-integration access: which portals/sandboxes the client can grant, and when.
 - ~~**Migration ranges**~~ — settled: `(A)` 0018–0039, `(B)` 0040+. `(A)` has taken **0018**.
-- **G0.3** — soft delete on `core`, or a written decision that parties are permanent.
+- ~~**G0.3** — soft delete on `core`~~ — **settled (2026-08-28): parties are permanent.** No
+  `deleted_at` anywhere in `core`; `core.party.archived_at` (0035) hides a party from pickers and
+  nothing more, and the decision is a paragraph in `CLAUDE.md`. Left open by it, and found by
+  review rather than by building: **the refusal is archive-time only.** Nothing stops a NEW
+  reference being created against an already-archived party — lead capture's `resolve()` matches
+  on identifier without consulting `archived_at`, so a capture carrying an archived party's PAN
+  attaches to it. Nothing renders blank (reading one party by id never filters), so this is a
+  state the design says should not exist rather than corruption. The invariant the schema actually
+  holds is *"nothing pointed at it at the instant it was archived"*, which is weaker than the
+  `CLAUDE.md` paragraph reads. Decide later whether capture should refuse an archived party or
+  quietly unarchive it — both are defensible and neither should be guessed.
 - **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
 - ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled

@@ -17,6 +17,7 @@ import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tena
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import {
   PostgresCredentialRepository,
@@ -64,6 +65,10 @@ const tenancy = new TenancyService({
   users,
   memberships,
   roleSeeder: { seedDefaultRoles: (t, a) => config.seedDefaultRoles(t, a) },
+  // Every firm gets its own entity and the fallback naming it as the issuer of
+  // its documents, in the same call — the real adapter, because what this test
+  // provisions has to be a firm that could actually draft a proposal.
+  issuingEntitySeeder: new PostgresDocumentRepository(app),
   roleDirectory: configRepository,
   gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
   gradeDirectory: staffGradeRepository,
@@ -260,5 +265,83 @@ describe("the firm keeps an administrator, against real rows", () => {
         SYSTEM_ACTOR,
       ),
     ).resolves.toBeDefined();
+  });
+});
+
+// ── G1.4 · the firm's standing signatory, as a real row ────────────────────
+//
+// Its own firm, because the block above deactivates its administrator on the
+// way out and this one needs a roster that still works.
+
+describe("who binds the firm", () => {
+  let firmId = "";
+  let partnerId = "";
+
+  beforeAll(async () => {
+    const tenant = await tenancy.createTenant({
+      name: "Lakeview Advisors",
+      slug: `signatory-test-${stamp}`,
+      reportingCurrency: "INR",
+    });
+    firmId = tenant.id;
+    const partner = await tenancy.ensureUser(
+      `signatory-${stamp}@lakeview.example`,
+      "Siddharth Jain",
+    );
+    partnerId = partner.id;
+    await tenancy.addMember({
+      tenantId: firmId,
+      userId: partnerId,
+      audience: "STAFF",
+      role: "partner",
+      commercialVisibility: true,
+    });
+  });
+
+  it("starts empty and survives a round trip", async () => {
+    expect(await tenancy.firmSignatory(firmId)).toBeNull();
+    await tenancy.setFirmSignatory(
+      { tenantId: firmId, userId: partnerId, title: "Director" },
+      SYSTEM_ACTOR,
+    );
+    expect(await tenancy.firmSignatory(firmId)).toEqual({
+      userId: partnerId,
+      displayName: "Siddharth Jain",
+      title: "Director",
+    });
+  });
+
+  it("refuses half a signatory, as the OWNER role", async () => {
+    // The same all-or-nothing property the letter's own block has. A name with
+    // no capacity cannot be printed under "Yours sincerely", and a capacity
+    // with no name is nobody — so neither is representable, whichever role is
+    // writing.
+    for (const statement of [
+      owner`
+        UPDATE tenancy.tenant SET firm_signatory_user_id = ${partnerId}, firm_signatory_title = NULL
+        WHERE id = ${firmId}
+      `,
+      owner`
+        UPDATE tenancy.tenant SET firm_signatory_user_id = NULL, firm_signatory_title = 'Director'
+        WHERE id = ${firmId}
+      `,
+      owner`UPDATE tenancy.tenant SET firm_signatory_title = '   ' WHERE id = ${firmId}`,
+    ]) {
+      const err = await statement.catch((e: unknown) => e);
+      expect((err as { code?: string }).code).toBe("23514"); // check_violation
+    }
+  });
+
+  it("refuses a signatory who is not a real account", async () => {
+    // The foreign key is all a GLOBAL table can offer here; that the person
+    // actually works at this firm is the service's check, proven in the unit
+    // tests. Both are needed and neither substitutes for the other.
+    const err = await owner`
+      UPDATE tenancy.tenant
+         SET firm_signatory_user_id = '11111111-1111-4111-8111-111111111111',
+             firm_signatory_title = 'Director'
+       WHERE id = ${firmId}
+    `.catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23503"); // foreign_key_violation
   });
 });

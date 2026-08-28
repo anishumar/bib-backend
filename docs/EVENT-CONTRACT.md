@@ -185,8 +185,16 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
 | `membership.restored` | membership | A deactivated membership was reinstated. |
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
+| `membership.grade_changed` | membership | A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later. |
+| `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |
+| `staff_grade.updated` | staff_grade | A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something. |
+| `grade_ladder.seeded` | tenant | A new tenant's seniority ladder was initialised from the product defaults. One event, not one per rung. |
+| `firm_signatory.set` | tenant | The firm named who binds it — the person and the capacity printed under "Yours sincerely" on every letter it sends from now on. Authority to bind is an audit question and a DIFFERENT fact from who operated the system, which is this event's actor. |
+| `firm_entity_preference.set` | firm_entity_preference | The firm said which of its OWN entities issues documents to clients in a country — or set the fallback that answers for every country it has no entity in. A commercial and legal decision (it settles governing law, courts and who the client's counterparty is), so who made it is the point of the record. |
 | `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
+| `party.archived` | party | A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035). |
+| `party.unarchived` | party | An archived party was brought back into the pickers and lists. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
@@ -221,7 +229,7 @@ version is exactly what gets asked about afterwards.
 | Verb | Object | Means |
 |---|---|---|
 | `lead.captured` | lead | A lead entered the pipeline. |
-| `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. |
+| `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. Payload carries `titleDiscarded` — WHETHER the capture's title was dropped, never the title itself, which names the counterparty and is sometimes a person's name (§3.4). The words go back to the caller on the response (`discardedTitle`) and are stored nowhere. |
 | `lead.stage_changed` | lead | A lead moved through the pipeline. Reaching a terminal stage closes it. |
 | `lead.owner_assigned` | lead | A lead was put on somebody's desk, or taken off it. |
 | `proposal.drafted` | proposal | A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out. |
@@ -229,7 +237,8 @@ version is exactly what gets asked about afterwards.
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |
 | `proposal.viewed` | proposal | The recipient opened it from its share link. Recorded ONCE, on the first open; the running count lives on `crm.proposal.view_count`, because a client refreshing a page is not fifty facts about the business. The actor is `system` — the recipient has no account, and inventing a user id for somebody who has never logged in would be worse than saying plainly that a link was opened. |
 | `proposal.accepted` | proposal | Accepted. |
-| `proposal.rejected` | proposal | Declined or expired. |
+| `proposal.rejected` | proposal | A proposal was declined by the recipient. |
+| `proposal.expired` | proposal | A proposal passed its validity date. Written LAZILY — nothing here runs on a timer, so it is recorded the first time somebody tries to act on the proposal. |
 | `engagement_letter.drafted` | engagement_letter | An engagement letter was drafted — the first row in the timeline of a document that will create obligations. |
 | `engagement_letter.sent` | engagement_letter | It went to the client for signature. |
 | `engagement_letter.withdrawn` | engagement_letter | Pulled before signature. A SIGNED letter is never withdrawn — it is superseded by a new one. |

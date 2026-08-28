@@ -61,7 +61,43 @@ export interface PartyRepository {
    * obvious.
    */
   listLegalEntities(tenantId: string, partyId: string): Promise<LegalEntity[]>;
-  listParties(tenantId: string): Promise<Party[]>;
+  /**
+   * The tenant's parties, in display order.
+   *
+   * ARCHIVED PARTIES ARE ABSENT unless `includeArchived` asks for them. The
+   * parameter is required, here AND on `PartyService.listParties`, so that
+   * every call site states which list it wants — a default is exactly how "the
+   * archive is hidden" quietly stops being true, and a rule stated in a comment
+   * that the code next door does not follow is the failure G0.3 was about.
+   */
+  listParties(tenantId: string, includeArchived: boolean): Promise<Party[]>;
+
+  /**
+   * Put a party away, stamping `archived_at` from the database clock, and
+   * return it as it now stands.
+   *
+   * THE REFUSAL IS THE DATABASE'S. `trg_party_archive_guard` (migration 0035,
+   * body replaced by 0036) refuses the UPDATE while a lead, proposal, proposal
+   * line's entity, engagement letter, letter line's entity or engagement still
+   * points at the party — so an import, an agent or a psql session is refused
+   * exactly as this call is. An implementation's only job is to translate that
+   * refusal into `PartyHasReferences`, carrying the names the database gave it.
+   *
+   * IT IS ALSO THE TRANSITION, NOT JUST THE WRITE. The caller has already
+   * checked the party exists and is live, but a check and a write are two
+   * statements with room between them, so an implementation must make the
+   * NULL → NOT NULL transition itself atomic and raise `PartyAlreadyArchived`
+   * for the loser. The alternative is two `party.archived` events for one
+   * archive, in a log that cannot be corrected. `PartyNotFound` if the party is
+   * not there at all.
+   */
+  archive(tenantId: string, partyId: string): Promise<Party>;
+
+  /** Clear `archived_at` and return the party. Nothing refuses this — bringing a
+   *  party back can never orphan anything — but it is the same atomic
+   *  transition in the other direction, raising `PartyNotArchived` for a caller
+   *  that lost the race. */
+  unarchive(tenantId: string, partyId: string): Promise<Party>;
 }
 
 export interface NewIdentifier {

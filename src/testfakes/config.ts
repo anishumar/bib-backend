@@ -84,6 +84,14 @@ export class FakeConfigRepo implements ConfigRepository, PermissionSource, RoleD
         entry,
         published:
           this.versions.find((v) => v.entryId === entry.id && v.status === "published") ?? null,
+        // The NEWEST draft, matching the adapter's LATERAL … ORDER BY version
+        // DESC LIMIT 1. Several may sit beside a published version, and a fake
+        // that returned the first one written would disagree with Postgres on
+        // exactly the case the join exists for.
+        pendingDraft:
+          this.versions
+            .filter((v) => v.entryId === entry.id && v.status === "draft")
+            .sort((a, b) => b.version - a.version)[0] ?? null,
       }));
     return Promise.resolve(rows);
   }

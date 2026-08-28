@@ -2,7 +2,14 @@
 // are owned by the use case that needs them, stated in our vocabulary; adapters
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
-import type { Amount, CurrencyCode } from "../../domain/money/model";
+import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
+import type {
+  BillingFrequency,
+  DocumentTerms,
+  DocumentType,
+  OutOfPocketEstimate,
+} from "../../domain/document/model";
 import type {
   Proposal,
   ProposalLine,
@@ -10,10 +17,34 @@ import type {
   ProposalTotals,
 } from "../../domain/proposal/model";
 
+
+/**
+ * Who issues this firm's documents, and what the next one is called.
+ *
+ * Narrow on purpose and stated in this use case's vocabulary: quoting does not
+ * want to know what a preference row is or how a counter works, only which of
+ * the firm's entities is offering this and what the document is called. The
+ * document use case satisfies it, so neither module imports the other — the
+ * same seam `ServiceCatalogue` gives the catalogue.
+ *
+ * `clientJurisdiction` may be null: a prospect's country is not always known at
+ * drafting, and "we do not know where they are" resolves through the same
+ * fallback as "we are not there".
+ */
+export interface DocumentIdentity {
+  issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+}
+
 export interface NewProposal {
   readonly id: string;
   readonly tenantId: string;
+  /** Allocated before the row is written — see `DocumentIdentity`. */
+  readonly ref: string;
   readonly partyId: string;
+  /** Which of the firm's own entities is offering this. Resolved once, here,
+   *  and stored: it is a snapshot, not a lookup. */
+  readonly issuingEntityPartyId: string;
   readonly leadId: string | null;
   readonly title: string;
   readonly currency: CurrencyCode;
@@ -33,9 +64,23 @@ export interface NewProposalLine {
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: Amount;
-  readonly unitAmount: Amount;
+  /** Null for a line that is genuinely "as mutually agreed". `pricingNote` is
+   *  then required — see `ProposalLine.unitAmount`. */
+  readonly unitAmount: Amount | null;
   readonly currency: CurrencyCode;
   readonly discountPercent: Amount;
+  readonly jurisdiction: string | null;
+  /** RESOLVED before it gets here: the caller's value, else the pinned
+   *  service's `recurrence`, else null. The use case does that once so the
+   *  default is a property of the deal at the moment it was struck rather than
+   *  something re-derived from a catalogue that has since moved. */
+  readonly billingFrequency: BillingFrequency | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  readonly pricingNote: string | null;
 }
 
 /**
@@ -44,9 +89,9 @@ export interface NewProposalLine {
  * The joined read model this codebase learnt to build the first time (see
  * CLAUDE.md): a bare `Proposal` carries `partyId` and each line carries a
  * `serviceVersionId`, which is right for the aggregate and renders as a column
- * of uuids. `listPrice` comes from the pinned catalogue version, so a screen can
- * show "list 25,000 — quoted 22,500" without resolving pins itself, which is the
- * commercial question the pin exists to answer.
+ * of uuids. `service` comes from the pinned catalogue version, so a screen can
+ * show "A1 — list 25,000, quoted 22,500" without resolving pins itself, which is
+ * the commercial question the pin exists to answer.
  *
  * Totals are computed in Postgres `numeric` by the query that reads the lines —
  * never summed in TypeScript.
@@ -56,6 +101,9 @@ export interface ProposalRecord {
   readonly party: { readonly id: string; readonly displayName: string };
   readonly lines: readonly ProposalLineRecord[];
   readonly totals: ProposalTotals;
+  /** Which of the firm's own entities is offering it, by NAME — this is what a
+   *  letterhead prints, and a uuid prints as nothing. */
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   /** Who signed off an over-limit discount, for a screen that has to show it.
    *  Null when nobody has. */
   readonly approvedBy: {
@@ -65,23 +113,109 @@ export interface ProposalRecord {
   } | null;
 }
 
+/**
+ * THE CATALOGUE ROW A LINE CITES, as it was PINNED — read off the frozen
+ * `config.version` the line stores, never off the catalogue as it stands today.
+ *
+ * It carries what a DOCUMENT prints and what a WORK ITEM copies, because those
+ * are the two consumers of a pin and both were making a registry call per line
+ * to get here — the per-row lookup CLAUDE.md names as the sign that a join
+ * belongs in the query. Concretely: `ref` is G2.1's acceptance ("a proposal
+ * cites the firm's own service code"), `slaDays` is what T3.1 snapshots onto a
+ * work item at creation, `recurrence` is what a letter line's billing frequency
+ * defaults from, `module` and `group` are the revenue and delivery axes a
+ * document groups by, and the four prose blocks are what an engagement letter is
+ * assembled from (G2.2).
+ *
+ * THE FOUR PROSE BLOCKS ARE THE CATALOGUE'S WORDS AND ONLY EVER THOSE. G1.6 adds
+ * a per-document OVERRIDE of each of them, and the override does NOT land here:
+ * `service` means "the catalogue row this line was quoted from", and a field
+ * that silently held the tailored wording instead would make that sentence
+ * false — a screen could no longer tell a standard scope from an edited one, and
+ * "what does our catalogue say" would have no answer left on the read model. The
+ * resolved wording is its own thing beside this one, and it says which of the
+ * two won.
+ *
+ * Every field but `key`, `version` and `name` is NULLABLE, and that is the
+ * catalogue's own shape rather than laziness: a published version is frozen, so
+ * a body published before a field existed can never be edited to carry it, and
+ * null here means "the firm never stated this" — never a default a consumer may
+ * invent. `slaDays: null` in particular is not zero; see `ServiceBody`.
+ *
+ * DELIBERATELY ABSENT: the catalogue's `description` (the LINE carries the words
+ * the client actually reads, and a firm tailors them per document — printing the
+ * catalogue's beside them is two descriptions and no rule about which wins),
+ * `category`, and `jurisdictions` (both are for FINDING a service in the
+ * catalogue, not for printing one on a document).
+ */
+export interface PinnedService {
+  /** The registry key and the version number — the pin, as a person cites it.
+   *  Not the firm's code: see `ref`. */
+  readonly key: string;
+  readonly version: number;
+  /** THE FIRM'S OWN SERVICE CODE — "A1", "H1", "R7". G2.1's acceptance in one
+   *  field: this is what a proposal has to print, and getting it meant a
+   *  registry call per line. Null for a service the firm's master never coded. */
+  readonly ref: string | null;
+  readonly name: string;
+  /** The Dept — the REVENUE reporting axis — and the delivery team. Independent
+   *  dimensions, never a hierarchy (see `ServiceBody.group`). */
+  readonly module: string | null;
+  readonly group: string | null;
+  /** What `unitAmount` and `listPrice` are PER — per hour, per month, per item,
+   *  or for the whole engagement. Without it an amount on a document is a number
+   *  with no unit. Null only for a stored body that somehow has none. */
+  readonly billingBasis: BillingBasis | null;
+  /** How often the work comes round. NOT how often it is billed — G1.6's
+   *  `billingFrequency` is a fact about this deal and defaults FROM this. */
+  readonly recurrence: ServiceRecurrence | null;
+  /** The turnaround the firm committed to, in whole days from signing, AS THIS
+   *  VERSION STATED IT. T3.1 copies it onto a work item at creation, which is
+   *  the whole reason the line pins a version rather than reading the catalogue
+   *  live: a revision next quarter must not make finished work retroactively
+   *  late. Null is "no SLA stated" and is not zero. */
+  readonly slaDays: number | null;
+  /** What the firm ASKED for this service when the line was quoted — the other
+   *  half of "list 25,000, quoted 22,500". Null means the firm quotes it case by
+   *  case, and `pricingNote` is where it says why. */
+  readonly listPrice: Money | null;
+  readonly pricingNote: string | null;
+  /** THE FOUR SCOPE BLOCKS, as the catalogue stated them — see the note above on
+   *  why the override is not folded into these. */
+  readonly scope: string | null;
+  readonly clientObligations: string | null;
+  readonly volumeLimits: string | null;
+  readonly exclusions: string | null;
+}
+
 export interface ProposalLineRecord {
   readonly line: ProposalLine;
   /** The entity by NAME. Null when the line names none — which on a proposal is
    *  a real answer, not a missing join. */
   readonly entity: { readonly id: string; readonly displayName: string } | null;
-  /** The service as it was PINNED — its name then, and its list price then.
-   *  Null only if the pinned version has somehow gone, which the composite
-   *  foreign key makes impossible; the type is honest about the join anyway. */
-  readonly service: {
-    readonly key: string;
-    readonly version: number;
-    readonly name: string;
-    readonly listPrice: { readonly amount: Amount; readonly currency: CurrencyCode } | null;
-  } | null;
+  /** The service as it was PINNED. Null only if the pinned version has somehow
+   *  gone, which the composite foreign key makes impossible; the type is honest
+   *  about the join anyway. */
+  readonly service: PinnedService | null;
+  /**
+   * THE FOUR SCOPE BLOCKS, RESOLVED — this line's override where it has one,
+   * the pinned catalogue version's words where it does not, and a flag saying
+   * which of the two won.
+   *
+   * Resolved by `resolveTerms` in the domain, in ONE place, because the
+   * alternative is every screen resolving it and the second one getting it
+   * wrong. `service` still carries the CATALOGUE's words untouched beside this,
+   * so an editor can show what the standard scope says and what this document
+   * changed it to — which is the comparison somebody makes before tailoring.
+   */
+  readonly terms: DocumentTerms;
   /** gross − discount for this line, in the proposal's currency. From the
-   *  database, like every other sum here. */
-  readonly net: Amount;
+   *  database, like every other sum here.
+   *
+   *  NULL when the line has no price — there is no net of an amount that does
+   *  not exist, and the alternative is a zero that sums into the document's
+   *  total as though the client agreed to pay nothing for this. */
+  readonly net: Amount | null;
 }
 
 /**
@@ -96,6 +230,7 @@ export interface ProposalLineRecord {
 export interface ProposalSummary {
   readonly proposal: Proposal;
   readonly party: { readonly id: string; readonly displayName: string };
+  readonly issuingEntity: { readonly id: string; readonly displayName: string };
   readonly totals: ProposalTotals;
   readonly lineCount: number;
 }
@@ -118,8 +253,15 @@ export interface ProposalFilters {
  */
 export interface SharedProposal {
   readonly id: string;
+  /** The number the recipient quotes back. The whole reason it exists is this
+   *  screen and the phone call that follows it. */
+  readonly ref: string;
   /** Who sent it. A document with no sender is not a document. */
   readonly firmName: string;
+  /** Which of the firm's entities is offering — the name on the letterhead. A
+   *  client needs to know which company they would be contracting with, and it
+   *  is not always the group name above. */
+  readonly issuedBy: string;
   readonly addressedTo: string;
   readonly title: string;
   readonly status: ProposalStatus;
@@ -129,9 +271,26 @@ export interface SharedProposal {
   readonly lines: readonly {
     readonly description: string;
     readonly quantity: Amount;
-    readonly unitAmount: Amount;
+    /** Null for "as mutually agreed" — and then `pricingNote` is what the
+     *  recipient reads where the figure would be. */
+    readonly unitAmount: Amount | null;
     readonly discountPercent: Amount;
-    readonly net: Amount;
+    readonly net: Amount | null;
+    /**
+     * WHY there is no figure. On the recipient's own document, because that is
+     * the whole point of the field: a client looking at a blank price has to be
+     * told it is deliberate.
+     *
+     * The four scope blocks deliberately do NOT travel here. This is the fourth
+     * PUBLIC path and widening what an unauthenticated link exposes is its own
+     * decision, not a side effect of G1.6.
+     */
+    readonly pricingNote: string | null;
+    /** How often the client will be invoiced for this line. */
+    readonly billingFrequency: BillingFrequency | null;
+    /** What the client is told to expect to reimburse, separate from the fee
+     *  and in its own currency. Never folded into the totals. */
+    readonly oopEstimate: OutOfPocketEstimate | null;
   }[];
   readonly totals: ProposalTotals;
 }
@@ -164,13 +323,21 @@ export interface ProposalRepository {
   /** The live lines, in document order. */
   listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]>;
 
-  /** Move the status and stamp whichever date goes with it, in one statement,
-   *  so a row can never claim to be sent with no sent_at. */
+  /**
+   * Move the status and stamp whichever date goes with it, in one statement, so
+   * a row can never claim to be sent with no sent_at.
+   *
+   * `declinedReason` travels with the status for the same reason the dates do:
+   * `proposal_declined_reason_when_rejected_chk` (0022) ties the two together,
+   * so writing them separately would not merely be untidy — the first statement
+   * would be refused. Null for every transition but a rejection.
+   */
   setStatus(
     tenantId: string,
     proposalId: string,
     status: ProposalStatus,
     at: string,
+    declinedReason: string | null,
   ): Promise<Proposal>;
 
   /** Attach the share link's digest as part of sending. Never at draft: a quote

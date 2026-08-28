@@ -20,12 +20,19 @@ import type {
   NewPerson,
   PartyRepository,
 } from "../../usecase/party/ports";
+import {
+  PartyAlreadyArchived,
+  PartyHasReferences,
+  PartyNotArchived,
+  PartyNotFound,
+} from "../../domain/party/errors";
 
 interface PartyRow {
   id: string;
   tenant_id: string;
   kind: PartyKind;
   display_name: string;
+  archived_at: Date | null;
 }
 interface OrgRow {
   party_id: string;
@@ -55,7 +62,15 @@ interface LegalEntityRow {
 }
 
 function toParty(r: PartyRow): Party {
-  return { id: r.id, tenantId: r.tenant_id, kind: r.kind, displayName: r.display_name };
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    kind: r.kind,
+    displayName: r.display_name,
+    // timestamptz arrives as a Date; the domain carries ISO 8601 with an
+    // offset, like every other timestamp that crosses this door.
+    archivedAt: r.archived_at === null ? null : r.archived_at.toISOString(),
+  };
 }
 function toOrg(r: OrgRow): Organization {
   return {
@@ -149,10 +164,20 @@ export class PostgresPartyRepository implements PartyRepository {
     });
   }
 
+  /**
+   * One party by id — AND IT NEVER FILTERS ON archived_at.
+   *
+   * Half of the archive design, and the half that is easy to break by adding
+   * "the obvious" WHERE clause. A proposal, an engagement letter or an
+   * engagement pointing at this id has to render its counterparty, and it has
+   * to keep rendering it after somebody tidies the picker. Archiving hides a
+   * party from LISTS; it never makes one stop existing.
+   */
   async findParty(tenantId: string, partyId: string): Promise<Party | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<PartyRow[]>`
-        SELECT id, tenant_id, kind, display_name FROM core.party WHERE id = ${partyId}
+        SELECT id, tenant_id, kind, display_name, archived_at
+        FROM core.party WHERE id = ${partyId}
       `;
       return row ? toParty(row) : null;
     });
@@ -195,12 +220,121 @@ export class PostgresPartyRepository implements PartyRepository {
     });
   }
 
-  async listParties(tenantId: string): Promise<Party[]> {
+  /**
+   * The tenant's parties — the other half of the asymmetry. This one DOES
+   * filter: an archived party is out of the picker until somebody asks for it.
+   *
+   * Two whole statements rather than one with a parameterised predicate,
+   * because `WHERE ($1 OR archived_at IS NULL)` cannot be matched against
+   * `idx_party_tenant_live` (migration 0035) — a partial index over exactly
+   * this predicate and this ordering — once the plan is generic. The default
+   * read is the one that has to stay cheap.
+   */
+  async listParties(tenantId: string, includeArchived: boolean): Promise<Party[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<PartyRow[]>`
-        SELECT id, tenant_id, kind, display_name FROM core.party ORDER BY display_name
-      `;
+      const rows = includeArchived
+        ? await db<PartyRow[]>`
+            SELECT id, tenant_id, kind, display_name, archived_at
+            FROM core.party
+            ORDER BY display_name
+          `
+        : await db<PartyRow[]>`
+            SELECT id, tenant_id, kind, display_name, archived_at
+            FROM core.party
+            WHERE archived_at IS NULL
+            ORDER BY display_name
+          `;
       return rows.map(toParty);
     });
   }
+
+  /**
+   * Archive, or be refused by the database.
+   *
+   * `now()` rather than a clock injected from the application: the timestamp
+   * belongs to the transaction that made the change, and every other stamp on
+   * this table (`created_at`, `updated_at`) is struck the same way.
+   *
+   * THE REFUSAL IS NOT WRITTEN HERE. `trg_party_archive_guard` (0035, body
+   * replaced by 0036) raises `restrict_violation` when a lead, proposal,
+   * proposal line, engagement letter, letter line or engagement still points at
+   * the party, and names them in DETAIL. All this method does is put our own
+   * error round it — so the same rule holds for an import, an agent or a psql
+   * session, none of which pass through this file.
+   *
+   * `AND archived_at IS NULL` MAKES THE TRANSITION ITSELF THE LOCK, the way
+   * `signAndFanOut` uses `AND status = 'sent'` and `recordAdvance` uses `AND
+   * advance_recorded_at IS NULL`. The service checks first, but a check and an
+   * UPDATE are two statements and two callers fit between them; the trigger
+   * cannot close that gap because it deliberately does not fire on NOT NULL →
+   * NOT NULL. Without the predicate both writers win, the timestamp moves, and
+   * a SECOND `party.archived` lands in a log that can never be corrected. With
+   * it the loser gets no row.
+   */
+  async archive(tenantId: string, partyId: string): Promise<Party> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<PartyRow[]>`
+        UPDATE core.party SET archived_at = now()
+        WHERE id = ${partyId} AND archived_at IS NULL
+        RETURNING id, tenant_id, kind, display_name, archived_at
+      `.catch((err: unknown) => {
+        throw isArchiveRefusal(err) ? new PartyHasReferences(partyId, referrersOf(err)) : err;
+      });
+      const row = rows[0];
+      if (!row) throw await this.explainMissedUpdate(db, partyId, "archive");
+      return toParty(row);
+    });
+  }
+
+  /** The same lock in the other direction: `AND archived_at IS NOT NULL`, so two
+   *  concurrent restores produce one event rather than two. */
+  async unarchive(tenantId: string, partyId: string): Promise<Party> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<PartyRow[]>`
+        UPDATE core.party SET archived_at = NULL
+        WHERE id = ${partyId} AND archived_at IS NOT NULL
+        RETURNING id, tenant_id, kind, display_name, archived_at
+      `;
+      if (!row) throw await this.explainMissedUpdate(db, partyId, "unarchive");
+      return toParty(row);
+    });
+  }
+
+  /**
+   * Why a guarded UPDATE matched nothing: the party is not there, or somebody
+   * else got there first. Both are the caller's answer and neither is a 500 —
+   * losing the race means the party is already in the state that was asked for,
+   * which is the same 409 the service's own pre-check gives.
+   *
+   * One extra read, on the failure path only.
+   */
+  private async explainMissedUpdate(
+    db: Db,
+    partyId: string,
+    action: "archive" | "unarchive",
+  ): Promise<Error> {
+    const [row] = await db<{ archived_at: Date | null }[]>`
+      SELECT archived_at FROM core.party WHERE id = ${partyId}
+    `;
+    if (!row) return new PartyNotFound(partyId);
+    return action === "archive"
+      ? new PartyAlreadyArchived(partyId)
+      : new PartyNotArchived(partyId);
+  }
+}
+
+/** SQLSTATE 23001, `restrict_violation` — what 0035's guard raises and nothing
+ *  else on this statement can. Matching the code rather than the message keeps
+ *  the translation independent of the wording. */
+function isArchiveRefusal(err: unknown): boolean {
+  return typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23001";
+}
+
+/** The guard puts the referring objects in DETAIL, comma separated, so the
+ *  names come from the one place that enumerates them. An empty DETAIL is not
+ *  worth failing over — the caller still learns the archive was refused. */
+function referrersOf(err: unknown): readonly string[] {
+  const detail = (err as { detail?: unknown }).detail;
+  if (typeof detail !== "string" || detail.trim() === "") return ["something in the firm's records"];
+  return detail.split(",").map((s) => s.trim());
 }
