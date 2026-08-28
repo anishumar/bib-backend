@@ -122,6 +122,16 @@ open and are recorded above; neither blocks Phase 2.
 
 ### Lane B — the engine
 - [ ] `(B)` **T2.5** **P2 Master configuration registry**: services, workflow templates (**versioned**), rule packs (`gst-in@2026.07`), SLAs — data, not code. *Acc: a new service is a config row; running jobs pin their template version.*
+  > **Agreed scope for the first pass (2026-08-28):** build the **versioned-config spine** (how a
+  > row is versioned, published, and *pinned* — a running job must stay on the version it
+  > started on, or editing a workflow silently rewrites jobs in flight), plus the two registries
+  > that already have consumers waiting: **services** (the catalogue T2.2 proposals build from)
+  > and **roles** (replacing the hardcoded matrix behind the existing `PermissionSource` port,
+  > so a firm can use its own vocabulary). **Workflow templates and rule packs are deliberately
+  > deferred** until the orchestrator (T2.7) and rule-match agent (T4.3) actually read them —
+  > designing those shapes against no consumer is how a schema ends up wrong in a way migrations
+  > have to undo. This is why T2.5 comes before T2.1: the plan says agree it before the lanes
+  > split, and T2.2 depends on the catalogue.
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
