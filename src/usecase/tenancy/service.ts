@@ -41,6 +41,8 @@ export interface AddMemberInput {
   readonly audience: string;
   readonly role: string;
   readonly commercialVisibility: boolean;
+  /** Which platform caller granted this. See the note on the class. */
+  readonly provisionedBy?: string | undefined;
 }
 
 export class TenancyService {
@@ -54,9 +56,15 @@ export class TenancyService {
   //
   // Provisioning runs on the platform's S2S surface with no end user behind it,
   // so these events name the system as actor rather than inventing a human.
+  // `provisionedBy` carries WHICH platform caller did it: "system" alone cannot
+  // be traced back to anything, and once more than one integration holds a key
+  // that is the only way to answer who created a firm.
 
   /** Register a firm as a tenant. Slug is validated and must be unique. */
-  async createTenant(input: { name: string; slug: string }, actor: Actor = SYSTEM_ACTOR): Promise<Tenant> {
+  async createTenant(
+    input: { name: string; slug: string; provisionedBy?: string | undefined },
+    actor: Actor = SYSTEM_ACTOR,
+  ): Promise<Tenant> {
     if (!isValidSlug(input.slug)) throw new InvalidSlug(input.slug);
     const existing = await this.deps.tenants.findBySlug(input.slug);
     if (existing) throw new SlugTaken(input.slug);
@@ -71,7 +79,7 @@ export class TenancyService {
       verb: "tenant.created",
       objectId: tenant.id,
       actor,
-      payload: { slug: tenant.slug },
+      payload: { slug: tenant.slug, ...byline(input.provisionedBy) },
     });
     return tenant;
   }
@@ -124,6 +132,7 @@ export class TenancyService {
         audience: membership.audience,
         role: membership.role,
         commercialVisibility: membership.commercialVisibility,
+        ...byline(input.provisionedBy),
       },
     });
     return membership;
@@ -134,4 +143,10 @@ export class TenancyService {
     const all = await this.deps.memberships.listByUser(userId);
     return activeMemberships(all);
   }
+}
+
+/** The provisioning caller's name, when there is one. A machine fact — the
+ *  name of an integration, never a person — so it is safe in the ledger. */
+function byline(provisionedBy: string | undefined): Record<string, string> {
+  return provisionedBy === undefined ? {} : { provisionedBy };
 }

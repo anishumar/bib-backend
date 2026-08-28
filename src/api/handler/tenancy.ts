@@ -153,7 +153,10 @@ const myMembershipsRoute = createRoute({
 export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDeps): void {
   app.openapi(createTenantRoute, async (c) => {
     const input = c.req.valid("json");
-    const tenant = await deps.service.createTenant(input);
+    const tenant = await deps.service.createTenant({
+      ...input,
+      provisionedBy: c.get("internalClient")?.name,
+    });
     return c.json(tenant, 201);
   });
 
@@ -165,7 +168,10 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
 
   app.openapi(addMemberRoute, async (c) => {
     const input = c.req.valid("json");
-    const membership = await deps.service.addMember(input);
+    const membership = await deps.service.addMember({
+      ...input,
+      provisionedBy: c.get("internalClient")?.name,
+    });
     return c.json(membership, 201);
   });
 

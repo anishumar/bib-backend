@@ -149,9 +149,15 @@ each file and new files forgot; a prefix guard cannot be forgotten by a file tha
 exist yet.
 
 - **`/internal/*`** — the platform's own provisioning API (create a tenant, grant a
-  membership, register a user, set a password). No end user behind it, so it takes a shared
-  secret: `Authorization: Bearer $BIB_INTERNAL_API_KEY`, compared in constant time. Services
-  record these writes as the **system** actor.
+  membership, register a user, set a password). No end user behind it, so **each caller has
+  its own key** (`BIB_INTERNAL_KEYS`) carrying only the capabilities it needs, compared in
+  constant time. One key opening every route was an escalation path: create a user, grant
+  them partner in any firm, set their password, sign in as them. Capabilities live in
+  `ROUTE_CAPABILITIES` (`api/capabilities.ts`) — **denied by default**, so a route with no
+  entry is refused to every key. `credential.set` grants a *login as somebody*, so boot
+  refuses it sharing a key with anything else in a production-like environment. Services
+  record these writes as the **system** actor, with the caller's name in the payload —
+  "system did it" cannot be traced to a system.
 - **`/api/v1/*`** — the product. Requires a session. The only exceptions are the three
   routes that exist to *obtain* one, listed by exact path in `PUBLIC_PATHS`. Adding to that
   set needs a reason as good as theirs.

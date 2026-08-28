@@ -10,6 +10,8 @@
 // environment is the source and there is no file.
 import "dotenv/config";
 import { z } from "zod";
+import { CAPABILITIES } from "../api/capabilities";
+import type { InternalClient } from "../api/capabilities";
 
 const EnvSchema = z.object({
   BIB_ENVIRONMENT: z.enum(["development", "qa", "uat", "production"]).default("development"),
@@ -39,10 +41,13 @@ const EnvSchema = z.object({
   // sending it. The enum grows when a real transport lands; production-like
   // refuses to boot on 'log'.
   BIB_MAIL_TRANSPORT: z.enum(["log"]).default("log"),
-  // The shared secret for the /internal surface (platform provisioning). No
-  // default and no optionality: an unset value would mean "the provisioning
-  // API is open", and that is not a state this process may boot in.
-  BIB_INTERNAL_API_KEY: z.string().min(32, "must be at least 32 characters"),
+  // The provisioning callers, as JSON: [{name, key, capabilities[]}]. Each
+  // caller has its OWN key carrying only what it needs — one key that opens
+  // every route is an escalation path (create a user, grant them partner, set
+  // their password, sign in as them). No default and no optionality: an unset
+  // value would mean the provisioning API is open, and that is not a state
+  // this process may boot in.
+  BIB_INTERNAL_KEYS: z.string().min(1),
 
   // ── Rate limiting ─────────────────────────────────────────────────────────
   // Whether X-Forwarded-For may be believed. Must match the deployment: behind
@@ -79,8 +84,8 @@ export interface AuthConfig {
   /** Whether the dev x-user-id principal resolver is registered. */
   readonly devAuthEnabled: boolean;
   readonly mailTransport: "log";
-  /** Bearer secret required by every /internal route. */
-  readonly internalApiKey: string;
+  /** The provisioning callers. Each key carries only its own capabilities. */
+  readonly internalClients: readonly InternalClient[];
 }
 
 export interface CorsConfig {
@@ -156,7 +161,7 @@ export function load(): Config {
           ? env.BIB_DEV_AUTH_ENABLED === "true"
           : !productionLike,
       mailTransport: env.BIB_MAIL_TRANSPORT,
-      internalApiKey: env.BIB_INTERNAL_API_KEY,
+      internalClients: parseInternalClients(env.BIB_INTERNAL_KEYS),
     },
     cors: {
       origins:
@@ -181,6 +186,52 @@ export function load(): Config {
   };
 }
 
+const InternalClientsSchema = z
+  .array(
+    z.object({
+      name: z.string().min(1),
+      key: z.string().min(32, "each internal key must be at least 32 characters"),
+      capabilities: z.array(z.enum(CAPABILITIES as [string, ...string[]])).min(1),
+    }),
+  )
+  .min(1, "at least one provisioning client must be configured");
+
+/** Parses BIB_INTERNAL_KEYS. A malformed value here means the provisioning
+ *  surface cannot be authorized, so it fails at boot rather than defaulting to
+ *  anything — there is no safe default for "who may create firms". */
+function parseInternalClients(raw: string): readonly InternalClient[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(
+      `BIB_INTERNAL_KEYS is not valid JSON. Expected ` +
+        `[{"name":"ops","key":"<32+ chars>","capabilities":["tenant.provision"]}] — ` +
+        `known capabilities: ${CAPABILITIES.join(", ")}`,
+    );
+  }
+  const result = InternalClientsSchema.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues
+      .map((i) => `  [${i.path.join(".")}] ${i.message}`)
+      .join("\n");
+    throw new Error(`BIB_INTERNAL_KEYS is invalid:\n${issues}`);
+  }
+  const names = new Set<string>();
+  const keys = new Set<string>();
+  for (const client of result.data) {
+    if (names.has(client.name)) throw new Error(`BIB_INTERNAL_KEYS: duplicate client name ${client.name}`);
+    if (keys.has(client.key)) {
+      throw new Error(
+        `BIB_INTERNAL_KEYS: two clients share a key, so the audit trail cannot tell them apart`,
+      );
+    }
+    names.add(client.name);
+    keys.add(client.key);
+  }
+  return result.data as readonly InternalClient[];
+}
+
 /** Real auth + secrets are mandatory here. QA and UAT are public, so they count
  *  as production — an empty secret there is as dangerous as in prod. The
  *  environment label is a security control, not a log field. */
@@ -202,7 +253,16 @@ export function redacted(cfg: Config): Record<string, unknown> {
     docsEnabled: cfg.docsEnabled,
     // The internal key is a credential; redacted() exists so a config dump is
     // safe to log, and this is exactly the field that would make it unsafe.
-    auth: { ...cfg.auth, internalApiKey: "***" },
+    // Every key is a credential; redacted() exists so a config dump is safe to
+    // log, and these are exactly the fields that would make it unsafe.
+    auth: {
+      ...cfg.auth,
+      internalClients: cfg.auth.internalClients.map((c) => ({
+        name: c.name,
+        key: "***",
+        capabilities: c.capabilities,
+      })),
+    },
     rateLimit: cfg.rateLimit,
     cors: cfg.cors,
     db: {

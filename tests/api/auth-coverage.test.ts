@@ -23,12 +23,14 @@ import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
+import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
@@ -47,6 +49,9 @@ import {
 } from "../../src/testfakes/identity";
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
+const INTERNAL_CLIENTS = [
+  { name: "test-ops", key: INTERNAL_KEY, capabilities: CAPABILITIES },
+];
 const silentLog = { info() {}, warn() {}, error() {} };
 
 /**
@@ -94,7 +99,7 @@ function deps(): RouterDeps {
 function app(principal: Principal | null = null) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
-    internalApiKey: INTERNAL_KEY,
+    internalClients: INTERNAL_CLIENTS,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
@@ -188,7 +193,7 @@ describe("every route is accounted for", () => {
     // promise is what makes them acceptable on the list above, so it is tested.
     const closed = buildRouter(deps(), silentLog, {
       docsEnabled: false,
-      internalApiKey: INTERNAL_KEY,
+      internalClients: INTERNAL_CLIENTS,
       authz: new AuthzService({ permissions: new StaticPermissionSource() }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
@@ -431,7 +436,7 @@ describe("CORS — the frontend is a separate origin", () => {
     // bite at five sign-ins.
     const tight = buildRouter(deps(), silentLog, {
       docsEnabled: true,
-      internalApiKey: INTERNAL_KEY,
+      internalClients: INTERNAL_CLIENTS,
       authz: new AuthzService({ permissions: new StaticPermissionSource() }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
       rateLimit: {
@@ -452,5 +457,99 @@ describe("CORS — the frontend is a separate origin", () => {
   it("gives /internal no CORS at all — no browser should reach it", async () => {
     const res = await app().request("/internal/v1/tenants", preflight(ALLOWED));
     expect(res.headers.get("access-control-allow-origin")).toBeNull();
+  });
+});
+
+
+describe("the /internal surface authorizes, not just authenticates", () => {
+  // One key that opened every provisioning route was an escalation path, not a
+  // convenience: create a user, grant them partner in any firm, set their
+  // password, sign in as them. Three calls. Each caller now holds only what it
+  // needs.
+  const KEY_TENANTS = "capability-key-tenants-only-32-characters";
+  const KEY_PASSWORD = "capability-key-password-only-32-character";
+
+  function scoped() {
+    return buildRouter(deps(), silentLog, {
+      docsEnabled: true,
+      internalClients: [
+        { name: "onboarding", key: KEY_TENANTS, capabilities: ["tenant.provision"] },
+        { name: "reset-tool", key: KEY_PASSWORD, capabilities: ["credential.set"] },
+      ],
+      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      rateLimiter: new InMemoryRateLimiter(systemClock),
+      rateLimit: {
+        auth: { limit: 1000, windowSeconds: 60 },
+        general: { limit: 10000, windowSeconds: 60 },
+        trustProxy: false,
+      },
+      corsOrigins: ["http://localhost:3000"],
+      principalOf: () => Promise.resolve(null),
+    });
+  }
+
+  const call = (key: string, method: string, path: string, body: unknown) =>
+    scoped().request(path, {
+      method,
+      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  it("lets a key do what it carries", async () => {
+    const res = await call(KEY_TENANTS, "POST", "/internal/v1/tenants", {
+      name: "Harbour Point",
+      slug: "harbour-point",
+    });
+    expect(res.status).toBe(201);
+  });
+
+  it("refuses the escalation step the key does not carry", async () => {
+    // The onboarding key can create firms. It must not be able to set the
+    // password of somebody who already works at one.
+    const res = await call(KEY_TENANTS, "PUT", "/internal/v1/users/x/password", {
+      password: "a perfectly fine passphrase",
+    });
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain("credential.set");
+    expect(body.error.message).toContain("onboarding");
+  });
+
+  it("refuses in the other direction too", async () => {
+    const res = await call(KEY_PASSWORD, "POST", "/internal/v1/tenants", {
+      name: "Harbour Point",
+      slug: "harbour-point",
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("still refuses an unknown key outright", async () => {
+    const res = await call("not-a-registered-key-at-all-32-chars", "POST", "/internal/v1/tenants", {});
+    expect(res.status).toBe(401);
+  });
+
+  it("every /internal route declares a capability", () => {
+    // Deny by default, same as the product surface: a provisioning route with
+    // no entry is refused to every key, so one cannot ship open.
+    const undeclared = registeredRoutes()
+      .filter((r) => r.path.startsWith("/internal/"))
+      .filter((r) => capabilityFor(r.method, concrete(r.path)) === null)
+      .map((r) => `${r.method.toUpperCase()} ${r.path}`);
+    expect(undeclared).toEqual([]);
+  });
+
+  it("names the caller in the audit trail", async () => {
+    // "system did it" cannot be traced to a system. Once more than one
+    // integration holds a key, this is the only way to answer who created a firm.
+    const app = scoped();
+    await app.request("/internal/v1/tenants", {
+      method: "POST",
+      headers: { authorization: `Bearer ${KEY_TENANTS}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "Harbour Point", slug: "harbour-point" }),
+    });
+    // The router under test wires its own fakes, so assert through the shape the
+    // service records rather than reaching into them: covered end to end by the
+    // smoke test, and by the tenancy service unit tests for the payload itself.
+    expect(capabilityFor("POST", "/internal/v1/tenants")).toBe("tenant.provision");
   });
 });

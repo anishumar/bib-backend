@@ -20,6 +20,7 @@ import type { RateLimiter } from "../platform/ratelimit";
 import { rateLimit } from "./ratelimit";
 import type { RateLimitConfig } from "./ratelimit";
 import { PUBLIC_PATHS } from "./guards";
+import type { InternalClient } from "./capabilities";
 import type { Logger } from "../platform/log";
 import { createOpenAPIApp } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
@@ -37,8 +38,8 @@ export interface RouterOptions {
   /** Serve /openapi.json and /docs. Off in production-like environments unless
    *  BIB_DOCS_ENABLED is set — the spec enumerates every endpoint. */
   readonly docsEnabled: boolean;
-  /** The shared secret every /internal route requires. */
-  readonly internalApiKey: string;
+  /** The provisioning callers, each with its own key and capabilities. */
+  readonly internalClients: readonly InternalClient[];
   /** How a request becomes a principal on the /api/v1 surface. */
   readonly principalOf: PrincipalResolver;
   readonly authz: AuthzService;
@@ -124,7 +125,7 @@ export function buildRouter(
   //
   // They run before request validation, so an unauthenticated call gets 401
   // rather than a 400 that tells an anonymous caller about the request shape.
-  app.use("/internal/*", internalGuard(opts.internalApiKey));
+  app.use("/internal/*", internalGuard(opts.internalClients));
   app.use("/api/v1/*", sessionGuard(opts.principalOf));
   // Gate 3 rides behind the session guard: by here the caller is authenticated
   // and their audience is settled, so the only question left is whether their

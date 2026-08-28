@@ -27,9 +27,10 @@ chk() { # chk <label> <expected> <actual>
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-echo; echo "── 1. The provisioning surface needs the platform key ──────────────"
+echo; echo "── 1. The provisioning surface needs a platform key ────────────────"
 chk "no key is refused"        401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -d '{}')"
 chk "wrong key is refused"     401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -H 'authorization: Bearer wrong' -d '{}')"
+chk "an undeclared route is refused" 403 "$(code -XPOST $API/internal/v1/nope -H "$H" -H "$A" -d '{}')"
 
 # Seed a firm: one partner, one associate, one client contact.
 T=$(curl -s -XPOST $API/internal/v1/tenants -H "$H" -H "$A" -d "{\"name\":\"Harbour Point\",\"slug\":\"demo-$S\"}" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')

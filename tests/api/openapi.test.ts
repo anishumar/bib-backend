@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
+import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
 import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
 import { systemClock } from "../../src/platform/clock";
@@ -79,12 +80,15 @@ function deps(): RouterDeps {
 }
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
+const INTERNAL_CLIENTS = [
+  { name: "test-ops", key: INTERNAL_KEY, capabilities: CAPABILITIES },
+];
 const internal = { authorization: `Bearer ${INTERNAL_KEY}`, "content-type": "application/json" };
 
 function app() {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
-    internalApiKey: INTERNAL_KEY,
+    internalClients: INTERNAL_CLIENTS,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
@@ -111,7 +115,7 @@ describe("OpenAPI spec", () => {
   it("is not served when docs are disabled", async () => {
     const res = await buildRouter(deps(), silentLog, {
       docsEnabled: false,
-      internalApiKey: INTERNAL_KEY,
+      internalClients: INTERNAL_CLIENTS,
     authz: new AuthzService({ permissions: new StaticPermissionSource() }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
@@ -184,8 +188,16 @@ describe("transport-level faults", () => {
     expect(body.error.code).toBe("VALIDATION");
   });
 
-  it("still answers an unknown route 404 in the envelope", async () => {
+  it("answers an unknown /internal path 403, not 404", async () => {
+    // The capability guard runs before routing, so it cannot tell a route that
+    // forgot its entry from a path that never existed — and answers "no" to
+    // both. Losing the accurate 404 is the price of deny-by-default, and the
+    // right side of that trade: no provisioning route can be open by omission.
     const res = await app().request("/internal/v1/nope", { headers: internal });
-    expect(res.status).toBe(404);
+    expect(res.status).toBe(403);
+  });
+
+  it("still answers an unknown path outside /internal with a 404", async () => {
+    expect((await app().request("/no/such/thing")).status).toBe(404);
   });
 });

@@ -3,6 +3,7 @@
 // value, and what was expected — because crash-loop beats silent degradation.
 import type { Config } from "./config";
 import { isProductionLike } from "./config";
+import { IDENTITY_GRANTING } from "../api/capabilities";
 
 /** Run before the server accepts traffic. Throws on any unbootable state. */
 export function validateServer(cfg: Config): void {
@@ -35,11 +36,31 @@ export function validateServer(cfg: Config): void {
     // The committed example value is public. Booting a public environment with
     // it would leave the provisioning API — create tenants, grant memberships,
     // set any user's password — open to anyone who has read the repo.
-    if (cfg.auth.internalApiKey === EXAMPLE_INTERNAL_KEY) {
+    const exampleKeys = cfg.auth.internalClients.filter((c) => c.key === EXAMPLE_INTERNAL_KEY);
+    if (exampleKeys.length > 0) {
       throw new Error(
-        `BIB_INTERNAL_API_KEY is still the value from .env.example while ` +
+        `BIB_INTERNAL_KEYS still uses the key from .env.example (client ` +
+          `${exampleKeys.map((c) => JSON.stringify(c.name)).join(", ")}) while ` +
           `BIB_ENVIRONMENT=${cfg.environment} (production-like). That value is committed and ` +
-          `public. Generate one: openssl rand -hex 32`,
+          `public. Generate one per client: openssl rand -hex 32`,
+      );
+    }
+
+    // Setting a password hands over a LOGIN AS somebody. Held next to
+    // user.provision and membership.grant it completes an escalation path:
+    // create a user, grant them partner in any firm, set their password, sign
+    // in as them. Three calls with one key. So in a public environment it lives
+    // on a key of its own, held by fewer systems and rotated on its own clock.
+    const overloaded = cfg.auth.internalClients.filter(
+      (c) => c.capabilities.includes(IDENTITY_GRANTING) && c.capabilities.length > 1,
+    );
+    if (overloaded.length > 0) {
+      throw new Error(
+        `BIB_INTERNAL_KEYS: client ${overloaded.map((c) => JSON.stringify(c.name)).join(", ")} ` +
+          `holds ${IDENTITY_GRANTING} alongside other capabilities while ` +
+          `BIB_ENVIRONMENT=${cfg.environment} (production-like). Setting a password grants a ` +
+          `login as that person; combined with user.provision and membership.grant it is a full ` +
+          `escalation path. Give ${IDENTITY_GRANTING} its own client and key.`,
       );
     }
 

@@ -112,6 +112,16 @@ export function wire(cfg: Config, log: Logger): Wired {
   const principalOf = cfg.auth.devAuthEnabled
     ? firstOf(sessionResolver(identity, cfg.auth.sessionCookieName), devHeaderResolver())
     : sessionResolver(identity, cfg.auth.sessionCookieName);
+  log.info(
+    {
+      clients: cfg.auth.internalClients.map((c) => ({
+        name: c.name,
+        capabilities: c.capabilities,
+      })),
+    },
+    "provisioning clients registered (keys redacted)",
+  );
+
   if (cfg.auth.devAuthEnabled) {
     log.warn(
       "DEV AUTH IS ON: an x-user-id header is accepted as a principal. Local development only.",
@@ -143,7 +153,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       log,
       {
         docsEnabled: cfg.docsEnabled,
-        internalApiKey: cfg.auth.internalApiKey,
+        internalClients: cfg.auth.internalClients,
         principalOf,
         authz,
         rateLimiter,

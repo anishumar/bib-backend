@@ -11,8 +11,10 @@
 // Two surfaces, two guards:
 //
 //   /internal/*  — the platform's own provisioning API (create a tenant, grant a
-//                  membership, set a password). No end user behind it, so it
-//                  authenticates with a shared secret from config.
+//                  membership, set a password). No end user behind it, so each
+//                  CALLER has its own key, carrying only the capabilities it
+//                  needs. A single key opening every route was an escalation
+//                  path, not a convenience.
 //   /api/v1/*    — the product. Requires a session, except the handful of routes
 //                  that exist to GET one, which are listed below by exact path.
 //
@@ -25,6 +27,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import type { Principal } from "../platform/callctx";
+import type { InternalClient } from "./capabilities";
+import { capabilityFor } from "./capabilities";
 import type { AuthzService } from "../usecase/authz/service";
 import type { PrincipalResolver } from "./principal";
 import { decideRoute } from "./permissions";
@@ -36,6 +40,9 @@ import { toEnvelope } from "./httpresp";
 export interface AppEnv {
   Variables: {
     principal: Principal | null;
+    /** Which provisioning caller made this request, on /internal only. Named in
+     *  the audit trail so "system did it" can be traced to a system. */
+    internalClient: InternalClient | null;
   };
 }
 
@@ -90,24 +97,67 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
  * The comparison is timing-safe because the alternative leaks the key one byte
  * at a time to anyone willing to measure, and this key is the provisioning API.
  */
-export function internalGuard(apiKey: string): MiddlewareHandler<AppEnv> {
-  const expected = Buffer.from(apiKey);
+export function internalGuard(clients: readonly InternalClient[]): MiddlewareHandler<AppEnv> {
+  // Compared in constant time, because the alternative leaks a key one byte at
+  // a time to anyone willing to measure. Every candidate is checked even after
+  // a match, so the work does not depend on WHICH key was presented.
+  const registry = clients.map((client) => ({ client, expected: Buffer.from(client.key) }));
+
   return async (c, next) => {
     const presented = bearer(c.req.header("authorization"));
-    if (presented === null || !constantTimeEquals(presented, expected)) {
+    let matched: InternalClient | null = null;
+    for (const { client, expected } of registry) {
+      if (presented !== null && constantTimeEquals(presented, expected)) matched = client;
+    }
+
+    if (matched === null) {
       return c.json(
         toEnvelope({
           status: 401,
           code: "UNAUTHORIZED",
           message:
-            "the /internal surface requires the platform key: Authorization: Bearer <BIB_INTERNAL_API_KEY>",
+            "the /internal surface requires a platform key: Authorization: Bearer <key from BIB_INTERNAL_KEYS>",
         }),
         401,
       );
     }
-    // No end user is behind a provisioning call, so there is no principal to
-    // set. Services record these writes as the system actor.
+
+    // AUTHORIZATION, not just authentication. A route with no declared
+    // capability is refused to every caller — the same deny-by-default the
+    // product surface uses, so a new provisioning route cannot ship open.
+    //
+    // This runs before routing, so it cannot tell a route that forgot its
+    // entry from a path that does not exist, and answers 403 to both. Losing
+    // an accurate 404 is the price of the default being "no": a typo here says
+    // 403 rather than 404, and in exchange no route can be open by omission.
+    const needed = capabilityFor(c.req.method, c.req.path);
+    if (needed === null) {
+      return c.json(
+        toEnvelope({
+          status: 403,
+          code: "FORBIDDEN",
+          message:
+            "no provisioning route here declares a capability, so no key may call it. Either the " +
+            "path is wrong, or the route needs an entry in ROUTE_CAPABILITIES (api/capabilities.ts).",
+        }),
+        403,
+      );
+    }
+    if (!matched.capabilities.includes(needed)) {
+      return c.json(
+        toEnvelope({
+          status: 403,
+          code: "FORBIDDEN",
+          message: `the platform key "${matched.name}" does not carry ${needed}`,
+        }),
+        403,
+      );
+    }
+
+    // No end user is behind a provisioning call, so there is no principal —
+    // but there IS a named caller, and the audit trail records which one.
     c.set("principal", null);
+    c.set("internalClient", matched);
     await next();
     return undefined;
   };
@@ -124,6 +174,7 @@ export function sessionGuard(principalOf: PrincipalResolver): MiddlewareHandler<
   return async (c, next) => {
     if (PUBLIC_PATHS.has(c.req.path)) {
       c.set("principal", null);
+      c.set("internalClient", null);
       await next();
       return undefined;
     }
@@ -150,6 +201,7 @@ export function sessionGuard(principalOf: PrincipalResolver): MiddlewareHandler<
     }
 
     c.set("principal", principal);
+    c.set("internalClient", null);
     await next();
     return undefined;
   };

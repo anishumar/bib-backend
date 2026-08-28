@@ -227,10 +227,13 @@ sandbox access + credentials. **Not on any demo's critical path.**
   concurrency cap of 6 on scrypt, bounding hash memory to ~192 MB however the requests
   arrive. *Limitation, by design:* the store is per-process, so behind N pods every limit is
   N times looser — it is a port, and Redis replaces it when there is a second pod.
-- [ ] **`/internal` authenticates but does not authorize.** One shared secret grants every
-  provisioning action — create a tenant, grant a membership, set any user's password.
-  Acceptable while the only caller is us; not acceptable the moment a second system holds
-  the key. Revisit when one does.
+- [x] **`/internal` authorization** — done. Each caller has its own key with its own
+  capabilities (`tenant.provision` / `user.provision` / `membership.grant` /
+  `credential.set`), enforced from one deny-by-default table, so a provisioning route with
+  no entry is refused to every key. `credential.set` grants a login as somebody, so boot
+  refuses it sharing a key with any other capability in a production-like environment —
+  it is the step that completes the escalation path. Provisioning events now carry
+  `provisionedBy`, because "system did it" cannot be traced to a system.
 
 ## Parking lot / decisions to make (don't build on guesses)
 
