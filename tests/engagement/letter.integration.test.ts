@@ -555,6 +555,104 @@ describe("the pin", () => {
     expect(live?.status).toBe("archived");
   });
 
+  it("serves the catalogue the line CITES, as that version stated it", async () => {
+    // G2.2 says a letter is "ASSEMBLED from the catalogue's own words", and until
+    // this join existed a grep for the four scope blocks outside the config model
+    // returned nothing — zero consumers. The same read carries `slaDays`, which
+    // is what T3.1 snapshots onto a work item at creation and the reason a
+    // LETTER pins a service version at all rather than reading the catalogue
+    // live: work already agreed must not become retroactively late.
+    const defined = await config.define(
+      {
+        tenantId: tenantA,
+        kind: "service",
+        key: "vcfo",
+        body: {
+          name: "Virtual CFO",
+          ref: "V2",
+          module: "RAA",
+          group: "VCFO CONSOLE",
+          billingBasis: "retainer",
+          recurrence: "monthly",
+          slaDays: 10,
+          listPrice: { amount: "90000.00", currency: "INR" },
+          scope: "Monthly management accounts, cash forecast and a board pack.",
+          clientObligations: "Bank statements and ledgers by the 7th.",
+          volumeLimits: "One entity; under 8 bank accounts.",
+          exclusions: "Statutory audit and transfer-pricing studies.",
+        },
+      },
+      SYSTEM_ACTOR,
+    );
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "vcfo", version: 1 },
+      SYSTEM_ACTOR,
+    );
+
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — vCFO",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: defined.draft.id,
+      description: "Virtual CFO, 12 months",
+      quantity: "12",
+      unitAmount: "85000",
+      discountPercent: "0",
+    });
+
+    // The firm rewrites the service AFTER the letter was drafted.
+    await config.addVersion({
+      tenantId: tenantA,
+      kind: "service",
+      key: "vcfo",
+      body: {
+        name: "Virtual CFO",
+        ref: "V2",
+        billingBasis: "retainer",
+        recurrence: "quarterly",
+        slaDays: 30,
+        scope: "REWRITTEN 2027: quarterly management accounts only.",
+      },
+    });
+    await config.publish(
+      { tenantId: tenantA, kind: "service", key: "vcfo", version: 2 },
+      SYSTEM_ACTOR,
+    );
+
+    const record = await service.describe(tenantA, letter.id);
+    const pinnedService = record.lines[0]?.service;
+    expect(pinnedService?.slaDays).toBe(10);
+    expect(pinnedService?.recurrence).toBe("monthly");
+    expect(pinnedService?.version).toBe(1);
+    // The firm's own code, on the letter, with no registry call per line.
+    expect(pinnedService?.ref).toBe("V2");
+    expect(pinnedService?.module).toBe("RAA");
+    // The words the letter is assembled FROM — as the version it cites stated
+    // them, not as the catalogue reads today.
+    expect(pinnedService?.scope).toBe(
+      "Monthly management accounts, cash forecast and a board pack.",
+    );
+    expect(pinnedService?.scope).not.toContain("REWRITTEN");
+    expect(pinnedService?.volumeLimits).toBe("One entity; under 8 bank accounts.");
+    // The other half of "list 90,000, agreed 85,000" — which migration 0017
+    // says is the reason a letter line pins a version.
+    expect(pinnedService?.listPrice).toEqual({ amount: "90000.00", currency: "INR" });
+    expect(record.lines[0]?.line.unitAmount).toBe("85000.0000");
+  });
+
   it("records a verifiable fingerprint of what was signed", async () => {
     const id = await signedLetter();
     const record = await service.describe(tenantA, id);

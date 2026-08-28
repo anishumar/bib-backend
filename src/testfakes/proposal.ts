@@ -15,9 +15,11 @@
 //   line to its proposal's currency. All database properties, proven against
 //   real Postgres.
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import { readServiceBody } from "../domain/config/model";
 import type {
   NewProposal,
   NewProposalLine,
+  PinnedService,
   PolicyDirectory,
   ProposalFilters,
   ProposalRecord,
@@ -36,6 +38,18 @@ import type { FakePreferenceRepo } from "./document";
 export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
   readonly lines: (ProposalLine & { removed: boolean })[] = [];
+  /**
+   * The catalogue the pins resolve against, so `describe` returns the PINNED
+   * service the way the Postgres adapter's join does instead of a null that
+   * says "this fake does not do that part".
+   *
+   * The SAME instance the use case quotes from (`makeProposalFakes` wires one),
+   * so a test registers a service in one place and the read model cites it — and
+   * a fake that could disagree with the adapter about which version a line
+   * resolved to would be worse than no fake at all. Left null when a test builds
+   * the repo by hand: `service: null` is a real answer the port already allows.
+   */
+  catalogue: FakeServiceCatalogue | null = null;
   /** Display names for the parties a test quotes, so a joined read returns
    *  something a screen could render rather than a uuid. */
   partyNames = new Map<string, string>();
@@ -209,7 +223,7 @@ export class FakeProposalRepo implements ProposalRepository {
                 id: l.entityPartyId,
                 displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
               },
-        service: null,
+        service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
         net: netOf(l),
       })),
       totals: totalsOf(lines, proposal.currency),
@@ -291,6 +305,15 @@ export class FakeServiceCatalogue implements ServiceCatalogue {
     this.versions.set(versionId, row);
   }
 
+  /** The same lookup `readPinnedVersion` does, without the promise — so
+   *  `FakeProposalRepo.describe` can resolve a line's pin the way a JOIN does,
+   *  in one pass, rather than awaiting once per line. */
+  pinned(
+    versionId: string,
+  ): { key: string; version: number; body: Record<string, unknown> } | null {
+    return this.versions.get(versionId) ?? null;
+  }
+
   readPinnedVersion(
     _tenantId: string,
     versionId: string,
@@ -329,9 +352,15 @@ export function makeProposalFakes(): Deps & {
   // the rule that picks an issuing entity stops working, and a stub that
   // recorded being asked would let it pass.
   const identity = makeDocumentIdentity();
+  // ONE catalogue, wired into both the use case and the read model, so a service
+  // a test publishes is the same one a line's pin resolves to. Two instances
+  // would let the fake read model cite a version the use case never saw.
+  const catalogue = new FakeServiceCatalogue();
+  const proposals = new FakeProposalRepo();
+  proposals.catalogue = catalogue;
   return {
-    proposals: new FakeProposalRepo(),
-    catalogue: new FakeServiceCatalogue(),
+    proposals,
+    catalogue,
     policies: new FakePolicyDirectory(),
     documents: identity.documents,
     firmEntities: identity.firmEntities,
@@ -402,6 +431,40 @@ function totalsOf(
     discount: fromScaled(gross - net),
     net: fromScaled(net),
     currency,
+  };
+}
+
+/**
+ * A line's pinned catalogue row, read the way the Postgres adapter reads it:
+ * through `readServiceBody`, the one reader for `kind='service'`.
+ *
+ * Sharing that function is the whole value of doing it here — a fake that
+ * mapped the body itself would be a second interpretation of a frozen jsonb, and
+ * the two would disagree exactly where a body predates a field.
+ */
+function pinnedServiceOf(
+  catalogue: FakeServiceCatalogue | null,
+  versionId: string,
+): PinnedService | null {
+  const row = catalogue?.pinned(versionId);
+  if (row === null || row === undefined) return null;
+  const stored = readServiceBody(row.body);
+  return {
+    key: row.key,
+    version: row.version,
+    ref: stored.ref,
+    name: stored.name === "" ? row.key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
   };
 }
 

@@ -2,7 +2,8 @@
 // are owned by the use case that needs them, stated in our vocabulary; adapters
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
-import type { Amount, CurrencyCode } from "../../domain/money/model";
+import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
 import type { DocumentType } from "../../domain/document/model";
 import type {
   Proposal,
@@ -69,9 +70,9 @@ export interface NewProposalLine {
  * The joined read model this codebase learnt to build the first time (see
  * CLAUDE.md): a bare `Proposal` carries `partyId` and each line carries a
  * `serviceVersionId`, which is right for the aggregate and renders as a column
- * of uuids. `listPrice` comes from the pinned catalogue version, so a screen can
- * show "list 25,000 — quoted 22,500" without resolving pins itself, which is the
- * commercial question the pin exists to answer.
+ * of uuids. `service` comes from the pinned catalogue version, so a screen can
+ * show "A1 — list 25,000, quoted 22,500" without resolving pins itself, which is
+ * the commercial question the pin exists to answer.
  *
  * Totals are computed in Postgres `numeric` by the query that reads the lines —
  * never summed in TypeScript.
@@ -93,20 +94,90 @@ export interface ProposalRecord {
   } | null;
 }
 
+/**
+ * THE CATALOGUE ROW A LINE CITES, as it was PINNED — read off the frozen
+ * `config.version` the line stores, never off the catalogue as it stands today.
+ *
+ * It carries what a DOCUMENT prints and what a WORK ITEM copies, because those
+ * are the two consumers of a pin and both were making a registry call per line
+ * to get here — the per-row lookup CLAUDE.md names as the sign that a join
+ * belongs in the query. Concretely: `ref` is G2.1's acceptance ("a proposal
+ * cites the firm's own service code"), `slaDays` is what T3.1 snapshots onto a
+ * work item at creation, `recurrence` is what a letter line's billing frequency
+ * defaults from, `module` and `group` are the revenue and delivery axes a
+ * document groups by, and the four prose blocks are what an engagement letter is
+ * assembled from (G2.2).
+ *
+ * THE FOUR PROSE BLOCKS ARE THE CATALOGUE'S WORDS AND ONLY EVER THOSE. G1.6 adds
+ * a per-document OVERRIDE of each of them, and the override does NOT land here:
+ * `service` means "the catalogue row this line was quoted from", and a field
+ * that silently held the tailored wording instead would make that sentence
+ * false — a screen could no longer tell a standard scope from an edited one, and
+ * "what does our catalogue say" would have no answer left on the read model. The
+ * resolved wording is its own thing beside this one, and it says which of the
+ * two won.
+ *
+ * Every field but `key`, `version` and `name` is NULLABLE, and that is the
+ * catalogue's own shape rather than laziness: a published version is frozen, so
+ * a body published before a field existed can never be edited to carry it, and
+ * null here means "the firm never stated this" — never a default a consumer may
+ * invent. `slaDays: null` in particular is not zero; see `ServiceBody`.
+ *
+ * DELIBERATELY ABSENT: the catalogue's `description` (the LINE carries the words
+ * the client actually reads, and a firm tailors them per document — printing the
+ * catalogue's beside them is two descriptions and no rule about which wins),
+ * `category`, and `jurisdictions` (both are for FINDING a service in the
+ * catalogue, not for printing one on a document).
+ */
+export interface PinnedService {
+  /** The registry key and the version number — the pin, as a person cites it.
+   *  Not the firm's code: see `ref`. */
+  readonly key: string;
+  readonly version: number;
+  /** THE FIRM'S OWN SERVICE CODE — "A1", "H1", "R7". G2.1's acceptance in one
+   *  field: this is what a proposal has to print, and getting it meant a
+   *  registry call per line. Null for a service the firm's master never coded. */
+  readonly ref: string | null;
+  readonly name: string;
+  /** The Dept — the REVENUE reporting axis — and the delivery team. Independent
+   *  dimensions, never a hierarchy (see `ServiceBody.group`). */
+  readonly module: string | null;
+  readonly group: string | null;
+  /** What `unitAmount` and `listPrice` are PER — per hour, per month, per item,
+   *  or for the whole engagement. Without it an amount on a document is a number
+   *  with no unit. Null only for a stored body that somehow has none. */
+  readonly billingBasis: BillingBasis | null;
+  /** How often the work comes round. NOT how often it is billed — G1.6's
+   *  `billingFrequency` is a fact about this deal and defaults FROM this. */
+  readonly recurrence: ServiceRecurrence | null;
+  /** The turnaround the firm committed to, in whole days from signing, AS THIS
+   *  VERSION STATED IT. T3.1 copies it onto a work item at creation, which is
+   *  the whole reason the line pins a version rather than reading the catalogue
+   *  live: a revision next quarter must not make finished work retroactively
+   *  late. Null is "no SLA stated" and is not zero. */
+  readonly slaDays: number | null;
+  /** What the firm ASKED for this service when the line was quoted — the other
+   *  half of "list 25,000, quoted 22,500". Null means the firm quotes it case by
+   *  case, and `pricingNote` is where it says why. */
+  readonly listPrice: Money | null;
+  readonly pricingNote: string | null;
+  /** THE FOUR SCOPE BLOCKS, as the catalogue stated them — see the note above on
+   *  why the override is not folded into these. */
+  readonly scope: string | null;
+  readonly clientObligations: string | null;
+  readonly volumeLimits: string | null;
+  readonly exclusions: string | null;
+}
+
 export interface ProposalLineRecord {
   readonly line: ProposalLine;
   /** The entity by NAME. Null when the line names none — which on a proposal is
    *  a real answer, not a missing join. */
   readonly entity: { readonly id: string; readonly displayName: string } | null;
-  /** The service as it was PINNED — its name then, and its list price then.
-   *  Null only if the pinned version has somehow gone, which the composite
-   *  foreign key makes impossible; the type is honest about the join anyway. */
-  readonly service: {
-    readonly key: string;
-    readonly version: number;
-    readonly name: string;
-    readonly listPrice: { readonly amount: Amount; readonly currency: CurrencyCode } | null;
-  } | null;
+  /** The service as it was PINNED. Null only if the pinned version has somehow
+   *  gone, which the composite foreign key makes impossible; the type is honest
+   *  about the join anyway. */
+  readonly service: PinnedService | null;
   /** gross − discount for this line, in the proposal's currency. From the
    *  database, like every other sum here. */
   readonly net: Amount;

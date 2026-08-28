@@ -16,7 +16,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
-import { readClauseBody } from "../../domain/config/model";
+import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import type {
   EngagementRepository,
   FirmSignatureRecord,
@@ -29,6 +29,7 @@ import type {
   NewLetter,
   NewLetterClause,
   NewLetterLine,
+  PinnedService,
   SignatureRecord,
 } from "../../usecase/engagement/ports";
 
@@ -173,6 +174,44 @@ function toClause(r: ClauseRow): LetterClause {
     engagementLetterId: r.engagement_letter_id,
     clauseVersionId: r.clause_version_id,
     position: r.position,
+  };
+}
+
+/**
+ * The pinned catalogue row, out of the frozen jsonb the join already selected.
+ *
+ * `readServiceBody` (domain/config) rather than reaching into the body by name
+ * here, for the reason `readClauseBody` is used two functions down: it is the
+ * ONE reader for `kind='service'`, it normalises, and every field FALLS BACK
+ * rather than throwing — which a PINNED version needs, because the body being
+ * read may predate the field being asked for and a pin must always resolve. On a
+ * signed letter that matters more than anywhere else: a read that threw would
+ * make the record of what a client agreed to unreadable.
+ *
+ * The name falls back to the registry KEY when a stored body somehow has none.
+ */
+function toPinnedService(
+  key: string,
+  version: number,
+  body: Record<string, unknown>,
+): PinnedService {
+  const stored = readServiceBody(body);
+  return {
+    key,
+    version,
+    ref: stored.ref,
+    name: stored.name === "" ? key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
   };
 }
 
@@ -390,12 +429,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           (r): LetterLineRecord => ({
             line: toLine(r),
             entity: { id: r.entity_party_id, displayName: r.entity_display_name },
-            service: {
-              key: r.service_key,
-              version: r.service_version,
-              name:
-                typeof r.service_body["name"] === "string" ? r.service_body["name"] : r.service_key,
-            },
+            service: toPinnedService(r.service_key, r.service_version, r.service_body),
             net: r.net,
           }),
         ),

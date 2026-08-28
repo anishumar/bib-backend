@@ -53,6 +53,54 @@ const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
 
+/**
+ * THE CATALOGUE ROW THIS LINE CITES, as it was PINNED.
+ *
+ * G2.1's acceptance is "a proposal CITES the firm's own service code", and until
+ * this schema carried `ref` a screen had to call the config registry once per
+ * line to print `A1` — the per-row lookup CLAUDE.md names as the sign that a
+ * join belongs in the query. `slaDays` is the same gap and the one T3.1 walks
+ * into: a work item snapshots the SLA in force when it was created, off the
+ * version the document PINNED, and nothing served it.
+ *
+ * Everything but `key`, `version` and `name` is nullable because the CATALOGUE
+ * is: a published version is frozen, so a body published before a field existed
+ * can never carry it, and null means "the firm never stated this". A screen must
+ * not turn that into a default — `slaDays: null` is not a zero-day SLA.
+ *
+ * The four prose blocks are the CATALOGUE's words. G1.6 adds per-document
+ * overrides of exactly these; they will arrive beside this object rather than
+ * inside it, so "what does our catalogue say" and "what does this document say"
+ * stay two answers.
+ */
+const PinnedServiceSchema = z
+  .object({
+    key: z.string(),
+    version: z.number().int(),
+    /** The firm's OWN code — "A1". Not the registry key, which is lowercase and
+     *  url-safe by rule. */
+    ref: z.string().nullable(),
+    name: z.string(),
+    /** The revenue axis and the delivery axis. Independent dimensions. */
+    module: z.string().nullable(),
+    group: z.string().nullable(),
+    /** What the amounts are PER — per hour, per month, per item, or for the
+     *  whole engagement. */
+    billingBasis: z.string().nullable(),
+    /** How often the WORK comes round, which is not how often it is billed. */
+    recurrence: z.string().nullable(),
+    /** The turnaround promised by THIS version, in whole days from signing. */
+    slaDays: z.number().int().nullable(),
+    /** Redacted by the fee axis, with the rest of the money. */
+    listPrice: MoneySchema.nullable(),
+    pricingNote: z.string().nullable(),
+    scope: z.string().nullable(),
+    clientObligations: z.string().nullable(),
+    volumeLimits: z.string().nullable(),
+    exclusions: z.string().nullable(),
+  })
+  .openapi("PinnedService");
+
 const TotalsSchema = z
   .object({
     // Nullable because of the fee axis: a caller without commercial visibility
@@ -110,14 +158,7 @@ const ProposalLineSchema = z
     // The PIN, on the wire, because a screen showing "list 25,000 / quoted
     // 22,500" needs to be able to say which catalogue version it is quoting.
     serviceVersionId: z.string().uuid(),
-    service: z
-      .object({
-        key: z.string(),
-        version: z.number().int(),
-        name: z.string(),
-        listPrice: MoneySchema.nullable(),
-      })
-      .nullable(),
+    service: PinnedServiceSchema.nullable(),
     description: z.string(),
     position: z.number().int(),
     quantity: AmountSchema,
@@ -491,6 +532,44 @@ function toProposalBody(
   };
 }
 
+/**
+ * The pinned catalogue row, field by field — never the port object forwarded.
+ *
+ * Only the PRICE half is redacted by the fee axis. The code, the Dept, the
+ * delivery team, the SLA and the four scope blocks are what the firm SELLS and
+ * what it UNDERTOOK; a delivery associate without commercial visibility is
+ * precisely the person who needs to read them, and hiding the scope of the work
+ * from whoever does the work would be the fee axis answering a question nobody
+ * asked it. `pricingNote` stays with them and not with the money on purpose: it
+ * is the sentence that PRINTS on the document where an amount would ("As
+ * mutually agreed"), so redacting it would leave a line showing neither a price
+ * nor a reason, which reads as data missing rather than as a decision.
+ */
+function toPinnedServiceBody(
+  service: NonNullable<ProposalRecord["lines"][number]["service"]>,
+  fees: boolean,
+): z.infer<typeof PinnedServiceSchema> {
+  return {
+    key: service.key,
+    version: service.version,
+    ref: service.ref,
+    name: service.name,
+    module: service.module,
+    group: service.group,
+    billingBasis: service.billingBasis,
+    recurrence: service.recurrence,
+    slaDays: service.slaDays,
+    // The list price is the firm's own commercial data, so it goes with the rest
+    // of the money.
+    listPrice: fees && service.listPrice !== null ? { ...service.listPrice } : null,
+    pricingNote: service.pricingNote,
+    scope: service.scope,
+    clientObligations: service.clientObligations,
+    volumeLimits: service.volumeLimits,
+    exclusions: service.exclusions,
+  };
+}
+
 function toTotalsBody(
   totals: ProposalRecord["totals"],
   fees: boolean,
@@ -518,17 +597,7 @@ function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof Pro
       entityPartyId: l.line.entityPartyId,
       entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
-      service:
-        l.service === null
-          ? null
-          : {
-              key: l.service.key,
-              version: l.service.version,
-              name: l.service.name,
-              // The list price is the firm's own commercial data, so it goes
-              // with the rest of the money.
-              listPrice: fees && l.service.listPrice !== null ? { ...l.service.listPrice } : null,
-            },
+      service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
       description: l.line.description,
       position: l.line.position,
       // Quantity is not money. "Three registrations" is what the work IS, and a

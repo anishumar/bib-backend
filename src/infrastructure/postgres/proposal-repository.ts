@@ -12,9 +12,11 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
+import { readServiceBody } from "../../domain/config/model";
 import type {
   NewProposal,
   NewProposalLine,
+  PinnedService,
   ProposalFilters,
   ProposalLineRecord,
   ProposalRecord,
@@ -195,10 +197,12 @@ export class PostgresProposalRepository implements ProposalRepository {
       `;
       if (!head) return null;
 
-      // The lines, each with the catalogue version it was PINNED to — its name
-      // and list price AS THEY WERE, which is the commercial question the pin
-      // exists to answer and the reason this join reads config.version by id
-      // rather than looking the service up live.
+      // The lines, each with the catalogue version it was PINNED to — its code,
+      // its Dept, its SLA, its scope blocks and its list price AS THEY WERE,
+      // which is the question the pin exists to answer and the reason this join
+      // reads config.version by id rather than looking the service up live.
+      // ONE join for the whole document: a screen wanting to print `A1` used to
+      // call the registry once per line.
       const lines = await db<
         (LineRow & {
           net: string;
@@ -246,12 +250,7 @@ export class PostgresProposalRepository implements ProposalRepository {
               r.entity_party_id === null || r.entity_display_name === null
                 ? null
                 : { id: r.entity_party_id, displayName: r.entity_display_name },
-            service: {
-              key: r.service_key,
-              version: r.service_version,
-              name: typeof r.service_body["name"] === "string" ? r.service_body["name"] : r.service_key,
-              listPrice: readListPrice(r.service_body),
-            },
+            service: toPinnedService(r.service_key, r.service_version, r.service_body),
             net: r.net,
           }),
         ),
@@ -539,16 +538,42 @@ export class PostgresProposalRepository implements ProposalRepository {
   }
 }
 
-/** The pinned service's list price, read out of the frozen body. Absent or
- *  malformed reads as "no list price", which is a real state — a service the
- *  firm quotes case by case. */
-function readListPrice(
+/**
+ * The pinned catalogue row, out of the frozen jsonb the join already selected.
+ *
+ * `readServiceBody` (domain/config) rather than reaching into the body by name
+ * here, and that is the point of it existing: it is the ONE reader for
+ * `kind='service'`, it NORMALISES (a currency code is compared, so "inr" beside
+ * "INR" would split a total), and every field FALLS BACK rather than throwing —
+ * which a pinned version needs, because the body being read may predate the
+ * field being asked for and a pin must always resolve. Reading the jsonb by name
+ * a second time here is how the two answers drift.
+ *
+ * The name falls back to the registry KEY when a stored body somehow has none:
+ * `readServiceBody` returns "" (it cannot know the key), and a line printing
+ * nothing at all is worse than one printing `gst-filing`.
+ */
+function toPinnedService(
+  key: string,
+  version: number,
   body: Record<string, unknown>,
-): { amount: string; currency: string } | null {
-  const raw = body["listPrice"];
-  if (typeof raw !== "object" || raw === null) return null;
-  const price = raw as Record<string, unknown>;
-  const amount = price["amount"];
-  const currency = price["currency"];
-  return typeof amount === "string" && typeof currency === "string" ? { amount, currency } : null;
+): PinnedService {
+  const stored = readServiceBody(body);
+  return {
+    key,
+    version,
+    ref: stored.ref,
+    name: stored.name === "" ? key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
+  };
 }

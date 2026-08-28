@@ -13,7 +13,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../domain/engagement/model";
-import { readClauseBody } from "../domain/config/model";
+import { readClauseBody, readServiceBody } from "../domain/config/model";
 import type {
   ClauseLibrary,
   ContentHasher,
@@ -28,6 +28,7 @@ import type {
   NewLetter,
   NewLetterClause,
   NewLetterLine,
+  PinnedService,
   SignatureRecord,
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
@@ -45,6 +46,18 @@ export class FakeEngagementRepo implements EngagementRepository {
   /** Pinned clause bodies, so `describeLetter` returns the wording that was
    *  actually agreed rather than an empty string. Keyed by version id. */
   readonly clauseBodies = new Map<string, Record<string, unknown>>();
+  /**
+   * The library the SERVICE pins resolve against, so `describeLetter` returns
+   * the pinned catalogue row the way the Postgres adapter's join does instead of
+   * a null that says "this fake does not do that part".
+   *
+   * The SAME instance the use case drafts from (`makeEngagementFakes` wires
+   * one), so a service a test publishes is the one a line's pin cites — a fake
+   * that could disagree with the adapter about which version resolved would be
+   * worse than no fake at all. Left null when a test builds the repo by hand:
+   * `service: null` is a real answer the port already allows.
+   */
+  catalogue: FakeClauseLibrary | null = null;
   partyNames = new Map<string, string>();
   /** The accounts behind a firm signatory, so the read model can join a name
    *  the way the Postgres adapter does. */
@@ -307,7 +320,7 @@ export class FakeEngagementRepo implements EngagementRepository {
           id: l.entityPartyId,
           displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
         },
-        service: null,
+        service: pinnedServiceOf(this.catalogue, l.serviceVersionId),
         net: net(l),
       })),
       clauses: clauses.map((c) => {
@@ -398,6 +411,15 @@ export class FakeClauseLibrary implements ClauseLibrary {
     this.versions.set(versionId, row);
   }
 
+  /** The same lookup `readPinnedVersion` does, without the promise — so
+   *  `FakeEngagementRepo.describeLetter` can resolve each line's pin the way a
+   *  JOIN does rather than awaiting once per line. */
+  pinned(
+    versionId: string,
+  ): { key: string; version: number; body: Record<string, unknown> } | null {
+    return this.versions.get(versionId) ?? null;
+  }
+
   readPinnedVersion(
     _tenantId: string,
     versionId: string,
@@ -475,9 +497,14 @@ export function makeEngagementFakes(): Deps & {
   // testfakes/proposal.ts. The two documents share one seam on purpose, so they
   // cannot disagree about which entity serves a client.
   const identity = makeDocumentIdentity();
+  // ONE library, wired into both the use case and the read model, so a service a
+  // test publishes is the same one a line's pin resolves to.
+  const library = new FakeClauseLibrary();
+  const letters = new FakeEngagementRepo();
+  letters.catalogue = library;
   return {
-    letters: new FakeEngagementRepo(),
-    library: new FakeClauseLibrary(),
+    letters,
+    library,
     documents: identity.documents,
     firmEntities: identity.firmEntities,
     firm: new FakeFirmSignatory(),
@@ -533,6 +560,39 @@ function totals(
     n += netScaled(line);
   }
   return { gross: unscaled(gross), discount: unscaled(gross - n), net: unscaled(n), currency };
+}
+
+/**
+ * A line's pinned catalogue row, read the way the Postgres adapter reads it:
+ * through `readServiceBody`, the one reader for `kind='service'`. Sharing that
+ * function is the point — a fake that mapped the frozen jsonb itself would be a
+ * second interpretation of it, and the two would disagree exactly where a body
+ * predates a field.
+ */
+function pinnedServiceOf(
+  catalogue: FakeClauseLibrary | null,
+  versionId: string,
+): PinnedService | null {
+  const row = catalogue?.pinned(versionId);
+  if (row === null || row === undefined) return null;
+  const stored = readServiceBody(row.body);
+  return {
+    key: row.key,
+    version: row.version,
+    ref: stored.ref,
+    name: stored.name === "" ? row.key : stored.name,
+    module: stored.module,
+    group: stored.group,
+    billingBasis: stored.billingBasis,
+    recurrence: stored.recurrence,
+    slaDays: stored.slaDays,
+    listPrice: stored.listPrice,
+    pricingNote: stored.pricingNote,
+    scope: stored.scope,
+    clientObligations: stored.clientObligations,
+    volumeLimits: stored.volumeLimits,
+    exclusions: stored.exclusions,
+  };
 }
 
 function strip(l: LetterLine & { removed: boolean }): LetterLine {

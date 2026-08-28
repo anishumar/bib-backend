@@ -1,7 +1,8 @@
 // The ports the engagement use case needs from the world. Interfaces are owned
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
-import type { Amount, CurrencyCode } from "../../domain/money/model";
+import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
 import type { DocumentType } from "../../domain/document/model";
 import type {
   Engagement,
@@ -230,6 +231,81 @@ export interface LetterView extends Omit<LetterRecord, "engagements"> {
   readonly engagements: readonly EngagementRecord[];
 }
 
+/**
+ * THE CATALOGUE ROW A LINE CITES, as it was PINNED — read off the frozen
+ * `config.version` the line stores, never off the catalogue as it stands today.
+ *
+ * DECLARED HERE AND AGAIN IN `usecase/proposal/ports.ts`, deliberately, the same
+ * way `DocumentIdentity` is: a port is owned by the use case that needs it, and
+ * the two documents are free to diverge — a letter will grow resolved wording
+ * that a proposal has no use for. What they must not do is share a type through
+ * a package neither owns.
+ *
+ * It carries what a DOCUMENT prints and what a WORK ITEM copies, because those
+ * are the two consumers of a pin and both were making a registry call per line
+ * to get here — the per-row lookup CLAUDE.md names as the sign that a join
+ * belongs in the query. Concretely: `ref` is G2.1's acceptance ("a document
+ * cites the firm's own service code"), `slaDays` is what T3.1 snapshots onto a
+ * work item at creation and is why an engagement letter pins at all, `recurrence`
+ * is what a line's billing frequency defaults from, `module` and `group` are the
+ * revenue and delivery axes a document groups by, and the four prose blocks are
+ * what an engagement letter is ASSEMBLED from (G2.2).
+ *
+ * THE FOUR PROSE BLOCKS ARE THE CATALOGUE'S WORDS AND ONLY EVER THOSE. G1.6 adds
+ * a per-document OVERRIDE of each of them, and the override does NOT land here:
+ * `service` means "the catalogue row this line was agreed from", and a field
+ * that silently held the tailored wording instead would make that sentence
+ * false — a screen could no longer tell a standard scope from an edited one, and
+ * on a SIGNED letter the two are the difference between what the firm sells and
+ * what this client actually agreed to. The resolved wording is its own thing
+ * beside this one, and it says which of the two won.
+ *
+ * Every field but `key`, `version` and `name` is NULLABLE, and that is the
+ * catalogue's own shape rather than laziness: a published version is frozen, so
+ * a body published before a field existed can never be edited to carry it, and
+ * null here means "the firm never stated this" — never a default a consumer may
+ * invent. `slaDays: null` in particular is not zero; see `ServiceBody`.
+ *
+ * DELIBERATELY ABSENT: the catalogue's `description` (the LINE carries the words
+ * the client actually agreed to), `category`, and `jurisdictions` (both are for
+ * FINDING a service in the catalogue, not for printing one on a document).
+ */
+export interface PinnedService {
+  /** The registry key and the version number — the pin, as a person cites it.
+   *  Not the firm's code: see `ref`. */
+  readonly key: string;
+  readonly version: number;
+  /** THE FIRM'S OWN SERVICE CODE — "A1", "H1", "R7". Null for a service the
+   *  firm's master never coded. */
+  readonly ref: string | null;
+  readonly name: string;
+  /** The Dept — the REVENUE reporting axis — and the delivery team. Independent
+   *  dimensions, never a hierarchy (see `ServiceBody.group`). */
+  readonly module: string | null;
+  readonly group: string | null;
+  /** What `unitAmount` and `listPrice` are PER. Without it an amount on a
+   *  document is a number with no unit. */
+  readonly billingBasis: BillingBasis | null;
+  /** How often the work comes round. NOT how often it is billed — G1.6's
+   *  `billingFrequency` is a fact about this deal and defaults FROM this. */
+  readonly recurrence: ServiceRecurrence | null;
+  /** The turnaround the firm committed to, in whole days from signing of THIS
+   *  letter, as the pinned version stated it. T3.1 copies it onto a work item at
+   *  creation. Null is "no SLA stated" and is not zero. */
+  readonly slaDays: number | null;
+  /** What the firm ASKED for this service when the letter was drafted — the
+   *  other half of "list 25,000, agreed 22,500", which is the question migration
+   *  0017 says the letter's pin exists to answer. */
+  readonly listPrice: Money | null;
+  readonly pricingNote: string | null;
+  /** THE FOUR SCOPE BLOCKS, as the catalogue stated them — see the note above on
+   *  why the override is not folded into these. */
+  readonly scope: string | null;
+  readonly clientObligations: string | null;
+  readonly volumeLimits: string | null;
+  readonly exclusions: string | null;
+}
+
 export interface LetterLineRecord {
   readonly line: LetterLine;
   /**
@@ -241,11 +317,9 @@ export interface LetterLineRecord {
    * be told apart, so a column of uuids is the one thing this must not be.
    */
   readonly entity: { readonly id: string; readonly displayName: string } | null;
-  readonly service: {
-    readonly key: string;
-    readonly version: number;
-    readonly name: string;
-  } | null;
+  /** The service as it was PINNED. Null only if the pinned version has somehow
+   *  gone, which the composite foreign key makes impossible. */
+  readonly service: PinnedService | null;
   readonly net: Amount;
 }
 

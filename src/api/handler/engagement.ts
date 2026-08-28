@@ -69,6 +69,51 @@ const TotalsSchema = z
   })
   .openapi("EngagementLetterTotals");
 
+const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
+
+/**
+ * THE CATALOGUE ROW THIS LINE CITES, as it was PINNED — its own schema rather
+ * than the proposal handler's, because the two surfaces are separate documents
+ * and a field added for one must not appear on the other by accident. The
+ * component name differs for the same reason the shape does not.
+ *
+ * G2.2 says an engagement letter is "ASSEMBLED from the catalogue's own words",
+ * and until this schema carried the four scope blocks there were ZERO consumers
+ * of them outside the config model. `slaDays` is the other half: T3.1 snapshots
+ * the SLA in force when a work item is created, read off the version this letter
+ * PINNED, and nothing served it.
+ *
+ * Everything but `key`, `version` and `name` is nullable because the CATALOGUE
+ * is: a published version is frozen, so a body published before a field existed
+ * can never carry it, and null means "the firm never stated this" — never a
+ * default. The four blocks are the CATALOGUE's words; G1.6's per-document
+ * overrides arrive beside this object rather than inside it, so what the firm
+ * sells and what this client agreed to stay two answers.
+ */
+const PinnedServiceSchema = z
+  .object({
+    key: z.string(),
+    version: z.number().int(),
+    /** The firm's OWN code — "A1". Not the registry key. */
+    ref: z.string().nullable(),
+    name: z.string(),
+    module: z.string().nullable(),
+    group: z.string().nullable(),
+    billingBasis: z.string().nullable(),
+    /** How often the WORK comes round, which is not how often it is billed. */
+    recurrence: z.string().nullable(),
+    /** The turnaround promised by THIS version, in whole days from signing. */
+    slaDays: z.number().int().nullable(),
+    /** Redacted by the fee axis, with the rest of the money. */
+    listPrice: MoneySchema.nullable(),
+    pricingNote: z.string().nullable(),
+    scope: z.string().nullable(),
+    clientObligations: z.string().nullable(),
+    volumeLimits: z.string().nullable(),
+    exclusions: z.string().nullable(),
+  })
+  .openapi("LetterPinnedService");
+
 const LetterSchema = z
   .object({
     id: z.string().uuid(),
@@ -129,9 +174,7 @@ const LetterLineSchema = z
     entityPartyId: z.string().uuid(),
     entity: z.object({ id: z.string().uuid(), displayName: z.string() }).nullable(),
     serviceVersionId: z.string().uuid(),
-    service: z
-      .object({ key: z.string(), version: z.number().int(), name: z.string() })
-      .nullable(),
+    service: PinnedServiceSchema.nullable(),
     description: z.string(),
     position: z.number().int(),
     quantity: AmountSchema,
@@ -561,6 +604,42 @@ function toEngagementBody(r: EngagementRecord): z.infer<typeof EngagementSchema>
   };
 }
 
+/**
+ * The pinned catalogue row, field by field — never the port object forwarded.
+ * It was a spread until this task, which is exactly how `role` and
+ * `commercialVisibility` sat undocumented on `/auth/me` for six tasks.
+ *
+ * Only the PRICE half is redacted by the fee axis, for the reason the clauses
+ * are not redacted at all: what the firm UNDERTOOK is the work, not the fee, and
+ * a delivery associate without commercial visibility is precisely the person who
+ * has to read the scope, the client's obligations and the exclusions.
+ * `pricingNote` stays with them rather than with the money: it is the sentence
+ * that prints on the document where an amount would ("As mutually agreed"), so
+ * redacting it would leave a line showing neither a price nor a reason.
+ */
+function toPinnedServiceBody(
+  service: NonNullable<LetterView["lines"][number]["service"]>,
+  fees: boolean,
+): z.infer<typeof PinnedServiceSchema> {
+  return {
+    key: service.key,
+    version: service.version,
+    ref: service.ref,
+    name: service.name,
+    module: service.module,
+    group: service.group,
+    billingBasis: service.billingBasis,
+    recurrence: service.recurrence,
+    slaDays: service.slaDays,
+    listPrice: fees && service.listPrice !== null ? { ...service.listPrice } : null,
+    pricingNote: service.pricingNote,
+    scope: service.scope,
+    clientObligations: service.clientObligations,
+    volumeLimits: service.volumeLimits,
+    exclusions: service.exclusions,
+  };
+}
+
 function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterRecordSchema> {
   return {
     letter: toLetterBody(record.letter, fees),
@@ -578,7 +657,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       entityPartyId: l.line.entityPartyId,
       entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
-      service: l.service === null ? null : { ...l.service },
+      service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
       description: l.line.description,
       position: l.line.position,
       quantity: l.line.quantity,

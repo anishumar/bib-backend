@@ -252,6 +252,73 @@ describe("quoting a line", () => {
     expect(line.position).toBe(1);
   });
 
+  it("hands the read model the catalogue row the line CITES", async () => {
+    // G2.1's acceptance — "a proposal cites the firm's own service code" — as a
+    // property of the READ MODEL, which is where it was missing. Before this
+    // the record carried `{key, version, name, listPrice}` and a screen wanting
+    // to print `A1`, or a work item wanting the SLA, had to call the registry
+    // once per line.
+    const s = setup();
+    s.catalogue.publishService("00000000-0000-0000-0000-0000000000d9", "payroll", {
+      name: "Payroll processing",
+      ref: "P3",
+      module: "FRC",
+      group: "PAYROLL",
+      billingBasis: "fixed",
+      recurrence: "monthly",
+      slaDays: 21,
+      listPrice: { amount: "12000.00", currency: "INR" },
+      scope: "Monthly payroll run for up to 50 employees.",
+      clientObligations: "Attendance inputs by the 25th.",
+      volumeLimits: "Up to 50 employees.",
+      exclusions: "Payroll tax litigation.",
+    });
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: "00000000-0000-0000-0000-0000000000d9",
+      description: "Payroll, 12 months",
+      quantity: "12",
+      unitAmount: "11000",
+      discountPercent: "0",
+    });
+
+    const record = await s.service.describe(TENANT, id);
+    const cited = record.lines[0]?.service;
+    expect(cited?.ref).toBe("P3");
+    expect(cited?.slaDays).toBe(21);
+    expect(cited?.recurrence).toBe("monthly");
+    expect(cited?.module).toBe("FRC");
+    expect(cited?.group).toBe("PAYROLL");
+    expect(cited?.scope).toBe("Monthly payroll run for up to 50 employees.");
+    expect(cited?.listPrice).toEqual({ amount: "12000.00", currency: "INR" });
+  });
+
+  it("says the firm never stated a field, rather than inventing one", async () => {
+    // Every field past the first six is OPTIONAL because a published version is
+    // FROZEN: a body from before the field existed can never be edited to carry
+    // it. Null therefore has to survive the read as null. `slaDays` is the one
+    // that matters — zero would be a same-day commitment nobody made.
+    const s = setup();
+    const id = await draftWith(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    const cited = (await s.service.describe(TENANT, id)).lines[0]?.service;
+    expect(cited?.name).toBe("GST monthly filing");
+    expect(cited?.slaDays).toBeNull();
+    expect(cited?.ref).toBeNull();
+    expect(cited?.recurrence).toBeNull();
+    expect(cited?.scope).toBeNull();
+  });
+
   it("refuses a version this firm does not have", async () => {
     const s = setup();
     const id = await draftWith(s);

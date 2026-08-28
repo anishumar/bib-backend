@@ -15,6 +15,12 @@
 //   version back — and by trying to edit the frozen body directly, which is the
 //   attack the trigger exists for.
 //
+//   AND IT IS SERVED ON THE LINE. Every assertion in this file used to resolve
+//   the pin BY HAND — `config.readPinned` then `readServiceBody` — which is the
+//   registry call per line that G2.1 left every consumer to make. The last test
+//   in the SLA section reads the same value off `proposals.describe`, which is
+//   the join that closes that gap.
+//
 // Run with:  npm run test:integration   (needs a migrated local database)
 //
 // NOTE ON CLEANUP: published config versions cannot be deleted, by any role —
@@ -318,6 +324,121 @@ describe("slaDays off a pinned version — what T3.1 stands on", () => {
       rows.filter((r) => r.entry.key === "gst-filing"),
     );
     expect(readServiceBody(live?.published?.body ?? {}).slaDays).toBe(3);
+  });
+
+  it("serves the pinned SLA on the LINE, without resolving the pin by hand", async () => {
+    // THE GAP G2.1 LEFT, and what T3.1 is blocked on. The two assertions above
+    // are the ones this file could make before the read model carried the
+    // catalogue: they go `config.readPinned` → `readServiceBody`, which is the
+    // registry call PER LINE that CLAUDE.md names as the sign a join belongs in
+    // the query — and a work item being created has no more reason to make it
+    // than a screen does.
+    //
+    // So: publish a service with an SLA, quote it, revise the SLA, and read the
+    // LINE back. The value it reports must be the one that was in force when it
+    // was quoted, because that is the commitment somebody made.
+    const defined = await config.define(
+      {
+        tenantId: tenant,
+        kind: "service",
+        key: "payroll",
+        body: {
+          name: "Payroll processing",
+          ref: "P3",
+          module: "FRC",
+          group: "PAYROLL",
+          billingBasis: "fixed",
+          recurrence: "monthly",
+          slaDays: 21,
+          listPrice: { amount: "12000.00", currency: "INR" },
+          scope: "Monthly payroll run and payslip issue for up to 50 employees.",
+          clientObligations: "Attendance and variable-pay inputs by the 25th.",
+          volumeLimits: "Up to 50 employees; one pay cycle a month.",
+          exclusions: "Payroll tax litigation and PF assessments.",
+        },
+      },
+      SYSTEM_ACTOR,
+    );
+    await config.publish(
+      { tenantId: tenant, kind: "service", key: "payroll", version: 1 },
+      SYSTEM_ACTOR,
+    );
+
+    const proposal = await proposals.draft(
+      {
+        tenantId: tenant,
+        partyId: client,
+        title: "Meridian — payroll",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+      },
+      SYSTEM_ACTOR,
+    );
+    await proposals.addLine({
+      tenantId: tenant,
+      proposalId: proposal.id,
+      serviceVersionId: defined.draft.id,
+      description: "Payroll processing, 12 months",
+      quantity: "12",
+      unitAmount: "12000.00",
+      discountPercent: "0",
+    });
+
+    // The firm relaxes the turnaround and rewrites the scope — AFTER the quote
+    // went out.
+    await config.addVersion({
+      tenantId: tenant,
+      kind: "service",
+      key: "payroll",
+      body: {
+        name: "Payroll processing",
+        ref: "P3",
+        module: "FRC",
+        group: "PAYROLL",
+        billingBasis: "fixed",
+        recurrence: "quarterly",
+        slaDays: 45,
+        listPrice: { amount: "15000.00", currency: "INR" },
+        scope: "REVISED 2027: monthly payroll run for up to 80 employees.",
+      },
+    });
+    await config.publish(
+      { tenantId: tenant, kind: "service", key: "payroll", version: 2 },
+      SYSTEM_ACTOR,
+    );
+
+    const record = await proposals.describe(tenant, proposal.id);
+    const service = record.lines[0]?.service;
+    // THE ONE T3.1 STANDS ON: 21, not 45. A work item created off this line
+    // copies the commitment that was actually made.
+    expect(service?.slaDays).toBe(21);
+    expect(service?.version).toBe(1);
+    // G2.1's acceptance, in one field: the firm's OWN code, on the document,
+    // with no second call to get it.
+    expect(service?.ref).toBe("P3");
+    expect(service?.module).toBe("FRC");
+    expect(service?.group).toBe("PAYROLL");
+    expect(service?.recurrence).toBe("monthly");
+    expect(service?.listPrice).toEqual({ amount: "12000.00", currency: "INR" });
+    // The catalogue's own words, which is what G2.2 says a letter is assembled
+    // from and what G1.6's overrides will have something to override.
+    expect(service?.scope).toBe(
+      "Monthly payroll run and payslip issue for up to 50 employees.",
+    );
+    expect(service?.scope).not.toContain("REVISED");
+    expect(service?.clientObligations).toBe(
+      "Attendance and variable-pay inputs by the 25th.",
+    );
+    expect(service?.exclusions).toBe("Payroll tax litigation and PF assessments.");
+
+    // …and the catalogue really has moved on, so none of the above is a
+    // tautology about a service nobody revised.
+    const [live] = await config
+      .list(tenant, "service")
+      .then((rows) => rows.filter((r) => r.entry.key === "payroll"));
+    expect(readServiceBody(live?.published?.body ?? {}).slaDays).toBe(45);
+    expect(readServiceBody(live?.published?.body ?? {}).recurrence).toBe("quarterly");
   });
 
   it("cannot be edited out from under the work item that copied it", async () => {
