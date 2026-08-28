@@ -1,9 +1,9 @@
 // The limiter's own behaviour. Every assertion here is about a property the
 // login path depends on, so a change that quietly weakens one shows up as a
 // failing name rather than as a slow leak.
+import { FakeClock } from "../../src/testfakes/clock";
 import { describe, expect, it } from "vitest";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
-import { FakeClock } from "../../src/testfakes/identity";
 
 function limiter(clock = new FakeClock()): { rl: InMemoryRateLimiter; clock: FakeClock } {
   return { rl: new InMemoryRateLimiter(clock), clock };

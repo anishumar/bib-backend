@@ -3,6 +3,7 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { FakeClock } from "../../src/testfakes/clock";
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
@@ -17,6 +18,14 @@ import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
+import { SchedulerService } from "../../src/usecase/scheduler/service";
+import {
+  FakeActivationFeed,
+  FakeJobRepo,
+  FakeTenantDirectory,
+} from "../../src/testfakes/scheduler";
+import { FakeIds } from "../../src/testfakes/ids";
+import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { IdentityService } from "../../src/usecase/identity/service";
@@ -29,7 +38,6 @@ import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
-  FakeClock,
   FakeCredentialRepo,
   FakeMagicLinkRepo,
   FakeMailer,
@@ -95,6 +103,16 @@ function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()) },
     staffGrades: { service: new StaffGradeService(makeFakes()) },
+    scheduler: {
+      service: new SchedulerService({
+        jobs: new FakeJobRepo(),
+        activations: new FakeActivationFeed(),
+        tenants: new FakeTenantDirectory(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },

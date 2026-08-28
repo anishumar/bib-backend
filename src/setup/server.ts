@@ -28,6 +28,10 @@ import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypt
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
+import {
+  PostgresJobRepository,
+  PostgresTenantDirectory,
+} from "../infrastructure/postgres/job-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
@@ -38,6 +42,7 @@ import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
+import { SchedulerService } from "../usecase/scheduler/service";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
@@ -91,6 +96,21 @@ export function wire(cfg: Config, log: Logger): Wired {
   const staffGrades = new StaffGradeService({
     grades: staffGradeRepository,
     ids: systemIds,
+    events: ledger,
+  });
+
+  // The API holds the scheduler READ-ONLY: the same service the worker runs, so
+  // there is one definition of what "runnable" means, but this process never
+  // sweeps and never advances a job. Writing is the worker's and the
+  // orchestrator's; a route that could finish a job would be a way to mark work
+  // done without doing it.
+  const jobs = new PostgresJobRepository(pools.app);
+  const scheduler = new SchedulerService({
+    jobs,
+    activations: jobs,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
     events: ledger,
   });
 
@@ -268,6 +288,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         },
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
+        scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },
         config: { service: config },

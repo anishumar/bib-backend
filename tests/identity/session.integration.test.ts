@@ -9,6 +9,7 @@
 //      an audience.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
+import { FakeClock } from "../../src/testfakes/clock";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
@@ -22,7 +23,7 @@ import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-r
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { ScryptPasswordHasher } from "../../src/infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
-import { FakeClock, FakeMailer } from "../../src/testfakes/identity";
+import { FakeMailer } from "../../src/testfakes/identity";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { systemIds } from "../../src/platform/ids";

@@ -14,6 +14,7 @@
 //   RLS, the one-line-per-position index, and the composite key that holds a
 //   line to its proposal's currency. All database properties, proven against
 //   real Postgres.
+import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
 import type {
   NewProposal,
@@ -28,7 +29,7 @@ import type {
 } from "../usecase/proposal/ports";
 import type { Deps } from "../usecase/proposal/service";
 import { FakeIds } from "./ids";
-import { FakeClock, FakeTokenFactory } from "./identity";
+import { FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
 
 export class FakeProposalRepo implements ProposalRepository {

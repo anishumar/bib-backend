@@ -1,12 +1,15 @@
-// In-memory fakes for the identity ports, plus a controllable clock — the whole
-// point of taking time as a dependency is that a test can jump a fortnight
-// forward without sleeping.
+// In-memory fakes for the identity ports.
+//
+// The controllable clock used to live here, because sessions and magic links
+// were the first things in the product defined entirely by time. It now lives in
+// testfakes/clock.ts: by the time the scheduler needed one there were two
+// classes with the same name and subtly different APIs, and a test importing the
+// wrong one would have compiled.
 //
 // FakeUserRepo and FakeMembershipRepo (testfakes/tenancy) already satisfy
 // identity's UserDirectory and MembershipDirectory, which is interface
 // segregation working as intended: identity asked for a narrow read, and the
 // existing fakes provide it unchanged.
-import type { Clock } from "../platform/clock";
 import type { MagicLink, Session } from "../domain/identity/model";
 import type {
   CredentialRepository,
@@ -18,20 +21,6 @@ import type {
   SessionRepository,
   TokenFactory,
 } from "../usecase/identity/ports";
-
-/** A clock a test drives. Starts at a fixed instant so nothing is flaky. */
-export class FakeClock implements Clock {
-  constructor(private current = new Date("2026-01-01T09:00:00Z")) {}
-  now(): Date {
-    return this.current;
-  }
-  advanceMinutes(minutes: number): void {
-    this.current = new Date(this.current.getTime() + minutes * 60 * 1000);
-  }
-  advanceDays(days: number): void {
-    this.advanceMinutes(days * 24 * 60);
-  }
-}
 
 /**
  * A hasher that reverses nothing and hides nothing: `hashed:<password>`.

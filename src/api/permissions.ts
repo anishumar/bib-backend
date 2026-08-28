@@ -159,6 +159,16 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
 
+  // THE DELIVERY ENGINE (T2.6). `party:read`, the same permission the pipeline
+  // and the proposals use — and for the same reason. A job names the engagement
+  // that caused it, and anybody who may already read the firm's parties, leads
+  // and proposals can see that engagement anyway; a `job:read` beside them would
+  // look like a boundary while enforcing none. It is also no longer free to add
+  // one: since T2.5 a new permission costs a migration to reach every existing
+  // firm. When a firm asks to keep delivery from commercial staff, that is the
+  // moment to pay for it.
+  [routeKey("GET", "/api/v1/jobs"), "party:read" as const],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

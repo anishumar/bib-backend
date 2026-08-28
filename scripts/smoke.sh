@@ -497,6 +497,51 @@ chk "bring it back"                      200 "$(code -b $J/partner.txt -XPUT $AP
 # administrator can be taken off the ladder; they cannot be demoted.
 chk "the last admin CAN be un-graded"    200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/grade -H "$H" -d '{"gradeId":null}')"
 
+echo; echo "── 10c. The delivery engine — a signed contract becomes a job ───────"
+# T2.6. The engagement letter above was signed AND its advance recorded, so
+# `contract.activated` is in the ledger. Nothing has acted on it yet: the
+# scheduler is a separate process, and this is the sweep it runs.
+BEFORE=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
+import sys, json
+print(len(json.load(sys.stdin)["jobs"]))')
+chk "no job before the sweep runs"        0 "$BEFORE"
+
+# The same code path the cron drives — a different entry point, never a
+# different rule. It needs no queue, so it needs no DDL rights either.
+(cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
+
+AFTER=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
+import sys, json
+print(len(json.load(sys.stdin)["jobs"]))')
+# TWO, and that is the point rather than an accident. The letter above has a
+# line for each of two sister companies, signing fanned it out into one
+# engagement PER COMPANY — the firm's own "Per Company" rule (G0.1) — and the
+# engine turns each into its own job. One job for "the client" would be the bug.
+chk "one job per engagement, not per letter" 2 "$AFTER"
+SHAPE=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
+import sys, json
+j = json.load(sys.stdin)["jobs"][0]
+print("%s/%s/%s" % (j["sourceKind"], j["status"], j["templateVersionId"] is None))')
+chk "…owed, pending, no graph yet"      "engagement/pending/True" "$SHAPE"
+
+# THE property the whole engine rests on. Every trigger is at-least-once, and a
+# second job is a second set of tasks and eventually a second invoice.
+(cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
+AGAIN=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
+import sys, json
+print(len(json.load(sys.stdin)["jobs"]))')
+chk "a second sweep spawns nothing"       2 "$AGAIN"
+
+# The trail says a clock did it, not whoever signed the letter.
+SPAWNER=$(curl -s -b $J/partner.txt "$API/api/v1/events?limit=60" | python3 -c '
+import sys, json
+for r in json.load(sys.stdin)["events"]:
+    if r["event"]["verb"] == "job.spawned":
+        print("%s/%s" % (r["event"]["actorType"], r["actor"] is None)); break
+else:
+    print("no job.spawned event")')
+chk "spawned by the system, not a person" "system/True" "$SPAWNER"
+
 echo; echo "── 11. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done

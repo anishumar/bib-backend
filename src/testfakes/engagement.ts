@@ -6,6 +6,7 @@
 // 0017, proven against real Postgres in
 // tests/engagement/letter.integration.test.ts. A fake that simulated them would
 // be asserting its own behaviour.
+import { FakeClock } from "./clock";
 import type {
   Engagement,
   EngagementLetter,
@@ -30,7 +31,6 @@ import type {
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
-import { FakeClock } from "./identity";
 import { RecordingEventSink } from "./ledger";
 
 export class FakeEngagementRepo implements EngagementRepository {

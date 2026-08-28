@@ -1,13 +1,13 @@
 // The sign-in flow, against in-memory ports. The interesting assertions here
 // are the negative ones: what the system refuses to reveal, and what stops
 // working the moment a session is revoked.
+import { FakeClock } from "../../src/testfakes/clock";
 import { beforeEach, describe, expect, it } from "vitest";
 import { IdentityService } from "../../src/usecase/identity/service";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import type { FakeMembershipRepo, FakeUserRepo } from "../../src/testfakes/tenancy";
 import {
-  FakeClock,
   FakeCredentialRepo,
   FakeMagicLinkRepo,
   FakeMailer,

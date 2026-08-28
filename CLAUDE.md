@@ -503,10 +503,50 @@ difference makes everything here stricter than its proposal counterpart.
   advance is recorded. **Its honest limit:** a person attests the money arrived, because
   payments (T3.5) do not exist. The gate is enforced; its confirmation is an attestation.
 
+## The delivery engine — a second process, and at-least-once everywhere (T2.6)
+
+`npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
+(`setup/worker.ts`). Compliance work runs for months and pauses on a human decision, which
+does not belong inside a request. `npm run worker:once` runs the same sweep with no queue in
+front of it — a different entry point, never a different rule.
+
+**The engine hears about work through the LEDGER, never through a call.** `contract.activated`
+is written because a contract activated, not because anything downstream wants to know; the
+scheduler reads activations that have no job yet (an anti-join). So the commercial lane does
+not know an engine exists, the ledger is a durable and replayable queue by construction, and
+T3.5's payments will read the same event without engagement changing again.
+
+**EVERY TRIGGER IS AT-LEAST-ONCE, and that is the whole design.** pg-boss redelivers on a
+crash, the sweep re-reads events it has seen, a restart leaves a message unacknowledged. None
+of it may produce a second job, because a second job is a second set of tasks for staff and
+eventually a second invoice. It is structural rather than careful: the job id is DERIVED from
+its cause, `UNIQUE (tenant_id, source_kind, source_ref)` makes the second insert conflict, and
+the event is recorded only when a row was actually created. A terminal job is final — work
+that must happen again is a NEW job with its own cause.
+
+**`delivery.job` is not pg-boss's row.** pg-boss's is a delivery ATTEMPT: retried, archived,
+eventually deleted, carrying no tenant and obeying no RLS. Ours is a business fact — "we owe
+this client this work, it is on step 3, here is what caused it" — tenant-scoped and outliving
+every retry. pg-boss carries the trigger; the table carries the work.
+
+**pg-boss migrates its own tables, and that is a real exception to the migration rule.** The
+line is drawn exactly: migration 0042 creates the `pgboss` schema and grants `bib_app` CREATE
+on **that schema and no other**, and `createSchema: false` stops pg-boss issuing its own
+`CREATE SCHEMA` — which fails with 42501 regardless, because PostgreSQL checks the database
+ACL before the existence check. Granting the app role CREATE on the database would have bought
+a statement that has nothing to do, at the price of letting it create objects anywhere.
+
+**The date arithmetic is pure and has no `Date` in it.** `domain/scheduler/model.ts` works in
+ISO strings: a filing period is a calendar fact in a jurisdiction, not an instant, and a UTC
+`Date` moves a period boundary by a day for anyone east or west of it. A quarter is aligned to
+the FINANCIAL year (Apr–Jun for India), which is the calculation that looks right three times
+out of four if nobody thinks about it. T3.2's calendar is its first real consumer.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
-`engagement letters` and the `staff grade` ladder are built. Next: T2.4's spawn bridge, then `billing`.
+`engagement letters`, the `staff grade` ladder and the `scheduler` are built. Next: T2.7's
+orchestrator, then `billing`.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves

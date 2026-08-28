@@ -61,6 +61,15 @@ const EnvSchema = z.object({
   // one bucket throttles everyone; with no proxy in front, ON lets any client
   // invent its own key and opt out of rate limiting entirely.
   BIB_TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  // ── the worker (T2.6) ──
+  // A cron expression rather than an interval, because "every day at 06:00 in
+  // the firm's morning" is a business cadence and an interval drifts. Default
+  // hourly: the spawn sweep only has to be finer than the lead times it feeds,
+  // and an hour costs one query per firm.
+  BIB_WORKER_SPAWN_CRON: z.string().min(1).default("0 * * * *"),
+  // How long a shutdown waits for a sweep already in flight. Long enough for the
+  // slowest one, finite so a wedged handler cannot hold a deploy open forever.
+  BIB_WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(45_000),
   BIB_RATELIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
   BIB_RATELIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
 
@@ -118,6 +127,14 @@ export interface Config {
   readonly auth: AuthConfig;
   readonly rateLimit: RateLimitConfig;
   readonly cors: CorsConfig;
+  readonly worker: WorkerConfig;
+}
+
+export interface WorkerConfig {
+  /** When the spawn sweep runs. A cron expression, not an interval. */
+  readonly spawnCron: string;
+  /** How long `stop()` waits for work in flight before the hard stop. */
+  readonly shutdownGraceMs: number;
 }
 
 /**
@@ -183,6 +200,10 @@ export function load(): Config {
       trustProxy: env.BIB_TRUST_PROXY === "true",
       authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
       generalPerMinute: env.BIB_RATELIMIT_GENERAL_PER_MINUTE,
+    },
+    worker: {
+      spawnCron: env.BIB_WORKER_SPAWN_CRON,
+      shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
     },
     db: {
       ownerUrl: env.BIB_DATABASE_URL,

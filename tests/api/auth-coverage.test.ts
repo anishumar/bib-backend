@@ -19,6 +19,7 @@
 // any future plain-Hono route would have been. The middleware guards still
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
+import { FakeClock } from "../../src/testfakes/clock";
 import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
@@ -36,6 +37,14 @@ import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
+import { SchedulerService } from "../../src/usecase/scheduler/service";
+import {
+  FakeActivationFeed,
+  FakeJobRepo,
+  FakeTenantDirectory,
+} from "../../src/testfakes/scheduler";
+import { FakeIds } from "../../src/testfakes/ids";
+import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { IdentityService } from "../../src/usecase/identity/service";
@@ -47,7 +56,6 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import {
-  FakeClock,
   FakeCredentialRepo,
   FakeMagicLinkRepo,
   FakeMailer,
@@ -88,6 +96,16 @@ function deps(): RouterDeps {
   const fakes = makeFakes();
   return {
     tenancy: { service: new TenancyService(fakes) },
+    scheduler: {
+      service: new SchedulerService({
+        jobs: new FakeJobRepo(),
+        activations: new FakeActivationFeed(),
+        tenants: new FakeTenantDirectory(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     staffGrades: {
       service: new StaffGradeService({
         grades: fakes.grades,

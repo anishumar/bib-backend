@@ -668,7 +668,11 @@ open and are recorded above; neither blocks Phase 2.
 > letter the firm actually sends — numbered, issued by a named entity, addressed to a person,
 > with its own scope wording, its exclusions, both signatures and the right governing law.
 
-- [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
+- [x] `(A/B)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
+  > **Closed by T2.6, with no work left for `(A)`.** The acceptance has two halves and they
+  > shipped in different tasks: T2.3 already emitted `contract.activated` on signature, and
+  > T2.6's scheduler is what consumes it. Verified end to end in `smoke` §10c. Ticked here
+  > rather than left open so nobody plans time against it.
 
 ### Lane B — the engine
 - [x] `(B)` **T2.5** **P2 Master configuration registry**: services, workflow templates (**versioned**), rule packs (`gst-in@2026.07`), SLAs — data, not code. *Acc: a new service is a config row; running jobs pin their template version.*
@@ -784,7 +788,58 @@ open and are recorded above; neither blocks Phase 2.
   > investigation, so the rule is written beside `J=$(mktemp -d)`: **JSON reaches python on
   > stdin or as argv, never as a filename.**
 
-- [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
+- [x] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
+  > **Done (2026-08-29) — and read the acceptance note: half of that line belongs to T3.2.**
+  >
+  > The engine's first moving part. A SECOND PROCESS (`npm run worker`), because compliance
+  > work runs for months and pauses on a human decision, and that does not belong inside a
+  > request. `npm run worker:once` runs the same sweep with no queue in front of it — a
+  > different entry point, never a different rule.
+  >
+  > **The trigger half is complete and proven end to end.** `contract.activated` has been
+  > emitted since T2.3; nothing consumed it, and `job.spawned` / `job.step_advanced` /
+  > `job.completed` were registered verbs with no writer — the exact "feature that looks
+  > finished" `CLAUDE.md` warns about. The scheduler reads the LEDGER for activations with no
+  > job (an anti-join), so the commercial lane still has no idea an engine exists. **That
+  > closes `(A)`'s T2.4** — see its entry.
+  >
+  > **The recurrence half is arithmetic, and its first consumer is T3.2.** `periodsFrom`,
+  > `dueDateFor`, `internalTargetFor` and `runnableAtFor` are pure functions over ISO date
+  > strings: twelve monthly periods a year out, quarters aligned to the FINANCIAL year
+  > (Apr–Jun for India, not "three months from whenever you asked"), a due day clamped to a
+  > short month, T–X never landing after the statutory date. 20 tests, no clock in any of
+  > them. What does not exist yet is the `obligation_template` rows to run it over — that is
+  > T3.2. **So the acceptance is met at the mechanism and not yet at the data**, the same
+  > shape of honest partial T1.6 recorded, and it is stated here rather than ticked quietly.
+  >
+  > **Node 22 + pg-boss 12 — this affects `(A)` and the deploy target.** pg-boss needs
+  > >=22.12 and the repo declared >=20; Node 20 left maintenance in April 2026, so CI was on
+  > an unsupported runtime anyway. `engines`, the CI workflow and the tsup target moved
+  > together.
+  >
+  > **Two decisions worth arguing with before changing them.** `delivery.job` is OURS and is
+  > not pg-boss's row: pg-boss's is a delivery ATTEMPT, retried and eventually deleted, with
+  > no tenant and no RLS; ours is a business fact that outlives every retry and is what T2.7
+  > advances. And `UNIQUE (tenant_id, source_kind, source_ref)` is the whole design — every
+  > trigger here is at-least-once, so the second attempt must CONFLICT rather than insert,
+  > because a second job is a second set of tasks and eventually a second invoice.
+  >
+  > **Migration 0042 exists because of a privilege, found by RUNNING the worker.** pg-boss
+  > issues `CREATE SCHEMA IF NOT EXISTS`, and PostgreSQL checks the database ACL BEFORE the
+  > existence check — so it fails with 42501 even when the schema is already there. Granting
+  > bib_app CREATE on the DATABASE would let the app role create objects anywhere, to buy a
+  > statement that has nothing to do. So 0041 owns the namespace, `createSchema: false` stops
+  > pg-boss trying, and bib_app has CREATE on that one schema. Every unit test was green
+  > while this was broken; it only appears at worker start, in a process nobody watches.
+  >
+  > One read route (`GET /api/v1/jobs`), because **a write with no read is not a stored
+  > fact** — nothing outside the database could otherwise confirm a signed contract produced
+  > work. Read-only: advancing a job belongs to the orchestrator, and a route that could mark
+  > work done without doing it is not a route.
+  >
+  > Gate: `check` 460 · `test:integration` 120 · `smoke` 130 — including the walk that signs a
+  > two-line letter, sweeps, and gets **one job per engagement rather than one per letter**,
+  > which is G0.1's "Per Company" rule showing up in the engine.
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
 - [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*

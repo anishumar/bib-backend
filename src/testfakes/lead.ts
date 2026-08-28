@@ -13,6 +13,7 @@
 // It does NOT enforce RLS, or the one-open-lead-per-party index: those are
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
+import { FakeClock } from "./clock";
 import type { Lead, LeadStage } from "../domain/lead/model";
 import type { PartyKind } from "../domain/party/model";
 import { isOpen } from "../domain/lead/model";
@@ -21,7 +22,6 @@ import type { Deps } from "../usecase/lead/service";
 import { PartyService } from "../usecase/party/service";
 import { FakePartyRepo, makePartyFakes } from "./party";
 import { FakeIds } from "./ids";
-import { FakeClock } from "./identity";
 import { RecordingEventSink } from "./ledger";
 
 /** A fixed capture time, so a test can assert on ordering. */
