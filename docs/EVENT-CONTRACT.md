@@ -182,13 +182,21 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 |---|---|---|
 | `tenant.created` | tenant | A firm was registered as a tenant. |
 | `membership.granted` | membership | A user was given a role in a tenant, for one audience. |
-| `membership.revoked` | membership | A membership was deactivated. |
+| `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
+| `membership.restored` | membership | A deactivated membership was reinstated. |
+| `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
 | `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
 | `party_relationship.ended` | party_relationship | A relationship was closed with a valid_to date. |
+
+> **`membership.revoked` was registered from the first draft of this contract and written by
+> nothing for six tasks.** The vocabulary was agreed before the capability existed, and a verb
+> that nothing emits is easy to mistake for a feature that works. It is written now, by
+> `TenancyService.setMemberActive`. If you add a verb here for something not yet built, say so
+> in its description — the registry is a promise about what the log contains.
 
 ### Platform — the configuration registry (P2 / T2.5, built and wired)
 

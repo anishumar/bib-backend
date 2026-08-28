@@ -85,6 +85,22 @@ export class VersionNotDraft extends ConfigError {
   }
 }
 
+export class NoOneWouldAdminister extends ConfigError {
+  constructor(adminRoles: readonly string[]) {
+    // The same unrecoverable outcome as WouldLockOutAdministration and a
+    // different cause, so it shares the code and says which one happened. Here
+    // the permission survives — on a role that is on nobody's membership, which
+    // helps nobody.
+    super(
+      "WOULD_LOCK_OUT_ADMINISTRATION",
+      `publishing this would leave the firm's administrator permission only on ` +
+        `${adminRoles.map((r) => JSON.stringify(r)).join(", ")}, which no active member holds. ` +
+        `Nobody would be able to change configuration, including changing it back. Give somebody ` +
+        `one of those roles first, or keep the permission on a role people actually have.`,
+    );
+  }
+}
+
 export class WouldLockOutAdministration extends ConfigError {
   constructor(role: string, adminPermission: string) {
     super(

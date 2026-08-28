@@ -129,6 +129,29 @@ the moment somebody decides to hand it out. Reading is `config:read` — an asso
 from the catalogue. And a publish that would leave no role carrying `tenant:admin` is
 refused: it is unrecoverable from inside the product.
 
+## Firm administration — the roster is the other half of access control
+
+`/api/v1/tenancy/members` is a firm running itself: who works here, what their role is, and
+whether they still have access. It is the app-facing counterpart to `/internal/v1/memberships`,
+which stays what it always was — the PLATFORM creating firms, behind a key no browser holds.
+
+**Revocation is real now.** `is_active` and its grant have existed since migration 0001, and
+`resolveSession` has re-read the membership on *every* request since T1.7 so that cutting
+access lands on the next request rather than at token expiry. Nothing ever wrote it until
+T2.5b: the verb `membership.revoked` was registered and emitted by nobody. If you find another
+registered verb with no writer, treat it the same way — as a feature that looks finished.
+
+Two guards, and between them they cover both routes to the same unrecoverable state:
+
+- **A role must be published before it can be assigned** (`RoleDirectory.knownRoles`). Handing
+  somebody a role the registry does not define is the `UNKNOWN_ROLE` lockout by hand.
+- **A firm must keep an active administrator** (`hasActiveAdministrator`, asked about the
+  roster the firm *would* have). The registry refuses to publish a role set where no role
+  carries `tenant:admin`; the roster refuses to remove the last person holding one.
+
+All four routes are `tenant:admin`, the read included — the roster lists colleagues' email
+addresses, and a general staff directory is a wider decision than this screen.
+
 ## Domain non-negotiables (compliance + money)
 
 - Money = amount + currency + FX-rate + rate-date. `numeric`, never float.
@@ -178,8 +201,10 @@ npm run test:integration   # the checks only a real Postgres can make (RLS, appe
                            # ledger). Needs a migrated local DB; not in `check`.
 npm run smoke              # end-to-end against a RUNNING server: seeds a firm with three
                            # roles and walks every gate, the party model, the config
-                           # registry, the lead pipeline, rate limits, CORS and the
-                           # audit trail. Prints logins to continue in the UI.
+                           # registry, the lead pipeline, firm administration, rate
+                           # limits, CORS and the audit trail. Prints logins to
+                           # continue in the UI. Sign-in is rate limited: two runs
+                           # inside a minute throttle, and the script says so.
 npm run arch       # the import wall, standalone
 ```
 

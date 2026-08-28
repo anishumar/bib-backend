@@ -56,10 +56,19 @@ export function mapError(err: unknown): MappedError {
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":
+      case "MEMBERSHIP_EXISTS":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "TENANT_NOT_FOUND":
       case "USER_NOT_FOUND":
+      case "MEMBERSHIP_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Both are "the firm is not in the state this call assumed", and neither
+      // is a malformed request. ROLE_NOT_DEFINED is a conflict between the
+      // roster and the role registry; LAST_ADMINISTRATOR is refused by the
+      // rest of the roster, so the caller fixes it by changing SOMEBODY ELSE.
+      case "ROLE_NOT_DEFINED":
+      case "LAST_ADMINISTRATOR":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }
   if (err instanceof PartyError) {

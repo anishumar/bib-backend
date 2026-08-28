@@ -90,3 +90,21 @@ export interface ConfigRepository {
     rows: readonly SeedRow[],
   ): Promise<readonly ConfigEntry[]>;
 }
+
+/**
+ * Which roles anybody actually HOLDS at this firm.
+ *
+ * The registry's lockout guard can see that some role carries `tenant:admin`.
+ * It cannot see whether a single person has that role — and a firm where the
+ * permission exists only on a role nobody holds is stranded exactly as
+ * completely as one where no role carries it at all.
+ *
+ * Narrow on purpose: the registry does not want to know what a membership is,
+ * only which role names are live. Satisfied by the membership adapter, which is
+ * where that fact lives.
+ */
+export interface RoleHolders {
+  /** Role keys held by ACTIVE members. Empty for a firm with no members yet —
+   *  there is nobody to strand, so the holder check does not apply. */
+  rolesInUse(tenantId: string): Promise<readonly string[]>;
+}

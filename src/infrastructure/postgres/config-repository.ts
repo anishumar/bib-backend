@@ -1,12 +1,13 @@
 // Postgres adapter for the configuration registry.
 //
-// ONE class, TWO ports, deliberately — the same pattern as the users/memberships
-// repositories serving both tenancy and identity. `ConfigRepository` is the
-// registry's own seam; `PermissionSource` is gate 3's, and the answer it wants
-// (what does the role `partner` carry at this firm) is a config read like any
-// other. Splitting them would put two files' worth of "what published means"
-// over the same two tables, and the day they disagreed, one of them would be
-// answering an authorization question wrongly.
+// ONE class, THREE ports, deliberately — the same pattern as the
+// users/memberships repositories serving both tenancy and identity.
+// `ConfigRepository` is the registry's own seam; `PermissionSource` is gate 3's;
+// `RoleDirectory` is what firm administration asks (which roles exist here, and
+// which of them can administer the place). All three questions are config reads
+// over the same two tables. Splitting them would put three files' worth of "what
+// published means" over one pair of tables, and the day they disagreed, one of
+// them would be answering an authorization question wrongly.
 //
 // Every method runs under withTenant, so the RLS tenant wall applies to each
 // statement. timestamptz arrives as a Date and leaves as an ISO 8601 string —
@@ -23,6 +24,7 @@ import type {
 } from "../../domain/config/model";
 import { readRolePermissions } from "../../domain/config/model";
 import type { PermissionSource } from "../../usecase/authz/ports";
+import type { RoleDirectory } from "../../usecase/tenancy/ports";
 import type {
   ConfigRepository,
   DefinedEntry,
@@ -78,7 +80,9 @@ function toVersion(r: VersionRow): ConfigVersion {
   };
 }
 
-export class PostgresConfigRepository implements ConfigRepository, PermissionSource {
+export class PostgresConfigRepository
+  implements ConfigRepository, PermissionSource, RoleDirectory
+{
   constructor(private readonly app: Db) {}
 
   async define(entry: NewEntry, firstDraft: NewVersion): Promise<DefinedEntry> {
@@ -294,6 +298,32 @@ export class PostgresConfigRepository implements ConfigRepository, PermissionSou
         FROM config.entry e
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'role'
+        ORDER BY e.key
+      `;
+      return rows.map((r) => r.key);
+    });
+  }
+
+  /**
+   * The roles carrying one permission — the third port this class satisfies
+   * (`RoleDirectory`, for firm administration).
+   *
+   * One query rather than `knownRoles` followed by `permissionsFor` per role.
+   * The caller — "does this firm still have anyone who can administer it" —
+   * asks on every role change and every deactivation, and it should not cost a
+   * round trip per role to answer.
+   *
+   * `jsonb_exists` over the permissions array asks the question in the database
+   * rather than reading every role body back to filter in TypeScript.
+   */
+  async rolesWith(tenantId: string, permission: Permission): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ key: string }[]>`
+        SELECT e.key
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'role'
+          AND jsonb_exists(v.body -> 'permissions', ${permission})
         ORDER BY e.key
       `;
       return rows.map((r) => r.key);

@@ -54,12 +54,16 @@ import {
   InvalidKind,
   VersionNotDraft,
   VersionNotFound,
+  NoOneWouldAdminister,
   WouldLockOutAdministration,
 } from "../../domain/config/errors";
-import type { ConfigRepository, DefinedEntry } from "./ports";
+import type { ConfigRepository, DefinedEntry, RoleHolders } from "./ports";
 
 export interface Deps {
   readonly registry: ConfigRepository;
+  /** Which roles are actually on somebody's membership — the half of the
+   *  lockout guard the registry cannot see by itself. */
+  readonly holders: RoleHolders;
   readonly ids: IdGen;
   /** The audit trail. Configuration decides what everyone else may do, so who
    *  changed it and when is exactly the sort of thing a regulator asks about. */
@@ -304,7 +308,10 @@ export class ConfigService {
     entry: ConfigEntry,
     draft: ConfigVersion,
   ): Promise<void> {
-    const published = await this.deps.registry.listPublished(tenantId, "role");
+    const [published, inUse] = await Promise.all([
+      this.deps.registry.listPublished(tenantId, "role"),
+      this.deps.holders.rolesInUse(tenantId),
+    ]);
     const after = new Map<string, readonly Permission[]>();
     for (const row of published) {
       // The entry being published is represented by its DRAFT below, not by
@@ -313,8 +320,23 @@ export class ConfigService {
       after.set(row.entry.key, readRolePermissions(row.published.body));
     }
     after.set(entry.key, readRolePermissions(draft.body));
+
+    // First: does the permission survive at all?
     if (leavesNobodyAdmin(after)) {
       throw new WouldLockOutAdministration(entry.key, ADMIN_PERMISSION);
+    }
+
+    // Second, and the reason this guard needed a second half: does anybody HOLD
+    // a role that has it? Moving the permission onto a role nobody is assigned
+    // passes the first check and strands the firm just as completely. Skipped
+    // when the firm has no members — there is nobody to strand, and the very
+    // first tenant is in exactly that state while it is being provisioned.
+    if (inUse.length === 0) return;
+    const adminRoles = [...after.entries()]
+      .filter(([, held]) => held.includes(ADMIN_PERMISSION))
+      .map(([key]) => key);
+    if (!adminRoles.some((role) => inUse.includes(role))) {
+      throw new NoOneWouldAdminister(adminRoles);
     }
   }
 }

@@ -75,6 +75,10 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   const config = new ConfigService({
     registry: configRepository,
+    // The registry can see that a role carries tenant:admin; only the roster
+    // knows whether anybody has that role. Both halves are needed to refuse a
+    // publish that would leave the firm with no administrator.
+    holders: memberships,
     ids: systemIds,
     events: ledger,
   });
@@ -88,7 +92,14 @@ export function wire(cfg: Config, log: Logger): Wired {
     tenants: new PostgresTenantRepository(pools.app),
     users,
     memberships,
-    roles: { seedDefaultRoles: (tenantId, actor) => config.seedDefaultRoles(tenantId, actor) },
+    roleSeeder: {
+      seedDefaultRoles: (tenantId, actor) => config.seedDefaultRoles(tenantId, actor),
+    },
+    // The other direction of the same relationship: administration has to know
+    // which roles this firm actually publishes, so it can refuse to assign one
+    // that does not exist and refuse to remove its last administrator. The
+    // config adapter already answers both questions for gate 3.
+    roleDirectory: configRepository,
     ids: systemIds,
     events: ledger,
   });

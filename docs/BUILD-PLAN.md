@@ -208,6 +208,35 @@ open and are recorded above; neither blocks Phase 2.
   > needs a confirmation flow that says how many rows are affected, which is a screen and a
   > decision), and any caching of the permission read (one indexed query per authenticated
   > request, uncached on purpose so a revoked permission is revoked now).
+- [x] `(B)` **T2.5b** **Firm administration**: the roster, role assignment, and revocation —
+  the app-facing half of membership. *Acc: an admin adds a colleague, changes their role, and
+  revokes access; the revoked session stops on its NEXT request.*
+  > **Found while looking for the first admin screen (2026-08-28).** T2.5 shipped role
+  > DEFINITION on the product surface, so a firm could invent a role and give it to nobody:
+  > membership existed only on `/internal`, behind a platform key no browser may hold. No route
+  > listed a firm's people, changed a role, or removed anybody.
+  >
+  > **The sharp part: `membership.revoked` was a registered event verb that nothing wrote.**
+  > `is_active` and its grant have existed since 0001, and `resolveSession` has re-read the
+  > membership on every request since T1.7 — a real per-request cost — precisely so revocation
+  > lands immediately. The switch was never connected. A firm that dismissed somebody could not
+  > stop their access. `tests/tenancy/administration.integration.test.ts` now proves the whole
+  > path against a real session: revoke, and the very next request loses its tenant and role.
+  >
+  > Four routes under `/api/v1/tenancy/members`, all `tenant:admin` including the read (the
+  > roster lists colleagues' email addresses; a general staff directory is a wider decision).
+  > The roster is a joined read model — membership plus email and name — so a screen shows
+  > people rather than uuids. Migration 0008 adds `user_account.display_name`, global per
+  > ADR-02: the same human at two firms is one person with one name.
+  >
+  > Two guards, closing both routes to one unrecoverable state. **A role must be published
+  > before it can be assigned** — enforced on the provisioning path too, since `/internal` can
+  > lock somebody out just as easily. **A firm must keep an active administrator**, asked about
+  > the roster it *would* have, so it covers a demotion and a deactivation alike, including an
+  > admin acting on themselves. Three verbs written: `membership.revoked` at last,
+  > `membership.restored`, `membership.role_changed`.
+  >
+  > Gate: `npm run check` 274 tests · `test:integration` 54 · `smoke` 58.
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*

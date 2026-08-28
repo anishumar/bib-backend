@@ -9,20 +9,29 @@ import type { EventSink } from "../ledger/ports";
 import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
 import {
   activeMemberships,
+  hasActiveAdministrator,
   isAudience,
   isValidSlug,
   normalizeEmail,
+  rosterAfter,
 } from "../../domain/tenancy/model";
+import { ADMIN_PERMISSION } from "../../domain/authz/model";
 import {
   EmailTaken,
   InvalidAudience,
   InvalidSlug,
+  LastAdministrator,
+  MembershipExists,
+  MembershipNotFound,
+  RoleNotDefined,
   SlugTaken,
   TenantNotFound,
   UserNotFound,
 } from "../../domain/tenancy/errors";
 import type {
+  MemberRecord,
   MembershipRepository,
+  RoleDirectory,
   RoleRegistrySeeder,
   TenantRepository,
   UserRepository,
@@ -33,7 +42,10 @@ export interface Deps {
   readonly users: UserRepository;
   readonly memberships: MembershipRepository;
   /** A new firm's role definitions, written as its own config rows. */
-  readonly roles: RoleRegistrySeeder;
+  readonly roleSeeder: RoleRegistrySeeder;
+  /** What this firm's roles ARE, for the two things administration must refuse:
+   *  assigning a role nobody published, and removing the last administrator. */
+  readonly roleDirectory: RoleDirectory;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -46,6 +58,30 @@ export interface AddMemberInput {
   readonly commercialVisibility: boolean;
   /** Which platform caller granted this. See the note on the class. */
   readonly provisionedBy?: string | undefined;
+}
+
+/** Adding somebody to a firm from inside the product, by the address an admin
+ *  actually knows. */
+export interface InviteMemberInput {
+  readonly tenantId: string;
+  readonly email: string;
+  readonly audience: string;
+  readonly role: string;
+  readonly commercialVisibility: boolean;
+  /** Applied only when the account is NEW — see ensureUser. */
+  readonly displayName?: string | undefined;
+}
+
+export interface ChangeMemberRoleInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  readonly role: string;
+}
+
+export interface SetMemberActiveInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  readonly isActive: boolean;
 }
 
 export class TenancyService {
@@ -96,7 +132,7 @@ export class TenancyService {
     // every request to it answers UNKNOWN_ROLE naming exactly this cause — and
     // it is preferable to the alternative, which is a firm that appears to work
     // because gate 3 quietly fell back to permissions nobody chose.
-    await this.deps.roles.seedDefaultRoles(tenant.id, actor);
+    await this.deps.roleSeeder.seedDefaultRoles(tenant.id, actor);
     return tenant;
   }
 
@@ -105,11 +141,14 @@ export class TenancyService {
    * design (ADR-02): inviting an email that already has an account LINKS to the
    * existing person — it never creates a duplicate identity.
    */
-  async ensureUser(email: string): Promise<UserAccount> {
+  async ensureUser(email: string, displayName?: string): Promise<UserAccount> {
     const normalized = normalizeEmail(email);
     const existing = await this.deps.users.findByEmail(normalized);
+    // A name supplied here is NOT applied to an account that already exists: the
+    // person already has one, and one firm inviting them is not grounds for
+    // renaming them everywhere else.
     if (existing) return existing;
-    return this.deps.users.create({ id: this.deps.ids.newId(), email: normalized });
+    return this.deps.users.create({ id: this.deps.ids.newId(), email: normalized, displayName });
   }
 
   /** Register a user, failing loudly if the email is already taken. Use when a
@@ -128,6 +167,16 @@ export class TenancyService {
     if (!tenant) throw new TenantNotFound(input.tenantId);
     const user = await this.deps.users.findById(input.userId);
     if (!user) throw new UserNotFound(input.userId);
+    // The role must be one the firm publishes — checked on THIS path too, not
+    // only on the administration path below, because the provisioning surface
+    // can lock somebody out exactly as easily. Every tenant has its four
+    // defaults from the moment createTenant returns, so there is no window in
+    // which a legitimate grant has no role to name.
+    //
+    // Ordered AFTER the tenant and user lookups on purpose: for a tenant that
+    // does not exist, "this firm has published no roles" is a true sentence and
+    // a useless one. The caller's actual mistake is the tenant id.
+    await this.requireDefinedRole(input.tenantId, input.role);
     const membership = await this.deps.memberships.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -158,6 +207,178 @@ export class TenancyService {
   async resolveAccess(userId: string): Promise<readonly Membership[]> {
     const all = await this.deps.memberships.listByUser(userId);
     return activeMemberships(all);
+  }
+
+  // ── Firm administration ─────────────────────────────────────────────────────
+  //
+  // Everything above is PROVISIONING: the platform creating firms and granting
+  // the first access, with no end user behind it. Everything below is a firm
+  // ADMINISTERING ITSELF — a real person, in a session, holding tenant:admin,
+  // changing who works there. That is the half that did not exist, which is why
+  // a firm could define a role and give it to nobody, and why nothing in the
+  // product could stop a dismissed colleague from signing in.
+  //
+  // Two guards run before every write here, and both refuse states that cannot
+  // be undone from inside the product:
+  //
+  //   the role must be PUBLISHED   — assigning one the registry does not define
+  //                                  hands somebody a login that carries nothing
+  //   an administrator must remain — see requireAdministratorSurvives
+
+  /** The roster: everyone with a membership here, deactivated people included. */
+  async listMembers(tenantId: string): Promise<readonly MemberRecord[]> {
+    return this.deps.memberships.listMembers(tenantId);
+  }
+
+  /**
+   * Give somebody access to this firm, by email.
+   *
+   * By EMAIL rather than by user id, because an admin knows an address and not
+   * a uuid — and because `ensureUser` makes that idempotent in the way ADR-02
+   * requires: an email that already has an account LINKS to that person rather
+   * than creating a second identity for them.
+   */
+  async inviteMember(input: InviteMemberInput, actor: Actor): Promise<Membership> {
+    if (!isAudience(input.audience)) throw new InvalidAudience(input.audience);
+    await this.requireDefinedRole(input.tenantId, input.role);
+
+    const user = await this.ensureUser(input.email, input.displayName);
+    // Checked rather than left to the unique constraint, which would surface as
+    // an unexplained 500. Someone who is already here — even deactivated —
+    // should be reinstated or have their role changed, deliberately, rather than
+    // silently rewritten by an "add".
+    const existing = (await this.deps.memberships.listMembers(input.tenantId)).find(
+      (m) => m.membership.userId === user.id && m.membership.audience === input.audience,
+    );
+    if (existing) throw new MembershipExists(normalizeEmail(input.email), input.audience);
+
+    return this.addMember(
+      {
+        tenantId: input.tenantId,
+        userId: user.id,
+        audience: input.audience,
+        role: input.role,
+        commercialVisibility: input.commercialVisibility,
+      },
+      actor,
+    );
+  }
+
+  /** Change what somebody may do here. Idempotent: setting the role they already
+   *  hold records nothing, because no change happened to record. */
+  async changeMemberRole(input: ChangeMemberRoleInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    await this.requireDefinedRole(input.tenantId, input.role);
+    if (membership.role === input.role) return membership;
+    await this.requireAdministratorSurvives(input.tenantId, membership.id, (m) => ({
+      ...m,
+      role: input.role,
+    }));
+
+    const updated = await this.deps.memberships.updateRole(
+      input.tenantId,
+      membership.id,
+      input.role,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "membership.role_changed",
+      objectId: membership.id,
+      actor,
+      payload: {
+        userId: membership.userId,
+        audience: membership.audience,
+        from: membership.role,
+        to: input.role,
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Revoke somebody's access, or give it back.
+   *
+   * This is the write that has been missing. `is_active` and its grant have
+   * existed since migration 0001, and `resolveSession` has re-read the
+   * membership on EVERY request since T1.7 so that revocation takes effect on
+   * the next one rather than at token expiry — a real cost, paid per request,
+   * for a switch nothing could flip. A firm that dismisses somebody this
+   * afternoon can now stop their access this afternoon.
+   */
+  async setMemberActive(input: SetMemberActiveInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    if (membership.isActive === input.isActive) return membership;
+    // Only deactivation can strand a firm. Reinstating somebody adds an
+    // administrator or is neutral; it can never remove the last one.
+    if (!input.isActive) {
+      await this.requireAdministratorSurvives(input.tenantId, membership.id, (m) => ({
+        ...m,
+        isActive: false,
+      }));
+    }
+
+    const updated = await this.deps.memberships.setActive(
+      input.tenantId,
+      membership.id,
+      input.isActive,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: input.isActive ? "membership.restored" : "membership.revoked",
+      objectId: membership.id,
+      actor,
+      // userId and role, never the email — the address is personal data and this
+      // log cannot be erased. The row it points at can.
+      payload: {
+        userId: membership.userId,
+        audience: membership.audience,
+        role: membership.role,
+      },
+    });
+    return updated;
+  }
+
+  // ── internals ───────────────────────────────────────────────────────────────
+
+  private async memberOrThrow(tenantId: string, membershipId: string): Promise<Membership> {
+    const membership = await this.deps.memberships.findById(tenantId, membershipId);
+    if (!membership) throw new MembershipNotFound(membershipId);
+    return membership;
+  }
+
+  private async requireDefinedRole(tenantId: string, role: string): Promise<void> {
+    const defined = await this.deps.roleDirectory.knownRoles(tenantId);
+    if (!defined.includes(role)) throw new RoleNotDefined(role, defined);
+  }
+
+  /**
+   * Refuse a change that would leave the firm with nobody able to administer it.
+   *
+   * Asked about the roster the firm WOULD have, not the one it has, so the same
+   * check serves a role change and a deactivation — including an administrator
+   * acting on themselves, which is the ordinary way this happens.
+   *
+   * The registry has its own version of this guard (a role set where no role
+   * carries the permission). These are two routes to one unrecoverable state:
+   * there, the permission stops existing; here, the last person holding it does.
+   */
+  private async requireAdministratorSurvives(
+    tenantId: string,
+    membershipId: string,
+    change: (m: Membership) => Membership,
+  ): Promise<void> {
+    const [roster, adminRoles] = await Promise.all([
+      this.deps.memberships.listMembers(tenantId),
+      this.deps.roleDirectory.rolesWith(tenantId, ADMIN_PERMISSION),
+    ]);
+    const after = rosterAfter(
+      roster.map((r) => r.membership),
+      membershipId,
+      change,
+    );
+    if (!hasActiveAdministrator(after, new Set(adminRoles))) {
+      throw new LastAdministrator(ADMIN_PERMISSION);
+    }
   }
 }
 

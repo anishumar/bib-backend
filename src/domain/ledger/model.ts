@@ -70,7 +70,9 @@ export const EVENT_VERBS = {
   // ── platform · tenancy + party (the spine) ─────────────────────────────────
   "tenant.created":              { objectType: "tenant",              lane: "platform",   description: "A firm was registered as a tenant." },
   "membership.granted":          { objectType: "membership",          lane: "platform",   description: "A user was given a role in a tenant, for one audience." },
-  "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated." },
+  "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated. The person's next request stops — resolveSession re-reads this on every one." },
+  "membership.restored":         { objectType: "membership",          lane: "platform",   description: "A deactivated membership was reinstated." },
+  "membership.role_changed":     { objectType: "membership",          lane: "platform",   description: "A member's role at a firm changed, and with it everything gate 3 lets them do." },
   "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user's session became active in THIS tenant — at login, or when the org switcher selected it." },
   "party.created":               { objectType: "party",               lane: "platform",   description: "An organization or person party was created." },
   "legal_entity.registered":     { objectType: "legal_entity",        lane: "platform",   description: "An organization was registered as a legal entity in a jurisdiction." },

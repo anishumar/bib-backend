@@ -17,6 +17,7 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
@@ -31,6 +32,9 @@ const owner = postgres(cfg.db.ownerUrl, { max: 2 });
 const registry = new PostgresConfigRepository(app);
 const service = new ConfigService({
   registry,
+  // Real memberships: the lockout guard's second half asks who actually holds a
+  // role, and a stub answering "nobody" would silently skip it.
+  holders: new PostgresMembershipRepository(app),
   ids: systemIds,
   events: new LedgerService({ events: new PostgresEventStore(app), ids: systemIds }),
 });

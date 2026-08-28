@@ -50,6 +50,22 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
   [routeKey("GET", "/api/v1/objects/{objectType}/{objectId}/events"), "ledger:read" as const],
 
+  // FIRM ADMINISTRATION. `tenant:admin` on all four, including the READ.
+  //
+  // The roster lists colleagues' email addresses, and this is the screen for
+  // running the firm rather than working at it. A general "who works here"
+  // directory is a wider decision — different data, probably a different
+  // permission — and belongs to whichever screen first needs one, not smuggled
+  // in as a side effect of the admin surface.
+  //
+  // The write side is the same `tenant:admin` the config registry uses, and for
+  // the same reason: between them these two surfaces decide what every role
+  // means AND who holds it, which is the whole of access control at a firm.
+  [routeKey("GET", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
+
   // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
   // lead:read / lead:write, and that is a decision rather than laziness.
   //

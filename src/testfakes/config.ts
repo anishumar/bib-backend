@@ -18,9 +18,11 @@ import type {
 } from "../domain/config/model";
 import { readRolePermissions, roleBodyOf } from "../domain/config/model";
 import type { PermissionSource } from "../usecase/authz/ports";
+import type { RoleDirectory } from "../usecase/tenancy/ports";
 import type {
   ConfigRepository,
   DefinedEntry,
+  RoleHolders,
   NewEntry,
   NewVersion,
   PublishOutcome,
@@ -35,7 +37,7 @@ import { RecordingEventSink } from "./ledger";
  *  to be ordered and deterministic. */
 const EPOCH = Date.parse("2026-01-01T00:00:00Z");
 
-export class FakeConfigRepo implements ConfigRepository, PermissionSource {
+export class FakeConfigRepo implements ConfigRepository, PermissionSource, RoleDirectory {
   readonly entries: ConfigEntry[] = [];
   readonly versions: ConfigVersion[] = [];
   private tick = 0;
@@ -187,6 +189,22 @@ export class FakeConfigRepo implements ConfigRepository, PermissionSource {
     return Promise.resolve(published ? readRolePermissions(published.body) : []);
   }
 
+  /** RoleDirectory's other half: which roles here carry a permission. Reads the
+   *  same published bodies gate 3 does, so the two cannot disagree. */
+  rolesWith(tenantId: string, permission: Permission): Promise<readonly string[]> {
+    const keys = this.entries
+      .filter((e) => e.tenantId === tenantId && e.kind === "role")
+      .filter((e) => {
+        const published = this.versions.find(
+          (v) => v.entryId === e.id && v.status === "published",
+        );
+        return published !== undefined && readRolePermissions(published.body).includes(permission);
+      })
+      .map((e) => e.key)
+      .sort((a, b) => a.localeCompare(b));
+    return Promise.resolve(keys);
+  }
+
   knownRoles(tenantId: string): Promise<readonly string[]> {
     return Promise.resolve(
       this.entries
@@ -202,10 +220,36 @@ export class FakeConfigRepo implements ConfigRepository, PermissionSource {
   }
 }
 
+/**
+ * Who holds which role, for the registry's lockout guard.
+ *
+ * Defaults to "nobody", which is how a firm looks while it is being provisioned
+ * — and the guard correctly skips its holder check for a firm with no members,
+ * since there is nobody to strand. A test about the holder half adds people.
+ */
+export class FakeRoleHolders implements RoleHolders {
+  private readonly held = new Map<string, Set<string>>();
+
+  hold(tenantId: string, role: string): this {
+    const roles = this.held.get(tenantId) ?? new Set<string>();
+    roles.add(role);
+    this.held.set(tenantId, roles);
+    return this;
+  }
+
+  rolesInUse(tenantId: string): Promise<readonly string[]> {
+    return Promise.resolve([...(this.held.get(tenantId) ?? [])].sort());
+  }
+}
+
 /** A ready-made dependency set for ConfigService, matching makePartyFakes(). */
-export function makeConfigFakes(): Deps & { registry: FakeConfigRepo } {
+export function makeConfigFakes(): Deps & {
+  registry: FakeConfigRepo;
+  holders: FakeRoleHolders;
+} {
   return {
     registry: new FakeConfigRepo(),
+    holders: new FakeRoleHolders(),
     ids: new FakeIds(),
     events: new RecordingEventSink(),
   };

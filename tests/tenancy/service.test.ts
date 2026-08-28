@@ -140,8 +140,12 @@ describe("resolveAccess (org-switcher)", () => {
     const a = await service.createTenant({ name: "A", slug: "firm-a" });
     const b = await service.createTenant({ name: "B", slug: "firm-b" });
     const user = await service.ensureUser("consultant@example.com");
-    await service.addMember({ tenantId: a.id, userId: user.id, audience: "STAFF", role: "member", commercialVisibility: false });
-    await service.addMember({ tenantId: b.id, userId: user.id, audience: "CLIENT_PORTAL", role: "contact", commercialVisibility: false });
+    // Roles the firms actually publish. This test used to name "member" and
+    // "contact", which no firm has ever defined — a grant that would have let
+    // both people sign in carrying nothing. Since roles became config rows,
+    // addMember refuses it, which is the point of the guard.
+    await service.addMember({ tenantId: a.id, userId: user.id, audience: "STAFF", role: "associate", commercialVisibility: false });
+    await service.addMember({ tenantId: b.id, userId: user.id, audience: "CLIENT_PORTAL", role: "client_contact", commercialVisibility: false });
 
     const access = await service.resolveAccess(user.id);
     expect(access).toHaveLength(2);

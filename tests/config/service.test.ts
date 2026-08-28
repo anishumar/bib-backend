@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import { ConfigService } from "../../src/usecase/config/service";
 import { makeConfigFakes } from "../../src/testfakes/config";
+import type { FakeRoleHolders } from "../../src/testfakes/config";
 import type { FakeConfigRepo } from "../../src/testfakes/config";
 import type { RecordingEventSink } from "../../src/testfakes/ledger";
 import { DEFAULT_ROLES } from "../../src/domain/authz/model";
@@ -23,6 +24,7 @@ import {
   InvalidKind,
   VersionNotDraft,
   VersionNotFound,
+  NoOneWouldAdminister,
   WouldLockOutAdministration,
 } from "../../src/domain/config/errors";
 
@@ -33,12 +35,14 @@ const ACTOR = { type: "human" as const, id: "00000000-0000-4000-8000-0000000000b
 function setup(): {
   service: ConfigService;
   registry: FakeConfigRepo;
+  holders: FakeRoleHolders;
   events: RecordingEventSink;
 } {
   const fakes = makeConfigFakes();
   return {
     service: new ConfigService(fakes),
     registry: fakes.registry,
+    holders: fakes.holders,
     events: fakes.events as RecordingEventSink,
   };
 }
@@ -504,6 +508,98 @@ describe("the firm cannot lock itself out of its own configuration", () => {
     ).resolves.toBeDefined();
     expect(await registry.permissionsFor(TENANT, "partner")).not.toContain("tenant:admin");
     expect(await registry.permissionsFor(TENANT, "office-admin")).toContain("tenant:admin");
+  });
+
+  it("refuses to move the permission onto a role nobody holds", async () => {
+    // The half the registry cannot see on its own. `office-admin` carries
+    // tenant:admin, so the first check passes — but if nobody at the firm is an
+    // office-admin, publishing partner without it strands them just as
+    // completely, and neither guard would have fired before this one existed.
+    const { service, holders } = await seeded();
+    holders.hold(TENANT, "partner");
+
+    await service.define(
+      {
+        tenantId: TENANT,
+        kind: "role",
+        key: "office-admin",
+        body: { label: "Office administrator", permissions: ["tenant:admin", "config:read"] },
+      },
+      ACTOR,
+    );
+    await service.publish(
+      { tenantId: TENANT, kind: "role", key: "office-admin", version: 1 },
+      ACTOR,
+    );
+    await service.addVersion({
+      tenantId: TENANT,
+      kind: "role",
+      key: "partner",
+      body: { label: "Partner", permissions: ["party:read", "party:write", "ledger:read"] },
+    });
+
+    const err = await service
+      .publish({ tenantId: TENANT, kind: "role", key: "partner", version: 2 }, ACTOR)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(NoOneWouldAdminister);
+    expect((err as Error).message).toContain("office-admin");
+  });
+
+  it("allows it once somebody actually holds that role", async () => {
+    const { service, holders } = await seeded();
+    holders.hold(TENANT, "partner").hold(TENANT, "office-admin");
+
+    await service.define(
+      {
+        tenantId: TENANT,
+        kind: "role",
+        key: "office-admin",
+        body: { label: "Office administrator", permissions: ["tenant:admin"] },
+      },
+      ACTOR,
+    );
+    await service.publish(
+      { tenantId: TENANT, kind: "role", key: "office-admin", version: 1 },
+      ACTOR,
+    );
+    await service.addVersion({
+      tenantId: TENANT,
+      kind: "role",
+      key: "partner",
+      body: { label: "Partner", permissions: ["party:read"] },
+    });
+    await expect(
+      service.publish({ tenantId: TENANT, kind: "role", key: "partner", version: 2 }, ACTOR),
+    ).resolves.toBeDefined();
+  });
+
+  it("skips the holder check for a firm with no members", async () => {
+    // How every tenant looks while it is being provisioned: roles exist, nobody
+    // has one yet. There is nobody to strand, and refusing here would make a
+    // brand-new firm unconfigurable.
+    const { service } = await seeded();
+    await service.define(
+      {
+        tenantId: TENANT,
+        kind: "role",
+        key: "office-admin",
+        body: { label: "Office administrator", permissions: ["tenant:admin"] },
+      },
+      ACTOR,
+    );
+    await service.publish(
+      { tenantId: TENANT, kind: "role", key: "office-admin", version: 1 },
+      ACTOR,
+    );
+    await service.addVersion({
+      tenantId: TENANT,
+      kind: "role",
+      key: "partner",
+      body: { label: "Partner", permissions: ["party:read"] },
+    });
+    await expect(
+      service.publish({ tenantId: TENANT, kind: "role", key: "partner", version: 2 }, ACTOR),
+    ).resolves.toBeDefined();
   });
 
   it("does not apply the rule to services", async () => {

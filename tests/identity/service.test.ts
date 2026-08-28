@@ -205,6 +205,7 @@ describe("login", () => {
     h.users.rows[h.users.rows.findIndex((r) => r.email === "gone@example.com")] = {
       id: uuidFor("user:gone@example.com"),
       email: "gone@example.com",
+      displayName: null,
       status: "disabled",
     };
     await expect(h.service.login("gone@example.com", PASSWORD)).rejects.toBeInstanceOf(

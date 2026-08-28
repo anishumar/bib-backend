@@ -8,7 +8,8 @@
 # key, the session wall, the audience and role gates, the party model, the
 # effective-dated relationships, the configuration registry (a published
 # version is frozen; a firm cannot strand itself), the lead pipeline (a
-# duplicate capture merges rather than creating), rate limiting, CORS, and
+# duplicate capture merges rather than creating), firm administration (a
+# revoked membership stops the very next request), rate limiting, CORS, and
 # the audit trail.
 #
 # Run:  npm run dev   (in another terminal)
@@ -48,6 +49,17 @@ for spec in "partner:STAFF:true" "associate:STAFF:false" "client:CLIENT_PORTAL:f
   curl -s -c $J/$R.txt -o /dev/null -XPOST $API/api/v1/auth/login -H "$H" -d "{\"email\":\"$R-$S@example.com\",\"password\":\"correct horse battery staple\"}"
 done
 echo "  (seeded firm ${T:0:8}… with partner, associate, client contact)"
+
+# Fail loudly and early if the seed logins did not take. The usual cause is this
+# script's own rate-limit section (section 9) from a run less than a minute ago:
+# the sign-in bucket is 10/minute per address, and seeding spends three of them.
+# Without this check every later assertion answers 401 and the output blames a
+# dozen unrelated things for one throttled login.
+if [ "$(code -b $J/partner.txt $API/api/v1/auth/me)" != "200" ]; then
+  printf "\n  \033[31m✗\033[0m the seeded partner could not sign in.\n"
+  echo "    Almost always the sign-in rate limit from a previous run — wait a minute and retry."
+  exit 1
+fi
 
 echo; echo "── 2. Authentication: nothing is reachable without a session ───────"
 chk "anonymous cannot list parties"        401 "$(code $API/api/v1/parties)"
@@ -154,18 +166,54 @@ import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):
     print("    %-24s %s" % (e["verb"], json.dumps(e["payload"])[:64]))'
 
-echo; echo "── 8. Rate limiting ────────────────────────────────────────────────"
+echo; echo "── 8. Firm administration — the roster, and revocation ─────────────"
+chk "associate cannot see the roster"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/members)"
+ROSTER=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
+import sys, json
+print(len(json.load(sys.stdin)["members"]))')
+chk "partner sees all three people"      3 "$ROSTER"
+NEW='{"email":"newjoiner-'$S'@example.com","audience":"STAFF","role":"associate","commercialVisibility":false,"displayName":"Rahul Iyer"}'
+chk "add a colleague by email"           201 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/members -H "$H" -d "$NEW")"
+chk "…and not twice"                     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/members -H "$H" -d "$NEW")"
+chk "a role the firm never published"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/members -H "$H" -d '{"email":"x-'$S'@example.com","audience":"STAFF","role":"rainmaker","commercialVisibility":false}')"
+
+# The associate has a live session from section 2. Revoke their membership and
+# watch that SESSION stop — the token is untouched and unexpired.
+# By EMAIL, not by role: the colleague added above is also an active associate,
+# and picking "the first active associate" revoked the wrong person — a green
+# tick for a revocation that never touched the session under test.
+AMID=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
+import sys, json
+for m in json.load(sys.stdin)["members"]:
+    if m["email"] == "associate-'$S'@example.com":
+        print(m["membership"]["id"]); break')
+chk "associate can still read parties"   200 "$(code -b $J/associate.txt $API/api/v1/parties)"
+chk "revoke their access"                200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$AMID/active -H "$H" -d '{"isActive":false}')"
+chk "their NEXT request is refused"      403 "$(code -b $J/associate.txt $API/api/v1/parties)"
+chk "restore it"                         200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$AMID/active -H "$H" -d '{"isActive":true}')"
+chk "and they are back, next request"    200 "$(code -b $J/associate.txt $API/api/v1/parties)"
+
+# The firm must keep somebody who can administer it — reachable from both sides.
+PMID=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
+import sys, json
+for m in json.load(sys.stdin)["members"]:
+    if m["membership"]["role"] == "partner":
+        print(m["membership"]["id"]); break')
+chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
+chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
+
+echo; echo "── 9. Rate limiting ────────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 9. CORS — the frontend is a separate origin ─────────────────────"
+echo; echo "── 10. CORS — the frontend is a separate origin ─────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 10. The audit trail, as recorded ─────────────────────────────────"
+echo; echo "── 11. The audit trail, as recorded ─────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):

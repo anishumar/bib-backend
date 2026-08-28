@@ -10,6 +10,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { TenancyService } from "../../usecase/tenancy/service";
 import { toEnvelope } from "../httpresp";
+import { scopeOf } from "../scope";
 
 /** What the route registrar needs. The service is the one collaborator the
  *  handlers call; the principal arrives from the session guard through the
@@ -34,6 +35,7 @@ const UserAccountSchema = z
   .object({
     id: z.string().uuid(),
     email: z.string().email(),
+    displayName: z.string().nullable(),
     status: z.enum(["active", "disabled"]),
   })
   .openapi("UserAccount");
@@ -54,6 +56,20 @@ const MembershipsResponse = z
   .object({ memberships: z.array(MembershipSchema) })
   .openapi("MembershipsResponse");
 
+/** One row of the roster: the membership plus who it belongs to, so a screen
+ *  can show people without a lookup per row. */
+const MemberSchema = z
+  .object({
+    membership: MembershipSchema,
+    email: z.string().email(),
+    displayName: z.string().nullable().openapi({
+      description: "Null when nobody has named the account — show the email instead.",
+    }),
+  })
+  .openapi("Member");
+
+const MembersResponse = z.object({ members: z.array(MemberSchema) }).openapi("MembersResponse");
+
 // ── Request schemas (DTOs) ──────────────────────────────────────────────────
 
 const CreateTenantRequest = z
@@ -63,6 +79,38 @@ const CreateTenantRequest = z
 const RegisterUserRequest = z
   .object({ email: z.string().email() })
   .openapi("RegisterUserRequest");
+
+// The administration DTOs. `audience` and `role` stay free strings on the wire
+// for the same reason AddMemberRequest does: the closed audience set is a domain
+// rule, and the valid ROLES are this firm's own published config — neither is
+// something a static schema can state, and a duplicate list here would be a
+// second place to change.
+const InviteMemberRequest = z
+  .object({
+    email: z.string().email(),
+    audience: z.string().min(1),
+    role: z.string().min(1),
+    commercialVisibility: z.boolean().default(false),
+    displayName: z.string().min(1).optional().openapi({
+      description: "Applied only when this email has no account yet.",
+    }),
+  })
+  .openapi("InviteMemberRequest");
+
+const ChangeMemberRoleRequest = z
+  .object({ role: z.string().min(1) })
+  .openapi("ChangeMemberRoleRequest");
+
+const SetMemberActiveRequest = z
+  .object({
+    isActive: z.boolean().openapi({
+      description:
+        "False revokes access — the person's next request is refused, not their next login.",
+    }),
+  })
+  .openapi("SetMemberActiveRequest");
+
+const MemberParam = z.object({ membershipId: z.string().uuid() });
 
 // `audience` is left a free string on the wire ON PURPOSE: the closed set of
 // audiences is a domain rule (AUDIENCES), validated by the service, which
@@ -133,6 +181,91 @@ const addMemberRoute = createRoute({
   },
 });
 
+// ── Firm administration ─────────────────────────────────────────────────────
+//
+// The product surface for a firm running itself: who works here, what they may
+// do, and whether they still have access. Everything above this line on
+// /internal is the PLATFORM creating firms; everything here is a partner with a
+// session doing it themselves.
+//
+// All four require `tenant:admin`. Reading the roster is admin-only for now
+// because it lists colleagues' email addresses — a general "who works here"
+// directory is a wider decision for whichever screen first needs one.
+
+const listMembersRoute = createRoute({
+  method: "get",
+  path: "/api/v1/tenancy/members",
+  tags: ["tenancy"],
+  summary: "The firm's roster, deactivated people included",
+  responses: {
+    200: { description: "Members", content: { "application/json": { schema: MembersResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+  },
+});
+
+const inviteMemberRoute = createRoute({
+  method: "post",
+  path: "/api/v1/tenancy/members",
+  tags: ["tenancy"],
+  summary: "Give somebody access to this firm, by email",
+  description:
+    "Idempotent on identity (ADR-02): an email that already has an account links to that " +
+    "person rather than creating a second one. No email is sent — they sign in with a magic link.",
+  request: {
+    body: { content: { "application/json": { schema: InviteMemberRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Access granted", content: { "application/json": { schema: MembershipSchema } } },
+    400: errorResponse("Request failed validation, or unknown audience"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    409: errorResponse("They already have access, or the role is not one this firm publishes"),
+  },
+});
+
+const changeMemberRoleRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/members/{membershipId}/role",
+  tags: ["tenancy"],
+  summary: "Change what a member may do",
+  request: {
+    params: MemberParam,
+    body: { content: { "application/json": { schema: ChangeMemberRoleRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Role changed. Idempotent — setting the role they hold records nothing.",
+      content: { "application/json": { schema: MembershipSchema } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such membership at this firm"),
+    409: errorResponse("The role is not one this firm publishes, or this would leave no administrator"),
+  },
+});
+
+const setMemberActiveRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/members/{membershipId}/active",
+  tags: ["tenancy"],
+  summary: "Revoke a member's access, or give it back",
+  description:
+    "Takes effect on their NEXT REQUEST, not at token expiry: the session resolver re-reads " +
+    "the membership every time. A firm that dismisses somebody can stop their access now.",
+  request: {
+    params: MemberParam,
+    body: { content: { "application/json": { schema: SetMemberActiveRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Access changed", content: { "application/json": { schema: MembershipSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such membership at this firm"),
+    409: errorResponse("This would leave the firm with no administrator"),
+  },
+});
+
 const myMembershipsRoute = createRoute({
   method: "get",
   path: "/api/v1/tenancy/me/memberships",
@@ -175,6 +308,47 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(membership, 201);
   });
 
+  // ── Firm administration. The tenant comes from the SESSION, so an admin can
+  // only ever administer the firm they are acting for.
+  app.openapi(listMembersRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const members = await deps.service.listMembers(s.tenantId);
+    return c.json({ members: [...members] }, 200);
+  });
+
+  app.openapi(inviteMemberRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const membership = await deps.service.inviteMember({ tenantId: s.tenantId, ...body }, s.actor);
+    return c.json(membership, 201);
+  });
+
+  app.openapi(changeMemberRoleRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const { role } = c.req.valid("json");
+    const membership = await deps.service.changeMemberRole(
+      { tenantId: s.tenantId, membershipId, role },
+      s.actor,
+    );
+    return c.json(membership, 200);
+  });
+
+  app.openapi(setMemberActiveRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const { isActive } = c.req.valid("json");
+    const membership = await deps.service.setMemberActive(
+      { tenantId: s.tenantId, membershipId, isActive },
+      s.actor,
+    );
+    return c.json(membership, 200);
+  });
+
   app.openapi(myMembershipsRoute, async (c) => {
     const principal = c.get("principal");
     if (!principal) {
@@ -195,4 +369,8 @@ export const tenancyRoutes = {
   registerUser: registerUserRoute,
   addMember: addMemberRoute,
   myMemberships: myMembershipsRoute,
+  listMembers: listMembersRoute,
+  inviteMember: inviteMemberRoute,
+  changeMemberRole: changeMemberRoleRoute,
+  setMemberActive: setMemberActiveRoute,
 } as const;
