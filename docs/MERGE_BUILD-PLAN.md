@@ -945,7 +945,17 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
 - Product name; which prior-vendor data (if any) migrates.
 - Real-integration access: which portals/sandboxes the client can grant, and when.
 - ~~**Migration ranges**~~ — settled: `(A)` 0018–0039, `(B)` 0040+. `(A)` has taken **0018**.
-- **G0.3** — soft delete on `core`, or a written decision that parties are permanent.
+- ~~**G0.3** — soft delete on `core`~~ — **settled (2026-08-28): parties are permanent.** No
+  `deleted_at` anywhere in `core`; `core.party.archived_at` (0035) hides a party from pickers and
+  nothing more, and the decision is a paragraph in `CLAUDE.md`. Left open by it, and found by
+  review rather than by building: **the refusal is archive-time only.** Nothing stops a NEW
+  reference being created against an already-archived party — lead capture's `resolve()` matches
+  on identifier without consulting `archived_at`, so a capture carrying an archived party's PAN
+  attaches to it. Nothing renders blank (reading one party by id never filters), so this is a
+  state the design says should not exist rather than corruption. The invariant the schema actually
+  holds is *"nothing pointed at it at the instant it was archived"*, which is weaker than the
+  `CLAUDE.md` paragraph reads. Decide later whether capture should refuse an archived party or
+  quietly unarchive it — both are defensible and neither should be guessed.
 - **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
 - ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled
