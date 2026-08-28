@@ -6,7 +6,7 @@
 // the append-only GRANT: those are database properties, proven against real
 // Postgres in tests/ledger/immutability.integration.test.ts, not simulated here.
 import type { DomainEvent } from "../domain/ledger/model";
-import type { EventStore, NewEvent } from "../usecase/ledger/ports";
+import type { EventRecord, EventStore, NewEvent } from "../usecase/ledger/ports";
 import type { Deps } from "../usecase/ledger/service";
 import { LedgerService } from "../usecase/ledger/service";
 import type { EventSink, RecordEventInput } from "../usecase/ledger/ports";
@@ -41,23 +41,41 @@ export class FakeEventStore implements EventStore {
     return Promise.resolve(row);
   }
 
-  recent(tenantId: string, limit: number): Promise<DomainEvent[]> {
+  /** Accounts the fake can resolve an actor to, keyed by user id — the join the
+   *  real adapter does in SQL. Empty by default: an unresolved actor is a real
+   *  state (system, agent, an erased account) and the read model says so. */
+  readonly accounts = new Map<string, { displayName: string | null; email: string }>();
+
+  private record(e: DomainEvent): EventRecord {
+    const account = e.actorId === null ? undefined : this.accounts.get(e.actorId);
+    return {
+      event: e,
+      actor:
+        e.actorId === null || account === undefined
+          ? null
+          : { userId: e.actorId, displayName: account.displayName, email: account.email },
+    };
+  }
+
+  recent(tenantId: string, limit: number): Promise<EventRecord[]> {
     return Promise.resolve(
       this.rows
         .filter((r) => r.tenantId === tenantId)
         .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
-        .slice(0, limit),
+        .slice(0, limit)
+        .map((e) => this.record(e)),
     );
   }
 
-  forObject(tenantId: string, objectType: string, objectId: string): Promise<DomainEvent[]> {
+  forObject(tenantId: string, objectType: string, objectId: string): Promise<EventRecord[]> {
     return Promise.resolve(
       this.rows
         .filter(
           (r) =>
             r.tenantId === tenantId && r.objectType === objectType && r.objectId === objectId,
         )
-        .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)),
+        .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))
+        .map((e) => this.record(e)),
     );
   }
 }

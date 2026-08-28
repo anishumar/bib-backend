@@ -271,7 +271,7 @@ describe("the pipeline's own history is not editable away", () => {
     // "Appends timeline", the other half of the acceptance — and there is no
     // timeline table to keep in step, because the audit log IS the timeline.
     const timeline = await ledger.forObject(tenantA, "lead", leadId);
-    const verbs = timeline.map((e) => e.verb).reverse();
+    const verbs = timeline.map((r) => r.event.verb).reverse();
     expect(verbs).toEqual(["lead.captured", "lead.stage_changed"]);
   });
 });

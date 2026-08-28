@@ -18,6 +18,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import { MAX_TIMELINE_LIMIT } from "../../usecase/ledger/service";
+import type { EventRecord } from "../../usecase/ledger/ports";
 import type { LedgerService } from "../../usecase/ledger/service";
 
 export interface LedgerDeps {
@@ -39,7 +40,29 @@ const EventSchema = z
   })
   .openapi("Event");
 
-const EventListSchema = z.object({ events: z.array(EventSchema) }).openapi("EventList");
+/**
+ * An event with the person who caused it.
+ *
+ * The stored row names its actor by id and always will — personal data stays
+ * out of a log erasure cannot mutate. The name is joined at READ time from the
+ * account as it stands now, so an erased account simply stops resolving while
+ * the event survives, and a screen shows who did something instead of
+ * `human/9895d76d…`.
+ */
+const EventRecordSchema = z
+  .object({
+    event: EventSchema,
+    actor: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string().email(),
+      })
+      .nullable(),
+  })
+  .openapi("EventRecord");
+
+const EventListSchema = z.object({ events: z.array(EventRecordSchema) }).openapi("EventList");
 
 const ObjectParam = z.object({
   objectType: z.string().min(1),
@@ -84,13 +107,22 @@ const objectTimelineRoute = createRoute({
   },
 });
 
+/** Named field by field, so a field added to the read model cannot reach the
+ *  wire without also reaching the spec. */
+function toRecordBody(record: EventRecord): z.infer<typeof EventRecordSchema> {
+  return {
+    event: { ...record.event },
+    actor: record.actor === null ? null : { ...record.actor },
+  };
+}
+
 export function registerLedgerRoutes(app: OpenAPIHono<AppEnv>, deps: LedgerDeps): void {
   app.openapi(tenantTimelineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { limit } = c.req.valid("query");
     const events = await deps.service.recent(s.tenantId, limit);
-    return c.json({ events: [...events] }, 200);
+    return c.json({ events: events.map(toRecordBody) }, 200);
   });
 
   app.openapi(objectTimelineRoute, async (c) => {
@@ -98,6 +130,6 @@ export function registerLedgerRoutes(app: OpenAPIHono<AppEnv>, deps: LedgerDeps)
     if (!s.ok) return c.json(s.deny, s.status);
     const { objectType, objectId } = c.req.valid("param");
     const events = await deps.service.forObject(s.tenantId, objectType, objectId);
-    return c.json({ events: [...events] }, 200);
+    return c.json({ events: events.map(toRecordBody) }, 200);
   });
 }

@@ -9,7 +9,7 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { ActorType, DomainEvent, EventVerb } from "../../domain/ledger/model";
-import type { EventStore, NewEvent } from "../../usecase/ledger/ports";
+import type { EventRecord, EventStore, NewEvent } from "../../usecase/ledger/ports";
 
 interface EventRow {
   id: string;
@@ -93,16 +93,29 @@ export class PostgresEventStore implements EventStore {
     });
   }
 
-  async recent(tenantId: string, limit: number): Promise<DomainEvent[]> {
+  // ── The reads, each joined to whoever caused the event ────────────────────
+  //
+  // The join is a LEFT one and it is the whole design: the stored row keeps
+  // only an actor id, because personal data must stay out of a log that erasure
+  // cannot mutate. The name is resolved at read time from the account as it
+  // stands NOW — so an erased or deleted account simply stops resolving and the
+  // event survives, which is exactly the behaviour erasability requires.
+  //
+  // user_account is GLOBAL and has no row policy of its own; the safety here is
+  // that ledger.event does, so only this tenant's rows reach the join at all.
+
+  async recent(tenantId: string, limit: number): Promise<EventRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<EventRow[]>`
-        SELECT id, tenant_id, actor_type, actor_id, verb, object_type, object_id,
-               payload, occurred_at, recorded_at
-        FROM ledger.event
-        ORDER BY occurred_at DESC, recorded_at DESC
+      const rows = await db<ActorEventRow[]>`
+        SELECT e.id, e.tenant_id, e.actor_type, e.actor_id, e.verb, e.object_type, e.object_id,
+               e.payload, e.occurred_at, e.recorded_at,
+               a.display_name AS actor_display_name, a.email AS actor_email
+        FROM ledger.event e
+        LEFT JOIN tenancy.user_account a ON a.id = e.actor_id
+        ORDER BY e.occurred_at DESC, e.recorded_at DESC
         LIMIT ${limit}
       `;
-      return rows.map(toEvent);
+      return rows.map(toRecord);
     });
   }
 
@@ -110,16 +123,39 @@ export class PostgresEventStore implements EventStore {
     tenantId: string,
     objectType: string,
     objectId: string,
-  ): Promise<DomainEvent[]> {
+  ): Promise<EventRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<EventRow[]>`
-        SELECT id, tenant_id, actor_type, actor_id, verb, object_type, object_id,
-               payload, occurred_at, recorded_at
-        FROM ledger.event
-        WHERE object_type = ${objectType} AND object_id = ${objectId}
-        ORDER BY occurred_at DESC, recorded_at DESC
+      const rows = await db<ActorEventRow[]>`
+        SELECT e.id, e.tenant_id, e.actor_type, e.actor_id, e.verb, e.object_type, e.object_id,
+               e.payload, e.occurred_at, e.recorded_at,
+               a.display_name AS actor_display_name, a.email AS actor_email
+        FROM ledger.event e
+        LEFT JOIN tenancy.user_account a ON a.id = e.actor_id
+        WHERE e.object_type = ${objectType} AND e.object_id = ${objectId}
+        ORDER BY e.occurred_at DESC, e.recorded_at DESC
       `;
-      return rows.map(toEvent);
+      return rows.map(toRecord);
     });
   }
+}
+
+interface ActorEventRow extends EventRow {
+  actor_display_name: string | null;
+  actor_email: string | null;
+}
+
+/** email is the discriminator, not actor_id: the system and agent actors have
+ *  no account, and a human whose account has been erased no longer joins. */
+function toRecord(r: ActorEventRow): EventRecord {
+  return {
+    event: toEvent(r),
+    actor:
+      r.actor_id === null || r.actor_email === null
+        ? null
+        : {
+            userId: r.actor_id,
+            displayName: r.actor_display_name,
+            email: r.actor_email,
+          },
+  };
 }

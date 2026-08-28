@@ -55,6 +55,34 @@ export interface NewEvent {
   readonly occurredAt: string | null;
 }
 
+/**
+ * An event with the person who caused it — the READ model.
+ *
+ * The stored row names its actor by id and always will: personal data must stay
+ * out of an append-only log, because erasure cannot mutate one (see the
+ * contract, §3.4). The NAME is joined at read time from the account as it
+ * stands today, so the log keeps its id, an erased account simply stops
+ * resolving, and a screen still shows who did something instead of
+ * `human/9895d76d…`.
+ *
+ * It carries the email as well as the name because an account may have no name,
+ * and an audit trail nobody can attribute is not an audit trail. That is the
+ * same trade `LeadRecord` makes and for the same reason: this surface needs
+ * `ledger:read`, which already exposes every client the firm has, so a
+ * colleague's work address is not where the line sits. It is not a staff
+ * directory — it is attribution on actions somebody actually took.
+ */
+export interface EventRecord {
+  readonly event: DomainEvent;
+  /** Null for the system and agent actors, and for a human whose account has
+   *  since been erased. */
+  readonly actor: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
+}
+
 export interface EventStore {
   /**
    * Append one event. Idempotent on the primary key: if the id already exists
@@ -63,8 +91,9 @@ export interface EventStore {
    * only way rows ever get there.
    */
   append(e: NewEvent): Promise<DomainEvent>;
-  /** The tenant timeline, newest first. */
-  recent(tenantId: string, limit: number): Promise<DomainEvent[]>;
+  /** The tenant timeline, newest first, each event joined to whoever caused
+   *  it — one query, not one lookup per row. */
+  recent(tenantId: string, limit: number): Promise<EventRecord[]>;
   /** Everything that ever happened to one object, newest first. */
-  forObject(tenantId: string, objectType: string, objectId: string): Promise<DomainEvent[]>;
+  forObject(tenantId: string, objectType: string, objectId: string): Promise<EventRecord[]>;
 }

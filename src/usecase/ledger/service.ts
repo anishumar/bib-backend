@@ -33,7 +33,13 @@ import {
   PayloadTooLarge,
   UnknownVerb,
 } from "../../domain/ledger/errors";
-import type { EventSink, EventStore, NewEvent, RecordEventInput } from "./ports";
+import type {
+  EventRecord,
+  EventSink,
+  EventStore,
+  NewEvent,
+  RecordEventInput,
+} from "./ports";
 
 export interface Deps {
   readonly events: EventStore;
@@ -101,8 +107,8 @@ export class LedgerService implements EventSink {
     return this.deps.events.append(row);
   }
 
-  /** The tenant timeline, newest first. */
-  async recent(tenantId: string, limit?: number): Promise<readonly DomainEvent[]> {
+  /** The tenant timeline, newest first, each event naming whoever caused it. */
+  async recent(tenantId: string, limit?: number): Promise<readonly EventRecord[]> {
     if (!isUuid(tenantId)) throw new InvalidTenantId(tenantId);
     return this.deps.events.recent(tenantId, clampLimit(limit));
   }
@@ -113,7 +119,7 @@ export class LedgerService implements EventSink {
     tenantId: string,
     objectType: string,
     objectId: string,
-  ): Promise<readonly DomainEvent[]> {
+  ): Promise<readonly EventRecord[]> {
     if (!isUuid(tenantId)) throw new InvalidTenantId(tenantId);
     if (!isUuid(objectId)) throw new InvalidObjectId(objectType, objectId);
     return this.deps.events.forObject(tenantId, objectType, objectId);

@@ -273,8 +273,8 @@ describe("reads", () => {
     await service.recordEvent({ tenantId: OTHER_TENANT, verb: "party.created", objectId: OBJECT, actor: human });
 
     const timeline = await service.recent(TENANT);
-    expect(timeline.map((e) => e.verb)).toEqual(["party_identifier.added", "party.created"]);
-    expect(timeline.every((e) => e.tenantId === TENANT)).toBe(true);
+    expect(timeline.map((r) => r.event.verb)).toEqual(["party_identifier.added", "party.created"]);
+    expect(timeline.every((r) => r.event.tenantId === TENANT)).toBe(true);
   });
 
   it("clamps the limit to the ceiling and falls back to the default", async () => {
@@ -296,7 +296,33 @@ describe("reads", () => {
 
     const history = await service.forObject(TENANT, "invoice", OBJECT);
     expect(history).toHaveLength(2);
-    expect(history.every((e) => e.objectId === OBJECT)).toBe(true);
+    expect(history.every((r) => r.event.objectId === OBJECT)).toBe(true);
+  });
+
+  it("names the person who acted, and leaves the system unnamed", async () => {
+    // The stored row keeps only an actor id — personal data must stay out of a
+    // log erasure cannot mutate. The NAME is joined at read time, so an erased
+    // account stops resolving and the event survives. Null is therefore a real
+    // answer, not a gap: the system and agent actors have no account either.
+    const { service, store } = svc();
+    store.accounts.set(human.id ?? "", { displayName: "Priya Menon", email: "priya@firm.test" });
+    await service.recordEvent({ tenantId: TENANT, verb: "party.created", objectId: OBJECT, actor: human });
+    await service.recordEvent({ tenantId: TENANT, verb: "job.spawned", objectId: OBJECT, actor: SYSTEM_ACTOR });
+
+    const timeline = await service.recent(TENANT);
+    const byVerb = new Map(timeline.map((r) => [r.event.verb, r]));
+    expect(byVerb.get("party.created")?.actor?.displayName).toBe("Priya Menon");
+    expect(byVerb.get("job.spawned")?.actor).toBeNull();
+  });
+
+  it("an unresolvable actor reads as null rather than as a uuid", async () => {
+    // An account erased under a data-protection request. The event must
+    // survive it; the name simply stops resolving.
+    const { service } = svc();
+    await service.recordEvent({ tenantId: TENANT, verb: "party.created", objectId: OBJECT, actor: human });
+    const [record] = await service.recent(TENANT);
+    expect(record?.event.actorId).toBe(human.id);
+    expect(record?.actor).toBeNull();
   });
 
   it("an object with no history reads as empty, not as an error", async () => {

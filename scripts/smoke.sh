@@ -201,8 +201,8 @@ chk "a finished lead cannot reopen"     409 "$(code -b $J/partner.txt -XPOST $AP
 echo "  the lead's timeline, which is the ledger and not a second table:"
 curl -s -b $J/partner.txt "$API/api/v1/objects/lead/$LID/events" | python3 -c '
 import sys, json
-for e in reversed(json.load(sys.stdin)["events"]):
-    print("    %-24s %s" % (e["verb"], json.dumps(e["payload"])[:64]))'
+for r in reversed(json.load(sys.stdin)["events"]):
+    print("    %-24s %s" % (r["event"]["verb"], json.dumps(r["event"]["payload"])[:64]))'
 
 echo; echo "── 8. Proposals — quoted from the catalogue, and the discount gate ─"
 # The catalogue version a line PINS: v1, which the firm has since superseded by
@@ -343,11 +343,35 @@ chk "unlisted origin gets none"        0 "$EVIL"
 echo; echo "── 12. The audit trail, as recorded ────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
-for e in reversed(json.load(sys.stdin)["events"]):
-    who = e["actorType"] + ("" if e["actorId"] is None else "/" + e["actorId"][:8])
-    print("    %-30s %-12s %s" % (e["verb"], who, json.dumps(e["payload"])[:60]))'
-LEAK=$(curl -s -b $J/partner.txt "$API/api/v1/events?limit=50" | grep -c "Priya Menon\|AABCM1234K\|@example.com")
-chk "no personal data in the log" 0 "$LEAK"
+for r in reversed(json.load(sys.stdin)["events"]):
+    e = r["event"]
+    who = e["actorType"]
+    if r["actor"] is not None:
+        who = r["actor"]["displayName"] or r["actor"]["email"].split("@")[0]
+    print("    %-30s %-14s %s" % (e["verb"], who[:14], json.dumps(e["payload"])[:56]))'
+
+# THE PROPERTY, tested precisely: personal data stays out of the STORED row.
+# The actor's name is a read-time JOIN against the account as it stands now, so
+# erasing that account stops it resolving and the event survives — which is what
+# erasability requires and what storing a name would have made impossible.
+#
+# So the check reads the `event` half of each record, which IS the log, and
+# ignores the `actor` half, which is not stored anywhere. Grepping the whole
+# response would conflate the two and would have called the join a leak.
+LEAK=$(curl -s -b $J/partner.txt "$API/api/v1/events?limit=50" | python3 -c '
+import sys, json
+stored = json.dumps([r["event"] for r in json.load(sys.stdin)["events"]])
+print(sum(stored.count(s) for s in ("Priya Menon", "AABCM1234K", "@example.com")))')
+chk "no personal data in the stored log" 0 "$LEAK"
+
+# …and the other half of that: the read still says WHO, so the trail is
+# attributable. `human/9895d76d…` is not an audit trail.
+NAMED=$(curl -s -b $J/partner.txt "$API/api/v1/events?limit=50" | python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["events"]
+human = [r for r in rs if r["event"]["actorType"] == "human"]
+print("yes" if human and all(r["actor"] is not None for r in human) else "no")')
+chk "…and every human act names its actor" yes "$NAMED"
 
 echo; echo "───────────────────────────────────────────────────────────────────"
 printf "  %s passed, %s failed\n\n" "$ok" "$bad"
