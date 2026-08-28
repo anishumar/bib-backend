@@ -79,13 +79,48 @@ Fee/commercial visibility is a **fifth, orthogonal** axis — a flag on membersh
 
 Gates 1–3 are built. Gate 1 is RLS; gates 2 and 3 are prefix middleware (`api/guards.ts`),
 both **denied by default** — a `CLIENT_PORTAL` session reaches only `PORTAL_PATHS`, and a
-route absent from `ROUTE_PERMISSIONS` is refused for everyone. Roles are the seeded matrix
-in `domain/authz/model.ts` behind a `PermissionSource` port; **T2.5 swaps in config rows and
-no call site changes**. An unrecognised role carries nothing and says so (`UNKNOWN_ROLE`),
-because a firm locked out by a typo must not look like policy working as intended. Gate 4
-needs the user-to-party link and lands with U1. The fee axis is `AuthzService.seesFees()` /
-`withFeeVisibility()` — it **redacts** money rather than omitting the record, so "you may
-not see this" never looks like "there is no fee".
+route absent from `ROUTE_PERMISSIONS` is refused for everyone. **Roles are config rows the
+firm owns** (T2.5), read through the `PermissionSource` port; the swap changed no call site,
+which is what the port was there for. `DEFAULT_ROLES` in `domain/authz/model.ts` is now only
+the SEED a new tenant's rows are written from — nothing consults it at request time, and
+there is deliberately no fallback to it (see the configuration registry below). A role the
+firm does not define carries nothing and says so (`UNKNOWN_ROLE`), because a firm locked out
+by a typo must not look like policy working as intended. Gate 4 needs the user-to-party link
+and lands with U1. The fee axis is `AuthzService.seesFees()` / `withFeeVisibility()` — it
+**redacts** money rather than omitting the record, so "you may not see this" never looks
+like "there is no fee".
+
+## The configuration registry — data, not code (P2 / T2.5)
+
+The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
+configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
+`config.version` is what it said at a point in time. Two kinds ship today, `service` and
+`role`; `workflow_template` and `rule_pack` join them when T2.7 and T4.3 actually read them.
+Adding a kind is a code change, because each kind needs a body validator in
+`domain/config/model.ts` and a kind without one accepts anything.
+
+**Publishing freezes.** A published version's body can never change — enforced by a trigger
+in migration 0005, so it binds the owner role and the psql session too, not just the app.
+Publishing a new version archives the one it replaces; archived versions stay readable
+forever. That is what makes a PIN meaningful, and pinning is the whole point: a consumer
+that must not move stores a `version.id` and reads that row for the rest of its life, so
+editing a workflow never rewrites jobs already walking it. The registry never pins on a
+consumer's behalf — **the consumer decides**, and both reads are explicit: `list`/`describe`
+for what is in force now, `readPinned` for what it said then. Roles read live, because a
+firm that removes a permission expects it gone that afternoon.
+
+**Every tenant owns a complete role set from the moment it exists** — `createTenant` seeds
+it through the `RoleRegistrySeeder` port, and migration 0005 backfilled the firms that
+predate it. There is no read-time fallback to the product defaults, deliberately: merging
+with them means a firm can never actually remove a permission, and using them only when a
+tenant has no rows means the first role a firm publishes locks out everyone holding another.
+A tenant with no role rows is a real fault and gate 3 says so loudly.
+
+**Writing config requires `tenant:admin`, not a `config:write` of its own.** Whoever can
+publish a role version can grant themselves everything, so the permission has to say that at
+the moment somebody decides to hand it out. Reading is `config:read` — an associate quotes
+from the catalogue. And a publish that would leave no role carrying `tenant:admin` is
+refused: it is unrecoverable from inside the product.
 
 ## Domain non-negotiables (compliance + money)
 
@@ -116,6 +151,10 @@ pass a raw string where a number/enum is meant. Validate in `validate.ts` — fa
   `api/handler/party.ts`. `/internal/…` is the platform's own S2S surface (provisioning).
 - **A business rule** → `usecase/<area>/service.ts`. If it needs something external, declare a
   port in `ports.ts` and inject it; never import an adapter.
+- **Something a firm should be able to change without a deploy** (a catalogue, a template, a
+  rule pack) → a `kind` in the configuration registry, not a table of its own. A body
+  validator in `domain/config/model.ts` and an entry in the `config.entry` CHECK; the
+  versioning, publishing, freezing and pinning already exist.
 - **An external system** (DB table, vendor API) → an adapter in `infrastructure/`, implementing
   a port with `implements`. Wire it in `setup/`.
 - **A new module** → mirror `tenancy/`: `domain/<agg>`, `usecase/<area>`, `infrastructure/`,
@@ -131,8 +170,9 @@ npm test           # vitest (unit + the architecture test)
 npm run test:integration   # the checks only a real Postgres can make (RLS, append-only
                            # ledger). Needs a migrated local DB; not in `check`.
 npm run smoke              # end-to-end against a RUNNING server: seeds a firm with three
-                           # roles and walks every gate, the party model, rate limits,
-                           # CORS and the audit trail. Prints logins to continue in the UI.
+                           # roles and walks every gate, the party model, the config
+                           # registry, rate limits, CORS and the audit trail. Prints
+                           # logins to continue in the UI.
 npm run arch       # the import wall, standalone
 ```
 
@@ -237,5 +277,6 @@ before emitting your first event.
 
 ## First module
 
-`tenancy`, `party` and the `ledger` are built. Next, in order: `crm`, then `billing` — the
-flagship slice. Reuse the platform's auth and notifications; do not rebuild them.
+`tenancy`, `party`, the `ledger` and the `config` registry are built. Next, in order: `crm`,
+then `billing` — the flagship slice. Reuse the platform's auth, notifications and config; do
+not rebuild them.

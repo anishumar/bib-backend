@@ -121,7 +121,7 @@ open and are recorded above; neither blocks Phase 2.
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
 ### Lane B — the engine
-- [ ] `(B)` **T2.5** **P2 Master configuration registry**: services, workflow templates (**versioned**), rule packs (`gst-in@2026.07`), SLAs — data, not code. *Acc: a new service is a config row; running jobs pin their template version.*
+- [x] `(B)` **T2.5** **P2 Master configuration registry**: services, workflow templates (**versioned**), rule packs (`gst-in@2026.07`), SLAs — data, not code. *Acc: a new service is a config row; running jobs pin their template version.*
   > **Agreed scope for the first pass (2026-08-28):** build the **versioned-config spine** (how a
   > row is versioned, published, and *pinned* — a running job must stay on the version it
   > started on, or editing a workflow silently rewrites jobs in flight), plus the two registries
@@ -132,6 +132,39 @@ open and are recorded above; neither blocks Phase 2.
   > designing those shapes against no consumer is how a schema ends up wrong in a way migrations
   > have to undo. This is why T2.5 comes before T2.1: the plan says agree it before the lanes
   > split, and T2.2 depends on the catalogue.
+  >
+  > **Done (2026-08-28), to that scope.** `config.entry` (the configured thing) + `config.version`
+  > (what it said, when) in migration 0005, with the two kinds `service` and `role`. Publishing
+  > **freezes** a version — a trigger, so it binds `bib_owner` and a psql session, not only the
+  > app — and archives the one it replaced; a partial unique index keeps exactly one version in
+  > force. **Pinning works**: `readPinned(versionId)` resolves an archived version with the body
+  > it had, proven against real Postgres. Both reads are explicit and the CONSUMER chooses —
+  > roles read live, because a firm that removes a permission expects it gone that afternoon.
+  >
+  > Gate 3 now reads the firm's own role rows through the unchanged `PermissionSource` port; the
+  > swap touched no call site, which is what the port existed for. `StaticPermissionSource` is
+  > deleted and `DEFAULT_ROLES` is only the seed. **Every tenant gets a complete role set inside
+  > `createTenant`** (a `RoleRegistrySeeder` port) and 0005 backfilled the firms that predate it,
+  > because both read-time fallbacks are worse: merging with product defaults means a firm can
+  > never remove a permission, and defaulting only when a tenant has no rows means its first
+  > published role locks out everyone holding another. New permission `config:read`; **writes use
+  > `tenant:admin`** rather than a `config:write`, since whoever publishes a role version can
+  > grant themselves everything — and a publish leaving no role with `tenant:admin` is refused,
+  > as it cannot be undone from inside the product. Four verbs added to the event contract;
+  > drafts are not recorded, because the log holds what took effect.
+  >
+  > Migration **0006** follows it with a composite foreign key `(entry_id, tenant_id)`: FK checks
+  > run as a system operation RLS does not filter, so 0005 alone let one firm hang a version off
+  > another firm's entry. It leaked nothing, but the wall should make that unrepresentable, not
+  > merely invisible. Separate number because 0005 was already applied — fix forward, no
+  > exception for the same afternoon.
+  >
+  > Gate: `npm run check` 219 tests · `test:integration` 33 · `smoke` 36. **Not built, and not
+  > pretending to be:** workflow templates and rule packs (deferred above), retiring or deleting
+  > an entry (removing a role locks out its members and removing a service breaks pins — that
+  > needs a confirmation flow that says how many rows are affected, which is a screen and a
+  > decision), and any caching of the permission read (one indexed query per authenticated
+  > request, uncached on purpose so a revoked permission is revoked now).
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*

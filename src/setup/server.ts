@@ -26,11 +26,12 @@ import {
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
-import { StaticPermissionSource } from "../infrastructure/authz/static-permissions";
+import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
+import { ConfigService } from "../usecase/config/service";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -62,10 +63,30 @@ export function wire(cfg: Config, log: Logger): Wired {
   const users = new PostgresUserRepository(pools.app);
   const memberships = new PostgresMembershipRepository(pools.app);
 
+  // ONE adapter over the config tables, serving TWO ports. The registry uses it
+  // as its repository; gate 3 uses it as its PermissionSource, because "what
+  // does the role `partner` carry here" is a config read like any other. Two
+  // adapters over the same two tables would eventually disagree about what
+  // "published" means, and one of them would be answering an authorization
+  // question.
+  const configRepository = new PostgresConfigRepository(pools.app);
+
+  const config = new ConfigService({
+    registry: configRepository,
+    ids: systemIds,
+    events: ledger,
+  });
+
+  // Creating a firm now also gives it its own role definitions, in the same
+  // call — gate 3 reads those rows and has no built-in table to fall back on,
+  // so a tenant without them is a tenant nobody can sign in to. The seam is a
+  // port on tenancy (RoleRegistrySeeder) rather than a direct call, so neither
+  // use case knows the other exists; this is the one place they meet.
   const tenancy = new TenancyService({
     tenants: new PostgresTenantRepository(pools.app),
     users,
     memberships,
+    roles: { seedDefaultRoles: (tenantId, actor) => config.seedDefaultRoles(tenantId, actor) },
     ids: systemIds,
     events: ledger,
   });
@@ -79,10 +100,12 @@ export function wire(cfg: Config, log: Logger): Wired {
   // behind the same port is the fix when there are more.
   const rateLimiter = new InMemoryRateLimiter(systemClock);
 
-  // HONEST REGISTRY: the seeded four-role matrix is the only permission source
-  // registered. It is not the configurable role system — T2.5 replaces it with
-  // an adapter reading rule rows a partner edited, behind this same port.
-  const authz = new AuthzService({ permissions: new StaticPermissionSource() });
+  // Gate 3 reads the firm's own role rows. The seeded four-role matrix that used
+  // to answer this is now only what a NEW tenant's rows are initialised from
+  // (domain/authz/model.ts, DEFAULT_ROLES); nothing consults it at request time.
+  // The port did not change and neither did any call site — which was the point
+  // of putting a port here before there was anything to swap in.
+  const authz = new AuthzService({ permissions: configRepository });
 
   const identity = new IdentityService({
     users,
@@ -149,6 +172,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         tenancy: tenancyDeps,
         party: { service: party },
         ledger: { service: ledger },
+        config: { service: config },
       },
       log,
       {

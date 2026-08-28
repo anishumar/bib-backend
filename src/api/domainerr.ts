@@ -11,6 +11,7 @@ import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
 import { AuthzError } from "../domain/authz/errors";
+import { ConfigError } from "../domain/config/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -73,6 +74,26 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DATE_RANGE":
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof ConfigError) {
+    switch (err.code) {
+      case "INVALID_KIND":
+      case "INVALID_KEY":
+      case "INVALID_BODY":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "ENTRY_NOT_FOUND":
+      case "VERSION_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // All three are "the registry is not in the state this call assumed".
+      // WOULD_LOCK_OUT_ADMINISTRATION is a conflict rather than a validation
+      // failure on purpose: the body is perfectly valid, and what refuses it is
+      // the rest of the firm's role set — the caller fixes it by changing
+      // ANOTHER role, not this request.
+      case "ENTRY_EXISTS":
+      case "VERSION_NOT_DRAFT":
+      case "WOULD_LOCK_OUT_ADMINISTRATION":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }
   // Both authorization failures are 403: the caller is who they say they are

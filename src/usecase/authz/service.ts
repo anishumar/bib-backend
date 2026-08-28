@@ -8,7 +8,6 @@
 import type { Principal } from "../../platform/callctx";
 import type { Permission } from "../../domain/authz/model";
 import { grants, redactCommercials, seesCommercials } from "../../domain/authz/model";
-import { KNOWN_ROLES } from "../../domain/authz/model";
 import { NotPermitted, UnknownRole } from "../../domain/authz/errors";
 import type { PermissionSource } from "./ports";
 
@@ -32,8 +31,12 @@ export class AuthzService {
       // has already answered that case with its own 403, so anything reaching
       // here has a role.
       const role = principal.role ?? "(none)";
-      if (!(await this.knowsRole(principal))) {
-        throw new UnknownRole(role, KNOWN_ROLES);
+      // The firm's OWN roles, not the product's defaults — since T2.5 those are
+      // config rows a partner can rename, and telling someone their role is not
+      // one of four names the firm has never used helps nobody.
+      const known = await this.knownRoles(principal);
+      if (!known.includes(role)) {
+        throw new UnknownRole(role, known);
       }
       throw new NotPermitted(role, permission);
     }
@@ -47,9 +50,9 @@ export class AuthzService {
     return grants(held, permission);
   }
 
-  private async knowsRole(principal: Principal): Promise<boolean> {
-    if (principal.tenantId === null || principal.role === null) return false;
-    return this.deps.permissions.isKnownRole(principal.tenantId, principal.role);
+  private async knownRoles(principal: Principal): Promise<readonly string[]> {
+    if (principal.tenantId === null) return [];
+    return this.deps.permissions.knownRoles(principal.tenantId);
   }
 
   /**

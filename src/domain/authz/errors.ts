@@ -32,11 +32,20 @@ export class NotPermitted extends AuthzError {
 
 export class UnknownRole extends AuthzError {
   constructor(role: string, known: readonly string[]) {
+    // Two genuinely different faults share this code, and the message separates
+    // them because the fixes are different. A role the firm does not define is
+    // somebody's typo in a membership. NO roles at all is a firm whose
+    // configuration was never seeded — every one of its people is locked out,
+    // and no amount of correcting role names will help.
     super(
       "UNKNOWN_ROLE",
-      `membership role ${JSON.stringify(role)} is not one the product knows, so it carries no ` +
-        `permissions. Known roles: ${known.join(", ")}. A firm's own vocabulary becomes ` +
-        `configurable in T2.5; until then a membership must use one of these.`,
+      known.length === 0
+        ? `membership role ${JSON.stringify(role)} carries no permissions because this firm has no ` +
+          `role configuration at all. Every member is locked out until it has one. Roles are seeded ` +
+          `when a tenant is created, so this firm's provisioning did not finish.`
+        : `membership role ${JSON.stringify(role)} is not one this firm defines, so it carries no ` +
+          `permissions. This firm's roles: ${known.join(", ")}. Either the membership names the ` +
+          `wrong one, or the role needs defining in the configuration registry.`,
     );
   }
 }

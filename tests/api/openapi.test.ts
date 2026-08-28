@@ -8,7 +8,7 @@ import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
-import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
+import { ConfigService } from "../../src/usecase/config/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
@@ -19,6 +19,8 @@ import { IdentityService } from "../../src/usecase/identity/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import { makePartyFakes } from "../../src/testfakes/party";
 import { makeLedgerFakes } from "../../src/testfakes/ledger";
+import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
+import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
   FakeClock,
   FakeCredentialRepo,
@@ -51,6 +53,18 @@ const devPrincipal: PrincipalResolver = (getHeader) => {
 
 const DEV_SESSION = "00000000-0000-0000-0000-0000000000de";
 
+/**
+ * Gate 3's permission source for these tests.
+ *
+ * The dev principal above has NO tenant — it has not chosen an org — so this is
+ * never actually consulted: every route it reaches here is either public or in
+ * NO_PERMISSION_REQUIRED. It is a real seeded registry rather than an empty one
+ * anyway, so that a test added later which does pick a tenant fails on what it
+ * is testing rather than on a firm with no roles.
+ */
+const DEV_TENANT = "00000000-0000-0000-0000-0000000000fa";
+const permissions: PermissionSource = withDefaultRoles(DEV_TENANT);
+
 function identityService(): IdentityService {
   const fakes = makeFakes();
   return new IdentityService({
@@ -75,6 +89,7 @@ function deps(): RouterDeps {
     tenancy: { service: new TenancyService(makeFakes()) },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
+    config: { service: new ConfigService(makeConfigFakes()) },
     auth: { service: identityService(), cookieName: "bib_session", cookieSecure: false },
   };
 }
@@ -89,7 +104,10 @@ function app() {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalClients: INTERNAL_CLIENTS,
-    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+    // A firm with the roles every real firm is created with. Gate 3 reads the
+    // registry now, so a permission source with an empty one would refuse
+    // everything and these tests would pass for the wrong reason.
+    authz: new AuthzService({ permissions }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
@@ -116,7 +134,7 @@ describe("OpenAPI spec", () => {
     const res = await buildRouter(deps(), silentLog, {
       docsEnabled: false,
       internalClients: INTERNAL_CLIENTS,
-    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+    authz: new AuthzService({ permissions }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },

@@ -49,6 +49,26 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
   [routeKey("GET", "/api/v1/objects/{objectType}/{objectId}/events"), "ledger:read" as const],
+
+  // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
+  // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
+  // rather than a `config:write` of its own.
+  //
+  // That is deliberate and it is the security decision in this table. One of the
+  // things this surface configures is the ROLE registry, so whoever may publish
+  // here may grant themselves every permission in the product. A separate name
+  // for it would let a firm hand out "just config editing" believing it was a
+  // small thing, when it is the largest thing there is. Naming the permission
+  // `tenant:admin` makes the grant say what it actually means at the moment
+  // somebody decides to make it.
+  [routeKey("GET", "/api/v1/config/{kind}"), "config:read" as const],
+  [routeKey("GET", "/api/v1/config/{kind}/{key}"), "config:read" as const],
+  [routeKey("POST", "/api/v1/config/{kind}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/config/{kind}/{key}/versions"), "tenant:admin" as const],
+  [
+    routeKey("POST", "/api/v1/config/{kind}/{key}/versions/{version}/publish"),
+    "tenant:admin" as const,
+  ],
 ]);
 
 // ── Matching a request to its entry ──────────────────────────────────────────

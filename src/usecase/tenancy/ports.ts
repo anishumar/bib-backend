@@ -3,6 +3,7 @@
 // owned by the use case that needs them (never a shared top-level ports pkg),
 // stated in our vocabulary. Adapters in infrastructure/ implement them.
 import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model";
+import type { Actor } from "../../domain/ledger/model";
 
 export interface NewTenant {
   readonly id: string;
@@ -42,4 +43,21 @@ export interface MembershipRepository {
   /** Reads a user's memberships ACROSS tenants — the org-switch, run under the
    *  identity RLS context, never a tenant bypass. */
   listByUser(userId: string): Promise<Membership[]>;
+}
+
+/**
+ * Giving a brand-new firm its own role definitions.
+ *
+ * Tenancy needs this and does not want to know what a config row is, so the
+ * seam is here rather than a direct call into the configuration registry. The
+ * composition root satisfies it with ConfigService.seedDefaultRoles.
+ *
+ * It is part of CREATING a tenant, not a follow-up step, because gate 3 reads
+ * the firm's own role rows and nothing else: a firm without them is a firm
+ * nobody can sign in to. Making it a port keeps that requirement visible here
+ * instead of buried in provisioning scripts.
+ */
+export interface RoleRegistrySeeder {
+  /** Returns the role keys written, for the caller's audit trail. */
+  seedDefaultRoles(tenantId: string, actor: Actor): Promise<readonly string[]>;
 }

@@ -38,6 +38,34 @@ describe("createTenant", () => {
       SlugTaken,
     );
   });
+
+  it("gives the new firm its own role definitions, in the same call", async () => {
+    // Gate 3 reads the firm's own role rows and has no built-in table to fall
+    // back on (T2.5). A tenant created without them is a tenant nobody can sign
+    // in to, so provisioning does it here rather than in a separate step that
+    // could be skipped.
+    const { service, f } = svc();
+    const t = await service.createTenant({ name: "Harbour Point", slug: "harbour-point" });
+
+    expect(await f.config.knownRoles(t.id)).toEqual([
+      "associate",
+      "client_contact",
+      "manager",
+      "partner",
+    ]);
+    // Usable immediately: somebody signing in as a partner can actually do
+    // something, including edit the configuration they were just given.
+    expect(await f.config.permissionsFor(t.id, "partner")).toContain("tenant:admin");
+  });
+
+  it("records the seeding as one fact, after the tenant's own creation", async () => {
+    // One event for four roles: eight rows for something that is really one
+    // fact would bury the events a person actually caused. And it comes second,
+    // because the tenant has to exist before its configuration can.
+    const { service, f } = svc();
+    await service.createTenant({ name: "Harbour Point", slug: "harbour-point" });
+    expect(f.events.verbs()).toEqual(["tenant.created", "config_registry.seeded"]);
+  });
 });
 
 describe("ensureUser (link, never duplicate — ADR-02)", () => {

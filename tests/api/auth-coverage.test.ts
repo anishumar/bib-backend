@@ -25,7 +25,7 @@ import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { CAPABILITIES } from "../../src/api/capabilities";
 import { AuthzService } from "../../src/usecase/authz/service";
-import { StaticPermissionSource } from "../../src/infrastructure/authz/static-permissions";
+import { ConfigService } from "../../src/usecase/config/service";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
@@ -38,6 +38,7 @@ import { IdentityService } from "../../src/usecase/identity/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import { makePartyFakes } from "../../src/testfakes/party";
 import { makeLedgerFakes } from "../../src/testfakes/ledger";
+import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import {
   FakeClock,
   FakeCredentialRepo,
@@ -66,12 +67,23 @@ const silentLog = { info() {}, warn() {}, error() {} };
  */
 const INTENTIONALLY_PUBLIC = new Set(["/health", "/ready", "/openapi.json", "/docs"]);
 
+/**
+ * The firm every session below acts for.
+ *
+ * Gate 3 reads role definitions from that firm's configuration registry now, so
+ * the permission source has to be a registry seeded FOR THIS TENANT — the same
+ * four roles createTenant writes. An empty registry would refuse every role and
+ * these tests would go green for the wrong reason.
+ */
+const SESSION_TENANT = "00000000-0000-4000-8000-000000000007";
+
 function deps(): RouterDeps {
   const fakes = makeFakes();
   return {
     tenancy: { service: new TenancyService(fakes) },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
+    config: { service: new ConfigService(makeConfigFakes()) },
     auth: {
       service: new IdentityService({
         users: fakes.users,
@@ -100,7 +112,7 @@ function app(principal: Principal | null = null) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalClients: INTERNAL_CLIENTS,
-    authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+    authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
@@ -194,7 +206,7 @@ describe("every route is accounted for", () => {
     const closed = buildRouter(deps(), silentLog, {
       docsEnabled: false,
       internalClients: INTERNAL_CLIENTS,
-      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
       rateLimit: {
@@ -437,7 +449,7 @@ describe("CORS — the frontend is a separate origin", () => {
     const tight = buildRouter(deps(), silentLog, {
       docsEnabled: true,
       internalClients: INTERNAL_CLIENTS,
-      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
       rateLimit: {
         auth: { limit: 3, windowSeconds: 60 },
@@ -476,7 +488,7 @@ describe("the /internal surface authorizes, not just authenticates", () => {
         { name: "onboarding", key: KEY_TENANTS, capabilities: ["tenant.provision"] },
         { name: "reset-tool", key: KEY_PASSWORD, capabilities: ["credential.set"] },
       ],
-      authz: new AuthzService({ permissions: new StaticPermissionSource() }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
       rateLimit: {
         auth: { limit: 1000, windowSeconds: 60 },

@@ -1,0 +1,92 @@
+// The ports the configuration registry needs from the world. Interfaces are
+// owned by the use case that needs them, stated in our vocabulary; adapters in
+// infrastructure/ implement them. Every method is tenant-scoped and expected to
+// run under the RLS context (withTenant) inside the adapter.
+import type { ConfigEntry, ConfigKind, ConfigVersion, PublishedEntry } from "../../domain/config/model";
+
+export interface NewEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: ConfigKind;
+  readonly key: string;
+}
+
+/**
+ * A version to insert. Note what is ABSENT: the version NUMBER.
+ *
+ * The repository assigns it, under a lock on the entry row, because computing
+ * `max + 1` up here and inserting it down there is a race two people editing
+ * the same service would eventually lose. The unique constraint would catch it,
+ * but a caller should not have to retry to find that out.
+ */
+export interface NewVersion {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly entryId: string;
+  readonly body: Record<string, unknown>;
+}
+
+/** An entry and its first version, created together — an entry with no version
+ *  says nothing, so the two are never separately observable. */
+export interface DefinedEntry {
+  readonly entry: ConfigEntry;
+  readonly draft: ConfigVersion;
+}
+
+export interface PublishOutcome {
+  readonly published: ConfigVersion;
+  /** The version this one replaced, now archived. Null when it is the first. */
+  readonly archived: ConfigVersion | null;
+}
+
+/** One entry to write straight into a published state — provisioning only. */
+export interface SeedRow {
+  readonly entryId: string;
+  readonly versionId: string;
+  readonly key: string;
+  readonly body: Record<string, unknown>;
+}
+
+export interface ConfigRepository {
+  /** Creates the entry and its first draft in ONE transaction. */
+  define(entry: NewEntry, firstDraft: NewVersion): Promise<DefinedEntry>;
+
+  findEntry(tenantId: string, kind: ConfigKind, key: string): Promise<ConfigEntry | null>;
+
+  /** The catalogue read: every entry of a kind, with whatever it currently
+   *  says. Entries with only drafts come back with `published: null`. */
+  listPublished(tenantId: string, kind: ConfigKind): Promise<readonly PublishedEntry[]>;
+
+  /** One entry's history, newest version first. */
+  listVersions(tenantId: string, entryId: string): Promise<readonly ConfigVersion[]>;
+
+  /** A new draft on an existing entry. The number is assigned here. */
+  addVersion(v: NewVersion): Promise<ConfigVersion>;
+
+  /**
+   * RESOLVE A PIN. The one read that must keep working after the version has
+   * been superseded and archived — that is the entire promise the registry
+   * makes to a job that started three weeks ago.
+   */
+  findVersionById(tenantId: string, versionId: string): Promise<ConfigVersion | null>;
+
+  /**
+   * Archive whatever this entry currently publishes and publish this draft, in
+   * ONE transaction. Two steps that must not be separately observable: between
+   * them there would be either two published versions or none, and a permission
+   * check landing in that window would get the wrong answer.
+   */
+  publish(tenantId: string, versionId: string): Promise<PublishOutcome>;
+
+  /**
+   * Create entries whose first version is already published, in one
+   * transaction. Provisioning only: a new firm's role registry has to exist
+   * before anyone can sign in to edit it, so it cannot be assembled through the
+   * draft-then-publish path the product uses.
+   */
+  seedPublished(
+    tenantId: string,
+    kind: ConfigKind,
+    rows: readonly SeedRow[],
+  ): Promise<readonly ConfigEntry[]>;
+}

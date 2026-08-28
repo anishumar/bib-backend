@@ -6,7 +6,9 @@
 # It seeds a firm with three people (a partner, an associate, a client contact),
 # then walks the properties the product actually depends on: the provisioning
 # key, the session wall, the audience and role gates, the party model, the
-# effective-dated relationships, rate limiting, CORS, and the audit trail.
+# effective-dated relationships, the configuration registry (a published
+# version is frozen; a firm cannot strand itself), rate limiting, CORS, and
+# the audit trail.
 #
 # Run:  npm run dev   (in another terminal)
 #       npm run smoke
@@ -80,18 +82,50 @@ for D in 2020-06-01 2025-06-01; do
   printf "    on %s -> %s relationship(s)\n" "$D" "$N"
 done
 
-echo; echo "── 6. Rate limiting ────────────────────────────────────────────────"
+echo; echo "── 6. The configuration registry — services and roles are data ─────"
+chk "associate may read the catalogue"     200 "$(code -b $J/associate.txt $API/api/v1/config/service)"
+chk "associate may NOT change it"          403 "$(code -b $J/associate.txt -XPOST $API/api/v1/config/service -H "$H" -d '{"key":"sneaky","body":{"name":"X","billingBasis":"fixed"}}')"
+SVC='{"key":"gst-filing","body":{"name":"GST monthly filing","category":"indirect-tax","jurisdictions":["IN"],"billingBasis":"fixed"}}'
+chk "partner defines a service"            201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d "$SVC")"
+chk "a misspelt field is refused"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service -H "$H" -d '{"key":"advisory","body":{"name":"A","billing":"fixed"}}')"
+NOTLIVE=$(curl -s -b $J/partner.txt $API/api/v1/config/service | python3 -c 'import sys,json;print(json.load(sys.stdin)["entries"][0]["published"])')
+chk "defining does not put it in force"    None "$NOTLIVE"
+chk "publishing does"                      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/1/publish -H "$H")"
+chk "publishing it twice is refused"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/1/publish -H "$H")"
+
+# A published version is frozen: v2 supersedes it, and v1 keeps the body it had.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions -H "$H" -d '{"body":{"name":"GST monthly filing (2026 scope)","billingBasis":"fixed"}}'
+chk "a second version publishes"           200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/gst-filing/versions/2/publish -H "$H")"
+FROZEN=$(curl -s -b $J/partner.txt $API/api/v1/config/service/gst-filing | python3 -c '
+import sys, json
+vs = {v["version"]: v for v in json.load(sys.stdin)["versions"]}
+print("%s/%s" % (vs[1]["status"], vs[1]["body"]["name"] == "GST monthly filing"))')
+chk "the version it replaced is frozen"    "archived/True" "$FROZEN"
+
+# The role registry is the same machinery — and it refuses to strand the firm.
+# Drafting a partner role with no tenant:admin is fine; PUBLISHING it is not,
+# because nobody would then be able to put it back.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/role/partner/versions -H "$H" \
+  -d '{"body":{"label":"Partner","permissions":["party:read","party:write","ledger:read"]}}'
+chk "a firm cannot remove its last admin"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/role/partner/versions/2/publish -H "$H")"
+
+# The thing that was impossible before T2.5: a firm's own word for a role.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/role -H "$H" \
+  -d '{"key":"rm","body":{"label":"Relationship manager","permissions":["party:read","config:read"]}}'
+chk "a firm can add a role of its own"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/role/rm/versions/1/publish -H "$H")"
+
+echo; echo "── 7. Rate limiting ────────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 7. CORS — the frontend is a separate origin ─────────────────────"
+echo; echo "── 8. CORS — the frontend is a separate origin ─────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 8. The audit trail, as recorded ─────────────────────────────────"
+echo; echo "── 9. The audit trail, as recorded ─────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for e in reversed(json.load(sys.stdin)["events"]):

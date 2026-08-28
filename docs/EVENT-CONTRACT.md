@@ -190,6 +190,24 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
 | `party_relationship.ended` | party_relationship | A relationship was closed with a valid_to date. |
 
+### Platform — the configuration registry (P2 / T2.5, built and wired)
+
+Configuration decides what everyone else may do, so who changed it, when, and to which
+version is exactly what gets asked about afterwards.
+
+| Verb | Object | Means |
+|---|---|---|
+| `config_entry.created` | config_entry | A configured thing (a service, a role) was defined, with its first draft. |
+| `config_version.published` | config_version | A version took effect and froze. Anything pinned to the version it replaced still reads that one. |
+| `config_version.archived` | config_version | A version stopped being what is in force. It stays readable — pins resolve to it forever. |
+| `config_registry.seeded` | tenant | A new tenant's registry was initialised from the product defaults, inside `createTenant`. |
+
+> **Drafts are not recorded, and seeding is one event.** A draft changes nothing about what
+> the firm does, and this log holds what took *effect* — `config_version.published` is where
+> that happens and it names whoever made it real. Seeding writes four roles and records one
+> event for the lot: eight rows in a new firm's timeline for a single fact would bury the
+> events a person actually caused.
+
 ### Commercial lane (A) — sell → bill → collect
 
 | Verb | Object | Means |
@@ -213,7 +231,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 
 | Verb | Object | Means |
 |---|---|---|
-| `workflow_template.published` | workflow_template | A template version was published; running jobs pin their version. |
+| `workflow_template.published` | workflow_template | A template version was published; running jobs pin their version. **Predates the registry** — when workflow templates become a config *kind* (T2.7), publishing one will already record `config_version.published`, and T2.7 decides whether this verb survives. |
 | `rule_pack.activated` | rule_pack | A rule-pack version became active. Never written by an agent (A10). |
 | `job.spawned` | job | The scheduler created a job from a trigger or a recurrence. |
 | `job.step_advanced` | job | The orchestrator moved a job to the next step. |
@@ -238,9 +256,14 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 Two questions, two routes (read-only — see below):
 
 ```
-GET /internal/v1/tenants/{tenantId}/events?limit=50
-GET /internal/v1/tenants/{tenantId}/objects/{objectType}/{objectId}/events
+GET /api/v1/events?limit=50
+GET /api/v1/objects/{objectType}/{objectId}/events
 ```
+
+These moved off `/internal` when real sessions landed (T1.7): the tenant comes from the
+session, so a caller can no longer name the firm whose audit trail they would like to read.
+Both require `ledger:read`, which is a partner-and-manager permission — the firm's whole
+trail names every client it has.
 
 There is **no POST**. Events are written by the service that causes them, naming its own
 actor. An endpoint that let a caller post an arbitrary event would make the audit trail

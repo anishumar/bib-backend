@@ -5,6 +5,7 @@
 //   /api/v1/auth/...                   sign in / prove / switch org / sign out
 //   /internal/v1/...                   service-to-service / platform (not app-facing)
 //   /api/v1/tenancy/...                app-facing (user principal)
+//   /api/v1/config/...                 the firm's own services and roles (T2.5)
 //   /openapi.json, /docs               generated spec + Swagger UI (gated)
 //
 // Per-module routes live in their handler module's registrar (registerTenancy…)
@@ -29,6 +30,8 @@ import { registerPartyRoutes } from "./handler/party";
 import type { PartyDeps } from "./handler/party";
 import { registerLedgerRoutes } from "./handler/ledger";
 import type { LedgerDeps } from "./handler/ledger";
+import { registerConfigRoutes } from "./handler/config";
+import type { ConfigDeps } from "./handler/config";
 import { registerAuthRoutes } from "./handler/auth";
 import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
@@ -54,6 +57,7 @@ export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly party: PartyDeps;
   readonly ledger: LedgerDeps;
+  readonly config: ConfigDeps;
   readonly auth: AuthDeps;
 }
 
@@ -137,6 +141,7 @@ export function buildRouter(
   registerTenancyRoutes(app, deps.tenancy);
   registerPartyRoutes(app, deps.party);
   registerLedgerRoutes(app, deps.ledger);
+  registerConfigRoutes(app, deps.config);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

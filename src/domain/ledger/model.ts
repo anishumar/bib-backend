@@ -78,6 +78,16 @@ export const EVENT_VERBS = {
   "party_relationship.recorded": { objectType: "party_relationship",  lane: "platform",   description: "An effective-dated relationship between two parties was recorded." },
   "party_relationship.ended":    { objectType: "party_relationship",  lane: "platform",   description: "A relationship was closed with a valid_to date." },
 
+  // ── platform · the configuration registry (P2 / T2.5) ─────────────────────
+  // Configuration decides what everyone else may do, so who changed it, when,
+  // and to which version is exactly what gets asked about later. Only versions
+  // that took EFFECT are recorded: a draft changes nothing until it is
+  // published, and the publish names the person who made it real.
+  "config_entry.created":        { objectType: "config_entry",        lane: "platform",   description: "A configured thing (a service, a role) was defined, with its first draft." },
+  "config_version.published":    { objectType: "config_version",      lane: "platform",   description: "A configuration version took effect and froze. Anything pinned to the version it replaced still reads that one." },
+  "config_version.archived":     { objectType: "config_version",      lane: "platform",   description: "A configuration version stopped being what is in force. It stays readable — pins resolve to it forever." },
+  "config_registry.seeded":      { objectType: "tenant",              lane: "platform",   description: "A new tenant's configuration registry was initialised from the product defaults. One event, not one per row." },
+
   // ── commercial lane (A) · sell → bill → collect ────────────────────────────
   "lead.captured":               { objectType: "lead",                lane: "commercial", description: "A lead entered the pipeline." },
   "lead.merged":                 { objectType: "lead",                lane: "commercial", description: "A duplicate lead was merged into an existing party." },

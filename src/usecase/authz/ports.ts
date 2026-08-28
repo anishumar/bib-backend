@@ -1,21 +1,31 @@
-// The seam that makes T2.5 a swap rather than a rewrite.
+// The seam that made T2.5 a swap rather than a rewrite.
 //
-// Today the answer comes from a table in the domain. When the master
-// configuration registry lands, a Postgres adapter implements this same
-// interface and reads rule rows a partner edited on a screen — and not one call
-// site changes, because no call site ever knew where the answer came from.
+// It has now been swapped. The answer used to come from a table in the domain;
+// it comes from the tenant's own `role` config rows, read by a Postgres adapter
+// that implements this same interface. No route, no guard and no handler
+// changed — none of them ever knew where the answer came from.
 import type { Permission } from "../../domain/authz/model";
 
 export interface PermissionSource {
   /**
-   * The permissions a role carries in a tenant.
+   * The permissions a role carries in a tenant, or none if the tenant does not
+   * define that role.
    *
-   * Tenant-scoped even though the seeded implementation ignores it: the whole
-   * point of T2.5 is that each firm defines its own roles, so the parameter has
-   * to be in the interface from the start or every call site changes later.
+   * Tenant-scoped from the first version of this interface, when the seeded
+   * implementation ignored the parameter — which is why the swap touched
+   * nothing above it.
    */
   permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]>;
-  /** Whether the product recognises the role at all — the difference between
-   *  "not allowed" and "misconfigured". */
-  isKnownRole(tenantId: string, role: string): Promise<boolean>;
+
+  /**
+   * Every role this firm defines.
+   *
+   * Not a boolean `isKnownRole`, because the caller that needs this is building
+   * the error for a membership naming a role the firm does not have — and the
+   * only useful thing to say to a firm locked out by a typo is which roles it
+   * actually has. An empty result means the firm has no role configuration at
+   * all, which is a provisioning fault rather than a policy answer, and the
+   * error says so differently.
+   */
+  knownRoles(tenantId: string): Promise<readonly string[]>;
 }

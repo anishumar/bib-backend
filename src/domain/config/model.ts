@@ -1,0 +1,255 @@
+// The master configuration registry (P2) — nouns + pure rules, stdlib only.
+//
+// One spine, several KINDS. The spine is the part that is hard to get right and
+// expensive to change later: how a configured thing is versioned, published,
+// and PINNED. The kinds are just body shapes riding on it.
+//
+// Pinning is the reason the spine exists. A consumer that must not move — a job
+// walking a workflow, a proposal quoted from the catalogue — stores the id of
+// the version it started on and reads that row forever. Editing a published
+// version would silently rewrite work already in flight, so a published version
+// is frozen (by a trigger, in migration 0005) and a change is a NEW version.
+// Which of the two reads a consumer wants is the CONSUMER's decision and is
+// always explicit:
+//
+//   live   — the published version, right now. Roles read this way: a firm that
+//            removes a permission expects it gone this afternoon, not whenever
+//            the sessions holding a pin expire.
+//   pinned — the version id stored at the time. Jobs and quotes read this way.
+//
+// Adding a kind is a code change, not a config change, because each kind needs a
+// body validator and a kind without one would accept anything. The database
+// CHECK on config.entry.kind is the other half of that agreement.
+import type { Permission } from "../authz/model";
+import { PERMISSIONS, isPermission } from "../authz/model";
+
+/** The configured things this pass knows about. `workflow_template` and
+ *  `rule_pack` join them when T2.7 and T4.3 actually read them — designing
+ *  those bodies against no consumer is how a schema ends up wrong in a way a
+ *  migration has to undo. */
+export type ConfigKind = "service" | "role";
+
+export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role"];
+
+export function isConfigKind(v: string): v is ConfigKind {
+  return (CONFIG_KINDS as readonly string[]).includes(v);
+}
+
+/** draft is working state; published is in force and frozen; archived was in
+ *  force and still resolves, because something may be pinned to it. */
+export type VersionStatus = "draft" | "published" | "archived";
+
+export interface ConfigEntry {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: ConfigKind;
+  /** The firm's own handle: `gst-filing`, `partner`. */
+  readonly key: string;
+}
+
+export interface ConfigVersion {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly entryId: string;
+  readonly version: number;
+  readonly status: VersionStatus;
+  readonly body: Record<string, unknown>;
+  readonly publishedAt: string | null;
+  readonly archivedAt: string | null;
+}
+
+/** An entry and what it says right now — null when nothing is published yet. */
+export interface PublishedEntry {
+  readonly entry: ConfigEntry;
+  readonly published: ConfigVersion | null;
+}
+
+/**
+ * How a pinned version is NAMED in a log, an error, or on a screen:
+ * `role:partner@2`, `service:gst-filing@7`. The build plan writes rule packs as
+ * `gst-in@2026.07`; this is the same idea with a monotonic number instead of a
+ * date, which is what the table actually stores.
+ *
+ * Derived, never a column — a stored copy would eventually disagree with the
+ * row it names.
+ */
+export function configRef(kind: ConfigKind, key: string, version: number): string {
+  return `${kind}:${key}@${String(version)}`;
+}
+
+/**
+ * A key is a handle, not a title: lowercase, url-safe, stable. The label a
+ * person reads lives in the body and can be changed freely; the key cannot,
+ * because pins and references are written against it.
+ */
+const KEY_PATTERN = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
+export const MAX_KEY_LENGTH = 64;
+
+export function isValidKey(key: string): boolean {
+  return key.length <= MAX_KEY_LENGTH && KEY_PATTERN.test(key);
+}
+
+// ── Body shapes, one per kind ────────────────────────────────────────────────
+
+/** A role, as a firm defines it. The permission SET is the product's; which of
+ *  them this role holds is the firm's. */
+export interface RoleBody {
+  readonly label: string;
+  readonly permissions: readonly Permission[];
+}
+
+/** How a service is charged. A closed set because quoting (T2.2) branches on
+ *  it — free text here would become an `if` nobody can enumerate. */
+export type BillingBasis = "fixed" | "hourly" | "retainer" | "per_unit";
+
+export const BILLING_BASES: readonly BillingBasis[] = [
+  "fixed",
+  "hourly",
+  "retainer",
+  "per_unit",
+];
+
+/**
+ * A catalogue row: what the firm sells, not what it charged anyone.
+ *
+ * Deliberately thin. Price belongs to a quote, which is T2.2's to design
+ * against a real proposal — and when it does, adding the field is a new
+ * VERSION of each service, not a migration. That is what the spine is for.
+ */
+export interface ServiceBody {
+  readonly name: string;
+  readonly description: string | null;
+  readonly category: string | null;
+  /** ISO 3166 codes the service is offered in; empty means everywhere. */
+  readonly jurisdictions: readonly string[];
+  readonly billingBasis: BillingBasis;
+}
+
+/**
+ * Validate a body against its kind. Returns the PROBLEM, or null when it is
+ * fine — the caller turns the problem into `InvalidBody`, so the message names
+ * the field, the bad value and the valid set rather than saying "invalid".
+ *
+ * Unknown keys are rejected rather than ignored. A body is stored verbatim and
+ * read back by name, so `permission: [...]` for `permissions: [...]` would be
+ * accepted, saved, and grant nothing — a config change that appears to work and
+ * does not is the worst outcome available here.
+ */
+export function validateBody(kind: ConfigKind, body: Record<string, unknown>): string | null {
+  switch (kind) {
+    case "role":
+      return validateRoleBody(body);
+    case "service":
+      return validateServiceBody(body);
+  }
+}
+
+const ROLE_FIELDS = ["label", "permissions"];
+
+function validateRoleBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, ROLE_FIELDS);
+  if (unknown) return unknown;
+
+  const label = body["label"];
+  if (typeof label !== "string" || label.trim() === "") {
+    return `"label" must be a non-empty string, got ${describe(label)}`;
+  }
+
+  const permissions = body["permissions"];
+  if (!Array.isArray(permissions)) {
+    return `"permissions" must be an array, got ${describe(permissions)}`;
+  }
+  for (const p of permissions) {
+    if (typeof p !== "string" || !isPermission(p)) {
+      return (
+        `"permissions" contains ${describe(p)}, which is not a permission this product checks. ` +
+        `Valid: ${PERMISSIONS.join(", ")}`
+      );
+    }
+  }
+  return null;
+}
+
+const SERVICE_FIELDS = ["name", "description", "category", "jurisdictions", "billingBasis"];
+
+function validateServiceBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, SERVICE_FIELDS);
+  if (unknown) return unknown;
+
+  const name = body["name"];
+  if (typeof name !== "string" || name.trim() === "") {
+    return `"name" must be a non-empty string, got ${describe(name)}`;
+  }
+  for (const field of ["description", "category"]) {
+    const v = body[field];
+    if (v !== undefined && v !== null && typeof v !== "string") {
+      return `"${field}" must be a string or null, got ${describe(v)}`;
+    }
+  }
+  const jurisdictions = body["jurisdictions"];
+  if (jurisdictions !== undefined) {
+    if (!Array.isArray(jurisdictions)) {
+      return `"jurisdictions" must be an array of ISO country codes, got ${describe(jurisdictions)}`;
+    }
+    for (const j of jurisdictions) {
+      if (typeof j !== "string" || j.trim() === "") {
+        return `"jurisdictions" contains ${describe(j)}; each entry is a code like "IN" or "SG"`;
+      }
+    }
+  }
+  const basis = body["billingBasis"];
+  if (typeof basis !== "string" || !(BILLING_BASES as readonly string[]).includes(basis)) {
+    return `"billingBasis" must be one of ${BILLING_BASES.join(", ")}, got ${describe(basis)}`;
+  }
+  return null;
+}
+
+function unknownFields(body: Record<string, unknown>, allowed: readonly string[]): string | null {
+  const extra = Object.keys(body).filter((k) => !allowed.includes(k));
+  if (extra.length === 0) return null;
+  return (
+    `unknown field${extra.length > 1 ? "s" : ""} ${extra.map((e) => JSON.stringify(e)).join(", ")}. ` +
+    `A body is stored verbatim and read back by name, so a misspelt field would save and do nothing. ` +
+    `Valid: ${allowed.join(", ")}`
+  );
+}
+
+function describe(v: unknown): string {
+  if (v === undefined) return "nothing";
+  if (v === null) return "null";
+  if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+    return JSON.stringify(v);
+  }
+  return Array.isArray(v) ? "an array" : "an object";
+}
+
+// ── Reading a stored body back ───────────────────────────────────────────────
+
+/**
+ * The permissions a stored role body carries.
+ *
+ * Filters to permissions the product still checks, which is the fail-closed
+ * reading of the two things that can put an unknown one in a stored row: a hand
+ * edit, or a permission being REMOVED from the code while rows still name it.
+ * In both cases the permission does not exist, so it grants nothing. Bodies are
+ * validated at the write, so this only ever fires for those two.
+ */
+export function readRolePermissions(body: Record<string, unknown>): readonly Permission[] {
+  const raw = body["permissions"];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((p): p is Permission => typeof p === "string" && isPermission(p));
+}
+
+/** The role's display name, falling back to its key when a stored body somehow
+ *  has none — a role with no label is still a role that works. */
+export function readRoleLabel(body: Record<string, unknown>, key: string): string {
+  const label = body["label"];
+  return typeof label === "string" && label.trim() !== "" ? label : key;
+}
+
+/** The body a seeded role is written with — the one place the seed's SHAPE is
+ *  stated, so tenancy provisioning and the migration agree on more than the
+ *  permission list. */
+export function roleBodyOf(definition: RoleBody): Record<string, unknown> {
+  return { label: definition.label, permissions: [...definition.permissions] };
+}

@@ -23,6 +23,7 @@ import {
 } from "../../domain/tenancy/errors";
 import type {
   MembershipRepository,
+  RoleRegistrySeeder,
   TenantRepository,
   UserRepository,
 } from "./ports";
@@ -31,6 +32,8 @@ export interface Deps {
   readonly tenants: TenantRepository;
   readonly users: UserRepository;
   readonly memberships: MembershipRepository;
+  /** A new firm's role definitions, written as its own config rows. */
+  readonly roles: RoleRegistrySeeder;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -81,6 +84,19 @@ export class TenancyService {
       actor,
       payload: { slug: tenant.slug, ...byline(input.provisionedBy) },
     });
+
+    // Then its roles, in the same call. Gate 3 reads the firm's own role rows
+    // and has no built-in table to fall back on (T2.5), so a tenant without
+    // them is a tenant nobody can sign in to. Doing it here rather than in a
+    // provisioning script means the two facts cannot get separated.
+    //
+    // The honest limit, same shape as the event ordering above: these are two
+    // ports with no shared unit of work, so a failure here leaves a created,
+    // audited tenant with no roles. That state is loud rather than silent —
+    // every request to it answers UNKNOWN_ROLE naming exactly this cause — and
+    // it is preferable to the alternative, which is a firm that appears to work
+    // because gate 3 quietly fell back to permissions nobody chose.
+    await this.deps.roles.seedDefaultRoles(tenant.id, actor);
     return tenant;
   }
 

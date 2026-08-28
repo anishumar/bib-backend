@@ -4,12 +4,15 @@
 // them.
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
+import { FakeConfigRepo } from "./config";
+import { ConfigService } from "../usecase/config/service";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
   MembershipRepository,
   NewMembership,
   NewTenant,
   NewUser,
+  RoleRegistrySeeder,
   TenantRepository,
   UserRepository,
 } from "../usecase/tenancy/ports";
@@ -60,14 +63,26 @@ export function makeFakes(): {
   tenants: FakeTenantRepo;
   users: FakeUserRepo;
   memberships: FakeMembershipRepo;
+  roles: RoleRegistrySeeder;
+  /** The rows the seeder wrote, so a test can look at what a new firm got. */
+  config: FakeConfigRepo;
   ids: FakeIds;
   events: RecordingEventSink;
 } {
+  const ids = new FakeIds();
+  const events = new RecordingEventSink();
+  // The REAL ConfigService over an in-memory registry, not a stub that records
+  // that it was asked — the same choice RecordingEventSink makes. A tenancy
+  // test therefore fails if provisioning stops giving a new firm a usable role
+  // set, which is the thing that would lock every one of its people out.
+  const config = new FakeConfigRepo();
   return {
     tenants: new FakeTenantRepo(),
     users: new FakeUserRepo(),
     memberships: new FakeMembershipRepo(),
-    ids: new FakeIds(),
-    events: new RecordingEventSink(),
+    roles: new ConfigService({ registry: config, ids, events }),
+    config,
+    ids,
+    events,
   };
 }

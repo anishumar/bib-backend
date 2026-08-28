@@ -16,17 +16,23 @@
  * What a caller may do. A closed set, deliberately coarse: these are the verbs
  * an API route is gated on, not a description of the business. Finer questions
  * ("may they approve THIS item") are record-level and belong with the record.
+ *
+ * The SET is the product's and stays code — a firm composes its roles out of
+ * these, it does not invent new ones. A permission nothing checks would be a
+ * lie on a screen, and only code knows what is actually checked.
  */
 export type Permission =
   | "party:read"
   | "party:write"
   | "ledger:read"
+  | "config:read"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
   "party:read",
   "party:write",
   "ledger:read",
+  "config:read",
   "tenant:admin",
 ];
 
@@ -35,45 +41,81 @@ export function isPermission(v: string): v is Permission {
 }
 
 /**
- * The seeded role vocabulary.
+ * The permission that can change the permissions.
  *
- * `membership.role` is free text on purpose — it is the firm's own word, and
- * T2.5 (the master configuration registry) makes the mapping below a table a
- * partner can edit. Until then these four are what the product ships with, and
- * a role outside the set resolves to NO permissions rather than to a guess.
- *
- * That is deliberate and it is a real constraint: a firm cannot invent "rm" and
- * have it work today. The alternative — treating an unrecognised role as the
- * least-privileged known one — silently grants access based on a spelling
- * nobody reviewed, and quiet is the wrong failure mode for an access decision.
+ * Config writes require exactly this one, and not a `config:write` of their
+ * own. Editing the role registry IS tenant administration: whoever can publish
+ * a role version can grant themselves anything, so a separate name for it would
+ * let a firm hand out "just config editing" without realising they had handed
+ * out everything. Naming it here keeps the rule and its reason together —
+ * api/permissions.ts gates the routes on it, and the domain uses it to refuse a
+ * role set that would leave nobody able to administer the firm at all.
  */
-export const DEFAULT_ROLE_PERMISSIONS: Readonly<Record<string, readonly Permission[]>> = {
+export const ADMIN_PERMISSION: Permission = "tenant:admin";
+
+/**
+ * The four roles a firm STARTS with — seed data, not the runtime answer.
+ *
+ * Since T2.5 the live role matrix is config rows (kind `role`) that the firm
+ * owns and can edit, read through the `PermissionSource` port. This table is
+ * what gets written into those rows the moment a tenant is created, and nothing
+ * consults it afterwards. Deliberately: a built-in fallback consulted at read
+ * time would mean a firm could never actually remove a permission, or would
+ * lock out every role it had not yet redefined. See the note in
+ * migrations/0005_config.up.sql for both failure modes.
+ *
+ * migrations/0005 seeds the same four for the firms that existed before it, and
+ * tests/config/seed-parity.test.ts fails if the two ever drift.
+ */
+export interface RoleDefinition {
+  /** What a person sees in the org chart. The firm may rename it. */
+  readonly label: string;
+  readonly permissions: readonly Permission[];
+}
+
+export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
   // Owns the client relationship and the commercials.
-  partner: ["party:read", "party:write", "ledger:read", "tenant:admin"],
+  partner: {
+    label: "Partner",
+    permissions: ["party:read", "party:write", "ledger:read", "config:read", "tenant:admin"],
+  },
   // Runs delivery for a book of clients; sees the audit trail for their work.
-  manager: ["party:read", "party:write", "ledger:read"],
-  // Does the work. No audit-trail sweep of the whole firm.
-  associate: ["party:read", "party:write"],
+  manager: {
+    label: "Manager",
+    permissions: ["party:read", "party:write", "ledger:read", "config:read"],
+  },
+  // Does the work, and quotes from the catalogue. No audit-trail sweep of the
+  // whole firm.
+  associate: {
+    label: "Associate",
+    permissions: ["party:read", "party:write", "config:read"],
+  },
   // A client's own contact. Holds nothing on the staff surface — the audience
   // gate already refuses them, and this is the second, independent answer.
-  client_contact: [],
+  client_contact: { label: "Client contact", permissions: [] },
 };
-
-export const KNOWN_ROLES: readonly string[] = Object.keys(DEFAULT_ROLE_PERMISSIONS);
-
-export function isKnownRole(role: string): boolean {
-  return Object.prototype.hasOwnProperty.call(DEFAULT_ROLE_PERMISSIONS, role);
-}
-
-/** The permissions a seeded role carries; empty for anything unrecognised. */
-export function permissionsForRole(role: string): readonly Permission[] {
-  return DEFAULT_ROLE_PERMISSIONS[role] ?? [];
-}
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
 
 export function grants(held: readonly Permission[], needed: Permission): boolean {
   return held.includes(needed);
+}
+
+/**
+ * Whether a firm's whole role set leaves nobody able to administer it.
+ *
+ * Publishing a role version that drops `tenant:admin` from the last role
+ * carrying it is unrecoverable through the product: config writes need that
+ * permission, so there would be no way to put it back. The registry refuses the
+ * publish instead — see usecase/config/service.ts.
+ */
+export function leavesNobodyAdmin(
+  permissionsByRole: ReadonlyMap<string, readonly Permission[]>,
+): boolean {
+  for (const held of permissionsByRole.values()) {
+    if (held.includes(ADMIN_PERMISSION)) return false;
+  }
+  return true;
 }
 
 /**
