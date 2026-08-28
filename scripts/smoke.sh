@@ -248,13 +248,52 @@ import sys, json
 s = json.load(sys.stdin)["lines"][0]["service"]
 print("%s %s" % (s["key"], s["version"]))')
 PINKEY=${PIN%% *}; PINVER=${PIN##* }
-PINNEDSLA=$(curl -s -b $J/partner.txt $API/api/v1/config/service/$PINKEY | python3 -c '
+# THE CHECK THAT PROVES T3.1 IS UNBLOCKED. A work item snapshots the SLA in
+# force when it is created, read off the PINNED version — so the SLA has to come
+# back ON THE LINE, in the same call. Until G2.1's read-model half it did not,
+# and this check had to resolve the pin itself through two more config calls.
+# Reading it here from lines[0].service is the whole point.
+PINNEDSLA=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["lines"][0]["service"]["slaDays"])')
+LIVESLA=$(curl -s -b $J/partner.txt $API/api/v1/config/service/$PINKEY | python3 -c '
 import sys, json
 vs = json.load(sys.stdin)["versions"]
-pinned = next(v for v in vs if v["version"] == '"$PINVER"')
-live = next(v for v in vs if v["status"] == "published")
-print("%s/%s" % (pinned["body"].get("slaDays"), live["body"].get("slaDays")))')
-chk "…and reads the SLA promised then"      "30/90" "$PINNEDSLA"
+print(next(v for v in vs if v["status"] == "published")["body"].get("slaDays"))')
+chk "…and the LINE carries the SLA promised then" 30 "$PINNEDSLA"
+chk "…while the catalogue has moved on"           90 "$LIVESLA"
+chk "…and the line cites the firm's own code"     "$(curl -s -b $J/partner.txt $API/api/v1/config/service/$PINKEY | python3 -c '
+import sys, json
+print(next(v for v in json.load(sys.stdin)["versions"] if v["version"] == 1)["body"].get("ref"))')" \
+  "$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["lines"][0]["service"]["ref"])')"
+
+# G1.6. `unit_amount` used to be NOT NULL, so "as mutually agreed" had to be
+# quoted as zero — which says something completely different to a client. The
+# total is now a FLOOR when anything is unpriced, and the count is what stops a
+# partner reading a wholly-unpriced document's zero as free work.
+chk "an unpriced line must say why"         400 \
+  "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, scope TBD","quantity":"1"}')"
+chk "…and with a reason it is allowed"      201 \
+  "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" -d '{"serviceVersionId":"'$BKV1'","description":"Clean-up, scope TBD","quantity":"1","pricingNote":"As mutually agreed once the ledger is seen."}')"
+UNPRICED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+line = next(l for l in d["lines"] if l["description"].startswith("Clean-up"))
+print("%s/%s/%s/%s" % (d["totals"]["unpricedLineCount"], d["totals"]["net"], line["priced"], line["net"]))')
+chk "…the total says how much it does NOT cover" "1/216000.0000/False/None" "$UNPRICED"
+
+# G1.6's overrides are what make an issued document reproducible: the letter
+# carries its own wording, so a later catalogue revision cannot change what a
+# signed document says. The catalogue's words stay readable beside it.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/proposals/$SLAPR/lines -H "$H" \
+  -d '{"serviceVersionId":"'$BKV1'","description":"Bookkeeping, tailored","quantity":"1","unitAmount":"5000.00","scopeOverride":"Ledgers only. No payroll."}'
+TAILORED=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$SLAPR | python3 -c '
+import sys, json
+line = next(l for l in json.load(sys.stdin)["lines"] if l["description"].endswith("tailored"))
+print("%s/%s" % (line["terms"]["scope"]["tailored"], line["terms"]["scope"]["text"]))')
+chk "a tailored scope says it was tailored" "True/Ledgers only. No payroll." "$TAILORED"
 
 echo; echo "── 8. Whose law governs — a clause says it in two halves ───────────"
 # G1.8, the SCHEMA half. A clause could state its terms only in prose, so
