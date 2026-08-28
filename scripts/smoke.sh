@@ -410,18 +410,45 @@ for m in json.load(sys.stdin)["members"]:
 chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
 chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
 
-echo; echo "── 11. Rate limiting ───────────────────────────────────────────────"
+echo; echo "── 11. Archiving a party — hidden from pickers, never removed ──────"
+# G0.3. Parties are permanent: there is no deleted_at in `core` and no DELETE
+# route. Archiving means "keep this out of the pickers", and the asymmetry
+# below IS the design — the LIST hides an archived party while reading ONE by
+# id always resolves it, because a signed engagement letter's counterparty has
+# to render forever.
+# One call, body AND status — archiving twice is refused, so a second request
+# just to read the code would be testing the refusal, not the archive.
+ARCHCODE=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/archive -H "$H" -o $J/archive.json -w '%{http_code}')
+chk "archive a party the firm mistyped"  200 "$ARCHCODE"
+chk "…and it is stamped, not removed"  "yes" \
+  "$(python3 -c 'import json;print("yes" if json.load(open("'$J'/archive.json")).get("archivedAt") else "no")')"
+chk "…and it is gone from the picker"   0 \
+  "$(curl -s -b $J/partner.txt "$API/api/v1/parties" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["parties"] if p["id"]=="'$ORG'"))')"
+chk "…but returns when asked for"       1 \
+  "$(curl -s -b $J/partner.txt "$API/api/v1/parties?includeArchived=true" | python3 -c 'import sys,json;print(sum(1 for p in json.load(sys.stdin)["parties"] if p["id"]=="'$ORG'"))')"
+chk "…and STILL resolves by id"       200 "$(code -b $J/partner.txt $API/api/v1/parties/$ORG)"
+chk "archiving twice is refused"        409 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/archive -H "$H" -o /dev/null)"
+chk "bring it back"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/unarchive -H "$H" -o /dev/null)"
+chk "…and unarchiving twice is refused" 409 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$ORG/unarchive -H "$H" -o /dev/null)"
+# The refusal that matters, and it is enforced by a TRIGGER, not by the service:
+# $PID is the party the lead in section 7 is about.
+REFCODE=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/$PID/archive -H "$H" -o $J/refused.json -w '%{http_code}')
+chk "a party a lead points at cannot be archived" 409 "$REFCODE"
+chk "…and the refusal names what refers to it" "yes" \
+  "$(python3 -c 'import json;print("yes" if "lead" in json.dumps(json.load(open("'$J'/refused.json"))) else "no")')"
+
+echo; echo "── 12. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done
 chk "brute force is throttled"  429 "$last"
 
-echo; echo "── 12. CORS — the frontend is a separate origin ────────────────────"
+echo; echo "── 13. CORS — the frontend is a separate origin ────────────────────"
 ACAO=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: http://localhost:3000' -H 'Access-Control-Request-Method: POST' | grep -i '^access-control-allow-origin' | tr -d '\r' | awk '{print $2}')
 chk "allowed origin gets a preflight" "http://localhost:3000" "$ACAO"
 EVIL=$(curl -s -D - -o /dev/null -X OPTIONS $API/api/v1/auth/login -H 'Origin: https://evil.example' -H 'Access-Control-Request-Method: POST' | grep -ci '^access-control-allow-origin' | tr -d '\r')
 chk "unlisted origin gets none"        0 "$EVIL"
 
-echo; echo "── 13. The audit trail, as recorded ────────────────────────────────"
+echo; echo "── 14. The audit trail, as recorded ────────────────────────────────"
 curl -s -b $J/partner.txt "$API/api/v1/events?limit=12" | python3 -c '
 import sys, json
 for r in reversed(json.load(sys.stdin)["events"]):

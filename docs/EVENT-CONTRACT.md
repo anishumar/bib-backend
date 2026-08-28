@@ -187,6 +187,8 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
 | `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
+| `party.archived` | party | A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035). |
+| `party.unarchived` | party | An archived party was brought back into the pickers and lists. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
@@ -229,7 +231,8 @@ version is exactly what gets asked about afterwards.
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |
 | `proposal.viewed` | proposal | The recipient opened it from its share link. Recorded ONCE, on the first open; the running count lives on `crm.proposal.view_count`, because a client refreshing a page is not fifty facts about the business. The actor is `system` — the recipient has no account, and inventing a user id for somebody who has never logged in would be worse than saying plainly that a link was opened. |
 | `proposal.accepted` | proposal | Accepted. |
-| `proposal.rejected` | proposal | Declined or expired. |
+| `proposal.rejected` | proposal | A proposal was declined by the recipient. |
+| `proposal.expired` | proposal | A proposal passed its validity date. Written LAZILY — nothing here runs on a timer, so it is recorded the first time somebody tries to act on the proposal. |
 | `engagement_letter.drafted` | engagement_letter | An engagement letter was drafted — the first row in the timeline of a document that will create obligations. |
 | `engagement_letter.sent` | engagement_letter | It went to the client for signature. |
 | `engagement_letter.withdrawn` | engagement_letter | Pulled before signature. A SIGNED letter is never withdrawn — it is superseded by a new one. |
