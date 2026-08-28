@@ -49,6 +49,12 @@ const MembershipSchema = z
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]),
     role: z.string(),
     commercialVisibility: z.boolean(),
+    gradeId: z.string().uuid().nullable().openapi({
+      description:
+        "Which rung of the firm's hierarchy this person is on — a separate axis from role. " +
+        "Null is ordinary: a portal contact has no grade, and neither does somebody whose " +
+        "designation the firm has never ranked. The roster read returns the rung itself.",
+    }),
     isActive: z.boolean(),
   })
   .openapi("Membership");
@@ -59,12 +65,31 @@ const MembershipsResponse = z
 
 /** One row of the roster: the membership plus who it belongs to, so a screen
  *  can show people without a lookup per row. */
+const MemberGradeSchema = z
+  .object({
+    id: z.string().uuid(),
+    code: z.string(),
+    name: z.string(),
+    rank: z.number().int(),
+    isActive: z.boolean().openapi({
+      description:
+        "False means the firm no longer promotes through this rung. The person really is on " +
+        "it, so it is shown rather than hidden — it simply is not offered to anybody new.",
+    }),
+  })
+  .openapi("MemberGrade");
+
 const MemberSchema = z
   .object({
     membership: MembershipSchema,
     email: z.string().email(),
     displayName: z.string().nullable().openapi({
       description: "Null when nobody has named the account — show the email instead.",
+    }),
+    // Resolved, not an id: a roster that returned `gradeId` would leave the
+    // screen fetching a grade per row to render a column.
+    grade: MemberGradeSchema.nullable().openapi({
+      description: "The rung this person sits on, or null when they are not on the ladder.",
     }),
   })
   .openapi("Member");
@@ -120,6 +145,19 @@ const SetMemberActiveRequest = z
     }),
   })
   .openapi("SetMemberActiveRequest");
+
+// `gradeId` is nullable rather than optional, and that distinction is the whole
+// DTO: `null` means "take them off the ladder", which is a decision somebody
+// made. An OPTIONAL field would make an omitted key mean the same thing as a
+// deliberate clearing, so a screen with a bug that dropped the field would
+// silently un-grade people.
+const ChangeMemberGradeRequest = z
+  .object({
+    gradeId: z.string().uuid().nullable().openapi({
+      description: "The rung to put them on, or null to take them off the ladder.",
+    }),
+  })
+  .openapi("ChangeMemberGradeRequest");
 
 const MemberParam = z.object({ membershipId: z.string().uuid() });
 
@@ -277,6 +315,34 @@ const setMemberActiveRoute = createRoute({
   },
 });
 
+const changeMemberGradeRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/members/{membershipId}/grade",
+  tags: ["tenancy"],
+  summary: "Put a member on a rung of the firm's hierarchy, or take them off it",
+  description:
+    "Seniority is a SEPARATE axis from role: the role decides what somebody may reach, the " +
+    "grade decides how senior they are, and it is the grade a review threshold compares. " +
+    "Unlike a role change this can strand nobody, so there is no last-administrator guard.",
+  request: {
+    params: MemberParam,
+    body: {
+      content: { "application/json": { schema: ChangeMemberGradeRequest } },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "Grade changed. Idempotent — setting the rung they hold records nothing.",
+      content: { "application/json": { schema: MembershipSchema } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such membership, or no such grade at this firm"),
+    409: errorResponse("The firm no longer promotes through that rung"),
+  },
+});
+
 const myMembershipsRoute = createRoute({
   method: "get",
   path: "/api/v1/tenancy/me/memberships",
@@ -372,6 +438,18 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(membership, 200);
   });
 
+  app.openapi(changeMemberGradeRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const { gradeId } = c.req.valid("json");
+    const membership = await deps.service.changeMemberGrade(
+      { tenantId: s.tenantId, membershipId, gradeId },
+      s.actor,
+    );
+    return c.json(membership, 200);
+  });
+
   app.openapi(myMembershipsRoute, async (c) => {
     const principal = c.get("principal");
     if (!principal) {
@@ -396,4 +474,5 @@ export const tenancyRoutes = {
   inviteMember: inviteMemberRoute,
   changeMemberRole: changeMemberRoleRoute,
   setMemberActive: setMemberActiveRoute,
+  changeMemberGrade: changeMemberGradeRoute,
 } as const;

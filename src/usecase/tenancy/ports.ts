@@ -62,6 +62,32 @@ export interface MemberRecord {
   readonly membership: Membership;
   readonly email: string;
   readonly displayName: string | null;
+  /**
+   * The rung, resolved — not the `gradeId` the membership carries.
+   *
+   * The read model carries NAMES, not just ids: a roster that returned a uuid
+   * would leave the screen fetching a grade per row to render a column, which
+   * is the exact mistake this codebase has now made and fixed five times
+   * (MemberRecord's own email, LeadRecord, ProposalRecord, party 360's
+   * relationships, the ledger's actor). `rank` rides along because the screen
+   * that shows seniority is also the one that sorts by it.
+   *
+   * Null when the person has no grade — a portal contact, or somebody whose
+   * designation the firm's hierarchy has never ranked.
+   */
+  readonly grade: MemberGrade | null;
+}
+
+/** A rung as a roster row shows it. A projection of the staff-grade aggregate,
+ *  named in tenancy's own vocabulary so neither module imports the other. */
+export interface MemberGrade {
+  readonly id: string;
+  readonly code: string;
+  readonly name: string;
+  readonly rank: number;
+  /** Whether the firm still promotes through it. A roster shows a retired rung
+   *  as retired rather than hiding it — the person really is on it. */
+  readonly isActive: boolean;
 }
 
 export interface MembershipRepository {
@@ -84,6 +110,42 @@ export interface MembershipRepository {
    * The column and the grant have existed since 0001; nothing ever wrote them.
    */
   setActive(tenantId: string, membershipId: string, isActive: boolean): Promise<Membership>;
+  /** Put somebody on a rung, or take them off it (`null`). The third axis
+   *  (G3.3) — independent of role and of fee visibility. */
+  updateGrade(
+    tenantId: string,
+    membershipId: string,
+    gradeId: string | null,
+  ): Promise<Membership>;
+}
+
+/**
+ * The firm's seniority ladder, as tenancy needs to see it.
+ *
+ * Tenancy owns `membership` and therefore owns who is on which rung, but it
+ * must not own what a rung IS. Two things it has to refuse: assigning a grade
+ * this firm has never defined, and assigning one the firm has stopped promoting
+ * through. Declared here in tenancy's vocabulary; the staff-grade adapter
+ * satisfies it, so neither module imports the other — the same seam, for the
+ * same reason, as `RoleDirectory` above.
+ */
+export interface GradeDirectory {
+  /** The rung, or null when this firm has no such grade. */
+  find(tenantId: string, gradeId: string): Promise<MemberGrade | null>;
+}
+
+/**
+ * Giving a brand-new firm its own seniority ladder.
+ *
+ * The same shape and the same argument as `RoleRegistrySeeder` below: it is part
+ * of CREATING a tenant rather than a follow-up step, because a firm with an
+ * empty ladder is a firm where nobody meets the review threshold — the rule the
+ * ladder exists for ("Manager or above") has nothing to compare against.
+ * Satisfied by StaffGradeService.seedDefaultGrades in the composition root.
+ */
+export interface GradeLadderSeeder {
+  /** Returns the grade codes written, for the caller's audit trail. */
+  seedDefaultGrades(tenantId: string, actor: Actor): Promise<readonly string[]>;
 }
 
 /**

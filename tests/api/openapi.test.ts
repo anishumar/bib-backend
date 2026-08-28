@@ -16,6 +16,7 @@ import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { IdentityService } from "../../src/usecase/identity/service";
@@ -93,6 +94,7 @@ function identityService(): IdentityService {
 function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()) },
+    staffGrades: { service: new StaffGradeService(makeFakes()) },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },

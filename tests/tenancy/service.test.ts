@@ -100,13 +100,37 @@ describe("createTenant", () => {
     expect(await f.config.permissionsFor(t.id, "partner")).toContain("tenant:admin");
   });
 
-  it("records the seeding as one fact, after the tenant's own creation", async () => {
-    // One event for four roles: eight rows for something that is really one
-    // fact would bury the events a person actually caused. And it comes second,
-    // because the tenant has to exist before its configuration can.
+  it("records each seeding as one fact, after the tenant's own creation", async () => {
+    // One event for four roles and one for ten rungs: fourteen rows for what
+    // are really two facts would bury the events a person actually caused. And
+    // both come after the tenant, because it has to exist before anything can
+    // be configured against it.
     const { service, f } = svc();
     await service.createTenant({ name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR" });
-    expect(f.events.verbs()).toEqual(["tenant.created", "config_registry.seeded"]);
+    expect(f.events.verbs()).toEqual([
+      "tenant.created",
+      "config_registry.seeded",
+      "grade_ladder.seeded",
+    ]);
+  });
+
+  it("gives a new firm its seniority ladder, so somebody meets the review threshold", async () => {
+    // The ladder is seeded for the same reason the roles are: the firm's review
+    // rule is "Manager or above", and a firm with no rungs is one where nobody
+    // is above anything. Without this, T2.9's routing would have nothing to
+    // route to on a firm's first day.
+    const { service, f } = svc();
+    const t = await service.createTenant({
+      name: "Harbour Point",
+      slug: "harbour-point",
+      reportingCurrency: "INR",
+    });
+    const ladder = await f.grades.list(t.id);
+    expect(ladder).toHaveLength(10);
+    expect(ladder.map((g) => g.code)).toContain("manager");
+    // Every rung arrives in use — a firm starts by promoting through all of them
+    // and retires the ones it does not want.
+    expect(ladder.every((g) => g.isActive)).toBe(true);
   });
 });
 

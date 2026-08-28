@@ -73,6 +73,16 @@ export const EVENT_VERBS = {
   "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated. The person's next request stops — resolveSession re-reads this on every one." },
   "membership.restored":         { objectType: "membership",          lane: "platform",   description: "A deactivated membership was reinstated." },
   "membership.role_changed":     { objectType: "membership",          lane: "platform",   description: "A member's role at a firm changed, and with it everything gate 3 lets them do." },
+  "membership.grade_changed":    { objectType: "membership",          lane: "platform",   description: "A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later." },
+
+  // ── platform · the seniority ladder (G3.3) ────────────────────────────────
+  // Separate from role: the role says what somebody may REACH, the grade says
+  // how senior they are. A firm owns its own ladder, so every change to it is
+  // recorded — a rung's rank is what the review threshold compares against, and
+  // moving one silently changes who may approve a statutory filing.
+  "staff_grade.created":         { objectType: "staff_grade",         lane: "platform",   description: "A firm added a rung to its own hierarchy — one its starting ladder did not have." },
+  "staff_grade.updated":         { objectType: "staff_grade",         lane: "platform",   description: "A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something." },
+  "grade_ladder.seeded":         { objectType: "tenant",              lane: "platform",   description: "A new tenant's seniority ladder was initialised from the product defaults. One event, not one per rung." },
   "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user's session became active in THIS tenant — at login, or when the org switcher selected it." },
   "party.created":               { objectType: "party",               lane: "platform",   description: "An organization or person party was created." },
   "party.archived":              { objectType: "party",               lane: "platform",   description: "A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035)." },

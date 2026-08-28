@@ -27,6 +27,7 @@ import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import { PostgresRoundRobinAssignment } from "../infrastructure/postgres/lead-assignment";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
@@ -37,6 +38,7 @@ import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
+import { StaffGradeService } from "../usecase/staffgrade/service";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
@@ -79,6 +81,20 @@ export function wire(cfg: Config, log: Logger): Wired {
   // question.
   const configRepository = new PostgresConfigRepository(pools.app);
 
+  // ONE adapter over the ladder, serving TWO ports, on the same reasoning as
+  // the config adapter above. The staff-grade use case holds it as its
+  // repository; tenancy holds it as its GradeDirectory, because "does this firm
+  // have this rung, and does it still promote through it" is a ladder read like
+  // any other. Two adapters would eventually disagree about what "retired"
+  // means, and one of them would be answering an assignment question.
+  const staffGradeRepository = new PostgresStaffGradeRepository(pools.app);
+
+  const staffGrades = new StaffGradeService({
+    grades: staffGradeRepository,
+    ids: systemIds,
+    events: ledger,
+  });
+
   const config = new ConfigService({
     registry: configRepository,
     // The registry can see that a role carries tenant:admin; only the roster
@@ -106,6 +122,13 @@ export function wire(cfg: Config, log: Logger): Wired {
     // that does not exist and refuse to remove its last administrator. The
     // config adapter already answers both questions for gate 3.
     roleDirectory: configRepository,
+    // And the same pair again for seniority (G3.3): the firm gets its ladder as
+    // part of coming into existence, and administration asks the ladder whether
+    // a rung is real and still in use before putting anybody on it.
+    gradeSeeder: {
+      seedDefaultGrades: (tenantId, actor) => staffGrades.seedDefaultGrades(tenantId, actor),
+    },
+    gradeDirectory: staffGradeRepository,
     ids: systemIds,
     events: ledger,
   });
@@ -251,6 +274,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           cookieSecure: cfg.auth.sessionCookieSecure,
         },
         tenancy: tenancyDeps,
+        staffGrades: { service: staffGrades },
         party: { service: party },
         ledger: { service: ledger },
         config: { service: config },

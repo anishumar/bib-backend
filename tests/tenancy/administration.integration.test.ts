@@ -28,6 +28,8 @@ import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-token
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { StaffGradeService } from "../../src/usecase/staffgrade/service";
+import { PostgresStaffGradeRepository } from "../../src/infrastructure/postgres/staff-grade-repository";
 import { IdentityService } from "../../src/usecase/identity/service";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { systemIds } from "../../src/platform/ids";
@@ -41,11 +43,18 @@ const owner = postgres(cfg.db.ownerUrl, { max: 2 });
 
 const ledger = new LedgerService({ events: new PostgresEventStore(app), ids: systemIds });
 const configRepository = new PostgresConfigRepository(app);
+const staffGradeRepository = new PostgresStaffGradeRepository(app);
 const users = new PostgresUserRepository(app);
 const memberships = new PostgresMembershipRepository(app);
 const config = new ConfigService({
   registry: configRepository,
   holders: memberships,
+  ids: systemIds,
+  events: ledger,
+});
+
+const staffGrades = new StaffGradeService({
+  grades: staffGradeRepository,
   ids: systemIds,
   events: ledger,
 });
@@ -56,6 +65,8 @@ const tenancy = new TenancyService({
   memberships,
   roleSeeder: { seedDefaultRoles: (t, a) => config.seedDefaultRoles(t, a) },
   roleDirectory: configRepository,
+  gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
+  gradeDirectory: staffGradeRepository,
   ids: systemIds,
   events: ledger,
 });

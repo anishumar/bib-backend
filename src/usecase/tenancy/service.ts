@@ -30,7 +30,14 @@ import {
   TenantNotFound,
   UserNotFound,
 } from "../../domain/tenancy/errors";
+// The two refusals a grade assignment owes. Tenancy owns WHO is on a rung; the
+// staff-grade domain owns what a rung is and what it means to have retired one,
+// so the vocabulary for refusing comes from there.
+import { GradeNotAssignable, GradeNotFound } from "../../domain/staffgrade/errors";
 import type {
+  GradeDirectory,
+  GradeLadderSeeder,
+  MemberGrade,
   MemberRecord,
   MembershipRepository,
   RoleDirectory,
@@ -48,6 +55,11 @@ export interface Deps {
   /** What this firm's roles ARE, for the two things administration must refuse:
    *  assigning a role nobody published, and removing the last administrator. */
   readonly roleDirectory: RoleDirectory;
+  /** A new firm's seniority ladder, written as its own rows (G3.3). */
+  readonly gradeSeeder: GradeLadderSeeder;
+  /** What this firm's rungs ARE, for the two things a grade assignment must
+   *  refuse: a grade this firm never defined, and one it has retired. */
+  readonly gradeDirectory: GradeDirectory;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -84,6 +96,13 @@ export interface SetMemberActiveInput {
   readonly tenantId: string;
   readonly membershipId: string;
   readonly isActive: boolean;
+}
+
+export interface ChangeMemberGradeInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  /** `null` takes them off the ladder — a real answer, not an omission. */
+  readonly gradeId: string | null;
 }
 
 export class TenancyService {
@@ -160,6 +179,19 @@ export class TenancyService {
     // it is preferable to the alternative, which is a firm that appears to work
     // because gate 3 quietly fell back to permissions nobody chose.
     await this.deps.roleSeeder.seedDefaultRoles(tenant.id, actor);
+
+    // And its seniority ladder, for the same reason and with the same honest
+    // limit. A firm with no rungs is a firm where the review rule the ladder
+    // exists for — "Manager or above" — has nothing to compare against, so
+    // nobody meets a threshold and nothing can be signed off. Seeding it here
+    // rather than in a provisioning script keeps that requirement attached to
+    // the moment the firm comes into existence.
+    //
+    // Ordered after the roles deliberately: a firm that ends up with roles and
+    // no ladder can still be administered, and an admin can add the rungs from
+    // the screen. The reverse — a ladder nobody can reach because gate 3
+    // refuses every request — cannot be fixed from inside the product.
+    await this.deps.gradeSeeder.seedDefaultGrades(tenant.id, actor);
     return tenant;
   }
 
@@ -360,6 +392,67 @@ export class TenancyService {
         userId: membership.userId,
         audience: membership.audience,
         role: membership.role,
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Put somebody on a rung of the firm's hierarchy, or take them off it.
+   *
+   * The THIRD axis, and it deliberately has no interaction with the other two.
+   * It does not run `requireAdministratorSurvives`: a grade grants nothing and
+   * removing one strands nobody — a firm whose every member is ungraded is
+   * merely a firm where nobody meets the review threshold, which is a state it
+   * can see and fix. Role is what can lock a firm out, and role has its own
+   * guard.
+   *
+   * `null` clears the grade, and that is a first-class answer rather than an
+   * absence: a portal contact has no rung, and neither does somebody whose
+   * designation the firm's hierarchy has never ranked. Both are more honest than
+   * a grade invented to fill the column.
+   *
+   * Idempotent: setting the rung somebody is already on records nothing.
+   */
+  async changeMemberGrade(input: ChangeMemberGradeInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    if (membership.gradeId === input.gradeId) return membership;
+
+    let to: MemberGrade | null = null;
+    if (input.gradeId !== null) {
+      to = await this.deps.gradeDirectory.find(input.tenantId, input.gradeId);
+      // A grade from another firm resolves to nothing here, because the
+      // directory reads under this tenant's RLS context. The composite foreign
+      // key in migration 0040 refuses it a second time, at the database.
+      if (!to) throw new GradeNotFound(input.gradeId);
+      if (!to.isActive) throw new GradeNotAssignable(to.name);
+    }
+    // Resolved only to name the OLD rung in the event. A retired rung still
+    // resolves — that is the whole point of retiring rather than deleting one.
+    const from =
+      membership.gradeId === null
+        ? null
+        : await this.deps.gradeDirectory.find(input.tenantId, membership.gradeId);
+
+    const updated = await this.deps.memberships.updateGrade(
+      input.tenantId,
+      membership.id,
+      input.gradeId,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "membership.grade_changed",
+      objectId: membership.id,
+      actor,
+      // Codes and ranks, never the person's email — the address is personal data
+      // and this log cannot be erased. Codes rather than uuids because the
+      // question asked of this row later is "when did they become a Manager",
+      // and two uuids cannot answer it without two more lookups.
+      payload: {
+        userId: membership.userId,
+        from: from?.code ?? null,
+        to: to?.code ?? null,
+        ...(to === null ? {} : { rank: to.rank }),
       },
     });
     return updated;

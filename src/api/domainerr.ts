@@ -7,6 +7,7 @@
 // No service adds to this set — finer distinctions go in `reason`.
 import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
+import { StaffGradeError } from "../domain/staffgrade/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
@@ -71,6 +72,23 @@ export function mapError(err: unknown): MappedError {
       // rest of the roster, so the caller fixes it by changing SOMEBODY ELSE.
       case "ROLE_NOT_DEFINED":
       case "LAST_ADMINISTRATOR":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+    }
+  }
+  if (err instanceof StaffGradeError) {
+    switch (err.code) {
+      case "INVALID_GRADE_CODE":
+      case "INVALID_RANK":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "GRADE_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "GRADE_CODE_TAKEN":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A conflict rather than a validation failure, on the same reasoning as
+      // LAST_ADMINISTRATOR above: the request is perfectly well formed, and what
+      // refuses it is the state of the LADDER — the caller fixes it by
+      // reactivating the rung or choosing another, not by resending this.
+      case "GRADE_NOT_ASSIGNABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
     }
   }
