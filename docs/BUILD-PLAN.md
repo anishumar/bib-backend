@@ -546,6 +546,17 @@ open and are recorded above; neither blocks Phase 2.
   > `contract.activated` now has a writer, as agreed. **T2.4 is the consumer side only**, which
   > makes it smaller than the board implies.
   >
+  > **The screens landed with it** (`/engagement-letters`, `/engagement-letters/[letterId]`),
+  > so T2.3 did not repeat the debt the first five modules left. **This is the first module all
+  > session where building the screen found NO API gap** — the read model carried names, the
+  > pinned clause text, the signature method and the engagements, because the lesson had
+  > already been paid for four times over.
+  >
+  > What the screen did add is a rule about what to OFFER: the clause picker shows only
+  > published clauses that apply to the letter's jurisdiction and are not already on it. The API
+  > refuses the rest, and offering something whose only outcome is an error is a slower error,
+  > not honesty.
+  >
   > Gate: `npm run check` 373 · `test:integration` 92 · `smoke` 104.
   >
   > **The questions as they were asked, kept for the record:**
