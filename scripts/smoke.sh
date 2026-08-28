@@ -379,6 +379,78 @@ for m in json.load(sys.stdin)["members"]:
 chk "the last admin cannot be demoted"   409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/role -H "$H" -d '{"role":"manager"}')"
 chk "…nor have their access revoked"     409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/active -H "$H" -d '{"isActive":false}')"
 
+echo; echo "── 10b. Seniority — the ladder, and who is on it ───────────────────"
+# Grades are a THIRD axis: role says what somebody may reach, grade says how
+# senior they are, and the firm's review rule ("Manager or above") compares the
+# rank. A firm gets its ladder at creation, so this is not an empty list.
+chk "associate cannot see the ladder"    403 "$(code -b $J/associate.txt $API/api/v1/tenancy/grades)"
+RUNGS=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/grades | python3 -c '
+import sys, json
+print(len(json.load(sys.stdin)["grades"]))')
+chk "a new firm already has a ladder"    10 "$RUNGS"
+TOP=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/grades | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["grades"][0]["code"])')
+chk "most senior first"                  partner "$TOP"
+
+# The rung the whole table exists for. Everything below assigns against it.
+MGR=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/grades | python3 -c '
+import sys, json
+for g in json.load(sys.stdin)["grades"]:
+    if g["code"] == "manager":
+        print(g["id"]); break')
+
+# Adding a rung the seed deliberately leaves out. The firm has real designations
+# its own hierarchy never ranked — Article is the one it asks for first — and
+# they arrive ranked by the firm rather than guessed by the product.
+ART='{"code":"article","name":"Article","rank":1}'
+chk "add a rung the seed omits"          201 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/grades -H "$H" -d "$ART")"
+chk "…and not the same code twice"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/grades -H "$H" -d "$ART")"
+chk "a rank of zero is refused"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/tenancy/grades -H "$H" -d '{"code":"intern","name":"Intern","rank":0}')"
+AID=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/grades | python3 -c '
+import sys, json
+for g in json.load(sys.stdin)["grades"]:
+    if g["code"] == "article":
+        print(g["id"]); break')
+
+# Re-ranking is what makes inserting a rung possible at all — without it a firm
+# would need an engineer with a SQL client to reorder its own hierarchy.
+chk "rename and re-rank in one call"     200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/grades/$AID -H "$H" -d '{"name":"Articled Assistant","rank":2}')"
+NEWRANK=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/grades | python3 -c '
+import sys, json
+for g in json.load(sys.stdin)["grades"]:
+    if g["code"] == "article":
+        print(g["rank"]); break')
+chk "…the new rank stuck"                2 "$NEWRANK"
+
+# Putting somebody on a rung, and the roster showing it by NAME rather than as
+# the uuid it stores — the read-model rule, checked where a screen would break.
+chk "put the new joiner on a rung"       200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$AMID/grade -H "$H" -d '{"gradeId":"'$MGR'"}')"
+GNAME=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
+import sys, json
+for m in json.load(sys.stdin)["members"]:
+    if m["membership"]["id"] == "'$AMID'":
+        print((m["grade"] or {}).get("name", "NONE")); break')
+chk "the roster shows the rung by name"  Manager "$GNAME"
+chk "a rung this firm never defined"     404 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$AMID/grade -H "$H" -d '{"gradeId":"00000000-0000-4000-8000-0000000009f9"}')"
+
+# Retiring is not deleting. The rung stays readable on the person who holds it,
+# because an approval they made has to keep explaining itself — it just stops
+# being offered to anybody new.
+chk "retire a rung"                      200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/grades/$MGR/active -H "$H" -d '{"isActive":false}')"
+chk "…nobody new can be put on it"       409 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/grade -H "$H" -d '{"gradeId":"'$MGR'"}')"
+STILL=$(curl -s -b $J/partner.txt $API/api/v1/tenancy/members | python3 -c '
+import sys, json
+for m in json.load(sys.stdin)["members"]:
+    if m["membership"]["id"] == "'$AMID'":
+        print((m["grade"] or {}).get("name", "NONE")); break')
+chk "…the holder keeps it, still named"  Manager "$STILL"
+chk "bring it back"                      200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/grades/$MGR/active -H "$H" -d '{"isActive":true}')"
+
+# A grade grants nothing, so unlike a role it can strand nobody. The last
+# administrator can be taken off the ladder; they cannot be demoted.
+chk "the last admin CAN be un-graded"    200 "$(code -b $J/partner.txt -XPUT $API/api/v1/tenancy/members/$PMID/grade -H "$H" -d '{"gradeId":null}')"
+
 echo; echo "── 11. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done

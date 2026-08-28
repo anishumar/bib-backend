@@ -27,6 +27,8 @@ import type { Logger } from "../platform/log";
 import { createOpenAPIApp } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
 import type { TenancyDeps } from "./handler/tenancy";
+import { registerStaffGradeRoutes } from "./handler/staffgrade";
+import type { StaffGradeDeps } from "./handler/staffgrade";
 import { registerPartyRoutes } from "./handler/party";
 import type { PartyDeps } from "./handler/party";
 import { registerLedgerRoutes } from "./handler/ledger";
@@ -62,6 +64,7 @@ export interface RouterOptions {
 /** Per-module dependencies the router mounts. One field per capability. */
 export interface RouterDeps {
   readonly tenancy: TenancyDeps;
+  readonly staffGrades: StaffGradeDeps;
   readonly party: PartyDeps;
   readonly ledger: LedgerDeps;
   readonly config: ConfigDeps;
@@ -149,6 +152,7 @@ export function buildRouter(
   // App + platform routes, one registrar per module.
   registerAuthRoutes(app, deps.auth);
   registerTenancyRoutes(app, deps.tenancy);
+  registerStaffGradeRoutes(app, deps.staffGrades);
   registerPartyRoutes(app, deps.party);
   registerLedgerRoutes(app, deps.ledger);
   registerConfigRoutes(app, deps.config);

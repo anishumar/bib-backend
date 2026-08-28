@@ -1,6 +1,23 @@
 # Migrations
 
-`NNNN_snake_case.{up,down}.sql` — 4-digit, monotonic, no gaps. Every `up` has a `down`.
+`NNNN_snake_case.{up,down}.sql` — 4-digit, monotonic. Every `up` has a `down`.
+
+## Numbering is split between the two developers — so there ARE gaps
+
+This rule used to say "no gaps", and it was changed deliberately rather than quietly
+broken. Two people adding schema at the same time collide on the next number, and a
+migration is immutable once applied anywhere — so a collision is not a rename, it is one of
+us redoing the work under a new number.
+
+**`(A)` holds 0018–0039. `(B)` holds 0040+.** The board (`docs/MERGE_BUILD-PLAN.md`) is
+where that split is agreed; revisit when either range runs low.
+
+What this costs, stated rather than discovered later: the ranges fill unevenly, so `0040`
+may be applied months before `0018` exists. The migrator sorts filenames and applies
+whatever is unapplied — it does not require contiguity — so a later `0018` simply lands
+after `0040`. **That is only safe while the two ranges stay independent**, which is a real
+obligation on both of us: a migration must not depend on a lower number from the other
+developer's range. If one ever does, it belongs in the range of whoever it depends on.
 
 ## The rules (inherited from the Zaap standard — non-negotiable)
 

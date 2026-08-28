@@ -6,6 +6,7 @@ import type { Db } from "../../db/pool";
 import { withIdentity, withTenant } from "../../db/tenant";
 import type { Membership } from "../../domain/tenancy/model";
 import type {
+  MemberGrade,
   MemberRecord,
   MembershipRepository,
   NewMembership,
@@ -20,13 +21,19 @@ interface MembershipRow {
   audience: Membership["audience"];
   role: string;
   commercial_visibility: boolean;
+  grade_id: string | null;
   is_active: boolean;
 }
 
-/** A membership row joined to the account behind it — the roster read. */
+/** A membership row joined to the account behind it AND to the rung it sits on
+ *  — the roster read. Both joins exist so a screen never fetches per row. */
 interface MemberRow extends MembershipRow {
   email: string;
   display_name: string | null;
+  grade_code: string | null;
+  grade_name: string | null;
+  grade_rank: number | null;
+  grade_is_active: boolean | null;
 }
 
 function toMembership(r: MembershipRow): Membership {
@@ -37,7 +44,26 @@ function toMembership(r: MembershipRow): Membership {
     audience: r.audience,
     role: r.role,
     commercialVisibility: r.commercial_visibility,
+    gradeId: r.grade_id,
     isActive: r.is_active,
+  };
+}
+
+/**
+ * The rung on a roster row, or null when the person is not on one.
+ *
+ * Every grade column arrives together or not at all — they come from one LEFT
+ * JOIN — so testing the id is enough to know the rest are present. Written as
+ * one guard rather than four so a future column cannot be forgotten here.
+ */
+function toMemberGrade(r: MemberRow): MemberGrade | null {
+  if (r.grade_id === null || r.grade_code === null) return null;
+  return {
+    id: r.grade_id,
+    code: r.grade_code,
+    name: r.grade_name ?? r.grade_code,
+    rank: r.grade_rank ?? 0,
+    isActive: r.grade_is_active ?? false,
   };
 }
 
@@ -58,7 +84,7 @@ export class PostgresMembershipRepository
           (id, tenant_id, user_id, audience, role, commercial_visibility)
         VALUES
           (${m.id}, ${m.tenantId}, ${m.userId}, ${m.audience}, ${m.role}, ${m.commercialVisibility})
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
       `;
       if (!row) throw new Error("membership insert returned no row");
       return toMembership(row);
@@ -90,7 +116,7 @@ export class PostgresMembershipRepository
   async listByUser(userId: string): Promise<Membership[]> {
     return withIdentity(this.app, userId, async (db) => {
       const rows = await db<MembershipRow[]>`
-        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, is_active
+        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
         FROM tenancy.membership
         WHERE user_id = ${userId}
         ORDER BY created_at
@@ -118,18 +144,29 @@ export class PostgresMembershipRepository
       // user_account is GLOBAL and carries no RLS of its own; the join is safe
       // because the membership side IS filtered — a firm can only reach the
       // accounts of people who are its members.
+      //
+      // The grade is a LEFT join and stays one: an ungraded membership is an
+      // ordinary state (a portal contact, or a designation the firm's hierarchy
+      // has never ranked), so an inner join would silently drop those people
+      // from the roster — the exact screen an admin opens to give them a rung.
+      // staff_grade IS tenant-scoped, and both sides are filtered by the same
+      // RLS context, so the join cannot reach another firm's ladder.
       const rows = await db<MemberRow[]>`
         SELECT m.id, m.tenant_id, m.user_id, m.audience, m.role,
-               m.commercial_visibility, m.is_active,
-               u.email::text AS email, u.display_name
+               m.commercial_visibility, m.grade_id, m.is_active,
+               u.email::text AS email, u.display_name,
+               g.code AS grade_code, g.name AS grade_name,
+               g.rank AS grade_rank, g.is_active AS grade_is_active
         FROM tenancy.membership m
         JOIN tenancy.user_account u ON u.id = m.user_id
+        LEFT JOIN tenancy.staff_grade g ON g.id = m.grade_id
         ORDER BY m.is_active DESC, u.display_name NULLS LAST, u.email
       `;
       return rows.map((r) => ({
         membership: toMembership(r),
         email: r.email,
         displayName: r.display_name,
+        grade: toMemberGrade(r),
       }));
     });
   }
@@ -137,7 +174,7 @@ export class PostgresMembershipRepository
   async findById(tenantId: string, membershipId: string): Promise<Membership | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<MembershipRow[]>`
-        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, is_active
+        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
         FROM tenancy.membership WHERE id = ${membershipId}
       `;
       return row ? toMembership(row) : null;
@@ -149,7 +186,7 @@ export class PostgresMembershipRepository
       const [row] = await db<MembershipRow[]>`
         UPDATE tenancy.membership SET role = ${role}
         WHERE id = ${membershipId}
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
       `;
       if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
       return toMembership(row);
@@ -165,7 +202,32 @@ export class PostgresMembershipRepository
       const [row] = await db<MembershipRow[]>`
         UPDATE tenancy.membership SET is_active = ${isActive}
         WHERE id = ${membershipId}
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+      `;
+      if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
+      return toMembership(row);
+    });
+  }
+
+  /**
+   * Put somebody on a rung, or take them off it.
+   *
+   * The composite foreign key (migration 0040) is what makes this safe against
+   * the failure RLS does not catch: a foreign-key check runs as a system
+   * operation the row policies do not filter, so an id-only reference would let
+   * this firm's membership point at another firm's grade. `(grade_id,
+   * tenant_id)` refuses it at the database, underneath the service's own check.
+   */
+  async updateGrade(
+    tenantId: string,
+    membershipId: string,
+    gradeId: string | null,
+  ): Promise<Membership> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<MembershipRow[]>`
+        UPDATE tenancy.membership SET grade_id = ${gradeId}
+        WHERE id = ${membershipId}
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
       `;
       if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
       return toMembership(row);

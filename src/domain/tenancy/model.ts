@@ -56,6 +56,21 @@ export interface Membership {
   /** The orthogonal fee-visibility axis — NOT a role. Delivery staff see the
    *  work but not the money. */
   readonly commercialVisibility: boolean;
+  /**
+   * Which rung of the firm's own hierarchy this person is on — a THIRD axis,
+   * independent of role and of fee visibility (G3.3).
+   *
+   * The role says what they may reach; the grade says how senior they are, and
+   * it is what the firm's review rule compares: "Manager or above is fine."
+   *
+   * Null is a real and common state, not a gap to be filled in later. A
+   * client-portal membership has no grade and never will, and the firm has
+   * several real designations its own hierarchy has never ranked — an ungraded
+   * person is visibly ungraded, which is the honest answer. A plausible
+   * invented rank would be indistinguishable from a real one, and this is the
+   * value that decides who may sign off a statutory filing.
+   */
+  readonly gradeId: string | null;
   readonly isActive: boolean;
 }
 

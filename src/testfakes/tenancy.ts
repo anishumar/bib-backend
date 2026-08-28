@@ -5,10 +5,14 @@
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
 import { FakeConfigRepo } from "./config";
+import { FakeStaffGradeRepo } from "./staffgrade";
 import type { RoleHolders } from "../usecase/config/ports";
 import { ConfigService } from "../usecase/config/service";
+import { StaffGradeService } from "../usecase/staffgrade/service";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
+  GradeDirectory,
+  GradeLadderSeeder,
   MemberRecord,
   MembershipRepository,
   NewMembership,
@@ -69,8 +73,14 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
    *  makeFakes so the fake user repo and this one see the same people. */
   users: FakeUserRepo | null = null;
 
+  /** The ladder behind the roster join, so a member record can carry the rung's
+   *  NAME rather than its id — the read model rule, held by the fake too. */
+  grades: FakeStaffGradeRepo | null = null;
+
   create(m: NewMembership): Promise<Membership> {
-    const row: Membership = { ...m, isActive: true };
+    // Ungraded on arrival, like the column: a grade is a separate decision from
+    // granting access, and inventing one here would hide that from every test.
+    const row: Membership = { ...m, gradeId: null, isActive: true };
     this.rows.push(row);
     return Promise.resolve(row);
   }
@@ -89,10 +99,24 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
       .filter((r) => r.tenantId === tenantId)
       .map((membership) => {
         const user = this.users?.rows.find((u) => u.id === membership.userId);
+        const grade =
+          membership.gradeId === null
+            ? null
+            : (this.grades?.rows.find((g) => g.id === membership.gradeId) ?? null);
         return {
           membership,
           email: user?.email ?? `${membership.userId}@unknown.invalid`,
           displayName: user?.displayName ?? null,
+          grade:
+            grade === null
+              ? null
+              : {
+                  id: grade.id,
+                  code: grade.code,
+                  name: grade.name,
+                  rank: grade.rank,
+                  isActive: grade.isActive,
+                },
         };
       });
     return Promise.resolve(rows);
@@ -110,6 +134,14 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
 
   setActive(tenantId: string, membershipId: string, isActive: boolean): Promise<Membership> {
     return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, isActive })));
+  }
+
+  updateGrade(
+    tenantId: string,
+    membershipId: string,
+    gradeId: string | null,
+  ): Promise<Membership> {
+    return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, gradeId })));
   }
 
   private replace(
@@ -132,8 +164,12 @@ export function makeFakes(): {
   memberships: FakeMembershipRepo;
   roleSeeder: RoleRegistrySeeder;
   roleDirectory: RoleDirectory;
+  gradeSeeder: GradeLadderSeeder;
+  gradeDirectory: GradeDirectory;
   /** The rows the seeder wrote, so a test can look at what a new firm got. */
   config: FakeConfigRepo;
+  /** The rungs a new firm got, for the same reason. */
+  grades: FakeStaffGradeRepo;
   ids: FakeIds;
   events: RecordingEventSink;
 } {
@@ -148,11 +184,22 @@ export function makeFakes(): {
   const config = new FakeConfigRepo();
   const users = new FakeUserRepo();
   const memberships = new FakeMembershipRepo();
+  const grades = new FakeStaffGradeRepo();
   memberships.users = users;
+  memberships.grades = grades;
   return {
     tenants: new FakeTenantRepo(),
     users,
     memberships,
+    // The REAL StaffGradeService over the in-memory ladder, on the same
+    // reasoning as the config service above: a tenancy test then fails if
+    // provisioning stops giving a new firm a ladder, which is the thing that
+    // would leave nobody meeting the review threshold. And `gradeDirectory` is
+    // the SAME store the seeder wrote to, so assigning a seeded rung works in a
+    // test exactly as it does in production.
+    gradeSeeder: new StaffGradeService({ grades, ids, events }),
+    gradeDirectory: grades,
+    grades,
     // `holders: memberships` mirrors the composition root exactly, so a tenancy
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".

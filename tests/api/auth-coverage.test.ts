@@ -35,6 +35,7 @@ import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { IdentityService } from "../../src/usecase/identity/service";
@@ -87,6 +88,13 @@ function deps(): RouterDeps {
   const fakes = makeFakes();
   return {
     tenancy: { service: new TenancyService(fakes) },
+    staffGrades: {
+      service: new StaffGradeService({
+        grades: fakes.grades,
+        ids: fakes.ids,
+        events: fakes.events,
+      }),
+    },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
     config: { service: new ConfigService(makeConfigFakes()) },

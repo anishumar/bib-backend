@@ -160,6 +160,45 @@ Two guards, and between them they cover both routes to the same unrecoverable st
 All four routes are `tenant:admin`, the read included — the roster lists colleagues' email
 addresses, and a general staff directory is a wider decision than this screen.
 
+## Seniority is a third axis, and it grants nothing (G3.3)
+
+`tenancy.staff_grade` is the firm's own ladder and `membership.grade_id` puts a person on a
+rung. Keep it clear of the other two axes: **role** says what somebody may REACH (permissions,
+gate 3), **commercial visibility** says whether they see money, and **grade** says how SENIOR
+they are. A grade carries no permission at all.
+
+It exists for exactly one comparison — the firm's stated review rule is *"Manager or above is
+fine"* — so `rank` is a plain integer and there is no skill matrix and no tier-and-load
+routing. T2.9's verification queue and T3.1's review step are its consumers.
+
+Four things about it are decisions, not details:
+
+- **`rank` is not unique and not contiguous.** Nothing compares WITHIN a rung, only across the
+  threshold. Requiring uniqueness would turn "insert a rung below this one" into a renumbering
+  of the whole ladder, to buy an ordering guarantee nothing reads.
+- **`is_active`, never a delete** — and `bib_app` holds no DELETE grant on the table, so that
+  is enforced rather than remembered. `deleted_at` would mean the row was a MISTAKE; this means
+  the firm has MOVED ON. A rung somebody held in 2026 is part of why they could approve
+  something in 2026, so it stays readable forever and the roster still renders it, marked
+  retired. What retiring changes is only that nobody NEW may be put on it.
+- **`grade_id` is nullable, and ungraded is a real answer.** A portal contact has no rung. Nor
+  does somebody whose designation the firm's own hierarchy never ranked — Article, Intern,
+  Trainee, Head, Public Relations Officer and CEO are all in use at the firm and none of them
+  is placed. This is the value that decides who may sign off a statutory filing, so a
+  plausible invented rank is worse than a null: it is indistinguishable from a real one. The
+  firm adds them itself, ranked as it chooses, from `/admin/grades`.
+- **It is a TABLE, not a registry kind**, even though a firm edits it. `membership.grade_id`
+  wants a real foreign key, and the ladder is read whole on every roster load rather than one
+  entry at a time. The registry's versioning and pinning would buy nothing here: nobody asks
+  what a rung meant last March, they ask who is on it now. Same shape of deviation as T3.2's
+  obligation templates, and recorded here for the same reason.
+
+`DEFAULT_GRADES` (`domain/staffgrade/model.ts`) is the ten rungs 10x Global gave on 22 Aug
+2026, seeded at `createTenant` through the `GradeLadderSeeder` port — a firm with no ladder is
+one where nobody meets the review threshold. Changing them costs a migration, and
+`tests/staffgrade/seed-parity.test.ts` holds the build red until the newest seed and the code
+agree; the same arrangement `DEFAULT_ROLES` has, for the same reason.
+
 ## Lists return read models, not aggregates
 
 An aggregate carries ids — `partyId`, `ownerUserId`, `userId` — which is right for the
@@ -436,8 +475,8 @@ difference makes everything here stricter than its proposal counterpart.
 
 ## First module
 
-`tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals` and
-`engagement letters` are built. Next: T2.4's spawn bridge, then `billing`.
+`tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
+`engagement letters` and the `staff grade` ladder are built. Next: T2.4's spawn bridge, then `billing`.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves

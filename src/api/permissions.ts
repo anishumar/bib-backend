@@ -66,6 +66,27 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
 
+  // THE SENIORITY LADDER (G3.3). `tenant:admin` on all five, the READ included,
+  // and the read is the one worth explaining.
+  //
+  // A grade is not a permission — holding one grants nothing — so the argument
+  // is not escalation, it is that these five routes are a firm RUNNING ITSELF.
+  // Between the ladder and the roster they decide who may sign off whose work:
+  // the firm's review rule is "Manager or above", so moving a rung's rank or
+  // moving a person onto it changes who can approve a statutory filing. Anybody
+  // who needs the rungs for a picker is already on the admin surface.
+  //
+  // It is also not free to loosen later in the other direction: a `grade:read`
+  // of its own would be a new permission, and since T2.5 a new permission costs
+  // a migration to reach every existing firm. When a screen outside
+  // administration needs the ladder — a work board showing seniority, say —
+  // that is the point to pay for it, with the screen in hand.
+  [routeKey("GET", "/api/v1/tenancy/grades"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/tenancy/grades"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/grades/{gradeId}"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/grades/{gradeId}/active"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/grade"), "tenant:admin" as const],
+
   // THE PIPELINE (T2.1) reuses the PARTY permissions rather than inventing
   // lead:read / lead:write, and that is a decision rather than laziness.
   //
