@@ -236,7 +236,12 @@ open and are recorded above; neither blocks Phase 2.
   > admin acting on themselves. Three verbs written: `membership.revoked` at last,
   > `membership.restored`, `membership.role_changed`.
   >
-  > Gate: `npm run check` 274 tests · `test:integration` 54 · `smoke` 58.
+  > Gate: `npm run check` 278 tests · `test:integration` 54 · `smoke` 58. The screens are in
+  > `../bib-frontend` (`/admin/people`, `/admin/roles`) — the first vertical slice of U2, and
+  > the first time any of the last five modules has had a UI. Building them immediately turned
+  > up two API gaps: nothing published the PERMISSION VOCABULARY, so a picker could only be
+  > built by retyping the list; and `/auth/me` still cannot tell a screen what the session may
+  > do. The first is fixed; the second is above.
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
@@ -349,6 +354,14 @@ sandbox access + credentials. **Not on any demo's critical path.**
   refuses it sharing a key with any other capability in a production-like environment —
   it is the step that completes the escalation path. Provisioning events now carry
   `provisionedBy`, because "system did it" cannot be traced to a system.
+
+- [ ] **`/auth/me` should carry the caller's permissions.** It returns the role but not what
+  the role carries, so the frontend cannot tell what a session may DO — the admin links are
+  shown to everyone and somebody without `tenant:admin` meets the API's 403 on the screen.
+  Accurate, but not the same as not offering it. Gate 3 already resolves the permissions on
+  every request (`AuthzService.can`), so this is a field on an existing response, not new work
+  — it needs a decision about whether a caller should be told the shape of what it cannot do.
+  Found building the admin screens (2026-08-28).
 
 - [ ] **Composite tenant keys across `core`** — `core.organization`, `core.person`,
   `core.legal_entity`, `core.party_identifier` and `core.party_relationship` still reference
