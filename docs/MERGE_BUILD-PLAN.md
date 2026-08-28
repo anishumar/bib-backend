@@ -216,10 +216,50 @@ open and are recorded above; neither blocks Phase 2.
   > by deferring workflow templates.
   >
   > Gate: `npm run check` 252 tests · `test:integration` 44 · `smoke` 46.
-- [ ] `(A)` **G3.1** **Lead: name it, and learn from it.** `title text NOT NULL` on `crm.lead`; `lost_reason text`; add `abandoned` to the stage CHECK and to the terminal-stage constraint. *Acc: two opportunities with the same client are distinguishable in a list; a lost deal records why in the closer's own words; "went quiet" and "chose a competitor" are different rows.* — **§4.4.** A lead has no name at all today, so every list renders the party instead. `lost_reason` is deliberately free text: a dropdown of five reasons produces five reasons, and the useful one is always the sixth. Collapsing `abandoned` into `lost` destroys the only signal separating a **pricing** problem from a **follow-up** problem. While here, confirm `lead_one_open_per_party` is intended — it stops a firm opening a second lead to quote an existing client for unrelated work.
-- [ ] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
+- [x] `(A)` **G3.1** **Lead: name it, and learn from it.** `title text NOT NULL` on `crm.lead`; `lost_reason text`; add `abandoned` to the stage CHECK and to the terminal-stage constraint. *Acc: two opportunities with the same client are distinguishable in a list; a lost deal records why in the closer's own words; "went quiet" and "chose a competitor" are different rows.* — **§4.4.** A lead has no name at all today, so every list renders the party instead. `lost_reason` is deliberately free text: a dropdown of five reasons produces five reasons, and the useful one is always the sixth. Collapsing `abandoned` into `lost` destroys the only signal separating a **pricing** problem from a **follow-up** problem. While here, confirm `lead_one_open_per_party` is intended — it stops a firm opening a second lead to quote an existing client for unrelated work.
+  > **Done (2026-08-28), migration 0030.** `title` arrived add-nullable → backfill from the
+  > party's display name → `SET NOT NULL`, with **no default**, deliberately: a default is
+  > both permanent and meaningless, and every future insert that omitted a title would get
+  > it silently. It is a SNAPSHOT, not a view — a title tracking `display_name` would rewrite
+  > history when a client renames.
+  >
+  > `lost_reason` is free text, and that is the decision rather than laziness. Scoped by CHECK
+  > to `lost` / `abandoned` and refused blank. **`abandoned` is a real terminal stage**, in the
+  > stage CHECK, in the closed-date constraint, and — the easy one to miss — inside
+  > `lead_one_open_per_party`'s `WHERE`, so an abandoned lead stops holding its client's slot.
+  >
+  > **`lead_one_open_per_party` is confirmed intended**, and it changes what the acceptance
+  > line means: a firm may hold exactly ONE live opportunity per client, so two opportunities
+  > are distinguishable by title only once the first has closed. Recorded rather than changed.
+  > **One gap found by smoke and left open:** a duplicate capture returns `200 / merged: true`
+  > carrying the EXISTING title and silently discards the new one — nothing in the response
+  > says a title was dropped. The service comment acknowledges the cost; the response shape
+  > does not surface it.
+- [x] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
   `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
   captured with no owner distribute evenly; a territory rule overrides the rotation.*
+  > **Done (2026-08-28), and no migration — that is the result, not an omission.** An
+  > `AssignmentStrategy` port with one implementation: round-robin over active STAFF.
+  >
+  > **The rotation state lives nowhere.** It is DERIVED — the lead goes to the active staff
+  > member with the fewest OPEN leads, ties broken by user id so the choice is total. A stored
+  > pointer is a second source of truth about a fact `crm.lead` already holds exactly, and it
+  > goes stale the moment the roster moves: the person it points at leaves and the rotation
+  > stalls; somebody joins on Monday and waits a full lap. Deriving it self-heals.
+  >
+  > **Stated honestly:** this routes by CURRENT DESK LOAD, not lifetime turn. On a level
+  > pipeline they are identical, which is the acceptance; they diverge when somebody closes
+  > faster and their emptier desk receives more. That is capacity routing, and it is a choice —
+  > strict lifetime rotation is a different strategy behind the same port.
+  >
+  > Fairness under concurrency is a per-tenant transaction-scoped advisory lock plus
+  > `AND owner_user_id IS NULL`, so a manual assignment landing in between wins — a rotation
+  > never overrules a person. Six simultaneous claims divide 2/2/2; with the lock removed the
+  > same test gives 4/6/5, which is how it was checked.
+  >
+  > **Territory is still not built, and still for the reason T2.1 gave:** its axis — geography,
+  > industry, service line — has never been chosen with the client. The port is shaped so it
+  > drops in without touching a caller.
 - [x] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
   > **Agreed design, before building (2026-08-28).** Settled in discussion; recorded here because
   > it decides the schema and money is the area CLAUDE.md is strictest about.
@@ -693,6 +733,21 @@ open and are recorded above; neither blocks Phase 2.
 - [ ] `(A)` **G1.6** **Line detail.** On both line tables: `jurisdiction text`, `billing_frequency text`, the four overrides (`scope_override`, `client_obligations_override`, `volume_limits_override`, `exclusions_override`), `oop_estimate_min` / `oop_estimate_max` / `oop_currency`, `pricing_note text`, **and relax `unit_amount` to nullable.** *Acc: a line can say "as mutually agreed" with a reason instead of a price; editing one client's scope wording does not touch the catalogue; a line carries an out-of-pocket range separate from the fee.* — **§4.6.** Two of these are sharper than the rest. `unit_amount numeric NOT NULL CHECK (>= 0)` makes an unpriced line **unrepresentable** — it has to be quoted as zero, which says something different to a client, and several real lines are genuinely "as mutually agreed". The four overrides are what make an issued document reproducible: the letter carries its own wording, so a later catalogue revision cannot change what a signed document says.
 - [ ] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
 - [ ] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
+  > **[~] Schema half done (2026-08-28); the wiring half is still open.** `ClauseBody` gains
+  > `governingLaw` and `courts`, each a `JurisdictionalTerm | null` — an ISO 3166-1 code AND
+  > the words the document prints. **Both halves, because neither does the other's job:** "the
+  > laws of the State of Delaware" does not follow from `US`, and "the DIFC Courts, Dubai" does
+  > not follow from `AE`; while prose alone is invisible to the machine comparison this task's
+  > acceptance actually asks for — a human review already let this letter out once. Validated
+  > together (a half term is refused), demanded in canonical upper case at the write, optional
+  > so that clause versions already published and pinned by issued letters still read.
+  >
+  > **What is NOT built, and it is the acceptance line itself:** resolving the law from the
+  > ISSUING ENTITY (G1.2) and refusing a mismatch. Two things are needed. G1.2 is in flight in
+  > the engagement lane. And `LetterClauseRecord` — `{clause, key, version, title, text}` —
+  > currently DISCARDS both terms, so the structured law cannot reach a document renderer at
+  > all; found by smoke rather than by building. **G1.8 stays open until a letter issued by the
+  > US entity cannot print Indian governing law.**
 
 > **Milestone G1 (inside Phase 2):** an engagement letter generated from this system is the
 > letter the firm actually sends — numbered, issued by a named entity, addressed to a person,
@@ -779,9 +834,34 @@ open and are recorded above; neither blocks Phase 2.
   > up two API gaps: nothing published the PERMISSION VOCABULARY, so a picker could only be
   > built by retyping the list; and `/auth/me` still cannot tell a screen what the session may
   > do. The first is fixed; the second is above.
-- [ ] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
-- [ ] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
-- [ ] `(A)` **G2.3** **Catalogue: `slaDays`, `recurrence`, `pricingNote`.** *Acc: a work item created from an engagement snapshots the SLA in force at creation; a service can recur monthly while being billed quarterly; a service with no list price can say why.* — **§4.8. This one gates `(B)`: T3.1 cannot meet its acceptance without `slaDays`.** The firm's rule is *"task is due from signing of EL"* and *"SLA is per service"*, and a work item copies the value at creation so a later catalogue revision cannot make finished work retroactively late. `recurrence` is not `billingBasis`: the latter says how a service is priced (fixed / hourly / retainer / per_unit), the former how often it recurs, and the EL line's `billing_frequency` (G1.6) defaults from it. `pricingNote` gives `listPrice: null` a reason — "As mutually agreed" currently has no home.
+- [x] `(A)` **G2.1** **Catalogue: identity and reporting axes.** Add `ref`, `module`, `group` to `ServiceBody` (or settle `ref` onto `config.entry.key` and write down which). *Acc: revenue can be grouped by Dept; a proposal cites the firm's own service code.* — **§4.8.** `(A)` despite sitting under a `(B)` task: Anish built the registry, and the gap-ownership rule follows the builder. `module` is FRC / TRC / RAA, the axis the firm's own dashboard splits revenue by, and the axis a SPOC is assigned per (G3.2). `group` is the delivery team and is deliberately **not** nested under module — FINCOMPLIANCE appears under both FRC and TRC, so they are independent dimensions of one service rather than a hierarchy. No migration: these arrive as a new VERSION of each service, which is T2.5's deferral paying off again.
+  > **Done (2026-08-28). `ref` settled onto the BODY, not `config.entry.key`** — and the
+  > reasoning is in the code and in a test: a key is lowercase by rule while the code is `A1`,
+  > so the key would mean storing `a1` and upper-casing it to print; the key is the pin target
+  > every issued document resolves through, while a services-master renumber is an ordinary
+  > Tuesday. `module` and `group` are independent dimensions, not a hierarchy — FINCOMPLIANCE
+  > delivers under both FRC and TRC, so nesting would force a duplicate row per Dept and count
+  > its revenue twice. Both are free-form firm codes (this product is sold to many firms) but
+  > demanded in CANONICAL form at the WRITE, because the whole job of the field is to be
+  > `GROUP BY`-ed and `frc` beside `FRC` splits one Dept into two half-sized ones that both
+  > look plausible. A body is stored verbatim, so the read is too late to fix it.
+- [x] `(A)` **G2.2** **Catalogue: the four scope blocks.** Add `scope`, `clientObligations`, `volumeLimits`, `exclusions` to `ServiceBody`. *Acc: an engagement letter is assembled from the catalogue's own words, and G1.6's overrides have something to override.* — **§4.8.** These are what protect the firm in a dispute. Store them as the firm states them — *"under 1,000 entries; under 8 bank accounts"* — not parsed into typed limits: nothing is metered, and when a client exceeds a ceiling the firm re-assesses the engagement rather than auto-charging. If metered billing is ever wanted, that is the point to add structure, not before.
+  > **Done (2026-08-28).** Prose, exactly as the firm states it — *"under 1,000 entries; under
+  > 8 bank accounts"* — and deliberately NOT parsed into typed limits: nothing is metered, and
+  > a client who exceeds a ceiling gets the engagement re-assessed rather than auto-charged.
+  > G1.6's per-document overrides now have something to override.
+- [x] `(A)` **G2.3** **Catalogue: `slaDays`, `recurrence`, `pricingNote`.** *Acc: a work item created from an engagement snapshots the SLA in force at creation; a service can recur monthly while being billed quarterly; a service with no list price can say why.* — **§4.8. This one gates `(B)`: T3.1 cannot meet its acceptance without `slaDays`.** The firm's rule is *"task is due from signing of EL"* and *"SLA is per service"*, and a work item copies the value at creation so a later catalogue revision cannot make finished work retroactively late. `recurrence` is not `billingBasis`: the latter says how a service is priced (fixed / hourly / retainer / per_unit), the former how often it recurs, and the EL line's `billing_frequency` (G1.6) defaults from it. `pricingNote` gives `listPrice: null` a reason — "As mutually agreed" currently has no home.
+  > **Done (2026-08-28) — this is the one that unblocked `(B)`'s T3.1.** `slaDays` is whole
+  > days from signing of the EL, read off a PINNED version, so a later catalogue revision
+  > cannot make finished work retroactively late. `recurrence` (one_time / monthly / quarterly
+  > / annually / custom) is NOT `billingBasis`: one says how often work comes round, the other
+  > what the price is a price OF. `pricingNote` gives `listPrice: null` a reason.
+  >
+  > **Every one of the ten fields is OPTIONAL, and that is load-bearing.** A published config
+  > version is FROZEN, so a required field would strand every version already published —
+  > which cannot be edited to carry it and has no honest value to invent. Absence reads as
+  > null, never as a default. **No migration:** these arrive as a new VERSION of each service,
+  > which is precisely what T2.5's deferral was deferred for.
 - [ ] `(B)` **T2.6** **P4 Scheduler** (pg-boss): recurring, due dates, triggers; spawns at T–X per config. *Acc: a monthly obligation spawns 12 instances a year out.*
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
