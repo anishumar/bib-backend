@@ -604,12 +604,57 @@ open and are recorded above; neither blocks Phase 2.
   > **(d)** Can an engagement be amended after signature, or is a change a NEW letter? A new
   > letter is the legally clean answer and the one this codebase's instincts favour; firms in
   > practice issue addenda.
-- [ ] `(A)` **G0.1** BLOCKING — **the entity a line is for.** Add `entity_party_id` to `crm.proposal_line` (nullable), `crm.engagement_letter_line` (NOT NULL) and `crm.engagement` (NOT NULL), each with a composite `(entity_party_id, tenant_id)` FK to `core.party`, plus indexes on `(tenant_id, entity_party_id)`. Thread it through both domain models, both `ports.ts`, both services, both repositories, both handlers, both fakes and the smoke script. In `usecase/engagement/service.ts` the fan-out takes the entity **from the line** while keeping `partyId: letter.partyId` — the client is who is billed, the entity is who the work is delivered to, and a firm needs both. *Acc: an EL line names an entity; signing fans out an engagement carrying it; a letter line with no entity is refused by the DATABASE, not by the service.* — **§5.1.**
-  > **Why this blocks T3.2, and therefore the whole delivery lane.** An engagement is `service × ONE LEGAL ENTITY` — the firm's own "Per Company": vCFO for a group of four companies is four engagements, not one. `crm.engagement` is currently spawned with `letter.partyId` (the client) and the line it fans out from names no entity, so that dimension does not exist anywhere in the commercial chain. `obligation_instance` keys on an entity — an entity owes GSTR-3B, a client does not — so the compliance calendar has **no join to generate against**, and `core.legal_entity` is reachable from nothing downstream.
+- [x] `(A)` **G0.1** ~~BLOCKING~~ — **the entity a line is for.** `entity_party_id` on `crm.proposal_line` (nullable), `crm.engagement_letter_line` (NOT NULL) and `crm.engagement` (NOT NULL), each with a composite `(entity_party_id, tenant_id)` FK to `core.party`, threaded through both domain models, both `ports.ts`, both services, both repositories, both handlers, both fakes and the smoke script. *Acc: an EL line names an entity; signing fans out an engagement carrying it; a letter line with no entity is refused by the DATABASE, not by the service.* — **§5.1.**
+  > **Done (2026-08-28), migration 0018.** The fan-out now takes the entity **from the line**
+  > and keeps `partyId: letter.partyId` — the client is who is BILLED, the entity is who the
+  > work is DELIVERED TO, and both are stored. `core.legal_entity` is reachable from
+  > downstream for the first time, and T3.2 has its join.
   >
-  > The migration is written and tested against this schema (applies clean, its down is re-runnable). All three tables are empty, so it is one additive migration today and a calendar rewrite after T3.2. Nullable on the proposal line is deliberate: Incorporation is a service the firm sells whose line cannot name an entity, because that entity is the line's own **output**.
+  > **Three deliberate additions to §5.1's plan**, each because building it asked a question
+  > the analysis had not:
   >
-  > Left open as a product decision rather than assumed: must an EL line name an entity the firm has already incorporated? If yes, the FK tightens to `core.legal_entity`, which needs a composite key on it first.
+  > **(1) The entity is in `canonicalContent`, so the SIGNATURE commits to it.** It is a term,
+  > and one of the most material — the same service for a different company of the same group
+  > is a different agreement at a different price. Leaving it out would have meant the hash
+  > says two such letters are identical, and the one dimension the delivery lane schedules
+  > against would sit outside what the signature proves. A test signs two letters differing
+  > only in the entity and asserts the hashes differ.
+  >
+  > **(2) The read model carries the entity's NAME, not just its id** — the rule CLAUDE.md
+  > says has now been learnt five times, and a letter's lines are precisely where a group
+  > client's four companies have to be told apart. A `JOIN core.party` on the letter read, a
+  > `LEFT JOIN` on the proposal read because a proposal line naming no entity is a real line.
+  >
+  > **(3) `contract.activated` carries `entityPartyId`.** That event is what T2.4's scheduler
+  > consumes and T3.2 generates from. A consumer that had to join back to the line to find out
+  > which company it was scheduling for would be reading the one fact the trigger exists to
+  > deliver out of a second table.
+  >
+  > **The migration REFUSES rather than backfilling, and that mattered.** §5.1's precondition —
+  > *"all three tables are empty"* — held on a clean database and on neither of ours: smoke
+  > runs had left 176 proposal lines, 91 EL lines and 91 engagements, and **every one of those
+  > EL lines belonged to a signed letter**. `trg_el_line_freeze` (0017) refuses any write to
+  > them, by any role, so the three-step add-nullable/backfill/`SET NOT NULL` fails at step two
+  > — and that is the freeze WORKING. There is also no honest value: no row ever recorded an
+  > entity, so writing the client into one puts a term into a signed document that the document
+  > never said. 0018 therefore raises a named exception if either table holds rows, and says
+  > what to do about it. **Both dev databases need dropping and re-seeding** (`npm run migrate`
+  > then `npm run smoke`); nothing else does, because there is no production data.
+  >
+  > **The forward consequence, written down because G1 hits it eight more times:** once real
+  > signed letters exist, **no NOT NULL column can ever be added to `crm.engagement_letter_line`
+  > again.** A new required field on an issued document is then a nullable column required only
+  > for letters drafted after it. That is a property of a frozen contract, not a defect, and
+  > 0018's exception message says so to whoever reads it next.
+  >
+  > Left where §5.1 left it: the FK points at `core.party`, not `core.legal_entity`. Whether an
+  > EL line may only name a company the firm has already incorporated is still the open product
+  > decision in the parking lot.
+  >
+  > Gate: `npm run check` 375 tests · `test:integration` 94 · `smoke` 109.
+
+- [ ] `(A)` **G1.0** **The freeze trigger enumerates columns — extend it with every field G1 adds.** `crm.refuse_signed_change()` (0017) compares an explicit list of `engagement_letter` columns; a column not in that list is **silently editable after signature**. G1.1–G1.5 add at least eight (`ref`, `issuing_entity_party_id`, `background`, `addressed_to_party_id`, `issued_on`, `effective_from`, the firm signatory block), and every one of them is part of what the client agreed to. *Acc: a test updates each new column on a signed letter and expects `restrict_violation`; adding a column to `engagement_letter` without adding it to the trigger fails the build.* — Found while building G0.1. The line and clause triggers refuse ANY change so they need nothing; only the head's does this column by column, and the asymmetry is easy to miss because the same migration defines both.
+
 - [ ] `(A)` **G1.1** **Document reference.** `ref text NOT NULL`, `UNIQUE (tenant_id, ref)` on proposal and engagement letter — `EL-US-2026-0007`. *Acc: a letter has a number a client can quote back on the phone, and two letters cannot share it.* — **§4.5.** Neither document has any human-facing identifier. Decide the generator alongside: per-entity per-year is the shape the demo used, and the same reasoning applies as in T3.4 — a sequence keeps its number on rollback.
 - [ ] `(A)` **G1.2** **Issuing entity, and the rule that picks it.** `issuing_entity_party_id uuid NOT NULL` on both documents, plus a `firm_entity_preference` table (`client_jurisdiction` including `'*'`, `firm_entity_party_id`, `note`) holding the fallback and any deliberate exception. *Acc: a letter names which of the firm's own entities is contracting; a client in a country the firm has no entity in resolves through the fallback, not through an `if`.* — **§4.5, §4.7.** The firm's rule is *"jahan ka client hota hai, wahan ki entity"*, with *"flexibility to choose. But mostly UAE"* where it has none. The letter carries a bare `jurisdiction text` today, which says **where** but never **who**. Stored rather than derived, because it is a snapshot: the client's default may change and an issued letter must always say who actually issued it.
 - [ ] `(A)` **G1.3** **The prose a letter opens and closes with.** `background text`, `addressed_to_party_id uuid`, `issued_on date`, `declined_reason text`, `supersedes_id uuid`. *Acc: a letter addresses a named person care-of the client organization, opens with why this client is buying this, and a rejected proposal records why.* — **§4.5.** `addressedTo` is currently a computed string (the party's display name), so the document cannot address an individual. `supersedes_id` matters more than it looks: the model already refuses to edit a signed letter — *"supersede it with a new letter instead"* — and gives that instruction nowhere to be recorded.
@@ -719,8 +764,9 @@ open and are recorded above; neither blocks Phase 2.
 ## Phase 3 · Close the loop  (~4–6 weeks)
 
 ### Lane B — delivery
-> **Read G0.1 first.** Everything in this lane keys on a legal entity, and the commercial
-> chain does not carry one yet. T3.2 is unstartable until it does.
+> **G0.1 has landed (2026-08-28, migration 0018).** Every line, engagement and
+> `contract.activated` event now carries `entity_party_id`, so this lane has the join it keys
+> on. Note the dev-database reset it requires — see G0.1.
 
 - [ ] `(B)` **G3.2** **Client ownership — `client_assignment`.** New tenant-scoped table: `client_party_id`, `role` in `key_manager` | `spoc`, `module_id` (the Dept for a SPOC, null for a key manager, enforced by CHECK), `user_id`, `valid_from` / `valid_to`. *Acc: a client has one Key Manager and one SPOC per Dept, effective-dated, and "who was SPOC in March" is answerable.* — **§4.2. T3.1's own acceptance line depends on this** — nothing else in the schema can answer "the client's Dept SPOC". Confirmed firm practice, not a guess: *"each client will de facto have two SPOC — one from TRC team and one from FRC team"*, and a client buying RAA work has three, which is why it is a row per Dept rather than two columns. Depends on G2.1 for `module`.
 - [ ] `(B)` **G3.3** **`staff_grade` + `membership.grade_id`.** The firm's nine grades, Article to Associate Director, with `rank` and `is_active`. *Acc: the review rule "Manager or above" is one comparison against `rank`, and a grade the firm stopped promoting through stays readable.* — **§4.3.** `rank` exists because that is the whole routing rule the firm actually stated — one threshold, no skill matrix, no tier-and-load. `is_active` rather than `deleted_at`, and the distinction is deliberate: `deleted_at` means the row was a mistake, `is_active` means the firm has moved on — and a rung somebody once held is part of why they could approve something in 2026. Needed by T2.9's verification routing and T3.1's review step. **No dependency on `(A)` — this can start today.**
@@ -898,7 +944,7 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
 - zod 3 → 4 migration (unlocks `@hono/zod-openapi@1.x`) — own commit, later.
 - Product name; which prior-vendor data (if any) migrates.
 - Real-integration access: which portals/sandboxes the client can grant, and when.
-- **Migration ranges** — `(A)` 0018–0039, `(B)` 0040+. Confirm before either lane writes SQL.
+- ~~**Migration ranges**~~ — settled: `(A)` 0018–0039, `(B)` 0040+. `(A)` has taken **0018**.
 - **G0.3** — soft delete on `core`, or a written decision that parties are permanent.
 - **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.

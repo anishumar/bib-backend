@@ -95,6 +95,9 @@ export interface DraftLetterInput {
 export interface AddLetterLineInput {
   readonly tenantId: string;
   readonly letterId: string;
+  /** WHOSE entity. Required on a letter line, unlike a proposal's, because
+   *  signing turns this line into an engagement. */
+  readonly entityPartyId: string;
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: string;
@@ -195,6 +198,7 @@ export class EngagementService {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       engagementLetterId: letter.id,
+      entityPartyId: input.entityPartyId,
       serviceVersionId: input.serviceVersionId,
       description: input.description,
       quantity: input.quantity,
@@ -320,12 +324,19 @@ export class EngagementService {
     // The fee gate, decided ONCE by the domain and carried into every
     // engagement the letter creates.
     const releasedNow = mayActivate(letter);
+    // BOTH parties, and from different places on purpose. The CLIENT comes from
+    // the letter — it is who the firm is billing, and it is the same for every
+    // line. The ENTITY comes from the LINE, because an engagement is
+    // `service × one legal entity`: a letter covering a group's four companies
+    // fans out into four engagements that differ in exactly this field, and
+    // taking it from the letter instead would make them indistinguishable.
     const engagements: NewEngagement[] = lines.map((line) => ({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       engagementLetterId: letter.id,
       engagementLetterLineId: line.id,
       partyId: letter.partyId,
+      entityPartyId: line.entityPartyId,
       status: releasedNow ? ("active" as const) : ("pending_advance" as const),
       activatedAt: releasedNow ? at : null,
     }));
@@ -478,6 +489,13 @@ export class EngagementService {
         engagementLetterId: engagement.engagementLetterId,
         engagementLetterLineId: engagement.engagementLetterLineId,
         partyId: engagement.partyId,
+        // THE ENTITY, on the trigger itself. This is the event T2.4's scheduler
+        // consumes and T3.2's calendar generates from, and an obligation
+        // attaches to an entity — an entity owes GSTR-3B, a client does not.
+        // A consumer that had to join back to the line to find out which
+        // company it was scheduling for would be reading the one fact the
+        // trigger exists to deliver out of a second table.
+        entityPartyId: engagement.entityPartyId,
       },
     });
   }

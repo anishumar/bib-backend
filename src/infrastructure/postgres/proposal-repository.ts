@@ -46,6 +46,7 @@ interface LineRow {
   id: string;
   tenant_id: string;
   proposal_id: string;
+  entity_party_id: string | null;
   service_version_id: string;
   description: string;
   position: number;
@@ -98,6 +99,7 @@ function toLine(r: LineRow): ProposalLine {
     id: r.id,
     tenantId: r.tenant_id,
     proposalId: r.proposal_id,
+    entityPartyId: r.entity_party_id,
     serviceVersionId: r.service_version_id,
     description: r.description,
     position: r.position,
@@ -186,18 +188,24 @@ export class PostgresProposalRepository implements ProposalRepository {
           service_key: string;
           service_version: number;
           service_body: Record<string, unknown>;
+          entity_display_name: string | null;
         })[]
       >`
-        SELECT l.id, l.tenant_id, l.proposal_id, l.service_version_id, l.description,
+        SELECT l.id, l.tenant_id, l.proposal_id, l.entity_party_id, l.service_version_id,
+               l.description,
                l.position, l.quantity, l.unit_amount, l.currency, l.discount_percent,
                a.net,
                e.key AS service_key,
                v.version AS service_version,
-               v.body AS service_body
+               v.body AS service_body,
+               entity.display_name AS entity_display_name
         FROM crm.proposal_line l
         JOIN crm.proposal_line_amount a ON a.id = l.id
         JOIN config.version v ON v.id = l.service_version_id
         JOIN config.entry e ON e.id = v.entry_id
+        -- LEFT, because a proposal line naming no entity is a real line: the
+        -- prospect may hold none yet, or the entity is this line's own output.
+        LEFT JOIN core.party entity ON entity.id = l.entity_party_id
         WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
         ORDER BY l.position
       `;
@@ -213,6 +221,10 @@ export class PostgresProposalRepository implements ProposalRepository {
         lines: lines.map(
           (r): ProposalLineRecord => ({
             line: toLine(r),
+            entity:
+              r.entity_party_id === null || r.entity_display_name === null
+                ? null
+                : { id: r.entity_party_id, displayName: r.entity_display_name },
             service: {
               key: r.service_key,
               version: r.service_version,
@@ -284,16 +296,17 @@ export class PostgresProposalRepository implements ProposalRepository {
       // them would lose to the unique index for no reason they could act on.
       const [row] = await db<LineRow[]>`
         INSERT INTO crm.proposal_line
-          (id, tenant_id, proposal_id, service_version_id, description, position,
-           quantity, unit_amount, currency, discount_percent)
-        SELECT ${l.id}, ${l.tenantId}, ${l.proposalId}, ${l.serviceVersionId},
+          (id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
+           position, quantity, unit_amount, currency, discount_percent)
+        SELECT ${l.id}, ${l.tenantId}, ${l.proposalId}, ${l.entityPartyId},
+               ${l.serviceVersionId},
                ${l.description},
                coalesce(max(position), 0) + 1,
                ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent}
         FROM crm.proposal_line
         WHERE proposal_id = ${l.proposalId} AND removed_at IS NULL
-        RETURNING id, tenant_id, proposal_id, service_version_id, description, position,
-                  quantity, unit_amount, currency, discount_percent
+        RETURNING id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
+                  position, quantity, unit_amount, currency, discount_percent
       `;
       if (!row) throw new Error("proposal line insert returned no row");
       return toLine(row);
@@ -312,8 +325,8 @@ export class PostgresProposalRepository implements ProposalRepository {
   async listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<LineRow[]>`
-        SELECT id, tenant_id, proposal_id, service_version_id, description, position,
-               quantity, unit_amount, currency, discount_percent
+        SELECT id, tenant_id, proposal_id, entity_party_id, service_version_id, description,
+               position, quantity, unit_amount, currency, discount_percent
         FROM crm.proposal_line
         WHERE proposal_id = ${proposalId} AND removed_at IS NULL
         ORDER BY position

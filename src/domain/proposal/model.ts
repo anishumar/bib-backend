@@ -134,6 +134,16 @@ export interface ProposalLine {
   readonly id: string;
   readonly tenantId: string;
   readonly proposalId: string;
+  /**
+   * Which of the client's entities this line is for, or null.
+   *
+   * NULLABLE here and required on an engagement letter line, and the asymmetry
+   * is the design: a proposal is an OFFER, the prospect may hold no entity yet,
+   * and an Incorporation line's entity is that line's own OUTPUT. A letter has
+   * to name one because signing it creates an engagement, and an engagement is
+   * `service × one legal entity`.
+   */
+  readonly entityPartyId: string | null;
   /** THE PIN: the frozen `config.version` this line was quoted from, so the
    *  list price at the time survives the catalogue moving on. */
   readonly serviceVersionId: string;

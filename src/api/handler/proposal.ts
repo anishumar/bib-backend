@@ -92,6 +92,11 @@ const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string()
 const ProposalLineSchema = z
   .object({
     id: z.string().uuid(),
+    /** Which of the client's entities this line is for. Nullable on a proposal:
+     *  the prospect may hold none yet, and Incorporation is a line whose entity
+     *  is its own output. An engagement letter line must name one. */
+    entityPartyId: z.string().uuid().nullable(),
+    entity: z.object({ id: z.string().uuid(), displayName: z.string() }).nullable(),
     // The PIN, on the wire, because a screen showing "list 25,000 / quoted
     // 22,500" needs to be able to say which catalogue version it is quoting.
     serviceVersionId: z.string().uuid(),
@@ -209,6 +214,7 @@ const DraftProposalRequest = z
 
 const AddLineRequest = z
   .object({
+    entityPartyId: z.string().uuid().optional(),
     serviceVersionId: z.string().uuid(),
     description: z.string().min(1),
     quantity: AmountSchema.default("1"),
@@ -468,6 +474,8 @@ function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof Pro
     party: { id: record.party.id, displayName: record.party.displayName },
     lines: record.lines.map((l) => ({
       id: l.line.id,
+      entityPartyId: l.line.entityPartyId,
+      entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
       service:
         l.service === null
@@ -549,6 +557,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     return c.json(
       {
         id: line.id,
+        entityPartyId: line.entityPartyId,
+        // Same as `service` below: a name the write path did not join for.
+        entity: null,
         serviceVersionId: line.serviceVersionId,
         // The pinned service is a join the write path does not do; the read
         // route carries it. Null here says "not loaded", which is what it is.

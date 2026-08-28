@@ -425,10 +425,29 @@ difference makes everything here stricter than its proposal counterpart.
 - **A letter needs lines AND clauses before it can go out.** No lines commits nobody to
   anything; no clauses is the dangerous one, because a signed contract with no terms is
   enforceable as whatever a court reads into it.
+- **A line names the ENTITY the work is for, and it is not the client.** An engagement is
+  `service × ONE LEGAL ENTITY` — the firm's own "Per Company" rule, so vCFO for a group of
+  four companies is four engagements. `entity_party_id` is NOT NULL on the letter line and on
+  the engagement, nullable on a proposal line (a prospect may hold no company yet, and
+  Incorporation is a line whose entity is its own OUTPUT). **`party_id` stays alongside it**:
+  the client is who is BILLED, the entity is who the work is DELIVERED TO, and invoicing needs
+  the first while the compliance calendar needs the second — an entity owes GSTR-3B, a client
+  does not. The entity is inside `canonicalContent`, so the signature commits to it, and it
+  travels on `contract.activated` so the scheduler need not join back to find it.
 - **Signing fans out one engagement per line, in ONE transaction.** A signature with no
   engagements is a client committed to work nobody scheduled; engagements with no signature is
   work nobody agreed to. `UNIQUE (engagement_letter_line_id)` makes a double fan-out
   impossible rather than unlikely.
+- **The freeze has two shapes, and only one of them is automatic.** The line and clause
+  triggers refuse *any* write to a signed letter's children. The letter's own
+  (`crm.refuse_signed_change`, 0017) compares an **enumerated list of columns** — so a column
+  added later is silently editable after signature until somebody adds it to that list. **Add
+  a column to `crm.engagement_letter`, add it to the trigger.**
+- **Once real signed letters exist, no NOT NULL column can be added to a letter line again.**
+  The freeze refuses the backfill, by design, and there is no honest value to write into a
+  document that never said it. A new required field on an issued document is then a nullable
+  column required only for letters drafted after it. Migration 0018 refuses rather than
+  working around this, and its exception message says so.
 - **The advance-fee gate is real.** Engagements start `pending_advance`, and
   `contract.activated` — the trigger T2.4's scheduler consumes — is not emitted until the
   advance is recorded. **Its honest limit:** a person attests the money arrived, because

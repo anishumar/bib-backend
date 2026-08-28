@@ -207,6 +207,7 @@ describe("the money adds up, in numeric", () => {
         id: l.line.id,
         tenantId: tenantA,
         proposalId: id,
+        entityPartyId: l.line.entityPartyId,
         serviceVersionId: l.line.serviceVersionId,
         description: l.line.description,
         quantity: l.line.quantity,

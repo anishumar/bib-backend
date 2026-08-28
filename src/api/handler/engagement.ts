@@ -84,6 +84,10 @@ const LetterSchema = z
 const LetterLineSchema = z
   .object({
     id: z.string().uuid(),
+    /** The entity this line's work is for — the id AND the name, because this
+     *  is where a group client's companies are told apart on screen. */
+    entityPartyId: z.string().uuid(),
+    entity: z.object({ id: z.string().uuid(), displayName: z.string() }).nullable(),
     serviceVersionId: z.string().uuid(),
     service: z
       .object({ key: z.string(), version: z.number().int(), name: z.string() })
@@ -117,7 +121,10 @@ const EngagementSchema = z
     id: z.string().uuid(),
     engagementLetterId: z.string().uuid(),
     engagementLetterLineId: z.string().uuid(),
+    /** Who is billed. */
     partyId: z.string().uuid(),
+    /** Who the work is delivered to — `service × one legal entity`. */
+    entityPartyId: z.string().uuid(),
     status: z.enum(ENGAGEMENT_STATUS_VALUES),
     activatedAt: z.string().nullable(),
     endsOn: DaySchema.nullable(),
@@ -175,6 +182,7 @@ const DraftLetterRequest = z
 
 const AddLineRequest = z
   .object({
+    entityPartyId: z.string().uuid(),
     serviceVersionId: z.string().uuid(),
     description: z.string().min(1),
     quantity: AmountSchema.default("1"),
@@ -420,6 +428,7 @@ function toEngagementBody(e: LetterRecord["engagements"][number]): z.infer<typeo
     engagementLetterId: e.engagementLetterId,
     engagementLetterLineId: e.engagementLetterLineId,
     partyId: e.partyId,
+    entityPartyId: e.entityPartyId,
     status: e.status,
     activatedAt: e.activatedAt,
     endsOn: e.endsOn,
@@ -432,6 +441,8 @@ function toRecordBody(record: LetterRecord, fees: boolean): z.infer<typeof Lette
     party: { id: record.party.id, displayName: record.party.displayName },
     lines: record.lines.map((l) => ({
       id: l.line.id,
+      entityPartyId: l.line.entityPartyId,
+      entity: l.entity === null ? null : { ...l.entity },
       serviceVersionId: l.line.serviceVersionId,
       service: l.service === null ? null : { ...l.service },
       description: l.line.description,
@@ -518,6 +529,10 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     return c.json(
       {
         id: line.id,
+        entityPartyId: line.entityPartyId,
+        // Null, not fetched: this is the write's echo, and the name comes back
+        // on the next read. Honest about the join rather than pretending to it.
+        entity: null,
         serviceVersionId: line.serviceVersionId,
         service: null,
         description: line.description,

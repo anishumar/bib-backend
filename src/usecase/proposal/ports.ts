@@ -27,6 +27,9 @@ export interface NewProposalLine {
   readonly id: string;
   readonly tenantId: string;
   readonly proposalId: string;
+  /** The entity this line is for, when the prospect has one. Null is a real
+   *  answer on a proposal — see the note on `ProposalLine`. */
+  readonly entityPartyId: string | null;
   readonly serviceVersionId: string;
   readonly description: string;
   readonly quantity: Amount;
@@ -64,6 +67,9 @@ export interface ProposalRecord {
 
 export interface ProposalLineRecord {
   readonly line: ProposalLine;
+  /** The entity by NAME. Null when the line names none — which on a proposal is
+   *  a real answer, not a missing join. */
+  readonly entity: { readonly id: string; readonly displayName: string } | null;
   /** The service as it was PINNED — its name then, and its list price then.
    *  Null only if the pinned version has somehow gone, which the composite
    *  foreign key makes impossible; the type is honest about the join anyway. */

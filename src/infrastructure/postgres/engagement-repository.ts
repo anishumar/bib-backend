@@ -59,6 +59,7 @@ interface LineRow {
   id: string;
   tenant_id: string;
   engagement_letter_id: string;
+  entity_party_id: string;
   service_version_id: string;
   description: string;
   position: number;
@@ -82,6 +83,7 @@ interface EngagementRow {
   engagement_letter_id: string;
   engagement_letter_line_id: string;
   party_id: string;
+  entity_party_id: string;
   status: EngagementStatus;
   activated_at: Date | null;
   ends_on: Date | null;
@@ -127,6 +129,7 @@ function toLine(r: LineRow): LetterLine {
     id: r.id,
     tenantId: r.tenant_id,
     engagementLetterId: r.engagement_letter_id,
+    entityPartyId: r.entity_party_id,
     serviceVersionId: r.service_version_id,
     description: r.description,
     position: r.position,
@@ -154,6 +157,7 @@ function toEngagement(r: EngagementRow): Engagement {
     engagementLetterId: r.engagement_letter_id,
     engagementLetterLineId: r.engagement_letter_line_id,
     partyId: r.party_id,
+    entityPartyId: r.entity_party_id,
     status: r.status,
     activatedAt: r.activated_at?.toISOString() ?? null,
     endsOn: r.ends_on === null ? null : toDay(r.ends_on),
@@ -211,15 +215,27 @@ export class PostgresEngagementRepository implements EngagementRepository {
       if (!head) return null;
 
       const lines = await db<
-        (LineRow & { net: string; service_key: string; service_version: number; service_body: Record<string, unknown> })[]
+        (LineRow & {
+          net: string;
+          service_key: string;
+          service_version: number;
+          service_body: Record<string, unknown>;
+          entity_display_name: string;
+        })[]
       >`
-        SELECT l.id, l.tenant_id, l.engagement_letter_id, l.service_version_id, l.description,
+        SELECT l.id, l.tenant_id, l.engagement_letter_id, l.entity_party_id,
+               l.service_version_id, l.description,
                l.position, l.quantity, l.unit_amount, l.currency, l.discount_percent,
                round(l.unit_amount * l.quantity * (1 - l.discount_percent / 100), 4) AS net,
-               e.key AS service_key, v.version AS service_version, v.body AS service_body
+               e.key AS service_key, v.version AS service_version, v.body AS service_body,
+               entity.display_name AS entity_display_name
         FROM crm.engagement_letter_line l
         JOIN config.version v ON v.id = l.service_version_id
         JOIN config.entry e ON e.id = v.entry_id
+        -- The entity by NAME, in the query rather than per row on a screen.
+        -- This is where a group client's four companies are told apart, so a
+        -- column of uuids is the one thing this read must not return.
+        JOIN core.party entity ON entity.id = l.entity_party_id
         WHERE l.engagement_letter_id = ${letterId} AND l.removed_at IS NULL
         ORDER BY l.position
       `;
@@ -252,7 +268,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
 
       const engagements = await db<EngagementRow[]>`
         SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               status, activated_at, ends_on
+               entity_party_id, status, activated_at, ends_on
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
       `;
 
@@ -262,6 +278,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         lines: lines.map(
           (r): LetterLineRecord => ({
             line: toLine(r),
+            entity: { id: r.entity_party_id, displayName: r.entity_display_name },
             service: {
               key: r.service_key,
               version: r.service_version,
@@ -349,15 +366,16 @@ export class PostgresEngagementRepository implements EngagementRepository {
       // people adding a line to one draft cannot race for the same number.
       const [row] = await db<LineRow[]>`
         INSERT INTO crm.engagement_letter_line
-          (id, tenant_id, engagement_letter_id, service_version_id, description, position,
-           quantity, unit_amount, currency, discount_percent)
-        SELECT ${l.id}, ${l.tenantId}, ${l.engagementLetterId}, ${l.serviceVersionId},
+          (id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
+           description, position, quantity, unit_amount, currency, discount_percent)
+        SELECT ${l.id}, ${l.tenantId}, ${l.engagementLetterId}, ${l.entityPartyId},
+               ${l.serviceVersionId},
                ${l.description}, coalesce(max(position), 0) + 1,
                ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent}
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = ${l.engagementLetterId} AND removed_at IS NULL
-        RETURNING id, tenant_id, engagement_letter_id, service_version_id, description,
-                  position, quantity, unit_amount, currency, discount_percent
+        RETURNING id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
+                  description, position, quantity, unit_amount, currency, discount_percent
       `;
       if (!row) throw new Error("engagement letter line insert returned no row");
       return toLine(row);
@@ -376,8 +394,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
   async listLines(tenantId: string, letterId: string): Promise<readonly LetterLine[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<LineRow[]>`
-        SELECT id, tenant_id, engagement_letter_id, service_version_id, description,
-               position, quantity, unit_amount, currency, discount_percent
+        SELECT id, tenant_id, engagement_letter_id, entity_party_id, service_version_id,
+               description, position, quantity, unit_amount, currency, discount_percent
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
         ORDER BY position
@@ -484,12 +502,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
         const [row] = await db<EngagementRow[]>`
           INSERT INTO crm.engagement
             (id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-             status, activated_at)
+             entity_party_id, status, activated_at)
           VALUES
             (${e.id}, ${e.tenantId}, ${e.engagementLetterId}, ${e.engagementLetterLineId},
-             ${e.partyId}, ${e.status}, ${e.activatedAt}::timestamptz)
+             ${e.partyId}, ${e.entityPartyId}, ${e.status}, ${e.activatedAt}::timestamptz)
           RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                    status, activated_at, ends_on
+                    entity_party_id, status, activated_at, ends_on
         `;
         if (!row) throw new Error("engagement insert returned no row");
         created.push(toEngagement(row));
@@ -525,7 +543,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
            SET status = 'active', activated_at = ${at}::timestamptz
          WHERE engagement_letter_id = ${letterId} AND status = 'pending_advance'
         RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                  status, activated_at, ends_on
+                  entity_party_id, status, activated_at, ends_on
       `;
       return { letter: toLetter(letter), released: released.map(toEngagement) };
     });
@@ -535,7 +553,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<EngagementRow[]>`
         SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               status, activated_at, ends_on
+               entity_party_id, status, activated_at, ends_on
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
         ORDER BY created_at
       `;

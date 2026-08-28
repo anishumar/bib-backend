@@ -77,6 +77,7 @@ export class FakeProposalRepo implements ProposalRepository {
       id: l.id,
       tenantId: l.tenantId,
       proposalId: l.proposalId,
+      entityPartyId: l.entityPartyId,
       serviceVersionId: l.serviceVersionId,
       description: l.description,
       position: live.length + 1,
@@ -184,6 +185,15 @@ export class FakeProposalRepo implements ProposalRepository {
       },
       lines: lines.map((l) => ({
         line: stripRemoved(l),
+        // Null is a real answer here, not an unresolved join: a proposal line
+        // may name no entity at all.
+        entity:
+          l.entityPartyId === null
+            ? null
+            : {
+                id: l.entityPartyId,
+                displayName: this.partyNames.get(l.entityPartyId) ?? l.entityPartyId,
+              },
         service: null,
         net: netOf(l),
       })),
