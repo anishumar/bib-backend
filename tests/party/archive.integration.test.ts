@@ -24,7 +24,11 @@ import { PostgresRelationshipRepository } from "../../src/infrastructure/postgre
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { PartyService } from "../../src/usecase/party/service";
-import { PartyHasReferences } from "../../src/domain/party/errors";
+import {
+  PartyAlreadyArchived,
+  PartyHasReferences,
+  PartyNotArchived,
+} from "../../src/domain/party/errors";
 import { systemIds } from "../../src/platform/ids";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 
@@ -33,8 +37,12 @@ const app = postgres(cfg.db.appUrl, { max: 2 });
 const owner = postgres(cfg.db.ownerUrl, { max: 2 });
 
 const ledger = new LedgerService({ events: new PostgresEventStore(app), ids: systemIds });
+/** Held separately as well as injected: the concurrency block below drives the
+ *  repository directly, because the service's own pre-check would otherwise
+ *  decide the race before the database ever saw it. */
+const parties = new PostgresPartyRepository(app);
 const service = new PartyService({
-  parties: new PostgresPartyRepository(app),
+  parties,
   identifiers: new PostgresIdentifierRepository(app),
   relationships: new PostgresRelationshipRepository(app),
   ids: systemIds,
@@ -101,14 +109,14 @@ describe("parties are permanent", () => {
 describe("the read asymmetry", () => {
   it("an archived party is absent from the list and still resolves by id", async () => {
     const partyId = await newParty(`Dormant Holdings ${stamp}`);
-    const before = await service.listParties(tenant);
+    const before = await service.listParties(tenant, false);
     expect(before.map((p) => p.id)).toContain(partyId);
 
     const archived = await service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
     expect(archived.archivedAt).not.toBeNull();
 
     // Gone from the picker…
-    const after = await service.listParties(tenant);
+    const after = await service.listParties(tenant, false);
     expect(after.map((p) => p.id)).not.toContain(partyId);
 
     // …still there when asked for…
@@ -129,7 +137,7 @@ describe("the read asymmetry", () => {
     const restored = await service.unarchiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
 
     expect(restored.archivedAt).toBeNull();
-    const list = await service.listParties(tenant);
+    const list = await service.listParties(tenant, false);
     expect(list.map((p) => p.id)).toContain(partyId);
   });
 
@@ -222,6 +230,59 @@ describe("archiving is refused while anything points at the party", () => {
     expect((err as { code?: string }).code).toBe("23001");
   });
 
+  // THE SIXTH REFERENCE (migration 0036). 0035 enumerated five and left this
+  // one out on the grounds that widening a refusal past what was decided is a
+  // product change. It was the wrong call: entity_party_id is ONE field at
+  // three stages of one document chain, 0035 probed the last two and skipped
+  // the first, and this is the cheapest probe of the six because
+  // idx_proposal_line_entity has existed since 0018. Without 0036 this test
+  // archives a subsidiary that a live quote is naming.
+  it("a party named only by a live proposal line cannot be archived", async () => {
+    const client = await newParty(`Group Client ${stamp}`);
+    const subsidiary = await newParty(`Group Subsidiary ${stamp}`);
+
+    await withTenant(app, tenant, async (db) => {
+      // A service version for the line to pin. The registry's own rules are not
+      // what is under test; the foreign key just needs a real row.
+      const [entry] = await db<{ id: string }[]>`
+        INSERT INTO config.entry (tenant_id, kind, key)
+        VALUES (${tenant}, 'service', ${`gst-filing-${stamp}`}) RETURNING id
+      `;
+      const [version] = await db<{ id: string }[]>`
+        INSERT INTO config.version (tenant_id, entry_id, version, status, body)
+        VALUES (${tenant}, ${entry?.id ?? ""}, 1, 'draft', '{}'::jsonb) RETURNING id
+      `;
+      // The proposal is about the CLIENT; only the LINE names the subsidiary.
+      // That is the whole shape this probe exists for — a group's quote, with
+      // the work delivered to one of its companies.
+      const [proposal] = await db<{ id: string }[]>`
+        INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
+        VALUES (${tenant}, ${client}, 'Group FY26', 'INR', 1, '2026-08-28') RETURNING id
+      `;
+      await db`
+        INSERT INTO crm.proposal_line
+          (tenant_id, proposal_id, service_version_id, description, position,
+           quantity, unit_amount, currency, entity_party_id)
+        VALUES
+          (${tenant}, ${proposal?.id ?? ""}, ${version?.id ?? ""}, 'GST filing', 1,
+           1, '15000.0000', 'INR', ${subsidiary})
+      `;
+    });
+
+    const err = await service
+      .archiveParty({ tenantId: tenant, partyId: subsidiary }, SYSTEM_ACTOR)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PartyHasReferences);
+    expect((err as PartyHasReferences).referrers).toEqual(["a proposal line"]);
+
+    // And the client at the head of the same document is refused too, by the
+    // proposal itself — the two probes are independent and both hold.
+    const clientErr = await service
+      .archiveParty({ tenantId: tenant, partyId: client }, SYSTEM_ACTOR)
+      .catch((e: unknown) => e);
+    expect((clientErr as PartyHasReferences).referrers).toEqual(["a proposal"]);
+  });
+
   it("lets the party be archived once what pointed at it is gone", async () => {
     // Not a trick: crm.lead has no DELETE grant either. The lead is CLOSED, and
     // a closed lead still refers to the party — which is the rule working, not
@@ -276,6 +337,71 @@ describe("the guard is narrow, deliberately", () => {
   });
 });
 
+describe("two archives at once", () => {
+  // The service checks isArchived and then the repository writes, which is two
+  // statements with room between them — and the trigger cannot close that gap
+  // because it deliberately does not fire on NOT NULL -> NOT NULL. Without
+  // `AND archived_at IS NULL` on the UPDATE both writers win, the timestamp
+  // moves, and a SECOND party.archived lands in a log that cannot be corrected.
+  //
+  // Driven through the REPOSITORY, not the service: the service's pre-check
+  // would decide most interleavings before the database saw either write, and a
+  // test that passes because of the check it is not testing is worthless.
+  it("only one wins, and the loser is told the party is already archived", async () => {
+    const partyId = await newParty(`Raced ${stamp}`);
+
+    const [a, b] = await Promise.allSettled([
+      parties.archive(tenant, partyId),
+      parties.archive(tenant, partyId),
+    ]);
+
+    const outcomes = [a, b];
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    const loser = outcomes.find((o) => o.status === "rejected");
+    expect((loser as PromiseRejectedResult).reason).toBeInstanceOf(PartyAlreadyArchived);
+
+    // One timestamp, and it is the winner's — the loser did not move it.
+    const winner = outcomes.find((o) => o.status === "fulfilled");
+    const [row] = await owner<{ archived_at: Date | null }[]>`
+      SELECT archived_at FROM core.party WHERE id = ${partyId}
+    `;
+    expect(row?.archived_at?.toISOString()).toBe(
+      (winner as PromiseFulfilledResult<{ archivedAt: string | null }>).value.archivedAt,
+    );
+  });
+
+  it("the same holds for two restores", async () => {
+    const partyId = await newParty(`Raced Back ${stamp}`);
+    await parties.archive(tenant, partyId);
+
+    const outcomes = await Promise.allSettled([
+      parties.unarchive(tenant, partyId),
+      parties.unarchive(tenant, partyId),
+    ]);
+    expect(outcomes.filter((o) => o.status === "fulfilled")).toHaveLength(1);
+    const loser = outcomes.find((o) => o.status === "rejected");
+    expect((loser as PromiseRejectedResult).reason).toBeInstanceOf(PartyNotArchived);
+  });
+
+  it("puts exactly one party.archived in the ledger", async () => {
+    // The reason the race matters at all. Through the SERVICE this time,
+    // because the event is what an un-correctable log would be left holding.
+    const partyId = await newParty(`Raced Ledger ${stamp}`);
+    await Promise.allSettled([
+      service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR),
+      service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR),
+    ]);
+
+    const rows = await withTenant(app, tenant, (db) =>
+      db<{ verb: string }[]>`
+        SELECT verb FROM ledger.event
+        WHERE object_id = ${partyId} AND verb = 'party.archived'
+      `,
+    );
+    expect(rows).toHaveLength(1);
+  });
+});
+
 describe("the tenant wall covers the archive", () => {
   it("the guard only sees references inside the party's own firm", async () => {
     // The trigger probes crm with an explicit tenant_id predicate as well as
@@ -299,6 +425,6 @@ describe("the tenant wall covers the archive", () => {
 
     const archived = await service.archiveParty({ tenantId: tenant, partyId: mine }, SYSTEM_ACTOR);
     expect(archived.archivedAt).not.toBeNull();
-    expect(await service.listParties(other.id)).toHaveLength(1);
+    expect(await service.listParties(other.id, false)).toHaveLength(1);
   });
 });

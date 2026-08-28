@@ -41,7 +41,7 @@ describe("createOrganization", () => {
       tradeName: "Harbour Point",
     }, ACTOR);
     expect(org.legalName).toBe("Harbour Point Advisory Private Limited");
-    const parties = await service.listParties(TENANT);
+    const parties = await service.listParties(TENANT, false);
     expect(parties).toHaveLength(1);
     expect(parties[0]?.displayName).toBe("Harbour Point");
     expect(parties[0]?.kind).toBe("organization");
@@ -50,7 +50,7 @@ describe("createOrganization", () => {
   it("falls back to the legal name when there is no trade name", async () => {
     const { service } = svc();
     await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
-    const [party] = await service.listParties(TENANT);
+    const [party] = await service.listParties(TENANT, false);
     expect(party?.displayName).toBe("Acme LLP");
   });
 });
@@ -331,7 +331,7 @@ describe("archiving a party", () => {
     const archived = await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
     expect(archived.archivedAt).not.toBeNull();
 
-    const list = await service.listParties(TENANT);
+    const list = await service.listParties(TENANT, false);
     expect(list.map((p) => p.id)).toEqual([live.partyId]);
 
     // Still there, still readable, still carrying its whole profile.
@@ -346,7 +346,7 @@ describe("archiving a party", () => {
     const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme LLP" }, ACTOR);
     await service.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
 
-    expect(await service.listParties(TENANT)).toHaveLength(0);
+    expect(await service.listParties(TENANT, false)).toHaveLength(0);
     expect(await service.listParties(TENANT, true)).toHaveLength(1);
   });
 
@@ -357,7 +357,7 @@ describe("archiving a party", () => {
     const restored = await service.unarchiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
 
     expect(restored.archivedAt).toBeNull();
-    expect(await service.listParties(TENANT)).toHaveLength(1);
+    expect(await service.listParties(TENANT, false)).toHaveLength(1);
   });
 
   it("refuses to archive twice, and to restore what is not archived", async () => {
@@ -399,7 +399,7 @@ describe("archiving a party", () => {
     expect(err).toBeInstanceOf(PartyHasReferences);
     expect((err as PartyHasReferences).referrers).toEqual(["a lead", "an engagement letter"]);
     // Refused means unchanged: it is still in the picker.
-    expect(await service.listParties(TENANT)).toHaveLength(1);
+    expect(await service.listParties(TENANT, false)).toHaveLength(1);
   });
 
   it("records archive and unarchive with the actor, and nothing when refused", async () => {

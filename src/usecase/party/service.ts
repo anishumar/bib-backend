@@ -301,10 +301,16 @@ export class PartyService {
   // pickers", and the two methods below are its whole surface.
   //
   // THE REFUSAL LIVES IN THE DATABASE, not here. `archive()` on the port is
-  // refused by migration 0035's trigger while anything still points at the
-  // party, so an import or an agent is stopped by the same rule this call is.
-  // What this service owns is the state machine around it — the party exists,
-  // and it is not already in the state being asked for — and the event.
+  // refused by the trigger (0035, body replaced by 0036) while anything still
+  // points at the party, so an import or an agent is stopped by the same rule
+  // this call is. What this service owns is the state machine around it — the
+  // party exists, and it is not already in the state being asked for — and the
+  // event.
+  //
+  // The check below is the FRIENDLY answer, not the guarantee: it and the write
+  // are two statements, so the port is required to make the transition itself
+  // atomic and refuse the loser of a race. Otherwise two clicks put two
+  // `party.archived` rows in a log that can never be corrected.
 
   /** Hide a party from pickers and lists. Refused by the database while a lead,
    *  proposal, engagement letter, letter line's entity or engagement still
@@ -390,8 +396,12 @@ export class PartyService {
   }
 
   /** The firm's parties. ARCHIVED ONES ARE HIDDEN unless explicitly asked for —
-   *  the other half of the asymmetry `partyProfile` documents. */
-  async listParties(tenantId: string, includeArchived = false): Promise<readonly Party[]> {
+   *  the other half of the asymmetry `partyProfile` documents.
+   *
+   *  `includeArchived` has no default, deliberately, and the port says the same
+   *  thing: a default is how "the archive is hidden" quietly stops being true,
+   *  and every caller of this should have had to decide. */
+  async listParties(tenantId: string, includeArchived: boolean): Promise<readonly Party[]> {
     return this.deps.parties.listParties(tenantId, includeArchived);
   }
 
