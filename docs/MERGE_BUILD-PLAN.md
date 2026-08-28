@@ -119,7 +119,37 @@ lanes' schema work genuinely parallel. Revisit when either range runs low.
 - [x] `(A)` **T1.3** **Party model**: `party` / `organization` / `person` / `legal_entity`, all effective-dated, with RLS from line one. *Acc: create a company + a director as parties; RLS isolates across tenants.* — migration `0002_party`, `core` schema, full vertical slice (domain/usecase/repos/API); RLS proven live (Firm A's org → 404 under Firm B, B's party list empty).
 - [x] `(A)` **T1.4** **`party_relationship`** (from, to, type, valid_from, valid_to, attributes) — directorship, employment, shareholding, client-of. *Acc: "who was a director on 31 Mar" resolves by date.* — `isInForceOn` + as-of `partyProfile`; verified in unit tests and live.
 - [x] `(A)` **T1.5** **`party_identifier`** — PAN, GSTIN (many per entity), TRN, CIN, effective-dated. *Acc: an entity holds ≥2 GSTINs; lookup by identifier works.* — closed-set CHECK, PAN/GSTIN validation + normalization, dedup lookup; verified holding 2 state GSTINs live.
-- [ ] `(A)` **G0.3** **Decide soft delete on `core`.** `CLAUDE.md` says *"Soft delete only"*, but no `core` table has `deleted_at` and no `DELETE` route exists — so a client created by mistake can be neither removed nor archived. Either add the column across `core` and filter every read, or write down that parties are permanent and the ledger plus `legal_entity.status` is the answer. *Acc: either the column exists and reads filter it, or the decision is a paragraph in `CLAUDE.md`.* — **§4.1.** Lower stakes than it looks; the honest answer may well be "permanent". What is not acceptable is a stated rule the schema does not implement, because the next person reads the rule and assumes the column.
+- [x] `(A)` **G0.3** **Decide soft delete on `core`** — decided: **parties are permanent.** No `deleted_at` anywhere in `core`, and the decision is a paragraph in `CLAUDE.md`. *Acc: the decision is written down — and the column that answers the real complaint exists.* — **§4.1.**
+  > **Both halves, because the binary the task offered was the wrong one.** The written decision
+  > was the honest answer, but it left the actual complaint — *a client created by mistake* —
+  > unanswered, so `core.party.archived_at` (migration **0035**) landed beside it. One column on
+  > one table, not `deleted_at` across seven behind a filter every read from now on has to
+  > remember to write. It means *keep this out of the pickers*, and nothing more.
+  >
+  > **The asymmetry IS the design.** The LIST hides archived parties and takes a flag to include
+  > them; reading ONE party by id **always** resolves, archived or not. A signed engagement
+  > letter's counterparty has to render forever — the same principle 0017's freeze protects.
+  >
+  > **Archiving is refused by a TRIGGER, not by the service**, while a lead, a proposal, a
+  > proposal line's entity, a letter, a letter line's entity or an engagement still points at
+  > the party — and the refusal NAMES them, in document-chain order, so the person reading it
+  > knows what to close first. A service check is one an import, an agent or a psql session
+  > walks straight past. It costs nothing on ordinary writes: `BEFORE UPDATE OF archived_at`
+  > with a `WHEN` clause on the NULL → NOT NULL transition, so a rename fires nothing at all.
+  >
+  > **Found by review, not by building, and both are now fixed.** The guard first shipped with
+  > five probes and missed `crm.proposal_line.entity_party_id` — one field at three stages of one
+  > document chain, with the first stage unprotected, giving a rule nobody could state. Migration
+  > **0036** adds it; it is the *cheapest* of the six, since `idx_proposal_line_entity` has
+  > existed since 0018. And the archive `UPDATE` carried no `archived_at IS NULL` predicate, so
+  > two concurrent archives both succeeded and wrote **two** `party.archived` events for one
+  > archive, into a log that cannot be corrected. The transition is now the lock, the way
+  > `signAndFanOut` and `recordAdvance` already do it.
+  >
+  > `bib_app` still holds **no DELETE grant on any table in this database**, so removal remains
+  > impossible at the database level rather than merely unimplemented.
+  >
+  > Gate: `npm run check` 386 · `test:integration` 111 · `smoke` 119.
 - [x] `(B)` **T1.6** **RBAC + fee-visibility axis**: role on membership enforced; commercial visibility is a separate boolean gate. *Acc: a delivery role sees a work item but not its fee, proven in a test.* — all three parts done. **Gate 2 (audience)** shipped first because it was a live hole, not scheduled work: a `CLIENT_PORTAL` login could read the firm's whole client book. **Gate 3 (role)** is a seeded four-role matrix behind a `PermissionSource` port, enforced by prefix middleware against one central route table — **deny by default**, so a route with no declared permission is refused for everyone and a structural test fails if one is added. **The fee axis** is a flag on membership, never derived from a role, with `withFeeVisibility()` redacting money in place. *Acceptance note, stated rather than reinterpreted:* the criterion names a `work_item`, which is T3.1 — the mechanism is proven against a representative fee-bearing record and applies unchanged when the real table exists. Gate 4 (record-scope) needs the user-to-party link and lands with U1.
 - [x] `(B)` **T1.7** **Real principal adapter** (session) replacing the dev `x-user-id` stub; client-portal audience wired. *Acc: prod boot refuses the dev resolver (honest registry).* — migration `0004_identity` (credential / session / magic_link, GLOBAL per ADR-02). Password (scrypt, no dependency) **and** magic link, both behind ports; server-side revocable sessions in an httpOnly cookie, token never in a response body. `Principal` now carries `sessionId + tenantId + audience`, with the org switch (`POST /auth/switch-tenant`) re-checking the membership. Verified live end to end, and **the acceptance holds twice**: a `BIB_ENVIRONMENT=qa` boot refuses `BIB_DEV_AUTH_ENABLED` *and* the logging mailer, by name.
 - [x] `(A/B)` **T1.8** **Frontend foundation** (separate app — "clean separation"): Next.js shell, auth flow against the session adapter, design system/tokens, and a **typed API client generated from `/openapi.json`**. Runs in parallel with the backend spine — whoever has slack. *Acc: the app boots, authenticates, and calls a real endpoint (e.g. `me/memberships`) through the generated client; regenerating the client after an API change is one command.* — **its own repo: `../bib-frontend`.** Next 16 + React 19, `openapi-typescript` + `openapi-fetch` (`npm run api:generate` is the one command), design tokens in `globals.css`, login → httpOnly session cookie → authenticated calls. **No dev proxy on purpose** — the app talks cross-origin locally exactly as it will in production, which is what surfaced the backend's missing CORS. Verified against the running API: login 200 + cookie, `/auth/me` 200, `/tenancy/me/memberships` 200, `/parties` 200 (5 rows). *Caveat:* driven with node's fetch replicating browser headers, not a real browser.
