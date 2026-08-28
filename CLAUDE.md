@@ -61,6 +61,14 @@ defended in **three independent places**, and you must not weaken any of them:
 
 1. **RLS** — every business table has `tenant_id NOT NULL` + `ENABLE ROW LEVEL SECURITY` + a
    policy. The app role `bib_app` is `NOBYPASSRLS`.
+   **And every reference between tenant-scoped tables carries the tenant with it** — a
+   composite `UNIQUE (id, tenant_id)` on the target, referenced as `(fk_id, tenant_id)`. A
+   foreign-key check runs as a system operation RLS does not filter, so an id-only reference
+   lets one firm's row hang off another firm's object with no policy violation anywhere. It
+   leaks nothing and the wall is still supposed to forbid it.
+   `tests/architecture/tenant-keys.integration.test.ts` asks the catalogue rather than a
+   list, so a table added next month is covered the day it exists — **a new tenant-scoped FK
+   fails the build until it carries `tenant_id`.**
 2. **The resolver** — tenant-scoped data is reached **only** through `withTenant` /
    `withIdentity` in `src/db/tenant.ts`, which `SET LOCAL app.tenant_id` inside a
    transaction. The raw pool (`src/db/pool.ts`) is importable only by `db/`,

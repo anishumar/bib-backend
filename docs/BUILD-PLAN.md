@@ -413,6 +413,26 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Gate: `npm run check` 344 · `test:integration` 77 · `smoke` 87.
   >
+> **The composite tenant-key sweep is done (2026-08-28).** The gap 0007 recorded and
+> deliberately did not half-fix: six references inside `core` — organization, person,
+> legal_entity, party_identifier, and BOTH ends of party_relationship — pointed at their
+> parent by id alone. A foreign-key check runs as a system operation RLS does not filter, so
+> one firm holding another's party id could hang a row off it with no policy violation
+> anywhere. It leaked nothing; the wall is supposed to forbid it anyway.
+>
+> Migration **0015** closes them. The identifier one was the worst in practice: identifiers
+> are what lead capture deduplicates on, so a crossed row would have made one firm's capture
+> resolve to another firm's party — a real leak with no RLS violation in it.
+>
+> **The lasting part is not the migration, it is the guard.**
+> `tests/architecture/tenant-keys.integration.test.ts` asks the CATALOGUE the same question
+> the sweep asked — every FK from a tenant-scoped table to a tenant-scoped table that does not
+> carry `tenant_id` — rather than enumerating tables. So T2.3's tables are covered the day
+> they exist, and the failure names the offending constraint and the fix. Verified by dropping
+> a constraint and watching it go red, because a guard nobody has seen fail is not a guard.
+>
+> Gate: `npm run check` 344 · `test:integration` 81 · `smoke` 87.
+
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
