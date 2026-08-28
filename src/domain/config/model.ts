@@ -434,15 +434,116 @@ export function readMaxDiscountPercent(body: Record<string, unknown>): Amount | 
  *
  * `jurisdictions` is the same shape services use: ISO 3166 codes, empty meaning
  * everywhere. The LETTER decides which jurisdiction it is written for and picks
- * clauses accordingly; this only says where a clause is applicable.
+ * clauses accordingly; this only says where a clause is applicable — which is
+ * NOT the same fact as whose law it names. See `governingLaw`.
  */
 export interface ClauseBody {
   readonly title: string;
   readonly text: string;
   readonly jurisdictions: readonly string[];
+  /**
+   * WHOSE LAW governs, when this clause is the one that says so.
+   *
+   * The sharpest finding of the project this product was designed against: the
+   * real engagement letter was issued by the firm's US entity to a US client,
+   * and its standard terms named Indian law and Delhi courts. The verdict was
+   * flat — "No. This is wrong. For US it's US. For UAE it's DIFC in Dubai."
+   *
+   * `jurisdictions` above did not and could not catch that. It says where a
+   * clause may be USED; this says what it SAYS. The clause that went out on
+   * that letter was applicable in India and named Indian law, and both of those
+   * were true — the letter was the wrong place for it. With no field holding
+   * the law, the bug is representable again, and nothing in the codebase can
+   * see it.
+   *
+   * Null is the ordinary case rather than an omission: confidentiality, fee and
+   * limitation-of-liability clauses name no law at all. It is OPTIONAL for the
+   * same reason every field G2.1-G2.3 added is — a published version is FROZEN,
+   * so a required field would strand every clause already published and pinned
+   * by an issued letter, with no honest value to backfill into terms that never
+   * said it.
+   *
+   * DELIBERATELY NOT CROSS-VALIDATED against `jurisdictions`. A firm may write
+   * English law into clauses it uses in three countries, and refusing that here
+   * would make one firm's rule a product rule. The check the finding actually
+   * asks for is against the ISSUING ENTITY's jurisdiction, which is G1.8's
+   * other half (it needs G1.2's `issuing_entity_party_id`, so it is not here).
+   */
+  readonly governingLaw: JurisdictionalTerm | null;
+  /**
+   * WHERE a dispute is heard.
+   *
+   * A second field rather than a sentence inside `governingLaw`, because they
+   * are two choices and a firm that has made one has not thereby made the
+   * other. Independently optional for that reason: putting a forum on a signed
+   * document that nobody chose is the same class of bug as putting a law on it.
+   *
+   * It carries a jurisdiction of its own because the forum is not derivable
+   * from the law: "the DIFC Courts, Dubai" is the firm's own answer for the
+   * UAE, and the DIFC is a common-law enclave with its own courts sitting in
+   * AE. The seat is what a mismatch check has to compare — half the bug the
+   * firm caught was the courts, not the law.
+   */
+  readonly courts: JurisdictionalTerm | null;
 }
 
-const CLAUSE_FIELDS = ["title", "text", "jurisdictions"];
+/**
+ * A term of the contract that belongs to a JURISDICTION: the code that makes it
+ * comparable, and the words the document prints. Both halves, because neither
+ * can do the other's job.
+ *
+ *   - The code cannot print. "the laws of the State of Delaware" does not
+ *     follow from "US" — US law is state law — and "the DIFC Courts, Dubai"
+ *     does not follow from "AE".
+ *   - The words cannot be compared. G1.8's acceptance is that a letter issued
+ *     by the US entity CANNOT print Indian governing law, and that refusal is a
+ *     machine equality test against the issuing entity's jurisdiction. A human
+ *     review already let this through once, on a letter that went to a client,
+ *     which is the whole reason prose alone is not enough.
+ *
+ * So the two travel in one object and are validated together: a stored term is
+ * never half a statement — a code nobody can print, or a sentence nobody can
+ * check.
+ */
+export interface JurisdictionalTerm {
+  /** ISO 3166-1 alpha-2, upper case. The comparable half. */
+  readonly jurisdiction: string;
+  /** What the letter actually says. The printable half. */
+  readonly text: string;
+}
+
+/**
+ * A jurisdiction code as this product stores it: ISO 3166-1 alpha-2.
+ *
+ * Duplicated from `domain/engagement/model.ts` on purpose rather than imported.
+ * The config registry is UPSTREAM of the engagement module — the engagement
+ * side already reads clause bodies through `readClauseBody` — so an import in
+ * this direction inverts the dependency and turns into a cycle the day the
+ * engagement domain reads a config body. One regex is the cheaper of the two
+ * prices, and `tests/config/clause.test.ts` asserts the two agree, so they
+ * cannot drift apart quietly.
+ */
+const JURISDICTION_CODE_PATTERN = /^[A-Z]{2}$/;
+
+const CLAUSE_FIELDS = ["title", "text", "jurisdictions", "governingLaw", "courts"];
+
+/** The two jurisdictional terms a clause may carry, with what each one is FOR.
+ *  The message has to say that, because somebody filing "DIFC" needs to know
+ *  whether they are naming a legal system or a courthouse. */
+const CLAUSE_TERMS = [
+  {
+    field: "governingLaw",
+    what: "whose law governs the engagement",
+    example: '{ "jurisdiction": "US", "text": "the laws of the State of Delaware" }',
+  },
+  {
+    field: "courts",
+    what: "which courts hear a dispute",
+    example: '{ "jurisdiction": "AE", "text": "the DIFC Courts, Dubai" }',
+  },
+] as const;
+
+const TERM_FIELDS = ["jurisdiction", "text"];
 
 function validateClauseBody(body: Record<string, unknown>): string | null {
   const unknown = unknownFields(body, CLAUSE_FIELDS);
@@ -470,12 +571,69 @@ function validateClauseBody(body: Record<string, unknown>): string | null {
       }
     }
   }
+
+  for (const term of CLAUSE_TERMS) {
+    const problem = validateJurisdictionalTerm(term, body[term.field]);
+    if (problem !== null) return problem;
+  }
   return null;
 }
 
-/** A stored clause body, read back for assembly onto a letter. Falls back
- *  rather than throwing: a pinned version always resolves, and a body that
- *  somehow lacks a field should not make a signed document unreadable. */
+/**
+ * One jurisdictional term — `governingLaw` or `courts`.
+ *
+ * Absent and null are both fine and mean the same thing: this clause does not
+ * state it. What is refused is a HALF term, for the reason the two halves exist
+ * at all — a code with no words prints nothing where a law was supposed to be,
+ * and words with no code are invisible to the mismatch check that is the point
+ * of the field.
+ */
+function validateJurisdictionalTerm(
+  term: (typeof CLAUSE_TERMS)[number],
+  raw: unknown,
+): string | null {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== "object" || Array.isArray(raw)) {
+    return (
+      `"${term.field}" is ${term.what} — an object like ${term.example}, or null when this ` +
+      `clause does not state it. Got ${describe(raw)}`
+    );
+  }
+
+  const value = raw as Record<string, unknown>;
+  const unknown = unknownFields(value, TERM_FIELDS);
+  if (unknown) return `"${term.field}" has ${unknown}`;
+
+  const jurisdiction = value["jurisdiction"];
+  if (typeof jurisdiction !== "string" || !JURISDICTION_CODE_PATTERN.test(jurisdiction)) {
+    return (
+      `"${term.field}.jurisdiction" must be an ISO 3166-1 alpha-2 code in UPPER CASE — "US", ` +
+      `"AE", "IN". It is not decoration: it is compared against the jurisdiction of the entity ` +
+      `ISSUING the letter, so that terms naming another country's law are refused rather than ` +
+      `signed. A body is stored verbatim, so "us" would be stored as written. ` +
+      `Got ${describe(jurisdiction)}`
+    );
+  }
+
+  const text = value["text"];
+  if (typeof text !== "string" || text.trim() === "") {
+    return (
+      `"${term.field}.text" must be a non-empty string — ${term.example} — because the code ` +
+      `cannot print: "the laws of the State of Delaware" does not follow from "US", and "the ` +
+      `DIFC Courts, Dubai" does not follow from "AE". Got ${describe(text)}`
+    );
+  }
+  return null;
+}
+
+/**
+ * A stored clause body, read back for assembly onto a letter. Falls back rather
+ * than throwing: a pinned version always resolves, and a body that somehow lacks
+ * a field should not make a signed document unreadable. That property is why
+ * `governingLaw` and `courts` join it as nulls rather than as a validation the
+ * read repeats — every clause published before G1.8 is frozen and has neither,
+ * and every one of them must still read.
+ */
 export function readClauseBody(body: Record<string, unknown>): ClauseBody {
   const title = body["title"];
   const text = body["text"];
@@ -486,7 +644,32 @@ export function readClauseBody(body: Record<string, unknown>): ClauseBody {
     jurisdictions: Array.isArray(jurisdictions)
       ? jurisdictions.filter((j): j is string => typeof j === "string")
       : [],
+    governingLaw: readJurisdictionalTerm(body["governingLaw"]),
+    courts: readJurisdictionalTerm(body["courts"]),
   };
+}
+
+/**
+ * A jurisdictional term out of a stored body. Absent, malformed and half-stated
+ * all read as null — the reading `readServiceListPrice` gives a half price, for
+ * a sharper reason: neither half of this is a statement on its own, and null is
+ * a true answer ("this clause names no law") where an invented half is not.
+ *
+ * The code is normalised on the way out, like a currency and unlike the words:
+ * it is COMPARED, and "us" and "US" are the same country beyond any doubt, so a
+ * hand-edited body still answers the mismatch check instead of quietly falling
+ * out of it. The words are handed back verbatim — they are printed on a signed
+ * document, and this is not the place to re-render what a firm wrote.
+ */
+function readJurisdictionalTerm(raw: unknown): JurisdictionalTerm | null {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  const term = raw as Record<string, unknown>;
+  const jurisdiction = term["jurisdiction"];
+  const text = term["text"];
+  if (typeof jurisdiction !== "string" || typeof text !== "string") return null;
+  if (text.trim() === "") return null;
+  const normalised = jurisdiction.trim().toUpperCase();
+  return JURISDICTION_CODE_PATTERN.test(normalised) ? { jurisdiction: normalised, text } : null;
 }
 
 /**
