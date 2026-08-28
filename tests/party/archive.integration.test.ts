@@ -166,8 +166,8 @@ describe("archiving is refused while anything points at the party", () => {
   it("through the service, naming what refers to it", async () => {
     const partyId = await newParty(`Has A Lead ${stamp}`);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${tenant}, ${partyId}, 'inbound', 'new')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${tenant}, ${partyId}, 'inbound', 'new', 'FY26 retainer')`,
     );
 
     const err = await service
@@ -186,8 +186,8 @@ describe("archiving is refused while anything points at the party", () => {
   it("names every kind of thing that refers to it, not just the first", async () => {
     const partyId = await newParty(`Lead And Proposal ${stamp}`);
     await withTenant(app, tenant, async (db) => {
-      await db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-               VALUES (${tenant}, ${partyId}, 'referral', 'qualified')`;
+      await db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+               VALUES (${tenant}, ${partyId}, 'referral', 'qualified', 'Group restructuring')`;
       await db`INSERT INTO crm.proposal (tenant_id, party_id, title, currency, fx_rate, fx_rate_date)
                VALUES (${tenant}, ${partyId}, 'FY26 compliance', 'INR', 1, '2026-08-28')`;
     });
@@ -203,8 +203,8 @@ describe("archiving is refused while anything points at the party", () => {
   it("and with raw SQL, as the app role — the import and agent path", async () => {
     const partyId = await newParty(`Raw App Path ${stamp}`);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${tenant}, ${partyId}, 'outbound', 'contacted')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${tenant}, ${partyId}, 'outbound', 'contacted', 'GST advisory')`,
     );
 
     const err = await archiveRaw(partyId);
@@ -217,8 +217,8 @@ describe("archiving is refused while anything points at the party", () => {
     // straight past. This is the assertion that says it does not.
     const partyId = await newParty(`Raw Owner Path ${stamp}`);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${tenant}, ${partyId}, 'event', 'new')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${tenant}, ${partyId}, 'event', 'new', 'Conference follow-up')`,
     );
 
     const err = await owner`
@@ -291,8 +291,8 @@ describe("archiving is refused while anything points at the party", () => {
     // particular lead stage.
     const partyId = await newParty(`Closed Lead ${stamp}`);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, closed_at)
-         VALUES (${tenant}, ${partyId}, 'partner', 'lost', now())`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, closed_at, title)
+         VALUES (${tenant}, ${partyId}, 'partner', 'lost', now(), 'Statutory audit')`,
     );
     const err = await service
       .archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR)
@@ -310,8 +310,8 @@ describe("the guard is narrow, deliberately", () => {
     // EXISTS probes, and this is what says so.
     const partyId = await newParty(`Renamed ${stamp}`);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${tenant}, ${partyId}, 'other', 'new')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${tenant}, ${partyId}, 'other', 'new', 'Rename probe')`,
     );
 
     await withTenant(app, tenant, (db) =>
@@ -328,8 +328,8 @@ describe("the guard is narrow, deliberately", () => {
     const partyId = await newParty(`Restored Under Reference ${stamp}`);
     await service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
     await withTenant(app, tenant, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${tenant}, ${partyId}, 'inbound', 'new')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${tenant}, ${partyId}, 'inbound', 'new', 'Unarchive probe')`,
     );
 
     const restored = await service.unarchiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
@@ -419,8 +419,8 @@ describe("the tenant wall covers the archive", () => {
       SYSTEM_ACTOR,
     );
     await withTenant(app, other.id, (db) =>
-      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage)
-         VALUES (${other.id}, ${theirs.partyId}, 'inbound', 'new')`,
+      db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+         VALUES (${other.id}, ${theirs.partyId}, 'inbound', 'new', 'Another firm''s opportunity')`,
     );
 
     const archived = await service.archiveParty({ tenantId: tenant, partyId: mine }, SYSTEM_ACTOR);

@@ -185,6 +185,10 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
 | `membership.restored` | membership | A deactivated membership was reinstated. |
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
+| `membership.grade_changed` | membership | A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later. |
+| `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |
+| `staff_grade.updated` | staff_grade | A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something. |
+| `grade_ladder.seeded` | tenant | A new tenant's seniority ladder was initialised from the product defaults. One event, not one per rung. |
 | `session.started` | user_account | A user's session became active in THIS tenant — at login, or via the org switcher. |
 | `party.created` | party | An organization or person party was created. |
 | `party.archived` | party | A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035). |

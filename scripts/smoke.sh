@@ -163,13 +163,13 @@ chk "a firm can add a role of its own"     200 "$(code -b $J/partner.txt -XPOST 
 
 echo; echo "── 7. The lead pipeline — dedup before create ──────────────────────"
 PAN2=AAACL5678M
-LEAD1='{"source":"inbound","kind":"organization","name":"Lakeview Foods Private Limited","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"email","value":"ops-'$S'@lakeview.example"}]}'
+LEAD1='{"source":"inbound","title":"FY26 statutory audit","kind":"organization","name":"Lakeview Foods Private Limited","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"email","value":"ops-'$S'@lakeview.example"}]}'
 curl -s -o $J/lead1.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD1"
-chk "capture a new lead"               201 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"outbound","kind":"organization","name":"Northwind Traders","identifiers":[{"type":"email","value":"hello-'$S'@northwind.example"}]}')"
+chk "capture a new lead"               201 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"outbound","title":"Bookkeeping retainer","kind":"organization","name":"Northwind Traders","identifiers":[{"type":"email","value":"hello-'$S'@northwind.example"}]}')"
 
 # The acceptance: the same prospect, reached a different way, does not become a
 # second party or a second opportunity.
-LEAD2='{"source":"referral","kind":"organization","name":"Lakeview Foods Pvt Ltd","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"phone","value":"+91 98180 11223"}]}'
+LEAD2='{"source":"referral","title":"Transfer pricing study","kind":"organization","name":"Lakeview Foods Pvt Ltd","identifiers":[{"type":"pan","value":"'$PAN2'"},{"type":"phone","value":"+91 98180 11223"}]}'
 MERGE=$(curl -s -o $J/merge.json -w '%{http_code}' -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d "$LEAD2")
 chk "a duplicate does not create a lead" 200 "$MERGE"
 SAME=$(python3 -c '
@@ -188,8 +188,8 @@ import sys, json
 print(sorted(r["party"]["displayName"] for r in json.load(sys.stdin)["leads"])[0])')
 chk "…and each one names its prospect"  "Lakeview Foods Private Limited" "$NAMED"
 
-chk "a lead with no way to reach them"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","kind":"organization","name":"Anonymous Ltd","identifiers":[{"type":"cin","value":"U17110MH2019PTC123456"}]}')"
-chk "a source we cannot report on"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"linkedin","kind":"person","name":"A N Other","identifiers":[{"type":"email","value":"x-'$S'@y.example"}]}')"
+chk "a lead with no way to reach them"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","title":"Unreachable","kind":"organization","name":"Anonymous Ltd","identifiers":[{"type":"cin","value":"U17110MH2019PTC123456"}]}')"
+chk "a source we cannot report on"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"linkedin","title":"Unreportable source","kind":"person","name":"A N Other","identifiers":[{"type":"email","value":"x-'$S'@y.example"}]}')"
 
 LID=$(python3 -c 'import json;print(json.load(open("'$J'/lead1.json"))["lead"]["id"])')
 chk "move it through the pipeline"      200 "$(code -b $J/partner.txt -XPOST $API/api/v1/leads/$LID/stage -H "$H" -d '{"stage":"qualified"}')"
