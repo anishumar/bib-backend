@@ -159,7 +159,7 @@ open and are recorded above; neither blocks Phase 2.
 - [ ] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
   `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
   captured with no owner distribute evenly; a territory rule overrides the rotation.*
-- [ ] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
+- [x] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
   > **Agreed design, before building (2026-08-28).** Settled in discussion; recorded here because
   > it decides the schema and money is the area CLAUDE.md is strictest about.
   >
@@ -341,7 +341,38 @@ open and are recorded above; neither blocks Phase 2.
   > All five proposal verbs now have a writer. When T2.2 started, four of them had none.
   >
   > Gate after step 3b: `npm run check` 340 tests · `test:integration` 77 · `smoke` 85.
-  > **Remaining on this line: step 4, the proposal screen.**
+  >
+  > **Step 4 done (2026-08-28)** — the screens, in `bib-frontend`: `/proposals`,
+  > `/proposals/[proposalId]`, and `/p/[token]`, which is that app's first page with no session
+  > behind it. **T2.2 is complete.**
+  >
+  > The rule this board set after five modules shipped against tests alone paid again — the
+  > screen found two things no test could:
+  >
+  > **(1) A catalogue priced in INR beside a line quoted in AED.** Both render with their own
+  > symbol, but two columns headed "List then" and "Quoted" invite a comparison that is not
+  > valid. The screen now says "not comparable" when the currencies differ. Converting would
+  > need a rate between the catalogue's currency and the quote's, and the only rate a proposal
+  > carries goes to the firm's REPORTING currency — so this is a real gap in the model, not a
+  > presentation problem, and it is recorded as one. If firms routinely price catalogues in one
+  > currency and quote in another, the service body eventually needs a price per currency rather
+  > than a price.
+  >
+  > **(2) `numeric(14,4)` reads back as "12.0000"** — the column being precise, not a person's
+  > idea of twelve. Trimmed for display only; the string sent back to the API is never
+  > reformatted.
+  >
+  > And one thing found while wiring it: **`viewCount` and `firstViewedAt` were on the row and
+  > not on the wire.** Tracking data a screen cannot read is tracking nobody does. Added to the
+  > response, unredacted — whether the client has opened the document is not money.
+  >
+  > **Money never becomes a JavaScript number, on either side.** The frontend hands the decimal
+  > string to `Intl.NumberFormat`, which formats it exactly; `format(Number(amount))` would undo
+  > at the last possible moment the thing the string exists for. It cost one line in
+  > `tsconfig.json` (`ES2023.Intl`) and one guarded assertion.
+  >
+  > Walked end to end against the running API, including the awkward case: 1499.50 × 12 less
+  > 12.5% comes back exactly 15744.75.
 - [ ] `(A)` **T2.3** **C4 Engagement letter**: clause library (per jurisdiction, versioned), e-sign **port** (fake), advance-fee gate. *Acc: signing fans out one EL into one engagement per line.*
 - [ ] `(A)` **T2.4** **C5 spawn bridge**: signed EL emits the engine's job-creation trigger (event, not a direct call). *Acc: a signature produces a `contract.active` event the scheduler consumes.*
 
