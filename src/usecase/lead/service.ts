@@ -27,6 +27,7 @@ import {
   DEDUP_IDENTIFIER_TYPES,
   LEAD_SOURCES,
   LEAD_STAGES,
+  CLOSED_UNWON_STAGES,
   canMoveStage,
   isAmbiguous,
   isDedupIdentifier,
@@ -34,14 +35,18 @@ import {
   isLeadStage,
   isTerminalStage,
   matchedParty,
+  recordsLostReason,
 } from "../../domain/lead/model";
 import type { DedupMatch } from "../../domain/lead/model";
 import {
   AmbiguousMatch,
+  BlankTitle,
   InvalidSource,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
+  LostReasonNotApplicable,
+  LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
   SameStage,
@@ -76,6 +81,18 @@ export interface CaptureIdentifier {
 export interface CaptureLeadInput {
   readonly tenantId: string;
   readonly source: string;
+  /**
+   * What to call this opportunity — "FY27 statutory audit", "GST registration
+   * for the Pune plant".
+   *
+   * REQUIRED, and not derived from the party's name when it is missing. A
+   * derived title would be identical for every opportunity a client ever has,
+   * which is the state before 0030 with a NOT NULL column in front of it: the
+   * read model already carries `party.displayName`, so a title that repeated it
+   * would add a column and no information. Somebody capturing a lead knows what
+   * it is for; the field asks them to say it once.
+   */
+  readonly title: string;
   /** Whether the prospect is a company or a human being. */
   readonly kind: PartyKind;
   /** The legal name of the organization, or the person's full name. */
@@ -106,6 +123,17 @@ export interface MoveStageInput {
   readonly tenantId: string;
   readonly leadId: string;
   readonly stage: string;
+  /**
+   * Why it did not close won. Required moving to `lost` or `abandoned`, refused
+   * on every other stage.
+   *
+   * REQUIRED for BOTH unwon stages, symmetrically and on purpose. Making it
+   * optional on `abandoned` — "went quiet is its own reason" — would put a
+   * friction gradient between the two, and the cheapest way past a text box is
+   * to file a competitor loss as "went quiet". That is the exact signal G3.1
+   * exists to protect, so neither stage is the easy one.
+   */
+  readonly lostReason?: string | undefined;
 }
 
 export interface AssignOwnerInput {
@@ -133,6 +161,7 @@ export class LeadService {
    */
   async capture(input: CaptureLeadInput, actor: Actor): Promise<CaptureResult> {
     const source = this.parseSource(input.source);
+    const title = this.parseTitle(input.title);
 
     // Everything that can be refused without writing is refused first — a
     // capture that fails halfway leaves a party nobody asked for.
@@ -157,10 +186,17 @@ export class LeadService {
       : await this.deps.leads.findOpenForParty(input.tenantId, existingPartyId);
 
     if (open) {
-      // THE MERGE. Nothing is overwritten: the source, owner and notes on the
-      // live opportunity were somebody's decision, and a duplicate web-form
+      // THE MERGE. Nothing is overwritten: the title, source, owner and notes on
+      // the live opportunity were somebody's decision, and a duplicate web-form
       // submission is not grounds to undo it. What the second capture brought
       // goes into the timeline, where it can be read and acted on.
+      //
+      // The discarded TITLE is the one real cost of the merge, and it is the
+      // sharp end of the open-question on lead_one_open_per_party (see below):
+      // if the second capture was genuinely a second piece of work rather than a
+      // duplicate form submission, its name is what gets thrown away here. That
+      // is an argument about the index, not about this branch — with one open
+      // lead per party, appending is the only correct thing to do.
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "lead.merged",
@@ -179,6 +215,7 @@ export class LeadService {
     const lead = await this.deps.leads.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
+      title,
       partyId,
       source,
       ownerUserId,
@@ -186,6 +223,15 @@ export class LeadService {
     });
     // The owner is part of this event rather than a second `lead.owner_assigned`
     // beside it: one action by one person is one row in the timeline.
+    //
+    // THE TITLE IS NOT IN THIS PAYLOAD, and that was a decision, not an
+    // omission. A title names the counterparty — "Priya Menon — personal tax",
+    // for a lead whose `kind` is `person` — so it is sometimes personal data
+    // and the ledger cannot tell which times. `findPiiKey` cannot help: it
+    // denies KEYS, and `title` is not one, so nothing would have stopped it.
+    // The rule is the one the event contract states (§3.4): the payload carries
+    // ids and machine facts, the erasable row carries the words. `partyId` is
+    // already here and resolves to the name for anyone entitled to it.
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "lead.captured",
@@ -202,21 +248,47 @@ export class LeadService {
     return { lead, merged: false, matchedExistingParty: existingPartyId !== null };
   }
 
-  /** Move a lead through the pipeline. Reaching a terminal stage closes it. */
+  /**
+   * Move a lead through the pipeline. Reaching a terminal stage closes it, and
+   * an unwon close records why.
+   *
+   * `lost` and `abandoned` are the two ways an opportunity ends without a win
+   * and they are NOT the same finding: went quiet is a follow-up problem, chose
+   * a competitor is a pricing problem, and a firm that cannot tell them apart
+   * cannot tell which of its two fixable failures it has.
+   */
   async moveStage(input: MoveStageInput, actor: Actor): Promise<Lead> {
     const to = this.parseStage(input.stage);
+    const lostReason = this.parseLostReason(to, input.lostReason);
     const lead = await this.leadOrThrow(input.tenantId, input.leadId);
     if (lead.stage === to) throw new SameStage(lead.stage);
     if (!canMoveStage(lead.stage, to)) throw new LeadClosed(lead.id, lead.stage);
 
     const closedAt = isTerminalStage(to) ? this.deps.clock.now().toISOString() : null;
-    const moved = await this.deps.leads.moveStage(input.tenantId, lead.id, to, closedAt);
+    const moved = await this.deps.leads.moveStage(
+      input.tenantId,
+      lead.id,
+      to,
+      closedAt,
+      lostReason,
+    );
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "lead.stage_changed",
       objectId: lead.id,
       actor,
-      payload: { from: lead.stage, to, closed: closedAt !== null, partyId: lead.partyId },
+      payload: {
+        from: lead.stage,
+        to,
+        closed: closedAt !== null,
+        partyId: lead.partyId,
+        // WHETHER a reason was recorded, never the reason itself. A closer
+        // writes "their CFO went with his old audit partner" — a sentence about
+        // a named human being — into a column that can be erased on request,
+        // and this log cannot be. The machine fact ("did anybody explain this
+        // loss?") is what a timeline needs; the sentence lives on crm.lead.
+        lostReasonRecorded: lostReason !== null,
+      },
     });
     return moved;
   }
@@ -277,6 +349,35 @@ export class LeadService {
   private parseStage(stage: string): LeadStage {
     if (!isLeadStage(stage)) throw new InvalidStage(stage, LEAD_STAGES);
     return stage;
+  }
+
+  /** Trimmed here rather than at the door, so every caller — the handler, a
+   *  future importer, a test — stores the same thing. `lead_title_present_chk`
+   *  is the backstop for the paths that do not come through here at all. */
+  private parseTitle(title: string): string {
+    const trimmed = title.trim();
+    if (trimmed === "") throw new BlankTitle();
+    return trimmed;
+  }
+
+  /**
+   * The reason, checked against the stage it is being written with.
+   *
+   * Both directions are refused, because both are silent data loss: an unwon
+   * close with no reason is the gap this field was added to close, and a reason
+   * on any other stage is a sentence in a column nothing reads. The database
+   * agrees on the second half (`lead_lost_reason_scope_chk`) and deliberately
+   * not on the first — leads closed before 0030 have no honest reason to
+   * backfill, so NULL there means "nobody was asked", which is true.
+   */
+  private parseLostReason(to: LeadStage, reason: string | undefined): string | null {
+    const trimmed = reason?.trim() ?? "";
+    if (!recordsLostReason(to)) {
+      if (trimmed !== "") throw new LostReasonNotApplicable(to, CLOSED_UNWON_STAGES);
+      return null;
+    }
+    if (trimmed === "") throw new LostReasonRequired(to);
+    return trimmed;
   }
 
   private async leadOrThrow(tenantId: string, leadId: string): Promise<Lead> {

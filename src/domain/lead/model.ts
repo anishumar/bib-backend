@@ -34,8 +34,20 @@ export function isLeadSource(v: string): v is LeadSource {
  * screen (T6.2) exists and a firm asks — designing a firm-editable stage
  * vocabulary before either exists is the same trap T2.5 avoided by deferring
  * workflow templates.
+ *
+ * `abandoned` is NOT a synonym for `lost` (G3.1, build2 §4.4). A prospect who
+ * went quiet is a FOLLOW-UP problem; a prospect who chose a competitor is a
+ * PRICING problem. They are the firm's two fixable failures and they have
+ * opposite remedies, so collapsing them into one stage means the pipeline can
+ * report a conversion rate and never say which of the two to go and fix.
  */
-export type LeadStage = "new" | "contacted" | "qualified" | "converted" | "lost";
+export type LeadStage =
+  | "new"
+  | "contacted"
+  | "qualified"
+  | "converted"
+  | "lost"
+  | "abandoned";
 
 export const LEAD_STAGES: readonly LeadStage[] = [
   "new",
@@ -43,6 +55,7 @@ export const LEAD_STAGES: readonly LeadStage[] = [
   "qualified",
   "converted",
   "lost",
+  "abandoned",
 ];
 
 export function isLeadStage(v: string): v is LeadStage {
@@ -51,7 +64,7 @@ export function isLeadStage(v: string): v is LeadStage {
 
 /** The stages a lead never leaves. Reaching one closes the opportunity and
  *  stamps closed_at; the database CHECK keeps the two in step. */
-export const TERMINAL_STAGES: readonly LeadStage[] = ["converted", "lost"];
+export const TERMINAL_STAGES: readonly LeadStage[] = ["converted", "lost", "abandoned"];
 
 export function isTerminalStage(stage: LeadStage): boolean {
   return TERMINAL_STAGES.includes(stage);
@@ -61,9 +74,38 @@ export function isOpen(stage: LeadStage): boolean {
   return !isTerminalStage(stage);
 }
 
+/**
+ * The terminal stages that did NOT win, and therefore owe an explanation.
+ *
+ * `converted` is deliberately absent: a won deal has no lost reason, and a field
+ * that accepted one on it would collect notes nothing ever reads. The database
+ * says the same thing (`lead_lost_reason_scope_chk`, migration 0030), because a
+ * rule only in TypeScript is one an import or a psql session walks straight
+ * past.
+ */
+export const CLOSED_UNWON_STAGES: readonly LeadStage[] = ["lost", "abandoned"];
+
+export function recordsLostReason(stage: LeadStage): boolean {
+  return CLOSED_UNWON_STAGES.includes(stage);
+}
+
 export interface Lead {
   readonly id: string;
   readonly tenantId: string;
+  /**
+   * What this opportunity is called.
+   *
+   * The opportunity's OWN name, not the client's. Before it existed every list
+   * rendered `party.displayName`, so a firm quoting one client for two things
+   * saw the same row twice with nothing distinguishing them — and the read
+   * model already carries the party name beside this, so a title that merely
+   * repeated it would add nothing.
+   *
+   * Never empty and never whitespace: `lead_title_present_chk` in migration
+   * 0030 says so at the table, because "  " satisfies NOT NULL and renders as
+   * the same blank row the column was added to prevent.
+   */
+  readonly title: string;
   /** The party this opportunity is about. Never null — a lead with no party is
    *  the duplicate-prospect problem this model exists to avoid. */
   readonly partyId: string;
@@ -72,6 +114,20 @@ export interface Lead {
   /** Whose desk it is on, or null for the unassigned queue. */
   readonly ownerUserId: string | null;
   readonly notes: string | null;
+  /**
+   * Why it did not close won, in the closer's own words.
+   *
+   * FREE TEXT, and that is the decision rather than the easy option: a dropdown
+   * of five reasons produces five reasons and the useful one is always the
+   * sixth. Null on an open lead and on a converted one (the database refuses
+   * anything else); null on a lead closed before 0030, which honestly means
+   * nobody was asked.
+   *
+   * Distinct from `notes`, which is about the opportunity while it is live.
+   * This is the one sentence somebody writes at the moment they know the answer
+   * and will not be able to reconstruct a month later.
+   */
+  readonly lostReason: string | null;
   readonly capturedAt: string;
   readonly closedAt: string | null;
 }
@@ -135,9 +191,11 @@ export function isAmbiguous(match: DedupMatch): boolean {
  * stage may move to any other, because real pipelines go backwards — a
  * "qualified" prospect who stops answering is "contacted" again, and a workflow
  * that forbids it just teaches people to lie to it. What is refused is leaving
- * a TERMINAL stage, because a converted or lost lead is finished; a prospect who
- * returns is a new opportunity, which is exactly what the one-open-lead-per-party
- * index leaves room for.
+ * a TERMINAL stage, because a converted, lost or abandoned lead is finished; a
+ * prospect who returns is a new opportunity, which is exactly what the
+ * one-open-lead-per-party index leaves room for — and since 0030 that index
+ * treats `abandoned` as closed too, so going quiet does not lock a prospect out
+ * of the pipeline for good.
  */
 export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
   if (isTerminalStage(from)) return false;

@@ -15,6 +15,10 @@ import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 export interface NewLead {
   readonly id: string;
   readonly tenantId: string;
+  /** Already trimmed and already known non-empty — the service checks it before
+   *  anything is written, so an adapter never has to decide what a blank title
+   *  means. */
+  readonly title: string;
   readonly partyId: string;
   readonly source: LeadSource;
   readonly ownerUserId: string | null;
@@ -65,9 +69,22 @@ export interface LeadRepository {
   list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]>;
   /** One lead, with the same joins. */
   findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null>;
-  /** Moves the stage and sets/clears closed_at together, so the two can never
-   *  disagree — the database CHECK is the backstop, not the mechanism. */
-  moveStage(tenantId: string, leadId: string, stage: LeadStage, closedAt: string | null): Promise<Lead>;
+  /**
+   * Moves the stage, closed_at and lost_reason TOGETHER, so no two of them can
+   * disagree — the database CHECKs are the backstop, not the mechanism.
+   *
+   * All three in one signature rather than a separate `recordLostReason`: a
+   * closing reason written a moment after the close is a second write that can
+   * fail on its own, leaving a lost lead that never says why, which is the
+   * state this field exists to end.
+   */
+  moveStage(
+    tenantId: string,
+    leadId: string,
+    stage: LeadStage,
+    closedAt: string | null,
+    lostReason: string | null,
+  ): Promise<Lead>;
   setOwner(tenantId: string, leadId: string, ownerUserId: string | null): Promise<Lead>;
 }
 

@@ -41,6 +41,7 @@ export const STAGE_VALUES = [
   "qualified",
   "converted",
   "lost",
+  "abandoned",
 ] as const satisfies readonly LeadStage[];
 
 // ── Response schemas ────────────────────────────────────────────────────────
@@ -49,11 +50,23 @@ const LeadSchema = z
   .object({
     id: z.string().uuid(),
     tenantId: z.string().uuid(),
+    title: z.string().openapi({
+      description:
+        "What this opportunity is called — the OPPORTUNITY's name, not the client's. " +
+        "A list already shows the party beside it, so this is what tells two live " +
+        "opportunities for the same client apart.",
+    }),
     partyId: z.string().uuid(),
     source: z.enum(SOURCE_VALUES),
     stage: z.enum(STAGE_VALUES),
     ownerUserId: z.string().uuid().nullable(),
     notes: z.string().nullable(),
+    lostReason: z.string().nullable().openapi({
+      description:
+        "Why the opportunity did not close won, in the closer's own words. Set only on " +
+        "`lost` and `abandoned`; null on an open or converted lead, and null on one closed " +
+        "before the field existed, which means nobody was asked.",
+    }),
     capturedAt: z.string(),
     closedAt: z.string().nullable(),
   })
@@ -113,6 +126,14 @@ const CaptureLeadBody = z
     name: z.string().min(1).openapi({
       description: "The organization's legal name, or the person's full name.",
     }),
+    // Required, not optional-with-a-fallback. A title derived from the party
+    // name would be identical for every opportunity a client ever has — the
+    // state this field was added to end, wearing a NOT NULL badge.
+    title: z.string().min(1).max(200).openapi({
+      description:
+        "What this opportunity is called — \"FY27 statutory audit\", \"GST registration for " +
+        "the Pune plant\". Name the work, not the client: the list shows the client already.",
+    }),
     // At least one on the wire; the service additionally requires one of them
     // to be a dedup type, with a message explaining why.
     identifiers: z
@@ -127,7 +148,21 @@ const CaptureLeadBody = z
   })
   .openapi("CaptureLeadRequest");
 
-const MoveStageBody = z.object({ stage: z.enum(STAGE_VALUES) }).openapi("MoveLeadStageRequest");
+const MoveStageBody = z
+  .object({
+    stage: z.enum(STAGE_VALUES),
+    // Not `.nullable()`: null and absent would mean the same thing here, and one
+    // spelling for one meaning keeps the generated client honest. Whether it is
+    // required is a rule about the STAGE, so it lives in the service where the
+    // refusal can say why rather than "invalid_type".
+    lostReason: z.string().min(1).max(2000).optional().openapi({
+      description:
+        "Why it did not close won. REQUIRED moving to `lost` or `abandoned`, refused on any " +
+        "other stage. Free text on purpose: a dropdown of five reasons produces five reasons, " +
+        "and the useful one is always the sixth.",
+    }),
+  })
+  .openapi("MoveLeadStageRequest");
 
 const AssignOwnerBody = z
   .object({
@@ -157,7 +192,9 @@ const captureRoute = createRoute({
         "The prospect already had a live opportunity; this capture was appended to it and nothing was created",
       content: { "application/json": { schema: CaptureResultSchema } },
     },
-    400: errorResponse("Unknown source, no contact identifier, or an invalid identifier"),
+    400: errorResponse(
+      "Unknown source, a blank title, no contact identifier, or an invalid identifier",
+    ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write parties"),
     409: errorResponse("The contact details belong to more than one existing party"),
@@ -210,14 +247,16 @@ const moveStageRoute = createRoute({
   method: "post",
   path: "/api/v1/leads/{leadId}/stage",
   tags: ["lead"],
-  summary: "Move a lead through the pipeline",
+  summary: "Move a lead through the pipeline; an unwon close says why",
   request: {
     params: LeadParam,
     body: { content: { "application/json": { schema: MoveStageBody } }, required: true },
   },
   responses: {
     200: { description: "Moved", content: { "application/json": { schema: LeadSchema } } },
-    400: errorResponse("Unknown stage"),
+    400: errorResponse(
+      "Unknown stage, a close with no reason, or a reason on a stage that takes none",
+    ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write parties"),
     404: errorResponse("No such lead in this firm"),
@@ -289,8 +328,11 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
-    const { stage } = c.req.valid("json");
-    return c.json(await deps.service.moveStage({ tenantId: s.tenantId, leadId, stage }, s.actor), 200);
+    const { stage, lostReason } = c.req.valid("json");
+    return c.json(
+      await deps.service.moveStage({ tenantId: s.tenantId, leadId, stage, lostReason }, s.actor),
+      200,
+    );
   });
 
   app.openapi(assignOwnerRoute, async (c) => {

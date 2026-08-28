@@ -10,7 +10,8 @@
 // stops recording party.created — none of which the lead use case implements,
 // and all of which its correctness depends on.
 //
-// It does NOT enforce RLS, or the one-open-lead-per-party index: those are
+// It does NOT enforce RLS, the one-open-lead-per-party index, or the CHECKs
+// that hold a title non-blank and a lost reason to an unwon stage: those are
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
 import type { Lead, LeadStage } from "../domain/lead/model";
@@ -37,11 +38,15 @@ export class FakeLeadRepo implements LeadRepository {
     const row: Lead = {
       id: l.id,
       tenantId: l.tenantId,
+      title: l.title,
       partyId: l.partyId,
       source: l.source,
       stage: "new",
       ownerUserId: l.ownerUserId,
       notes: l.notes,
+      // A lead is captured OPEN, so it has nothing to explain yet. The real
+      // table says the same with lead_lost_reason_scope_chk.
+      lostReason: null,
       capturedAt: at,
       closedAt: null,
     };
@@ -104,8 +109,14 @@ export class FakeLeadRepo implements LeadRepository {
     leadId: string,
     stage: LeadStage,
     closedAt: string | null,
+    lostReason: string | null,
   ): Promise<Lead> {
-    return Promise.resolve(this.replace(tenantId, leadId, (r) => ({ ...r, stage, closedAt })));
+    // All three together, exactly as the adapter's single UPDATE does — a fake
+    // that let them drift apart would make the service look correct against a
+    // shape the database would refuse.
+    return Promise.resolve(
+      this.replace(tenantId, leadId, (r) => ({ ...r, stage, closedAt, lostReason })),
+    );
   }
 
   setOwner(tenantId: string, leadId: string, ownerUserId: string | null): Promise<Lead> {
