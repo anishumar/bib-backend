@@ -1610,7 +1610,96 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` 795 · `test:integration` 255 · `smoke` **227 passed, 0 failed**
   > (the smoke walk is at its request budget and gained no section here — the ladder is a
   > WORKER, and `worker:once` is how it is demonstrated).
-- [ ] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
+- [x] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
+  > **Done (2026-08-29). Migration 0037, and a new `files` schema.** Both halves of the
+  > acceptance are proven against a running server, not asserted: a PDF uploaded, attached to a
+  > party, listed back through `/subjects/party/{id}/documents`, downloaded, and the bytes
+  > compared byte-for-byte with the file on disk — the stored `content_hash` equals its real
+  > sha256. A second firm's partner gets **404 on the document AND on its bytes**.
+  >
+  > **A NEW SCHEMA, and it is not tidiness.** `crm.document_block` (G1.7) and
+  > `crm.document_ref_series` (0020) already exist and neither is about a FILE. A
+  > `crm.document` beside `crm.document_block` would read as "the document a block belongs
+  > to", which is the opposite of what it is. And this store attaches across the whole product
+  > — party, lead, proposal, letter, engagement, invoice, job — so it is not CRM's to own.
+  >
+  > **THE ACCEPTANCE'S SECOND HALF IS THE INTERESTING ONE.** "No pre-signed URL escape" is not
+  > a missing feature, it is the design: a pre-signed URL is a capability that outlives the
+  > session that minted it and is checked by a storage vendor rather than by this product,
+  > which means it answers to **none of the four scoping gates**. Bytes leave through
+  > `GET /documents/{id}/content` only, and the version row that names the storage key is
+  > fetched under RLS — so the key is unreachable before it could be used. Proven live.
+  >
+  > **VERSIONS ARE APPEND-ONLY BY GRANT, NOT BY TRIGGER.** `bib_app` holds SELECT and INSERT on
+  > `files.document_version` and nothing else, the same arrangement the `ledger` schema has. A
+  > trigger is a rule the table carries; a missing grant is a permission the role does not
+  > hold, and an import or an agent walks past the first and not the second. The integration
+  > test asserts `has_table_privilege(... 'UPDATE') = false` rather than only that an UPDATE
+  > threw, because those are different claims.
+  >
+  > **CONTENT-ADDRESSED, and the cost is stated rather than discovered.** The storage key is
+  > derived from the sha256, so a client re-sending the file they already sent stores one blob
+  > — the ordinary case, not an edge one. The consequence: **two documents can share a blob**,
+  > so nothing may delete bytes because one document that referenced them went away. The
+  > `BlobStore` port therefore has **no delete method**, matching `bib_app` holding no DELETE
+  > grant anywhere in this database.
+  >
+  > **`subject_ref` HAS NO FOREIGN KEY, and cannot.** It follows `delivery.job`'s
+  > `(source_kind, source_ref)` (0041) rather than inventing a second idiom. The containment is
+  > the CHECK on `subject_kind`: a dangling link is possible within a KNOWN vocabulary, never a
+  > pointer to anything at all. `linksOf` resolves the subject to a label with a LEFT JOIN per
+  > kind, so an unresolvable link shows as unresolved instead of rendering blank — the
+  > read-model rule applied to the one case where the join can legitimately fail.
+  >
+  > **`brand_asset` landed here** — it was in "deliberately NOT on this board" with the note
+  > that PDF cannot ship without it, and it is one small table over the store this migration
+  > already builds. **Keyed on the ENTITY, not the firm**: G1.2's rule applied to paper, because
+  > a letter issued by the US entity printing the Indian logo is the same class of error as one
+  > printing Indian governing law (G1.8). A partial unique index (`WHERE is_active`) makes "the
+  > current logo" a lookup rather than a sort, and superseded marks stay readable.
+  >
+  > **The honest registry gained its FOURTH stub**, with the treatment `attested-signer.ts`
+  > says a fourth must get: `validateServer` refuses a production-like boot on
+  > `BIB_STORAGE_BACKEND=filesystem`. Two failures, and the first is the nastier because it is
+  > intermittent — replicas do not share a disk, so a file uploaded through one pod is a 500
+  > through the others depending on which one the balancer picks; and a container filesystem
+  > does not survive a restart, leaving metadata that outlives its bytes. `tests/config/
+  > boot-gates.test.ts` now covers all four.
+  >
+  > **Two codes were added to the error vocabulary, deliberately.** `PAYLOAD_TOO_LARGE` (413) is
+  > not VALIDATION — the request is well formed and it is the SIZE that is refused, so a client
+  > can offer "compress and retry" instead of "invalid file". `UPSTREAM_FAILURE` (502) is not
+  > INTERNAL — it means the metadata is intact and STORAGE lost the bytes, which is the first
+  > thing anybody woken at night needs to know.
+  >
+  > **NOT DONE, and split out on purpose: rendering. See T3.8.** The `DocumentRenderer` port was
+  > written and then deliberately deleted before commit, on this repo's own rule — T2.5 deferred
+  > `workflow_template` because "a body designed against no consumer ends up wrong", and a
+  > renderer interface with nothing implementing it is exactly that. It gets designed against
+  > real letters and real invoices, in T3.8.
+  >
+  > Gate: `npm run check` **939** (was 906) · `test:integration` **296** · `smoke` **229 passed,
+  > 0 failed** (unchanged).
+
+- [ ] `(A)` **T3.8** **Render a document a client can be sent** — the other half of T3.6, split
+  from it deliberately rather than rushed into it. *Acc: an engagement letter and an invoice
+  each render to a file, stored as a `generated` document version, whose content hash a
+  re-render of unchanged data reproduces exactly.*
+  > **The decomposition T3.6 stopped short of, stated so it is not re-derived.** The renderer
+  > must NOT read the database itself — the service that already holds the data (engagement,
+  > invoice) builds a plain `RenderableDocument`, and the renderer turns that into bytes. A
+  > renderer holding repositories would duplicate read logic that already exists and would make
+  > the engine choice reach into the data layer.
+  >
+  > **The engine has to be DETERMINISTIC, and that is the whole constraint.** A document's
+  > content hash is evidence — it is what proves the file a client holds is the one the firm
+  > issued (T2.3's `content_hash` finally has something to point at). A headless browser does
+  > not guarantee byte-identical output across versions; a pure-layout library does. That
+  > argues for pdf-lib or pdfkit over puppeteer, and it also removes chromium from the
+  > container. **Not decided — it is a real trade against fidelity and it is worth ten minutes
+  > with `(B)` rather than a unilateral `npm install`.**
+  >
+  > `brand_asset` (T3.6) is the input this needs and already exists, so nothing blocks it.
 - [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
 
 **Milestone M3:** full compliance cycle (spawn → work → verify → file → invoice → collect) runs with humans in the loop; money is gapless and auditable.
@@ -1789,9 +1878,9 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
 | Thing | Why it matters | Whose call |
 |---|---|---|
 | `notification` (in-app inbox) | The firm asked for it directly — *"email aur in-app — in-app kar do abhi"*. In neither the schema nor this plan. | A/B |
-| `brand_asset` (logo, signature image) | PDF generation cannot ship without it, and PDF is not scheduled either. | A |
+| ~~`brand_asset` (logo, signature image)~~ | **Done — landed with T3.6** as `files.brand_asset`, keyed on the issuing ENTITY rather than the firm (G1.2 applied to paper). PDF generation is now scheduled too: **T3.8**. | A |
 | `communication` (email / WhatsApp threading) | T4.7 (A1 Intake) has nothing to attach to without it. | A |
-| `credit_note.reason` mandatory | Carry the CHECK across when T3.5 lands. Without it revenue leakage is invisible — the numbers always reconcile; *why* 40,000 came off does not. | A |
+| ~~`credit_note.reason` mandatory~~ | **Done, and this row was stale.** It shipped WITH T3.5: `migrations/0028_payments_credit_notes.up.sql:161` has `reason text NOT NULL CHECK (reason IN (...))`, plus an index on `(tenant_id, reason, issued_on)` so "why did revenue come off" is a query and not a read-through. Found while picking up T3.6. | A |
 | Maker ≠ checker as a CHECK constraint | Already T2.9's acceptance. Named here only so it is not quietly downgraded to a service rule — a rule in a form is one a script, an import or an agent walks straight past. | B |
 | Gapless invoice numbering | Already T3.4's acceptance, and the mechanism is named correctly there (a locked counter row, not a sequence — a sequence keeps its number on rollback and burns 41 forever). | A |
 | AI `proposed` kept beside `applied` | Phase 4. Keeping only the corrected value is the obvious thing to do and throws the entire accuracy signal away. | B |

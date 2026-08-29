@@ -5,3 +5,7 @@ coverage/
 *.log
 .DS_Store
 .vitest/
+
+# Local blob storage (BIB_STORAGE_ROOT). The filesystem adapter is a dev-only
+# stub; a production-like boot refuses it. Never commit a firm's documents.
+.data/

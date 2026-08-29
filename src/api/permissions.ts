@@ -267,6 +267,50 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/invoice-series"), "config:read" as const],
   [routeKey("POST", "/api/v1/invoice-series/{entityPartyId}/prefix"), "tenant:admin" as const],
 
+  // THE DOCUMENT STORE (T3.6). Reading is `party:read` and writing is
+  // `party:write`, matching every other route that handles a client's material
+  // — a document is a fact about a client, and the permission that governs
+  // seeing their record governs seeing their file.
+  //
+  // NO NEW PERMISSION, and that is a considered decision rather than an
+  // omission. CLAUDE.md says a new permission costs a migration, so the bar is
+  // whether a firm would genuinely want to grant one of these without the
+  // other. It would not: anybody who may open a client's page may see what is
+  // attached to it, and anybody who may edit that client may attach to it.
+  // `document:read` would be a distinction no firm has asked for, enforced on
+  // every route from now on.
+  //
+  // THE DOWNLOAD ROUTES TAKE THE SAME PERMISSION AS THE METADATA, deliberately.
+  // Splitting them would say "you may see that a file exists but not open it",
+  // which is a record-scope question (Gate 4, U1) and not a role question — and
+  // answering a role question with a permission would make the real answer
+  // harder to add later.
+  [routeKey("GET", "/api/v1/documents"), "party:read" as const],
+  [routeKey("POST", "/api/v1/documents"), "party:write" as const],
+  [routeKey("GET", "/api/v1/documents/{documentId}"), "party:read" as const],
+  [routeKey("GET", "/api/v1/documents/{documentId}/content"), "party:read" as const],
+  [routeKey("GET", "/api/v1/documents/{documentId}/versions"), "party:read" as const],
+  [routeKey("POST", "/api/v1/documents/{documentId}/versions"), "party:write" as const],
+  [
+    routeKey("GET", "/api/v1/documents/{documentId}/versions/{versionId}/content"),
+    "party:read" as const,
+  ],
+  [routeKey("GET", "/api/v1/documents/{documentId}/links"), "party:read" as const],
+  [routeKey("POST", "/api/v1/documents/{documentId}/links"), "party:write" as const],
+  [routeKey("GET", "/api/v1/subjects/{subjectKind}/{subjectRef}/documents"), "party:read" as const],
+
+  // Brand assets are `tenant:admin` to WRITE, unlike the documents themselves.
+  // The firm's letterhead and its partners' signature images are what every
+  // outgoing document is printed under; putting a new one in force is the same
+  // class of act as naming the entity that issues (G1.2), which is admin for
+  // the same reason. Reading is `config:read`, so a drafting screen can show
+  // what a document will carry without being able to change it.
+  [routeKey("GET", "/api/v1/firm-entities/{entityPartyId}/brand-assets"), "config:read" as const],
+  [
+    routeKey("PUT", "/api/v1/firm-entities/{entityPartyId}/brand-assets/{kind}"),
+    "tenant:admin" as const,
+  ],
+
   [routeKey("GET", "/api/v1/territory-rules"), "config:read" as const],
   [routeKey("POST", "/api/v1/territory-rules"), "tenant:admin" as const],
 

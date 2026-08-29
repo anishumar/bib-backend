@@ -20,6 +20,7 @@ import { ProposalError } from "../domain/proposal/errors";
 import { EngagementError } from "../domain/engagement/errors";
 import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
+import { FileStoreError } from "../domain/filestore/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -32,13 +33,29 @@ export const ERROR_CODES = [
   "RATE_LIMITED",
   "NOT_IMPLEMENTED",
   "INTERNAL",
+  // Two codes added with the document store (T3.6), because uploads are the
+  // first thing in this product where the existing vocabulary would have
+  // flattened two genuinely different answers into one.
+  //
+  // PAYLOAD_TOO_LARGE is not VALIDATION. The request is well formed and the
+  // caller did nothing wrong in shape — it is the SIZE that is refused — and a
+  // client that can tell them apart offers "compress this and try again"
+  // instead of "invalid file".
+  //
+  // UPSTREAM_FAILURE is not INTERNAL. It means a system BEHIND this one failed
+  // while this one is healthy: the metadata is intact and the storage backend
+  // has lost the bytes. Collapsing it into INTERNAL would make a storage outage
+  // indistinguishable from a bug in this process, which is the first thing
+  // anybody woken up at night needs to know.
+  "PAYLOAD_TOO_LARGE",
+  "UPSTREAM_FAILURE",
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
 /** The HTTP statuses this system emits — a closed set, so it is assignable to
  *  the transport's status type without a cast. */
-export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 429 | 500 | 501;
+export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 413 | 429 | 500 | 501 | 502;
 
 export interface MappedError {
   readonly status: HttpStatus;
@@ -383,6 +400,37 @@ export function mapError(err: unknown): MappedError {
       case "NO_ISSUING_ENTITY":
       case "BLOCKS_ALREADY_SEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof FileStoreError) {
+    switch (err.code) {
+      case "EMPTY_CONTENT":
+      case "UNSUPPORTED_MEDIA_TYPE":
+      case "INVALID_FILENAME":
+      case "INVALID_TITLE":
+      case "UNKNOWN_SUBJECT_KIND":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 413 and not 400. The request is well formed and the caller did nothing
+      // wrong in shape — it is the SIZE that is refused, and a client that can
+      // tell the two apart can offer "compress this and try again" instead of
+      // "invalid file".
+      case "CONTENT_TOO_LARGE":
+        return { status: 413, code: "PAYLOAD_TOO_LARGE", message: err.message, reason: err.code };
+      case "DOCUMENT_NOT_FOUND":
+      case "VERSION_NOT_FOUND":
+      case "BRAND_ASSET_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "ALREADY_ATTACHED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 502, and this is the one mapping here worth arguing. The metadata is
+      // intact and the bytes are gone, so the caller asked for something that
+      // SHOULD exist and a system behind us failed to produce it. Answering 404
+      // would send whoever reads the log looking for a deleted document; this
+      // says plainly that storage lost it.
+      case "BYTES_MISSING":
+        return { status: 502, code: "UPSTREAM_FAILURE", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

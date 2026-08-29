@@ -31,6 +31,12 @@ import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
 import { DocumentService } from "../../src/usecase/document/service";
+import { FileStoreService } from "../../src/usecase/filestore/service";
+import {
+  FakeBlobStore,
+  FakeContentDigest,
+  FakeDocumentStoreRepo,
+} from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
@@ -165,6 +171,16 @@ function deps(): RouterDeps {
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
     document: { service: new DocumentService(makeDocumentFakes()) },
+    filestore: {
+      service: new FileStoreService({
+        documents: new FakeDocumentStoreRepo(),
+        blobs: new FakeBlobStore(),
+        digest: new FakeContentDigest(),
+        ids: new FakeIds(),
+        events: new RecordingEventSink(),
+        maxUploadBytes: 25 * 1024 * 1024,
+      }),
+    },
     invoice: {
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
       service: new InvoiceService(makeInvoiceFakes()),

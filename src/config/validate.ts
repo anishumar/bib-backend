@@ -122,6 +122,25 @@ export function validateServer(cfg: Config): void {
           `before deploying.`,
       );
     }
+
+    // The FOURTH stub. `attested-signer.ts` says in its own header that adding a
+    // fourth without this treatment is not allowed, so here it is with it.
+    //
+    // Two independent failures, and the first is the nastier one because it is
+    // intermittent: replicas do not share a filesystem, so a file uploaded
+    // through one pod answers 500 through every other, depending on which one
+    // the load balancer picks. The second is plain — a container filesystem does
+    // not survive a restart, and the metadata would outlive the bytes, leaving
+    // the product listing documents it cannot open.
+    if (cfg.storage.backend === "filesystem") {
+      throw new Error(
+        `BIB_STORAGE_BACKEND=filesystem while BIB_ENVIRONMENT=${cfg.environment} ` +
+          `(production-like). The filesystem blob store writes to the local disk: replicas do ` +
+          `not share it, so an upload through one pod is a 500 through the others, and a ` +
+          `restart loses the bytes while the metadata survives. Register an object-store ` +
+          `adapter (infrastructure/storage) and set BIB_STORAGE_BACKEND to it before deploying.`,
+      );
+    }
   }
 }
 

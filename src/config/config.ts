@@ -84,6 +84,18 @@ const EnvSchema = z.object({
   BIB_RATELIMIT_AUTH_PER_MINUTE: z.coerce.number().int().positive().default(10),
   BIB_RATELIMIT_GENERAL_PER_MINUTE: z.coerce.number().int().positive().default(300),
 
+  // ── Document storage (T3.6) ───────────────────────────────────────────────
+  // Where uploaded bytes live. The filesystem adapter is a STUB — per-pod and
+  // not restart-safe — and validateServer refuses a production-like boot with
+  // it, so this default is a local-development convenience and nothing more.
+  BIB_STORAGE_BACKEND: z.enum(["filesystem"]).default("filesystem"),
+  BIB_STORAGE_ROOT: z.string().min(1).default(".data/blobs"),
+  // The largest file the store accepts. A MEMORY BUDGET, not a preference: the
+  // whole file is held in memory to be hashed before it is written, so this is
+  // what one upload request can cost the process. 25 MB fits a scanned
+  // multi-page PDF, which is what this product actually receives.
+  BIB_MAX_UPLOAD_BYTES: z.coerce.number().int().positive().default(25 * 1024 * 1024),
+
   // ── CORS ──────────────────────────────────────────────────────────────────
   // Which browser origins may call the API. Comma-separated, exact matches
   // only. Unset falls back to BIB_APP_BASE_URL — the app that receives magic
@@ -128,6 +140,16 @@ export interface RateLimitConfig {
   readonly generalPerMinute: number;
 }
 
+export interface StorageConfig {
+  /** Which blob adapter is registered. `filesystem` is a stub — see the honest
+   *  registry check in validate.ts. */
+  readonly backend: "filesystem";
+  /** Root directory for the filesystem adapter. */
+  readonly root: string;
+  /** Largest accepted upload, in bytes. A memory budget. */
+  readonly maxUploadBytes: number;
+}
+
 export interface Config {
   readonly environment: Environment;
   readonly logLevel: "debug" | "info" | "warn" | "error";
@@ -139,6 +161,7 @@ export interface Config {
   readonly rateLimit: RateLimitConfig;
   readonly cors: CorsConfig;
   readonly worker: WorkerConfig;
+  readonly storage: StorageConfig;
 }
 
 export interface WorkerConfig {
@@ -215,6 +238,11 @@ export function load(): Config {
       trustProxy: env.BIB_TRUST_PROXY === "true",
       authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
       generalPerMinute: env.BIB_RATELIMIT_GENERAL_PER_MINUTE,
+    },
+    storage: {
+      backend: env.BIB_STORAGE_BACKEND,
+      root: env.BIB_STORAGE_ROOT,
+      maxUploadBytes: env.BIB_MAX_UPLOAD_BYTES,
     },
     worker: {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,

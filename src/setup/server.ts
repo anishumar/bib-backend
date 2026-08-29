@@ -47,6 +47,12 @@ import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
+import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
+import {
+  FilesystemBlobStore,
+  Sha256ByteDigest,
+} from "../infrastructure/storage/filesystem-blob-store";
+import { FileStoreService } from "../usecase/filestore/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
 import {
@@ -220,6 +226,19 @@ export function wire(cfg: Config, log: Logger): Wired {
     ids: systemIds,
     clock: systemClock,
     events: ledger,
+  });
+
+  // THE DOCUMENT STORE (T3.6). The blob adapter is chosen here and nowhere
+  // else, which is what makes replacing the filesystem stub with an object
+  // store a one-line change in this file. `validateServer` has already refused
+  // to boot a production-like environment on the stub by the time this runs.
+  const fileStore = new FileStoreService({
+    documents: new PostgresDocumentStoreRepository(pools.app),
+    blobs: new FilesystemBlobStore(cfg.storage.root),
+    digest: new Sha256ByteDigest(),
+    ids: systemIds,
+    events: ledger,
+    maxUploadBytes: cfg.storage.maxUploadBytes,
   });
 
   // CHASING is its own use case, and it runs in TWO places: the worker sweeps
@@ -448,6 +467,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         engagement: { service: engagement, authz },
         document: { service: documents },
         invoice: { service: invoices, dunning, authz },
+        filestore: { service: fileStore },
       },
       log,
       {

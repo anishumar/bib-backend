@@ -1,10 +1,11 @@
 // THE HONEST REGISTRY, enforced and now tested.
 //
-// This codebase registers exactly three stubs — the dev auth resolver, the
-// logging mailer, and the attested e-sign signer — and CLAUDE.md's rule is that
-// none of them may reach a public environment. Each has a boot gate in
-// validate.ts; until now none of those gates had a test, so all three could
-// have been deleted or inverted and the build would have stayed green.
+// This codebase registers exactly four stubs — the dev auth resolver, the
+// logging mailer, the attested e-sign signer, and the filesystem blob store
+// (T3.6) — and CLAUDE.md's rule is that none of them may reach a public
+// environment. Each has a boot gate in validate.ts; until these tests existed
+// none of those gates had one, so any of them could have been deleted or
+// inverted and the build would have stayed green.
 //
 // That is worth guarding precisely because the failure is silent: a gate that
 // stops refusing does not break anything, it just quietly permits the thing it
@@ -20,7 +21,10 @@ import type { Config } from "../../src/config/config";
  * time and see the boot refuse. Anything that is not the subject of a test is
  * deliberately safe.
  */
-function productionLike(overrides: Partial<Config["auth"]> = {}): Config {
+function productionLike(
+  overrides: Partial<Config["auth"]> = {},
+  storage: Partial<Config["storage"]> = {},
+): Config {
   return {
     environment: "production",
     logLevel: "info",
@@ -48,6 +52,12 @@ function productionLike(overrides: Partial<Config["auth"]> = {}): Config {
     },
     cors: { origins: ["https://app.example.com"] },
     rateLimit: { trustProxy: true, authPerMinute: 10, generalPerMinute: 300 },
+    storage: {
+      backend: "s3" as unknown as "filesystem",
+      root: ".data/blobs",
+      maxUploadBytes: 25 * 1024 * 1024,
+      ...storage,
+    },
   } as unknown as Config;
 }
 
@@ -70,6 +80,16 @@ describe("a production-like environment refuses every stub", () => {
     expect(() => {
       validateServer(productionLike({ mailTransport: "log" }));
     }).toThrow(/BIB_MAIL_TRANSPORT/);
+  });
+
+  it("refuses the filesystem blob store — replicas do not share a disk", () => {
+    // The failure this gate prevents is intermittent, which is what makes it
+    // worth a boot refusal rather than a runbook note: with two replicas, a
+    // file uploaded through one pod is a 500 through the other, depending on
+    // which one the load balancer happens to pick.
+    expect(() => {
+      validateServer(productionLike({}, { backend: "filesystem" }));
+    }).toThrow(/BIB_STORAGE_BACKEND/);
   });
 
   it("refuses the attested signer — an engagement letter creates obligations", () => {
