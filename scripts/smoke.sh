@@ -49,7 +49,11 @@ chk() { # chk <label> <expected> <actual>
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-# THE WALK'S OWN BUDGET, and it is nearly spent. This script makes ~250 requests
+# THE WALK'S OWN BUDGET, AND IT IS ALL BUT SPENT: ~288 requests against a limit
+# of 300. The next section added here does not fit, and that is a decision to
+# take deliberately rather than discover as a flaky run.
+#
+# This script makes ~288 requests
 # from one client address in a few seconds, against a general limiter of 300 a
 # minute (BIB_RATELIMIT_GENERAL_PER_MINUTE). So: one run fits, TWO RUNS INSIDE A
 # MINUTE DO NOT — the second one drowns in 429s partway through, which reads
@@ -62,6 +66,14 @@ code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # feature. The fix is to spend fewer requests here, not to raise the product's
 # default: a limit the smoke walk cannot live under is one a real client cannot
 # either, and finding that out is part of what this script is for.
+#
+# THE REAL-WORLD VERSION OF THIS IS WORTH SEEING, because the walk is not the
+# only client that shares one address: a firm behind a single office NAT gateway
+# puts all of its staff in ONE bucket. 300/min is comfortable for a handful of
+# browsers and is not obviously comfortable for forty people on a Monday
+# morning. That is a product question about BIB_RATELIMIT_GENERAL_PER_MINUTE and
+# the key the edge limiter uses — not something to fix by quietly raising a
+# number so a test goes green. It is on the board.
 
 echo; echo "── 1. The provisioning surface needs a platform key ────────────────"
 chk "no key is refused"        401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -d '{}')"
@@ -1081,6 +1093,42 @@ LEFT=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$NEXTEL | python
 import sys, json
 print(len([b for b in json.load(sys.stdin)["blocks"] if b["kind"] == "exclusion"]))')
 chk "…and the others are untouched"     "0" "$LEFT"
+
+echo; echo "── 16d. Invoicing — the one number that may not gap ─────────────────"
+# T3.4. A proposal reference may gap: PR-2026-0007 missing means somebody
+# abandoned a quote. A TAX INVOICE NUMBER MAY NOT — an auditor is entitled to
+# read a missing one as a suppressed sale — so the counter is a row taken under
+# SELECT ... FOR UPDATE inside the same transaction as the insert, and a
+# rollback releases the number. That property is proven against real Postgres in
+# tests/invoice/numbering.integration.test.ts, including six simultaneous
+# invoices; what this section walks is the surface and the freeze.
+INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+INV1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}')
+chk "an invoice is numbered on creation"  "INV/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
+INV1ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<< "$INV1")
+chk "an empty invoice cannot be issued"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
+chk "a line goes on"                      204 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"GST filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"10","taxPercent":"18"}')"
+# The arithmetic is the schema's, in numeric: 24000 gross, less 10%, plus 18%.
+TOT=$(curl -s -b $J/partner.txt $API/api/v1/invoices/$INV1ID | python3 -c '
+import sys, json
+t = json.load(sys.stdin)["totals"]
+print("%s/%s/%s" % (t["net"], t["tax"], t["total"]))')
+chk "…and the totals come from the schema" "21600.0000/3888.0000/25488.0000" "$TOT"
+chk "…an associate cannot issue it"       403 "$(code -b $J/associate.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
+chk "…the partner can"                    200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
+chk "…and then its lines are fixed"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"One more thing","quantity":"1","unitAmount":"500"}')"
+
+# Cancelling does NOT release the number: the row stays in the sequence saying
+# it was cancelled, which is what an auditor needs to see where a number went.
+INV2ID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "a second invoice takes the next"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H")"
+INV3=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])')
+chk "…and a cancelled one leaves no hole" "INV/2026-27/0003" "$INV3"
+SEQ=$(curl -s -b $J/partner.txt "$API/api/v1/invoices" | python3 -c '
+import sys, json
+inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
+print(sorted(i["sequenceNumber"] for i in inv))')
+chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
 
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""

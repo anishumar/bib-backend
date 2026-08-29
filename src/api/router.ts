@@ -8,6 +8,7 @@
 //   /api/v1/config/...                 the firm's own services and roles (T2.5)
 //   /api/v1/leads/...                  the commercial pipeline (T2.1)
 //   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
+//   /api/v1/invoices/...               invoicing, and the one gapless series (T3.4)
 //   /openapi.json, /docs               generated spec + Swagger UI (gated)
 //
 // Per-module routes live in their handler module's registrar (registerTenancy…)
@@ -42,6 +43,8 @@ import { registerLeadRoutes } from "./handler/lead";
 import { registerProposalRoutes } from "./handler/proposal";
 import { registerEngagementRoutes } from "./handler/engagement";
 import { registerDocumentRoutes } from "./handler/document";
+import { registerInvoiceRoutes } from "./handler/invoice";
+import type { InvoiceDeps } from "./handler/invoice";
 import type { LeadDeps } from "./handler/lead";
 import type { ProposalDeps } from "./handler/proposal";
 import type { EngagementDeps } from "./handler/engagement";
@@ -78,6 +81,7 @@ export interface RouterDeps {
   readonly proposal: ProposalDeps;
   readonly engagement: EngagementDeps;
   readonly document: DocumentDeps;
+  readonly invoice: InvoiceDeps;
   readonly auth: AuthDeps;
 }
 
@@ -168,6 +172,7 @@ export function buildRouter(
   registerProposalRoutes(app, deps.proposal);
   registerEngagementRoutes(app, deps.engagement);
   registerDocumentRoutes(app, deps.document);
+  registerInvoiceRoutes(app, deps.invoice);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

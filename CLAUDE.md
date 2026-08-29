@@ -588,6 +588,39 @@ written from. Its limit, stated: a deliberate foreign choice (English law under 
 neutral arbitral seat) is now unrepresentable. Making the exception representable belongs on the
 LETTER and is a decision nobody has taken.
 
+## Invoicing — the one number in this product that may not gap (T3.4)
+
+A proposal reference may gap: `PR-2026-0007` missing means somebody abandoned a quote, and
+`crm.document_ref_series` burns numbers on purpose. **A tax invoice number may not.** Under
+Indian GST a series must be consecutive, and an auditor who finds one missing is entitled to
+read it as a suppressed sale.
+
+So `InvoiceRepository.create` **both allocates and writes**, and the signature is the
+guarantee. The mechanism is a counter row taken under `SELECT … FOR UPDATE` inside the same
+transaction as the insert: a second writer blocks until the first commits or rolls back, and
+a rollback releases the number because the counter never moved. **Never a sequence** —
+`nextval` survives rollback by design, which is what makes it wrong here and unfixable
+afterwards. Never `max(number)+1`, which reads a snapshot.
+
+The series is per **(entity, financial year)**, because two of a firm's companies each file
+their own returns and each owes its own consecutive series. Both correctly issue
+`INV/2026-27/0001`, which is why `UNIQUE` is scoped to `(tenant, entity, number)`; the
+`prefix` on the series row is how a firm tells them apart when it wants to. The financial
+year is 1 April and that is hardcoded — right for India, wrong for the UK and the US, and
+generalising it through `core.legal_entity.financial_year_end` would make a series' year
+depend on a mutable column, which is a decision a firm has to take.
+
+**The number, the series and an issued invoice's money are frozen by a trigger**, not by a
+service check — "why is invoice 41 now numbered 43" is a question an auditor asks, and an
+application rule is one an import or a psql session walks past. A wrong invoice is CANCELLED
+and reissued; the cancelled row stays in the sequence saying so, which is exactly what shows
+where a number went.
+
+**There is no `paid` status.** What has been paid is the sum of the payments against it
+(T3.5). A status saying "paid" beside a balance saying otherwise is how those two disagree,
+and only one of them is arithmetic. Totals are `security_invoker` views in `numeric`, like
+the proposal's.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
@@ -630,8 +663,8 @@ out of four if nobody thinks about it. T3.2's calendar is its first real consume
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
-`engagement letters`, the `staff grade` ladder and the `scheduler` are built. Next: T2.7's
-orchestrator, then `billing`.
+`engagement letters`, the `staff grade` ladder, the `scheduler` and `invoicing` are built.
+Next: T2.7's orchestrator, and T3.5's payments.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

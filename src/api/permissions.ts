@@ -201,6 +201,28 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // territory rule decides who a new opportunity goes to before anybody has
   // looked at it, and quietly moving a country moves the pipeline — and with it
   // whose numbers it shows up in.
+  // INVOICING (T3.4). Reading is `party:read` — a delivery colleague opening a
+  // client's page sees that an invoice exists, and the FEE AXIS is what decides
+  // whether they see the amounts, not this table. Writing is `party:write`, the
+  // same permission every other drafting route on both documents takes.
+  //
+  // ISSUING AND CANCELLING ARE `tenant:admin`, and that is the one considered
+  // difference. Raising a draft is bookkeeping; ISSUING allocates nothing new
+  // but sends a legal demand to a client under one of the firm's own entities,
+  // and CANCELLING withdraws one — both leave a permanent mark in a consecutive
+  // series that a tax authority may ask about. That is a decision at the level
+  // of deciding what a role means, not a drafting action.
+  [routeKey("GET", "/api/v1/invoices"), "party:read" as const],
+  [routeKey("GET", "/api/v1/invoices/{invoiceId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/invoices"), "party:write" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/lines"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/invoices/{invoiceId}/lines/{lineId}"), "party:write" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/issue"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/cancel"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/irn"), "party:write" as const],
+  [routeKey("GET", "/api/v1/invoice-series"), "config:read" as const],
+  [routeKey("POST", "/api/v1/invoice-series/{entityPartyId}/prefix"), "tenant:admin" as const],
+
   [routeKey("GET", "/api/v1/territory-rules"), "config:read" as const],
   [routeKey("POST", "/api/v1/territory-rules"), "tenant:admin" as const],
 

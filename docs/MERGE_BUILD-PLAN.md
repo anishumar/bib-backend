@@ -1252,7 +1252,59 @@ open and are recorded above; neither blocks Phase 2.
   > **The decision AND its reason are both recorded** (`resolution`, `resolution_reason`, `resolved_at`). In a CA firm this moment is where money and liability are decided, and today it happens on WhatsApp and is written down nowhere. The reason is the capture-or-lose half: in eighteen months nobody remembers why a late fee was accepted rather than a provisional filing made, and that is exactly the thing worth knowing. Writes `obligation.missed`, then `obligation.filed` or a resolution.
 
 ### Lane A — money & documents
-- [ ] `(A)` **T3.4** **C6 Invoicing**: **gapless per-entity series** (trigger-frozen), IRN field, `invoice`/`invoice_line`, balance is a sum. *Acc: numbers cannot be edited; a gap is impossible under concurrency.*
+- [x] `(A)` **T3.4** **C6 Invoicing**: **gapless per-entity series** (trigger-frozen), IRN field, `invoice`/`invoice_line`, balance is a sum. *Acc: numbers cannot be edited; a gap is impossible under concurrency.*
+  > **Done (2026-08-29). Migration 0027.** Both halves of the acceptance are proven against
+  > real Postgres, because neither can be proven anywhere else.
+  >
+  > **THE MECHANISM IS A COUNTER ROW UNDER `SELECT … FOR UPDATE`, IN THE SAME TRANSACTION AS
+  > THE INSERT.** That is why `InvoiceRepository.create` both allocates and writes: the obvious
+  > split — `nextNumber()` then `create()` — cannot be gapless however carefully it is called,
+  > because between the two the caller may fail and the number is spent. The signature IS the
+  > guarantee, the same argument `AssignmentStrategy.assign` makes about fairness, reached from
+  > money instead.
+  >
+  > **A SEQUENCE WOULD HAVE BEEN WRONG AND UNFIXABLE.** `nextval` survives rollback by design —
+  > that is what makes sequences fast and lock-free — so an aborted transaction burns its number
+  > forever. `max(number)+1` is wrong differently: it reads a snapshot, so two concurrent
+  > invoices both see 40. The board already named the right mechanism and this is it.
+  >
+  > **Verified by a NEGATIVE CONTROL, not by going green.** Deleting `FOR UPDATE` from the
+  > adapter turns exactly one test red — six simultaneous invoices no longer get six consecutive
+  > numbers — so the lock is demonstrably load-bearing rather than decorative.
+  >
+  > **This is the deliberate opposite of `document_ref_series` (0020),** which BURNS a number
+  > when a draft fails. A gap in `PR-2026-0007` is honest; a gap in a tax invoice series is
+  > something an auditor is entitled to read as a suppressed sale. Both files say so, pointing
+  > at each other, because the next person will meet one of them first.
+  >
+  > **One correction taken BEFORE the migration was committed**, and it would have shipped a
+  > schema that fails on a real customer: `UNIQUE (tenant_id, number)` — one number per firm,
+  > which is what a person quoting "invoice 41" assumes — is wrong, because the series is per
+  > ENTITY and a firm's two companies each correctly issue their own `INV/2026-27/0001`. It
+  > would have failed on the second entity's first invoice, discovered by whichever customer
+  > opened a second company. Scoped to `(tenant, entity, number)`, with a per-entity `prefix`
+  > on the series so a firm CAN tell them apart when it wants to.
+  >
+  > **Cancelling does not release the number.** The row stays in the sequence saying it was
+  > cancelled — which is exactly what an auditor needs in order to see where a number went — and
+  > the integration test asserts the stored sequence numbers are 1..N with nothing missing,
+  > whatever happened along the way.
+  >
+  > **There is no `paid` status, deliberately.** What has been paid is the sum of the payments
+  > against it (T3.5); a status saying "paid" beside a balance saying otherwise is the classic
+  > way those two disagree, and only one of them is arithmetic. Totals are VIEWS in `numeric`,
+  > `security_invoker`, exactly as the proposal's are.
+  >
+  > **The IRN's honest limit:** nothing in this product talks to the IRP. `registerIrn` records
+  > an answer obtained elsewhere, the same shape as the advance-fee attestation, and it is
+  > set-once. The real connector is T7.1.
+  >
+  > **`financial_year_of` exists twice** — in SQL because a CHECK cannot call TypeScript, and in
+  > the domain because the application composes the number before it writes the row. An
+  > integration test asks both the same boundary dates, because two copies of a rule is exactly
+  > how 31 March ends up answered differently on the two sides.
+  >
+  > Gate: `npm run check` 766 · `test:integration` 243 · `smoke` **225 passed, 0 failed**.
 - [ ] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
 - [ ] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
 - [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
@@ -1362,6 +1414,15 @@ sandbox access + credentials. **Not on any demo's critical path.**
   shape the roster already uses. The owner carries an email as well as a name, which is the
   first real answer to the staff-directory question the roster's admin-only read deferred —
   revisit the two together when a directory screen exists.
+
+- [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
+  300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
+  a firm of forty behind a single office NAT gateway — they share one bucket. Found by the
+  smoke walk hitting the same ceiling from the other direction (it now spends 288 of 300, and
+  the next section added to it will not fit). Two questions, and both are product decisions
+  rather than a number to quietly raise: should the authenticated surface key on the SESSION
+  rather than the address, and is 300 the right figure for the anonymous one. Raising the
+  default to make a test green is the one answer that is definitely wrong.
 
 - [ ] **Response shapes are documented but not VERIFIED.** zod-openapi describes a response
   without validating it, so a handler can send a field its schema never mentions — which is

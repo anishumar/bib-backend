@@ -16,6 +16,7 @@ import { ConfigError } from "../domain/config/errors";
 import { LeadError } from "../domain/lead/errors";
 import { ProposalError } from "../domain/proposal/errors";
 import { EngagementError } from "../domain/engagement/errors";
+import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
@@ -277,6 +278,29 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_SUPERSEDABLE":
       case "ALREADY_SUPERSEDED":
       case "ISSUER_JURISDICTION_UNKNOWN":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof InvoiceError) {
+    switch (err.code) {
+      case "INVALID_INVOICE_CURRENCY":
+      case "INVALID_INVOICE_AMOUNT":
+      case "INVALID_SERIES_PREFIX":
+      case "INVALID_INVOICE_DATE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "INVOICE_NOT_FOUND":
+      case "INVOICE_LINE_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // "The invoice is not in the state this call assumed", and none of them is
+      // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by
+      // cancelling and reissuing, never by retrying — a copy has left the
+      // building and, in India, a copy is registered with the government.
+      case "INVOICE_NOT_EDITABLE":
+      case "EMPTY_INVOICE":
+      case "INVALID_INVOICE_TRANSITION":
+      case "IRN_ALREADY_REGISTERED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

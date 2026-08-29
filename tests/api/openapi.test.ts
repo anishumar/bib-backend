@@ -38,6 +38,8 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes } from "../../src/testfakes/document";
+import { makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { InvoiceService } from "../../src/usecase/invoice/service";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
   FakeCredentialRepo,
@@ -128,6 +130,7 @@ function deps(): RouterDeps {
       authz: new AuthzService({ permissions }),
     },
     document: { service: new DocumentService(makeDocumentFakes()) },
+    invoice: { service: new InvoiceService(makeInvoiceFakes()) },
     auth: {
       service: identityService(),
       authz: new AuthzService({ permissions }),

@@ -42,6 +42,8 @@ import {
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
+import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
+import { InvoiceService } from "../usecase/invoice/service";
 import {
   PostgresDocumentBlockRepository,
   PostgresStandardBlockRepository,
@@ -156,6 +158,16 @@ export function wire(cfg: Config, log: Logger): Wired {
     standardBlocks: new PostgresStandardBlockRepository(pools.app),
     blocks: new PostgresDocumentBlockRepository(pools.app),
     ids: systemIds,
+    events: ledger,
+  });
+
+  // INVOICING (T3.4). Its repository is the only one in this codebase whose
+  // `create` both allocates and writes — a gapless series cannot be handed to a
+  // caller, because a failure between the two spends the number. See the file.
+  const invoices = new InvoiceService({
+    invoices: new PostgresInvoiceRepository(pools.app),
+    ids: systemIds,
+    clock: systemClock,
     events: ledger,
   });
 
@@ -364,6 +376,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
         document: { service: documents },
+        invoice: { service: invoices },
       },
       log,
       {

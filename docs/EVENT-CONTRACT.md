@@ -247,10 +247,13 @@ version is exactly what gets asked about afterwards.
 | `engagement_letter.signed` | engagement_letter | The client signed. The letter freezes at this moment (a trigger, 0017) and one engagement is created per line. Payload carries the signature METHOD and the content hash, never the signer's name — that is personal data and lives in the erasable row. |
 | `engagement_letter.advance_recorded` | engagement_letter | The advance fee was recorded as received, releasing every engagement the letter created. Recorded by a person until payments (T3.5) can confirm it. |
 | `contract.activated` | engagement | An engagement became active and work may begin. **The spawn trigger the scheduler consumes (T2.4)** — written by T2.3, which is the module that causes it. Held back until the advance is recorded when the letter requires one. |
+| `invoice.raised` | invoice | An invoice was created and its number ALLOCATED from the entity's gapless series. Registered because the allocation is the audit-relevant moment, not the sending: a consecutive series is evidence, and 'which number went to which client, when, decided by whom' is the question an auditor asks about a gap. The number is in the payload for the same reason. |
 | `invoice.issued` | invoice | An invoice was issued and its number frozen. |
 | `invoice.cancelled` | invoice | Cancelled by credit note; the number is never reused. |
 | `payment.recorded` | payment | A payment was received and applied. |
 | `credit_note.issued` | credit_note | Issued against an invoice. |
+| `invoice.registered` | invoice | The government e-invoice registry's identifier (IRN) was recorded against an invoice. Its honest limit: nothing in this product talks to the IRP, so this records an answer obtained elsewhere — the same shape as the advance-fee attestation. The real connector is T7.1. |
+| `invoice_series.set` | invoice_series | The firm named what one of its entities' invoice numbers READ as. It changes future numbers only — every issued invoice keeps the number it was issued with, because the freeze trigger refuses to move one. |
 | `dunning.escalated` | invoice | A receivable moved up the ladder. |
 | `document.attached` | document | A document version was linked to an object. |
 
