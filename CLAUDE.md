@@ -746,12 +746,82 @@ ISO strings: a filing period is a calendar fact in a jurisdiction, not an instan
 the FINANCIAL year (Apr–Jun for India), which is the calculation that looks right three times
 out of four if nobody thinks about it. T3.2's calendar is its first real consumer.
 
+## The orchestrator — a process a firm writes down, and steps a person can tick (T2.7)
+
+T2.6 gave a signed engagement a JOB. This gives the job a PROCESS. The point of the task is
+plain: "how we do a GST filing" lives in a partner's head, and this is where it gets written
+down once and walked automatically.
+
+**The template is `workflow_template`, the registry's sixth kind** — deferred at T2.5 on the
+stated grounds that a body designed against no consumer ends up wrong, and built now because
+the orchestrator reads it. The validator refuses a CYCLE, a dependency on a step that does not
+exist, and a duplicate step key, all at the WRITE — each of them produces a job that sits
+half-finished with nothing saying why, and a partner looking at a screen can fix what a worker
+at 3am cannot.
+
+**The graph is `dependsOn`, and all three shapes fall out of ONE rule**: a step is ready when
+every step it depends on has settled in a way that clears its dependents. Sequential is a
+chain, parallel is two steps on one dependency, branch is a skip. **A skip CLEARS its
+dependents; a failure does NOT** — that is why there are two terminal-but-not-done states, and
+collapsing them would either strand a graph or release work that was waiting on a machine that
+gave up. `cascadeSkips` is the other half of a branch: skipping only the conditional step
+leaves everything downstream waiting forever.
+
+**AGENTS ARE OPTIONAL, and this is a product decision, not a stopgap.** `human` is the ordinary
+executor. A firm can write its whole process with every step human and it runs TODAY; a step
+becomes an agent's later by changing one field, with no template rewrite and no migration. The
+rule that follows: **a template may say `agent` before any agent exists, and the job does not
+fail — the step waits for a person.** `NoAgentsBuiltYet` is the honest implementation of a true
+statement about this product, which is why it is NOT gated on config the way the dev auth
+resolver, the logging mailer and the attested signer are: those are stubs for something that
+must exist before launch, and a firm running entirely on human steps is a supported permanent
+way to use this.
+
+**The pin is the point, and it is at the JOB.** `delivery.job.template_version_id` is written
+ONCE (`WHERE template_version_id IS NULL`, in SQL, so two workers cannot both set it), and from
+then on the job resolves that version and never what is in force. Editing a process must never
+rewrite a job already walking it. **The SERVICE, by contrast, is read LIVE** — through the
+letter line's pinned version to the ENTRY and back out to what is published now. A client
+agreed to the service, its price and its scope; they did not agree to our internal steps. That
+started as the opposite and was a real bug: every engagement signed before a firm wrote its
+first process pinned a service version naming no template, so those jobs could never pick one
+up.
+
+**`delivery.job_step` is rows, not a blob on the job**, for three reasons and the third
+decides it: dashboards need "how many are stuck on review" without a scan, work is handed out
+by an indexed column, and **T2.9's maker != checker can only be a DATABASE constraint if who
+performed a step is a column**. `performed_by` therefore exists now and no rule reads it yet —
+adding it later means backfilling a fact nobody recorded.
+
+**A skipped step is kept and shown.** `skipped` is not `done`, and the schema INSISTS on a
+reason for a skip and a failure while forbidding one everywhere else, because that note is only
+ever written by somebody already in a hurry. The ledger carries the FACT and its values, never
+the prose: a sentence does not `GROUP BY`, and this log cannot be erased.
+
+**AN UNRESOLVED FACT KEEPS THE STEP.** A service that never stated its recurrence must not
+quietly lose a review because a field was blank. An extra review costs an hour; a missing one
+costs a filing. Read `evaluateCondition` before "simplifying" it into an else.
+
+**`listRunnable` includes `blocked`**, and leaving it out was the second real bug here: a job
+waiting on a person vanished from the work board AND from the sweep, so nothing would ever look
+at it again. Only `done` and `cancelled` are excluded — those never move.
+
+**Step conditions test a CLOSED set of facts** (`recurrence`, `jurisdiction`), both of which
+already exist. A little expression language was refused: it is a vocabulary nobody chose, no
+partner can write and no test can cover. Which facts the firm actually branches on is an open
+question with the client; adding one is a member of `StepFact`, a case in the orchestrator's
+resolver, and a line of documentation.
+
+**`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
+permission, because the row it gates is the record of who did the work.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
-`engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the `scheduler`
-and `invoicing` are built.
-Next: T2.7's orchestrator, then T3.6's documents and T3.7's dashboards.
+`engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
+`scheduler`, the `orchestrator` and `invoicing` are built.
+Next: T2.7's remaining half (merging an engagement's jobs by `(entity, team)`), then T2.8's
+agent runtime, T3.6's documents and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

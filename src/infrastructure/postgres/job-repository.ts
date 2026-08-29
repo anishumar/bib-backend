@@ -108,9 +108,20 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
     return withTenant(this.app, tenantId, async (db) => {
       // Oldest first: a backlog is worked in the order it was owed, not in
       // whatever order the index returns. Matches idx_job_runnable.
+      //
+      // `blocked` IS INCLUDED, and leaving it out was a real bug found by
+      // running the engine (T2.7). A blocked job is one waiting on a PERSON —
+      // the commonest state a job is in and the main thing a work board exists
+      // to show. Worse, the orchestrator finds its work through this same read,
+      // so a job that blocked would never be swept again: the moment somebody
+      // finished a step outside the API path, or an agent was built for a step
+      // that had been waiting, nothing would notice.
+      //
+      // The three excluded are the terminal ones — `done` and `cancelled` never
+      // move again. That is what "runnable" has to mean here.
       const rows = await db<JobRow[]>`
         SELECT ${db.unsafe(COLUMNS)} FROM delivery.job
-        WHERE status IN ('pending', 'running') AND runnable_at <= ${asOf}
+        WHERE status IN ('pending', 'running', 'blocked') AND runnable_at <= ${asOf}
         ORDER BY runnable_at
         LIMIT ${limit}
       `;
@@ -128,6 +139,25 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
    * keeps the moment it FIRST started, which is what "how long has this been in
    * flight" means.
    */
+  /**
+   * Pin the workflow version, and only where nothing is pinned yet.
+   *
+   * `WHERE template_version_id IS NULL` is the guard, and it is in the SQL
+   * rather than in the service on purpose: a check-then-write has a race between
+   * its two halves, and two workers sweeping the same job would both read null.
+   * The database decides, once, and the loser is told it lost.
+   */
+  async pinTemplate(tenantId: string, jobId: string, versionId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db`
+        UPDATE delivery.job SET template_version_id = ${versionId}
+        WHERE id = ${jobId} AND template_version_id IS NULL
+        RETURNING id
+      `;
+      return rows.length === 1;
+    });
+  }
+
   async updateStatus(
     tenantId: string,
     jobId: string,

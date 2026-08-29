@@ -9,6 +9,7 @@ import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
+import { OrchestratorError } from "../domain/orchestrator/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
@@ -122,6 +123,29 @@ export function mapError(err: unknown): MappedError {
       // refuses it is the state of the LADDER — the caller fixes it by
       // reactivating the rung or choosing another, not by resending this.
       case "GRADE_NOT_ASSIGNABLE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof OrchestratorError) {
+    switch (err.code) {
+      case "JOB_NOT_FOUND":
+      case "STEP_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // A firm that has not written its process yet, or a job pinned to a
+      // version that no longer reads. Both are 409 rather than 404: the request
+      // is well formed and what refuses it is the STATE of the firm's config,
+      // which is fixed on the workflow screen and not by resending this. Same
+      // reasoning as ROLE_NOT_DEFINED and AXIS_NOT_ASSIGNABLE.
+      case "NO_TEMPLATE_PUBLISHED":
+      case "TEMPLATE_UNREADABLE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // The step moved under the caller, or was never theirs to move. Both are
+      // conflicts for the same reason: the request said something true a moment
+      // ago, and the fix is to look at the job again rather than to retry.
+      case "STEP_NOT_WAITING":
+      case "STEP_NOT_A_PERSONS":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

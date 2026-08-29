@@ -8,9 +8,9 @@
 //
 //   npm run worker:once
 //
-// It runs BOTH sweeps — spawn and dunning — because both are what the worker
-// does, and an entry point that mirrored half the process would be a worse lie
-// than none at all.
+// It runs ALL THREE sweeps — spawn, orchestrate and dunning — because all three
+// are what the worker does, and an entry point that mirrored part of the process
+// would be a worse lie than none at all.
 import pino from "pino";
 import { load } from "../config/config";
 import { wireWorker } from "../setup/worker";
@@ -41,10 +41,37 @@ async function main(): Promise<void> {
       console.log();
     }
 
-    // BOTH sweeps, because both are what the worker does. Running only the
-    // spawn one here would make this entry point a partial mirror of the
-    // process it exists to stand in for — and the dunning ladder would be
-    // demonstrable only by waiting for a cron.
+    // ALL THREE sweeps, because all three are what the worker does. Running
+    // only one here would make this entry point a partial mirror of the process
+    // it exists to stand in for — and the engine would be demonstrable only by
+    // waiting for a cron.
+    // ORCHESTRATE BEFORE CHASING, and in the same order the worker's crons put
+    // them: a job spawned a moment ago should have its steps written on the same
+    // run, so `worker:once` shows the whole engine rather than a job that will
+    // start "next time".
+    const walked = await wired.orchestrator.sweep();
+    const started = walked.reduce((n, r) => n + r.started, 0);
+    const advanced = walked.reduce((n, r) => n + r.advanced, 0);
+    const onDesks = walked.reduce((n, r) => n + r.awaitingPeople, 0);
+    const finished = walked.reduce((n, r) => n + r.completed, 0);
+    const noProcess = walked.reduce((n, r) => n + r.awaitingTemplate, 0);
+
+    if (started === 0 && advanced === 0 && noProcess === 0) {
+      console.log("  nothing to walk — no job has a step that can move.\n");
+    } else {
+      if (started > 0) console.log(`  started ${String(started)} job(s) — steps written`);
+      if (advanced > 0) console.log(`  moved ${String(advanced)} step(s)`);
+      // The two numbers somebody has to ACT on, and they are different people.
+      if (onDesks > 0) console.log(`  ${String(onDesks)} step(s) are waiting for a person`);
+      if (noProcess > 0) {
+        console.log(
+          `  ${String(noProcess)} job(s) are waiting for a workflow template to be published`,
+        );
+      }
+      if (finished > 0) console.log(`  ${String(finished)} job(s) completed`);
+      console.log();
+    }
+
     const dunning = await wired.dunning.sweep();
     const escalated = dunning.reduce((n, r) => n + r.escalated, 0);
     const waiting = dunning.reduce((n, r) => n + r.awaitingApproval, 0);

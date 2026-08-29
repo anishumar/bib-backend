@@ -25,15 +25,22 @@ import { PERMISSIONS, isPermission } from "../authz/model";
 import type { Amount, Money } from "../money/model";
 import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 
-/** The configured things this pass knows about. `workflow_template` and
- *  `rule_pack` join them when T2.7 and T4.3 actually read them — designing
- *  those bodies against no consumer is how a schema ends up wrong in a way a
- *  migration has to undo.
+/** The configured things this pass knows about. `rule_pack` joins them when
+ *  T4.3 actually reads it — designing a body against no consumer is how a
+ *  schema ends up wrong in a way a migration has to undo. `workflow_template`
+ *  arrived on exactly those terms: it was deferred at T2.5 and is here now
+ *  because T2.7's orchestrator reads it.
  *
  *  `policy` (0010) is the first NON-CATALOGUE kind — a rule the firm sets for
  *  itself rather than something it sells — which is what makes it the honest
  *  test of whether this spine generalises. */
-export type ConfigKind = "service" | "role" | "policy" | "clause" | "dunning";
+export type ConfigKind =
+  | "service"
+  | "role"
+  | "policy"
+  | "clause"
+  | "dunning"
+  | "workflow_template";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -41,6 +48,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "policy",
   "clause",
   "dunning",
+  "workflow_template",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -366,6 +374,21 @@ export interface ServiceBody {
   /** The ceilings the price assumes — "under 1,000 entries; under 8 bank
    *  accounts". A ceiling, not a meter: see the four-blocks note above. */
   readonly volumeLimits: string | null;
+  /**
+   * The `workflow_template` key that says HOW this service is delivered (T2.7).
+   *
+   * On the SERVICE, because the process is a property of the work: a GST filing
+   * and a statutory audit are not done the same way, and a firm-wide default
+   * would be a process that fits nothing. The key rather than a version id — the
+   * catalogue points at the CURRENT process, and the JOB is what pins the
+   * version it started on. Pinning here would freeze every service to whatever
+   * the process was the day it was catalogued.
+   *
+   * Optional like every field past the first six, and null is a real answer:
+   * the firm has not written this service's process yet. A job for it WAITS,
+   * visibly, rather than running a process nobody wrote.
+   */
+  readonly workflowTemplateKey: string | null;
   /** What is NOT included. Stated explicitly, because on a signed document
    *  silence reads as included. */
   readonly exclusions: string | null;
@@ -717,6 +740,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateClauseBody(body);
     case "dunning":
       return validateDunningBody(body);
+    case "workflow_template":
+      return validateWorkflowTemplateBody(body);
   }
 }
 
@@ -766,6 +791,7 @@ const SERVICE_FIELDS = [
   "clientObligations",
   "volumeLimits",
   "exclusions",
+  "workflowTemplateKey",
 ];
 const LIST_PRICE_FIELDS = ["amount", "currency"];
 
@@ -898,6 +924,23 @@ function validateServiceBody(body: Record<string, unknown>): string | null {
         `"pricingNote" must be a non-empty string — "As mutually agreed", "Plus statutory fees ` +
         `at actuals" — or null. It is why there is no list price, so an empty one leaves ` +
         `"listPrice": null saying no more than it already did. Got ${describe(pricingNote)}`
+      );
+    }
+  }
+
+  const workflowKey = body["workflowTemplateKey"];
+  if (workflowKey !== undefined && workflowKey !== null) {
+    // Validated as a KEY, not merely as a string, because it resolves against
+    // `config.entry.key` — the same shape every other pin target has. Whether a
+    // template with this key EXISTS is not checked here: this function is pure,
+    // and a firm may catalogue a service before writing its process. The
+    // orchestrator is where the absence shows up, and it says so rather than
+    // running a process nobody wrote.
+    if (typeof workflowKey !== "string" || !isValidKey(workflowKey)) {
+      return (
+        `"workflowTemplateKey" must be a config key — lowercase, url-safe — naming the ` +
+        `workflow_template that says how this service is delivered, or null when the firm has ` +
+        `not written that process yet. Got ${describe(workflowKey)}`
       );
     }
   }
@@ -1048,6 +1091,7 @@ export function readServiceBody(body: Record<string, unknown>): StoredServiceBod
     clientObligations: readText(body["clientObligations"]),
     volumeLimits: readText(body["volumeLimits"]),
     exclusions: readText(body["exclusions"]),
+    workflowTemplateKey: readText(body["workflowTemplateKey"]),
   };
 }
 
@@ -1250,4 +1294,322 @@ export function dueDunningSteps(
   taken: ReadonlySet<string>,
 ): readonly DunningStep[] {
   return ladder.steps.filter((s) => daysOverdue >= s.afterDays && !taken.has(s.key));
+}
+
+// ── workflow_template: what a firm's process actually IS (T2.7) ──────────────
+//
+// Deferred at T2.5 on the stated grounds that designing a body against no
+// consumer is how a schema ends up wrong. The consumer exists now: T2.7's
+// orchestrator reads a template, writes one `delivery.job_step` per step, and
+// walks them.
+//
+// ── WHY THIS IS CONFIG AND NOT CODE ─────────────────────────────────────────
+//
+// "How we do a GST filing" is the firm's own knowledge, and today it lives in a
+// partner's head. Every firm's is different and every firm's CHANGES. As code it
+// would be a deploy per process change, at every firm, forever.
+//
+// As config it gets the registry's versioning and freezing for free — which is
+// the whole reason a job PINS the version it started on. "Why did that filing
+// have no review step?" has to be answerable with "because the process in force
+// when it started did not have one", not with "the template has changed three
+// times since".
+//
+// ── THE GRAPH IS `dependsOn`, NOT AN ORDER ──────────────────────────────────
+//
+// One field gives all three shapes the acceptance asks for, and no simpler field
+// gives all three:
+//
+//   SEQUENTIAL  each step depends on the one before it
+//   PARALLEL    two steps depend on the SAME step, so both become ready at once
+//   BRANCH      a step carries a `condition`; when it does not hold, that step
+//               and everything downstream of it is skipped
+//
+// An ordered array with a "parallel" flag was the other candidate, and it cannot
+// express "D waits for both B and C" without inventing groups. A dependency list
+// says it directly, and it is what the orchestrator has to evaluate at every
+// tick anyway.
+
+/**
+ * Who performs a step.
+ *
+ * **`human` is the ordinary answer, and that is the point.** A firm can write
+ * its entire process with every step `human` and it runs end to end TODAY —
+ * which is the first goal: get the work that lives in people's heads and in
+ * spreadsheets into the product, standardised. Agents are an optimisation
+ * applied later, one step at a time, by changing this one field. No template
+ * rewrite, no migration.
+ *
+ * `agent_with_approval` is not "an agent that is a bit careful". It is a
+ * DIFFERENT thing from both: the machine produces the output and a person
+ * decides whether it stands, which is two records rather than one, and is what
+ * T2.9's maker-checker rule is built on.
+ */
+export type StepExecutor = "human" | "agent" | "agent_with_approval";
+
+export const STEP_EXECUTORS: readonly StepExecutor[] = [
+  "human",
+  "agent",
+  "agent_with_approval",
+];
+
+export function isStepExecutor(v: string): v is StepExecutor {
+  return (STEP_EXECUTORS as readonly string[]).includes(v);
+}
+
+/**
+ * The facts a step's condition may test.
+ *
+ * A CLOSED SET, deliberately, and small. The alternative offered itself and was
+ * refused: a little expression language is a vocabulary nobody chose, that no
+ * partner can write and no test can cover, and it drags a parser and an
+ * evaluation-order story in behind it.
+ *
+ * Both facts here already EXIST and are unambiguous — this is not a guess about
+ * the firm's process. `recurrence` is the service's own, from `ServiceBody`;
+ * `jurisdiction` is that of the entity the work is delivered to.
+ *
+ * **Which facts the firm actually branches on is an open question with the
+ * client** — asked, not answered. Adding one is a member here, a case in the
+ * orchestrator's fact resolver, and a line of documentation: deliberately cheap,
+ * because the answer will name facts nobody has thought of yet.
+ */
+export type StepFact = "recurrence" | "jurisdiction";
+
+export const STEP_FACTS: readonly StepFact[] = ["recurrence", "jurisdiction"];
+
+export function isStepFact(v: string): v is StepFact {
+  return (STEP_FACTS as readonly string[]).includes(v);
+}
+
+/**
+ * When a step applies at all.
+ *
+ * Equality only, and a `null` condition means always. `equals` is compared
+ * exactly against the resolved fact, which is why both facts are already
+ * normalised where they are stored.
+ *
+ * A fact the job cannot resolve does NOT silently skip the step — see
+ * `usecase/orchestrator`. Skipping on an unknown is how a review step quietly
+ * stops happening.
+ */
+export interface StepCondition {
+  readonly fact: StepFact;
+  readonly equals: string;
+}
+
+export interface WorkflowStep {
+  /**
+   * The step's own key — `collect`, `reconcile`, `review`. Recorded on every
+   * `job_step` row, so the row stays readable after the template moves under it.
+   *
+   * Never an index: an index shifts when a firm inserts a step, silently
+   * renaming the history of every job that ever ran. The same argument
+   * `DunningStep.key` makes.
+   */
+  readonly key: string;
+  /** What a person reads on the work board. */
+  readonly label: string;
+  readonly executor: StepExecutor;
+  /** Step keys that must be finished or skipped before this one may start.
+   *  Empty means it starts as soon as the job does. */
+  readonly dependsOn: readonly string[];
+  /** When this step applies at all. Null means always. */
+  readonly condition: StepCondition | null;
+}
+
+export interface WorkflowTemplateBody {
+  readonly label: string;
+  readonly steps: readonly WorkflowStep[];
+}
+
+const WORKFLOW_FIELDS = ["label", "steps"];
+const WORKFLOW_STEP_FIELDS = ["key", "label", "executor", "dependsOn", "condition"];
+
+/** A step key is a lowercase handle, like a config key and for the same reason:
+ *  it is compared, stored on every row, and read in an audit trail. */
+const STEP_KEY_PATTERN = /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])$/;
+
+export function isValidStepKey(key: string): boolean {
+  return STEP_KEY_PATTERN.test(key);
+}
+
+function validateWorkflowTemplateBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, WORKFLOW_FIELDS);
+  if (unknown) return unknown;
+
+  const label = body["label"];
+  if (typeof label !== "string" || label.trim() === "") {
+    return `"label" must be a non-empty string — it is what a partner picks this process by`;
+  }
+
+  const steps = body["steps"];
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return `"steps" must be a non-empty array — a process with no steps is not a process`;
+  }
+
+  const keys = new Set<string>();
+  const parsed: { key: string; dependsOn: string[] }[] = [];
+
+  for (const [index, raw] of steps.entries()) {
+    const at = `steps[${String(index)}]`;
+    if (typeof raw !== "object" || raw === null) return `${at} must be an object`;
+    const step = raw as Record<string, unknown>;
+
+    const stepUnknown = unknownFields(step, WORKFLOW_STEP_FIELDS);
+    if (stepUnknown) return `${at}: ${stepUnknown}`;
+
+    const key = step["key"];
+    if (typeof key !== "string" || !isValidStepKey(key)) {
+      return (
+        `${at}.key must be a lowercase handle (2-40 chars, letters, digits, "-" or "_") — ` +
+        `"reconcile", "manager_review". It is stored on every job's row and read in the ` +
+        `audit trail, which is why it is a handle and not a sentence.`
+      );
+    }
+    // A duplicate key would make two rows collide on `UNIQUE (job, step_key)`,
+    // and the second step would silently never exist — a process that looks
+    // like it has six steps and runs five.
+    if (keys.has(key)) return `${at}.key ${JSON.stringify(key)} appears twice`;
+    keys.add(key);
+
+    const stepLabel = step["label"];
+    if (typeof stepLabel !== "string" || stepLabel.trim() === "") {
+      return `${at}.label must be a non-empty string — somebody reads it on the work board`;
+    }
+
+    const executor = step["executor"];
+    if (typeof executor !== "string" || !isStepExecutor(executor)) {
+      return (
+        `${at}.executor must be one of ${STEP_EXECUTORS.join(", ")}. "human" is the ordinary ` +
+        `answer: a process written entirely of human steps runs today, and a step becomes an ` +
+        `agent's later by changing this one field.`
+      );
+    }
+
+    const dependsOn = step["dependsOn"];
+    if (!Array.isArray(dependsOn)) {
+      return `${at}.dependsOn must be an array of step keys — empty for a step that starts first`;
+    }
+    const deps: string[] = [];
+    for (const d of dependsOn) {
+      if (typeof d !== "string") return `${at}.dependsOn contains ${describe(d)}, not a step key`;
+      if (d === key) return `${at}.dependsOn names its own step, which can never be satisfied`;
+      if (deps.includes(d)) return `${at}.dependsOn names ${JSON.stringify(d)} twice`;
+      deps.push(d);
+    }
+    parsed.push({ key, dependsOn: deps });
+
+    const condition = step["condition"];
+    if (condition !== null && condition !== undefined) {
+      if (typeof condition !== "object") return `${at}.condition must be an object or null`;
+      const c = condition as Record<string, unknown>;
+      const cUnknown = unknownFields(c, ["fact", "equals"]);
+      if (cUnknown) return `${at}.condition: ${cUnknown}`;
+      const fact = c["fact"];
+      if (typeof fact !== "string" || !isStepFact(fact)) {
+        return (
+          `${at}.condition.fact must be one of ${STEP_FACTS.join(", ")}. The set is closed on ` +
+          `purpose — a free expression is a language nobody can write or test — and it grows ` +
+          `by adding a member here when the firm names a condition it actually uses.`
+        );
+      }
+      const equals = c["equals"];
+      if (typeof equals !== "string" || equals.trim() === "") {
+        return `${at}.condition.equals must be a non-empty string`;
+      }
+    }
+  }
+
+  // Every dependency must name a step this template HAS. A typo would otherwise
+  // produce a step that can never become ready, in a job that would sit
+  // half-finished forever with nothing saying why.
+  for (const step of parsed) {
+    for (const dep of step.dependsOn) {
+      if (!keys.has(dep)) {
+        return (
+          `step ${JSON.stringify(step.key)} depends on ${JSON.stringify(dep)}, which this ` +
+          `template does not have. Steps: ${[...keys].join(", ")}`
+        );
+      }
+    }
+  }
+
+  const cycle = findStepCycle(parsed);
+  if (cycle !== null) {
+    return (
+      `the steps form a cycle — ${cycle.join(" -> ")} — so none of them could ever start. ` +
+      `Refused here rather than at run time, because a job that deadlocks is discovered by ` +
+      `somebody wondering why nothing happened.`
+    );
+  }
+
+  return null;
+}
+
+/**
+ * The first dependency cycle, as the path that closes it, or null.
+ *
+ * Depth-first with an on-stack marker. Returned as a PATH rather than a boolean
+ * because "these three steps form a cycle" is fixable and "this template is
+ * invalid" is not — the same reason every refusal in this file names the value.
+ */
+function findStepCycle(
+  steps: readonly { key: string; dependsOn: readonly string[] }[],
+): readonly string[] | null {
+  const deps = new Map(steps.map((s) => [s.key, s.dependsOn]));
+  const state = new Map<string, "visiting" | "done">();
+  const path: string[] = [];
+
+  function walk(key: string): readonly string[] | null {
+    const seen = state.get(key);
+    if (seen === "done") return null;
+    if (seen === "visiting") return [...path.slice(path.indexOf(key)), key];
+
+    state.set(key, "visiting");
+    path.push(key);
+    for (const dep of deps.get(key) ?? []) {
+      const found = walk(dep);
+      if (found !== null) return found;
+    }
+    path.pop();
+    state.set(key, "done");
+    return null;
+  }
+
+  for (const step of steps) {
+    const found = walk(step.key);
+    if (found !== null) return found;
+  }
+  return null;
+}
+
+/**
+ * A stored workflow body, read back — the ONE reader for `kind='workflow_template'`.
+ *
+ * Returns null rather than throwing when the body is not one, for the reason
+ * `readDunningLadder` gives: a caller resolving a PINNED version is reading
+ * history, and history that fails to parse is a fact about the past rather than
+ * an exception to raise at whoever asked.
+ */
+export function readWorkflowTemplate(
+  body: Record<string, unknown>,
+): WorkflowTemplateBody | null {
+  if (validateWorkflowTemplateBody(body) !== null) return null;
+  const steps = (body["steps"] as Record<string, unknown>[]).map(
+    (s): WorkflowStep => ({
+      key: s["key"] as string,
+      label: s["label"] as string,
+      executor: s["executor"] as StepExecutor,
+      dependsOn: [...((s["dependsOn"] as string[] | undefined) ?? [])],
+      condition:
+        s["condition"] === null || s["condition"] === undefined
+          ? null
+          : {
+              fact: (s["condition"] as Record<string, unknown>)["fact"] as StepFact,
+              equals: (s["condition"] as Record<string, unknown>)["equals"] as string,
+            },
+    }),
+  );
+  return { label: body["label"] as string, steps };
 }

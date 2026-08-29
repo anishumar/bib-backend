@@ -41,6 +41,13 @@ import {
   FakeServiceAxisRepo,
   FakeWorkSplitSetting,
 } from "../../src/testfakes/serviceaxis";
+import { OrchestratorService } from "../../src/usecase/orchestrator/service";
+import {
+  FakeAgentRuntime,
+  FakeJobStepRepo,
+  FakeJobSubjectSource,
+  FakeTemplateSource,
+} from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
@@ -111,6 +118,19 @@ function deps(): RouterDeps {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),
         activations: new FakeActivationFeed(),
+        tenants: { activeTenantIds: () => Promise.resolve([]) },
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
+    orchestrator: {
+      service: new OrchestratorService({
+        jobs: new FakeJobRepo(),
+        steps: new FakeJobStepRepo(),
+        templates: new FakeTemplateSource(),
+        subjects: new FakeJobSubjectSource(),
+        agents: new FakeAgentRuntime(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),

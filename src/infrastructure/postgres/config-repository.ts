@@ -16,6 +16,10 @@
 // the door where Postgres types become ours.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import type {
+  ResolvedTemplate,
+  TemplateSource,
+} from "../../usecase/orchestrator/ports";
 import type { Permission } from "../../domain/authz/model";
 import type {
   ConfigEntry,
@@ -28,6 +32,7 @@ import {
   DISCOUNT_POLICY_KEY,
   readMaxDiscountPercent,
   readRolePermissions,
+  readWorkflowTemplate,
 } from "../../domain/config/model";
 import type { PermissionSource } from "../../usecase/authz/ports";
 import type { RoleDirectory } from "../../usecase/tenancy/ports";
@@ -93,7 +98,13 @@ function toVersion(r: VersionRow): ConfigVersion {
 }
 
 export class PostgresConfigRepository
-  implements ConfigRepository, PermissionSource, RoleDirectory, ServiceCatalogue, PolicyDirectory
+  implements
+    ConfigRepository,
+    PermissionSource,
+    RoleDirectory,
+    ServiceCatalogue,
+    PolicyDirectory,
+    TemplateSource
 {
   constructor(private readonly app: Db) {}
 
@@ -436,4 +447,63 @@ export class PostgresConfigRepository
       return row ? readMaxDiscountPercent(row.body) : null;
     });
   }
+
+  // ── TemplateSource (the orchestrator's seam) ────────────────────────────────
+  //
+  // Two reads, and the difference between them IS pinning. `publishedTemplate`
+  // is asked once, when a job starts; `pinnedTemplate` every time afterwards. A
+  // single "get the template" method would have collapsed them, and a job would
+  // silently move onto a process edited under it.
+
+  async publishedTemplate(tenantId: string, key: string): Promise<ResolvedTemplate | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'workflow_template' AND e.key = ${key}
+      `;
+      // No row is the ordinary answer for a firm that has not written this
+      // process yet, and the orchestrator turns it into a job that WAITS.
+      // A draft is deliberately not accepted: a process somebody is still
+      // writing is not one to run a client's work through.
+      return row ? toResolvedTemplate(row.id, row.body) : null;
+    });
+  }
+
+  async pinnedTemplate(tenantId: string, versionId: string): Promise<ResolvedTemplate | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // By VERSION id, with no status filter — the version a job pinned is
+      // `archived` the moment the firm publishes a newer one, and reading it is
+      // the entire point. Filtering on `published` here would quietly break
+      // every job the first time its process was revised.
+      const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
+        SELECT id, body FROM config.version WHERE id = ${versionId}
+      `;
+      return row ? toResolvedTemplate(row.id, row.body) : null;
+    });
+  }
+}
+
+/** A stored body as the orchestrator's port states it. Null when the row does
+ *  not read as a template — which for a PINNED version is a fact about the past,
+ *  not an exception to raise at whoever asked. */
+function toResolvedTemplate(
+  versionId: string,
+  body: Record<string, unknown>,
+): ResolvedTemplate | null {
+  const template = readWorkflowTemplate(body);
+  if (!template) return null;
+  return {
+    versionId,
+    label: template.label,
+    steps: template.steps.map((s) => ({
+      key: s.key,
+      label: s.label,
+      executor: s.executor,
+      dependsOn: s.dependsOn,
+      condition: s.condition,
+    })),
+  };
+
 }

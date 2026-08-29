@@ -1285,12 +1285,20 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `check` 460 · `test:integration` 120 · `smoke` 130 — including the walk that signs a
   > two-line letter, sweeps, and gets **one job per engagement rather than one per letter**,
   > which is G0.1's "Per Company" rule showing up in the engine.
-- [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
-  > **Scope agreed with `(B)`'s reviewer on 2026-08-29, before any of it was built, and it
-  > moved.** An engagement's lines are GROUPED before a job is made, and the grouping axis is
-  > the firm's own `work_split_axis` — so **T2.6's "one job per engagement" becomes "one job
-  > per (engagement, group)"**, and a firm on the default `none` keeps exactly one. That is a
-  > change to a rule T2.6 already shipped, recorded here rather than made quietly.
+- [~] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
+  > **CORRECTION (2026-08-29), and it was mine.** The line above previously said T2.7 would
+  > turn "one job per engagement" into "one job per (engagement, group)". **That is backwards**,
+  > and reading the code rather than the board is what found it: `crm.engagement` carries
+  > `UNIQUE (engagement_letter_line_id)` — one engagement per LINE — so a letter with three
+  > service lines already becomes three engagements and three jobs. Grouping therefore MERGES
+  > jobs; it does not split them. Nothing built for G2.4 is wrong because of this — the lists,
+  > the setting and `groupByAxis` are all unaffected — only what the grouping is applied TO.
+  >
+  > **And the grouping key is `(entity, team)`, never the team alone.** Confirmed with `(B)`'s
+  > reviewer on 2026-08-29: merging across legal entities would break the firm's own
+  > client-confirmed "Per Company" rule (G0.1), under which vCFO for four companies is four
+  > engagements because each company files its own returns. So work is merged WITHIN one
+  > entity and never across.
   >
   > **G2.4 is the prerequisite and is DONE.** The rule needed the axis to be a list a typo
   > cannot fork, and `groupByAxis` (`domain/serviceaxis/model.ts`) is already written and
@@ -1299,11 +1307,106 @@ open and are recorded above; neither blocks Phase 2.
   > it lands `work_split_axis` is a setting nothing reads; `/admin/structure` says so on the
   > screen.
   >
-  > **Still open, and it is a CLIENT question, not a design one:** what a branch condition is
-  > allowed to test. Agreed direction is the job's own source facts (the service's recurrence,
-  > the client's jurisdiction) rather than an expression language nobody can write or test —
-  > but which conditions are REAL at the firm has been put to Sidharth and is not answered.
-  > Building the mechanism does not need the answer; choosing the closed set of facts does.
+  > ── **DONE, EXCEPT THE MERGE. Read this whole block before ticking it.** ────────────────
+  >
+  > **The acceptance is met.** A three-step graph advances step to step, and sequential,
+  > parallel and branch all work — proven by 69 unit tests, 16 integration tests, and an
+  > end-to-end walk on a real firm where a partner wrote a four-step process, the worker
+  > pinned it and wrote the rows, a person ticked a step off, the conditional step SKIPPED
+  > with its reason, and the ledger recorded all of it.
+  >
+  > **What is NOT done: the grouping/merge.** `groupByAxis` still has no caller, and one
+  > engagement is still one job. That was scoped INTO this task and is not finished, so the
+  > box is `[~]` and not `[x]`. It is the next thing, and it is now well specified: merge an
+  > engagement letter's engagements by `(entity_party_id, axis code)`, widen
+  > `delivery.job`'s `UNIQUE (tenant_id, source_kind, source_ref)`, and settle the one
+  > question it raises — what happens when the services in a merged group name DIFFERENT
+  > workflow templates.
+  >
+  > **Migrations 0044 (`job_step` + the registry's sixth kind) and 0045 (`work:write`).**
+  >
+  > **THE TEMPLATE IS CONFIG, and that is the whole point of the task.** "How we do a GST
+  > filing" lives in a partner's head today. `workflow_template` is the registry's sixth kind
+  > — deferred at T2.5 on the stated grounds that a body designed against no consumer ends up
+  > wrong, and built now because the consumer exists. The validator refuses a cycle, a
+  > dependency on a step that does not exist, and a duplicate key, all at the WRITE, because
+  > each of them produces a job that sits half-finished with nothing saying why.
+  >
+  > **THE GRAPH IS `dependsOn`, and all three shapes fall out of one rule.** A step is ready
+  > when every step it depends on has SETTLED in a way that clears its dependents. Sequential
+  > is a chain; parallel is two steps on one dependency; branch is a skip, and **a skip CLEARS
+  > its dependents while a failure does NOT** — that difference is why there are two terminal
+  > states and not one. The cascade is the other half: skipping only the conditional step
+  > leaves everything downstream waiting forever.
+  >
+  > **AGENTS ARE OPTIONAL, AND THAT IS A PRODUCT DECISION, not a stopgap.** Taken with `(B)`'s
+  > reviewer on 2026-08-29: the first goal is to get the work that happens in people's heads
+  > and spreadsheets INTO the product, standardised. So `human` is the ordinary executor, a
+  > firm can write its entire process with every step human and it runs today, and a step
+  > becomes an agent's later by changing ONE field. The runtime consequence is stated as a
+  > rule: **a template may say `agent` before any agent exists, and the job does not fail —
+  > the step waits for a person.** `NoAgentsBuiltYet` is the honest implementation of a true
+  > statement rather than a stub, which is why it is NOT gated on config the way the dev auth
+  > resolver is: a firm running entirely on human steps is a supported permanent state.
+  >
+  > **TWO REAL BUGS, BOTH FOUND BY RUNNING IT** — neither by a unit test, which is the third
+  > entry in this project's ledger of that lesson:
+  >
+  >   **The service was read at its PINNED version**, faithfully to how price and scope
+  >   resolve — and it meant every engagement signed before a firm wrote its first process
+  >   pinned a service version naming no template, so those jobs could never pick one up. A
+  >   firm adopting this product with work in flight would watch its existing engagements wait
+  >   forever while only new ones moved. The workflow key is read LIVE now: a client agreed to
+  >   the service, not to our internal steps, and pinning already happens one level down where
+  >   it belongs — the JOB pins the workflow version.
+  >
+  >   **`listRunnable` excluded `blocked`**, so a job waiting on a person vanished from the
+  >   work board AND from the sweep. It would never be looked at again unless somebody
+  >   completed a step through the one API path that advances inline. `blocked` is the
+  >   commonest state a job is in.
+  >
+  > **A skipped step is kept and shown, never hidden.** `skipped` is not `done`: "we did not do
+  > this, and here is why" is the question asked when a filing is questioned. The reason is a
+  > column the schema INSISTS on for a skip and a failure and forbids everywhere else, because
+  > the note is only ever written by somebody already in a hurry. The ledger carries the FACT
+  > and its values rather than the prose — a sentence does not GROUP BY, and this log cannot
+  > be erased.
+  >
+  > **AN UNRESOLVED FACT KEEPS THE STEP.** A service that never stated its recurrence must not
+  > quietly lose a review step because a field was left blank. An extra review costs an hour; a
+  > missing one costs a filing. Proven both ways end to end — the same template skipped the
+  > step for a service that said `monthly` and kept it for one that said nothing.
+  >
+  > **`work:write` is a new permission and cost a migration (0045)**, exactly as CLAUDE.md
+  > says a new permission does. Saying a filing is done is not reading the board, and the row
+  > it gates is the record of WHO did the work — which is what T2.9's maker-checker rule will
+  > compare. Partner, manager AND associate get it: an associate who could not tick off the
+  > step they performed would have to ask somebody else to, putting a false name on the record.
+  >
+  > **`job_step.performed_by` exists and is unused by any rule yet.** Deliberate: T2.9 needs it
+  > as a COLUMN to express maker != checker as a database constraint, and adding it later means
+  > backfilling a fact nobody recorded.
+  >
+  > **Screens built alongside**: `/work` (the delivery board — the first screen this half of
+  > the product has ever had; `GET /api/v1/jobs` had been a write with no read since T2.6) and
+  > `/work/[jobId]`, which shows the process, marks a skipped step "not needed" with its
+  > reason, says "waiting for you — no agent built for this yet" on an agent step nobody has
+  > built, and has the Done button that makes the whole thing usable with zero agents.
+  >
+  > **NOT BUILT, and a firm needs it: a screen to WRITE a workflow template.** A process is
+  > published through the API today. `/catalogue` is the precedent for what it should look
+  > like — versions, drafts, publish — and it is the honest gap in this task alongside the
+  > merge.
+  >
+  > **Still open, and it is a CLIENT question:** which facts a branch may test. The mechanism
+  > is built and proven over `recurrence` and `jurisdiction` — two facts that already exist,
+  > not guesses — and the closed set grows by adding a member, a case in the fact resolver and
+  > a line of documentation. Asked of Sidharth; not answered.
+  >
+  > Gate: `npm run check` **906** · `test:integration` **284** · `smoke` **229 passed, 0
+  > failed** (unchanged — the smoke is at its request budget, so the engine is demonstrated by
+  > `worker:once` and a scripted walk, which is how T3.5's ladder is demonstrated too).
+
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
 - [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
 

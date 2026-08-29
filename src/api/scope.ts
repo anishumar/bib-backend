@@ -16,7 +16,22 @@ import { toEnvelope } from "./httpresp";
 import type { ErrorEnvelope } from "./httpresp";
 
 export type Scope =
-  | { readonly ok: true; readonly tenantId: string; readonly actor: Actor }
+  | {
+      readonly ok: true;
+      readonly tenantId: string;
+      readonly actor: Actor;
+      /**
+       * The signed-in person, as a plain id.
+       *
+       * Redundant with `actor.id` and stated separately on purpose: `Actor.id`
+       * is nullable because system and agent actors have no account, while a
+       * scope resolved from a SESSION is always a human with one. A route that
+       * has to store who did something — T2.7's step completion is the first —
+       * would otherwise carry a null check for a case this function cannot
+       * produce.
+       */
+      readonly userId: string;
+    }
   | { readonly ok: false; readonly deny: ErrorEnvelope; readonly status: 401 | 403 };
 
 /**
@@ -51,5 +66,6 @@ export function scopeOf(principal: Principal | null): Scope {
     ok: true,
     tenantId: principal.tenantId,
     actor: { type: "human", id: principal.userId },
+    userId: principal.userId,
   };
 }

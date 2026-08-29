@@ -66,6 +66,10 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { SchedulerService } from "../usecase/scheduler/service";
+import { OrchestratorService } from "../usecase/orchestrator/service";
+import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
+import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
+import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
@@ -147,6 +151,27 @@ export function wire(cfg: Config, log: Logger): Wired {
     axes: serviceAxisRepository,
     split: new PostgresWorkSplitSetting(pools.app),
     ids: systemIds,
+    events: ledger,
+  });
+
+  // The API holds the orchestrator for the two things a PERSON does: reading a
+  // job's steps, and saying one is finished. It never sweeps — that is the
+  // worker's, and a route that could advance work nobody performed would be a
+  // way to mark a filing done without filing it.
+  //
+  // The same `NoAgentsBuiltYet` as the worker, and for the same reason: when a
+  // person completes a step the service asks whether an agent exists for it, and
+  // an API that answered differently from the worker would let somebody tick off
+  // work a machine was already doing.
+  const orchestrator = new OrchestratorService({
+    jobs,
+    steps: new PostgresJobStepRepository(pools.app),
+    templates: configRepository,
+    subjects: new PostgresJobSubjectRepository(pools.app),
+    agents: new NoAgentsBuiltYet(),
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
     events: ledger,
   });
 
@@ -413,6 +438,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
+        orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },

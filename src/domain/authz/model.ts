@@ -27,6 +27,7 @@ export type Permission =
   | "ledger:read"
   | "config:read"
   | "proposal:approve"
+  | "work:write"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -35,6 +36,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "ledger:read",
   "config:read",
   "proposal:approve",
+  "work:write",
   "tenant:admin",
 ];
 
@@ -60,6 +62,10 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
   "proposal:approve":
     "Authorise a discount larger than the firm's published limit. Anyone who can write a " +
     "proposal can offer a discount within the limit; this is the sign-off for going past it.",
+  "work:write":
+    "Say that a step of a client's work is done. This is the record of WHO did the work, so " +
+    "it is its own permission rather than part of reading the board — and it is what T2.9's " +
+    "maker-checker rule will compare against.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -109,18 +115,19 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "config:read",
       "tenant:admin",
       "proposal:approve",
+      "work:write",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
   manager: {
     label: "Manager",
-    permissions: ["party:read", "party:write", "ledger:read", "config:read"],
+    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write"],
   },
   // Does the work, and quotes from the catalogue. No audit-trail sweep of the
   // whole firm.
   associate: {
     label: "Associate",
-    permissions: ["party:read", "party:write", "config:read"],
+    permissions: ["party:read", "party:write", "config:read", "work:write"],
   },
   // A client's own contact. Holds nothing on the staff surface — the audience
   // gate already refuses them, and this is the second, independent answer.

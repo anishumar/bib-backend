@@ -36,6 +36,7 @@ export const KIND_VALUES = [
   "policy",
   "clause",
   "dunning",
+  "workflow_template",
 ] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────

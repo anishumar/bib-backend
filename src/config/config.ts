@@ -71,6 +71,13 @@ const EnvSchema = z.object({
   // DAYS, so sweeping more often re-reads the same answer and buys nothing —
   // and the one thing it could buy, a reminder arriving at 3am, is not wanted.
   BIB_WORKER_DUNNING_CRON: z.string().min(1).default("0 7 * * *"),
+  // EVERY FIVE MINUTES, and much finer than the other two on purpose. This one
+  // is not a clock-driven policy — it is the engine noticing that work became
+  // ready, and the person waiting on the next step is a colleague at their desk.
+  // An hour here would mean a filing sitting done while nobody is told the
+  // review may start. The sweep is cheap: one indexed read per firm, over the
+  // partial index that excludes finished jobs.
+  BIB_WORKER_ORCHESTRATOR_CRON: z.string().min(1).default("*/5 * * * *"),
   // How long a shutdown waits for a sweep already in flight. Long enough for the
   // slowest one, finite so a wedged handler cannot hold a deploy open forever.
   BIB_WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(45_000),
@@ -140,6 +147,7 @@ export interface WorkerConfig {
   /** How often the dunning ladder is climbed. Daily by default: the rungs are
    *  counted in DAYS, so sweeping more often only re-reads the same answer. */
   readonly dunningCron: string;
+  readonly orchestratorCron: string;
   /** How long `stop()` waits for work in flight before the hard stop. */
   readonly shutdownGraceMs: number;
 }
@@ -211,6 +219,7 @@ export function load(): Config {
     worker: {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,
       dunningCron: env.BIB_WORKER_DUNNING_CRON,
+      orchestratorCron: env.BIB_WORKER_ORCHESTRATOR_CRON,
       shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
     },
     db: {

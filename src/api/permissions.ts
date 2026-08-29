@@ -198,6 +198,15 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // firm. When a firm asks to keep delivery from commercial staff, that is the
   // moment to pay for it.
   [routeKey("GET", "/api/v1/jobs"), "party:read" as const],
+
+  // A job's steps (T2.7). READ on `party:read`, like the job list it hangs off:
+  // the work board is what every member of the delivery team looks at, and a
+  // step's label and state carry no money and no personal data.
+  [routeKey("GET", "/api/v1/jobs/{jobId}/steps"), "party:read" as const],
+  // COMPLETING one needs `work:write` — a separate permission, because saying a
+  // filing is done is not the same act as reading the board, and the record of
+  // WHO did it is worth only as much as the gate in front of it.
+  [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
   // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
   // configuration registry uses, and for the same reason: this IS firm
   // configuration. Reading it is `config:read` — an associate drafting a letter

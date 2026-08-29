@@ -40,6 +40,18 @@ export interface JobRepository {
     status: JobStatus,
     at: string,
   ): Promise<Job>;
+  /**
+   * Record which workflow version this job will walk — ONCE, and never again.
+   *
+   * The write half of pinning (T2.7), and the guard is the point: the adapter
+   * sets `template_version_id` only where it is still null, so a second sweep,
+   * a redelivered message or a later edit to the firm's process cannot move a
+   * job onto a different path than the one it started down. That is the whole
+   * argument for the column existing, and a plain UPDATE would give it away.
+   *
+   * Returns whether this call was the one that set it.
+   */
+  pinTemplate(tenantId: string, jobId: string, versionId: string): Promise<boolean>;
 }
 
 /**

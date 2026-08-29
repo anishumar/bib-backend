@@ -58,12 +58,27 @@ export class FakeJobRepo implements JobRepository {
       .filter(
         (r) =>
           r.tenantId === tenantId &&
-          (r.status === "pending" || r.status === "running") &&
+          // `blocked` included, matching the adapter. A blocked job is one
+          // waiting on a person, and it must still be swept — see the note on
+          // PostgresJobRepository.listRunnable.
+          (r.status === "pending" || r.status === "running" || r.status === "blocked") &&
           r.runnableAt <= asOf,
       )
       .sort((a, b) => a.runnableAt.localeCompare(b.runnableAt))
       .slice(0, limit);
     return Promise.resolve(rows);
+  }
+
+  /** Pins ONCE, like the adapter: a second call finds a version already there
+   *  and reports that it did not set it. A fake that overwrote would make the
+   *  race the real guard exists for untestable. */
+  pinTemplate(tenantId: string, jobId: string, versionId: string): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === jobId);
+    const current = this.rows[i];
+    if (i < 0 || !current) throw new Error(`job ${jobId} not in the fake`);
+    if (current.templateVersionId !== null) return Promise.resolve(false);
+    this.rows[i] = { ...current, templateVersionId: versionId };
+    return Promise.resolve(true);
   }
 
   updateStatus(

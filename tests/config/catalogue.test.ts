@@ -369,6 +369,7 @@ describe("reading a stored body back", () => {
       clientObligations: "Books by the 5th.",
       volumeLimits: "Under 1,000 entries.",
       exclusions: "Appeals and litigation.",
+      workflowTemplateKey: "gst-monthly-process",
     });
     expect(stored).toEqual({
       name: "GST monthly filing",
@@ -390,6 +391,10 @@ describe("reading a stored body back", () => {
       clientObligations: "Books by the 5th.",
       volumeLimits: "Under 1,000 entries.",
       exclusions: "Appeals and litigation.",
+      // How the service is DELIVERED (T2.7). A key, not a version id: the
+      // catalogue points at the firm's current process and the JOB is what pins
+      // the version it started on.
+      workflowTemplateKey: "gst-monthly-process",
     });
   });
 

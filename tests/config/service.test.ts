@@ -122,9 +122,14 @@ describe("defining a configured thing", () => {
   it("refuses a kind the product has no validator for", async () => {
     // A kind without a body validator would accept anything, so adding one is a
     // code change — not something a caller can invent over HTTP.
+    //
+    // `rule_pack` is the next kind the board actually plans (T4.3), and it is
+    // used here for the same reason `workflow_template` was until T2.7 built it:
+    // it is a name somebody might plausibly send, which is what makes the
+    // refusal worth asserting.
     await expect(
       setup().service.define(
-        { tenantId: TENANT, kind: "workflow_template", key: "x", body: {} },
+        { tenantId: TENANT, kind: "rule_pack", key: "x", body: {} },
         ACTOR,
       ),
     ).rejects.toBeInstanceOf(InvalidKind);

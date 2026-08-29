@@ -21,6 +21,11 @@ import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
 import { LedgerService } from "../usecase/ledger/service";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { DunningService } from "../usecase/dunning/service";
+import { OrchestratorService } from "../usecase/orchestrator/service";
+import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
+import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
+import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
   PostgresDunningLadder,
@@ -37,11 +42,17 @@ export const SPAWN_QUEUE = "delivery.spawn";
  *  both would have to run at the faster of the two. */
 export const DUNNING_QUEUE = "billing.dunning";
 
+/** The queue the orchestrator sweep runs on. Its own name and its own cadence
+ *  again — this one is minutes rather than hours or days, because what it is
+ *  waiting for is not a clock but a colleague finishing a step. */
+export const ORCHESTRATOR_QUEUE = "delivery.orchestrate";
+
 export interface WiredWorker {
   readonly pools: Pools;
   readonly queue: JobQueue;
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
+  readonly orchestrator: OrchestratorService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -92,6 +103,29 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // THE THIRD SWEEP (T2.7). It shares the job repository with the scheduler on
+  // purpose: the scheduler creates jobs and this one walks them, and two
+  // adapters over `delivery.job` would eventually disagree about what "runnable"
+  // means — which is the one thing both of them turn on.
+  const orchestrator = new OrchestratorService({
+    jobs,
+    steps: new PostgresJobStepRepository(pools.app),
+    // The config repository, in its `TemplateSource` role. The same class the
+    // API reads roles and services through — one adapter over `config`, so what
+    // is published is one answer rather than two that agree by luck.
+    templates: new PostgresConfigRepository(pools.app),
+    subjects: new PostgresJobSubjectRepository(pools.app),
+    // There are no agents. Not a stub standing in for something missing — a
+    // true statement about this product today, which is why it is not gated on
+    // config the way the dev auth resolver is. Every step waits for a person,
+    // and the firm's work runs. T2.8 replaces this line.
+    agents: new NoAgentsBuiltYet(),
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const queue = new BossJobQueue({ connectionString: cfg.db.appUrl, log });
 
   return {
@@ -99,6 +133,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     queue,
     scheduler,
     dunning,
+    orchestrator,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -136,6 +171,30 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(DUNNING_QUEUE, cfg.worker.dunningCron);
+
+      await queue.register(ORCHESTRATOR_QUEUE, async () => {
+        const reports = await orchestrator.sweep();
+        for (const r of reports) {
+          if (r.started === 0 && r.advanced === 0 && r.awaitingTemplate === 0) continue;
+          // `awaitingPeople` and `awaitingTemplate` are the two numbers somebody
+          // has to ACT on, and they are different people: the first is work on
+          // colleagues' desks, the second is a partner who has not written a
+          // process yet. A sweep that logged only what it moved would say the
+          // engine is idle when it is actually waiting on the firm.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              started: r.started,
+              advanced: r.advanced,
+              awaitingPeople: r.awaitingPeople,
+              completed: r.completed,
+              awaitingTemplate: r.awaitingTemplate,
+            },
+            "orchestrator sweep",
+          );
+        }
+      });
+      await queue.schedule(ORCHESTRATOR_QUEUE, cfg.worker.orchestratorCron);
     },
   };
 }
