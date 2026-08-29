@@ -1,0 +1,154 @@
+// Sentinel errors — the closed vocabulary of ways a document-store operation
+// fails. They live in the domain so the meaning is owned here; the api layer
+// maps them to HTTP status codes (domainerr.ts). Match with `instanceof`, never
+// string search.
+//
+// Every code added here is a COMPILE error until `api/domainerr.ts` maps it —
+// its switch ends `default: return unmapped(err.code)` and `unmapped` takes
+// `never`. That is deliberate, and it is why `StaffGradeError` cannot happen
+// twice (G3.3 shipped answering 500 to every refusal).
+
+export class FileStoreError extends Error {
+  constructor(
+    readonly code: FileStoreErrorCode,
+    message: string,
+  ) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
+export type FileStoreErrorCode =
+  | "DOCUMENT_NOT_FOUND"
+  | "VERSION_NOT_FOUND"
+  | "EMPTY_CONTENT"
+  | "CONTENT_TOO_LARGE"
+  | "UNSUPPORTED_MEDIA_TYPE"
+  | "INVALID_FILENAME"
+  | "INVALID_TITLE"
+  | "UNKNOWN_SUBJECT_KIND"
+  | "ALREADY_ATTACHED"
+  | "BYTES_MISSING"
+  | "BRAND_ASSET_NOT_FOUND";
+
+export class DocumentNotFound extends FileStoreError {
+  constructor(id: string) {
+    super("DOCUMENT_NOT_FOUND", `no document ${JSON.stringify(id)} at this firm`);
+  }
+}
+
+export class VersionNotFound extends FileStoreError {
+  constructor(documentId: string, versionNo: number | null) {
+    super(
+      "VERSION_NOT_FOUND",
+      versionNo === null
+        ? `document ${JSON.stringify(documentId)} has no versions — which should be impossible, ` +
+            `because a document is created with its first version in one transaction. Treat this ` +
+            `as data corruption rather than an ordinary miss.`
+        : `document ${JSON.stringify(documentId)} has no version ${versionNo}`,
+    );
+  }
+}
+
+export class EmptyContent extends FileStoreError {
+  constructor(filename: string) {
+    // Not silent, and not stored. A zero-byte upload is always a failed one,
+    // and accepting it means a client sees "PAN card attached" over nothing —
+    // which is worse than an error, because it looks like the work is done.
+    super(
+      "EMPTY_CONTENT",
+      `${JSON.stringify(filename)} is zero bytes. An empty file is a failed upload, not a ` +
+        `document — storing it would show as an attachment over nothing.`,
+    );
+  }
+}
+
+export class ContentTooLarge extends FileStoreError {
+  constructor(byteSize: number, limitBytes: number) {
+    super(
+      "CONTENT_TOO_LARGE",
+      `this file is ${byteSize} bytes and the limit is ${limitBytes} ` +
+        `(BIB_MAX_UPLOAD_BYTES). Raise the limit deliberately if the firm genuinely needs it — ` +
+        `the whole file is held in memory to be hashed, so the limit is a memory budget and not ` +
+        `an arbitrary preference.`,
+    );
+  }
+}
+
+export class UnsupportedMediaType extends FileStoreError {
+  constructor(raw: string) {
+    super(
+      "UNSUPPORTED_MEDIA_TYPE",
+      `${JSON.stringify(raw)} is not a media type this store can record. Expected ` +
+        `type/subtype, like "application/pdf" or "image/png".`,
+    );
+  }
+}
+
+export class InvalidFilename extends FileStoreError {
+  constructor(raw: string) {
+    super(
+      "INVALID_FILENAME",
+      `${JSON.stringify(raw)} leaves nothing usable as a filename once path separators and ` +
+        `control characters are removed. The filename is a label shown to people, never a path.`,
+    );
+  }
+}
+
+export class InvalidTitle extends FileStoreError {
+  constructor() {
+    super(
+      "INVALID_TITLE",
+      `a document needs a title — it is what somebody scanning a client's file sees, and the ` +
+        `filename is not always legible ("scan_0043.pdf")`,
+    );
+  }
+}
+
+export class UnknownSubjectKind extends FileStoreError {
+  constructor(raw: string, known: readonly string[]) {
+    // Names the valid set, per CLAUDE.md. This one matters more than most: the
+    // subject reference has no foreign key, so this refusal is the ONLY thing
+    // standing between a typo and a link nothing can ever resolve.
+    super(
+      "UNKNOWN_SUBJECT_KIND",
+      `${JSON.stringify(raw)} is not something a document can be attached to. Known: ` +
+        `${known.join(", ")}. This is checked rather than trusted because a subject reference ` +
+        `carries no foreign key — an unknown kind would be a link nothing can follow.`,
+    );
+  }
+}
+
+export class AlreadyAttached extends FileStoreError {
+  constructor(subjectKind: string, subjectRef: string) {
+    super(
+      "ALREADY_ATTACHED",
+      `this document is already attached to ${subjectKind} ${JSON.stringify(subjectRef)}. ` +
+        `Attaching the same file to the same thing twice is a double-click, not a second fact.`,
+    );
+  }
+}
+
+export class BytesMissing extends FileStoreError {
+  constructor(storageKey: string) {
+    // The row says the bytes exist and the store disagrees. This is never an
+    // ordinary 404 to the caller — the metadata is intact, so the honest answer
+    // is that the storage backend has lost something, and saying "not found"
+    // would send whoever reads it looking for a deleted document instead.
+    super(
+      "BYTES_MISSING",
+      `the storage backend has no object at ${JSON.stringify(storageKey)}, but a version row ` +
+        `says it should. The document's metadata is intact and its bytes are not — this is a ` +
+        `storage fault, not a missing document.`,
+    );
+  }
+}
+
+export class BrandAssetNotFound extends FileStoreError {
+  constructor(entityPartyId: string, kind: string) {
+    super(
+      "BRAND_ASSET_NOT_FOUND",
+      `this firm's entity ${JSON.stringify(entityPartyId)} has no active ${kind}`,
+    );
+  }
+}

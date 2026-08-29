@@ -710,6 +710,59 @@ client owe*, which is arithmetic over rows; this answers *what will the firm do 
 which is policy on a clock. They meet at `outstanding()` and nowhere else — which is also why
 paying an invoice stops the chasing with no flag for anybody to clear.
 
+## The document store — bytes, and the one route they leave by (T3.6)
+
+`files.document` / `document_version` / `document_link` / `brand_asset` (migration 0037). **A
+new schema, and not tidiness:** `crm.document_block` (G1.7) is PROSE inside a proposal and
+`crm.document_ref_series` (0020) hands out `PR-2026-0007`. A `crm.document` beside
+`crm.document_block` would read as "the document a block belongs to". `domain/document` is
+the words; `domain/filestore` is the bytes. They meet only where a rendered letter becomes a
+file.
+
+**Bytes leave by ONE route and there is no pre-signed URL.** That is a design position, not a
+missing feature: a pre-signed URL is a capability that outlives the session that minted it and
+is checked by a storage vendor, so it answers to **none of the four scoping gates**. The
+version row naming the storage key is read under RLS, which makes the key unreachable before
+it could be used. If object storage ever replaces the filesystem adapter, this stays true —
+the port has no method that returns a URL, and adding one is the thing not to do.
+
+**`document_version` is append-only by GRANT, not by trigger.** `bib_app` holds SELECT and
+INSERT and nothing else, the same arrangement the `ledger` schema has. A trigger is a rule the
+table carries; a missing grant is a permission the role does not hold, and an import or an
+agent walks past the first and not the second. `document_link` has no UPDATE either — changing
+what a document is attached to, in place, rewrites "what was filed against this engagement"
+with no trace. **Detaching is deliberately not implemented**: whether an attachment made in
+error should vanish or remain visible as withdrawn is a question for a firm, not a guess.
+
+**Storage is content-addressed, and the cost is the interesting half.** The key derives from
+the sha256, so a client re-sending a file stores one blob. The consequence is that **two
+documents can share a blob**, so nothing may delete bytes because one document went away —
+which is why `BlobStore` has no `delete` and must not grow one. A retention or erasure
+requirement is a deliberate feature with reference counting behind it.
+
+**`subject_ref` carries no foreign key and cannot** — it points at a different table depending
+on `subject_kind`, following `delivery.job`'s `(source_kind, source_ref)` idiom rather than a
+second one for the same shape. The CHECK on `subject_kind` is the containment: a dangling link
+is possible within a KNOWN vocabulary, never a pointer to anything at all. Adding a kind is a
+migration AND a case in `linksOf`'s label resolution — a kind nothing can resolve is a link
+nobody can follow.
+
+**Brand assets are keyed on the ENTITY, never the firm.** G1.2's rule applied to paper: a firm
+signing on two letterheads must not print the Indian logo on a letter its US entity issued.
+Superseding is an insert plus a cleared flag under a partial unique index (`WHERE is_active`),
+so the mark in force when a document was issued stays resolvable.
+
+**The filesystem blob store is the FOURTH honest-registry stub** and gets the same treatment as
+the first three: `validateServer` refuses a production-like boot on it. Replicas do not share a
+disk (an upload through one pod is a 500 through the others, intermittently), and a container
+filesystem does not survive a restart, leaving metadata that outlives its bytes.
+
+**Rendering is NOT here.** A `DocumentRenderer` port was written and deleted before commit,
+under this file's own rule that a contract designed against no consumer ends up wrong (the
+reason T2.5 deferred `workflow_template`). It is T3.8, and the constraint that decides its
+engine is stated there: a document's content hash is evidence, so the renderer must be
+deterministic.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
