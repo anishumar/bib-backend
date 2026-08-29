@@ -1506,6 +1506,15 @@ sandbox access + credentials. **Not on any demo's critical path.**
   first real answer to the staff-directory question the roster's admin-only read deferred —
   revisit the two together when a directory screen exists.
 
+- [x] **Two collections read models were columns of uuids** — found by building the screens,
+  which is the fifth and sixth time this codebase has learnt the same lesson. `/receivables`
+  returned a balance with `partyId` and no name and no invoice NUMBER, so a collections list
+  rendered one anonymous row per debt; and the dunning queue returned a rung with an
+  `invoiceId`, which asked a partner to approve putting **a uuid** on credit hold. Both now
+  return joined records (`ReceivableRecord`, `PendingDunningRecord`) — and the dunning one
+  carries what is outstanding **now**, because a debt settled since the rung fired is exactly
+  the case somebody rejects, and a stale figure would hide it. The smoke walk asserts the name.
+
 - [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
   300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
   a firm of forty behind a single office NAT gateway — they share one bucket. Found by the

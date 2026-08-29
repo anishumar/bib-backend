@@ -29,6 +29,7 @@ import type {
   DunningLadderSource,
   DunningRepository,
   InvoiceRepository,
+  PendingDunningRecord,
   TenantDirectory,
 } from "../invoice/ports";
 
@@ -97,7 +98,11 @@ export class DunningService {
     let alreadyTaken = 0;
     let awaitingApproval = 0;
 
-    for (const balance of await this.deps.invoices.outstanding(tenantId)) {
+    for (const receivable of await this.deps.invoices.outstanding(tenantId)) {
+      // The sweep needs only the arithmetic; the names on this record are for
+      // the SCREEN that works the queue. One query serves both rather than two
+      // that could disagree about which invoices are outstanding.
+      const balance = receivable.balance;
       // No due date is not overdue. A firm that raised an invoice without one
       // has not told anybody when to pay, and chasing on that basis would be
       // the product deciding a payment term nobody agreed.
@@ -157,7 +162,7 @@ export class DunningService {
   }
 
   /** The terminal rungs waiting for a person — the queue a partner works. */
-  pending(tenantId: string): Promise<readonly DunningActionRecord[]> {
+  pending(tenantId: string): Promise<readonly PendingDunningRecord[]> {
     return this.deps.dunning.pending(tenantId);
   }
 

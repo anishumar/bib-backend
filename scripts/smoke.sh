@@ -1155,11 +1155,15 @@ chk "…and it puts the debt back"          "25488.0000" "$BACK"
 CN=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"5488","reason":"service_failure","note":"Filed late, ours"}')
 chk "…and it gets its own series"         "CN/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$CN")"
 chk "…more than was billed is refused"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"999999","reason":"goodwill"}')"
+# The collections read model: what is left, and WHOSE it is. The name and the
+# number are joined by the API — a screen rendering one row per debt must not
+# fetch a party per row, and building that screen is what found this missing.
 OWED=$(curl -s -b $J/partner.txt $API/api/v1/receivables | python3 -c '
 import sys, json
-rs = {r["invoiceId"]: r["outstanding"] for r in json.load(sys.stdin)["receivables"]}
-print(rs.get("'$INV1ID'", "absent"))')
-chk "…and the receivable is what is left" "20000.0000" "$OWED"
+rs = {r["balance"]["invoiceId"]: r for r in json.load(sys.stdin)["receivables"]}
+r = rs.get("'$INV1ID'")
+print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
+chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
 
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""

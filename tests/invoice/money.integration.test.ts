@@ -238,7 +238,7 @@ describe("the balance is arithmetic, done by the database", () => {
   it("counts an invoice nobody has paid, which is the point of the LEFT JOINs", async () => {
     const invoice = await issued("7500");
     const receivables = await service.outstanding(tenant);
-    expect(receivables.some((r) => r.invoiceId === invoice && r.outstanding === "7500.0000")).toBe(
+    expect(receivables.some((r) => r.balance.invoiceId === invoice && r.balance.outstanding === "7500.0000")).toBe(
       true,
     );
   });
@@ -256,7 +256,7 @@ describe("the balance is arithmetic, done by the database", () => {
       unitAmount: "99999",
     });
     const receivables = await service.outstanding(tenant);
-    expect(receivables.map((r) => r.invoiceId)).not.toContain(draft.id);
+    expect(receivables.map((r) => r.balance.invoiceId)).not.toContain(draft.id);
   });
 });
 

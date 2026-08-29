@@ -62,6 +62,7 @@ import type {
   InvoiceSeriesRecord,
   InvoiceSummary,
   NewCreditNote,
+  ReceivableRecord,
   NewInvoice,
   NewInvoiceLine,
   NewPayment,
@@ -599,18 +600,30 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     });
   }
 
-  async outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
+  async outstanding(tenantId: string): Promise<readonly ReceivableRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<BalanceRow[]>`
-        SELECT ${db.unsafe(BALANCE_COLUMNS)} FROM crm.invoice_balance
+      const rows = await db<(BalanceRow & { number: string; party_name: string })[]>`
+        SELECT ${db.unsafe(BALANCE_COLUMNS.split(", ").map((c) => `b.${c}`).join(", "))},
+               i.number, p.display_name AS party_name
+        FROM crm.invoice_balance b
+        -- The number and the client, IN THE QUERY. A collections screen renders
+        -- one row per debt and has to say whose and which; without this it is a
+        -- column of uuids, which is the per-row lookup this codebase has now
+        -- learnt about six times.
+        JOIN crm.invoice i ON i.id = b.invoice_id
+        JOIN core.party p ON p.id = b.party_id
         -- ISSUED only, and outstanding only. A draft owes nothing because
         -- nobody has been asked; a cancelled invoice owes nothing because it
         -- was withdrawn. Both would otherwise appear in "who owes us money"
         -- with their full total, which is the report a partner acts on.
-        WHERE status = 'issued' AND outstanding > 0
-        ORDER BY due_on NULLS LAST, invoice_id
+        WHERE b.status = 'issued' AND b.outstanding > 0
+        ORDER BY b.due_on NULLS LAST, b.invoice_id
       `;
-      return rows.map(toBalance);
+      return rows.map((r) => ({
+        balance: toBalance(r),
+        number: r.number,
+        party: { id: r.party_id, displayName: r.party_name },
+      }));
     });
   }
 }

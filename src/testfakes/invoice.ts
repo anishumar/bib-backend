@@ -33,6 +33,7 @@ import type {
   NewInvoice,
   NewInvoiceLine,
   NewPayment,
+  ReceivableRecord,
 } from "../usecase/invoice/ports";
 import type { Deps } from "../usecase/invoice/service";
 import { FakeIds } from "./ids";
@@ -233,11 +234,18 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return this.balance(invoice);
   }
 
-  async outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
-    const balances = this.invoices
+  async outstanding(tenantId: string): Promise<readonly ReceivableRecord[]> {
+    const owing = this.invoices
       .filter((i) => i.tenantId === tenantId && i.status === "issued")
-      .map((i) => this.balance(i));
-    return Promise.resolve(balances.filter((b) => scaled(b.outstanding) > 0n));
+      .map((invoice) => ({ invoice, balance: this.balance(invoice) }))
+      .filter((r) => scaled(r.balance.outstanding) > 0n);
+    return Promise.resolve(
+      owing.map((r) => ({
+        balance: r.balance,
+        number: r.invoice.number,
+        party: { id: r.invoice.partyId, displayName: this.nameOf(r.invoice.partyId) },
+      })),
+    );
   }
 
   private balance(invoice: Invoice): InvoiceBalance {

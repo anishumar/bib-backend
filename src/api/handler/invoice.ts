@@ -528,6 +528,17 @@ const balanceRoute = createRoute({
   },
 });
 
+/** A debt with the two facts a person needs to act on it. The join is the
+ *  API's, not the browser's — a collections screen must not fetch a party per
+ *  row to render a list of who owes money. */
+const ReceivableSchema = z
+  .object({
+    balance: BalanceSchema,
+    number: z.string(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+  })
+  .openapi("Receivable");
+
 const outstandingRoute = createRoute({
   method: "get",
   path: "/api/v1/receivables",
@@ -539,7 +550,7 @@ const outstandingRoute = createRoute({
   responses: {
     200: {
       description: "Receivables",
-      content: { "application/json": { schema: z.object({ receivables: z.array(BalanceSchema) }) } },
+      content: { "application/json": { schema: z.object({ receivables: z.array(ReceivableSchema) }) } },
     },
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
@@ -564,6 +575,20 @@ const DunningActionSchema = z
   })
   .openapi("DunningAction");
 
+/** A terminal rung, and what a partner needs in order to decide it: the client,
+ *  the invoice number, and what is ACTUALLY still owed — read now, because a
+ *  debt settled since the rung fired is precisely the case somebody rejects. */
+const PendingDunningSchema = z
+  .object({
+    action: DunningActionSchema,
+    invoiceNumber: z.string(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    outstanding: Decimal,
+    currency: z.string().length(3),
+    dueOn: z.string().nullable(),
+  })
+  .openapi("PendingDunningAction");
+
 const pendingDunningRoute = createRoute({
   method: "get",
   path: "/api/v1/dunning/pending",
@@ -577,7 +602,7 @@ const pendingDunningRoute = createRoute({
     200: {
       description: "Waiting for a decision",
       content: {
-        "application/json": { schema: z.object({ actions: z.array(DunningActionSchema) }) },
+        "application/json": { schema: z.object({ actions: z.array(PendingDunningSchema) }) },
       },
     },
     401: errorResponse("Not signed in"),
@@ -786,14 +811,35 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const receivables = await deps.service.outstanding(s.tenantId);
-    return c.json({ receivables: receivables.map(toBalanceBody) }, 200);
+    return c.json(
+      {
+        receivables: receivables.map((r) => ({
+          balance: toBalanceBody(r.balance),
+          number: r.number,
+          party: { id: r.party.id, displayName: r.party.displayName },
+        })),
+      },
+      200,
+    );
   });
 
   app.openapi(pendingDunningRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const actions = await deps.dunning.pending(s.tenantId);
-    return c.json({ actions: actions.map(toDunningBody) }, 200);
+    return c.json(
+      {
+        actions: actions.map((a) => ({
+          action: toDunningBody(a.action),
+          invoiceNumber: a.invoiceNumber,
+          party: { id: a.party.id, displayName: a.party.displayName },
+          outstanding: a.outstanding,
+          currency: a.currency,
+          dueOn: a.dueOn,
+        })),
+      },
+      200,
+    );
   });
 
   app.openapi(invoiceDunningRoute, async (c) => {

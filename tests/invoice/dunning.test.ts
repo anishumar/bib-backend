@@ -230,11 +230,11 @@ describe("the terminal rung needs a partner — the acceptance", () => {
 
     expect(report?.awaitingApproval).toBe(1);
     const pending = await s.service.pending(TENANT);
-    expect(pending.map((a) => a.action)).toEqual(["credit_hold"]);
-    expect(pending[0]?.state).toBe("pending_approval");
+    expect(pending.map((a) => a.action.action)).toEqual(["credit_hold"]);
+    expect(pending[0]?.action.state).toBe("pending_approval");
     // The rungs a machine MAY climb went through unattended, which is the other
     // half of the same sentence.
-    const taken = (await s.service.listFor(TENANT, pending[0]?.invoiceId ?? "")).filter(
+    const taken = (await s.service.listFor(TENANT, pending[0]?.action.invoiceId ?? "")).filter(
       (a) => a.state === "taken",
     );
     expect(taken.map((a) => a.step)).toEqual(["d3", "d7"]);
@@ -249,7 +249,7 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     if (pending === undefined) throw new Error("nothing pending");
 
     const decided = await s.service.decide(
-      { tenantId: TENANT, actionId: pending.id, approve: true, note: "Third quarter, no contact" },
+      { tenantId: TENANT, actionId: pending.action.id, approve: true, note: "Third quarter, no contact" },
       PARTNER,
     );
     expect(decided.state).toBe("approved");
@@ -270,7 +270,7 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     if (pending === undefined) throw new Error("nothing pending");
 
     const decided = await s.service.decide(
-      { tenantId: TENANT, actionId: pending.id, approve: false, note: "Client is disputing scope" },
+      { tenantId: TENANT, actionId: pending.action.id, approve: false, note: "Client is disputing scope" },
       PARTNER,
     );
     expect(decided.state).toBe("rejected");
@@ -288,7 +288,7 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     const [pending] = await s.service.pending(TENANT);
     if (pending === undefined) throw new Error("nothing pending");
     await expect(
-      s.service.decide({ tenantId: TENANT, actionId: pending.id, approve: true }, SYSTEM_ACTOR),
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, SYSTEM_ACTOR),
     ).rejects.toBeInstanceOf(DunningNotAwaitingApproval);
   });
 
@@ -315,9 +315,9 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     await s.service.sweep();
     const [pending] = await s.service.pending(TENANT);
     if (pending === undefined) throw new Error("nothing pending");
-    await s.service.decide({ tenantId: TENANT, actionId: pending.id, approve: true }, PARTNER);
+    await s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: true }, PARTNER);
     await expect(
-      s.service.decide({ tenantId: TENANT, actionId: pending.id, approve: false }, PARTNER),
+      s.service.decide({ tenantId: TENANT, actionId: pending.action.id, approve: false }, PARTNER),
     ).rejects.toBeInstanceOf(DunningAlreadyDecided);
   });
 });

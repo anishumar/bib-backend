@@ -125,9 +125,24 @@ export interface InvoiceRepository {
 
   /** What one invoice still owes, computed by Postgres. */
   balanceOf(tenantId: string, invoiceId: string): Promise<InvoiceBalance | null>;
-  /** Every invoice with something still owing — "who owes us money", which is
-   *  the question the dunning ladder and every collections screen ask. */
-  outstanding(tenantId: string): Promise<readonly InvoiceBalance[]>;
+  /**
+   * Every invoice with something still owing — "who owes us money".
+   *
+   * A JOINED read model, not a bare balance. A collections screen renders one
+   * row per debt and has to say WHOSE and WHICH; a list of invoice ids with
+   * amounts beside them is the per-row-lookup CLAUDE.md names as the sign that
+   * the join belongs in the query. Found by building the screen, which is the
+   * only thing that asks — the sweep that also calls this ignores the names.
+   */
+  outstanding(tenantId: string): Promise<readonly ReceivableRecord[]>;
+}
+
+/** A debt, with the two facts a person needs to act on it. */
+export interface ReceivableRecord {
+  readonly balance: InvoiceBalance;
+  /** The number a client quotes back and an audit cites. */
+  readonly number: string;
+  readonly party: { readonly id: string; readonly displayName: string };
 }
 
 export interface NewPayment {
@@ -182,6 +197,18 @@ export interface DunningActionRecord {
   readonly note: string | null;
 }
 
+/** A terminal rung, and what a partner needs in order to decide it. */
+export interface PendingDunningRecord {
+  readonly action: DunningActionRecord;
+  readonly invoiceNumber: string;
+  readonly party: { readonly id: string; readonly displayName: string };
+  /** What is actually still owed — the number the decision turns on. A rung
+   *  that fired at D+15 on a debt since settled is one a partner rejects. */
+  readonly outstanding: string;
+  readonly currency: string;
+  readonly dueOn: string | null;
+}
+
 export interface NewDunningAction {
   readonly id: string;
   readonly tenantId: string;
@@ -210,8 +237,15 @@ export interface DunningRepository {
   take(a: NewDunningAction): Promise<DunningActionRecord | null>;
   /** Which rungs an invoice has already had — the sweep's own memory. */
   taken(tenantId: string, invoiceId: string): Promise<readonly string[]>;
-  /** Terminal rungs waiting for a partner. */
-  pending(tenantId: string): Promise<readonly DunningActionRecord[]>;
+  /**
+   * Terminal rungs waiting for a partner — JOINED to what they are about.
+   *
+   * The decision is "put THIS CLIENT on credit hold", and a queue that showed a
+   * rung, a step key and an invoice uuid would be asking somebody to approve
+   * something they cannot see. The client, the invoice number and what is
+   * actually outstanding are the decision, so they come back with it.
+   */
+  pending(tenantId: string): Promise<readonly PendingDunningRecord[]>;
   decide(
     tenantId: string,
     actionId: string,

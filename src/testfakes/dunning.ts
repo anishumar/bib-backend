@@ -17,6 +17,7 @@ import type {
   DunningLadderSource,
   DunningRepository,
   NewDunningAction,
+  PendingDunningRecord,
 } from "../usecase/invoice/ports";
 
 export class FakeDunningRepo implements DunningRepository {
@@ -40,11 +41,42 @@ export class FakeDunningRepo implements DunningRepository {
     );
   }
 
-  pending(tenantId: string): Promise<readonly DunningActionRecord[]> {
+  /**
+   * The queue, joined the way the adapter joins it.
+   *
+   * The names come from `invoiceFacts`, which a test fills in — a fake that
+   * returned bare rows would let a screen test pass while the real queue showed
+   * a partner a uuid and asked them to approve a credit hold.
+   */
+  pending(tenantId: string): Promise<readonly PendingDunningRecord[]> {
     return Promise.resolve(
-      this.rows.filter((r) => r.tenantId === tenantId && r.state === "pending_approval"),
+      this.rows
+        .filter((r) => r.tenantId === tenantId && r.state === "pending_approval")
+        .map((action) => {
+          const facts = this.invoiceFacts.get(action.invoiceId);
+          return {
+            action,
+            invoiceNumber: facts?.number ?? action.invoiceId,
+            party: facts?.party ?? { id: "", displayName: "" },
+            outstanding: facts?.outstanding ?? "0",
+            currency: facts?.currency ?? "INR",
+            dueOn: facts?.dueOn ?? null,
+          };
+        }),
     );
   }
+
+  /** What the queue's join would find, as a test sets it. */
+  readonly invoiceFacts = new Map<
+    string,
+    {
+      number: string;
+      party: { id: string; displayName: string };
+      outstanding: string;
+      currency: string;
+      dueOn: string | null;
+    }
+  >();
 
   find(tenantId: string, actionId: string): Promise<DunningActionRecord | null> {
     return Promise.resolve(
