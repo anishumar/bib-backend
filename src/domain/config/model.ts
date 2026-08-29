@@ -1581,19 +1581,72 @@ export function isStepFact(v: string): v is StepFact {
 }
 
 /**
- * When a step applies at all.
+ * How a condition compares its fact.
  *
- * Equality only, and a `null` condition means always. `equals` is compared
- * exactly against the resolved fact, which is why both facts are already
- * normalised where they are stored.
+ * A CLOSED SET, for `StepFact`'s reason: a little expression language is a
+ * vocabulary nobody chose, no partner can write and no test can cover.
  *
- * A fact the job cannot resolve does NOT silently skip the step — see
- * `usecase/orchestrator`. Skipping on an unknown is how a review step quietly
- * stops happening.
+ * **All four operate on a STRING fact, because both facts this engine can
+ * resolve are strings.** There is deliberately no `gte` / `lte` here yet, and
+ * that is not an oversight — it is the same rule this codebase keeps being
+ * caught by. The firm's own compliance list (2026-08-30) shows its single most
+ * common driver is a THRESHOLD — *"turnover > ₹1 Cr"*, *"AATO ≥ ₹5 Cr"* — but
+ * nothing in this schema stores a turnover, an employee count or a paid-up
+ * capital. A `gte` offered today would sit in a picker beside `jurisdiction`,
+ * compare a string, and be a control that looks live and is inert.
+ *
+ * They arrive with the first NUMERIC fact, which arrives with the data, which
+ * is T3.2's `obligation_template`. **Adding an operator later is backward
+ * compatible** — a frozen body naming `equals` still reads. Changing the SHAPE
+ * later would not have been, which is why the shape moved now and the operators
+ * did not.
+ */
+export type StepOperator = "equals" | "not_equals" | "in" | "not_in";
+
+export const STEP_OPERATORS: readonly StepOperator[] = [
+  "equals",
+  "not_equals",
+  "in",
+  "not_in",
+];
+
+export function isStepOperator(v: string): v is StepOperator {
+  return (STEP_OPERATORS as readonly string[]).includes(v);
+}
+
+/** Whether an operator compares against a LIST rather than a single value. The
+ *  one structural difference between them, and the validator and the screen
+ *  both ask it rather than restating the membership. */
+export function operatorTakesList(op: StepOperator): boolean {
+  return op === "in" || op === "not_in";
+}
+
+/**
+ * When a step applies at all. `null` means always.
+ *
+ * The value is compared exactly against the resolved fact, which is why both
+ * facts are already normalised where they are stored.
+ *
+ * **A fact the job cannot resolve does NOT skip the step, under ANY operator** —
+ * see `usecase/orchestrator`. That rule is easy to get subtly wrong on a
+ * negative operator, where "the fact is not X" reads as true when the fact is
+ * unknown; it is not true, it is unknown, and skipping on an unknown is how a
+ * review step quietly stops happening.
+ *
+ * ── THE LEGACY SHAPE ────────────────────────────────────────────────────────
+ *
+ * Bodies written before this operator existed carry `{ fact, equals }` and no
+ * `op`. They are read as `equals` forever, and never rewritten: a published
+ * config version is FROZEN, which is the whole point of the registry, so the
+ * old shape is not a migration to run but a shape to keep parsing. Both are
+ * accepted on the way in; only the new one is written.
  */
 export interface StepCondition {
   readonly fact: StepFact;
-  readonly equals: string;
+  readonly op: StepOperator;
+  /** A single value for `equals` / `not_equals`; a non-empty list for `in` /
+   *  `not_in`. `operatorTakesList` is the one place that mapping lives. */
+  readonly value: string | readonly string[];
 }
 
 export interface WorkflowStep {
@@ -1724,7 +1777,10 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
     if (condition !== null && condition !== undefined) {
       if (typeof condition !== "object") return `${at}.condition must be an object or null`;
       const c = condition as Record<string, unknown>;
-      const cUnknown = unknownFields(c, ["fact", "equals"]);
+      // BOTH SHAPES, and the legacy one is not deprecated — it is FROZEN into
+      // every version published before operators existed, and a published body
+      // can never be rewritten. `equals` alone means `op: "equals"` forever.
+      const cUnknown = unknownFields(c, ["fact", "op", "value", "equals"]);
       if (cUnknown) return `${at}.condition: ${cUnknown}`;
       const fact = c["fact"];
       if (typeof fact !== "string" || !isStepFact(fact)) {
@@ -1734,9 +1790,51 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
           `by adding a member here when the firm names a condition it actually uses.`
         );
       }
-      const equals = c["equals"];
-      if (typeof equals !== "string" || equals.trim() === "") {
-        return `${at}.condition.equals must be a non-empty string`;
+
+      const legacyEquals = c["equals"];
+      const hasLegacy = legacyEquals !== undefined;
+      const hasOp = c["op"] !== undefined || c["value"] !== undefined;
+      // Refused rather than silently preferring one. A body carrying both is
+      // somebody's half-finished edit, and guessing which half they meant is
+      // how a step quietly starts applying to the wrong clients.
+      if (hasLegacy && hasOp) {
+        return (
+          `${at}.condition carries both the old "equals" and the newer "op"/"value". Use one: ` +
+          `"equals" is the shape published before operators existed and still reads, and ` +
+          `{ "op": "equals", "value": … } is what to write now.`
+        );
+      }
+
+      if (hasLegacy) {
+        if (typeof legacyEquals !== "string" || legacyEquals.trim() === "") {
+          return `${at}.condition.equals must be a non-empty string`;
+        }
+      } else {
+        const op = c["op"];
+        if (typeof op !== "string" || !isStepOperator(op)) {
+          return (
+            `${at}.condition.op must be one of ${STEP_OPERATORS.join(", ")}. All four compare a ` +
+            `STRING, because both facts this engine can resolve are strings — a numeric ` +
+            `comparison arrives with the first numeric fact and not before.`
+          );
+        }
+        const value = c["value"];
+        if (operatorTakesList(op)) {
+          if (!Array.isArray(value) || value.length === 0) {
+            return (
+              `${at}.condition.value must be a non-empty array for "${op}" — ` +
+              `["IN", "AE", "SG"]. An empty list matches nothing, which is a step that never ` +
+              `runs rather than a condition somebody meant.`
+            );
+          }
+          for (const v of value) {
+            if (typeof v !== "string" || v.trim() === "") {
+              return `${at}.condition.value contains ${describe(v)}, not a non-empty string`;
+            }
+          }
+        } else if (typeof value !== "string" || value.trim() === "") {
+          return `${at}.condition.value must be a non-empty string for "${op}"`;
+        }
       }
     }
 
@@ -1820,6 +1918,30 @@ function findStepCycle(
 }
 
 /**
+ * One stored condition, in the shape the engine evaluates — the ONE place the
+ * legacy `{ fact, equals }` becomes `{ fact, op, value }`.
+ *
+ * Normalised HERE and nowhere else, so the orchestrator's evaluator never has
+ * to know two shapes existed. A published version is frozen, so the old shape
+ * is permanent rather than a migration waiting to happen, and every consumer
+ * reading it through this function sees one shape forever.
+ */
+function readStepCondition(raw: unknown): StepCondition | null {
+  if (raw === null || raw === undefined) return null;
+  const c = raw as Record<string, unknown>;
+  const fact = c["fact"] as StepFact;
+  const legacy = c["equals"];
+  if (typeof legacy === "string") return { fact, op: "equals", value: legacy };
+  const op = c["op"];
+  const value = c["value"];
+  if (typeof op !== "string" || !isStepOperator(op)) return null;
+  if (operatorTakesList(op)) {
+    return Array.isArray(value) ? { fact, op, value: [...(value as string[])] } : null;
+  }
+  return typeof value === "string" ? { fact, op, value } : null;
+}
+
+/**
  * A stored workflow body, read back — the ONE reader for `kind='workflow_template'`.
  *
  * Returns null rather than throwing when the body is not one, for the reason
@@ -1837,13 +1959,7 @@ export function readWorkflowTemplate(
       label: s["label"] as string,
       executor: s["executor"] as StepExecutor,
       dependsOn: [...((s["dependsOn"] as string[] | undefined) ?? [])],
-      condition:
-        s["condition"] === null || s["condition"] === undefined
-          ? null
-          : {
-              fact: (s["condition"] as Record<string, unknown>)["fact"] as StepFact,
-              equals: (s["condition"] as Record<string, unknown>)["equals"] as string,
-            },
+      condition: readStepCondition(s["condition"]),
       // Absent reads as null, not as a parse failure. Every template published
       // before T2.9 has no such field, and those are processes a firm is
       // running today — a body that stopped parsing would take their jobs with

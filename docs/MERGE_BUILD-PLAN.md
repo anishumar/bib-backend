@@ -1409,7 +1409,30 @@ open and are recorded above; neither blocks Phase 2.
   > **Still open, and it is a CLIENT question:** which facts a branch may test. The mechanism
   > is built and proven over `recurrence` and `jurisdiction` — two facts that already exist,
   > not guesses — and the closed set grows by adding a member, a case in the fact resolver and
-  > a line of documentation. Asked of Sidharth; not answered.
+  > a line of documentation. Asked of Sidharth; **answered on 2026-08-30, and the answer was
+  > "not yet"** — *"I think this will be applicable only once we start using"* — with a
+  > compliance-applicability spreadsheet attached that belongs to T3.2. `StepFact` was
+  > therefore NOT extended.
+  >
+  > **The condition SHAPE was widened on 2026-08-30, and only the shape.** `{ fact, equals }`
+  > became `{ fact, op, value }` with four operators — `equals`, `not_equals`, `in`, `not_in`
+  > — all of which compare a string and all of which work on the two facts that exist. `in` /
+  > `not_in` close a real gap: three jurisdictions needed three templates before.
+  >
+  > **`gte` / `lte` were deliberately NOT added**, even though the firm's spreadsheet makes a
+  > threshold its commonest rule, because nothing stores a turnover to compare. The asymmetry
+  > is the point: adding an operator later is backward compatible against a frozen body,
+  > changing the shape later is not — so the shape moved the day the need was known and the
+  > operators wait for T3.2's data.
+  >
+  > The legacy `{ fact, equals }` is frozen into every version published before this and
+  > **still parses, forever**; `readStepCondition` normalises it so the evaluator sees one
+  > shape. A bug was found writing this and it is worth knowing: the first `explain` was a
+  > ternary chain, and an unrecognised operator fell through to the `not_in` arm and called
+  > `.join` on a string — so a template naming an unknown operator crashed the sweep instead of
+  > keeping the step. `compare` had already returned "keep" correctly; the EXPLANATION threw.
+  > Found by the test written for exactly that case. `scripts/step-operators-walk.sh` proves
+  > all four against a real job, plus the legacy shape beside them.
   >
   > Gate: `npm run check` **906** · `test:integration` **284** · `smoke` **229 passed, 0
   > failed** (unchanged — the smoke is at its request budget, so the engine is demonstrated by
@@ -1745,6 +1768,31 @@ open and are recorded above; neither blocks Phase 2.
 
 - [ ] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
   > Blocked on **G3.2** (the SPOC the acceptance names) and **G2.3** (`slaDays`, snapshotted at creation so a catalogue revision cannot make finished work retroactively late). From the demo, worth carrying across: `is_statutory_due` is what makes priority derivable — *"due dates that are statutory should anyway be high priority"* — and `blocked_reason` + `blocked_at` are the capture-or-lose pair, because "Blocked" as a state records that work is stuck and never why, and a year later "are our delays ours or the client's" has no query that can answer it.
+
+> ### The client's own applicability rules arrived (2026-08-30) — read this before T3.2
+>
+> Sidharth sent **`docs/India_Compliance_Calendar_Applicability_Business_in_a_Box.xlsx`** in
+> answer to *"what causes a step to be added or skipped"*, with the words *"I think this will
+> be applicable only once we start using. But I guess we can give rule based logics here."*
+>
+> **It is not an answer to that question, and it is worth more than one.** The question was
+> about STEP conditions inside a process (T2.7). The file is **55 obligations across 12
+> modules with their applicability tests** — which is T3.2's specification, not T2.7's. He has
+> said plainly that step-level skip rules do not exist yet and will emerge in use, so
+> `StepFact` was deliberately NOT extended on the strength of it.
+>
+> **The `Primary Driver` column is the closed set of facts this firm actually branches on**, and
+> it clusters: turnover / financial threshold (~12), transaction or corporate event (~13),
+> State (~6), registration status (~6), entity type and size (~5), employee count (~4),
+> industry (~4), cross-border (~6).
+>
+> **THE FINDING THAT CHANGES A DESIGN: the firm's commonest rule is a THRESHOLD, and nothing
+> in this schema stores the numbers it compares.** No turnover, no employee count, no paid-up
+> capital, no listed status. So `obligation_template` must be designed with **numeric
+> comparison and the fields to compare**, not equality — and the two arrive together, because
+> an operator without a fact to read is a control that looks live and is inert.
+>
+> The condition SHAPE was widened for this ahead of time — see the note under T2.7.
 
 - [ ] `(B)` **T3.2** **Obligations — the compliance calendar.** `obligation_template` → `obligation_instance`, statutory **and** internal-target dates, T–X lead time, financial-year periods. *Acc: an Indian quarter is Apr–Jun; March TDS exception resolves to 30 Apr; a monthly obligation spawns twelve instances a year out; re-running the generator changes nothing.*
   > **The one idea that makes this work: an obligation is not a task.** The obligation is what the LAW requires of the ENTITY — Kaveri Foods must file GSTR-3B for August by 20 September. The task is what somebody at the firm must DO about it. Merge them and the calendar can never be generated, only typed in by hand, which is the exact Excel work being replaced. Nobody adds a row to this calendar: it falls out of which entities exist, what each bought, and what the law says about that combination. If a human could add an entry, the calendar could drift from the law — and then it is Excel again, only now inside Postgres.

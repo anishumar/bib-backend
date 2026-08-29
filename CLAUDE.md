@@ -866,10 +866,33 @@ waiting on a person vanished from the work board AND from the sweep, so nothing 
 at it again. Only `done` and `cancelled` are excluded — those never move.
 
 **Step conditions test a CLOSED set of facts** (`recurrence`, `jurisdiction`), both of which
-already exist. A little expression language was refused: it is a vocabulary nobody chose, no
-partner can write and no test can cover. Which facts the firm actually branches on is an open
-question with the client; adding one is a member of `StepFact`, a case in the orchestrator's
+already exist, with a CLOSED set of operators (`equals`, `not_equals`, `in`, `not_in`). A
+little expression language was refused: it is a vocabulary nobody chose, no partner can write
+and no test can cover. Adding a fact is a member of `StepFact`, a case in the orchestrator's
 resolver, and a line of documentation.
+
+**THERE IS NO `gte` / `lte`, AND THAT IS THE SAME RULE AS EVERYTHING ELSE HERE.** The firm's
+own compliance list (given 2026-08-30) makes a THRESHOLD its single commonest driver —
+*"turnover > ₹1 Cr"*, *"AATO ≥ ₹5 Cr"*, *"net worth ≥ ₹500 Cr"* — but nothing in this schema
+stores a turnover, an employee count, a paid-up capital or a listed status. A numeric operator
+today would sit in a picker beside `jurisdiction`, compare a string, and do nothing: a control
+that looks live and is inert. It arrives with the first NUMERIC FACT, which arrives with the
+data, which is T3.2.
+
+**The SHAPE moved and the operators did not, and the asymmetry is deliberate.** Adding an
+operator later is backward compatible — a frozen body naming `equals` still reads. Changing
+`{ fact, equals }` into `{ fact, op, value }` later would not have been, because every body
+published in between would carry the old shape forever. So the shape changed the day the need
+was known and the operators wait for their data. **The legacy `{ fact, equals }` is not
+deprecated — it is frozen into every version published before operators existed, and
+`readStepCondition` normalises it to `op: "equals"` on the way out so the evaluator only ever
+sees one shape.**
+
+**AN UNRESOLVED FACT KEEPS THE STEP — under EVERY operator, and the negative ones are the
+subtle half.** "The jurisdiction is not IN" reads as true when the jurisdiction is unknown, and
+it is not true, it is unknown. Evaluating `not_equals` against a null would let a blank field
+SATISFY a condition, which is the same failure as skipping on one, reached from the opposite
+side. The null check is therefore before the operator is even looked at.
 
 **`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
 permission, because the row it gates is the record of who did the work.

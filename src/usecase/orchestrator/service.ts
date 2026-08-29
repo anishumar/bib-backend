@@ -998,7 +998,11 @@ export class OrchestratorService {
         payload: {
           stepKey: step.stepKey,
           fact: def.condition.fact,
-          expected: def.condition.equals,
+          // The OPERATOR rides along now. Without it "expected: IN, actual: AE"
+          // reads as a plain mismatch whichever way the rule pointed, and
+          // "how often does a not_in rule fire" would be unanswerable.
+          op: def.condition.op,
+          expected: def.condition.value,
           actual: verdict.actual,
         },
       });
@@ -1240,10 +1244,21 @@ export class OrchestratorService {
  * review step costs an hour, a missing one costs a filing.
  */
 export function evaluateCondition(
-  condition: { readonly fact: string; readonly equals: string },
+  condition: {
+    readonly fact: string;
+    readonly op: string;
+    readonly value: string | readonly string[];
+  },
   subject: JobSubject | null,
 ): { readonly holds: boolean; readonly actual: string | null; readonly why: string } {
   const actual = resolveFact(condition.fact, subject);
+
+  // FIRST, AND BEFORE THE OPERATOR IS EVEN LOOKED AT. On a negative operator
+  // this is the whole subtlety: "the jurisdiction is not IN" reads as TRUE when
+  // the jurisdiction is unknown, and it is not true — it is unknown. Evaluating
+  // `not_equals` against a null would make a blank field silently satisfy a
+  // condition, which is the same failure as skipping on one, arrived at from
+  // the opposite side.
   if (actual === null) {
     return {
       holds: true,
@@ -1251,12 +1266,71 @@ export function evaluateCondition(
       why: `${condition.fact} is not stated, so the step was kept`,
     };
   }
-  const holds = actual === condition.equals;
-  return {
-    holds,
-    actual,
-    why: `${condition.fact} is ${JSON.stringify(actual)}, and this step applies only when it is ${JSON.stringify(condition.equals)}`,
-  };
+
+  const holds = compare(actual, condition.op, condition.value);
+  return { holds, actual, why: explain(condition.fact, actual, condition.op, condition.value) };
+}
+
+/**
+ * The four comparisons, and the default that keeps the step.
+ *
+ * An operator this function has not learnt is treated as "holds", for
+ * `resolveFact`'s reason: a template naming something the engine cannot
+ * evaluate must not silently delete steps from a process. The config validator
+ * refuses an unknown operator at the write, so this is the second wall rather
+ * than the first.
+ */
+function compare(actual: string, op: string, value: string | readonly string[]): boolean {
+  switch (op) {
+    case "equals":
+      return actual === value;
+    case "not_equals":
+      return actual !== value;
+    case "in":
+      return Array.isArray(value) && value.includes(actual);
+    case "not_in":
+      return Array.isArray(value) && !value.includes(actual);
+    default:
+      return true;
+  }
+}
+
+/**
+ * Why a step was skipped, in words, for the note on the row. The LEDGER gets
+ * the fact and the values instead — a sentence does not GROUP BY.
+ *
+ * A `switch` with a default, mirroring `compare`, and NOT a ternary chain. The
+ * chain was the first draft and it had a real bug: an operator neither branch
+ * recognised fell through to the `not_in` arm and called `.join` on a string,
+ * so a template naming an unknown operator crashed the sweep instead of keeping
+ * the step. `compare` had already returned "keep" correctly — the explanation
+ * is what threw. Found by the test for exactly that case.
+ */
+function explain(
+  fact: string,
+  actual: string,
+  op: string,
+  value: string | readonly string[],
+): string {
+  const list = Array.isArray(value) ? value.join(", ") : String(value);
+  let applies: string;
+  switch (op) {
+    case "equals":
+      applies = `only when it is ${JSON.stringify(value)}`;
+      break;
+    case "not_equals":
+      applies = `only when it is anything but ${JSON.stringify(value)}`;
+      break;
+    case "in":
+      applies = `only when it is one of ${list}`;
+      break;
+    case "not_in":
+      applies = `only when it is none of ${list}`;
+      break;
+    default:
+      applies = `under a rule this engine cannot read (${JSON.stringify(op)}), so it was kept`;
+  }
+  return `${fact} is ${JSON.stringify(actual)}, and this step applies ${applies}`;
 }
 
 function resolveFact(fact: string, subject: JobSubject | null): string | null {

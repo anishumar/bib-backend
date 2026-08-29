@@ -96,7 +96,20 @@ export interface TemplateStep {
   readonly label: string;
   readonly executor: string;
   readonly dependsOn: readonly string[];
-  readonly condition: { readonly fact: string; readonly equals: string } | null;
+  /**
+   * When this step applies at all, or null for always.
+   *
+   * Stated structurally rather than imported from `domain/config`, like every
+   * other field here — but note it is the NORMALISED shape: a template body
+   * published before operators existed carries `{ fact, equals }`, and the
+   * config reader turns that into `op: "equals"` before it ever reaches this
+   * port. The orchestrator only ever sees one shape.
+   */
+  readonly condition: {
+    readonly fact: string;
+    readonly op: string;
+    readonly value: string | readonly string[];
+  } | null;
   /** The `verification_policy` key that governs who checks this step once it is
    *  done, or null for a step nobody checks (T2.9). Every template published
    *  before T2.9 reads as null here, which is exactly what those processes

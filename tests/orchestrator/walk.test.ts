@@ -231,7 +231,7 @@ describe("branch — a step whose condition does not hold is skipped, and the re
     step({
       key: "annual_summary",
       dependsOn: ["collect"],
-      condition: { fact: "recurrence", equals: "annually" },
+      condition: { fact: "recurrence", op: "equals", value: "annually" },
     }),
     step({ key: "file", dependsOn: ["collect"] }),
   ]);
@@ -270,7 +270,7 @@ describe("branch — a step whose condition does not hold is skipped, and the re
         step({
           key: "annual_summary",
           dependsOn: ["collect"],
-          condition: { fact: "recurrence", equals: "annually" },
+          condition: { fact: "recurrence", op: "equals", value: "annually" },
         }),
         // Two levels below the conditional step, to prove the cascade is
         // transitive rather than one-deep.
@@ -303,6 +303,9 @@ describe("branch — a step whose condition does not hold is skipped, and the re
     expect(skip?.payload).toEqual({
       stepKey: "annual_summary",
       fact: "recurrence",
+      // The operator too. Without it "expected: annually, actual: monthly"
+      // reads the same whichever way the rule pointed.
+      op: "equals",
       expected: "annually",
       actual: "monthly",
     });
@@ -618,7 +621,7 @@ describe("a job's status is derived from its steps, never tracked beside them", 
           key: "b",
           executor: "agent",
           dependsOn: ["a"],
-          condition: { fact: "recurrence", equals: "annually" },
+          condition: { fact: "recurrence", op: "equals", value: "annually" },
         }),
       ]),
     );
