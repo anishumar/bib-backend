@@ -96,7 +96,15 @@ Phase 7  Real integrations P11 — external-gated, its own track
 `0018`, and a migration is immutable once applied anywhere, so a collision is not a rename —
 it is one of us redoing the work under a new number.
 
-**Proposed:** `(A)` takes **0018–0039**, `(B)` takes **0040+**. Cheap, and it makes the two
+**Proposed:** `(A)` takes **0018–0039**, `(B)` takes **0040+**.
+
+> **`(A)` has taken 0018–0033, and 0034 is next.** One slip worth recording rather than
+> quietly fixing: the dunning migrations were first written as `0030`/`0031`, and **`0030` was
+> already `0030_lead_title_and_lost_reason`** (G3.1). The migrator keys on the full filename,
+> so both would have applied and nothing would have broken — which is exactly why it would
+> have survived review and confused whoever read the directory next. Caught before the branch
+> was pushed and renumbered to `0032`/`0033`. **Check `ls migrations/` before choosing a
+> number; the range is not a guarantee that the number inside it is free.** Cheap, and it makes the two
 lanes' schema work genuinely parallel. Revisit when either range runs low.
 
 ---
@@ -1306,7 +1314,7 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Gate: `npm run check` 766 · `test:integration` 243 · `smoke` **225 passed, 0 failed**.
 - [x] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
-  > **Done (2026-08-29). Migrations 0028, 0029, 0030, 0031.** Payments, credit notes AND the
+  > **Done (2026-08-29). Migrations 0028, 0029, 0032, 0033.** Payments, credit notes AND the
   > dunning ladder — the acceptance holds in both halves: the worker climbs the ladder, and the
   > terminal rung needs a partner.
   >

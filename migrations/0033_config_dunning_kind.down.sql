@@ -1,4 +1,4 @@
--- Reverses 0031. Refuses if any firm has published a dunning ladder, which is
+-- Reverses 0033. Refuses if any firm has published a dunning ladder, which is
 -- correct: going back means that configuration is no longer representable.
 SET ROLE bib_owner;
 

@@ -1,4 +1,4 @@
--- 0030 · The dunning ladder (T3.5) — chasing a receivable, and the one rung a
+-- 0032 · The dunning ladder (T3.5) — chasing a receivable, and the one rung a
 -- machine may not climb
 --
 -- ── WHAT THIS TABLE IS, AND WHY IT IS NOT DERIVED ──────────────────────────

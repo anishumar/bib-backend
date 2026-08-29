@@ -1,4 +1,4 @@
--- 0031 · `dunning` joins the configuration registry's kinds
+-- 0033 · `dunning` joins the configuration registry's kinds
 --
 -- The ladder a firm chases receivables with — D+3, D+7, D+15 — is the registry's
 -- own test case: numbers a partner changes, that must not need a deploy, and
