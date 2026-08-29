@@ -1285,7 +1285,7 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `check` 460 · `test:integration` 120 · `smoke` 130 — including the walk that signs a
   > two-line letter, sweeps, and gets **one job per engagement rather than one per letter**,
   > which is G0.1's "Per Company" rule showing up in the engine.
-- [~] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
+- [x] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
   > **CORRECTION (2026-08-29), and it was mine.** The line above previously said T2.7 would
   > turn "one job per engagement" into "one job per (engagement, group)". **That is backwards**,
   > and reading the code rather than the board is what found it: `crm.engagement` carries
@@ -1414,6 +1414,91 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` **906** · `test:integration` **284** · `smoke` **229 passed, 0
   > failed** (unchanged — the smoke is at its request budget, so the engine is demonstrated by
   > `worker:once` and a scripted walk, which is how T3.5's ladder is demonstrated too).
+  >
+  > ── **THE MERGE, 2026-08-29 — and this is what closes the box.** ─────────────────────────
+  >
+  > **Migration 0046.** `groupByAxis` has its caller. One client, one company, one delivery
+  > team, one letter, three services -> ONE checklist. Run against a seeded firm and watched:
+  > FinCompliance's GST + TDS merged into one job, Payroll got its own, and the SAME client's
+  > second company got its own FinCompliance job — the Per Company rule holding on screen.
+  >
+  > **The key is `(engagement_letter_id, entity_party_id, axis code, workflow key)`**, and
+  > every part earns its place:
+  >
+  >   `entity_party_id` — the firm's own Per Company rule. vCFO for four companies is four
+  >   engagements because each files its own returns. **The firm says three sub-companies get
+  >   three separate LETTERS**, so within a letter the entity is normally constant and this
+  >   looks redundant — it is not. `engagement_letter_line.entity_party_id` is per LINE and
+  >   NOT NULL (0018), so the schema permits a mixed letter whatever the practice is. The key
+  >   makes the rule hold rather than leaving the practice to hold it. **See the open question
+  >   below: the demo repo records the OPPOSITE as a closed client answer.**
+  >
+  >   `engagement_letter_id` — a job has to be able to FINISH. Two letters months apart are
+  >   two contracts; letting the second join the first's open checklist grows one job for the
+  >   life of the client relationship.
+  >
+  >   the axis code — the firm's own `work_split_axis` (G2.4).
+  >
+  >   **the workflow key — the open question from the first pass, decided.** Two services
+  >   naming two processes are two processes by the firm's own account; merging them invents
+  >   an order nobody wrote over step keys that can collide. Degrades well: services on one
+  >   team usually name one process or none, so the merge still happens, and "no process" is
+  >   its own group. The cost is that a splitting firm can see two cards for one team — so the
+  >   card names its process's team and lists its services, rather than looking like a
+  >   duplicate.
+  >
+  > **A BUG IN `groupByAxis` ITSELF, found by wiring the caller.** Its `none` branch returned
+  > ONE bucket holding everything, documented as "T2.6's behaviour, unchanged" — and it is the
+  > opposite. T2.6 gives one job per ENGAGEMENT, so one bucket would have MERGED every line of
+  > every letter for every firm on the default setting: the exact silent re-cut G2.4 promised
+  > would not happen until a firm chooses. Eleven unit tests were green on it, because nothing
+  > consumed it. `none` now merges nothing. **Third time on this project the consumer, not the
+  > test, found the bug.**
+  >
+  > **TWO uniqueness rules, and they are not the same rule.** `job_engagement UNIQUE
+  > (tenant_id, engagement_id)` is ABSOLUTE and forever — one engagement's work exists in
+  > exactly one job, which is what stops a second set of tasks and a second invoice. The job
+  > table's own key became PARTIAL (`WHERE status NOT IN ('done','cancelled')`): at most one
+  > OPEN job per group, because a group whose checklist finished must be able to get a new one
+  > when a later line's advance lands months later. Attaching new work to a finished checklist
+  > is work nobody looks at again.
+  >
+  > **`job.scope_extended` is a new verb**, for the second line of a letter joining a
+  > checklist already in flight. Proven live: first sweep opened the job, the second advance
+  > was recorded, the next sweep said "nothing to spawn" and the ledger carries
+  > `job.scope_extended` with ONLY the engagement that joined.
+  >
+  > **`source_ref` stops naming a row.** For a merged job it is the group key, derived (uuid
+  > v5, its own namespace). Which is why **the work board no longer renders a uuid** — the old
+  > comment there called that an outstanding gap; the merge made it unavoidable, since a
+  > derived key is not even a uuid somebody could look up. `GET /api/v1/jobs` carries the
+  > company, the client, the team and the SERVICE NAMES now, in one query for the page.
+  >
+  > **A THIRD BUG, found over HTTP.** `SchedulerError` had NO entry in `api/domainerr.ts` — it
+  > had never been reachable, because the list route never looks a job up. The new
+  > `GET /api/v1/jobs/{jobId}` is its first surface and answered **500 to an unknown job while
+  > its own OpenAPI said 404**. Mapped. Same failure as `StaffGradeError`, third occurrence,
+  > and CLAUDE.md already warns about it.
+  >
+  > **`GET /api/v1/jobs/{jobId}` also closes a real gap**: `/api/v1/jobs` lists only what is
+  > RUNNABLE, so a FINISHED job's steps were readable with nothing saying whose work they were.
+  >
+  > **NOT done, and named rather than implied:** nothing re-cuts jobs that already exist when a
+  > firm changes `work_split_axis` — that is the stated design (`G2.4`: changing it restates
+  > nothing), and it means a firm that switches mid-year has two shapes of job on its board
+  > until the old ones finish. No screen says so yet.
+  >
+  > **AND A CLIENT FACT IS IN DISPUTE — do not settle it from this file.** `(B)`'s reviewer
+  > states that three sub-companies get three separate engagement letters. The pre-rebuild demo
+  > records the OPPOSITE as a CLOSED question answered by the firm's owner — `docs/OPEN-QUESTIONS.md`
+  > Q20: *"One EL."* One document, many entities bound by the parent's signature, which is
+  > exactly why `entity_party_id` sits on the LINE and not the document. Both readings are
+  > safe under this design, because the merge never crosses entities either way. It is on the
+  > board because it decides whether the drafting screens should let one letter name several
+  > companies, and that is `(A)`'s lane.
+  >
+  > Gate after the merge: `npm run check` **920** · `test:integration` **293** · `smoke`
+  > **229 passed, 0 failed**.
 
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
 - [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*

@@ -96,6 +96,8 @@ describe("idempotency, enforced by the key rather than by the caller", () => {
       sourceKind: "engagement",
       sourceRef: ids.engagementA,
       runnableAt: new Date().toISOString(),
+      splitAxis: "none" as const,
+      splitCode: null,
     });
     const second = await repo.createIfAbsent({
       id: ref(),
@@ -103,6 +105,8 @@ describe("idempotency, enforced by the key rather than by the caller", () => {
       sourceKind: "engagement",
       sourceRef: ids.engagementA,
       runnableAt: new Date().toISOString(),
+      splitAxis: "none" as const,
+      splitCode: null,
     });
 
     expect(first.created).toBe(true);
@@ -133,6 +137,8 @@ describe("idempotency, enforced by the key rather than by the caller", () => {
       sourceKind: "engagement",
       sourceRef: ids.engagementA,
       runnableAt: new Date().toISOString(),
+      splitAxis: "none" as const,
+      splitCode: null,
     });
     const [after] = await asTenant(ids.tenantA, (tx) =>
       tx<{ updated_at: Date }[]>`
@@ -152,6 +158,8 @@ describe("idempotency, enforced by the key rather than by the caller", () => {
       sourceKind: "engagement",
       sourceRef: ids.engagementA,
       runnableAt: new Date().toISOString(),
+      splitAxis: "none" as const,
+      splitCode: null,
     });
     expect(other.created).toBe(true);
   });
@@ -235,28 +243,30 @@ describe("a job is never removed", () => {
 });
 
 describe("the activation feed reads the ledger and stops when the job exists", () => {
-  it("offers an activation once, and not after its job is spawned", async () => {
-    // The anti-join is what makes the feed self-limiting: a worker that was down
-    // for a day finds exactly the backlog, and a worker that already spawned
-    // finds nothing. Without it every sweep would re-offer the whole history.
+  it("does not offer an activation whose engagement is not there", async () => {
+    // CHANGED BY 0046, and deliberately. The anti-join used to be over
+    // `job.source_ref` and this fixture's engagement ids are bare uuids with no
+    // crm rows behind them, which was fine while the feed read nothing but the
+    // ledger.
+    //
+    // The feed now resolves each activation's letter, entity and service so it
+    // can decide which checklist the work belongs on, and `job_engagement`
+    // carries a foreign key to `crm.engagement` — so an activation naming a row
+    // that is not there could not become a job even if it were offered. It is
+    // not offered. Before the link table it produced a phantom job that sat
+    // forever unable to resolve its own subject, which was the same fault one
+    // step further downstream.
+    //
+    // The anti-join proper, with real engagements behind it, is
+    // `merge.integration.test.ts` — it needs a letter, lines and a published
+    // service, which is a fixture this file deliberately does not have.
     await owner`
       INSERT INTO ledger.event (id, tenant_id, actor_type, actor_id, verb, object_type, object_id, payload)
       VALUES (${ref()}, ${ids.tenantA}, 'system', NULL, 'contract.activated', 'engagement', ${ids.engagementB}, '{}'::jsonb)
     `;
 
-    const before = await repo.unspawnedActivations(ids.tenantA, 10);
-    expect(before.map((a) => a.engagementId)).toContain(ids.engagementB);
-
-    await repo.createIfAbsent({
-      id: ref(),
-      tenantId: ids.tenantA,
-      sourceKind: "engagement",
-      sourceRef: ids.engagementB,
-      runnableAt: new Date().toISOString(),
-    });
-
-    const after = await repo.unspawnedActivations(ids.tenantA, 10);
-    expect(after.map((a) => a.engagementId)).not.toContain(ids.engagementB);
+    const offered = await repo.unspawnedActivations(ids.tenantA, 10);
+    expect(offered.map((a) => a.engagementId)).not.toContain(ids.engagementB);
   });
 
   it("does not offer another firm's activations", async () => {
@@ -275,6 +285,8 @@ describe("what is runnable", () => {
       sourceKind: "obligation",
       sourceRef: source,
       runnableAt: future,
+      splitAxis: "none" as const,
+      splitCode: null,
     });
     const runnable = await repo.listRunnable(ids.tenantA, new Date().toISOString(), 50);
     expect(runnable.map((j) => j.sourceRef)).not.toContain(source);
@@ -304,6 +316,8 @@ describe("what is runnable", () => {
       sourceKind: "obligation",
       sourceRef: ref(),
       runnableAt: new Date().toISOString(),
+      splitAxis: "none" as const,
+      splitCode: null,
     });
     const started = await repo.updateStatus(
       ids.tenantA,

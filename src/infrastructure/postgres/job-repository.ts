@@ -7,10 +7,13 @@
 // without the commercial lane knowing an engine exists.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { readServiceBody } from "../../domain/config/model";
 import type { Job, JobSource, JobStatus } from "../../domain/scheduler/model";
+import type { WorkSplitAxis } from "../../domain/serviceaxis/model";
 import type {
   Activation,
   ActivationFeed,
+  JobDetail,
   JobRepository,
   NewJob,
   TenantDirectory,
@@ -23,13 +26,32 @@ interface JobRow {
   source_ref: string;
   status: JobStatus;
   template_version_id: string | null;
+  split_axis: WorkSplitAxis;
+  split_code: string | null;
   runnable_at: Date | string;
   started_at: Date | string | null;
   finished_at: Date | string | null;
 }
 
+interface DetailRow {
+  job_id: string;
+  engagement_id: string;
+  service_name: string | null;
+  entity_name: string | null;
+  client_name: string | null;
+}
+
+interface ActivationRow {
+  object_id: string;
+  occurred_at: Date | string;
+  engagement_letter_id: string;
+  entity_party_id: string;
+  body: Record<string, unknown> | null;
+}
+
 const COLUMNS =
-  "id, tenant_id, source_kind, source_ref, status, template_version_id, runnable_at, started_at, finished_at";
+  "id, tenant_id, source_kind, source_ref, status, template_version_id, " +
+  "split_axis, split_code, runnable_at, started_at, finished_at";
 
 /** timestamptz comes back from postgres.js as a Date; the domain speaks ISO
  *  strings, so it is converted once, here at the door. */
@@ -46,6 +68,8 @@ function toJob(r: JobRow): Job {
     sourceRef: r.source_ref,
     status: r.status,
     templateVersionId: r.template_version_id,
+    splitAxis: r.split_axis,
+    splitCode: r.split_code,
     runnableAt: ts(r.runnable_at) ?? "",
     startedAt: ts(r.started_at),
     finishedAt: ts(r.finished_at),
@@ -71,28 +95,146 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
    */
   async createIfAbsent(job: NewJob): Promise<{ job: Job; created: boolean }> {
     return withTenant(this.app, job.tenantId, async (db) => {
+      // The conflict target names the partial index's PREDICATE as well as its
+      // columns (0046) — postgres will not infer a partial index without it,
+      // and the whole point of the index being partial is that a group whose
+      // job has FINISHED may legally get another one when a later engagement
+      // arrives. Without the WHERE, this would either not compile or would
+      // silently match a different index.
       const inserted = await db<JobRow[]>`
-        INSERT INTO delivery.job (id, tenant_id, source_kind, source_ref, runnable_at)
-        VALUES (${job.id}, ${job.tenantId}, ${job.sourceKind}, ${job.sourceRef}, ${job.runnableAt})
-        ON CONFLICT (tenant_id, source_kind, source_ref) DO NOTHING
+        INSERT INTO delivery.job
+          (id, tenant_id, source_kind, source_ref, runnable_at, split_axis, split_code)
+        VALUES (
+          ${job.id}, ${job.tenantId}, ${job.sourceKind}, ${job.sourceRef},
+          ${job.runnableAt}, ${job.splitAxis}, ${job.splitCode}
+        )
+        ON CONFLICT (tenant_id, source_kind, source_ref)
+          WHERE status NOT IN ('done', 'cancelled')
+          DO NOTHING
         RETURNING ${db.unsafe(COLUMNS)}
       `;
       const row = inserted[0];
       if (row) return { job: toJob(row), created: true };
 
+      // The OPEN one, matching the index that refused the insert. A finished
+      // job for the same cause may also exist and is not the answer: handing it
+      // back would attach new work to a checklist nobody will look at again.
       const [existing] = await db<JobRow[]>`
         SELECT ${db.unsafe(COLUMNS)} FROM delivery.job
         WHERE source_kind = ${job.sourceKind} AND source_ref = ${job.sourceRef}
+          AND status NOT IN ('done', 'cancelled')
       `;
       if (!existing) {
         throw new Error(
           `job for ${job.sourceKind} ${job.sourceRef} neither inserted nor found — the unique ` +
-            `key refused the insert but the row is not visible, which should be impossible ` +
+            `key refused the insert but no open row is visible, which should be impossible ` +
             `inside one transaction`,
         );
       }
       return { job: toJob(existing), created: false };
     });
+  }
+
+  /**
+   * Attach engagements to a job, and report which ones this call actually
+   * attached.
+   *
+   * `ON CONFLICT DO NOTHING` over `UNIQUE (tenant_id, engagement_id)` is doing
+   * two different jobs at once and both are wanted. An engagement already
+   * linked to THIS job is a redelivery, and the right answer is "nothing
+   * happened". An engagement linked to ANOTHER job is the thing that must never
+   * occur — two checklists for one piece of work, two sets of tasks, eventually
+   * two invoices — and the constraint refuses it here rather than leaving it to
+   * a rule somebody remembers.
+   *
+   * One statement rather than a loop, so a failure cannot leave a merged job
+   * holding half its engagements and then run to completion looking finished.
+   */
+  async linkEngagements(
+    tenantId: string,
+    jobId: string,
+    engagementIds: readonly string[],
+  ): Promise<readonly string[]> {
+    if (engagementIds.length === 0) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ engagement_id: string }[]>`
+        INSERT INTO delivery.job_engagement (tenant_id, job_id, engagement_id)
+        SELECT ${tenantId}, ${jobId}, e
+        FROM unnest(${db.array([...engagementIds])}::uuid[]) AS e
+        ON CONFLICT (tenant_id, engagement_id) DO NOTHING
+        RETURNING engagement_id
+      `;
+      return rows.map((r) => r.engagement_id);
+    });
+  }
+
+  /**
+   * What a set of jobs is for, in words — one query for the whole list.
+   *
+   * The service NAME comes off the PINNED version while the grouping facts came
+   * off the LIVE one, and that split is deliberate: the name is a term of the
+   * client's letter and must read as it was written, while which team delivers
+   * it and how is ours and reads as it is now.
+   */
+  async describeJobs(
+    tenantId: string,
+    jobIds: readonly string[],
+  ): Promise<ReadonlyMap<string, JobDetail>> {
+    const out = new Map<string, JobDetail>();
+    if (jobIds.length === 0) return out;
+
+    const rows = await withTenant(this.app, tenantId, async (db) => {
+      return db<DetailRow[]>`
+        SELECT
+          je.job_id,
+          je.engagement_id,
+          pinned.body->>'name' AS service_name,
+          ent.display_name AS entity_name,
+          cl.display_name  AS client_name
+        FROM delivery.job_engagement je
+        -- LEFT all the way down. The link row is the fact that this work is in
+        -- this job; everything below it is only how to NAME it. A row that
+        -- could not be named must still appear, blank, rather than vanish from
+        -- the card while its steps sit on somebody's board.
+        LEFT JOIN crm.engagement e
+          ON e.id = je.engagement_id AND e.tenant_id = je.tenant_id
+        LEFT JOIN crm.engagement_letter_line l
+          ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
+        LEFT JOIN config.version pinned
+          ON pinned.id = l.service_version_id AND pinned.tenant_id = l.tenant_id
+        -- The entity the work is delivered TO and the client who is BILLED are
+        -- different parties and the board shows both. LEFT on each: a party is
+        -- never deleted in this product, so a null here would be a real fault
+        -- and is better rendered as a blank than as a crashed list.
+        LEFT JOIN core.party ent
+          ON ent.id = e.entity_party_id AND ent.tenant_id = e.tenant_id
+        LEFT JOIN core.party cl
+          ON cl.id = e.party_id AND cl.tenant_id = e.tenant_id
+        WHERE je.job_id = ANY(${db.array([...jobIds])}::uuid[])
+        ORDER BY je.job_id, je.created_at, je.engagement_id
+      `;
+    });
+
+    for (const r of rows) {
+      const existing = out.get(r.job_id);
+      const service = {
+        engagementId: r.engagement_id,
+        // A published service body always has a name (the validator requires
+        // it). The fallback is for the row that should not exist rather than a
+        // default anybody is meant to see.
+        serviceName: r.service_name ?? "(unnamed service)",
+      };
+      if (existing) {
+        out.set(r.job_id, { ...existing, services: [...existing.services, service] });
+      } else {
+        out.set(r.job_id, {
+          entityName: r.entity_name,
+          clientName: r.client_name,
+          services: [service],
+        });
+      }
+    }
+    return out;
   }
 
   async findById(tenantId: string, jobId: string): Promise<Job | null> {
@@ -198,21 +340,69 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
    */
   async unspawnedActivations(tenantId: string, limit: number): Promise<readonly Activation[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ object_id: string; occurred_at: Date | string }[]>`
-        SELECT e.object_id, e.occurred_at
-        FROM ledger.event e
-        WHERE e.verb = 'contract.activated'
+      const rows = await db<ActivationRow[]>`
+        SELECT
+          ev.object_id,
+          ev.occurred_at,
+          e.engagement_letter_id,
+          e.entity_party_id,
+          live.body AS body
+        FROM ledger.event ev
+        -- INNER on the engagement, and that is a deliberate narrowing (0046).
+        -- An activation naming a row that is not there can no longer BECOME a
+        -- job: job_engagement carries a foreign key to crm.engagement, so the
+        -- link would be refused. The feed therefore does not offer work it
+        -- could not create. Before the link table existed this produced a
+        -- phantom job that sat forever unable to resolve its own subject,
+        -- which was not better -- it was the same fault, further downstream.
+        JOIN crm.engagement e
+          ON e.id = ev.object_id AND e.tenant_id = ev.tenant_id
+        -- LEFT from here down, and this half matters more. The line, the
+        -- pinned version and the live body are needed only for the GROUPING
+        -- facts, and a service that cannot be resolved -- unpublished since,
+        -- or a line that went missing -- must still SPAWN. It lands in the
+        -- unfiled bucket and gets its own job, exactly as a service filed
+        -- under no Dept does. Losing work because we could not decide which
+        -- checklist it belonged on is the worst failure available here.
+        LEFT JOIN crm.engagement_letter_line l
+          ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
+        -- Through the line's PINNED service version to the ENTRY, then back out
+        -- to whatever is published NOW. The grouping facts are read LIVE for the
+        -- reason the subject read gives at length: a client agreed to the
+        -- service, not to which of our teams delivers it or what our internal
+        -- steps are. LEFT, because a firm may have unpublished the service since
+        -- — which reads as "filed under nothing, no process", both real states.
+        LEFT JOIN config.version pinned
+          ON pinned.id = l.service_version_id AND pinned.tenant_id = l.tenant_id
+        LEFT JOIN config.version live
+          ON live.entry_id = pinned.entry_id
+         AND live.tenant_id = pinned.tenant_id
+         AND live.status = 'published'
+        WHERE ev.verb = 'contract.activated'
+          -- THE ANTI-JOIN, and it is now over the LINK table rather than over
+          -- job.source_ref (0046). A merged job's source_ref is a derived
+          -- group key that names no engagement, so the old test would have
+          -- reported every already-merged engagement as unspawned and built a
+          -- second checklist for it on the very next sweep.
           AND NOT EXISTS (
-            SELECT 1 FROM delivery.job j
-            WHERE j.source_kind = 'engagement' AND j.source_ref = e.object_id
+            SELECT 1 FROM delivery.job_engagement je
+            WHERE je.engagement_id = ev.object_id AND je.tenant_id = ev.tenant_id
           )
-        ORDER BY e.occurred_at
+        ORDER BY ev.occurred_at
         LIMIT ${limit}
       `;
-      return rows.map((r) => ({
-        engagementId: r.object_id,
-        occurredAt: ts(r.occurred_at) ?? "",
-      }));
+      return rows.map((r) => {
+        const service = r.body === null ? null : readServiceBody(r.body);
+        return {
+          engagementId: r.object_id,
+          occurredAt: ts(r.occurred_at) ?? "",
+          engagementLetterId: r.engagement_letter_id,
+          entityPartyId: r.entity_party_id,
+          deptCode: service?.module ?? null,
+          teamCode: service?.group ?? null,
+          workflowKey: service?.workflowTemplateKey ?? null,
+        };
+      });
     });
   }
 }

@@ -15,7 +15,9 @@ import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
+import type { Activation } from "../../src/usecase/scheduler/ports";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -26,6 +28,27 @@ const FIRM_B = "00000000-0000-4000-8000-0000000000a2";
 const ENGAGEMENT_1 = "00000000-0000-4000-8000-0000000000e1";
 const ENGAGEMENT_2 = "00000000-0000-4000-8000-0000000000e2";
 const NOW = "2026-08-29T09:00:00.000Z";
+const LETTER_1 = "00000000-0000-4000-8000-0000000000L1".replace("L", "b");
+const ENTITY_1 = "00000000-0000-4000-8000-0000000000c1";
+
+/** An activation with the grouping facts filled in (T2.7).
+ *
+ *  Defaults are the UNFILED, UNSPLIT case on purpose: no Dept, no team, no
+ *  process. Every test written before the merge existed is asserting against a
+ *  firm on `none`, and that must keep meaning exactly what it meant. A test
+ *  about the merge says so by overriding. */
+function activation(engagementId: string, occurredAt: string, over: Partial<Activation> = {}): Activation {
+  return {
+    engagementId,
+    occurredAt,
+    engagementLetterId: LETTER_1,
+    entityPartyId: ENTITY_1,
+    deptCode: null,
+    teamCode: null,
+    workflowKey: null,
+    ...over,
+  };
+}
 
 function engine(tenantIds: string[] = [FIRM_A]) {
   const jobs = new FakeJobRepo();
@@ -33,21 +56,23 @@ function engine(tenantIds: string[] = [FIRM_A]) {
   activations.jobs = jobs; // the anti-join, as the real query does it
   const events = new RecordingEventSink();
   const clock = new FakeClock(new Date(NOW));
+  const split = new FakeWorkSplit();
   const service = new SchedulerService({
     jobs,
     activations,
     tenants: new FakeTenantDirectory(tenantIds),
+    splitAxis: split,
     ids: new FakeIds(),
     clock,
     events,
   });
-  return { service, jobs, activations, events, clock };
+  return { service, jobs, activations, events, clock, split };
 }
 
 describe("a released contract becomes a job", () => {
   it("spawns one job per activation, and records it", async () => {
     const { service, jobs, activations, events } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
 
     const [report] = await service.sweepActivations();
     expect(report).toMatchObject({ tenantId: FIRM_A, spawned: 1, alreadySpawned: 0 });
@@ -65,7 +90,7 @@ describe("a released contract becomes a job", () => {
     // an hour later is an implementation detail of ours, and a timeline built
     // from these events should read as the business rather than as our cadence.
     const { service, events, activations, clock } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
 
     // A whole day passes before the sweep runs — a worker that was down, or an
     // hourly cadence over a weekend.
@@ -82,7 +107,7 @@ describe("a released contract becomes a job", () => {
     // An engagement carries no lead time of its own, unlike an obligation whose
     // whole point is to open T–X before a statutory date.
     const { service, jobs, activations } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await service.sweepActivations();
     expect(jobs.rows[0]?.runnableAt).toBe(NOW);
   });
@@ -91,7 +116,7 @@ describe("a released contract becomes a job", () => {
 describe("at-least-once: the same trigger twice does nothing twice", () => {
   it("spawns nothing on a second sweep", async () => {
     const { service, jobs, events, activations } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
 
     await service.sweepActivations();
     const [second] = await service.sweepActivations();
@@ -115,6 +140,8 @@ describe("at-least-once: the same trigger twice does nothing twice", () => {
       sourceKind: "engagement" as const,
       sourceRef: ENGAGEMENT_1,
       runnableAt: NOW,
+      splitAxis: "none" as const,
+      splitCode: null,
     };
     const first = await jobs.createIfAbsent({ ...base, id: "00000000-0000-4000-8000-00000000f001" });
     const second = await jobs.createIfAbsent({ ...base, id: "00000000-0000-4000-8000-00000000f002" });
@@ -130,8 +157,8 @@ describe("at-least-once: the same trigger twice does nothing twice", () => {
     // so the second insert conflicts on the primary key too.
     const a = engine();
     const b = engine();
-    a.activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
-    b.activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    a.activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
+    b.activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await a.service.sweepActivations();
     await b.service.sweepActivations();
     expect(a.jobs.rows[0]?.id).toBe(b.jobs.rows[0]?.id);
@@ -141,8 +168,8 @@ describe("at-least-once: the same trigger twice does nothing twice", () => {
 describe("the sweep walks firms, one context at a time", () => {
   it("spawns for each firm independently", async () => {
     const { service, jobs, activations } = engine([FIRM_A, FIRM_B]);
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
-    activations.add(FIRM_B, { engagementId: ENGAGEMENT_2, occurredAt: "2026-08-28T11:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
+    activations.add(FIRM_B, activation(ENGAGEMENT_2, "2026-08-28T11:00:00.000Z"));
 
     const reports = await service.sweepActivations();
     expect(reports.map((r) => r.spawned)).toEqual([1, 1]);
@@ -151,7 +178,7 @@ describe("the sweep walks firms, one context at a time", () => {
 
   it("gives one firm's job the other firm's tenant on neither", async () => {
     const { service, jobs, activations } = engine([FIRM_A, FIRM_B]);
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await service.sweepActivations();
     expect(jobs.rows.every((j) => j.tenantId === FIRM_A)).toBe(true);
   });
@@ -172,6 +199,8 @@ describe("what is runnable, and when", () => {
       tenantId: FIRM_A,
       sourceKind: "obligation",
       sourceRef: ENGAGEMENT_2,
+      splitAxis: "none" as const,
+      splitCode: null,
       // T–X: a filing due next month, materialised now and not yet runnable.
       runnableAt: "2026-09-10T00:00:00.000Z",
     });
@@ -193,6 +222,8 @@ describe("what is runnable, and when", () => {
         sourceKind: "engagement",
         sourceRef: ref,
         runnableAt: at,
+        splitAxis: "none" as const,
+        splitCode: null,
       });
     }
     const runnable = await service.runnableJobs(FIRM_A);
@@ -204,7 +235,7 @@ describe("what is runnable, and when", () => {
 
   it("stops offering a job once it is finished", async () => {
     const { service, jobs, activations } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await service.sweepActivations();
     const job = jobs.rows[0];
     if (!job) throw new Error("no job");
@@ -219,10 +250,7 @@ describe("what is runnable, and when", () => {
 describe("a finished job is finished", () => {
   async function spawned() {
     const e = engine();
-    e.activations.add(FIRM_A, {
-      engagementId: ENGAGEMENT_1,
-      occurredAt: "2026-08-28T10:00:00.000Z",
-    });
+    e.activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await e.service.sweepActivations();
     const job = e.jobs.rows[0];
     if (!job) throw new Error("no job");
@@ -284,7 +312,7 @@ describe("the actor on a spawned job", () => {
     // Nobody spawned this. The trail has to be able to say so rather than
     // attributing a cron to whoever happened to sign the letter.
     const { service, events, activations } = engine();
-    activations.add(FIRM_A, { engagementId: ENGAGEMENT_1, occurredAt: "2026-08-28T10:00:00.000Z" });
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
     await service.sweepActivations(SYSTEM_ACTOR);
     expect(events.recorded[0]?.actorType).toBe("system");
     expect(events.recorded[0]?.actorId).toBeNull();

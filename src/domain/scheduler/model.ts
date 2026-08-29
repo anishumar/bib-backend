@@ -8,9 +8,28 @@
 // the part that is wrong in ways nobody notices — a quarter that starts in
 // January instead of April is right three times out of four — so it is pure,
 // and it is tested against the calendar rather than against a running worker.
+//
+// The one internal import in this file: `WorkSplitAxis` is the vocabulary a
+// sibling domain already owns (G2.4), and restating it here would create two
+// notions of the same closed set that are free to drift. Domain may import
+// domain; the wall forbids reaching OUT of domain, not across it.
+import type { WorkSplitAxis } from "../serviceaxis/model";
 
-/** What caused a job to exist. A closed set, mirrored by the CHECK in 0041. */
-export type JobSource = "engagement" | "obligation";
+/**
+ * What caused a job to exist. A closed set, mirrored by the CHECK in 0041/0046.
+ *
+ *   `engagement`       one engagement's work, and its `sourceRef` is that
+ *                      engagement's id. Every job written before T2.7's merge,
+ *                      and every job a firm on `work_split_axis = none` writes
+ *                      after it.
+ *   `engagement_group` several engagements merged into one checklist, because
+ *                      the firm splits its work by Dept or by delivery team.
+ *                      Its `sourceRef` names NO row in any table — it is the
+ *                      group key, derived, and it exists to make a redelivered
+ *                      sweep conflict instead of building a second checklist.
+ *   `obligation`       a recurring statutory filing. T3.2.
+ */
+export type JobSource = "engagement" | "obligation" | "engagement_group";
 
 /**
  * The engine's own mechanics — NOT the firm's vocabulary.
@@ -37,6 +56,19 @@ export interface Job {
   readonly status: JobStatus;
   /** The pinned workflow version, once T2.7 gives a job a graph to walk. */
   readonly templateVersionId: string | null;
+  /**
+   * How this job was cut, and under which Dept or delivery team.
+   *
+   * Copied onto the row at spawn rather than derived, for the two reasons
+   * `job_step.executor` already argues: the work board renders it on every
+   * card, and it must not move when a firm re-files a service next quarter —
+   * that would restate why a job already running was cut the way it was.
+   *
+   * `splitCode` is null on `none`, and also null on a firm that DOES split when
+   * the service is filed under nothing. Both are real answers.
+   */
+  readonly splitAxis: WorkSplitAxis;
+  readonly splitCode: string | null;
   /** When the work may begin — the T–X date. */
   readonly runnableAt: string;
   readonly startedAt: string | null;

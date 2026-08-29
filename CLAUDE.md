@@ -240,10 +240,13 @@ Two roads to the same broken state are both closed: choosing an axis whose list 
 refused, and so is retiring the last active row on the axis already chosen. Closing only one
 leaves the other open, and the second is the one somebody actually walks.
 
-**`groupByAxis` has exactly one intended caller and it does not exist yet.** T2.7 is what
-makes the setting do anything; `/admin/structure` says so on the screen rather than letting a
-live-looking control be discovered as inert. If you find another registered thing with no
-reader, treat it the same way.
+**`groupByAxis`'s one caller now exists** — T2.7's spawn (migration 0046), and see the
+orchestrator section below for the whole key. Note what wiring it found: the `none` branch
+returned ONE bucket holding everything, called "T2.6's behaviour, unchanged" in its own
+comment, and it was the opposite — T2.6 gives one job per ENGAGEMENT, so that would have
+merged every line of every letter for every firm on the DEFAULT setting. Eleven unit tests
+were green on it because nothing consumed it. If you find another registered thing with no
+reader, treat it the same way: it is not proven, whatever its tests say.
 
 ## Lists return read models, not aggregates
 
@@ -815,13 +818,57 @@ resolver, and a line of documentation.
 **`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
 permission, because the row it gates is the record of who did the work.
 
+**ONE CLIENT, ONE TEAM, ONE LETTER — ONE CHECKLIST (migration 0046).** `crm.engagement`
+carries `UNIQUE (engagement_letter_line_id)`, so a three-line letter is ALREADY three
+engagements and three jobs. The grouping therefore MERGES; it never splits. The key is
+**`(engagement_letter_id, entity_party_id, axis code, workflow key)`** and every part is
+load-bearing:
+
+- **`entity_party_id` is the one that is not negotiable.** The firm's Per Company rule: vCFO
+  for four companies is four engagements because each files its own returns. Merging across
+  entities would put two companies' filings on one checklist. Keep it in the key even though
+  a letter normally names one entity — `engagement_letter_line.entity_party_id` is per LINE
+  and NOT NULL (0018), so the schema permits a mixed letter and the key is what makes the
+  rule hold rather than the practice holding it.
+- **`engagement_letter_id`** — a job has to be able to FINISH. Two letters months apart are
+  two contracts, and without this one job grows for the life of the client relationship.
+- **the workflow key** — two services naming two processes are two processes by the firm's
+  own account, and merging them invents an order nobody wrote over step keys that can
+  collide. In practice a team's services name one process or none, so the merge still
+  happens.
+
+**`none` merges NOTHING** — one job per engagement, exactly what every firm has today. It is
+a real answer, not "unconfigured", and a default that merged would have silently re-cut every
+firm's work.
+
+**Two uniqueness rules, and they are different rules.** `job_engagement UNIQUE (tenant_id,
+engagement_id)` is ABSOLUTE and forever: one engagement's work exists in exactly one job,
+which is what stops a second set of tasks and a second invoice. `delivery.job`'s own key is
+PARTIAL (`WHERE status NOT IN ('done','cancelled')`) — at most one OPEN job per group,
+because a group whose checklist finished must get a NEW one when a later line's advance lands
+months later. Attaching new work to a finished checklist is work nobody looks at again.
+
+**Every job has link rows, merged or not**, so "what is this job FOR" has one answer
+everywhere. `source_ref` is back to being nothing but an idempotency key, and for a merged job
+it names NO row — it is the group key, derived. **Which is why a job list can never render it:
+`GET /api/v1/jobs` carries the company, the client and the SERVICE NAMES**, in one query for
+the page, and `GET /api/v1/jobs/{jobId}` exists because the list is only what is RUNNABLE and a
+finished job's steps were otherwise readable with nothing saying whose work they were.
+
+**`job.scope_extended`** is the verb for a later line joining a checklist already in flight —
+its own verb, because "why did this job gain a service on the 14th" is a question a spawn event
+cannot answer.
+
+**What does NOT happen:** changing `work_split_axis` re-cuts nothing that already exists. That
+is G2.4's stated design, and it means a firm that switches mid-year has two shapes of job on
+its board until the old ones finish.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator` and `invoicing` are built.
-Next: T2.7's remaining half (merging an engagement's jobs by `(entity, team)`), then T2.8's
-agent runtime, T3.6's documents and T3.7's dashboards.
+Next: T2.8's agent runtime, T2.9's verification queue, T3.6's documents and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

@@ -19,6 +19,7 @@ import {
 } from "../infrastructure/postgres/job-repository";
 import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
 import { LedgerService } from "../usecase/ledger/service";
+import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { DunningService } from "../usecase/dunning/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
@@ -82,6 +83,11 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // `tenancy.tenant` is GLOBAL. It returns ids and nothing else; every read
     // that follows is scoped to one of them.
     tenants: new PostgresTenantDirectory(pools.app),
+    // ONE adapter satisfying two ports declared in two use cases — the shape
+    // AxisDirectory and RoleDirectory already have. `usecase/serviceaxis` owns
+    // the write side of this setting; the scheduler reads it, and neither
+    // imports the other.
+    splitAxis: new PostgresWorkSplitSetting(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
