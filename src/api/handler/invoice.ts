@@ -14,6 +14,8 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { InvoiceService } from "../../usecase/invoice/service";
+import type { DunningService } from "../../usecase/dunning/service";
+import type { DunningActionRecord } from "../../usecase/invoice/ports";
 import type {
   CreditNote,
   Invoice,
@@ -26,15 +28,20 @@ import {
   INVOICE_STATUSES,
   PAYMENT_METHODS,
 } from "../../domain/invoice/model";
+import { DUNNING_ACTIONS } from "../../domain/config/model";
 import type { InvoiceRecord, InvoiceSummary } from "../../usecase/invoice/ports";
 
 export interface InvoiceDeps {
   readonly service: InvoiceService;
+  /** Chasing is its own use case: invoicing answers what a client owes, this
+   *  answers what the firm will do about it. They meet at one query. */
+  readonly dunning: DunningService;
 }
 
 const STATUS_VALUES = [...INVOICE_STATUSES] as [string, ...string[]];
 const PAYMENT_METHOD_VALUES = [...PAYMENT_METHODS] as [string, ...string[]];
 const CREDIT_REASON_VALUES = [...CREDIT_REASONS] as [string, ...string[]];
+const DUNNING_ACTION_VALUES = [...DUNNING_ACTIONS] as [string, ...string[]];
 
 /** A decimal STRING. The pattern is the contract: a client that sends a JSON
  *  number gets a 400 here rather than a rounded amount in the database. */
@@ -539,6 +546,92 @@ const outstandingRoute = createRoute({
   },
 });
 
+// ── The dunning ladder (T3.5) ──────────────────────────────────────────────
+
+const DunningActionSchema = z
+  .object({
+    id: z.string().uuid(),
+    invoiceId: z.string().uuid(),
+    /** The rung's own key as the ladder named it — never an index, which would
+     *  shift when a firm inserts a rung and silently rename history. */
+    step: z.string(),
+    afterDays: z.number().int(),
+    action: z.enum(DUNNING_ACTION_VALUES),
+    state: z.enum(["taken", "pending_approval", "approved", "rejected"]),
+    approvedBy: z.string().uuid().nullable(),
+    decidedAt: z.string().nullable(),
+    note: z.string().nullable(),
+  })
+  .openapi("DunningAction");
+
+const pendingDunningRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dunning/pending",
+  tags: ["invoices"],
+  summary: "Terminal dunning steps waiting for a partner",
+  description:
+    "Credit hold and legal action are the two rungs a machine may REACH and may not APPLY — " +
+    "they are the things a firm cannot take back with an apology. The worker climbs to them " +
+    "and stops; this is the queue somebody works.",
+  responses: {
+    200: {
+      description: "Waiting for a decision",
+      content: {
+        "application/json": { schema: z.object({ actions: z.array(DunningActionSchema) }) },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const invoiceDunningRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoices/{invoiceId}/dunning",
+  tags: ["invoices"],
+  summary: "How far this receivable has been chased",
+  request: { params: z.object({ invoiceId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "The ladder as climbed",
+      content: {
+        "application/json": { schema: z.object({ actions: z.array(DunningActionSchema) }) },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const decideDunningRoute = createRoute({
+  method: "post",
+  path: "/api/v1/dunning/{actionId}/decide",
+  tags: ["invoices"],
+  summary: "Approve or reject a terminal dunning step",
+  description:
+    "BOTH outcomes are recorded. 'We considered legal action and decided against it' is a fact " +
+    "somebody wants three months later, and a rejection that vanished would leave the ladder " +
+    "looking as though it never got there. A decision is final.",
+  request: {
+    params: z.object({ actionId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ approve: z.boolean(), note: z.string().max(2000).optional() }),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Decided", content: { "application/json": { schema: DunningActionSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such dunning action at this firm"),
+    409: errorResponse("Not awaiting approval, or already decided"),
+  },
+});
+
 export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDeps): void {
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -695,6 +788,44 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     const receivables = await deps.service.outstanding(s.tenantId);
     return c.json({ receivables: receivables.map(toBalanceBody) }, 200);
   });
+
+  app.openapi(pendingDunningRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const actions = await deps.dunning.pending(s.tenantId);
+    return c.json({ actions: actions.map(toDunningBody) }, 200);
+  });
+
+  app.openapi(invoiceDunningRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const actions = await deps.dunning.listFor(s.tenantId, c.req.valid("param").invoiceId);
+    return c.json({ actions: actions.map(toDunningBody) }, 200);
+  });
+
+  app.openapi(decideDunningRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const decided = await deps.dunning.decide(
+      { tenantId: s.tenantId, actionId: c.req.valid("param").actionId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(toDunningBody(decided), 200);
+  });
+}
+
+function toDunningBody(a: DunningActionRecord): z.infer<typeof DunningActionSchema> {
+  return {
+    id: a.id,
+    invoiceId: a.invoiceId,
+    step: a.step,
+    afterDays: a.afterDays,
+    action: a.action,
+    state: a.state,
+    approvedBy: a.approvedBy,
+    decidedAt: a.decidedAt,
+    note: a.note,
+  };
 }
 
 function toPaymentBody(p: Payment): z.infer<typeof PaymentSchema> {

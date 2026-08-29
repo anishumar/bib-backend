@@ -7,6 +7,10 @@
 // handler calls, so anything true here is true there.
 //
 //   npm run worker:once
+//
+// It runs BOTH sweeps — spawn and dunning — because both are what the worker
+// does, and an entry point that mirrored half the process would be a worse lie
+// than none at all.
 import pino from "pino";
 import { load } from "../config/config";
 import { wireWorker } from "../setup/worker";
@@ -33,6 +37,26 @@ async function main(): Promise<void> {
       // silent second run looks identical to a broken one.
       if (already > 0) {
         console.log(`  ${String(already)} activation(s) already had a job — nothing done`);
+      }
+      console.log();
+    }
+
+    // BOTH sweeps, because both are what the worker does. Running only the
+    // spawn one here would make this entry point a partial mirror of the
+    // process it exists to stand in for — and the dunning ladder would be
+    // demonstrable only by waiting for a cron.
+    const dunning = await wired.dunning.sweep();
+    const escalated = dunning.reduce((n, r) => n + r.escalated, 0);
+    const waiting = dunning.reduce((n, r) => n + r.awaitingApproval, 0);
+
+    if (escalated === 0) {
+      console.log("  nothing to chase — no receivable has reached a rung it has not had.\n");
+    } else {
+      console.log(`  climbed ${String(escalated)} dunning rung(s)`);
+      // The number somebody has to ACT on: the worker reached a credit hold or
+      // a legal step and stopped, and nothing further happens without a partner.
+      if (waiting > 0) {
+        console.log(`  ${String(waiting)} terminal step(s) are waiting for a partner`);
       }
       console.log();
     }

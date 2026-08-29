@@ -1,5 +1,6 @@
 // The seams invoicing needs from the world. Interfaces owned by this use case,
 // stated in its vocabulary; adapters in infrastructure/ implement them.
+import type { DunningBody } from "../../domain/config/model";
 import type {
   CreditNote,
   CreditReason,
@@ -164,4 +165,86 @@ export interface InvoiceSeriesRecord {
   readonly documentType: string;
   readonly prefix: string;
   readonly lastNumber: number;
+}
+
+// ── The dunning ladder (T3.5) ──────────────────────────────────────────────
+
+export interface DunningActionRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly step: string;
+  readonly afterDays: number;
+  readonly action: string;
+  readonly state: "taken" | "pending_approval" | "approved" | "rejected";
+  readonly approvedBy: string | null;
+  readonly decidedAt: string | null;
+  readonly note: string | null;
+}
+
+export interface NewDunningAction {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly step: string;
+  readonly afterDays: number;
+  readonly action: string;
+  /** `taken` for a rung a machine may climb; `pending_approval` for the two it
+   *  may reach and may not apply. */
+  readonly state: "taken" | "pending_approval";
+}
+
+export interface DunningRepository {
+  /**
+   * Take a rung, ONCE.
+   *
+   * Returns null when the rung was already taken — an ON CONFLICT DO NOTHING,
+   * not an error, because the sweep re-reads invoices it has seen and pg-boss
+   * redelivers on a crash. A second reminder to a client who has already paid
+   * is the kind of mistake a firm hears about, so it is made impossible by the
+   * unique key rather than avoided by careful callers.
+   *
+   * The null is what tells the service NOT to write an event, which is the same
+   * arrangement the scheduler's derived job id has.
+   */
+  take(a: NewDunningAction): Promise<DunningActionRecord | null>;
+  /** Which rungs an invoice has already had — the sweep's own memory. */
+  taken(tenantId: string, invoiceId: string): Promise<readonly string[]>;
+  /** Terminal rungs waiting for a partner. */
+  pending(tenantId: string): Promise<readonly DunningActionRecord[]>;
+  decide(
+    tenantId: string,
+    actionId: string,
+    state: "approved" | "rejected",
+    approvedBy: string,
+    at: string,
+    note: string | null,
+  ): Promise<DunningActionRecord | null>;
+  find(tenantId: string, actionId: string): Promise<DunningActionRecord | null>;
+  listFor(tenantId: string, invoiceId: string): Promise<readonly DunningActionRecord[]>;
+}
+
+/**
+ * The ladder in force at a firm, read LIVE from the configuration registry.
+ *
+ * Live rather than pinned: a firm that softens its ladder expects the next
+ * sweep to use the new one, the same reading roles get. What a rung MEANT when
+ * it fired is already recorded on the action row (`afterDays` is snapshotted),
+ * so nothing historical depends on this read.
+ */
+export interface DunningLadderSource {
+  ladderFor(tenantId: string): Promise<DunningBody | null>;
+}
+
+/**
+ * Which firms exist — the sweep's outer loop.
+ *
+ * DECLARED HERE AND AGAIN in `usecase/scheduler/ports.ts`, deliberately: a port
+ * is owned by the use case that needs it, and the two are free to diverge. What
+ * they must not do is share a type through a package neither owns. The ADAPTER
+ * is one — `PostgresTenantDirectory` in `job-repository.ts` — because two
+ * pieces of SQL answering "which firms exist" would eventually disagree.
+ */
+export interface TenantDirectory {
+  activeTenantIds(): Promise<readonly string[]>;
 }

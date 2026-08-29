@@ -26,7 +26,10 @@ export type InvoiceErrorCode =
   | "INVALID_PAYMENT_METHOD"
   | "INVALID_CREDIT_REASON"
   | "INVOICE_NOT_ISSUED"
-  | "CREDIT_EXCEEDS_INVOICE";
+  | "CREDIT_EXCEEDS_INVOICE"
+  | "DUNNING_ACTION_NOT_FOUND"
+  | "DUNNING_NOT_AWAITING_APPROVAL"
+  | "DUNNING_ALREADY_DECIDED";
 
 export class InvoiceNotFound extends InvoiceError {
   constructor(id: string) {
@@ -189,6 +192,50 @@ export class CreditExceedsInvoice extends InvoiceError {
       `crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
         `${remaining} of it is uncredited. Credit the remainder, or check whether this belongs ` +
         `against a different invoice.`,
+    );
+  }
+}
+
+// ── The dunning ladder (T3.5) ──────────────────────────────────────────────
+
+export class DunningActionNotFound extends InvoiceError {
+  constructor(id: string) {
+    super("DUNNING_ACTION_NOT_FOUND", `no dunning action ${JSON.stringify(id)} at this firm.`);
+  }
+}
+
+/**
+ * Only the two terminal rungs are ever gated, and only a person decides them.
+ *
+ * A reminder that sat waiting for a partner would be a ladder that never
+ * climbs; and a `system` or `agent` actor reaching the decision would mean the
+ * gate had been routed around, which is the one thing the rung exists to
+ * prevent.
+ */
+export class DunningNotAwaitingApproval extends InvoiceError {
+  constructor(id: string, action: string) {
+    super(
+      "DUNNING_NOT_AWAITING_APPROVAL",
+      `dunning action ${JSON.stringify(id)} is a ${JSON.stringify(action)} and is not waiting ` +
+        `for anybody. Only credit hold and legal action need a partner, and only a person may ` +
+        `decide one.`,
+    );
+  }
+}
+
+/**
+ * A decision about a client is final.
+ *
+ * Reversing "we put them on credit hold" by editing the row would leave no
+ * trace that it ever happened, and the ladder's whole value is that it records
+ * what the firm did. The next move is the next step, not a rewrite of the last.
+ */
+export class DunningAlreadyDecided extends InvoiceError {
+  constructor(id: string, state: string) {
+    super(
+      "DUNNING_ALREADY_DECIDED",
+      `dunning action ${JSON.stringify(id)} was already ${state}, and a decision about a client ` +
+        `is not editable. Take the next step instead.`,
     );
   }
 }

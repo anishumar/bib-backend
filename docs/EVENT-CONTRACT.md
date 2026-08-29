@@ -254,6 +254,7 @@ version is exactly what gets asked about afterwards.
 | `credit_note.issued` | credit_note | Issued against an invoice. |
 | `invoice.registered` | invoice | The government e-invoice registry's identifier (IRN) was recorded against an invoice. Its honest limit: nothing in this product talks to the IRP, so this records an answer obtained elsewhere — the same shape as the advance-fee attestation. The real connector is T7.1. |
 | `invoice_series.set` | invoice_series | The firm named what one of its entities' invoice numbers READ as. It changes future numbers only — every issued invoice keeps the number it was issued with, because the freeze trigger refuses to move one. |
+| `dunning.decided` | invoice | A partner approved or rejected a TERMINAL dunning step — credit hold or legal action. Both outcomes are recorded: 'we considered legal action and decided against it' is a fact somebody wants three months later, and a rejection that vanished would leave the ladder looking as though it never got there. objectType is the invoice, because 'what happened to this receivable' is the timeline anybody reads. |
 | `dunning.escalated` | invoice | A receivable moved up the ladder. |
 | `document.attached` | document | A document version was linked to an object. |
 

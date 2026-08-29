@@ -33,9 +33,15 @@ import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from ".
  *  `policy` (0010) is the first NON-CATALOGUE kind — a rule the firm sets for
  *  itself rather than something it sells — which is what makes it the honest
  *  test of whether this spine generalises. */
-export type ConfigKind = "service" | "role" | "policy" | "clause";
+export type ConfigKind = "service" | "role" | "policy" | "clause" | "dunning";
 
-export const CONFIG_KINDS: readonly ConfigKind[] = ["service", "role", "policy", "clause"];
+export const CONFIG_KINDS: readonly ConfigKind[] = [
+  "service",
+  "role",
+  "policy",
+  "clause",
+  "dunning",
+];
 
 export function isConfigKind(v: string): v is ConfigKind {
   return (CONFIG_KINDS as readonly string[]).includes(v);
@@ -709,6 +715,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validatePolicyBody(body);
     case "clause":
       return validateClauseBody(body);
+    case "dunning":
+      return validateDunningBody(body);
   }
 }
 
@@ -1073,4 +1081,173 @@ function readServiceListPrice(raw: unknown): Money | null {
   if (typeof currency !== "string") return null;
   const normalised = normalizeCurrency(currency);
   return isCurrencyCode(normalised) ? { amount, currency: normalised } : null;
+}
+
+// ── The dunning ladder (T3.5) ──────────────────────────────────────────────
+
+/**
+ * What the firm does, and when, about a receivable nobody has paid.
+ *
+ * A CONFIG KIND rather than a table, and this one fits the registry's own test
+ * exactly: D+3, D+7 and D+15 are the firm's numbers, they change, and a partner
+ * should be able to move them without a deploy. Versioning earns its keep here
+ * too — "which ladder was in force when we put them on hold" is a question that
+ * gets asked, and a published version is frozen.
+ *
+ * ONE ENTRY HOLDS THE WHOLE LADDER, not one entry per rung. The rungs are read
+ * together and their ORDER is the meaning; splitting them would make "the
+ * ladder" a thing nobody could publish atomically, and a firm could end up
+ * halfway between two ladders with D+3 from the old one and D+15 from the new.
+ */
+export interface DunningBody {
+  readonly steps: readonly DunningStep[];
+}
+
+export interface DunningStep {
+  /** The rung's own key — `d3`, `d7`, `final`. Recorded on every action, so a
+   *  row stays readable after the ladder moves under it. Never an index: an
+   *  index shifts when a firm inserts a rung, silently renaming history. */
+  readonly key: string;
+  /** Days past the due date. 0 means the due date itself. */
+  readonly afterDays: number;
+  readonly action: DunningAction;
+  readonly label: string;
+}
+
+/**
+ * `credit_hold` and `legal` are the two a machine may reach and may not APPLY —
+ * they are the things a firm cannot take back with an apology, so they land
+ * pending a partner's decision. That is a property of the ACTION, stated here,
+ * rather than a flag a firm could clear on a rung by accident.
+ */
+export type DunningAction = "reminder" | "call" | "credit_hold" | "legal";
+
+export const DUNNING_ACTIONS: readonly DunningAction[] = [
+  "reminder",
+  "call",
+  "credit_hold",
+  "legal",
+];
+
+const TERMINAL_ACTIONS: readonly DunningAction[] = ["credit_hold", "legal"];
+
+export function isDunningAction(v: string): v is DunningAction {
+  return (DUNNING_ACTIONS as readonly string[]).includes(v);
+}
+
+/** Whether a rung needs a person. The single place that question is answered,
+ *  so the sweep, the API and the schema cannot disagree about it. */
+export function needsApproval(action: DunningAction): boolean {
+  return TERMINAL_ACTIONS.includes(action);
+}
+
+const DUNNING_FIELDS = ["steps"];
+
+function validateDunningBody(body: Record<string, unknown>): string | null {
+  const unknown = Object.keys(body).find((k) => !DUNNING_FIELDS.includes(k));
+  if (unknown !== undefined) return `unknown field ${JSON.stringify(unknown)}`;
+
+  const steps = body["steps"];
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return "steps must be a non-empty array — a ladder with no rungs chases nobody";
+  }
+
+  const keys = new Set<string>();
+  let previousDays = -1;
+  for (const [index, raw] of steps.entries()) {
+    if (typeof raw !== "object" || raw === null) return `steps[${String(index)}] must be an object`;
+    const step = raw as Record<string, unknown>;
+
+    const key = step["key"];
+    if (typeof key !== "string" || key.trim() === "") {
+      return `steps[${String(index)}].key must be a non-empty string`;
+    }
+    // Duplicate keys would collide on `UNIQUE (tenant, invoice, step)` and the
+    // second rung would silently never fire — a ladder that looks like it has
+    // four rungs and climbs three.
+    if (keys.has(key)) return `steps[${String(index)}].key ${JSON.stringify(key)} appears twice`;
+    keys.add(key);
+
+    const afterDays = step["afterDays"];
+    if (typeof afterDays !== "number" || !Number.isInteger(afterDays) || afterDays < 0) {
+      return `steps[${String(index)}].afterDays must be a non-negative whole number of days`;
+    }
+    // ASCENDING, and refused rather than sorted. A ladder given out of order is
+    // a firm that has made a mistake about its own escalation, and quietly
+    // reordering it would hide that — while leaving "which rung is next" to
+    // depend on how the array happened to be written.
+    if (afterDays <= previousDays) {
+      return `steps[${String(index)}].afterDays must be greater than the rung before it (${String(previousDays)})`;
+    }
+    previousDays = afterDays;
+
+    const action = step["action"];
+    if (typeof action !== "string" || !isDunningAction(action)) {
+      return `steps[${String(index)}].action must be one of ${DUNNING_ACTIONS.join(", ")}`;
+    }
+
+    const label = step["label"];
+    if (typeof label !== "string" || label.trim() === "") {
+      return `steps[${String(index)}].label must be a non-empty string — somebody reads it`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A stored dunning body, read back.
+ *
+ * Falls back to an EMPTY ladder rather than throwing, for the reason every
+ * reader in this file does: a pinned version must always resolve. An empty
+ * ladder chases nobody, which is the safe direction — the alternative would be
+ * inventing rungs a firm never published and sending a client a letter it never
+ * approved.
+ */
+export function readDunningBody(body: Record<string, unknown>): DunningBody {
+  const raw = body["steps"];
+  if (!Array.isArray(raw)) return { steps: [] };
+  const steps: DunningStep[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const step = item as Record<string, unknown>;
+    const key = step["key"];
+    const afterDays = step["afterDays"];
+    const action = step["action"];
+    const label = step["label"];
+    if (
+      typeof key !== "string" ||
+      typeof afterDays !== "number" ||
+      typeof action !== "string" ||
+      !isDunningAction(action)
+    ) {
+      continue;
+    }
+    steps.push({
+      key,
+      afterDays,
+      action,
+      label: typeof label === "string" ? label : key,
+    });
+  }
+  return { steps };
+}
+
+/**
+ * The rungs that are DUE on an invoice: past their day, and not already taken.
+ *
+ * Pure, and it is the whole rule the sweep applies. `daysOverdue` is computed
+ * by the caller from ISO dates — no `Date` arithmetic here, because a due date
+ * is a calendar fact in a jurisdiction and a UTC instant moves it by a day for
+ * anyone east or west of Greenwich.
+ *
+ * Returns EVERY due rung rather than only the next one. A firm whose worker was
+ * down for a week should not need seven sweeps to catch up — and each rung is
+ * idempotent by its own unique key, so replaying them is safe.
+ */
+export function dueDunningSteps(
+  ladder: DunningBody,
+  daysOverdue: number,
+  taken: ReadonlySet<string>,
+): readonly DunningStep[] {
+  return ladder.steps.filter((s) => daysOverdue >= s.afterDays && !taken.has(s.key));
 }

@@ -1305,13 +1305,48 @@ open and are recorded above; neither blocks Phase 2.
   > how 31 March ends up answered differently on the two sides.
   >
   > Gate: `npm run check` 766 · `test:integration` 243 · `smoke` **225 passed, 0 failed**.
-- [~] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
-  > **[x] Payments and credit notes done (2026-08-29). Migration 0028. [ ] The DUNNING LADDER
-  > is not built, and it is the half the acceptance line actually names** — the worker, the
-  > D+3/D+7/D+15 rungs and the partner sign-off on the terminal step. Marked `[~]` rather than
-  > ticked, because a task whose acceptance is half unbuilt is not done and ticking it would
-  > make this board say something untrue. The ladder needs the ledger and the scheduler
-  > together, and `outstanding()` — "who owes the firm money" — is the query it will climb.
+- [x] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
+  > **Done (2026-08-29). Migrations 0028, 0029, 0030, 0031.** Payments, credit notes AND the
+  > dunning ladder — the acceptance holds in both halves: the worker climbs the ladder, and the
+  > terminal rung needs a partner.
+  >
+  > **THE LADDER IS CONFIG, the fifth registry kind.** D+3, D+7, D+15 are the firm's numbers and
+  > they change, so a partner edits them without a deploy — and "which ladder was in force when
+  > we put them on hold" is answerable because a published version is frozen. ONE entry holds
+  > the whole ladder rather than one per rung: the rungs are read together and their ORDER is
+  > the meaning, and splitting them would let a firm end up halfway between two ladders.
+  >
+  > **THE TERMINAL RUNG IS THE ACCEPTANCE.** Credit hold and legal action are the two things on
+  > this ladder a firm cannot take back with an apology, so the worker may CLIMB to them and may
+  > not APPLY them: the row lands `pending_approval` and a partner decides. Enforced in the
+  > schema (`dunning_action_gate_chk`, and a decider that is NOT NULL exactly when a decision
+  > exists) rather than only in the sweep, because a rule in a worker is one a second worker, a
+  > script or an agent walks past. **A rejection is recorded as loudly as an approval** — "we
+  > considered legal action and decided against it" is a fact somebody wants three months later.
+  >
+  > **AT-LEAST-ONCE, like everything the engine touches.** `UNIQUE (tenant, invoice, step)` makes
+  > a second chase impossible, and the event is written only when a row was actually created —
+  > so a redelivered message and a restarted worker leave one row and one event. The sweep takes
+  > EVERY due rung, not just the next: a firm whose worker was down for a week should not need
+  > seven sweeps to catch up.
+  >
+  > **A correction to my own reporting, found by a test.** `alreadyTaken` was documented as "the
+  > redelivery case", by analogy with the scheduler's counter. It is not: `dueDunningSteps`
+  > filters out rungs already had, so an ordinary second sweep never reaches the insert and the
+  > counter is ZERO. What it actually counts is the genuine race — two workers overlapping —
+  > which is the only case the pre-filter is too late for. Both the comment and the test now say
+  > so, and a second test drives two concurrent sweeps to prove it.
+  >
+  > **Two duplications caught at the composition root rather than shipped.** A second
+  > `PostgresTenantDirectory` and a second `FakeTenantDirectory` — two pieces of SQL and two
+  > fakes answering "which firms exist", which would eventually disagree about which firms a
+  > sweep walks. The PORT is declared twice, deliberately, as this codebase does; the ADAPTER is
+  > one. TypeScript reported it as a duplicate identifier, which is where it should be caught.
+  >
+  > **It actually runs.** The sweep is registered on its own queue at its own cadence (DAILY, not
+  > the spawn sweep's hourly — the rungs are counted in days, and the one thing a faster sweep
+  > would change is a chaser landing at 3am), and `npm run worker:once` runs BOTH sweeps, because
+  > an entry point mirroring half the worker is a worse lie than none.
   >
   > **THE BALANCE IS A SUM, and there is no `paid` flag anywhere.** Both a flag and an
   > `amount_paid` column are caches of an addition, and both drift the first time a payment is
@@ -1351,7 +1386,9 @@ open and are recorded above; neither blocks Phase 2.
   > independent facts, and it is now written that way. A regression test sits in T3.4's own file,
   > where it should have been.
   >
-  > Gate: `npm run check` 780 · `test:integration` 255 · `smoke` **227 passed, 0 failed**.
+  > Gate: `npm run check` 795 · `test:integration` 255 · `smoke` **227 passed, 0 failed**
+  > (the smoke walk is at its request budget and gained no section here — the ladder is a
+  > WORKER, and `worker:once` is how it is demonstrated).
 - [ ] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
 - [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
 

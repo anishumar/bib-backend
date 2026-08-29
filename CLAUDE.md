@@ -637,6 +637,30 @@ without it the numbers always reconcile and *why* money came off does not — an
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
 
+## Chasing a receivable — and the one rung a machine may not climb (T3.5)
+
+The dunning ladder is **config**, the registry's fifth kind: D+3, D+7, D+15 are the firm's
+numbers and they change, so a partner edits them without a deploy. One entry holds the whole
+ladder rather than one per rung — the rungs are read together and their order is the meaning.
+
+**The terminal rungs are `credit_hold` and `legal`, and the worker may reach them and may not
+apply them.** They are the two things on this ladder a firm cannot take back with an apology,
+so the row lands `pending_approval` and a partner decides. That is enforced in the schema —
+`dunning_action_gate_chk`, plus a decider that is NOT NULL exactly when a decision exists —
+and not only in the sweep, because a rule in a worker is one a second worker, a script or an
+agent walks straight past. A rejection is recorded as loudly as an approval: *we considered
+legal action and decided against it* is a fact somebody wants three months later.
+
+**Chasing is at-least-once, like everything the engine touches.** `UNIQUE (tenant_id,
+invoice_id, step)` makes a second chase impossible and the event is written only when a row
+was actually created, so a redelivered message leaves one row and one event. The sweep takes
+every DUE rung rather than only the next, so a week of downtime does not need seven sweeps.
+
+`DunningService` is its own use case, not part of invoicing: invoicing answers *what does this
+client owe*, which is arithmetic over rows; this answers *what will the firm do about it*,
+which is policy on a clock. They meet at `outstanding()` and nowhere else — which is also why
+paying an invoice stops the chasing with no flag for anybody to clear.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
@@ -680,7 +704,7 @@ out of four if nobody thinks about it. T3.2's calendar is its first real consume
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the `scheduler` and `invoicing` are built.
-Next: T2.7's orchestrator, and T3.5's payments.
+Next: T2.7's orchestrator, then T3.6's documents and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

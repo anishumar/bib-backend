@@ -294,6 +294,7 @@ export function mapError(err: unknown): MappedError {
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
+      case "DUNNING_ACTION_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The invoice is not in the state this call assumed", and none of them is
       // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by
@@ -305,6 +306,8 @@ export function mapError(err: unknown): MappedError {
       case "IRN_ALREADY_REGISTERED":
       case "INVOICE_NOT_ISSUED":
       case "CREDIT_EXCEEDS_INVOICE":
+      case "DUNNING_NOT_AWAITING_APPROVAL":
+      case "DUNNING_ALREADY_DECIDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

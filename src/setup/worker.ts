@@ -20,16 +20,28 @@ import {
 import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
 import { LedgerService } from "../usecase/ledger/service";
 import { SchedulerService } from "../usecase/scheduler/service";
+import { DunningService } from "../usecase/dunning/service";
+import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
+import {
+  PostgresDunningLadder,
+  PostgresDunningRepository,
+} from "../infrastructure/postgres/dunning-repository";
 import type { JobQueue } from "../usecase/scheduler/ports";
 
 /** The queue the spawn sweep runs on. A name, because pg-boss keys a schedule
  *  by it — see `BossJobQueue.schedule`. */
 export const SPAWN_QUEUE = "delivery.spawn";
 
+/** The queue the dunning sweep runs on. Its own name and its own cadence: the
+ *  ladder is counted in days and the spawn sweep in hours, and one queue doing
+ *  both would have to run at the faster of the two. */
+export const DUNNING_QUEUE = "billing.dunning";
+
 export interface WiredWorker {
   readonly pools: Pools;
   readonly queue: JobQueue;
   readonly scheduler: SchedulerService;
+  readonly dunning: DunningService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -64,12 +76,29 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // CHASING RECEIVABLES runs here rather than in the API for the reason every
+  // sweep does: it is work nobody asked for, on a clock, across every firm. The
+  // API's own composition root builds a DunningService too — for the half a
+  // PARTNER drives, deciding a terminal rung — and the two are separate graphs
+  // because a worker and an API are separate processes.
+  const invoiceRepository = new PostgresInvoiceRepository(pools.app);
+  const dunning = new DunningService({
+    dunning: new PostgresDunningRepository(pools.app),
+    ladders: new PostgresDunningLadder(pools.app),
+    invoices: invoiceRepository,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const queue = new BossJobQueue({ connectionString: cfg.db.appUrl, log });
 
   return {
     pools,
     queue,
     scheduler,
+    dunning,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -87,6 +116,26 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(SPAWN_QUEUE, cfg.worker.spawnCron);
+
+      await queue.register(DUNNING_QUEUE, async () => {
+        const reports = await dunning.sweep();
+        for (const r of reports) {
+          if (r.escalated === 0 && r.alreadyTaken === 0) continue;
+          // `awaitingApproval` is logged because it is the number somebody has
+          // to ACT on: the worker has climbed to a credit hold and stopped, and
+          // nothing further happens until a partner decides.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              escalated: r.escalated,
+              alreadyTaken: r.alreadyTaken,
+              awaitingApproval: r.awaitingApproval,
+            },
+            "dunning sweep",
+          );
+        }
+      });
+      await queue.schedule(DUNNING_QUEUE, cfg.worker.dunningCron);
     },
   };
 }

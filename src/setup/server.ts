@@ -44,6 +44,11 @@ import { PostgresEngagementRepository } from "../infrastructure/postgres/engagem
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import { InvoiceService } from "../usecase/invoice/service";
+import { DunningService } from "../usecase/dunning/service";
+import {
+  PostgresDunningLadder,
+  PostgresDunningRepository,
+} from "../infrastructure/postgres/dunning-repository";
 import {
   PostgresDocumentBlockRepository,
   PostgresStandardBlockRepository,
@@ -164,8 +169,27 @@ export function wire(cfg: Config, log: Logger): Wired {
   // INVOICING (T3.4). Its repository is the only one in this codebase whose
   // `create` both allocates and writes — a gapless series cannot be handed to a
   // caller, because a failure between the two spends the number. See the file.
+  const invoiceRepository = new PostgresInvoiceRepository(pools.app);
   const invoices = new InvoiceService({
-    invoices: new PostgresInvoiceRepository(pools.app),
+    invoices: invoiceRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // CHASING is its own use case, and it runs in TWO places: the worker sweeps
+  // the ladder, and a partner decides the terminal rung from a request. Only
+  // the second half is wired here — `setup/worker.ts` builds its own graph, as
+  // it does for the scheduler, because a worker and an API are two processes
+  // and sharing a composition root between them is how one ends up importing
+  // the other's config.
+  const dunning = new DunningService({
+    dunning: new PostgresDunningRepository(pools.app),
+    ladders: new PostgresDunningLadder(pools.app),
+    invoices: invoiceRepository,
+    // The SAME adapter the scheduler uses. Two would be two pieces of SQL
+    // that could disagree about which firms a sweep walks.
+    tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -376,7 +400,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
         document: { service: documents },
-        invoice: { service: invoices },
+        invoice: { service: invoices, dunning },
       },
       log,
       {

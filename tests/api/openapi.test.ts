@@ -39,6 +39,8 @@ import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
+import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
@@ -111,7 +113,7 @@ function deps(): RouterDeps {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),
         activations: new FakeActivationFeed(),
-        tenants: new FakeTenantDirectory(),
+        tenants: { activeTenantIds: () => Promise.resolve([]) },
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
         events: new RecordingEventSink(),
@@ -130,7 +132,18 @@ function deps(): RouterDeps {
       authz: new AuthzService({ permissions }),
     },
     document: { service: new DocumentService(makeDocumentFakes()) },
-    invoice: { service: new InvoiceService(makeInvoiceFakes()) },
+    invoice: {
+      service: new InvoiceService(makeInvoiceFakes()),
+      dunning: new DunningService({
+        dunning: new FakeDunningRepo(),
+        ladders: new FakeDunningLadder(),
+        invoices: makeInvoiceFakes().invoices,
+        tenants: new FakeTenantDirectory(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     auth: {
       service: identityService(),
       authz: new AuthzService({ permissions }),

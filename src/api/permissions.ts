@@ -233,6 +233,18 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/credit-notes"), "party:read" as const],
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/balance"), "party:read" as const],
   [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
+
+  // THE DUNNING LADDER (T3.5). Reading how far a receivable has been chased is
+  // `party:read` — the person on the phone to the client needs to know what has
+  // already been sent. DECIDING a terminal step is `tenant:admin`, and that is
+  // the acceptance line as a permission: credit hold and legal action are the
+  // two things on this ladder a firm cannot take back with an apology, and the
+  // worker deliberately stops short of them. The gate is what makes "the worker
+  // climbs the ladder; terminal needs partner approval" true rather than
+  // intended.
+  [routeKey("GET", "/api/v1/dunning/pending"), "party:read" as const],
+  [routeKey("GET", "/api/v1/invoices/{invoiceId}/dunning"), "party:read" as const],
+  [routeKey("POST", "/api/v1/dunning/{actionId}/decide"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/invoice-series"), "config:read" as const],
   [routeKey("POST", "/api/v1/invoice-series/{entityPartyId}/prefix"), "tenant:admin" as const],
 
