@@ -1580,9 +1580,14 @@ open and are recorded above; neither blocks Phase 2.
   >     config API today. Deliberate: there are no agents, so there is nothing to auto-commit,
   >     and a screen for a knob with no consumer is the "feature that looks finished" shape.
   >     It belongs with the first real agent (T4.x).
-  >   · **The job screen was not opened in a browser this session** — the Chrome extension
-  >     disconnected. It typechecks, it lints, and the API shape it reads was verified over
-  >     HTTP; it has not been LOOKED at, which on this project is a different claim.
+  >   · ~~The job screen was not opened in a browser.~~ **It was, on the retry — and opening it
+  >     found a fifth bug.** The step's own label still read *"waiting for you — no agent built
+  >     for this yet"* while a proposal sat underneath saying one had just run: `StepState` was
+  >     deciding on the executor alone, which was the whole truth until T2.8 and stopped being
+  >     it. It reads the proposal now, and says the two machine-answered cases apart — *"a
+  >     machine answered — waiting for you to check it"* against *"a machine could not answer
+  >     this — waiting for you to decide"*. Both rendered and looked at, with the bar, the
+  >     provenance and Accept / Correct / Reject in place of Done.
   >   · **`escalated` and `queued` land in the same place** — a blocked step on the job page.
   >     Routing them to the right person by role, grade, load and SLA is T2.9, and this task
   >     deliberately does not build half a queue.
