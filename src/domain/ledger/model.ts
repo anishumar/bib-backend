@@ -104,6 +104,14 @@ export const EVENT_VERBS = {
   "party_relationship.recorded": { objectType: "party_relationship",  lane: "platform",   description: "An effective-dated relationship between two parties was recorded." },
   "party_relationship.ended":    { objectType: "party_relationship",  lane: "platform",   description: "A relationship was closed with a valid_to date." },
 
+  // ── platform · who at the firm owns a client (G3.2) ───────────────────────
+  // Effective-dated rows, so the TABLE already answers "who was the SPOC in
+  // March". These two events answer the different question the table cannot:
+  // WHO DECIDED, and when they decided it. A handover names the row it closed,
+  // because otherwise one act looks like two unrelated events on one day.
+  "client_assignment.created":   { objectType: "client_assignment",   lane: "platform",   description: "Somebody at the firm was put in charge of a client — the Key Manager, or a SPOC for one Dept or delivery team. A key-manager handover carries `handedOverFrom`, naming the assignment it closed in the same transaction." },
+  "client_assignment.ended":     { objectType: "client_assignment",   lane: "platform",   description: "An assignment was closed — somebody stopped holding a client, with nobody named in their place. NOT a delete: the row stays and is what answers who held it before. The payload carries the date it stopped being in force, which is the FIRST DAY NOT IN FORCE." },
+
   // ── platform · the configuration registry (P2 / T2.5) ─────────────────────
   // Configuration decides what everyone else may do, so who changed it, when,
   // and to which version is exactly what gets asked about later. Only versions

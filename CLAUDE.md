@@ -217,7 +217,7 @@ vocabulary, the same at every firm. The firm owns the ROWS.
 
 **It lives in `tenancy`, not the config registry**, for `staff_grade`'s reason: a Dept is the
 firm's own structure, `is_active` is a distinction the registry cannot express, and G3.2's
-`client_assignment.module_id` needs a real row to point at.
+`client_assignment.axis_id` needs a real row to point at.
 
 **A `service` body still stores the CODE, not a foreign key**, and that is not a shortcut. A
 published config version is FROZEN — the freeze is what lets a nine-month-old proposal still
@@ -766,6 +766,61 @@ reason T2.5 deferred `workflow_template`). It is T3.8, and the constraint that d
 engine is stated there: a document's content hash is evidence, so the renderer must be
 deterministic.
 
+## Who owns a client — the Key Manager and the SPOCs (G3.2)
+
+`crm.client_assignment` (migration 0049) is who at the firm looks after a client, effective-
+dated. **Key Manager** — one at a time, owns the relationship. **SPOC** — the day-to-day
+contact for one Dept or delivery team; the firm's own practice is one per Dept (*"each client
+will defacto have two SPOC, one from TRC and one from FRC"*), and a client buying RAA work has
+three, which is why it is a row per assignment and not two columns.
+
+It is in `crm` and not `tenancy` because it is the firm describing a RELATIONSHIP with a
+client, not describing itself the way `staff_grade` and `service_axis` do.
+
+**`axis_id`, not `module_id`**, and the widening is deliberate: 0043 made Depts and delivery
+teams one list precisely because neither layer is universal, so pinning a SPOC to `dept` leaves
+a firm with only teams nowhere to put one. It costs 10x Global nothing and it avoids settling
+the open Dept-vs-team question in DDL. What IS enforced is structural — a SPOC has an axis, a
+Key Manager never does.
+
+**A DEPT MAY HAVE MORE THAN ONE SPOC, and that is a decision.** Shrestha, 2026-08-30, against
+the board's own acceptance line: leave cover, a joint SPOC on a group, a fortnight's parallel
+handover. So there is no "one per axis" constraint, "who was the SPOC in March" may answer with
+a LIST, and every reader takes one. `ownership.integration.test.ts` tests the ABSENCE, so a
+later tidy-up cannot add it back without somebody deciding to — and note the asymmetry that
+chose the direction: dropping a constraint later is one line, adding one later fails against
+whatever overlap the firm has already recorded.
+
+**Two EXCLUSION constraints, not a partial unique index.** One Key Manager at a time per
+client, and no duplicate (same person, same role, same axis, overlapping). An index over OPEN
+rows constrains only today — two CLOSED rows overlapping in March would slip past it and leave
+"who was the Key Manager in March" answering with two names, which is the acceptance criterion
+failing behind a constraint that looked like it covered this. `btree_gist` +
+`daterange(valid_from, valid_to, '[)')`.
+
+**Half-open, `[valid_from, valid_to)`** — `valid_to` is the FIRST DAY NOT IN FORCE, like
+`party_relationship`, `party_identifier` and `isInForceOn`. The demo used an inclusive bound and
+copying it would have shown two SPOCs on every changeover day. **A handover closes the old row
+at D and opens the new one at D**, in ONE transaction, and is never an `UPDATE` of `user_id`:
+overwriting who the SPOC is destroys the only record of who it WAS.
+
+**"TODAY" IS THE CALLER'S FACT, NOT THE SERVER'S — this module is the first to take that
+seriously.** `clock.now().toISOString().slice(0, 10)` is a day out for a firm east of Greenwich
+every morning, and opening the screen at 04:11 in Delhi found both halves of it: the panel said
+"as of 29-08" on the thirtieth, and then a client assigned from that form was missing from its
+holder's own book because `CURRENT_DATE` on a UTC server had not reached it. So `GET
+/api/v1/my-clients` takes `asOf`, `listOpenForClient` takes the date, `CURRENT_DATE` appears
+nowhere in this module's SQL, and the browser sends its LOCAL calendar day. **The defaults still
+use the server's day**, which is the honest fallback for a caller that did not say — and the
+same one-liner is still the convention in `invoice`, `dunning` and `lead`, which have the same
+bug and their own task to fix it in.
+
+`party:read` to see an account team, `party:write` to change one — not `tenant:admin`. Naming a
+Key Manager grants nobody anything; it is a fact about a client, like its identifiers. Its
+honest limit is on the SCREEN: the assign form needs the roster and the Dept list, both
+`tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
+`/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
@@ -1079,7 +1134,7 @@ stays earmarked for T3.1.
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator` and `invoicing` are built.
-Next: T2.9's verification queue, G3.2's client assignment, T3.6's documents and T3.7's dashboards.
+Next: T3.1's work items (which reads G3.2's SPOC), T3.2's compliance calendar and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

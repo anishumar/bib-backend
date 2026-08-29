@@ -20,6 +20,7 @@ import type {
   NewPerson,
   PartyRepository,
 } from "../../usecase/party/ports";
+import type { ClientDirectory } from "../../usecase/clientassignment/ports";
 import {
   PartyAlreadyArchived,
   PartyHasReferences,
@@ -105,7 +106,15 @@ function toLegalEntity(r: LegalEntityRow): LegalEntity {
   };
 }
 
-export class PostgresPartyRepository implements PartyRepository {
+/**
+ * Two ports over the party tables. `PartyRepository` is the party use case's
+ * own; `ClientDirectory` is G3.2's, which needs one question answered before it
+ * puts somebody in charge of a client — is this party the firm's, and has the
+ * firm archived it? One adapter, because a second notion of "archived" would
+ * eventually let an assignment be made against a client that is out of every
+ * picker.
+ */
+export class PostgresPartyRepository implements PartyRepository, ClientDirectory {
   constructor(private readonly app: Db) {}
 
   async createOrganization(o: NewOrganization): Promise<Organization> {

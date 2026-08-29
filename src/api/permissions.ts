@@ -53,6 +53,33 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // that carries it to every tenant that has not customised its roles.
   [routeKey("POST", "/api/v1/parties/{partyId}/archive"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/unarchive"), "party:write" as const],
+
+  // WHO OWNS A CLIENT (G3.2) reuses the party permissions, and that is argued
+  // rather than assumed.
+  //
+  // It is not `tenant:admin`: the ladder and the Depts are the firm describing
+  // ITSELF, and this is a fact about one client's relationship with it — the
+  // same kind of fact as its identifiers and its leads, which `party:write`
+  // already covers. Naming somebody the Key Manager grants them nothing; the
+  // permission axis is untouched by it.
+  //
+  // A new `client:assign` would be the tighter answer and it is not free:
+  // permissions reach existing firms as config rows, so one costs a migration
+  // that carries it to every tenant that has not customised its roles (T2.5's
+  // rule). And a firm that wants only partners reassigning clients can do most
+  // of it today — publish a role without `party:write`, this afternoon, with no
+  // deploy. Revisit when one asks, as `proposal:approve` was.
+  [routeKey("GET", "/api/v1/parties/{partyId}/assignments"), "party:read" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/assignments"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/parties/{partyId}/assignments/{assignmentId}/end"),
+    "party:write" as const,
+  ],
+  // "My clients" is a read of the caller's OWN book and still takes
+  // `party:read`, because it returns the firm's clients by name — the thing
+  // that permission governs. It is not `NO_PERMISSION_REQUIRED` just because
+  // the rows happen to be the caller's.
+  [routeKey("GET", "/api/v1/my-clients"), "party:read" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],

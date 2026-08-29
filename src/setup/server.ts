@@ -28,6 +28,7 @@ import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypt
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
+import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import {
   PostgresServiceAxisRepository,
   PostgresWorkSplitSetting,
@@ -71,6 +72,7 @@ import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
+import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
@@ -378,11 +380,41 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   const tenancyDeps: TenancyDeps = { service: tenancy };
 
+  // Held in a variable rather than constructed inline, because the
+  // client-assignment use case needs the same adapter as its `ClientDirectory`
+  // — it must refuse an assignment to a party that is not there or that the
+  // firm has archived, and only this adapter can say.
+  const partyRepository = new PostgresPartyRepository(pools.app);
+
   const party = new PartyService({
-    parties: new PostgresPartyRepository(pools.app),
+    parties: partyRepository,
     identifiers: new PostgresIdentifierRepository(pools.app),
     relationships: new PostgresRelationshipRepository(pools.app),
     ids: systemIds,
+    events: ledger,
+  });
+
+  // WHO OWNS A CLIENT (G3.2). Four ports, and three of them are adapters that
+  // already exist for somebody else — which is the point of stating ports in
+  // each use case's own vocabulary.
+  //
+  //   · `clients`  — the party adapter. One notion of what a party is and
+  //     whether it is archived; a second would eventually disagree about
+  //     whether an archived client may be given an owner.
+  //   · `staff`    — the SAME membership adapter the lead use case holds as its
+  //     own `StaffDirectory`, and for the same reason: `tenancy.user_account` is
+  //     GLOBAL, so nothing but the roster can say the person works HERE.
+  //   · `axes`     — a THIRD port on `PostgresServiceAxisRepository`, beside the
+  //     service-axis repository and the config registry's `AxisDirectory`. One
+  //     table, one adapter: two would let a SPOC be assigned to a Dept the
+  //     picker never offered.
+  const clientAssignments = new ClientAssignmentService({
+    assignments: new PostgresClientAssignmentRepository(pools.app),
+    clients: partyRepository,
+    staff: memberships,
+    axes: serviceAxisRepository,
+    ids: systemIds,
+    clock: systemClock,
     events: ledger,
   });
 
@@ -479,6 +511,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
+        clientAssignments: { service: clientAssignments },
         orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },

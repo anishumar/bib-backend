@@ -57,6 +57,13 @@ import {
   FakeTemplateSource,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
+import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
+import {
+  FakeAssignableAxes,
+  FakeAssignmentStaff,
+  FakeClientAssignmentRepo,
+  FakeClientDirectory,
+} from "../../src/testfakes/clientassignment";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
@@ -164,6 +171,17 @@ function deps(): RouterDeps {
         axes: new FakeServiceAxisRepo(),
         split: new FakeWorkSplitSetting(),
         ids: new FakeIds(),
+        events: new RecordingEventSink(),
+      }),
+    },
+    clientAssignments: {
+      service: new ClientAssignmentService({
+        assignments: new FakeClientAssignmentRepo(),
+        clients: new FakeClientDirectory(),
+        staff: new FakeAssignmentStaff(),
+        axes: new FakeAssignableAxes(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         events: new RecordingEventSink(),
       }),
     },

@@ -1743,7 +1743,86 @@ open and are recorded above; neither blocks Phase 2.
 > `contract.activated` event now carries `entity_party_id`, so this lane has the join it keys
 > on. Note the dev-database reset it requires — see G0.1.
 
-- [ ] `(B)` **G3.2** **Client ownership — `client_assignment`.** New tenant-scoped table: `client_party_id`, `role` in `key_manager` | `spoc`, `module_id` (the Dept for a SPOC, null for a key manager, enforced by CHECK), `user_id`, `valid_from` / `valid_to`. *Acc: a client has one Key Manager and one SPOC per Dept, effective-dated, and "who was SPOC in March" is answerable.* — **§4.2. T3.1's own acceptance line depends on this** — nothing else in the schema can answer "the client's Dept SPOC". Confirmed firm practice, not a guess: *"each client will de facto have two SPOC — one from TRC team and one from FRC team"*, and a client buying RAA work has three, which is why it is a row per Dept rather than two columns. Depends on G2.1 for `module`.
+- [x] `(B)` **G3.2** **Client ownership — `crm.client_assignment`.** New tenant-scoped table: `client_party_id`, `role` in `key_manager` | `spoc`, **`axis_id`** (the Dept OR delivery team for a SPOC, null for a key manager, enforced by CHECK), `user_id`, `valid_from` / `valid_to`. *Acc: a client has one Key Manager, effective-dated SPOCs per Dept, and "who was SPOC in March" is answerable.* — **§4.2. T3.1's own acceptance line depends on this** — nothing else in the schema can answer "the client's Dept SPOC". Confirmed firm practice, not a guess: *"each client will de facto have two SPOC — one from TRC team and one from FRC team"*, and a client buying RAA work has three, which is why it is a row per Dept rather than two columns. Depends on G2.1 for `module`.
+  > **Done (2026-08-30). Migration 0049.** `npm run check` **1061** · `npm run test:integration`
+  > **355** · `npm run smoke` **229/229** · `scripts/client-assignment-walk.sh` **34/34** ·
+  > screens opened in the browser.
+  >
+  > **THE ACCEPTANCE LINE WAS CHANGED ABOVE, and this is the one thing to read here.** The
+  > board said *one SPOC per Dept*; Shrestha's instruction (2026-08-30) is that **in general a
+  > Dept may have more than one** — leave cover, a joint SPOC on a group, a fortnight's
+  > handover run in parallel. So there is deliberately **no "one SPOC per axis" constraint**,
+  > the consequence is stated rather than discovered ("who was the SPOC in March" may answer
+  > with a LIST, and every reader takes a list), and what T3.1 does with two SPOCs is T3.1's
+  > decision made with its screen in hand. The direction is also the cheap one to reverse:
+  > dropping a constraint later is one line; ADDING one later fails against whatever overlap
+  > the firm has already recorded, and somebody then has to choose which real assignment to
+  > delete. `ownership.integration.test.ts` tests the ABSENCE so a later tidy-up cannot put it
+  > back without deciding to.
+  >
+  > **`axis_id`, not `module_id` — a deliberate widening, for the standing directive.** 0043
+  > made Depts and delivery teams ONE list with an `axis` discriminator precisely because
+  > neither layer is universal; pinning a SPOC to `dept` leaves a firm with only delivery teams
+  > nowhere to put one. It costs 10x Global nothing — they point their SPOCs at their Depts and
+  > get exactly what the board asked for, from a picker rather than a migration. It also avoids
+  > answering the open FINCOMPLIANCE question in DDL. What IS still enforced, because it is
+  > structural: a SPOC has an axis, a Key Manager never does.
+  >
+  > **One Key Manager at a time, and history stays unambiguous — by an EXCLUSION constraint,
+  > not a partial unique index.** An index over open rows constrains only TODAY; two CLOSED
+  > rows overlapping in March slip past it and the acceptance line fails with a constraint that
+  > looked like it covered this. `btree_gist` + `daterange(valid_from, valid_to, '[)')`, plus a
+  > second exclusion that refuses the SAME person twice on one axis (de-duplication, not
+  > policy). Both proven against real Postgres.
+  >
+  > **Half-open `[valid_from, valid_to)`, against the demo's inclusive bound.** Every
+  > effective-dated thing in BiB is half-open (`party_relationship`, `party_identifier`,
+  > `isInForceOn`), and copying the demo would have shown TWO SPOCs on every changeover day —
+  > the exact ambiguity this table exists to remove. A handover closes at D and opens at D.
+  >
+  > **A handover is two rows and never an edit**, in ONE transaction: the exclusion constraint
+  > refuses the incoming row until the outgoing one is closed, so two calls would leave a
+  > client with nobody in charge when the insert failed.
+  >
+  > **Two bugs, both found by OPENING THE PAGE, and they are the same bug from two sides —
+  > #8 and #9.** At 04:11 in Delhi, `new Date().toISOString().slice(0,10)` is **yesterday**.
+  > The panel rendered "as of 29-08" on the thirtieth (#8). Fixing the screen was not enough:
+  > the client assigned from the form then vanished from its holder's own book (#9), because
+  > the SERVER's today is UTC's and `listForUser` / `listOpenForClient` were asking
+  > `CURRENT_DATE`. **A calendar day is the CALLER's fact and cannot be derived on the
+  > server**, so `GET /api/v1/my-clients` takes `asOf`, `listOpenForClient` takes the date, and
+  > the browser sends its LOCAL one. `CURRENT_DATE` is gone from this module's SQL.
+  >
+  > **The wider version of that is NOT fixed and is not mine to fix here:** `clock.now()
+  > .toISOString().slice(0,10)` is the codebase's convention for "today" in `invoice`,
+  > `dunning` and `lead` too, and every one of them is a day out for a firm east of Greenwich
+  > in the morning. Changing four modules' behaviour belongs in its own task with its own
+  > argument. **This module's defaults still use it** — they are the honest fallback for an API
+  > caller that did not say — and every path the screens use sends an explicit date.
+  >
+  > **Permissions: `party:read` / `party:write`, not `tenant:admin`.** Naming a Key Manager
+  > grants nobody anything; it is a fact about a client, like its identifiers and its leads. A
+  > `client:assign` of its own would cost a migration to reach every existing firm (T2.5's
+  > rule), and a firm wanting it tighter can publish a role without `party:write` today.
+  >
+  > **HONEST GAP, and it is the same one `/leads` already has.** Assigning needs `party:write`,
+  > which a manager holds — but the two PICKERS the form needs (the roster, the firm's Depts)
+  > are `tenant:admin` reads, so a manager is permitted to assign and is shown no form. The
+  > screen degrades exactly as the pipeline's owner dropdown does rather than being fixed here
+  > on a whim: widening either read is a decision about who may see the firm's roster and it
+  > belongs in one place for both screens.
+  >
+  > Four routes, and the screens: **`/clients/[partyId]`** gains an Account team panel with an
+  > **"as of" date box** — the acceptance line, on screen — and the history below it;
+  > **`/clients`** gains a **My clients** tab that reads the assignments rather than filtering
+  > the party list. Two ledger verbs, and a handover's `client_assignment.created` carries
+  > `handedOverFrom` so one act does not read as two unrelated events on one day.
+  >
+  > **Still not decided, and deliberately left open:** which axis 10x actually assigns SPOCs
+  > per (the FINCOMPLIANCE conflict — a DATA question this schema expresses either way), and
+  > whether a SPOC could ever be a client-side contact rather than staff (assumed staff; the
+  > roster is what refuses a stranger, because the FK points at a GLOBAL table).
+
 - [x] `(B)` **G3.3** **`staff_grade` + `membership.grade_id`.** The firm's own grade ladder, with `rank` and `is_active`. *Acc: the review rule "Manager or above" is one comparison against `rank`, and a grade the firm stopped promoting through stays readable.* — **§4.3.** `rank` exists because that is the whole routing rule the firm actually stated — one threshold, no skill matrix, no tier-and-load. `is_active` rather than `deleted_at`, and the distinction is deliberate: `deleted_at` means the row was a mistake, `is_active` means the firm has moved on — and a rung somebody once held is part of why they could approve something in 2026. Needed by T2.9's verification routing and T3.1's review step.
   > **Done (2026-08-28). Migration 0040 — the first in the `(B)` range.**
   >

@@ -9,6 +9,7 @@ import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
+import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
 import { VerificationError } from "../domain/verification/errors";
 import { SchedulerError } from "../domain/scheduler/errors";
@@ -264,6 +265,38 @@ export function mapError(err: unknown): MappedError {
       // choosing another, not by resending this.
       case "AXIS_NOT_ASSIGNABLE":
       case "WORK_SPLIT_AXIS_EMPTY":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof ClientAssignmentError) {
+    switch (err.code) {
+      // Malformed in shape or incoherent on its face — the caller fixes the
+      // request. The two axis rules are here rather than with the conflicts
+      // because a SPOC with no Dept and a Key Manager with one are wrong
+      // whatever state the firm is in.
+      case "INVALID_ASSIGNMENT_ROLE":
+      case "INVALID_ASSIGNMENT_DATES":
+      case "AXIS_REQUIRED_FOR_SPOC":
+      case "AXIS_NOT_ALLOWED_FOR_KEY_MANAGER":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "ASSIGNMENT_CLIENT_NOT_FOUND":
+      case "ASSIGNMENT_AXIS_NOT_FOUND":
+      case "ASSIGNMENT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Conflicts, on `AXIS_NOT_ASSIGNABLE`'s reasoning: every one of these is
+      // a well-formed request refused by the state of the firm's own records —
+      // a client it has put away, a Dept it has retired, an assignment that
+      // already exists or already ended, a start date the incumbent's own
+      // period is in the way of. The caller fixes each on another screen or
+      // with another date, never by resending this.
+      case "ASSIGNMENT_CLIENT_ARCHIVED":
+      case "ASSIGNMENT_AXIS_RETIRED":
+      case "ASSIGNMENT_HOLDER_NOT_STAFF":
+      case "ASSIGNMENT_ALREADY_ENDED":
+      case "ASSIGNMENT_DUPLICATE":
+      case "ASSIGNMENT_PREDATES_INCUMBENT":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

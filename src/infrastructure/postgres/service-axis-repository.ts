@@ -16,6 +16,7 @@ import type {
   WorkSplitSetting,
 } from "../../usecase/serviceaxis/ports";
 import type { AxisDirectory, KnownAxis } from "../../usecase/config/ports";
+import type { AssignableAxisDirectory } from "../../usecase/clientassignment/ports";
 
 interface AxisRow {
   id: string;
@@ -47,14 +48,24 @@ function toAxis(r: AxisRow): ServiceAxis {
 const COLUMNS = "id, tenant_id, axis, code, name, sort_order, is_active";
 
 /**
- * Two ports over one table, the pattern the staff-grade repository already uses.
+ * THREE ports over one table, the pattern the staff-grade repository already
+ * uses.
  *
  * `ServiceAxisRepository` is this use case's own seam. `AxisDirectory` is the
  * CONFIG registry's — declared in config's vocabulary so the two use cases never
  * import each other, exactly as `RoleDirectory` lets tenancy ask the registry
  * what a role is without knowing what a config row looks like.
+ * `AssignableAxisDirectory` is G3.2's, which needs one question answered: is
+ * this Dept or delivery team the firm's, and does it still take new work? One
+ * adapter because it is one table — two would eventually disagree, and a SPOC
+ * would end up assigned to a Dept the picker never offered.
+ *
+ * The three `implements` are what makes the agreement a COMPILE error rather
+ * than a discovery: if any port's shape drifts, this line fails, in one place.
  */
-export class PostgresServiceAxisRepository implements ServiceAxisRepository, AxisDirectory {
+export class PostgresServiceAxisRepository
+  implements ServiceAxisRepository, AxisDirectory, AssignableAxisDirectory
+{
   constructor(private readonly app: Db) {}
 
   async list(tenantId: string, axis: ServiceAxisKind): Promise<readonly ServiceAxis[]> {
