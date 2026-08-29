@@ -1500,7 +1500,95 @@ open and are recorded above; neither blocks Phase 2.
   > Gate after the merge: `npm run check` **920** · `test:integration` **293** · `smoke`
   > **229 passed, 0 failed**.
 
-- [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
+- [x] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
+  > **Done (2026-08-29). Migration 0047 — `delivery.agent_run` + `confidence_tier`, the
+  > registry's seventh kind.**
+  >
+  > **A GUARDRAIL BUILT BEFORE THE THING IT GUARDS, and that is the order, not an accident.**
+  > There are no agents. The product's plan is to get what firms do manually INTO the product
+  > first — standardised and visible, which T2.7 finished — and only then replace some of it
+  > with machines. So this task builds the rails while nothing is on them, exactly as the
+  > board asks above Phase 4: **guardrails first, then capabilities**. A rule written after
+  > the thing it restrains gets written by whoever is already shipping that thing, and this
+  > rule decides whether a machine may file a return with the firm's name on it.
+  >
+  > **THE GUARDRAIL IS A CHECK, NOT A SERVICE RULE.** `build2.md` in the firm's own terms:
+  > *"a rule that lives in a form is a rule that a script, an import or an AI agent walks
+  > straight past."* Here the rule is ABOUT agents, so an agent walking past it is the
+  > literal failure mode. A CHECK cannot read config, so **the thresholds that applied are
+  > COPIED onto the run** — same move as `job.split_code` and `job_step.executor`, and it
+  > buys the constraint AND the answer to "why was this allowed" surviving the firm raising
+  > its bar next quarter. `guardrail.integration.test.ts` proves all of it as the OWNER role,
+  > going around the application entirely.
+  >
+  > **`> `, NOT `>=`, AND IT IS LOAD-BEARING.** A machine acts unattended only STRICTLY above
+  > the bar, which makes **1.0 a real off switch** — one edit stops every unattended commit,
+  > with no deploy, on the morning somebody needs it. With `>=` no value would mean "never".
+  >
+  > **NOTHING IS SEEDED, and no firm's behaviour changed.** Roles and the grade ladder are
+  > seeded because a firm without them is BROKEN. A firm without thresholds is not broken, it
+  > is cautious: `ASK_A_PERSON` = `(autoCommitAt 1, reviewAt 0)`, expressed in the same two
+  > numbers so nothing needs a special case. The discount policy's rule reached from the same
+  > direction — *no published policy means ZERO, not "no limit"*.
+  >
+  > **THE FIRM'S OWN INSTRUCTION OUTRANKS THE NUMBERS**, which is why the 0.95/0.70 figures
+  > were not a blocking client question. The real control is per step on the template —
+  > `human` / `agent_with_approval` / `agent`, chosen by whoever knows what the step does —
+  > and `agent_with_approval` NEVER commits however sure the machine was. `approval_required`
+  > is stored on the run so the CHECK can express that, and so "was this queued because it
+  > was unsure, or because we always check this step" has an answer. **The numbers are still
+  > not the client's**: the demo says outright they *"come from another vendor's document and
+  > the firm has never been asked"*. What the firm HAS confirmed is Q47 (closed 2026-08-21) —
+  > unattended creation is wanted at all: *"Yes of course it should be created through AI, and
+  > there should be a manual option too."* `SUGGESTED_TIERS` is exported, published
+  > deliberately, and never seeded.
+  >
+  > **THE GAP THIS CLOSED, and it had been there since T2.7.** `agent_with_approval` was
+  > blocked by `waitsForAPerson` BEFORE `agents.run` was reached — the machine produced
+  > nothing and the person had nothing to approve, while the kind's own comment said "the
+  > machine produces the output and a PERSON decides whether it stands". `runsAMachine` is
+  > now a separate question from `waitsForAPerson`, because they are separate questions.
+  >
+  > **`proposed` AND `applied` BOTH SURVIVE, FOREVER** — `build2.md` §5.2, listed there as one
+  > of the demo's hardest-won rules with no home yet. Two CHECKs keep the number honest rather
+  > than merely collected: a `corrected` must ACTUALLY differ and an `accepted` must not.
+  >
+  > **`agent_run.completed` and `agent_run.escalated` were registered verbs with NO WRITER** —
+  > the shape this codebase keeps catching. They have one now. `agent_run.decided` is new, and
+  > carries WHICH of the three outcomes and never the values: accepted-vs-corrected is the
+  > accuracy signal, and an agent's output can hold a client's own data in a log that cannot
+  > be erased.
+  >
+  > **A FOURTH BUG FOUND BY RUNNING IT.** A correction identical to the proposal was refused by
+  > the CHECK and reached the browser as **500 "internal error"** — a raw `PostgresError`
+  > belongs to no domain family. It is refused in WORDS by the service now, with the CHECK
+  > still underneath as the wall for anything that never reaches the service. Fourth time on
+  > this project that a real request found what unit tests could not.
+  >
+  > **Screens**: `/work/[jobId]` shows the proposal — the confidence WITH the bar it was
+  > judged against, because "0.82" alone means nothing — and offers Accept / Correct / Reject
+  > INSTEAD of the Done button while one is undecided. The API refuses the Done button there,
+  > so offering it would be a slower error.
+  >
+  > **Proven live** against a seeded firm: a queued run rendered over HTTP with its bar and
+  > provenance, the plain Done button answered 409, a no-op correction answered 409 with an
+  > actionable message, a real correction stored BOTH values, and an acceptance applied the
+  > proposal itself and finished the step.
+  >
+  > **HONEST LIMITS, named rather than implied:**
+  >   · **No screen publishes the thresholds.** A firm can only set them through the generic
+  >     config API today. Deliberate: there are no agents, so there is nothing to auto-commit,
+  >     and a screen for a knob with no consumer is the "feature that looks finished" shape.
+  >     It belongs with the first real agent (T4.x).
+  >   · **The job screen was not opened in a browser this session** — the Chrome extension
+  >     disconnected. It typechecks, it lints, and the API shape it reads was verified over
+  >     HTTP; it has not been LOOKED at, which on this project is a different claim.
+  >   · **`escalated` and `queued` land in the same place** — a blocked step on the job page.
+  >     Routing them to the right person by role, grade, load and SLA is T2.9, and this task
+  >     deliberately does not build half a queue.
+  >
+  > Gate: `npm run check` **942** · `test:integration` **308** · `smoke` **229 passed, 0
+  > failed**.
 - [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
 
 **Milestone M2:** a signed engagement letter automatically spawns jobs that walk a configured step graph and land in a verification queue — the **engine runs end-to-end** with fake executors. *(This is the demoable core spine.)*

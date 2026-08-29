@@ -210,3 +210,20 @@ export function jobStatusFrom(
 export function waitsForAPerson(executor: string): boolean {
   return executor === "human" || executor === "agent_with_approval";
 }
+
+/**
+ * Whether a MACHINE produces the output — regardless of who signs it off.
+ *
+ * Both agent kinds do, and keeping this separate from `waitsForAPerson` is
+ * T2.8's correction. The orchestrator used to branch on that one predicate
+ * alone, so `agent_with_approval` was blocked before `agents.run` was ever
+ * reached: the machine produced nothing and the person had nothing to approve.
+ * The kind's whole purpose is that BOTH happen.
+ *
+ * So the two questions are genuinely different and are asked separately now:
+ * `runsAMachine` decides whether to run one, `waitsForAPerson` decides whether
+ * its answer may ever stand unattended.
+ */
+export function runsAMachine(executor: string): boolean {
+  return executor === "agent" || executor === "agent_with_approval";
+}

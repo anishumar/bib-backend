@@ -17,8 +17,10 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
+  PublishedTiers,
   ResolvedTemplate,
   TemplateSource,
+  TierSource,
 } from "../../usecase/orchestrator/ports";
 import type { Permission } from "../../domain/authz/model";
 import type {
@@ -29,7 +31,9 @@ import type {
   VersionStatus,
 } from "../../domain/config/model";
 import {
+  CONFIDENCE_TIER_KEY,
   DISCOUNT_POLICY_KEY,
+  readConfidenceTierBody,
   readMaxDiscountPercent,
   readRolePermissions,
   readWorkflowTemplate,
@@ -104,7 +108,8 @@ export class PostgresConfigRepository
     RoleDirectory,
     ServiceCatalogue,
     PolicyDirectory,
-    TemplateSource
+    TemplateSource,
+    TierSource
 {
   constructor(private readonly app: Db) {}
 
@@ -468,6 +473,36 @@ export class PostgresConfigRepository
       // A draft is deliberately not accepted: a process somebody is still
       // writing is not one to run a client's work through.
       return row ? toResolvedTemplate(row.id, row.body) : null;
+    });
+  }
+
+  /**
+   * The firm's confidence thresholds, as published (T2.8).
+   *
+   * One entry per firm under a fixed key, not one per agent. A per-agent
+   * threshold is a knob nobody can fill today — there are no agents, so there is
+   * no accuracy record to set one from — and a knob set by guessing is worse
+   * than one that does not exist. When agents exist and their accuracy differs,
+   * this becomes a key per agent and the port does not change.
+   *
+   * Null is the ordinary answer and NOT an error: the caller falls back to
+   * "never commit, always ask" rather than to numbers this code invented, which
+   * is why T2.8 changed no firm's behaviour on the day it shipped.
+   */
+  async publishedTiers(tenantId: string): Promise<PublishedTiers | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'confidence_tier' AND e.key = ${CONFIDENCE_TIER_KEY}
+      `;
+      if (!row) return null;
+      const tiers = readConfidenceTierBody(row.body);
+      // A published row that no longer parses reads as nothing published. The
+      // safe direction: a machine that cannot establish what it is allowed to do
+      // does not act unattended.
+      return tiers === null ? null : { tiers, versionId: row.id };
     });
   }
 

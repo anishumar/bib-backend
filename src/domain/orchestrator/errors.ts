@@ -25,7 +25,9 @@ export type OrchestratorErrorCode =
   | "NO_TEMPLATE_PUBLISHED"
   | "TEMPLATE_UNREADABLE"
   | "STEP_NOT_WAITING"
-  | "STEP_NOT_A_PERSONS";
+  | "PROPOSAL_UNDECIDED"
+  | "NOTHING_PROPOSED"
+  | "CORRECTION_CHANGED_NOTHING";
 
 export class JobNotFound extends OrchestratorError {
   constructor(jobId: string) {
@@ -81,13 +83,68 @@ export class StepNotWaiting extends OrchestratorError {
   }
 }
 
-export class StepNotAPersons extends OrchestratorError {
-  constructor(stepKey: string, executor: string) {
+/**
+ * A step a machine has answered, which nobody has decided about yet (T2.8).
+ *
+ * Replaces `StepNotAPersons`, whose case stopped existing: every `blocked` step
+ * is now a person's to finish, including an `agent` step nobody built an agent
+ * for. What is refused instead is finishing one BEHIND the proposal — ticking
+ * "done" on a step where a machine produced an answer records that a person did
+ * the work and leaves what the machine said undecided forever, which is exactly
+ * the accuracy signal `agent_run` exists to keep.
+ */
+export class ProposalUndecided extends OrchestratorError {
+  constructor(stepKey: string) {
     super(
-      "STEP_NOT_A_PERSONS",
-      `step ${JSON.stringify(stepKey)} is ${JSON.stringify(executor)} work, so it is not a ` +
-        `person's to complete. If it should be, change the step's executor on the template — ` +
-        `that is one field, and every job started after it picks the change up.`,
+      "PROPOSAL_UNDECIDED",
+      `step ${JSON.stringify(stepKey)} has an answer from a machine that nobody has ` +
+        `decided about. Accept it, correct it, or reject it with a reason — ticking it done ` +
+        `would record that a person did the work and lose whether the machine was right.`,
+    );
+  }
+}
+
+/**
+ * Somebody tried to accept or correct an answer nothing produced (T2.8).
+ *
+ * The ordinary case is a `human` step, or a machine step nobody built an agent
+ * for: both are blocked and both are finished with the plain Done button. This
+ * is what stops a decision route being used as a second way to tick one off,
+ * which would write "accepted" against a proposal that never existed and put a
+ * fictional point into the accuracy record.
+ */
+export class NothingProposed extends OrchestratorError {
+  constructor(stepKey: string) {
+    super(
+      "NOTHING_PROPOSED",
+      `step ${JSON.stringify(stepKey)} has no answer from a machine to decide about. It is ` +
+        `waiting for a person to do the work and mark it done.`,
+    );
+  }
+}
+
+/**
+ * A "correction" that corrected nothing (T2.8).
+ *
+ * The schema refuses this too, and that CHECK is the real enforcement — it has
+ * to hold against an import or an agent. But a constraint violation reaching a
+ * person as "internal error" tells them nothing, and this is a mistake somebody
+ * makes by clicking Correct and then changing their mind: an acceptance,
+ * mis-recorded. Counted as a correction it understates the agent, which is why
+ * it is refused rather than quietly stored.
+ *
+ * FOUND BY RUNNING IT. The database said no and the API answered 500, because a
+ * raw `PostgresError` belongs to no domain family. Same shape as the two before
+ * it on this project, and the fix is the same: the service refuses it in words,
+ * and the CHECK stays as the wall for everything that never reaches the service.
+ */
+export class CorrectionChangedNothing extends OrchestratorError {
+  constructor(stepKey: string) {
+    super(
+      "CORRECTION_CHANGED_NOTHING",
+      `the correction to step ${JSON.stringify(stepKey)} is identical to what the machine ` +
+        `proposed. If it was right, accept it — recording it as a correction would say the ` +
+        `machine got it wrong, and that number is the only measure of whether it is improving.`,
     );
   }
 }

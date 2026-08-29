@@ -9,11 +9,14 @@ import { describe, expect, it } from "vitest";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
 import { FakeJobRepo } from "../../src/testfakes/scheduler";
 import {
+  FakeAgentRunRepo,
   FakeAgentRuntime,
   FakeJobStepRepo,
   FakeJobSubjectSource,
   FakeTemplateSource,
+  FakeTierSource,
 } from "../../src/testfakes/orchestrator";
+import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
@@ -22,7 +25,7 @@ import type { Job } from "../../src/domain/scheduler/model";
 import type { ResolvedTemplate, TemplateStep } from "../../src/usecase/orchestrator/ports";
 import {
   NoTemplatePublished,
-  StepNotAPersons,
+  NothingProposed,
   StepNotWaiting,
   TemplateUnreadable,
 } from "../../src/domain/orchestrator/errors";
@@ -86,11 +89,23 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
     jurisdiction: "IN",
   });
 
+  // Thresholds published, so these tests keep meaning what they meant before
+  // T2.8: they are about the GRAPH, and a confident agent finishing its step is
+  // the shape they assert. The fake agent answers at confidence 1 by default,
+  // which is above 0.95.
+  //
+  // The OPPOSITE case — no tier published, so nothing commits however sure the
+  // machine is — is the product's real starting state and has its own tests in
+  // `agent.test.ts`, where it is the subject rather than the backdrop.
+  const tiers = new FakeTierSource().publish(SUGGESTED_TIERS);
+  const runs = new FakeAgentRunRepo();
   const service = new OrchestratorService({
     jobs,
     steps,
     templates,
     subjects,
+    tiers,
+    runs,
     agents,
     tenants: { activeTenantIds: () => Promise.resolve([TENANT]) },
     ids: new FakeIds(),
@@ -616,14 +631,13 @@ describe("a job's status is derived from its steps, never tracked beside them", 
   });
 });
 
-describe("StepNotAPersons", () => {
-  it("is what a caller gets for a running agent step", () => {
-    // Constructed directly: reaching this state through the service needs an
-    // agent that blocks mid-run, which no fake models and no runtime yet does.
-    // The message is the part that matters, and it tells the reader the fix is
-    // one field on the template.
-    const err = new StepNotAPersons("reconcile", "agent");
-    expect(err.code).toBe("STEP_NOT_A_PERSONS");
-    expect(err.message).toContain("change the step's executor on the template");
+describe("NothingProposed", () => {
+  it("is what a caller gets for deciding a step no machine answered", () => {
+    // The route that accepts or corrects a proposal must not become a second
+    // way to tick a step off — that would write "accepted" against a proposal
+    // that never existed and put a fictional point into the accuracy record.
+    const err = new NothingProposed("reconcile");
+    expect(err.code).toBe("NOTHING_PROPOSED");
+    expect(err.message).toContain("no answer from a machine");
   });
 });

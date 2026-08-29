@@ -70,6 +70,7 @@ import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
+import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
@@ -174,6 +175,13 @@ export function wire(cfg: Config, log: Logger): Wired {
     templates: configRepository,
     subjects: new PostgresJobSubjectRepository(pools.app),
     agents: new NoAgentsBuiltYet(),
+    // The guardrail's two seams (T2.8). Both are wired even though nothing runs
+    // through them yet, and that is the order the board asks for — the rails
+    // exist before anything is on them, so the first real agent is a change to
+    // ONE line above and not a conversation about what it may do while somebody
+    // waits for it to ship.
+    tiers: configRepository,
+    runs: new PostgresAgentRunRepository(pools.app),
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,

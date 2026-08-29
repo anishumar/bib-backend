@@ -35,18 +35,25 @@ import {
   cascadeSkips,
   jobStatusFrom,
   readySteps,
-  waitsForAPerson,
+  runsAMachine,
 } from "../../domain/orchestrator/model";
+import { ASK_A_PERSON, decideFor } from "../../domain/agent/model";
+import type { ProposalOutcome } from "../../domain/agent/model";
 import {
   JobNotFound,
   NoTemplatePublished,
-  StepNotAPersons,
+  CorrectionChangedNothing,
+  NothingProposed,
+  ProposalUndecided,
   StepNotFound,
   StepNotWaiting,
   TemplateUnreadable,
 } from "../../domain/orchestrator/errors";
 import type {
+  AgentRun,
+  AgentRunRepository,
   AgentRuntime,
+  TierSource,
   JobStepRepository,
   JobSubject,
   JobSubjectSource,
@@ -63,6 +70,9 @@ export interface Deps {
   readonly templates: TemplateSource;
   readonly subjects: JobSubjectSource;
   readonly agents: AgentRuntime;
+  /** The firm's confidence thresholds, and the run book they judge (T2.8). */
+  readonly tiers: TierSource;
+  readonly runs: AgentRunRepository;
   readonly tenants: TenantDirectory;
   readonly ids: IdGen;
   readonly clock: Clock;
@@ -194,6 +204,120 @@ export class OrchestratorService {
   }
 
   /**
+   * What a person decided about what a machine proposed (T2.8).
+   *
+   * The write that makes `applied` a stored fact rather than a column with no
+   * writer — the shape this codebase has been caught by before. Three outcomes,
+   * and they are not interchangeable:
+   *
+   *   accepted   the machine was right. The step is done, by this person.
+   *   corrected  the machine was close. What actually stands is recorded
+   *              ALONGSIDE what was proposed, never over it, and the schema
+   *              refuses a "correction" that changed nothing. The step is done.
+   *   rejected   the machine was wrong, with a reason the schema insists on.
+   *              The step stays BLOCKED, because rejecting an answer is not
+   *              doing the work — somebody still has to, and then ticks it off
+   *              the ordinary way.
+   *
+   * Accepted and corrected are kept apart because the difference between them is
+   * the entire accuracy signal, and that number is the only evidence that could
+   * ever justify moving a threshold.
+   */
+  async decideProposal(
+    input: {
+      readonly tenantId: string;
+      readonly jobId: string;
+      readonly stepKey: string;
+      readonly outcome: ProposalOutcome;
+      readonly applied: Record<string, unknown> | null;
+      readonly rejectedReason: string | null;
+    },
+    actor: Actor,
+    decidedBy: string,
+  ): Promise<JobStep> {
+    const step = await this.deps.steps.findByKey(input.tenantId, input.jobId, input.stepKey);
+    if (!step) throw new StepNotFound(input.stepKey);
+    if (step.status !== "blocked") throw new StepNotWaiting(step.stepKey, step.status);
+
+    const open = await this.deps.runs.openForStep(input.tenantId, step.id);
+    if (!open) throw new NothingProposed(step.stepKey);
+
+    // Refused HERE as well as by the CHECK, and the difference is who is being
+    // told. The constraint has to hold against an import, a script or an agent;
+    // this exists so that a PERSON who clicked Correct and then changed nothing
+    // is told what to do instead of being shown "internal error". A raw
+    // constraint violation carries no actionable message, which is how this was
+    // found — by clicking it.
+    if (
+      input.outcome === "corrected" &&
+      JSON.stringify(input.applied) === JSON.stringify(open.proposed)
+    ) {
+      throw new CorrectionChangedNothing(step.stepKey);
+    }
+
+    const at = this.deps.clock.now().toISOString();
+    // Only where nothing has been decided, in SQL — two people looking at the
+    // same queue can click at once, and the second must not overwrite the
+    // first's answer. Null means somebody got there first.
+    const decided = await this.deps.runs.decide(input.tenantId, open.id, {
+      outcome: input.outcome,
+      // An acceptance applies the proposal ITSELF, taken from the run rather
+      // than from the caller — so "accepted" cannot quietly carry a different
+      // value than the one proposed. The schema refuses that too; this is why
+      // it never has to.
+      applied: input.outcome === "accepted" ? open.proposed : input.applied,
+      rejectedReason: input.outcome === "rejected" ? input.rejectedReason : null,
+      decidedBy,
+      decidedAt: at,
+    });
+    if (!decided) throw new ProposalUndecided(step.stepKey);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "agent_run.decided",
+      objectId: open.id,
+      actor,
+      // WHICH of the three, and never the values. Accepted-vs-corrected is the
+      // accuracy signal and belongs here; the values themselves can hold a
+      // client's own data, and this log cannot be erased.
+      payload: {
+        stepKey: step.stepKey,
+        outcome: input.outcome,
+        confidence: open.confidence,
+        decision: open.decision,
+        model: open.model,
+        promptVersion: open.promptVersion,
+      },
+    });
+
+    // A rejection is not the work being done. The machine's answer is thrown
+    // away, the step stays waiting, and whoever rejected it still has to do it
+    // and tick it off the ordinary way.
+    if (input.outcome === "rejected") return step;
+
+    const done = await this.deps.steps.transition(input.tenantId, step.id, "blocked", {
+      status: "done",
+      at,
+      performedBy: decidedBy,
+    });
+    if (!done) throw new StepNotWaiting(step.stepKey, "done");
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "job.step_advanced",
+      objectId: input.jobId,
+      actor,
+      payload: {
+        stepKey: step.stepKey,
+        from: "blocked",
+        to: "done",
+        executor: step.executor,
+        outcome: input.outcome,
+      },
+    });
+    return done;
+  }
+
+  /**
    * One job's steps, in the order its TEMPLATE wrote them.
    *
    * The template's order, not the database's: `job_step` is stored keyed and
@@ -205,6 +329,17 @@ export class OrchestratorService {
    * ROWS are the history and they are readable whatever happened to the config.
    * Only the ordering falls back to the stored one.
    */
+  /** The undecided proposals in this job, keyed by step id — what the job screen
+   *  puts in front of a person. Passed straight through; the query is the
+   *  adapter's and a use case that reassembled it would be a second place for it
+   *  to drift. */
+  async proposalsFor(
+    tenantId: string,
+    jobId: string,
+  ): Promise<ReadonlyMap<string, AgentRun>> {
+    return this.deps.runs.openForJob(tenantId, jobId);
+  }
+
   async stepsOf(tenantId: string, jobId: string): Promise<readonly JobStep[]> {
     const job = await this.deps.jobs.findById(tenantId, jobId);
     if (!job) throw new JobNotFound(jobId);
@@ -252,14 +387,19 @@ export class OrchestratorService {
     // second completion would overwrite who did it and when, which is the one
     // fact this row exists to hold.
     if (step.status !== "blocked") throw new StepNotWaiting(step.stepKey, step.status);
-    if (!waitsForAPerson(step.executor)) {
-      // Except when nobody built the agent. Then the step IS a person's, whatever
-      // the template intended — that is the rule that keeps a firm working while
-      // the agents are still being written.
-      if (!(step.executor === "agent" && !this.deps.agents.canRun(step.stepKey))) {
-        throw new StepNotAPersons(step.stepKey, step.executor);
-      }
-    }
+
+    // EVERY blocked step is a person's to finish, and T2.8 is what made that
+    // true rather than mostly true. `blocked` now has exactly three causes — a
+    // human step, a machine step nobody built an agent for, and a machine step
+    // whose answer is waiting on a decision — and a person is the answer to all
+    // three. The executor check that used to sit here refused the third.
+    //
+    // What is refused instead is finishing one BEHIND the machine's answer.
+    // Ticking "done" would record that a person did the work and leave what the
+    // machine proposed undecided forever, which is precisely the accuracy signal
+    // this task exists to keep.
+    const open = await this.deps.runs.openForStep(input.tenantId, step.id);
+    if (open) throw new ProposalUndecided(step.stepKey);
 
     const at = this.deps.clock.now().toISOString();
     const done = await this.deps.steps.transition(input.tenantId, step.id, "blocked", {
@@ -454,14 +594,23 @@ export class OrchestratorService {
       const step = byKey.get(key);
       if (!step) continue;
 
-      // A person's step, or an agent's that nobody has built yet. Both wait, and
+      // A person's step, or a machine's that nobody has built yet. Both wait, and
       // they are the same state on purpose: the firm's work carries on, and an
       // `agent` step sitting `blocked` is exactly the visible fact that an agent
       // is missing. No note is stored for it — the executor and the status say
       // it between them, and a stored sentence would be prose duplicating a
       // fact two columns already hold.
-      const noAgent = step.executor === "agent" && !this.deps.agents.canRun(step.stepKey);
-      if (waitsForAPerson(step.executor) || noAgent) {
+      //
+      // `agent_with_approval` MOVED OUT of this branch in T2.8, and it was a real
+      // gap. `waitsForAPerson` returns true for it, so it used to be blocked
+      // here and `agents.run` was never reached — the machine produced nothing,
+      // and the person had nothing to approve. Its own comment said "the machine
+      // produces the output and a PERSON decides whether it stands", and the
+      // code did only the second half. It runs the agent now; what it will never
+      // do is commit unattended, whatever the confidence says.
+      const machine = runsAMachine(step.executor);
+      const noAgent = machine && !this.deps.agents.canRun(step.stepKey);
+      if (!machine || noAgent) {
         const moved = await this.deps.steps.transition(tenantId, step.id, "pending", {
           status: "blocked",
           at: this.deps.clock.now().toISOString(),
@@ -498,21 +647,95 @@ export class OrchestratorService {
         stepKey: step.stepKey,
       });
       const at = this.deps.clock.now().toISOString();
-      const finished = await this.deps.steps.transition(tenantId, running.id, "running", {
-        status: outcome.done ? "done" : "failed",
+      const { model, promptVersion } = this.deps.agents.provenance();
+
+      // A FAILURE RECORDS NO RUN. `agent_run` holds what a machine produced,
+      // and a machine that gave up produced nothing — a row with an invented
+      // proposal would put a fabricated answer into the accuracy record.
+      if (!outcome.done) {
+        const failed = await this.deps.steps.transition(tenantId, running.id, "running", {
+          status: "failed",
+          at,
+          outcomeNote: outcome.note,
+        });
+        if (!failed) continue;
+        advanced += 1;
+        await this.deps.events.recordEvent({
+          tenantId,
+          verb: "job.step_failed",
+          objectId: job.id,
+          actor,
+          payload: { stepKey: step.stepKey, executor: step.executor, model, promptVersion },
+        });
+        continue;
+      }
+
+      // THE GUARDRAIL, decided here and enforced by a CHECK on the insert below.
+      //
+      // The thresholds are read LIVE and then COPIED onto the run, because "was
+      // this allowed" must be answerable against the numbers in force at the
+      // moment of judgement rather than whatever is published a year later.
+      // Absent config is not an error and not a default: it is `ASK_A_PERSON`,
+      // which commits nothing.
+      const published = await this.deps.tiers.publishedTiers(tenantId);
+      const tiers = published?.tiers ?? ASK_A_PERSON;
+      const approvalRequired = step.executor === "agent_with_approval";
+      const decision = decideFor(outcome.confidence, tiers, approvalRequired);
+
+      const committing = decision === "committed";
+      const settled = await this.deps.steps.transition(tenantId, running.id, "running", {
+        status: committing ? "done" : "blocked",
         at,
-        ...(outcome.done ? {} : { outcomeNote: outcome.note }),
       });
-      if (!finished) continue;
+      if (!settled) continue;
+
+      // Written AFTER the step has settled, so a run row never describes an
+      // action the step did not actually take.
+      const run = await this.deps.runs.record({
+        id: this.deps.ids.newId(),
+        tenantId,
+        jobId: job.id,
+        jobStepId: settled.id,
+        confidence: outcome.confidence,
+        autoCommitAt: tiers.autoCommitAt,
+        reviewAt: tiers.reviewAt,
+        tierVersionId: published?.versionId ?? null,
+        decision,
+        approvalRequired,
+        proposed: outcome.proposed,
+        // A commit applies its own proposal, at the same moment and by nobody.
+        // Anything else has nothing applied until a person decides.
+        applied: committing ? outcome.proposed : null,
+        model,
+        promptVersion,
+      });
+
       advanced += 1;
+      if (!committing) awaitingPeople += 1;
+      // `agent_run.completed` and `agent_run.escalated` have been in the verb
+      // registry since the ledger was written and NOTHING has ever emitted
+      // them — the "registered feature with no writer" shape this codebase keeps
+      // catching. T2.8 is their writer. The object is the RUN, not the job,
+      // which is what the registry already says they are about.
       await this.deps.events.recordEvent({
         tenantId,
-        verb: outcome.done ? "job.step_advanced" : "job.step_failed",
-        objectId: job.id,
+        verb: decision === "escalated" ? "agent_run.escalated" : "agent_run.completed",
+        objectId: run.id,
         actor,
-        payload: outcome.done
-          ? { stepKey: step.stepKey, from: "running", to: "done", executor: step.executor }
-          : { stepKey: step.stepKey, executor: step.executor },
+        // The CONFIDENCE and the bar it was judged against, never the proposal
+        // itself: the ledger holds machine facts and cannot be erased, and an
+        // agent's output can carry a client's own data.
+        payload: {
+          stepKey: step.stepKey,
+          executor: step.executor,
+          decision,
+          confidence: outcome.confidence,
+          autoCommitAt: tiers.autoCommitAt,
+          reviewAt: tiers.reviewAt,
+          model,
+          promptVersion,
+          ...(committing ? { from: "running", to: "done" } : {}),
+        },
       });
     }
     return { advanced, awaitingPeople };

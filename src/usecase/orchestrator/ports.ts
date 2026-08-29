@@ -2,6 +2,11 @@
 // this use case, stated in our vocabulary; adapters in infrastructure/ implement
 // them.
 import type { JobStep, StepStatus } from "../../domain/orchestrator/model";
+import type {
+  AgentDecision,
+  ConfidenceTiers,
+  ProposalOutcome,
+} from "../../domain/agent/model";
 
 export interface NewJobStep {
   readonly id: string;
@@ -150,10 +155,32 @@ export interface JobSubjectSource {
  */
 export interface AgentOutcomeDone {
   readonly done: true;
+  /**
+   * How sure the machine is, 0 to 1 (T2.8).
+   *
+   * NOT optional, and that is the decision: a runtime that could omit it would
+   * make "we do not know how sure it was" indistinguishable from "it was sure",
+   * and the whole guardrail hangs off this number. An agent that genuinely
+   * cannot score itself reports 0 and is escalated, which is the honest answer.
+   */
+  readonly confidence: number;
+  /**
+   * What it produced, verbatim, in whatever shape that agent's work has.
+   *
+   * Kept forever alongside what a person ended up applying — `build2.md` §5.2
+   * names this as one of the demo's hardest-won rules: keeping only the
+   * corrected value throws away the entire accuracy signal, which is the only
+   * evidence that could ever justify moving a threshold.
+   */
+  readonly proposed: Record<string, unknown>;
 }
 export interface AgentOutcomeFailed {
   readonly done: false;
-  /** Why, in words somebody can act on. Stored on the step. */
+  /** Why, in words somebody can act on. Stored on the step.
+   *
+   *  A failure records no run: this table holds what a machine PRODUCED, and a
+   *  machine that gave up produced nothing. The step goes `failed` with this
+   *  note, exactly as it did before T2.8. */
   readonly note: string;
 }
 export type AgentOutcome = AgentOutcomeDone | AgentOutcomeFailed;
@@ -161,9 +188,101 @@ export type AgentOutcome = AgentOutcomeDone | AgentOutcomeFailed;
 export interface AgentRuntime {
   /** Whether an agent exists for this step at all. */
   canRun(stepKey: string): boolean;
+  /** What produced the answer — the model and the prompt version, together.
+   *
+   *  Asked of the runtime rather than carried on each outcome, because it is a
+   *  property of the runtime and a failed run has to record it too. "Extraction
+   *  got worse in March" needs something to blame and something to revert. */
+  provenance(): { readonly model: string; readonly promptVersion: string };
   run(input: {
     readonly tenantId: string;
     readonly jobId: string;
     readonly stepKey: string;
   }): Promise<AgentOutcome>;
+}
+
+/**
+ * The firm's confidence thresholds, as published (T2.8).
+ *
+ * Null when the firm has published none, which is the ordinary state and NOT an
+ * error: the caller falls back to `ASK_A_PERSON` — never commit, always
+ * propose — rather than to numbers this code invented. Same shape the discount
+ * policy takes, and the reason turning T2.8 on changes no firm's behaviour.
+ */
+export interface PublishedTiers {
+  readonly tiers: ConfidenceTiers;
+  /** The `config.version` this came from — what the run PINS, so "why was this
+   *  allowed" survives the firm raising its bar next quarter. */
+  readonly versionId: string;
+}
+
+export interface TierSource {
+  publishedTiers(tenantId: string): Promise<PublishedTiers | null>;
+}
+
+/** One attempt a machine made at one step, as it is written down. */
+export interface NewAgentRun {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly jobId: string;
+  readonly jobStepId: string;
+  readonly confidence: number;
+  /** The thresholds that APPLIED, copied — see the migration. A CHECK cannot
+   *  read config, and the firm's bar moves. */
+  readonly autoCommitAt: number;
+  readonly reviewAt: number;
+  readonly tierVersionId: string | null;
+  readonly decision: AgentDecision;
+  /** Whether the firm asked for a person on this step whatever the numbers said
+   *  — the template's `agent_with_approval`. Recorded because the guardrail
+   *  CHECK needs it, and because "unsure" and "always checked" are different
+   *  reasons for the same queue. */
+  readonly approvalRequired: boolean;
+  readonly proposed: Record<string, unknown>;
+  /** Equal to `proposed` on a commit; null while nobody has decided. */
+  readonly applied: Record<string, unknown> | null;
+  readonly model: string;
+  readonly promptVersion: string;
+}
+
+export interface AgentRun extends NewAgentRun {
+  readonly outcome: ProposalOutcome | null;
+  readonly rejectedReason: string | null;
+  readonly decidedBy: string | null;
+  readonly decidedAt: string | null;
+  readonly createdAt: string;
+}
+
+/** What a person decided about a proposal. */
+export interface RunDecision {
+  readonly outcome: ProposalOutcome;
+  /** What actually stands. Must equal the proposal for `accepted`, differ for
+   *  `corrected`, and be absent for `rejected` — enforced by CHECKs, because an
+   *  accuracy figure nobody can trust is worse than no figure. */
+  readonly applied: Record<string, unknown> | null;
+  readonly rejectedReason: string | null;
+  readonly decidedBy: string;
+  readonly decidedAt: string;
+}
+
+export interface AgentRunRepository {
+  /** Write the run and what it was allowed to do, in one statement. The
+   *  guardrail is a CHECK on this insert, not a rule this code remembers. */
+  record(run: NewAgentRun): Promise<AgentRun>;
+  /** The undecided run for a step, if there is one — what the job screen shows
+   *  a person and what T2.9's queue will route. */
+  openForStep(tenantId: string, jobStepId: string): Promise<AgentRun | null>;
+  /** Every undecided run in one job, keyed by step id. One query for the page,
+   *  not one per row — the lookup-per-row "lists return read models" exists to
+   *  prevent, and a job's steps are rendered together. */
+  openForJob(tenantId: string, jobId: string): Promise<ReadonlyMap<string, AgentRun>>;
+  /**
+   * Record what a person decided.
+   *
+   * Only where nothing has been decided yet, in SQL, so two people clicking at
+   * once cannot overwrite each other's answer — the guard `pinTemplate` makes
+   * for the same reason. Returns null when somebody got there first, which the
+   * caller reads as "already decided" and not as an error.
+   */
+  decide(tenantId: string, runId: string, decision: RunDecision): Promise<AgentRun | null>;
 }

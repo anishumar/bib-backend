@@ -1,4 +1,13 @@
-// The master configuration registry (P2) — nouns + pure rules, stdlib only.
+// The master configuration registry (P2) — nouns + pure rules.
+//
+// One internal import, and it is the same argument `domain/scheduler` makes for
+// reaching across to `domain/serviceaxis`: `ConfidenceTiers` and what counts as a
+// valid confidence are one concept that `domain/agent` already owns, and
+// restating the range check here would create two notions of "valid" free to
+// drift — with the drift landing on whether a machine may file unattended. The
+// wall forbids reaching OUT of domain, not across it.
+import type { ConfidenceTiers } from "../agent/model";
+import { isConfidence, tiersAreCoherent } from "../agent/model";
 //
 // One spine, several KINDS. The spine is the part that is hard to get right and
 // expensive to change later: how a configured thing is versioned, published,
@@ -40,7 +49,8 @@ export type ConfigKind =
   | "policy"
   | "clause"
   | "dunning"
-  | "workflow_template";
+  | "workflow_template"
+  | "confidence_tier";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -49,6 +59,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "clause",
   "dunning",
   "workflow_template",
+  "confidence_tier",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -438,6 +449,17 @@ const POLICY_FIELDS = ["maxDiscountPercent"];
  *  the honest state rather than a promise. */
 export const DISCOUNT_POLICY_KEY = "discount";
 
+/**
+ * The one `confidence_tier` entry a firm publishes (T2.8).
+ *
+ * A fixed key because there is one answer per firm today, not one per agent —
+ * there are no agents, so there is no accuracy record any per-agent number could
+ * be set from, and a threshold chosen by guessing is worse than one that does
+ * not exist. When agents exist and differ, this becomes a key per agent and
+ * nothing above it changes.
+ */
+export const CONFIDENCE_TIER_KEY = "default";
+
 function validatePolicyBody(body: Record<string, unknown>): string | null {
   const unknown = unknownFields(body, POLICY_FIELDS);
   if (unknown) return unknown;
@@ -742,7 +764,65 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateDunningBody(body);
     case "workflow_template":
       return validateWorkflowTemplateBody(body);
+    case "confidence_tier":
+      return validateConfidenceTierBody(body);
   }
+}
+
+const TIER_FIELDS = ["autoCommitAt", "reviewAt"];
+
+/**
+ * How sure a machine has to be before it may act unattended (T2.8).
+ *
+ * **In the registry rather than in a table, and the reason is the question it
+ * has to answer.** "Why did this commit on its own?" is asked a year later, and
+ * the only true answer is "the bar was 0.95 that day". A published version is
+ * frozen and a run PINS the one it was judged under, so that answer survives the
+ * firm raising the bar afterwards. `staff_grade` went the other way for the
+ * opposite reason: nobody asks what a rung meant last March.
+ *
+ * Two numbers and no more. A per-agent threshold is a knob nobody can fill
+ * today — there are no agents, so there is no accuracy record to set it from —
+ * and a knob set by guessing is worse than one that does not exist.
+ */
+function validateConfidenceTierBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, TIER_FIELDS);
+  if (unknown) return unknown;
+
+  const autoCommitAt = body["autoCommitAt"];
+  if (typeof autoCommitAt !== "number" || !isConfidence(autoCommitAt)) {
+    return (
+      `"autoCommitAt" must be a number between 0 and 1, got ${describe(autoCommitAt)}. A ` +
+      `machine acts unattended only STRICTLY above it, which is what makes 1 mean "never" — ` +
+      `the one edit that stops every unattended commit without a deploy.`
+    );
+  }
+
+  const reviewAt = body["reviewAt"];
+  if (typeof reviewAt !== "number" || !isConfidence(reviewAt)) {
+    return `"reviewAt" must be a number between 0 and 1, got ${describe(reviewAt)}`;
+  }
+
+  if (!tiersAreCoherent({ autoCommitAt, reviewAt })) {
+    return (
+      `"reviewAt" (${String(reviewAt)}) is above "autoCommitAt" (${String(autoCommitAt)}), ` +
+      `which describes no possible routing. Equal is allowed and means the machine either ` +
+      `commits or escalates, with nothing merely proposed.`
+    );
+  }
+  return null;
+}
+
+/** Read a published `confidence_tier` body back. Null when the body does not
+ *  parse, which the caller reads as "the firm has published nothing usable" and
+ *  therefore falls back to asking a person — never to a threshold this code
+ *  invented. */
+export function readConfidenceTierBody(body: Record<string, unknown>): ConfidenceTiers | null {
+  if (validateConfidenceTierBody(body) !== null) return null;
+  const autoCommitAt = body["autoCommitAt"];
+  const reviewAt = body["reviewAt"];
+  if (typeof autoCommitAt !== "number" || typeof reviewAt !== "number") return null;
+  return { autoCommitAt, reviewAt };
 }
 
 const ROLE_FIELDS = ["label", "permissions"];

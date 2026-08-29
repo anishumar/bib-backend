@@ -146,7 +146,21 @@ export function mapError(err: unknown): MappedError {
       // conflicts for the same reason: the request said something true a moment
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
-      case "STEP_NOT_A_PERSONS":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A machine has answered this step and nobody has said whether the answer
+      // stands. A conflict, not a 400: the request is well formed and what
+      // refuses it is the state of the step, fixed by deciding the proposal
+      // rather than by resending this.
+      case "PROPOSAL_UNDECIDED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Nothing produced an answer here, so there is nothing to accept. A 409
+      // rather than a 404: the step exists and is perfectly real, it is just
+      // finished a different way — with the Done button.
+      case "NOTHING_PROPOSED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A correction identical to the proposal. 409 rather than 400: the body is
+      // well formed and what refuses it is the state of the run it is about.
+      case "CORRECTION_CHANGED_NOTHING":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

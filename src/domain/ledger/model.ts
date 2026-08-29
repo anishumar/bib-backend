@@ -163,7 +163,8 @@ export const EVENT_VERBS = {
   "obligation.filed":            { objectType: "obligation_instance", lane: "delivery",   description: "An obligation was discharged (filed / paid / submitted)." },
   "obligation.missed":           { objectType: "obligation_instance", lane: "delivery",   description: "A statutory date passed undischarged. A state, not an error." },
   "agent_run.completed":         { objectType: "agent_run",           lane: "delivery",   description: "An agent produced an output, with its confidence score in the payload." },
-  "agent_run.escalated":         { objectType: "agent_run",           lane: "delivery",   description: "An agent refused to act and handed the work to a human." },
+  "agent_run.escalated":         { objectType: "agent_run",           lane: "delivery",   description: "An agent refused to act and handed the work to a human. Its output is kept and offered as material, not as an answer." },
+  "agent_run.decided":           { objectType: "agent_run",           lane: "delivery",   description: "A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values — accepted vs corrected is the entire accuracy signal, and an agent's output can hold a client's own data, which may not enter a log that cannot be erased." },
   "output.approved":             { objectType: "verification",        lane: "delivery",   description: "A checker approved an output. Never the same actor that produced it." },
   "output.rejected":             { objectType: "verification",        lane: "delivery",   description: "A checker rejected an output and sent it back." },
 } as const satisfies Record<string, VerbSpec>;

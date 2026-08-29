@@ -27,6 +27,7 @@ import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-r
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
+import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
   PostgresDunningLadder,
@@ -113,19 +114,31 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // purpose: the scheduler creates jobs and this one walks them, and two
   // adapters over `delivery.job` would eventually disagree about what "runnable"
   // means — which is the one thing both of them turn on.
+  // ONE config repository, in three roles: the template source, the tier source
+  // and the catalogue. Two instances would be two adapters over the same table
+  // free to disagree about what is published — and one of the two answers here
+  // decides whether a machine may act with nobody watching.
+  const configRepository = new PostgresConfigRepository(pools.app);
   const orchestrator = new OrchestratorService({
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
     // The config repository, in its `TemplateSource` role. The same class the
     // API reads roles and services through — one adapter over `config`, so what
     // is published is one answer rather than two that agree by luck.
-    templates: new PostgresConfigRepository(pools.app),
+    templates: configRepository,
     subjects: new PostgresJobSubjectRepository(pools.app),
     // There are no agents. Not a stub standing in for something missing — a
     // true statement about this product today, which is why it is not gated on
     // config the way the dev auth resolver is. Every step waits for a person,
     // and the firm's work runs. T2.8 replaces this line.
     agents: new NoAgentsBuiltYet(),
+    // The guardrail's two seams (T2.8). Both are wired even though nothing runs
+    // through them yet, and that is the order the board asks for — the rails
+    // exist before anything is on them, so the first real agent is a change to
+    // ONE line above and not a conversation about what it may do while somebody
+    // waits for it to ship.
+    tiers: configRepository,
+    runs: new PostgresAgentRunRepository(pools.app),
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,

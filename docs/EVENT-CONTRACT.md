@@ -292,7 +292,8 @@ version is exactly what gets asked about afterwards.
 | `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). |
 | `obligation.missed` | obligation_instance | A statutory date passed undischarged. A state, not an error (T3.3). |
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |
-| `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. |
+| `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. Its output is KEPT and offered as material rather than as an answer — throwing away a usable draft every time the machine is unsure is how a firm ends up redoing the work by hand anyway. |
+| `agent_run.decided` | agent_run | A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values: accepted-vs-corrected is the entire accuracy signal and belongs in the log, while an agent's output can hold a client's own data, which may not enter a log that cannot be erased. |
 | `output.approved` | verification | A checker approved an output. Never the actor that produced it. |
 | `output.rejected` | verification | Sent back. |
 

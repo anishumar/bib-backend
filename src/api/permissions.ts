@@ -208,6 +208,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // filing is done is not the same act as reading the board, and the record of
   // WHO did it is worth only as much as the gate in front of it.
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
+  // Deciding a machine's output is doing the work, not reading the board: the
+  // row it writes is the record of who checked it. Same permission as
+  // completing a step, deliberately — a firm that trusts somebody to say "this
+  // filing is done" trusts them to say "the machine got it right".
+  [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/decide"), "work:write" as const],
   // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
   // configuration registry uses, and for the same reason: this IS firm
   // configuration. Reading it is `config:read` — an associate drafting a letter

@@ -2,10 +2,17 @@
 // its Postgres counterpart does, so a compile error here is the same compile
 // error production would get.
 import type { JobStep, StepStatus } from "../domain/orchestrator/model";
+import type { ConfidenceTiers } from "../domain/agent/model";
 import type {
   AgentOutcome,
+  AgentRun,
+  AgentRunRepository,
   AgentRuntime,
   JobStepRepository,
+  NewAgentRun,
+  PublishedTiers,
+  RunDecision,
+  TierSource,
   JobSubject,
   JobSubjectSource,
   NewJobStep,
@@ -141,18 +148,156 @@ export class FakeJobSubjectSource implements JobSubjectSource {
  * that forgot to say so should get the honest answer rather than a machine that
  * silently does everything.
  */
+/** The firm's thresholds, as a value a test sets directly.
+ *
+ *  `null` by default and that is the product's real starting state — no firm has
+ *  published any — so a test that never mentions tiers is asserting against a
+ *  world where nothing commits unattended. Which is the whole safety property. */
+export class FakeTierSource implements TierSource {
+  published: PublishedTiers | null = null;
+
+  /** Publish thresholds, as a partner would. */
+  publish(tiers: ConfidenceTiers, versionId = "00000000-0000-4000-8000-0000000000ab"): this {
+    this.published = { tiers, versionId };
+    return this;
+  }
+
+  publishedTiers(): Promise<PublishedTiers | null> {
+    return Promise.resolve(this.published);
+  }
+}
+
+/**
+ * The run book, in memory — and it reproduces the CHECKs, not just the shape.
+ *
+ * A fake that accepted a `committed` run below the bar would let every guardrail
+ * test pass while the property was broken in production, which is the opposite
+ * of what the test is for. The real enforcement is a CHECK in migration 0047;
+ * this raises for the same three cases so that the service is exercised against
+ * a world that behaves like the real one.
+ */
+export class FakeAgentRunRepo implements AgentRunRepository {
+  readonly rows: AgentRun[] = [];
+
+  record(run: NewAgentRun): Promise<AgentRun> {
+    if (
+      run.decision === "committed" &&
+      !(!run.approvalRequired && run.confidence > run.autoCommitAt)
+    ) {
+      throw new Error(
+        `agent_run_commit_needs_confidence: ${String(run.confidence)} is not above ` +
+          `${String(run.autoCommitAt)}, or the firm asked for a person on this step`,
+      );
+    }
+    if (
+      run.decision === "queued" &&
+      !run.approvalRequired &&
+      !(run.confidence >= run.reviewAt && run.confidence <= run.autoCommitAt)
+    ) {
+      throw new Error(`agent_run_queue_band: ${String(run.confidence)} is outside the band`);
+    }
+    if (run.decision === "escalated" && !(run.confidence < run.reviewAt)) {
+      throw new Error(`agent_run_escalate_band: ${String(run.confidence)} is not below the bar`);
+    }
+    const row: AgentRun = {
+      ...run,
+      outcome: null,
+      rejectedReason: null,
+      decidedBy: null,
+      decidedAt: null,
+      createdAt: new Date().toISOString(),
+    };
+    this.rows.push(row);
+    return Promise.resolve(row);
+  }
+
+  openForStep(tenantId: string, jobStepId: string): Promise<AgentRun | null> {
+    const open = this.rows.filter(
+      (r) =>
+        r.tenantId === tenantId &&
+        r.jobStepId === jobStepId &&
+        r.outcome === null &&
+        r.decision !== "committed",
+    );
+    return Promise.resolve(open[open.length - 1] ?? null);
+  }
+
+  openForJob(tenantId: string, jobId: string): Promise<ReadonlyMap<string, AgentRun>> {
+    const out = new Map<string, AgentRun>();
+    for (const r of this.rows) {
+      if (r.tenantId !== tenantId || r.jobId !== jobId) continue;
+      if (r.outcome !== null || r.decision === "committed") continue;
+      out.set(r.jobStepId, r);
+    }
+    return Promise.resolve(out);
+  }
+
+  decide(tenantId: string, runId: string, decision: RunDecision): Promise<AgentRun | null> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === runId);
+    const current = this.rows[i];
+    // Already answered — the second clicker loses, as the SQL guard makes them.
+    if (!current || current.outcome !== null) return Promise.resolve(null);
+    // The two CHECKs that keep the accuracy signal honest.
+    const same = JSON.stringify(current.proposed) === JSON.stringify(decision.applied);
+    if (decision.outcome === "corrected" && same) {
+      throw new Error("agent_run_corrected_actually_differs: nothing changed");
+    }
+    if (decision.outcome === "accepted" && !same) {
+      throw new Error("agent_run_accepted_does_not_differ: the value changed");
+    }
+    const next: AgentRun = {
+      ...current,
+      outcome: decision.outcome,
+      applied: decision.applied,
+      rejectedReason: decision.rejectedReason,
+      decidedBy: decision.decidedBy,
+      decidedAt: decision.decidedAt,
+    };
+    this.rows[i] = next;
+    return Promise.resolve(next);
+  }
+}
+
+/**
+ * An agent that produces whatever a test told it to, at whatever confidence.
+ *
+ * The deterministic fake T2.8's acceptance is written against — "commits >0.95,
+ * queues 0.70–0.95, escalates <0.70" — and the only executor this product has.
+ * No network, no model, no cost: the guardrail is what is being proven, and a
+ * real model would make the test about the model.
+ */
 export class FakeAgentRuntime implements AgentRuntime {
   private readonly able = new Set<string>();
   private readonly failures = new Map<string, string>();
+  private readonly results = new Map<
+    string,
+    { confidence: number; proposed: Record<string, unknown> }
+  >();
   readonly ran: string[] = [];
+  model = "fake";
+  promptVersion = "v1";
 
-  /** Give this step an agent. */
+  /** Give this step an agent. Certain, and producing nothing in particular —
+   *  for the tests that are about the graph rather than about confidence. */
   arm(stepKey: string): this {
     this.able.add(stepKey);
     return this;
   }
 
-  /** Give this step an agent that cannot finish the work. */
+  /** Give this step an agent that produces a specific answer at a specific
+   *  confidence. This is the one the tier tests use. */
+  armWith(
+    stepKey: string,
+    confidence: number,
+    proposed: Record<string, unknown> = { value: stepKey },
+  ): this {
+    this.able.add(stepKey);
+    this.results.set(stepKey, { confidence, proposed });
+    return this;
+  }
+
+  /** Give this step an agent that cannot finish the work. A failure records no
+   *  run: this seam is about what a machine PRODUCED, and it produced nothing. */
   armFailing(stepKey: string, note: string): this {
     this.able.add(stepKey);
     this.failures.set(stepKey, note);
@@ -163,9 +308,22 @@ export class FakeAgentRuntime implements AgentRuntime {
     return this.able.has(stepKey);
   }
 
+  provenance(): { model: string; promptVersion: string } {
+    return { model: this.model, promptVersion: this.promptVersion };
+  }
+
   run(input: { readonly stepKey: string }): Promise<AgentOutcome> {
     this.ran.push(input.stepKey);
     const note = this.failures.get(input.stepKey);
-    return Promise.resolve(note === undefined ? { done: true } : { done: false, note });
+    if (note !== undefined) return Promise.resolve({ done: false, note });
+    const result = this.results.get(input.stepKey);
+    return Promise.resolve({
+      done: true,
+      // Certain by default, so a test that never mentions confidence keeps
+      // meaning what it meant before T2.8 — with no tier published that still
+      // queues rather than commits, which is the safe direction.
+      confidence: result?.confidence ?? 1,
+      proposed: result?.proposed ?? { value: input.stepKey },
+    });
   }
 }

@@ -102,8 +102,8 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Three kinds ship today — `service`, `role` and
-`policy`; `workflow_template` and `rule_pack` join them when T2.7 and T4.3 actually read them.
+`config.version` is what it said at a point in time. Seven kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`
+and `confidence_tier`; `rule_pack` joins them when T4.3 actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
 
@@ -863,12 +863,69 @@ cannot answer.
 is G2.4's stated design, and it means a firm that switches mid-year has two shapes of job on
 its board until the old ones finish.
 
+## The agent guardrail — built before there is an agent (T2.8)
+
+There are still no agents, and `NoAgentsBuiltYet` is still wired in `setup/`. This task built
+the RAILS: what a machine would be allowed to do with what it produced, before anything
+produces anything. That order is the board's (*guardrails first, then capabilities*) and it is
+the product's — get manual work into the product standardised, then replace some of it.
+
+**The guardrail is a CHECK in migration 0047, not a rule in the orchestrator.** `build2.md` in
+the firm's words: *a rule that lives in a form is a rule that a script, an import or an AI agent
+walks straight past* — and here the rule is ABOUT agents. A CHECK cannot read config, so
+**`delivery.agent_run` copies the thresholds that applied** onto every row, the same move
+`job.split_code` and `job_step.executor` make. It also makes "why was this allowed" survive the
+firm raising its bar next quarter.
+
+**A machine acts unattended only STRICTLY above the bar.** `>` and not `>=`, so **1.0 means
+never** — one edit stops every unattended commit with no deploy. Do not "tidy" that comparison.
+
+**Three answers, not two.** `committed` · `queued` (the machine answered, a person says whether
+it stands) · `escalated` (it was not sure enough to answer). The middle one is the point:
+"commit or don't" throws away a usable draft every time the machine is unsure, which is most of
+the time, and a firm redoing the work by hand has bought nothing.
+
+**`confidence_tier` is the registry's SEVENTH kind, not a table**, and the reason is the
+question it answers: *why did this commit on its own?* is asked a year later and the only true
+answer is "the bar was 0.95 that day". A run PINS the version it was judged under. `staff_grade`
+went the other way for the opposite reason — nobody asks what a rung meant last March.
+
+**NOTHING IS SEEDED, and shipping this changed no firm's behaviour.** No published tier means
+`ASK_A_PERSON` — `(autoCommitAt 1, reviewAt 0)`, so nothing commits and everything proposes,
+expressed in the same two numbers so no code has a special case. The discount policy's rule
+from the same direction: *no published policy means ZERO, not "no limit"*. `SUGGESTED_TIERS`
+(0.95 / 0.70) is a starting point a firm publishes deliberately — and those numbers are **not
+the client's**: the demo records them as inherited from another vendor and never agreed.
+
+**THE TEMPLATE OUTRANKS THE NUMBERS.** `agent_with_approval` never commits, whatever the
+confidence — the firm said a person signs this step off, and that is a decision by somebody who
+knows what the step does. `approval_required` is stored on the run so the CHECK can express it,
+and so "unsure" and "always checked" stay different facts. **This is why the thresholds are not
+the load-bearing product decision**, and why `runsAMachine` is a separate question from
+`waitsForAPerson` — conflating them was a real bug: `agent_with_approval` was blocked before
+`agents.run` was reached, so the machine produced nothing and the person had nothing to approve.
+
+**`proposed` and `applied` both survive forever** (`build2.md` §5.2). Keeping only the corrected
+value throws away the entire accuracy signal — the only evidence that could ever justify moving
+a threshold. Two CHECKs keep it honest: a `corrected` must ACTUALLY differ, an `accepted` must
+not. A rejection must say why, and does NOT finish the step: throwing away an answer is not
+doing the work.
+
+**Nothing about a run can be rewritten** — a trigger refuses edits to the proposal, the
+confidence, the thresholds, the decision or the provenance. A person's verdict is the one half
+that legitimately arrives later. `model` and `prompt_version` are NOT NULL from the start,
+because *"extraction got worse in March"* needs something to blame and something to revert, and
+adding them later means backfilling a fact nobody recorded.
+
+**Ticking Done behind a proposal is refused** (`PROPOSAL_UNDECIDED`): it would record that a
+person did the work and leave what the machine said undecided forever.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator` and `invoicing` are built.
-Next: T2.8's agent runtime, T2.9's verification queue, T3.6's documents and T3.7's dashboards.
+Next: T2.9's verification queue, G3.2's client assignment, T3.6's documents and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

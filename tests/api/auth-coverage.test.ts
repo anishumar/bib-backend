@@ -43,7 +43,9 @@ import {
 } from "../../src/testfakes/serviceaxis";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
 import {
+  FakeAgentRunRepo,
   FakeAgentRuntime,
+  FakeTierSource,
   FakeJobStepRepo,
   FakeJobSubjectSource,
   FakeTemplateSource,
@@ -133,6 +135,8 @@ function deps(): RouterDeps {
         templates: new FakeTemplateSource(),
         subjects: new FakeJobSubjectSource(),
         agents: new FakeAgentRuntime(),
+        tiers: new FakeTierSource(),
+        runs: new FakeAgentRunRepo(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
