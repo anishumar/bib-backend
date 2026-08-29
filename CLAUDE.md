@@ -199,6 +199,52 @@ one where nobody meets the review threshold. Changing them costs a migration, an
 `tests/staffgrade/seed-parity.test.ts` holds the build red until the newest seed and the code
 agree; the same arrangement `DEFAULT_ROLES` has, for the same reason.
 
+## The firm's own delivery structure — and who decides how work is split (G2.4)
+
+`tenancy.service_axis` is ONE table holding the firm's TWO lists, discriminated by `axis`:
+**Depts** (FRC / TRC / RAA — the revenue axis, what a SPOC covers) and **delivery teams**
+(FINCOMPLIANCE, VCFO CONSOLE, PAYROLL — who does the work). They CROSS: one team commonly
+delivers under several Depts, so they are independent dimensions and never a hierarchy —
+nesting them would force a duplicate catalogue row per Dept and count its revenue twice.
+
+One table rather than the demo's two, because the two were structurally identical and would
+have meant two repositories, two services and two fakes free to drift. `axis` is a CHECKed
+discriminator, doing what `config.entry.kind` and `delivery.job.source_kind` do: the engine's
+vocabulary, the same at every firm. The firm owns the ROWS.
+
+**It lives in `tenancy`, not the config registry**, for `staff_grade`'s reason: a Dept is the
+firm's own structure, `is_active` is a distinction the registry cannot express, and G3.2's
+`client_assignment.module_id` needs a real row to point at.
+
+**A `service` body still stores the CODE, not a foreign key**, and that is not a shortcut. A
+published config version is FROZEN — the freeze is what lets a nine-month-old proposal still
+show the price it was sent at — so a migration rewriting published bodies would break the one
+guarantee the registry exists to make. The table is therefore the LIST the code is checked
+against, at the write, through the `AxisDirectory` port. Consequences, all intended: a rename
+changes `name` and never `code`; a body naming a retired code still reads and simply cannot be
+written again; and **a firm with no rows on an axis is checked against nothing on that axis**,
+because a list the firm has never written is not a list to validate against.
+
+**`tenancy.tenant.work_split_axis` (`none` | `dept` | `team`) is how the firm cuts ONE
+client's work into separate jobs**, and it is a COLUMN for `firm_signatory_user_id`'s reason:
+freely changeable, and changing it RESTATES NOTHING — jobs already created keep their rows,
+the next engagement is split the new way. The opposite of `reporting_currency`, which is a
+column because it must never change.
+
+**`none` is the DEFAULT and a real answer, not "unconfigured".** Not every firm has these
+layers: a fifteen-person practice has neither, a single-P&L firm has teams and no Depts, a
+multi-partner firm the reverse. `none` reproduces T2.6's behaviour exactly, which is why this
+migration changed no firm's behaviour until somebody chooses.
+
+Two roads to the same broken state are both closed: choosing an axis whose list is empty is
+refused, and so is retiring the last active row on the axis already chosen. Closing only one
+leaves the other open, and the second is the one somebody actually walks.
+
+**`groupByAxis` has exactly one intended caller and it does not exist yet.** T2.7 is what
+makes the setting do anything; `/admin/structure` says so on the screen rather than letting a
+live-looking control be discovered as inert. If you find another registered thing with no
+reader, treat it the same way.
+
 ## Lists return read models, not aggregates
 
 An aggregate carries ids — `partyId`, `ownerUserId`, `userId` — which is right for the
@@ -703,7 +749,8 @@ out of four if nobody thinks about it. T3.2's calendar is its first real consume
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
-`engagement letters`, the `staff grade` ladder, the `scheduler` and `invoicing` are built.
+`engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the `scheduler`
+and `invoicing` are built.
 Next: T2.7's orchestrator, then T3.6's documents and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 

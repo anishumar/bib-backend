@@ -10,6 +10,7 @@
 // revocation lands on the NEXT one — for a switch nothing could flip.
 import { describe, expect, it } from "vitest";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { NoAxesDefined } from "../../src/testfakes/serviceaxis";
 import { ConfigService } from "../../src/usecase/config/service";
 import { makeFakes } from "../../src/testfakes/tenancy";
 import {
@@ -40,6 +41,7 @@ async function firm() {
   const config = new ConfigService({
     registry: f.config,
     holders: f.memberships,
+    axes: new NoAxesDefined(),
     ids: f.ids,
     events: f.events,
   });

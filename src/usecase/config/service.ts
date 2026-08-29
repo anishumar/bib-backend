@@ -57,13 +57,18 @@ import {
   NoOneWouldAdminister,
   WouldLockOutAdministration,
 } from "../../domain/config/errors";
-import type { ConfigRepository, DefinedEntry, RoleHolders } from "./ports";
+import type { AxisDirectory, ConfigRepository, DefinedEntry, RoleHolders } from "./ports";
+import { AxisNotAssignable, UnknownAxisCode } from "../../domain/serviceaxis/errors";
 
 export interface Deps {
   readonly registry: ConfigRepository;
   /** Which roles are actually on somebody's membership — the half of the
    *  lockout guard the registry cannot see by itself. */
   readonly holders: RoleHolders;
+  /** The firm's own Depts and delivery teams. A `service` body names one of
+   *  each by code, and a code nobody defined would silently become its own
+   *  group once T2.7 starts cutting work up by it. */
+  readonly axes: AxisDirectory;
   readonly ids: IdGen;
   /** The audit trail. Configuration decides what everyone else may do, so who
    *  changed it and when is exactly the sort of thing a regulator asks about. */
@@ -112,7 +117,7 @@ export class ConfigService {
   async define(input: DefineInput, actor: Actor): Promise<DefinedEntry> {
     const kind = this.parseKind(input.kind);
     if (!isValidKey(input.key)) throw new InvalidKey(input.key);
-    this.checkBody(kind, input.body);
+    await this.checkBody(input.tenantId, kind, input.body);
 
     const existing = await this.deps.registry.findEntry(input.tenantId, kind, input.key);
     if (existing) throw new EntryExists(kind, input.key);
@@ -145,7 +150,7 @@ export class ConfigService {
    */
   async addVersion(input: AddVersionInput): Promise<ConfigVersion> {
     const kind = this.parseKind(input.kind);
-    this.checkBody(kind, input.body);
+    await this.checkBody(input.tenantId, kind, input.body);
     const entry = await this.entryOrThrow(input.tenantId, kind, input.key);
 
     return this.deps.registry.addVersion({
@@ -278,9 +283,84 @@ export class ConfigService {
     return kind;
   }
 
-  private checkBody(kind: ConfigKind, body: Record<string, unknown>): void {
+  private async checkBody(
+    tenantId: string,
+    kind: ConfigKind,
+    body: Record<string, unknown>,
+  ): Promise<void> {
     const problem = validateBody(kind, body);
     if (problem !== null) throw new InvalidBody(kind, problem);
+    if (kind === "service") await this.checkServiceAxes(tenantId, body);
+  }
+
+  /**
+   * A service must be filed under a Dept and a delivery team the firm actually
+   * has — once the firm HAS such a list (G2.4).
+   *
+   * ── The rule, stated precisely ────────────────────────────────────────────
+   *
+   *   Null on either field stays legal. Most firms have only one of these
+   *   layers and plenty have neither, so "filed under no Dept" is a real answer
+   *   the catalogue screen already renders as such.
+   *
+   *   A firm with NO rows on an axis is checked against nothing on that axis.
+   *   The field behaves exactly as it did before this task: free text in
+   *   canonical form. This is not laxity dressed up — a list the firm has never
+   *   written is not a list to validate against, and the alternative would mean
+   *   a brand-new firm cannot file a service anywhere until it has first been
+   *   made to fill in an org chart it may not have.
+   *
+   *   The moment a firm defines its first Dept, its Dept list is CLOSED. The
+   *   two axes are independent here as everywhere: a firm may have Depts and no
+   *   teams, and then `module` is checked and `group` is not.
+   *
+   * ── What this deliberately does NOT close ─────────────────────────────────
+   *
+   * A firm that files services under free-text codes, and only LATER writes its
+   * list, keeps whatever it published in the meantime — published bodies are
+   * frozen and are not rewritten by anything, ever. Those services still group
+   * correctly (T2.7 groups by the code itself), they simply have no row to take
+   * a display name from. Re-publishing one is what forces the code to be fixed.
+   * Recorded on the board rather than pretended away.
+   *
+   * Retired is refused separately and with its own message, for the reason
+   * `GradeNotAssignable` gives: services already naming a retired Dept keep it
+   * and still read, but filing something NEW there is almost always a stale
+   * picker or a stale import.
+   */
+  private async checkServiceAxes(
+    tenantId: string,
+    body: Record<string, unknown>,
+  ): Promise<void> {
+    const named = ([
+      { axis: "dept", field: "module" },
+      { axis: "team", field: "group" },
+    ] as const)
+      .map((a) => ({ axis: a.axis, code: body[a.field] }))
+      .filter(
+        (a): a is { axis: "dept" | "team"; code: string } =>
+          typeof a.code === "string" && a.code.trim() !== "",
+      );
+    if (named.length === 0) return;
+
+    const known = await this.deps.axes.knownAxes(tenantId);
+    for (const { axis, code } of named) {
+      const onThisAxis = known.filter((k) => k.axis === axis);
+      // The firm has not written this list. Nothing to check against — see the
+      // rule above. Checked per axis, not once for both, because having Depts
+      // says nothing about having teams.
+      if (onThisAxis.length === 0) continue;
+
+      const row = onThisAxis.find((k) => k.code === code);
+      if (!row) {
+        throw new UnknownAxisCode(
+          axis,
+          code,
+          onThisAxis.filter((k) => k.isActive).map((k) => k.code),
+        );
+      }
+      if (!row.isActive) throw new AxisNotAssignable(axis, code);
+    }
   }
 
   private async entryOrThrow(

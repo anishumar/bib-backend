@@ -28,6 +28,7 @@ import type {
   PublishOutcome,
   SeedRow,
 } from "../usecase/config/ports";
+import { NoAxesDefined } from "./serviceaxis";
 import type { Deps } from "../usecase/config/service";
 import { ConfigService } from "../usecase/config/service";
 import { FakeIds } from "./ids";
@@ -250,7 +251,12 @@ export class FakeRoleHolders implements RoleHolders {
   }
 }
 
-/** A ready-made dependency set for ConfigService, matching makePartyFakes(). */
+/** A ready-made dependency set for ConfigService, matching makePartyFakes().
+ *
+ *  `axes` is a firm that has defined NO Depts or delivery teams, which is what
+ *  every firm looks like until somebody opens the firm-structure screen — and is
+ *  the registry's own "nothing to check against" case. A test that IS about
+ *  refusing an unknown Dept swaps in a `FakeServiceAxisRepo`. */
 export function makeConfigFakes(): Deps & {
   registry: FakeConfigRepo;
   holders: FakeRoleHolders;
@@ -258,6 +264,7 @@ export function makeConfigFakes(): Deps & {
   return {
     registry: new FakeConfigRepo(),
     holders: new FakeRoleHolders(),
+    axes: new NoAxesDefined(),
     ids: new FakeIds(),
     events: new RecordingEventSink(),
   };

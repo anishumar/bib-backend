@@ -31,6 +31,8 @@ import { registerTenancyRoutes } from "./handler/tenancy";
 import type { TenancyDeps } from "./handler/tenancy";
 import { registerStaffGradeRoutes } from "./handler/staffgrade";
 import type { StaffGradeDeps } from "./handler/staffgrade";
+import { registerServiceAxisRoutes } from "./handler/serviceaxis";
+import type { ServiceAxisDeps } from "./handler/serviceaxis";
 import { registerSchedulerRoutes } from "./handler/scheduler";
 import type { SchedulerDeps } from "./handler/scheduler";
 import { registerPartyRoutes } from "./handler/party";
@@ -73,6 +75,7 @@ export interface RouterOptions {
 export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly staffGrades: StaffGradeDeps;
+  readonly serviceAxes: ServiceAxisDeps;
   readonly scheduler: SchedulerDeps;
   readonly party: PartyDeps;
   readonly ledger: LedgerDeps;
@@ -164,6 +167,7 @@ export function buildRouter(
   registerAuthRoutes(app, deps.auth);
   registerTenancyRoutes(app, deps.tenancy);
   registerStaffGradeRoutes(app, deps.staffGrades);
+  registerServiceAxisRoutes(app, deps.serviceAxes);
   registerSchedulerRoutes(app, deps.scheduler);
   registerPartyRoutes(app, deps.party);
   registerLedgerRoutes(app, deps.ledger);

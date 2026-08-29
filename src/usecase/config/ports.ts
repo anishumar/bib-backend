@@ -108,3 +108,36 @@ export interface RoleHolders {
    *  there is nobody to strand, so the holder check does not apply. */
   rolesInUse(tenantId: string): Promise<readonly string[]>;
 }
+
+/**
+ * The firm's own Depts and delivery teams — the lists a `service` body's
+ * `module` and `group` must name (G2.4).
+ *
+ * The registry validates a body against its KIND, and that check is pure: it can
+ * see that `module` is in canonical form, and it cannot see whether the firm has
+ * ever heard of it. That was enough while these fields were only grouped by on a
+ * dashboard. It stops being enough at T2.7, where the orchestrator gives each
+ * group of an engagement's lines its own job: `FINCOMPLIANCE` and
+ * `FIN COMPLIANCE` are both canonical, they are one team to a person, and they
+ * would silently become two jobs with nobody told.
+ *
+ * Narrow on purpose: the registry does not want to know what a Dept IS, only
+ * which codes are defined and which are still in use. Satisfied by the
+ * service-axis adapter, which is where that fact lives — so the two use cases
+ * never import each other, exactly as `RoleDirectory` and `RoleHolders` do.
+ */
+export interface KnownAxis {
+  /** `dept` or `team`. Stated as a plain string here rather than importing the
+   *  service-axis domain: this is the registry's own vocabulary for a fact it
+   *  gets from elsewhere, and the adapter is what reconciles the two. */
+  readonly axis: string;
+  readonly code: string;
+  readonly isActive: boolean;
+}
+
+export interface AxisDirectory {
+  /** Both lists at this firm, retired rows included — a body naming a retired
+   *  code is refused with a different message than one naming an unknown code,
+   *  and telling them apart needs both. */
+  knownAxes(tenantId: string): Promise<readonly KnownAxis[]>;
+}

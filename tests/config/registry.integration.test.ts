@@ -16,6 +16,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
+import { PostgresServiceAxisRepository } from "../../src/infrastructure/postgres/service-axis-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { ConfigService } from "../../src/usecase/config/service";
@@ -35,6 +36,9 @@ const service = new ConfigService({
   // Real memberships: the lockout guard's second half asks who actually holds a
   // role, and a stub answering "nobody" would silently skip it.
   holders: new PostgresMembershipRepository(app),
+  // The real adapter: these firms define no Depts, which is the rule's own
+  // "the firm has not written this list" case.
+  axes: new PostgresServiceAxisRepository(app),
   ids: systemIds,
   events: new LedgerService({ events: new PostgresEventStore(app), ids: systemIds }),
 });

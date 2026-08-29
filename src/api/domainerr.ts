@@ -8,6 +8,7 @@
 import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
+import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
@@ -121,6 +122,32 @@ export function mapError(err: unknown): MappedError {
       // refuses it is the state of the LADDER — the caller fixes it by
       // reactivating the rung or choosing another, not by resending this.
       case "GRADE_NOT_ASSIGNABLE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof ServiceAxisError) {
+    switch (err.code) {
+      case "INVALID_AXIS_KIND":
+      case "INVALID_AXIS_CODE":
+      case "INVALID_AXIS_NAME":
+      case "INVALID_WORK_SPLIT_AXIS":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // Both the "no such row" case and the "your service names a Dept this firm
+      // never defined" one. The second is a 404 rather than a 400 for the same
+      // reason ROLE_NOT_DEFINED is: the request is well formed and what is
+      // missing is the firm's own row, which is fixed on another screen.
+      case "AXIS_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "AXIS_CODE_TAKEN":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Conflicts rather than validation failures, on GRADE_NOT_ASSIGNABLE's
+      // reasoning: the request is well formed and what refuses it is the state
+      // of the firm's LIST. The caller fixes it by reactivating a row or
+      // choosing another, not by resending this.
+      case "AXIS_NOT_ASSIGNABLE":
+      case "WORK_SPLIT_AXIS_EMPTY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

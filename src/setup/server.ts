@@ -29,6 +29,10 @@ import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import {
+  PostgresServiceAxisRepository,
+  PostgresWorkSplitSetting,
+} from "../infrastructure/postgres/service-axis-repository";
+import {
   PostgresJobRepository,
   PostgresTenantDirectory,
 } from "../infrastructure/postgres/job-repository";
@@ -60,6 +64,7 @@ import { LedgerService } from "../usecase/ledger/service";
 import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
+import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
@@ -133,12 +138,27 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // ONE adapter over `tenancy.service_axis`, serving TWO ports: the service-axis
+  // use case's own, and the config registry's `AxisDirectory`. One adapter
+  // because it is one table — two would eventually disagree about which Depts a
+  // firm has, and the registry would accept a code the picker never offered.
+  const serviceAxisRepository = new PostgresServiceAxisRepository(pools.app);
+  const serviceAxes = new ServiceAxisService({
+    axes: serviceAxisRepository,
+    split: new PostgresWorkSplitSetting(pools.app),
+    ids: systemIds,
+    events: ledger,
+  });
+
   const config = new ConfigService({
     registry: configRepository,
     // The registry can see that a role carries tenant:admin; only the roster
     // knows whether anybody has that role. Both halves are needed to refuse a
     // publish that would leave the firm with no administrator.
     holders: memberships,
+    // A `service` body names a Dept and a delivery team by CODE, and once the
+    // firm has such a list the code has to be on it — see `checkServiceAxes`.
+    axes: serviceAxisRepository,
     ids: systemIds,
     events: ledger,
   });
@@ -392,6 +412,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         },
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
+        serviceAxes: { service: serviceAxes },
         scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },

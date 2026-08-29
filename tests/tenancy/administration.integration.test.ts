@@ -16,6 +16,7 @@ import { load } from "../../src/config/config";
 import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
+import { PostgresServiceAxisRepository } from "../../src/infrastructure/postgres/service-axis-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
@@ -50,6 +51,7 @@ const memberships = new PostgresMembershipRepository(app);
 const config = new ConfigService({
   registry: configRepository,
   holders: memberships,
+  axes: new PostgresServiceAxisRepository(app),
   ids: systemIds,
   events: ledger,
 });

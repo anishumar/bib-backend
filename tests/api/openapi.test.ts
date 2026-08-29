@@ -18,6 +18,11 @@ import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import {
+  FakeServiceAxisRepo,
+  FakeWorkSplitSetting,
+} from "../../src/testfakes/serviceaxis";
+import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
@@ -109,6 +114,14 @@ function deps(): RouterDeps {
   return {
     tenancy: { service: new TenancyService(makeFakes()) },
     staffGrades: { service: new StaffGradeService(makeFakes()) },
+    serviceAxes: {
+      service: new ServiceAxisService({
+        axes: new FakeServiceAxisRepo(),
+        split: new FakeWorkSplitSetting(),
+        ids: makeFakes().ids,
+        events: makeFakes().events,
+      }),
+    },
     scheduler: {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),

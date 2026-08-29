@@ -7,6 +7,7 @@ import { RecordingEventSink } from "./ledger";
 import { FakeConfigRepo } from "./config";
 import { FakeStaffGradeRepo } from "./staffgrade";
 import type { RoleHolders } from "../usecase/config/ports";
+import { NoAxesDefined } from "./serviceaxis";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
@@ -221,7 +222,13 @@ export function makeFakes(): {
     // `holders: memberships` mirrors the composition root exactly, so a tenancy
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".
-    roleSeeder: new ConfigService({ registry: config, holders: memberships, ids, events }),
+    roleSeeder: new ConfigService({
+      registry: config,
+      holders: memberships,
+      axes: new NoAxesDefined(),
+      ids,
+      events,
+    }),
     // Every firm owns an issuing entity from the moment it exists, exactly as
     // it owns a role set. A tenancy test therefore fails if provisioning stops
     // giving a new firm one, which is the thing that would leave it unable to

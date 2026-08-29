@@ -29,6 +29,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
+import { PostgresServiceAxisRepository } from "../../src/infrastructure/postgres/service-axis-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
@@ -61,6 +62,9 @@ const configRepository = new PostgresConfigRepository(app);
 const config = new ConfigService({
   registry: configRepository,
   holders: new PostgresMembershipRepository(app),
+  // The real adapter, so a service body's Dept is checked against a real list.
+  // These firms define none, which is the rule's own "not in use" case.
+  axes: new PostgresServiceAxisRepository(app),
   ids: systemIds,
   events: ledger,
 });

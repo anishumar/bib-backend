@@ -93,6 +93,16 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/tenancy/grades"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/grades/{gradeId}"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/grades/{gradeId}/active"), "tenant:admin" as const],
+
+  // The firm's delivery structure (G2.4). `tenant:admin` throughout, the READ
+  // included, for the same reason the ladder above is: this is a firm
+  // describing itself, and the split axis chosen here decides how every future
+  // engagement is cut into jobs.
+  [routeKey("GET", "/api/v1/tenancy/structure"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/tenancy/structure/axes"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}/active"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/tenancy/structure/work-split"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/grade"), "tenant:admin" as const],
   // WHO BINDS THE FIRM (G1.4). The same split the firm-entity rule and the
   // configuration registry use, and for the same reason: this IS firm

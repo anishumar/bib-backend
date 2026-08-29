@@ -82,6 +82,17 @@ export const EVENT_VERBS = {
   // moving one silently changes who may approve a statutory filing.
   "staff_grade.created":         { objectType: "staff_grade",         lane: "platform",   description: "A firm added a rung to its own hierarchy — one its starting ladder did not have." },
   "staff_grade.updated":         { objectType: "staff_grade",         lane: "platform",   description: "A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something." },
+  // ── platform · the firm's own delivery structure (G2.4) ───────────────────
+  // Depts (the revenue axis) and delivery teams (who does the work) are the
+  // firm's own org chart, and once `work_split_axis` names one of them it also
+  // decides how a client's work is cut into separate jobs. Retiring a Dept
+  // therefore changes what the engine does next, which is why it is recorded
+  // rather than left as a boolean nobody can date.
+  "service_axis.created":        { objectType: "service_axis",        lane: "platform",   description: "A firm added a Dept or a delivery team to its own structure." },
+  "service_axis.updated":        { objectType: "service_axis",        lane: "platform",   description: "A Dept or delivery team was renamed or reordered. The payload names the CODE and says which of the two changed — the code is what every service body joins on and it never moves." },
+  "service_axis.retired":        { objectType: "service_axis",        lane: "platform",   description: "A firm stopped filing new work under a Dept or delivery team. NOT a delete: services already naming it keep it and still read." },
+  "service_axis.reactivated":    { objectType: "service_axis",        lane: "platform",   description: "A retired Dept or delivery team was brought back into use." },
+  "work_split_axis.changed":     { objectType: "tenant",              lane: "platform",   description: "A firm changed how one client's work is cut into separate jobs — by Dept, by delivery team, or not at all. The payload carries BOTH sides: \"what did it used to be\" is the question asked when a job looks split the wrong way." },
   "grade_ladder.seeded":         { objectType: "tenant",              lane: "platform",   description: "A new tenant's seniority ladder was initialised from the product defaults. One event, not one per rung." },
   "session.started":             { objectType: "user_account",        lane: "platform",   description: "A user's session became active in THIS tenant — at login, or when the org switcher selected it." },
   "party.created":               { objectType: "party",               lane: "platform",   description: "An organization or person party was created." },

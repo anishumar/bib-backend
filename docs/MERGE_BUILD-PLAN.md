@@ -1118,6 +1118,84 @@ open and are recorded above; neither blocks Phase 2.
   > which cannot be edited to carry it and has no honest value to invent. Absence reads as
   > null, never as a default. **No migration:** these arrive as a new VERSION of each service,
   > which is precisely what T2.5's deferral was deferred for.
+
+- [x] `(B)` **G2.4** **Depts and delivery teams become the firm's own LISTS, and the firm says which one splits its work.** `tenancy.service_axis` (one table, `axis` in `dept`|`team`, code/name/order/`is_active`) + `tenancy.tenant.work_split_axis` in `none`|`dept`|`team`, default `none`. A service body still stores the CODE; the list is what that code is checked against, at the write. *Acc: `FINCOMPLIANCE` and `FIN COMPLIANCE` cannot become two teams; a firm renames a Dept without touching a published service version; a firm with neither layer is unaffected.* — **Not from build2.md. This task came out of designing T2.7**, and it is on the board because the alternative was to build the orchestrator on a field a typo can silently fork.
+  > **Done (2026-08-29). Migration 0043 — `(B)` range.**
+  >
+  > **WHY THIS EXISTS.** G2.1 gave `ServiceBody` two axes — `module` (the Dept: FRC / TRC /
+  > RAA) and `group` (the delivery team: FINCOMPLIANCE, VCFO CONSOLE, PAYROLL) — as free text
+  > in canonical form. That was enough while they were only GROUPED BY on a dashboard: a split
+  > revenue figure is wrong in a way somebody notices at month end. It stops being enough at
+  > T2.7, where the orchestrator gives each group of an engagement's lines its own job.
+  > `FINCOMPLIANCE` and `FIN COMPLIANCE` are BOTH canonical, they are one team to a person,
+  > and they would silently become two jobs — one client's work split across two checklists
+  > with nobody told. Not a report to correct at month end; work nobody is looking at.
+  >
+  > **THE PRODUCT DECISION, taken with `(B)`'s reviewer on 2026-08-29 and worth arguing with
+  > before changing.** Neither layer is universal. A fifteen-person practice has neither; a
+  > single-P&L firm has delivery teams and no revenue split; a multi-partner firm has the
+  > opposite. So **which axis splits work is the FIRM's setting, not the product's rule** —
+  > `none` is the default, it reproduces T2.6's behaviour exactly (one engagement, one job),
+  > and merging this changed no firm's behaviour until somebody chooses. A default of `dept`
+  > would have silently re-cut every future engagement on the installation to save one click.
+  >
+  > **ONE TABLE, NOT TWO.** The demo used `service_module` and `service_group` — structurally
+  > identical, and here that would have meant two repositories, two services, two route sets
+  > and two fakes, all free to drift. `axis` is a CHECKed discriminator, doing what
+  > `config.entry.kind` and `delivery.job.source_kind` do: the ENGINE's vocabulary, the same at
+  > every firm. What the firm owns is the rows.
+  >
+  > **`tenancy`, NOT `config`.** These read like catalogue metadata and are not: a Dept is the
+  > firm's org structure. **This unblocks G3.2** — `client_assignment.module_id` needs a real
+  > row to point at ("each client will defacto have two SPOC, one from TRC and one from FRC"),
+  > which today it cannot have because a Dept is a string inside a frozen JSON body.
+  > `staff_grade` (0040) is the same shape for the same reason and this table copies it.
+  >
+  > **THE BODY STILL STORES A STRING, and the obvious move is the wrong one.** Replacing
+  > `body->>'module'` with a foreign key would mean rewriting PUBLISHED versions, and that
+  > freeze is what lets a proposal sent nine months ago show the price it was sent at. So the
+  > body keeps its code, the table is the list of codes it must be one of, and the check is at
+  > the WRITE in the config use case (`AxisDirectory`, one adapter over one table serving both
+  > use cases — declared twice as this codebase does, implemented once as T3.5 argued). A
+  > rename therefore changes `name` and never `code`; a body naming a retired code still READS
+  > and simply cannot be written again.
+  >
+  > **HONEST PARTIAL — SAY THIS OUT LOUD.** `groupByAxis` is written, tested against the
+  > firm's own three-service example, and **has no caller**: `work_split_axis` is a setting
+  > nothing reads yet, because the thing that reads it is T2.7. That is exactly the "feature
+  > that looks finished" shape `CLAUDE.md` warns about — a registered verb with no writer — so
+  > **the screen says so in as many words** ("Not in effect yet… until then every signed
+  > engagement produces one job, whatever is chosen here"). T2.7 is what makes it true.
+  >
+  > **AND A SECOND THING NOT CLOSED.** A firm with NO rows on an axis is checked against
+  > nothing on that axis — the field behaves exactly as before this task. That is deliberate
+  > (a list the firm has never written is not a list to validate against, and a brand-new firm
+  > must not be made to fill in an org chart before it can file a service), and it is why the
+  > smoke walk still passes unchanged. The residue: a firm that files services under free text
+  > and only LATER writes its list keeps whatever it published, because published bodies are
+  > frozen and nothing rewrites them. Those services still GROUP correctly — T2.7 groups by the
+  > code itself — they just have no row to take a display name from. Re-publishing one forces
+  > the fix. The picker offers such a code marked "no longer on this firm's list" rather than
+  > blanking the field, because a form whose submit rewrites the whole body would otherwise
+  > drop a Dept nobody meant to drop.
+  >
+  > **Two roads to one broken state, both closed.** Choosing an axis whose list is empty is
+  > refused, and so is retiring the last active row on the axis already chosen. Closing only
+  > the first leaves the second open, and the second is the one somebody actually walks — a
+  > firm restructures by retiring rows one at a time.
+  >
+  > **Screen built alongside**, as the rule says: `/admin/structure` — both lists, retire and
+  > restore, and the split chooser with an empty list's option DISABLED and the reason beside
+  > it. `/catalogue`'s two text boxes became pickers, and stay text boxes for a firm with no
+  > list, because that is the API's actual rule rendered honestly rather than a disabled empty
+  > dropdown claiming the service cannot be filed.
+  >
+  > Gate: `npm run check` **837** · `test:integration` **268** · `smoke` **227 passed, 0
+  > failed** (unchanged — the point of the `none` default). Plus a scripted HTTP walk of all
+  > five routes on a freshly seeded firm: empty-list refusal, `frc`→`FRC` normalisation, the
+  > cross-axis code that is allowed, the split becoming choosable once a list exists, an
+  > unknown Dept refused 404 and a retired one 409, and nine structure events in the ledger
+  > carrying codes and never display names.
 - [x] `(B)` **T1.6b** **What a portal session is told it may do.** `permissionsOf` returns `[]` for a `CLIENT_PORTAL` session whatever role it holds. *Acc: a `CLIENT_PORTAL` membership carrying `manager` reports no permissions, a STAFF one is unchanged, and a permission-gated portal route fails the build.*
   > **Found by reading a screen, not a test (2026-08-29).** Nothing refuses `manager` on a
   > `CLIENT_PORTAL` membership — the roster's Add form offers every published role against
@@ -1193,6 +1271,12 @@ open and are recorded above; neither blocks Phase 2.
   > pg-boss trying, and bib_app has CREATE on that one schema. Every unit test was green
   > while this was broken; it only appears at worker start, in a process nobody watches.
   >
+  > **Superseded in part by G2.4 (2026-08-29):** "one job per engagement" is now the
+  > behaviour of `work_split_axis = 'none'`, which is the default and what every existing firm
+  > has. A firm that chooses to split by Dept or delivery team gets one job per group instead,
+  > from T2.7. `UNIQUE (tenant_id, source_kind, source_ref)` is what T2.7 has to widen, and
+  > that is stated here so it is found from the task that set the rule.
+  >
   > One read route (`GET /api/v1/jobs`), because **a write with no read is not a stored
   > fact** — nothing outside the database could otherwise confirm a signed contract produced
   > work. Read-only: advancing a job belongs to the orchestrator, and a route that could mark
@@ -1202,6 +1286,24 @@ open and are recorded above; neither blocks Phase 2.
   > two-line letter, sweeps, and gets **one job per engagement rather than one per letter**,
   > which is G0.1's "Per Company" rule showing up in the engine.
 - [ ] `(B)` **T2.7** **P3 Orchestrator**: walks the step graph, resolves each step's executor (agent | human | agent-with-approval). *Acc: a 3-step graph advances step to step, sequential + parallel + branch.*
+  > **Scope agreed with `(B)`'s reviewer on 2026-08-29, before any of it was built, and it
+  > moved.** An engagement's lines are GROUPED before a job is made, and the grouping axis is
+  > the firm's own `work_split_axis` — so **T2.6's "one job per engagement" becomes "one job
+  > per (engagement, group)"**, and a firm on the default `none` keeps exactly one. That is a
+  > change to a rule T2.6 already shipped, recorded here rather than made quietly.
+  >
+  > **G2.4 is the prerequisite and is DONE.** The rule needed the axis to be a list a typo
+  > cannot fork, and `groupByAxis` (`domain/serviceaxis/model.ts`) is already written and
+  > tested against the firm's own three-service example — including that an unfiled line joins
+  > a `null` bucket rather than being dropped. **T2.7 is its first and only caller**, and until
+  > it lands `work_split_axis` is a setting nothing reads; `/admin/structure` says so on the
+  > screen.
+  >
+  > **Still open, and it is a CLIENT question, not a design one:** what a branch condition is
+  > allowed to test. Agreed direction is the job's own source facts (the service's recurrence,
+  > the client's jurisdiction) rather than an expression language nobody can write or test —
+  > but which conditions are REAL at the firm has been put to Sidharth and is not answered.
+  > Building the mechanism does not need the answer; choosing the closed set of facts does.
 - [ ] `(B)` **T2.8** **P5 Agent-runtime seam**: executor abstraction + `confidence_tier` rows; guardrail hooks (no auto-commit above tier). *Acc: a fake executor commits >0.95, queues 0.70–0.95, escalates <0.70.*
 - [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
 
