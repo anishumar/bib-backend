@@ -146,6 +146,7 @@ function deps(): RouterDeps {
     },
     document: { service: new DocumentService(makeDocumentFakes()) },
     invoice: {
+      authz: new AuthzService({ permissions }),
       service: new InvoiceService(makeInvoiceFakes()),
       dunning: new DunningService({
         dunning: new FakeDunningRepo(),

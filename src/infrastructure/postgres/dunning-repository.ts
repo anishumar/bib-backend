@@ -24,6 +24,7 @@ import type {
   DunningLadderSource,
   DunningRepository,
   NewDunningAction,
+  PendingDunningRecord,
 } from "../../usecase/invoice/ports";
 
 interface DunningRow {
@@ -95,14 +96,43 @@ export class PostgresDunningRepository implements DunningRepository {
     });
   }
 
-  async pending(tenantId: string): Promise<readonly DunningActionRecord[]> {
+  async pending(tenantId: string): Promise<readonly PendingDunningRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<DunningRow[]>`
-        SELECT ${db.unsafe(COLUMNS)} FROM crm.dunning_action
-        WHERE state = 'pending_approval'
-        ORDER BY created_at
+      const rows = await db<
+        (DunningRow & {
+          number: string;
+          party_id: string;
+          party_name: string;
+          outstanding: string;
+          currency: string;
+          due_on: Date | null;
+        })[]
+      >`
+        SELECT ${db.unsafe(COLUMNS.split(", ").map((c) => `d.${c}`).join(", "))},
+               i.number, b.party_id, p.display_name AS party_name,
+               b.outstanding, b.currency, b.due_on
+        FROM crm.dunning_action d
+        -- THE DECISION IS "put THIS CLIENT on credit hold", so the client, the
+        -- number and what is actually still owed come back with the rung. A
+        -- queue of uuids would be asking somebody to approve something they
+        -- cannot see — found by building the screen, which is the only thing
+        -- that asks.
+        JOIN crm.invoice i ON i.id = d.invoice_id
+        JOIN crm.invoice_balance b ON b.invoice_id = d.invoice_id
+        JOIN core.party p ON p.id = b.party_id
+        WHERE d.state = 'pending_approval'
+        ORDER BY d.created_at
       `;
-      return rows.map(toRecord);
+      return rows.map((r) => ({
+        action: toRecord(r),
+        invoiceNumber: r.number,
+        party: { id: r.party_id, displayName: r.party_name },
+        // Read NOW, not when the rung fired: a debt settled since is exactly
+        // the case a partner rejects, and a stale figure would hide it.
+        outstanding: r.outstanding,
+        currency: r.currency,
+        dueOn: r.due_on === null ? null : r.due_on.toISOString().slice(0, 10),
+      }));
     });
   }
 

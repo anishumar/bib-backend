@@ -1608,6 +1608,30 @@ sandbox access + credentials. **Not on any demo's critical path.**
   first real answer to the staff-directory question the roster's admin-only read deferred —
   revisit the two together when a directory screen exists.
 
+- [x] **Two collections read models were columns of uuids** — found by building the screens,
+  which is the fifth and sixth time this codebase has learnt the same lesson. `/receivables`
+  returned a balance with `partyId` and no name and no invoice NUMBER, so a collections list
+  rendered one anonymous row per debt; and the dunning queue returned a rung with an
+  `invoiceId`, which asked a partner to approve putting **a uuid** on credit hold. Both now
+  return joined records (`ReceivableRecord`, `PendingDunningRecord`) — and the dunning one
+  carries what is outstanding **now**, because a debt settled since the rung fired is exactly
+  the case somebody rejects, and a stale figure would hide it. The smoke walk asserts the name.
+
+- [x] **Invoicing shipped without the fee axis** — found by walking the product for a client
+  demo, which is the first time anybody had opened it as somebody OTHER than a partner. Every
+  invoice figure was visible to a delivery colleague with `commercialVisibility: false`, while
+  proposals and engagement letters had redacted correctly since T2.2. An invoice is money end
+  to end, so it is the module where the axis matters most, and it was the one module that did
+  not have it. Now redacted the same way — the record is shown, the money is not — with the
+  line QUANTITY and the tax RATE deliberately surviving, because how much work was done is the
+  work and a statutory rate is not a price. `npm run smoke` asserts both halves.
+
+  **Why no test caught it:** every test in the suite acts as a partner. The fee axis has no
+  general guard the way the tenant wall and the route-permission table do; each module wires it
+  by hand, which means the next money-bearing module can forget it too. A catalogue-derived
+  check — every route returning an amount is exercised under both visibilities — would close
+  the class. Not built.
+
 - [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
   300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
   a firm of forty behind a single office NAT gateway — they share one bucket. Found by the

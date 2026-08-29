@@ -276,7 +276,10 @@ describe("who owes the firm money", () => {
     );
 
     const receivables = await s.service.outstanding(TENANT);
-    expect(receivables.map((r) => r.invoiceId)).toEqual([owing]);
-    expect(receivables[0]?.outstanding).toBe("5000.0000");
+    expect(receivables.map((r) => r.balance.invoiceId)).toEqual([owing]);
+    expect(receivables[0]?.balance.outstanding).toBe("5000.0000");
+    // The JOIN the collections screen needs: whose debt, and which invoice.
+    expect(receivables[0]?.party.displayName).not.toBe("");
+    expect(receivables[0]?.number).toMatch(/^INV\//);
   });
 });

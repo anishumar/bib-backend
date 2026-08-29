@@ -64,6 +64,7 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  ReceivableRecord,
 } from "./ports";
 
 export interface Deps {
@@ -503,7 +504,7 @@ export class InvoiceService {
 
   /** Who owes the firm money — the question every collections screen and the
    *  dunning ladder ask. */
-  outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
+  outstanding(tenantId: string): Promise<readonly ReceivableRecord[]> {
     return this.deps.invoices.outstanding(tenantId);
   }
 

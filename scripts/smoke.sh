@@ -1131,6 +1131,20 @@ inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
 print(sorted(i["sequenceNumber"] for i in inv))')
 chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
 
+# THE FEE AXIS, on the module where it matters most. An invoice is money end to
+# end, so a delivery colleague seeing the work but not what it was worth is the
+# whole point of the axis — and invoicing shipped without it until the demo
+# walk-through caught it, because every test asserts as the partner.
+ASSOCTOT=$(curl -s -b $J/associate.txt $API/api/v1/invoices/$INV1ID | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print("%s/%s/%s" % (d["totals"]["total"], d["lines"][0]["unitAmount"], d["party"]["displayName"]))')
+chk "an associate sees the work, not the money" "None/None/Cobalt Foods Private Limited" "$ASSOCTOT"
+PARTNERTOT=$(curl -s -b $J/partner.txt $API/api/v1/invoices/$INV1ID | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["totals"]["total"])')
+chk "…while the partner sees both"            "25488.0000" "$PARTNERTOT"
+
 echo; echo "── 16e. What a client still owes — the balance is a SUM ─────────────"
 # T3.5. There is no `paid` flag and no `amount_paid` column: both are caches of
 # an addition and both drift the first time a payment is corrected, leaving an
@@ -1155,11 +1169,15 @@ chk "…and it puts the debt back"          "25488.0000" "$BACK"
 CN=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"5488","reason":"service_failure","note":"Filed late, ours"}')
 chk "…and it gets its own series"         "CN/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$CN")"
 chk "…more than was billed is refused"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"999999","reason":"goodwill"}')"
+# The collections read model: what is left, and WHOSE it is. The name and the
+# number are joined by the API — a screen rendering one row per debt must not
+# fetch a party per row, and building that screen is what found this missing.
 OWED=$(curl -s -b $J/partner.txt $API/api/v1/receivables | python3 -c '
 import sys, json
-rs = {r["invoiceId"]: r["outstanding"] for r in json.load(sys.stdin)["receivables"]}
-print(rs.get("'$INV1ID'", "absent"))')
-chk "…and the receivable is what is left" "20000.0000" "$OWED"
+rs = {r["balance"]["invoiceId"]: r for r in json.load(sys.stdin)["receivables"]}
+r = rs.get("'$INV1ID'")
+print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
+chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
 
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""
