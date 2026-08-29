@@ -235,7 +235,7 @@ open and are recorded above; neither blocks Phase 2.
   > carrying the EXISTING title and silently discards the new one — nothing in the response
   > says a title was dropped. The service comment acknowledges the cost; the response shape
   > does not surface it.
-- [~] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
+- [x] `(A)` **T2.1b** **Lead assignment**: round-robin over active staff behind an
   `AssignmentStrategy` port; territory once its axis is chosen with the client. *Acc: N leads
   captured with no owner distribute evenly; a territory rule overrides the rotation.*
   > **CORRECTED after review (was ticked; now `[~]`).** Round-robin is built, tested and
@@ -263,9 +263,59 @@ open and are recorded above; neither blocks Phase 2.
   > never overrules a person. Six simultaneous claims divide 2/2/2; with the lock removed the
   > same test gives 4/6/5, which is how it was checked.
   >
-  > **Territory is still not built, and still for the reason T2.1 gave:** its axis — geography,
-  > industry, service line — has never been chosen with the client. The port is shaped so it
-  > drops in without touching a caller.
+  > **[x] Territory built (2026-08-29). Migration 0026, and the acceptance now holds in both
+  > halves: a territory rule OVERRIDES the rotation, proven where the two answers differ.**
+  >
+  > **The axis was not a conversation nobody had — it was a MISSING COLUMN.** Every previous
+  > note said "the axis has never been chosen with the client", which was true and hid the
+  > concrete blocker: `crm.lead` held a title, a party, a source, a stage and an owner, so
+  > whichever axis was chosen, there was nothing on a lead to match it against.
+  >
+  > **`lead.jurisdiction` earns its place even if territory is never switched on**, which is
+  > what makes it the safe axis to commit to. Every other stage of this product already keys on
+  > a jurisdiction — a proposal's issuing entity, a letter's own, a clause's scope, a standard
+  > prose block's — and the pipeline was the only one that did not record it. Concretely:
+  > `ProposalService.draft` TAKES `clientJurisdiction` and nothing supplied it, so a lead that
+  > converted re-asked a question the firm had answered at capture, and the answer decides
+  > which of the firm's own entities contracts. **This is still a choice a client can overrule**
+  > — if the firm wants industry or service line instead, that is a second column and a second
+  > rule table, and nothing here has to move.
+  >
+  > **A TABLE, not a registry kind** — `crm.territory_rule` is `firm_entity_preference`'s twin,
+  > answering the same question of a different subject ("whose desk covers X" beside "which of
+  > our entities serves X"). `UNIQUE (tenant, jurisdiction)` is the property that matters and a
+  > registry kind cannot express it; its key must also be lower case, so a country code would
+  > be stored in a case the rest of the product refuses.
+  >
+  > **NO WILDCARD ROW, and that is the difference from 0021.** A document that cannot name who
+  > is contracting is not a document, so preferences need a `'*'` fallback. Assignment already
+  > has a better one: the ROTATION. A lead from a country no rule covers goes to the emptiest
+  > desk — a real decision, not a catch-all row somebody has to remember to maintain.
+  >
+  > **The port changed shape, and it had to.** `policy` was a FIELD on the strategy, read by the
+  > service off `deps.assignment.policy`. That was right with one rule and became a lie with
+  > two: a composite answers per LEAD, not per wiring, and the field would have labelled every
+  > territory-decided capture `round_robin` — destroying the one thing `ownerAssignedBy` exists
+  > for. `assign` now returns `{ lead, policy }`.
+  >
+  > **Ordering is the composition root's, not a branch inside a strategy.** `FirstMatchAssignment`
+  > takes an array; the ORDER is the firm's precedence, stated once and visibly in `setup/`. A
+  > third rule is a line there.
+  >
+  > **A rule NEVER overrules a person**, and a rule whose desk has gone declines rather than
+  > parking leads where nobody sees them: the active-staff check is a JOIN inside the strategy's
+  > own statement, not trust in the row, because a membership is revoked long after the rule was
+  > written and no foreign key can express "active". Both checked — at write time by the service
+  > and at assignment time by the query — and only the second sees a leaver.
+  >
+  > **One bug caught by the integration test the fakes could not:** the rotation adapter's
+  > `RETURNING` list did not carry the new column, so a lead came back from assignment having
+  > silently lost its jurisdiction. And `tests/api/openapi.test.ts` caught a second — the lead
+  > handler's `toRecordBody` SPREAD the domain object under a comment claiming it named fields
+  > one by one, which is the `/auth/me` bug exactly. Both fixed; the handler now lists its
+  > fields.
+  >
+  > Gate: `npm run check` 727 · `test:integration` 226 · `smoke` **215 passed, 0 failed**.
 - [x] `(A)` **T2.2** **C3 Proposals**: catalogue-built, scope + pricing, per-country quoting, send/track (views, expiry). *Acc: a proposal renders from catalogue rows; discount over limit blocks on approval.*
   > **Agreed design, before building (2026-08-28).** Settled in discussion; recorded here because
   > it decides the schema and money is the area CLAUDE.md is strictest about.

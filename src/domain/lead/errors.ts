@@ -23,7 +23,8 @@ export type LeadErrorCode =
   | "OWNER_NOT_STAFF"
   | "LOST_REASON_REQUIRED"
   | "LOST_REASON_NOT_APPLICABLE"
-  | "BLANK_TITLE";
+  | "BLANK_TITLE"
+  | "INVALID_LEAD_JURISDICTION";
 
 export class InvalidSource extends LeadError {
   constructor(source: string, valid: readonly string[]) {
@@ -137,6 +138,24 @@ export class BlankTitle extends LeadError {
       `a lead needs a title with something in it. Whitespace satisfies NOT NULL and renders as ` +
         `the blank row the field exists to prevent — name the opportunity, not the client, ` +
         `because the list already shows the client beside it.`,
+    );
+  }
+}
+
+/**
+ * Refused rather than dropped.
+ *
+ * A caller sending "India" or "in" would otherwise get a lead with no
+ * jurisdiction, the rotation instead of the UK desk rule, and no clue why — a
+ * silent fallback that looks exactly like the ordinary unknown-country case.
+ */
+export class InvalidLeadJurisdiction extends LeadError {
+  constructor(given: string) {
+    super(
+      "INVALID_LEAD_JURISDICTION",
+      `${JSON.stringify(given)} is not a jurisdiction. Give an ISO 3166-1 alpha-2 code in ` +
+        `upper case ("IN", "AE", "US"), or leave it out — an unknown country is a real answer ` +
+        `and the assignment rotation covers it.`,
     );
   }
 }

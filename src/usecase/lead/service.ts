@@ -20,6 +20,8 @@
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
+import { isJurisdiction } from "../../domain/document/model";
+import type { TerritoryRule } from "../../domain/lead/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
 import type { Lead, LeadSource, LeadStage, OwnerSource } from "../../domain/lead/model";
@@ -48,11 +50,14 @@ import {
   LostReasonNotApplicable,
   LostReasonRequired,
   NoContactDetail,
+  InvalidLeadJurisdiction,
   OwnerNotStaff,
   SameStage,
 } from "../../domain/lead/errors";
 import type {
+  AssignmentOutcome,
   AssignmentStrategy,
+  TerritoryRules,
   LeadRecord,
   LeadRepository,
   ProspectDirectory,
@@ -68,6 +73,9 @@ export interface Deps {
    *  wants — rotation today, territory once its axis is chosen — is a wiring
    *  change at the composition root rather than an edit to this file. */
   readonly assignment: AssignmentStrategy;
+  /** The firm's territory rules — for the SCREEN that maintains them. The
+   *  strategy reads the table itself, inside its own single statement. */
+  readonly territories: TerritoryRules;
   readonly ids: IdGen;
   /** For the identifier's valid-from date. Time is a port here for the same
    *  reason it is in identity: a test must be able to fix "today". */
@@ -128,6 +136,16 @@ export interface CaptureLeadInput {
    */
   readonly ownerUserId?: string | null | undefined;
   readonly notes?: string | undefined;
+  /**
+   * Where the PROSPECT is — the axis territory assignment matches on, and the
+   * answer a proposal drafted from this lead needs for `clientJurisdiction`.
+   *
+   * OPTIONAL, and absent is ordinary: often nobody knows the country when
+   * somebody phones in, and a capture must never be refused for it. An unknown
+   * country matches no territory rule and falls through to the rotation, which
+   * is why there is no wildcard rule.
+   */
+  readonly jurisdiction?: string | undefined;
 }
 
 export interface CaptureResult {
@@ -215,6 +233,10 @@ export class LeadService {
   async capture(input: CaptureLeadInput, actor: Actor): Promise<CaptureResult> {
     const source = this.parseSource(input.source);
     const title = this.parseTitle(input.title);
+    // Demanded in canonical UPPER CASE rather than normalised, the same rule
+    // G1.8 applies to a clause's terms: this value is COMPARED — against a
+    // territory rule — and "in" is what a comparison would get.
+    const jurisdiction = this.parseJurisdiction(input.jurisdiction);
 
     // Everything that can be refused without writing is refused first — a
     // capture that fails halfway leaves a party nobody asked for.
@@ -304,6 +326,7 @@ export class LeadService {
       source,
       ownerUserId: requestedOwner ?? null,
       notes: input.notes ?? null,
+      jurisdiction,
     });
 
     // ASSIGNMENT, and only when nobody named an owner. It runs AFTER the insert
@@ -312,9 +335,12 @@ export class LeadService {
     // exist yet. The cost is that a lead exists unowned for the width of one
     // statement; the alternative — choose, then write in a second transaction —
     // is the race the port exists to close.
-    const lead =
-      requestedOwner === undefined ? await this.deps.assignment.assign(created) : created;
-    const ownerAssignedBy = this.ownerSource(requestedOwner, lead);
+    const assigned =
+      requestedOwner === undefined
+        ? await this.deps.assignment.assign(created)
+        : { lead: created, policy: null };
+    const lead = assigned.lead;
+    const ownerAssignedBy = this.ownerSource(requestedOwner, assigned);
     // The owner is part of this event rather than a second `lead.owner_assigned`
     // beside it: one action by one person is one row in the timeline.
     //
@@ -499,9 +525,92 @@ export class LeadService {
    * reader asking "was this assigned automatically?" gets yes-by-which-rule, no
    * because a person said so, or no because nobody is on it.
    */
-  private ownerSource(requested: string | null | undefined, lead: Lead): OwnerSource | null {
-    if (lead.ownerUserId === null) return null;
-    return requested === undefined ? this.deps.assignment.policy : "requested";
+  /**
+   * WHICH rule put the owner there — read off what assignment actually did.
+   *
+   * It used to read `deps.assignment.policy`, a field on the strategy. That was
+   * right while there was one rule and became a lie the moment there were two:
+   * a strategy that tries territory and falls through to the rotation answers
+   * per lead, not per wiring, and the field would have labelled every
+   * territory-decided capture `round_robin`. The whole point of this value is
+   * that "the rotation chose Anand" and "the UK desk rule chose Anand" are
+   * different facts.
+   */
+  private ownerSource(
+    requested: string | null | undefined,
+    assigned: AssignmentOutcome,
+  ): OwnerSource | null {
+    if (assigned.lead.ownerUserId === null) return null;
+    if (requested !== undefined) return "requested";
+    // A policy is present whenever a strategy chose, and the owner is non-null
+    // here — so a null policy would mean a strategy wrote an owner without
+    // saying which rule did it, which is a bug in that adapter rather than a
+    // state to paper over.
+    return assigned.policy ?? "round_robin";
+  }
+
+  /** Absent stays absent — an unknown country is a real state and the rotation
+   *  answers for it. A malformed one is refused rather than dropped, so a
+   *  caller sending "India" learns it, instead of quietly getting the rotation
+   *  and wondering why the UK desk rule never fires. */
+  private parseJurisdiction(raw: string | undefined): string | null {
+    if (raw === undefined) return null;
+    if (!isJurisdiction(raw)) throw new InvalidLeadJurisdiction(raw);
+    return raw;
+  }
+
+  /** Whose desk covers where — the rule as a screen shows it. */
+  async listTerritoryRules(tenantId: string): Promise<readonly TerritoryRule[]> {
+    return this.deps.territories.list(tenantId);
+  }
+
+  /**
+   * Say whose desk covers a country.
+   *
+   * An upsert, because the schema allows exactly one desk per country and "add
+   * a second opinion about IN" is not an operation anybody wants — it is an
+   * ambiguity the strategy would have to break arbitrarily, and arbitrary is
+   * the one thing an assignment rule must never be.
+   *
+   * The owner is checked as ACTIVE STAFF here, so naming somebody who left is
+   * a refusal now rather than leads quietly falling through to the rotation
+   * later. The strategy checks it AGAIN at assignment time, and that is not
+   * belt-and-braces: a membership is revoked long after the rule was written,
+   * and only the second check sees that.
+   */
+  async setTerritoryRule(
+    input: {
+      readonly tenantId: string;
+      readonly jurisdiction: string;
+      readonly ownerUserId: string;
+      readonly note?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<TerritoryRule> {
+    if (!isJurisdiction(input.jurisdiction)) {
+      throw new InvalidLeadJurisdiction(input.jurisdiction);
+    }
+    await this.requireStaff(input.tenantId, input.ownerUserId);
+
+    const saved = await this.deps.territories.set({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      jurisdiction: input.jurisdiction,
+      ownerUserId: input.ownerUserId,
+      note: input.note ?? null,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "territory_rule.set",
+      objectId: saved.id,
+      actor,
+      // Ids and machine facts. The NOTE stays out: it is free text a person
+      // wrote, this log cannot be erased, and the row keeps it where it can be
+      // — the same reasoning `firm_entity_preference.set` gives.
+      payload: { jurisdiction: saved.jurisdiction, ownerUserId: saved.ownerUserId },
+    });
+    return saved;
   }
 
   private async requireStaff(tenantId: string, userId: string): Promise<void> {

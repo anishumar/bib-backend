@@ -195,6 +195,15 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // `tenant:admin`, because moving the fallback silently changes the governing
   // law, the courts and the counterparty on every document issued afterwards,
   // and that is a decision at the same level as deciding what a role means.
+  // WHOSE DESK COVERS A COUNTRY (T2.1b) — the same split as the two rules above
+  // and for the same reason. Reading is `config:read`: anybody drafting should
+  // be able to see where a lead will land. Writing is `tenant:admin`, because a
+  // territory rule decides who a new opportunity goes to before anybody has
+  // looked at it, and quietly moving a country moves the pipeline — and with it
+  // whose numbers it shows up in.
+  [routeKey("GET", "/api/v1/territory-rules"), "config:read" as const],
+  [routeKey("POST", "/api/v1/territory-rules"), "tenant:admin" as const],
+
   [routeKey("GET", "/api/v1/firm-entities/preferences"), "config:read" as const],
   [routeKey("POST", "/api/v1/firm-entities/preferences"), "tenant:admin" as const],
 

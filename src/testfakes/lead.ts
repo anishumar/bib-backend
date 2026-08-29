@@ -15,11 +15,14 @@
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
 import { FakeClock } from "./clock";
-import type { AssignmentPolicy, Lead, LeadStage } from "../domain/lead/model";
+import type { Lead, LeadStage, TerritoryRule } from "../domain/lead/model";
 import type { PartyKind } from "../domain/party/model";
 import { isOpen } from "../domain/lead/model";
 import type {
+  AssignmentOutcome,
   AssignmentStrategy,
+  NewTerritoryRule,
+  TerritoryRules,
   LeadRecord,
   LeadRepository,
   NewLead,
@@ -47,6 +50,7 @@ export class FakeLeadRepo implements LeadRepository {
       title: l.title,
       partyId: l.partyId,
       source: l.source,
+      jurisdiction: l.jurisdiction,
       stage: "new",
       ownerUserId: l.ownerUserId,
       notes: l.notes,
@@ -195,21 +199,23 @@ export class FakeStaffDirectory implements StaffDirectory {
  * that test, so it is never asked to.
  */
 export class FakeRoundRobinAssignment implements AssignmentStrategy {
-  readonly policy: AssignmentPolicy = "round_robin";
-
   constructor(
     private readonly leads: FakeLeadRepo,
     private readonly staff: FakeStaffDirectory,
   ) {}
 
-  async assign(lead: Lead): Promise<Lead> {
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
     const roster = this.staff.roster(lead.tenantId);
-    if (roster.length === 0) return lead;
+    if (roster.length === 0) return { lead, policy: null };
 
     const current = await this.leads.findById(lead.tenantId, lead.id);
     // Somebody claimed it in between. A person's decision outranks a rotation,
-    // exactly as `AND owner_user_id IS NULL` says in the adapter.
-    if (current === null || current.ownerUserId !== null) return current ?? lead;
+    // exactly as `AND owner_user_id IS NULL` says in the adapter — and the
+    // policy is null because the ROTATION did not choose, which is what keeps
+    // the timeline from crediting it with a person's decision.
+    if (current === null || current.ownerUserId !== null) {
+      return { lead: current ?? lead, policy: null };
+    }
 
     const load = new Map<string, number>(roster.map((userId) => [userId, 0]));
     for (const row of this.leads.rows) {
@@ -222,8 +228,94 @@ export class FakeRoundRobinAssignment implements AssignmentStrategy {
     const chosen = [...load.entries()].sort(
       (a, b) => a[1] - b[1] || a[0].localeCompare(b[0]),
     )[0];
-    if (chosen === undefined) return lead;
-    return this.leads.setOwner(lead.tenantId, lead.id, chosen[0]);
+    if (chosen === undefined) return { lead, policy: null };
+    return {
+      lead: await this.leads.setOwner(lead.tenantId, lead.id, chosen[0]),
+      policy: "round_robin",
+    };
+  }
+}
+
+/**
+ * TERRITORY, in memory — whose desk covers the prospect's country.
+ *
+ * It mirrors the adapter's three refusals rather than only the happy path,
+ * because each of them is a rule and a fake that skipped one would let a test
+ * pass on behaviour the database would not produce: an unknown country matches
+ * nothing, a rule naming somebody who is no longer active staff DECLINES so the
+ * lead falls through to the rotation, and a lead that acquired an owner in
+ * between is left alone.
+ */
+export class FakeTerritoryAssignment implements AssignmentStrategy {
+  /** jurisdiction → owner. The firm's rules, as a test sets them. */
+  readonly rules = new Map<string, string>();
+
+  constructor(
+    private readonly leads: FakeLeadRepo,
+    private readonly staff: FakeStaffDirectory,
+  ) {}
+
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
+    if (lead.jurisdiction === null) return { lead, policy: null };
+    const owner = this.rules.get(lead.jurisdiction);
+    if (owner === undefined) return { lead, policy: null };
+    if (!this.staff.roster(lead.tenantId).includes(owner)) return { lead, policy: null };
+
+    const current = await this.leads.findById(lead.tenantId, lead.id);
+    if (current === null || current.ownerUserId !== null) {
+      return { lead: current ?? lead, policy: null };
+    }
+    return {
+      lead: await this.leads.setOwner(lead.tenantId, lead.id, owner),
+      policy: "territory",
+    };
+  }
+}
+
+/** Territory first, rotation second — the same first-match the composition root
+ *  wires, so a test asserts the ORDER and not just the two rules. */
+export class FakeFirstMatchAssignment implements AssignmentStrategy {
+  constructor(private readonly strategies: readonly AssignmentStrategy[]) {}
+
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
+    for (const strategy of this.strategies) {
+      const outcome = await strategy.assign(lead);
+      if (outcome.policy !== null) return outcome;
+    }
+    return { lead, policy: null };
+  }
+}
+
+/**
+ * The rules a firm maintains, in memory — and it writes THROUGH the strategy's
+ * own map rather than keeping a second one.
+ *
+ * That is deliberate. Two collections would let a test set a rule the strategy
+ * cannot see, and every assertion about "the firm published a rule and the next
+ * lead went to that desk" would pass against a fake that had quietly stopped
+ * modelling the thing under test. One source of truth here, as in the database.
+ */
+export class FakeTerritoryRules implements TerritoryRules {
+  private readonly rows: TerritoryRule[] = [];
+
+  constructor(private readonly strategy: FakeTerritoryAssignment) {}
+
+  list(tenantId: string): Promise<readonly TerritoryRule[]> {
+    return Promise.resolve(
+      this.rows.filter((r) => r.tenantId === tenantId).slice()
+        .sort((a, b) => a.jurisdiction.localeCompare(b.jurisdiction)),
+    );
+  }
+
+  set(r: NewTerritoryRule): Promise<TerritoryRule> {
+    const at = this.rows.findIndex(
+      (x) => x.tenantId === r.tenantId && x.jurisdiction === r.jurisdiction,
+    );
+    const row: TerritoryRule = { ...r, id: at === -1 ? r.id : (this.rows[at]?.id ?? r.id) };
+    if (at === -1) this.rows.push(row);
+    else this.rows[at] = row;
+    this.strategy.rules.set(r.jurisdiction, r.ownerUserId);
+    return Promise.resolve(row);
   }
 }
 
@@ -232,7 +324,12 @@ export class FakeRoundRobinAssignment implements AssignmentStrategy {
 export function makeLeadFakes(): Deps & {
   leads: FakeLeadRepo;
   staff: FakeStaffDirectory;
-  assignment: FakeRoundRobinAssignment;
+  assignment: FakeFirstMatchAssignment;
+  /** The two rules behind the composite, so a test can set a territory rule or
+   *  assert which of them chose. */
+  rotation: FakeRoundRobinAssignment;
+  territory: FakeTerritoryAssignment;
+  territories: FakeTerritoryRules;
   events: RecordingEventSink;
   /** The real party module the pipeline is built on, for a test that wants to
    *  read back the prospect capture created. */
@@ -258,6 +355,10 @@ export function makeLeadFakes(): Deps & {
     },
   };
   const staff = new FakeStaffDirectory();
+  const rotation = new FakeRoundRobinAssignment(leads, staff);
+  const territory = new FakeTerritoryAssignment(leads, staff);
+  const assignment = new FakeFirstMatchAssignment([territory, rotation]);
+  const territories = new FakeTerritoryRules(territory);
   return {
     leads,
     prospects: party,
@@ -265,7 +366,16 @@ export function makeLeadFakes(): Deps & {
     // Rotates over whoever the test registered on `staff`. A test that has
     // registered nobody therefore captures leads into the unassigned queue,
     // which is why the tests written before T2.1b still mean what they meant.
-    assignment: new FakeRoundRobinAssignment(leads, staff),
+    //
+    // The COMPOSITE is what the service gets, in the same order the composition
+    // root wires — territory first, rotation second. A test that sets no
+    // territory rule sees exactly the rotation it always saw, because territory
+    // declines on every lead, which is the property that makes this override
+    // safe to add underneath every existing test.
+    assignment,
+    rotation,
+    territory,
+    territories,
     ids,
     clock: new FakeClock(new Date("2026-03-01T10:00:00Z")),
     events,

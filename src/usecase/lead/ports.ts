@@ -10,7 +10,7 @@ import type {
   PartyKind,
   Person,
 } from "../../domain/party/model";
-import type { AssignmentPolicy, Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import type { AssignmentPolicy, TerritoryRule, Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 
 export interface NewLead {
   readonly id: string;
@@ -23,6 +23,9 @@ export interface NewLead {
   readonly source: LeadSource;
   readonly ownerUserId: string | null;
   readonly notes: string | null;
+  /** Where the PROSPECT is, normalised and validated by the service. Null is
+   *  ordinary — often nobody knows yet, and the rotation answers for it. */
+  readonly jurisdiction: string | null;
 }
 
 /**
@@ -139,10 +142,52 @@ export interface StaffDirectory {
  * queue is a state this pipeline has supported since migration 0007.
  */
 export interface AssignmentStrategy {
-  /** Which rule this is, for the timeline. Named by the strategy so a second
-   *  one is self-describing the day it exists. */
-  readonly policy: AssignmentPolicy;
-  assign(lead: Lead): Promise<Lead>;
+  assign(lead: Lead): Promise<AssignmentOutcome>;
+}
+
+/**
+ * What assignment did — the lead, and WHICH rule chose.
+ *
+ * The policy used to be a field on the strategy, read by the service off
+ * `deps.assignment.policy`. That worked while there was exactly one rule and
+ * stopped working the moment there were two: a strategy that tries territory
+ * and falls through to the rotation cannot answer "which rule is this" in
+ * advance, because the answer is per lead. A field would have made the timeline
+ * lie about half the captures, which is the one thing `ownerAssignedBy` exists
+ * to prevent — "the rotation chose Anand" and "the UK desk rule chose Anand"
+ * are different facts, and only the first is evidence about whether the
+ * rotation is working.
+ *
+ * `policy: null` means nothing chose, and the lead is in the unassigned queue.
+ * DECLINING IS A REAL ANSWER: a firm with nobody active, or no rule covering
+ * this lead. A capture must not be lost because assignment had nobody to pick.
+ */
+export interface AssignmentOutcome {
+  readonly lead: Lead;
+  readonly policy: AssignmentPolicy | null;
+}
+
+/**
+ * Whose desk covers a country — the rules a firm maintains (T2.1b).
+ *
+ * Read LIVE, never pinned: a firm that moves the UK to somebody else expects it
+ * that afternoon, the same reading roles get. Nothing historical resolves
+ * through this — what a lead's assignment MEANT is already on the timeline, in
+ * `lead.captured`'s `ownerAssignedBy`.
+ */
+export interface TerritoryRules {
+  list(tenantId: string): Promise<readonly TerritoryRule[]>;
+  /** Upsert by (tenant, jurisdiction). One desk per country is a constraint in
+   *  the schema, so "set" is the only honest verb. */
+  set(r: NewTerritoryRule): Promise<TerritoryRule>;
+}
+
+export interface NewTerritoryRule {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly jurisdiction: string;
+  readonly ownerUserId: string;
+  readonly note: string | null;
 }
 
 // ── The party seam ───────────────────────────────────────────────────────────

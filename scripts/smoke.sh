@@ -634,6 +634,25 @@ chk "…each one to the emptiest desk then"   "as the rule says" "$(sed -n 2p $J
 chk "…and never to the client contact"      0 "$(sed -n 3p $J/desks.txt)"
 sed -n 4p $J/desks.txt
 
+# T2.1b's OTHER half: a territory rule OVERRIDES the rotation. Kept to five
+# requests because the walk is close to its per-minute budget (see the note by
+# `code()`), so this proves the override and the fall-through and nothing else —
+# the refusals and the revoked-desk case are unit and integration tests.
+chk "the firm gives one desk the UK"        200 "$(code -b $J/partner.txt -XPOST $API/api/v1/territory-rules -H "$H" -d '{"jurisdiction":"GB","ownerUserId":"'$ASSOCUID'","note":"UK desk"}')"
+chk "an associate cannot move a territory"  403 "$(code -b $J/associate.txt -XPOST $API/api/v1/territory-rules -H "$H" -d '{"jurisdiction":"GB","ownerUserId":"'$ASSOCUID'"}')"
+curl -s -o $J/gb.json -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" \
+  -d '{"source":"inbound","title":"UK holdco setup","kind":"organization","name":"Thames Holdings Ltd","jurisdiction":"GB","identifiers":[{"type":"email","value":"uk-'$S'@thames.example"}]}'
+GBID=$(python3 -c 'import json;print(json.load(open("'$J'/gb.json"))["lead"]["id"])')
+GBRULE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/lead/$GBID/events" | python3 -c '
+import sys, json
+e = next(r["event"] for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "lead.captured")
+print("%s/%s" % (e["payload"]["ownerAssignedBy"], e["payload"]["ownerUserId"] == "'$ASSOCUID'"))')
+# The associate is the BUSIER desk by now, so the rotation would not have picked
+# them — which is the only way to tell an override from a coincidence.
+chk "…a UK lead lands on that desk"         "territory/True" "$GBRULE"
+UNKNOWN=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/leads -H "$H" -d '{"source":"inbound","title":"Unknown country","kind":"organization","name":"Somewhere Trading","identifiers":[{"type":"email","value":"any-'$S'@somewhere.example"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["lead"]["jurisdiction"] is None)')
+chk "…and a lead with no country is fine"   "True" "$UNKNOWN"
+
 # A rotation never overrules a person. Naming an owner at capture consults no
 # strategy at all, and the timeline says so — `requested` is the ABSENCE of a
 # policy, which is a materially different fact from the rotation happening to

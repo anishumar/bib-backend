@@ -22,6 +22,7 @@ export interface LeadRow {
   owner_user_id: string | null;
   notes: string | null;
   lost_reason: string | null;
+  jurisdiction: string | null;
   captured_at: Date;
   closed_at: Date | null;
 }
@@ -61,6 +62,7 @@ export function toLead(r: LeadRow): Lead {
     source: r.source,
     stage: r.stage,
     ownerUserId: r.owner_user_id,
+    jurisdiction: r.jurisdiction,
     notes: r.notes,
     lostReason: r.lost_reason,
     capturedAt: r.captured_at.toISOString(),
@@ -79,11 +81,12 @@ export class PostgresLeadRepository implements LeadRepository {
       // for the same reason turned around — a lead is captured OPEN, and
       // lead_lost_reason_scope_chk refuses a reason on any open stage.
       const [row] = await db<LeadRow[]>`
-        INSERT INTO crm.lead (id, tenant_id, title, party_id, source, owner_user_id, notes)
+        INSERT INTO crm.lead
+          (id, tenant_id, title, party_id, source, owner_user_id, notes, jurisdiction)
         VALUES (${l.id}, ${l.tenantId}, ${l.title}, ${l.partyId}, ${l.source},
-                ${l.ownerUserId}, ${l.notes})
+                ${l.ownerUserId}, ${l.notes}, ${l.jurisdiction})
         RETURNING id, tenant_id, title, party_id, source, stage, owner_user_id, notes,
-                  lost_reason, captured_at, closed_at
+                  lost_reason, jurisdiction, captured_at, closed_at
       `;
       if (!row) throw new Error("lead insert returned no row");
       return toLead(row);
@@ -94,7 +97,7 @@ export class PostgresLeadRepository implements LeadRepository {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LeadRow[]>`
         SELECT id, tenant_id, title, party_id, source, stage, owner_user_id, notes,
-               lost_reason, captured_at, closed_at
+               lost_reason, jurisdiction, captured_at, closed_at
         FROM crm.lead WHERE id = ${leadId}
       `;
       return row ? toLead(row) : null;
@@ -113,7 +116,7 @@ export class PostgresLeadRepository implements LeadRepository {
       // follows would hit a unique violation instead of merging.
       const [row] = await db<LeadRow[]>`
         SELECT id, tenant_id, title, party_id, source, stage, owner_user_id, notes,
-               lost_reason, captured_at, closed_at
+               lost_reason, jurisdiction, captured_at, closed_at
         FROM crm.lead
         WHERE party_id = ${partyId} AND stage NOT IN ('converted', 'lost', 'abandoned')
       `;
@@ -133,7 +136,7 @@ export class PostgresLeadRepository implements LeadRepository {
         stage === null
           ? await db<LeadRecordRow[]>`
               SELECT l.id, l.tenant_id, l.title, l.party_id, l.source, l.stage, l.owner_user_id,
-                     l.notes, l.lost_reason, l.captured_at, l.closed_at,
+                     l.notes, l.lost_reason, l.jurisdiction, l.captured_at, l.closed_at,
                      p.kind AS party_kind, p.display_name AS party_display_name,
                      u.display_name AS owner_display_name, u.email::text AS owner_email
               FROM crm.lead l
@@ -143,7 +146,7 @@ export class PostgresLeadRepository implements LeadRepository {
             `
           : await db<LeadRecordRow[]>`
               SELECT l.id, l.tenant_id, l.title, l.party_id, l.source, l.stage, l.owner_user_id,
-                     l.notes, l.lost_reason, l.captured_at, l.closed_at,
+                     l.notes, l.lost_reason, l.jurisdiction, l.captured_at, l.closed_at,
                      p.kind AS party_kind, p.display_name AS party_display_name,
                      u.display_name AS owner_display_name, u.email::text AS owner_email
               FROM crm.lead l
@@ -160,7 +163,7 @@ export class PostgresLeadRepository implements LeadRepository {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LeadRecordRow[]>`
         SELECT l.id, l.tenant_id, l.title, l.party_id, l.source, l.stage, l.owner_user_id,
-               l.notes, l.lost_reason, l.captured_at, l.closed_at,
+               l.notes, l.lost_reason, l.jurisdiction, l.captured_at, l.closed_at,
                p.kind AS party_kind, p.display_name AS party_display_name,
                u.display_name AS owner_display_name, u.email::text AS owner_email
         FROM crm.lead l
@@ -194,7 +197,7 @@ export class PostgresLeadRepository implements LeadRepository {
             lost_reason = ${lostReason}
         WHERE id = ${leadId}
         RETURNING id, tenant_id, title, party_id, source, stage, owner_user_id, notes,
-                  lost_reason, captured_at, closed_at
+                  lost_reason, jurisdiction, captured_at, closed_at
       `;
       if (!row) throw new Error(`lead ${leadId} vanished between the read and the stage move`);
       return toLead(row);
@@ -207,7 +210,7 @@ export class PostgresLeadRepository implements LeadRepository {
         UPDATE crm.lead SET owner_user_id = ${ownerUserId}
         WHERE id = ${leadId}
         RETURNING id, tenant_id, title, party_id, source, stage, owner_user_id, notes,
-                  lost_reason, captured_at, closed_at
+                  lost_reason, jurisdiction, captured_at, closed_at
       `;
       if (!row) throw new Error(`lead ${leadId} vanished between the read and the assignment`);
       return toLead(row);

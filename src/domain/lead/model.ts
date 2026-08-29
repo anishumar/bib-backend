@@ -113,6 +113,20 @@ export interface Lead {
   readonly stage: LeadStage;
   /** Whose desk it is on, or null for the unassigned queue. */
   readonly ownerUserId: string | null;
+  /**
+   * Where the PROSPECT is — ISO 3166-1 alpha-2, or null when nobody has said.
+   *
+   * Null is ordinary and must stay cheap: a prospect's country often is not
+   * known when they phone in, and a capture must never be refused for it. The
+   * rotation is what answers for an unknown country, which is why there is no
+   * wildcard territory rule.
+   *
+   * It is the axis territory assignment matches on, and it is also the answer
+   * `ProposalService.draft` needs for `clientJurisdiction` — which decides
+   * which of the firm's own entities contracts. The pipeline was the only stage
+   * of this product that did not record a jurisdiction.
+   */
+  readonly jurisdiction: string | null;
   readonly notes: string | null;
   /**
    * Why it did not close won, in the closer's own words.
@@ -220,7 +234,26 @@ export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
  * names itself on the timeline, and every report that groups leads by how they
  * were assigned keeps working across the change.
  */
-export type AssignmentPolicy = "round_robin";
+export type AssignmentPolicy = "round_robin" | "territory";
+
+/**
+ * Whose desk covers leads from a country (T2.1b).
+ *
+ * One row per country per firm — the twin of `crm.firm_entity_preference`, and
+ * the same question asked of a different table: that one answers "which of our
+ * entities serves a client in X", this one answers "whose desk covers a lead
+ * from X". There is deliberately NO wildcard: assignment already has a better
+ * fallback than a catch-all row, which is the rotation.
+ */
+export interface TerritoryRule {
+  readonly id: string;
+  readonly tenantId: string;
+  /** ISO 3166-1 alpha-2, upper case. */
+  readonly jurisdiction: string;
+  readonly ownerUserId: string;
+  /** Why the firm drew the line here. Null on a row nobody has explained. */
+  readonly note: string | null;
+}
 
 /**
  * Where a lead's owner came from — recorded on `lead.captured`, so a firm can

@@ -15,7 +15,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import { IdentifierTypeSchema } from "./party";
-import type { LeadSource, LeadStage } from "../../domain/lead/model";
+import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 import type { LeadService } from "../../usecase/lead/service";
 import type { LeadRecord } from "../../usecase/lead/ports";
 
@@ -66,6 +66,13 @@ const LeadSchema = z
         "Why the opportunity did not close won, in the closer's own words. Set only on " +
         "`lost` and `abandoned`; null on an open or converted lead, and null on one closed " +
         "before the field existed, which means nobody was asked.",
+    }),
+    jurisdiction: z.string().length(2).nullable().openapi({
+      description:
+        "Where the PROSPECT is, ISO 3166-1 alpha-2. Null is ordinary — often nobody knows " +
+        "at capture — and an unknown country matches no territory rule, so the assignment " +
+        "rotation covers it. It is also the answer a proposal drafted from this lead needs " +
+        "for `clientJurisdiction`, which decides which of the firm's entities contracts.",
     }),
     capturedAt: z.string(),
     closedAt: z.string().nullable(),
@@ -177,6 +184,12 @@ const CaptureLeadBody = z
         "who must be active staff at this firm.",
     }),
     notes: z.string().optional(),
+    jurisdiction: z.string().length(2).optional().openapi({
+      description:
+        "Where the PROSPECT is, ISO 3166-1 alpha-2 in UPPER CASE. Optional — often nobody " +
+        "knows at capture, and a capture is never refused for it. Demanded in canonical case " +
+        "rather than normalised, because it is compared against the firm's territory rules.",
+    }),
   })
   .openapi("CaptureLeadRequest");
 
@@ -328,15 +341,111 @@ const assignOwnerRoute = createRoute({
 
 // ── Registration ────────────────────────────────────────────────────────────
 
-/** Named field by field rather than forwarded, so a field added to the read
- *  model cannot reach the wire without also reaching the spec. */
+/**
+ * Named field by field rather than forwarded, so a field added to the read
+ * model cannot reach the wire without also reaching the spec.
+ *
+ * The comment above this function said exactly that while the body underneath
+ * it spread `record.lead`, which is the SAME shape of bug `/auth/me` shipped:
+ * zod-openapi documents a response without validating it, so a spread ships
+ * whatever the domain object happens to hold. T2.1b's `jurisdiction` reached
+ * the wire undocumented that way and `tests/api/openapi.test.ts` — the general
+ * assertion — caught it before it merged. The fields are now listed.
+ */
 function toRecordBody(record: LeadRecord): z.infer<typeof LeadRecordSchema> {
   return {
-    lead: { ...record.lead },
+    lead: toLeadBody(record.lead),
     party: { ...record.party },
     owner: record.owner === null ? null : { ...record.owner },
   };
 }
+
+function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
+  return {
+    id: lead.id,
+    tenantId: lead.tenantId,
+    title: lead.title,
+    partyId: lead.partyId,
+    source: lead.source,
+    stage: lead.stage,
+    ownerUserId: lead.ownerUserId,
+    notes: lead.notes,
+    lostReason: lead.lostReason,
+    jurisdiction: lead.jurisdiction,
+    capturedAt: lead.capturedAt,
+    closedAt: lead.closedAt,
+  };
+}
+
+// ── Territory rules (T2.1b) ────────────────────────────────────────────────
+//
+// Whose desk covers leads from a country. The twin of the firm-entity
+// preferences screen, and the same shape of rule: one row per country, no
+// wildcard — because assignment already has a better fallback than a catch-all
+// row, which is the rotation.
+
+const TerritoryRuleSchema = z
+  .object({
+    id: z.string().uuid(),
+    jurisdiction: z.string().length(2),
+    ownerUserId: z.string().uuid(),
+    note: z.string().nullable(),
+  })
+  .openapi("TerritoryRule");
+
+const TerritoryRulesResponse = z
+  .object({ rules: z.array(TerritoryRuleSchema) })
+  .openapi("TerritoryRulesResponse");
+
+const SetTerritoryRuleRequest = z
+  .object({
+    jurisdiction: z.string().length(2),
+    ownerUserId: z.string().uuid(),
+    note: z.string().max(1000).optional(),
+  })
+  .openapi("SetTerritoryRuleRequest");
+
+const listTerritoryRoute = createRoute({
+  method: "get",
+  path: "/api/v1/territory-rules",
+  tags: ["leads"],
+  summary: "Whose desk covers leads from where",
+  description:
+    "A country with no rule is not a gap: the assignment rotation covers it, which is why " +
+    "there is no wildcard row.",
+  responses: {
+    200: {
+      description: "The firm's territory rules",
+      content: { "application/json": { schema: TerritoryRulesResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const setTerritoryRoute = createRoute({
+  method: "post",
+  path: "/api/v1/territory-rules",
+  tags: ["leads"],
+  summary: "Say whose desk covers a country",
+  description:
+    "Upserts the row for that country — the schema allows exactly one desk per country, " +
+    "because two rules for one country is an ambiguity a strategy would have to break " +
+    "arbitrarily. The owner must be active staff.",
+  request: {
+    body: {
+      content: { "application/json": { schema: SetTerritoryRuleRequest } },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Set", content: { "application/json": { schema: TerritoryRuleSchema } } },
+    400: errorResponse("Not an ISO 3166-1 alpha-2 code in upper case"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    409: errorResponse("That user is not active staff at this firm"),
+  },
+});
 
 export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): void {
   app.openapi(captureRoute, async (c) => {
@@ -383,6 +492,40 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     const { ownerUserId } = c.req.valid("json");
     return c.json(
       await deps.service.assignOwner({ tenantId: s.tenantId, leadId, ownerUserId }, s.actor),
+      200,
+    );
+  });
+  app.openapi(listTerritoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const rules = await deps.service.listTerritoryRules(s.tenantId);
+    return c.json(
+      {
+        rules: rules.map((r) => ({
+          id: r.id,
+          jurisdiction: r.jurisdiction,
+          ownerUserId: r.ownerUserId,
+          note: r.note,
+        })),
+      },
+      200,
+    );
+  });
+
+  app.openapi(setTerritoryRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setTerritoryRule(
+      { tenantId: s.tenantId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(
+      {
+        id: saved.id,
+        jurisdiction: saved.jurisdiction,
+        ownerUserId: saved.ownerUserId,
+        note: saved.note,
+      },
       200,
     );
   });

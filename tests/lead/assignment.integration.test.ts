@@ -21,7 +21,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
-import { PostgresRoundRobinAssignment } from "../../src/infrastructure/postgres/lead-assignment";
+import {
+  FirstMatchAssignment,
+  PostgresRoundRobinAssignment,
+  PostgresTerritoryAssignment,
+  PostgresTerritoryRules,
+} from "../../src/infrastructure/postgres/lead-assignment";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
@@ -51,12 +56,22 @@ const party = new PartyService({
   ids: systemIds,
   events: ledger,
 });
+// The ROTATION on its own, because several tests below drive it directly to
+// watch six simultaneous claims divide.
 const assignment = new PostgresRoundRobinAssignment(app);
+const territory = new PostgresTerritoryAssignment(app);
+const territories = new PostgresTerritoryRules(app);
 const service = new LeadService({
   leads: new PostgresLeadRepository(app),
   prospects: party,
   staff: memberships,
-  assignment,
+  // What the SERVICE gets is the composite, in the order the composition root
+  // wires it: territory first, rotation second. Every test in this file that
+  // sets no territory rule therefore sees exactly the rotation it always saw,
+  // because territory declines on a lead with no jurisdiction — which is the
+  // property that makes T2.1b's override safe underneath work already written.
+  assignment: new FirstMatchAssignment([territory, assignment]),
+  territories,
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -216,7 +231,7 @@ describe("fairness when two leads arrive in the same instant", () => {
     for (let n = 0; n < 6; n += 1) queued.push(await captureQueued(firm.id));
 
     const claimed = await Promise.all(queued.map((lead) => assignment.assign(lead)));
-    const owners = claimed.map((lead) => lead.ownerUserId);
+    const owners = claimed.map((outcome) => outcome.lead.ownerUserId);
 
     expect(owners.filter((o) => o === null)).toHaveLength(0);
     expect(tally(owners, firm.desks)).toEqual([2, 2, 2]);
@@ -311,7 +326,10 @@ describe("a rotation never overrules a person", () => {
     expect(lead.ownerUserId).toBe(busiest.owner_user_id);
 
     const again = await assignment.assign(lead);
-    expect(again.ownerUserId).toBe(busiest.owner_user_id);
+    expect(again.lead.ownerUserId).toBe(busiest.owner_user_id);
+    // …and it says it did not choose, so the timeline does not credit the
+    // rotation with a decision a person already made.
+    expect(again.policy).toBeNull();
   });
 
   it("honours an explicit request for the unassigned queue", async () => {
@@ -333,5 +351,90 @@ describe("a rotation never overrules a person", () => {
       SELECT owner_user_id FROM crm.lead WHERE id = ${lead.id}
     `;
     expect(row?.owner_user_id).toBeNull();
+  });
+});
+
+describe("T2.1b — territory, against the real tables", () => {
+  // The half the fakes cannot prove: the rule and the ACTIVE-STAFF join are one
+  // SQL statement, and "declines when the desk it names is gone" is that join
+  // returning no row. A fake asserts the intention; only this asserts the query.
+
+  /** A capture from a named country, with no owner — territory decides. */
+  async function captureFrom(tenantId: string, jurisdiction: string): Promise<Lead> {
+    const { lead } = await service.capture(
+      {
+        tenantId,
+        source: "inbound",
+        title: "FY27 statutory audit",
+        kind: "organization",
+        name: `Territory Prospect ${String(sequence + 1)} Private Limited`,
+        identifiers: [{ type: "email", value: nextEmail() }],
+        jurisdiction,
+      },
+      SYSTEM_ACTOR,
+    );
+    return lead;
+  }
+
+  it("sends a lead from the rule's country to that desk, past the rotation", async () => {
+    const specialist = await makeMember(firm.id, "gb-desk");
+    await service.setTerritoryRule(
+      { tenantId: firm.id, jurisdiction: "GB", ownerUserId: specialist, note: "UK desk" },
+      SYSTEM_ACTOR,
+    );
+    // The specialist joined last and holds nothing, so the rotation might well
+    // pick them by accident — load their desk first, and the two answers can no
+    // longer coincide.
+    for (let n = 0; n < 3; n += 1) {
+      const filler = await captureUnowned(firm.id);
+      await owner`UPDATE crm.lead SET owner_user_id = ${specialist} WHERE id = ${filler.id}`;
+    }
+    const lead = await captureFrom(firm.id, "GB");
+    expect(lead.ownerUserId).toBe(specialist);
+    expect(lead.jurisdiction).toBe("GB");
+  });
+
+  it("declines to a desk whose membership has been revoked", async () => {
+    const leaver = await makeMember(firm.id, "gb-leaver");
+    await service.setTerritoryRule(
+      { tenantId: firm.id, jurisdiction: "SG", ownerUserId: leaver },
+      SYSTEM_ACTOR,
+    );
+    // The rule stays; the person goes. No foreign key can express this, and the
+    // service check ran when the rule was WRITTEN — only the strategy's join
+    // sees it now.
+    await owner`
+      UPDATE tenancy.membership SET is_active = false
+      WHERE tenant_id = ${firm.id} AND user_id = ${leaver}
+    `;
+    const lead = await captureFrom(firm.id, "SG");
+    expect(lead.ownerUserId).not.toBeNull();
+    // It fell through to the rotation rather than parking on a dead desk, where
+    // it would LOOK assigned and be seen by nobody.
+    expect(lead.ownerUserId).not.toBe(leaver);
+  });
+
+  it("a lead with no country never reaches the territory query at all", async () => {
+    const specialist = await makeMember(firm.id, "gb-desk-2");
+    await service.setTerritoryRule(
+      { tenantId: firm.id, jurisdiction: "GB", ownerUserId: specialist },
+      SYSTEM_ACTOR,
+    );
+    const lead = await captureUnowned(firm.id);
+    expect(lead.jurisdiction).toBeNull();
+    expect(lead.ownerUserId).not.toBeNull();
+  });
+
+  it("keeps one firm's territory rules out of another's", async () => {
+    // RLS on crm.territory_rule, and it matters more here than on most tables:
+    // a rule that leaked would put another firm's staff on this firm's leads.
+    const mine = await makeMember(firm.id, "row-mine");
+    await service.setTerritoryRule(
+      { tenantId: firm.id, jurisdiction: "AE", ownerUserId: mine },
+      SYSTEM_ACTOR,
+    );
+    expect(await service.listTerritoryRules(rival.id)).toEqual([]);
+    const theirs = await captureFrom(rival.id, "AE");
+    expect(theirs.ownerUserId).not.toBe(mine);
   });
 });

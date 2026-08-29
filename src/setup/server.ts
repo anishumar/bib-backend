@@ -33,7 +33,12 @@ import {
   PostgresTenantDirectory,
 } from "../infrastructure/postgres/job-repository";
 import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
-import { PostgresRoundRobinAssignment } from "../infrastructure/postgres/lead-assignment";
+import {
+  FirstMatchAssignment,
+  PostgresRoundRobinAssignment,
+  PostgresTerritoryAssignment,
+  PostgresTerritoryRules,
+} from "../infrastructure/postgres/lead-assignment";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
@@ -279,7 +284,15 @@ export function wire(cfg: Config, log: Logger): Wired {
     leads: new PostgresLeadRepository(pools.app),
     prospects: party,
     staff: memberships,
-    assignment: new PostgresRoundRobinAssignment(pools.app),
+    // TERRITORY FIRST, ROTATION SECOND — which is what T2.1b's "a territory
+    // rule OVERRIDES the rotation" means as wiring. The ORDER here IS the
+    // firm's precedence, stated in one visible place: a third rule is a line in
+    // this array, not a branch inside a strategy.
+    assignment: new FirstMatchAssignment([
+      new PostgresTerritoryAssignment(pools.app),
+      new PostgresRoundRobinAssignment(pools.app),
+    ]),
+    territories: new PostgresTerritoryRules(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

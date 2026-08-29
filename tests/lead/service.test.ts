@@ -24,6 +24,7 @@ import {
   AmbiguousMatch,
   BlankTitle,
   InvalidSource,
+  InvalidLeadJurisdiction,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
@@ -38,6 +39,8 @@ const TENANT = "00000000-0000-4000-8000-0000000000c1";
 const ACTOR = { type: "human" as const, id: "00000000-0000-4000-8000-0000000000d1" };
 const STAFF = "00000000-0000-4000-8000-0000000000d2";
 const OUTSIDER = "00000000-0000-4000-8000-0000000000d3";
+/** A second desk, for the territory rule to name. */
+const SPECIALIST = "00000000-0000-4000-8000-0000000000d4";
 
 const EMAIL = "priya@meridian.example";
 const PHONE = "+919876543210";
@@ -1032,5 +1035,200 @@ describe("assigning a lead nobody named an owner for", () => {
     expect(second.merged).toBe(true);
     expect(second.lead.id).toBe(first.lead.id);
     expect(second.lead.ownerUserId).toBe(first.lead.ownerUserId);
+  });
+});
+
+describe("T2.1b — a territory rule overrides the rotation", () => {
+  // THE HALF OF T2.1b THAT WAS NEVER BUILT, and the board said why honestly:
+  // the axis had never been chosen. The reason it could not be turns out to be
+  // concrete — A LEAD HAD NO AXIS ON IT. Not geography, not industry, not
+  // service line: `crm.lead` held a title, a party, a source, a stage and an
+  // owner, so whichever axis was picked, the column did not exist.
+  //
+  // Migration 0026 adds `jurisdiction` — where the PROSPECT is — and it earns
+  // its place independently of assignment: every other stage of this product
+  // already keys on a jurisdiction, and `ProposalService.draft` takes a
+  // `clientJurisdiction` that nothing supplied, so a lead that converted
+  // re-asked a question the firm answered at capture.
+
+  /** Two desks, and a rule that gives one of them the UK. */
+  function firmWithTerritory(): ReturnType<typeof setup> & {
+    fakes: ReturnType<typeof makeLeadFakes>;
+  } {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF);
+    fakes.staff.add(TENANT, SPECIALIST);
+    return {
+      fakes,
+      service: new LeadService(fakes),
+      leads: fakes.leads,
+      staff: fakes.staff,
+      events: fakes.events,
+    };
+  }
+
+  it("sends a lead from the rule's country to that desk", async () => {
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST, note: "UK desk" },
+      ACTOR,
+    );
+    const { lead } = await s.service.capture(capture({ jurisdiction: "GB" }), ACTOR);
+    expect(lead.ownerUserId).toBe(SPECIALIST);
+  });
+
+  it("…and the timeline says the RULE chose, not the rotation", async () => {
+    // The reason `AssignmentOutcome` carries the policy instead of the strategy
+    // declaring one. "The rotation chose Anand" and "the UK desk rule chose
+    // Anand" are different facts, and only the first is evidence about whether
+    // the rotation is working.
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    await s.service.capture(capture({ jurisdiction: "GB" }), ACTOR);
+    const captured = s.events.recorded.find((e) => e.verb === "lead.captured");
+    expect(captured?.payload).toMatchObject({ ownerAssignedBy: "territory" });
+  });
+
+  it("overrides the rotation even when that desk is the busiest", async () => {
+    // "OVERRIDES" is the acceptance's own word, and this is what it has to mean
+    // to be worth anything: the rotation would pick the emptiest desk, and the
+    // rule wins anyway. Without this the two are indistinguishable whenever
+    // they happen to agree.
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    // Load the specialist's desk up so the rotation would never choose them.
+    for (let n = 0; n < 3; n += 1) {
+      await s.service.capture(
+        capture({
+          title: `Filler ${String(n)}`,
+          ownerUserId: SPECIALIST,
+          identifiers: [{ type: "email" as const, value: `filler-${String(n)}@x.example` }],
+          name: `Filler Co ${String(n)}`,
+        }),
+        ACTOR,
+      );
+    }
+    const { lead } = await s.service.capture(capture({ jurisdiction: "GB" }), ACTOR);
+    expect(lead.ownerUserId).toBe(SPECIALIST);
+  });
+
+  it("falls through to the rotation for a country no rule covers", async () => {
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    const { lead } = await s.service.capture(capture({ jurisdiction: "IN" }), ACTOR);
+    expect(lead.ownerUserId).not.toBeNull();
+    const captured = s.events.recorded.find((e) => e.verb === "lead.captured");
+    expect(captured?.payload).toMatchObject({ ownerAssignedBy: "round_robin" });
+  });
+
+  it("…and for a lead whose country nobody knows", async () => {
+    // The everyday capture. An unknown country is ordinary and must stay cheap:
+    // it is exactly why there is no wildcard territory rule — the rotation IS
+    // the fallback, and a catch-all row would be a worse one somebody has to
+    // remember to maintain.
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    const { lead } = await s.service.capture(capture(), ACTOR);
+    expect(lead.jurisdiction).toBeNull();
+    const captured = s.events.recorded.find((e) => e.verb === "lead.captured");
+    expect(captured?.payload).toMatchObject({ ownerAssignedBy: "round_robin" });
+  });
+
+  it("never overrules a person who named the owner", async () => {
+    // A rule outranks the rotation; neither outranks a human. Same reasoning as
+    // `AND owner_user_id IS NULL` in both adapters.
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    const { lead } = await s.service.capture(
+      capture({ jurisdiction: "GB", ownerUserId: STAFF }),
+      ACTOR,
+    );
+    expect(lead.ownerUserId).toBe(STAFF);
+    const captured = s.events.recorded.find((e) => e.verb === "lead.captured");
+    expect(captured?.payload).toMatchObject({ ownerAssignedBy: "requested" });
+  });
+
+  it("declines when the rule names somebody who has left", async () => {
+    // A membership is revoked long after the rule was written, and no foreign
+    // key can express "active". Without this check the lead parks on a dead
+    // desk where nobody sees it — worse than the unassigned queue, because it
+    // LOOKS assigned.
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    s.staff.remove(TENANT, SPECIALIST);
+    const { lead } = await s.service.capture(capture({ jurisdiction: "GB" }), ACTOR);
+    expect(lead.ownerUserId).toBe(STAFF);
+  });
+
+  it("refuses to write a rule naming somebody who is not staff", async () => {
+    const s = firmWithTerritory();
+    await expect(
+      s.service.setTerritoryRule(
+        { tenantId: TENANT, jurisdiction: "GB", ownerUserId: OUTSIDER },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(OwnerNotStaff);
+  });
+
+  it("keeps one desk per country — setting it again MOVES it", async () => {
+    const s = firmWithTerritory();
+    const first = await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    const moved = await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: STAFF },
+      ACTOR,
+    );
+    // The row keeps its identity, so anything that referenced it still can.
+    expect(moved.id).toBe(first.id);
+    expect(await s.service.listTerritoryRules(TENANT)).toHaveLength(1);
+    const { lead } = await s.service.capture(capture({ jurisdiction: "GB" }), ACTOR);
+    expect(lead.ownerUserId).toBe(STAFF);
+  });
+
+  it("records the rule and never the note", async () => {
+    const s = firmWithTerritory();
+    await s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "GB", ownerUserId: SPECIALIST, note: "Ravi lives there" },
+      ACTOR,
+    );
+    const set = s.events.recorded.find((e) => e.verb === "territory_rule.set");
+    expect(set?.payload).toEqual({ jurisdiction: "GB", ownerUserId: SPECIALIST });
+    expect(JSON.stringify(set?.payload)).not.toContain("Ravi");
+  });
+
+  it("refuses a jurisdiction it could never compare", async () => {
+    // Refused rather than dropped, on both the lead and the rule. A caller
+    // sending "gb" would otherwise get the rotation and no clue why — a silent
+    // fallback indistinguishable from the ordinary unknown-country case.
+    const s = firmWithTerritory();
+    await expect(
+      s.service.capture(capture({ jurisdiction: "gb" }), ACTOR),
+    ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
+    await expect(
+      s.service.setTerritoryRule(
+        { tenantId: TENANT, jurisdiction: "United Kingdom", ownerUserId: SPECIALIST },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
   });
 });

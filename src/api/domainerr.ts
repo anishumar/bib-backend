@@ -159,6 +159,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_STAGE":
       case "NO_CONTACT_DETAIL":
       case "BLANK_TITLE":
+      case "INVALID_LEAD_JURISDICTION":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };

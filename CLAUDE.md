@@ -634,6 +634,21 @@ out of four if nobody thinks about it. T3.2's calendar is its first real consume
 orchestrator, then `billing`.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
+**Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`
+takes an ordered array and the ORDER is the firm's precedence — a third rule is a line there, not
+a branch inside a strategy. `crm.territory_rule` says whose desk covers a country, keyed on
+`crm.lead.jurisdiction` (where the PROSPECT is, nullable because it is often unknown at capture).
+There is deliberately **no wildcard rule**: the rotation is the fallback, and it is a better one
+than a catch-all row somebody has to maintain. A rule never overrules a person, and a rule whose
+desk has been revoked DECLINES — checked as a join inside the strategy's own statement, because a
+membership goes inactive long after the rule was written and no foreign key can express "active".
+
+`AssignmentStrategy.assign` returns `{ lead, policy }` rather than the strategy declaring a
+`policy` field. With one rule a field was fine; with two it lies, because which rule chose is a
+fact about the LEAD. `lead.captured`'s `ownerAssignedBy` is the whole point — "the rotation chose
+Anand" and "the UK desk rule chose Anand" are different facts, and only the first is evidence
+about whether the rotation is working.
+
 **A lead is a party.** The pipeline does not keep its own copy of a prospect: capture resolves
 a party by identifier FIRST (phone + PAN + email, normalised), and `crm.lead` holds only what
 is about the opportunity — source, stage, owner. At most one OPEN lead per party, enforced by

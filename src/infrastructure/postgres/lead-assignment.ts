@@ -52,8 +52,13 @@
 // The lock is per tenant, so one firm's captures never queue behind another's.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { AssignmentPolicy, Lead } from "../../domain/lead/model";
-import type { AssignmentStrategy } from "../../usecase/lead/ports";
+import type { AssignmentPolicy, Lead, TerritoryRule } from "../../domain/lead/model";
+import type {
+  AssignmentOutcome,
+  AssignmentStrategy,
+  NewTerritoryRule,
+  TerritoryRules,
+} from "../../usecase/lead/ports";
 import { toLead } from "./lead-repository";
 import type { LeadRow } from "./lead-repository";
 
@@ -84,11 +89,9 @@ export function assignmentLockKey(tenantId: string): number {
 }
 
 export class PostgresRoundRobinAssignment implements AssignmentStrategy {
-  readonly policy: AssignmentPolicy = "round_robin";
-
   constructor(private readonly app: Db) {}
 
-  async assign(lead: Lead): Promise<Lead> {
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
     return withTenant(this.app, lead.tenantId, async (db) => {
       // Held until this transaction commits, which is also when the answer
       // becomes visible. Taking it as its own statement is deliberate: the
@@ -136,7 +139,8 @@ export class PostgresRoundRobinAssignment implements AssignmentStrategy {
         FROM pick
         WHERE t.id = ${lead.id} AND t.owner_user_id IS NULL
         RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
-                  t.owner_user_id, t.notes, t.lost_reason, t.captured_at, t.closed_at
+                  t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
+                  t.captured_at, t.closed_at
       `;
 
       // No row means the strategy DECLINED, and both ways of getting here are
@@ -145,7 +149,158 @@ export class PostgresRoundRobinAssignment implements AssignmentStrategy {
       // insert and this statement and a person's decision stands. Either way
       // the lead is returned exactly as it came in, and it stays in the
       // unassigned queue — which is a supported state, not a failure.
-      return row ? toLead(row) : lead;
+      return row ? { lead: toLead(row), policy: ROUND_ROBIN } : { lead, policy: null };
     });
   }
+}
+
+const ROUND_ROBIN: AssignmentPolicy = "round_robin";
+const TERRITORY: AssignmentPolicy = "territory";
+
+/**
+ * TERRITORY: whose desk covers the country the prospect is in (T2.1b).
+ *
+ * The half of T2.1b's acceptance that was never built — "a territory rule
+ * OVERRIDES the rotation" — and the reason it could not be is that a lead had
+ * no axis on it at all. Migration 0026 adds `crm.lead.jurisdiction`, and this
+ * is the rule that reads it.
+ *
+ * ONE STATEMENT, and it is the same three-part discipline the rotation uses,
+ * for the same reasons:
+ *
+ *   1. `AND t.owner_user_id IS NULL` — a manual assignment that landed in
+ *      between wins. A rule never overrules a person.
+ *   2. The rule's owner must be ACTIVE STAFF, joined here rather than trusted
+ *      from the row. A membership is revoked without anybody remembering the
+ *      territory table, and a foreign key cannot express "active" — so a rule
+ *      naming somebody who left DECLINES and the lead falls through to the
+ *      rotation, instead of parking on a dead desk where nobody sees it. This
+ *      is the same `audience = 'STAFF' AND is_active` predicate
+ *      `isActiveStaff` and the rotation both ask.
+ *   3. No advisory lock, and that is the difference from the rotation. This
+ *      strategy decides against NO SHARED STATE — the answer for a country is
+ *      the same whoever else is being assigned at that instant — so there is
+ *      nothing for two concurrent captures to race over. Taking the lock anyway
+ *      would serialise every capture in the firm behind a query that does not
+ *      need it.
+ *
+ * A lead with no jurisdiction declines immediately, without a query: an unknown
+ * country matches no rule, and that is what the rotation is the fallback for.
+ */
+export class PostgresTerritoryAssignment implements AssignmentStrategy {
+  constructor(private readonly app: Db) {}
+
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
+    if (lead.jurisdiction === null) return { lead, policy: null };
+    return withTenant(this.app, lead.tenantId, async (db) => {
+      const [row] = await db<LeadRow[]>`
+        WITH covering AS (
+          -- RLS filters all three tables to the tenant, which is why none of
+          -- them carries a tenant_id predicate — the same reason the rotation's
+          -- query has none.
+          SELECT r.owner_user_id
+          FROM crm.territory_rule r
+          JOIN tenancy.membership m
+            ON m.user_id = r.owner_user_id
+           AND m.audience = 'STAFF'
+           AND m.is_active
+          WHERE r.jurisdiction = ${lead.jurisdiction}
+        )
+        UPDATE crm.lead AS t
+        SET owner_user_id = covering.owner_user_id
+        FROM covering
+        WHERE t.id = ${lead.id} AND t.owner_user_id IS NULL
+        RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
+                  t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
+                  t.captured_at, t.closed_at
+      `;
+      return row ? { lead: toLead(row), policy: TERRITORY } : { lead, policy: null };
+    });
+  }
+}
+
+/**
+ * Territory first, rotation second — which is what "a territory rule OVERRIDES
+ * the rotation" means as code.
+ *
+ * The composite is the reason `AssignmentOutcome` carries the policy rather
+ * than the strategy declaring one: which rule chose is a fact about THIS lead,
+ * not about the wiring, and a field would have made the timeline say
+ * `round_robin` for captures the UK desk rule decided.
+ *
+ * It is a general first-match, not a hardcoded pair, because a third rule is
+ * then a line in `setup/` — and the ORDER is the policy. Whoever wires it is
+ * stating the firm's precedence, in one place, visibly.
+ */
+export class FirstMatchAssignment implements AssignmentStrategy {
+  constructor(private readonly strategies: readonly AssignmentStrategy[]) {}
+
+  async assign(lead: Lead): Promise<AssignmentOutcome> {
+    for (const strategy of this.strategies) {
+      const outcome = await strategy.assign(lead);
+      // A policy means it CHOSE. Declining is ordinary — no rule covers this
+      // country, or the desk it names is gone — so the next strategy gets its
+      // turn with the lead exactly as it came in.
+      if (outcome.policy !== null) return outcome;
+    }
+    return { lead, policy: null };
+  }
+}
+
+/**
+ * The firm's territory rules, in Postgres.
+ *
+ * A separate class from the strategies above and from the lead repository,
+ * because it answers a different question: those DECIDE, this is the firm
+ * MAINTAINING the rules. The strategy reads the table directly inside its own
+ * single UPDATE — it must, since choosing and recording have to be one
+ * statement — so this exists for the screen, not for assignment.
+ */
+export class PostgresTerritoryRules implements TerritoryRules {
+  constructor(private readonly app: Db) {}
+
+  async list(tenantId: string): Promise<readonly TerritoryRule[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<TerritoryRuleRow[]>`
+        SELECT id, tenant_id, jurisdiction, owner_user_id, note
+        FROM crm.territory_rule ORDER BY jurisdiction
+      `;
+      return rows.map(toTerritoryRule);
+    });
+  }
+
+  async set(r: NewTerritoryRule): Promise<TerritoryRule> {
+    return withTenant(this.app, r.tenantId, async (db) => {
+      // Upsert on the country, because the schema allows exactly one desk per
+      // country. The supplied id is used only when the row is NEW — an existing
+      // row keeps its identity, the same way a firm-entity preference does.
+      const [row] = await db<TerritoryRuleRow[]>`
+        INSERT INTO crm.territory_rule (id, tenant_id, jurisdiction, owner_user_id, note)
+        VALUES (${r.id}, ${r.tenantId}, ${r.jurisdiction}, ${r.ownerUserId}, ${r.note})
+        ON CONFLICT (tenant_id, jurisdiction)
+        DO UPDATE SET owner_user_id = EXCLUDED.owner_user_id, note = EXCLUDED.note
+        RETURNING id, tenant_id, jurisdiction, owner_user_id, note
+      `;
+      if (!row) throw new Error("territory rule upsert returned no row");
+      return toTerritoryRule(row);
+    });
+  }
+}
+
+interface TerritoryRuleRow {
+  id: string;
+  tenant_id: string;
+  jurisdiction: string;
+  owner_user_id: string;
+  note: string | null;
+}
+
+function toTerritoryRule(r: TerritoryRuleRow): TerritoryRule {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    jurisdiction: r.jurisdiction,
+    ownerUserId: r.owner_user_id,
+    note: r.note,
+  };
 }
