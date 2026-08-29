@@ -33,8 +33,23 @@ const PreferenceSchema = z
     /** The CLIENT's country, or `*` for the fallback. */
     clientJurisdiction: z.string(),
     firmEntityPartyId: z.string().uuid(),
-    /** The entity by NAME — this screen is a table of country to company. */
-    firmEntity: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    /**
+     * The entity by NAME — this screen is a table of country to company — and
+     * where that company is REGISTERED, which is the fact that makes the row
+     * legible: "a client in AE is served by this company" reads very
+     * differently once you can see the company is registered in IN.
+     *
+     * `jurisdiction` is null for an entity with no registration recorded, which
+     * is the state of every firm's seeded default. It is not decoration: G1.8
+     * refuses a governing-law clause on a letter issued by an unregistered
+     * entity, and this column is where a firm sees which of its own entities
+     * that applies to before it hits the refusal.
+     */
+    firmEntity: z.object({
+      id: z.string().uuid(),
+      displayName: z.string(),
+      jurisdiction: z.string().length(2).nullable(),
+    }),
     /** Why the firm made this choice. Null on a row nobody has explained. */
     note: z.string().nullable(),
   })
@@ -103,7 +118,11 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
           id: r.preference.id,
           clientJurisdiction: r.preference.clientJurisdiction,
           firmEntityPartyId: r.preference.firmEntityPartyId,
-          firmEntity: { id: r.entity.id, displayName: r.entity.displayName },
+          firmEntity: {
+            id: r.entity.id,
+            displayName: r.entity.displayName,
+            jurisdiction: r.entity.jurisdiction,
+          },
           note: r.preference.note,
         })),
       },
@@ -123,7 +142,11 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
         firmEntityPartyId: saved.preference.firmEntityPartyId,
         // The name as STORED, not as the request spelled it: the write's answer
         // is what the firm will read back.
-        firmEntity: { id: saved.entity.id, displayName: saved.entity.displayName },
+        firmEntity: {
+          id: saved.entity.id,
+          displayName: saved.entity.displayName,
+          jurisdiction: saved.entity.jurisdiction,
+        },
         note: saved.preference.note,
       },
       200,

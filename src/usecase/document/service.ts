@@ -33,6 +33,7 @@ import {
 } from "../../domain/document/errors";
 import type {
   DocumentReferences,
+  FirmEntity,
   FirmEntityPreferenceRecord,
   FirmEntityPreferenceRepository,
 } from "./ports";
@@ -124,6 +125,27 @@ export class DocumentService {
     const chosen = resolveIssuingEntity(rows, clientJurisdiction);
     if (chosen === null) throw new NoIssuingEntity(clientJurisdiction);
     return chosen.firmEntityPartyId;
+  }
+
+  /**
+   * Where the entity issuing a document is REGISTERED — G1.8's other half.
+   *
+   * The engagement module holds an issuing entity's id (it stored one at
+   * drafting) and needs the country to compare a clause's governing law
+   * against. It asks here rather than reading `core.legal_entity` itself,
+   * because "which of our companies, and where is it" is one question and this
+   * is the module that answers it.
+   *
+   * Three answers, and the caller must tell them apart: a jurisdiction, `null`
+   * for an entity that exists but has no registration recorded, and a throw for
+   * an id that is not this firm's party at all. The middle one is the state of
+   * every firm's seeded default entity, so it is ordinary and cannot be treated
+   * as an error here — what it means is decided by whoever asked.
+   */
+  async issuerJurisdiction(tenantId: string, firmEntityPartyId: string): Promise<FirmEntity> {
+    const entity = await this.deps.preferences.findEntity(tenantId, firmEntityPartyId);
+    if (entity === null) throw new FirmEntityNotFound(firmEntityPartyId);
+    return entity;
   }
 
   /**

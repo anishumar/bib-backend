@@ -811,7 +811,7 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Gate: `npm run check` 643 · `test:integration` 204 · `smoke` 182.
 - [ ] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
-- [ ] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
+- [x] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
   > **[~] Schema half done (2026-08-28); the wiring half is still open.** `ClauseBody` gains
   > `governingLaw` and `courts`, each a `JurisdictionalTerm | null` — an ISO 3166-1 code AND
   > the words the document prints. **Both halves, because neither does the other's job:** "the
@@ -821,12 +821,62 @@ open and are recorded above; neither blocks Phase 2.
   > together (a half term is refused), demanded in canonical upper case at the write, optional
   > so that clause versions already published and pinned by issued letters still read.
   >
-  > **What is NOT built, and it is the acceptance line itself:** resolving the law from the
-  > ISSUING ENTITY (G1.2) and refusing a mismatch. Two things are needed. G1.2 is in flight in
-  > the engagement lane. And `LetterClauseRecord` — `{clause, key, version, title, text}` —
-  > currently DISCARDS both terms, so the structured law cannot reach a document renderer at
-  > all; found by smoke rather than by building. **G1.8 stays open until a letter issued by the
-  > US entity cannot print Indian governing law.**
+  > **[x] Wiring half done (2026-08-29). A letter issued by the US entity cannot print Indian
+  > governing law — proven end-to-end in smoke, on the letter the firm actually caught.**
+  >
+  > **The comparison is against the ISSUING ENTITY, and that is the whole point.** Not against
+  > the letter's own jurisdiction, and not against the clause's `jurisdictions` — which was
+  > satisfied by the real bug and always would be. The clause that went out was applicable
+  > EVERYWHERE and every word of it was true; the letter was the wrong place for it. The test
+  > `…and jurisdictions could not have caught it` asserts exactly that, so the distinction
+  > cannot quietly collapse into the older check.
+  >
+  > **BOTH terms are checked**, because half the bug the firm caught was the courts. A clause
+  > naming Delaware law and a Singapore seat is refused on a US letter, and a check comparing
+  > only `governingLaw` would pass it.
+  >
+  > **An UNREGISTERED issuer is refused too, and this is the case that decides whether the
+  > check is worth anything.** `seedFirmEntity` writes a `core.organization` and no
+  > `core.legal_entity` row — nothing knows the firm's country at `createTenant` — so every
+  > firm's default issuing entity has no jurisdiction, and that is exactly the position the
+  > original letter was written from. Passing there would put the check everywhere except
+  > where the bug lives. It is a 409, not a 400: the request is well formed and resending
+  > changes nothing, and the message names the entity to register. **It costs no existing
+  > flow** — a clause naming no law is untouched, and `governingLaw` was added the day before,
+  > so no letter anywhere pins a clause this can refuse.
+  >
+  > **THE LIMIT, written down rather than discovered:** a deliberate foreign choice is now
+  > unrepresentable. An Indian entity contracting under English law, or naming a neutral
+  > arbitral seat, is a real arrangement in cross-border work and this refuses it. That is the
+  > firm's own rule applied as a product rule, and it is the safer direction to be wrong in —
+  > a wrong law on an issued document reached a client once, and a refusal is visible in a way
+  > a bad clause is not. Making the exception representable belongs on the LETTER (a term it
+  > records as chosen on purpose) and is a decision nobody has taken.
+  >
+  > **`LetterClauseRecord` carries the structured terms now**, read from the PINNED version, so
+  > a signed letter answers with what the client agreed to. Without it the two fields could be
+  > stored, validated and refused against — and then reach nothing.
+  >
+  > **Two things found while wiring it, neither of them G1.8:**
+  >
+  > 1. **The fake's clause read model returned empty titles and empty text, and had since
+  >    T2.3.** A LINE's pin resolved through the shared library; a CLAUSE's pin resolved
+  >    through a `clauseBodies` map **nothing ever wrote to**. No test noticed because none
+  >    read a clause's wording until this one had to. It now resolves through the same library,
+  >    the way the Postgres adapter's join does, with the map demoted to an override.
+  > 2. **`api/domainerr.ts` could silently answer 500 for any unmapped code, in every family.**
+  >    That is the G3.3 bug — `StaffGradeError` shipped with no entry and every refusal
+  >    answered 500 — and its note asked the next person to remember. Each family's switch now
+  >    ends `default: return unmapped(err.code)` where `unmapped` takes `never`, so **an
+  >    unmapped code is a COMPILE error naming itself**, on the day it is added. Verified by
+  >    deleting a case and watching the build go red. Runtime still returns 500 rather than
+  >    throwing, because a mapper that crashes turns a mislabelled error into no response.
+  >
+  > Also on the wire, because a write with no read is not a stored fact: the firm-entity
+  > preferences screen now shows where each of the firm's own entities is REGISTERED. That is
+  > the column that makes the rule legible — "a client in AE is served by this company" reads
+  > differently once you can see the company is registered in IN — and it is where a firm sees
+  > which of its entities the refusal above applies to before it hits one.
 
 > **Milestone G1 (inside Phase 2):** an engagement letter generated from this system is the
 > letter the firm actually sends — numbered, issued by a named entity, addressed to a person,

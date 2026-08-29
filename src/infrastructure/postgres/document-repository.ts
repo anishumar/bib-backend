@@ -27,6 +27,7 @@ import { withTenant } from "../../db/tenant";
 import type { DocumentType, FirmEntityPreference } from "../../domain/document/model";
 import type {
   DocumentReferences,
+  FirmEntity,
   FirmEntityPreferenceRecord,
   FirmEntityPreferenceRepository,
   NewFirmEntityPreference,
@@ -90,13 +91,22 @@ export class PostgresDocumentRepository
 
   async list(tenantId: string): Promise<readonly FirmEntityPreferenceRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<(PreferenceRow & { entity_display_name: string })[]>`
+      const rows = await db<
+        (PreferenceRow & { entity_display_name: string; entity_jurisdiction: string | null })[]
+      >`
         SELECT p.id, p.tenant_id, p.client_jurisdiction, p.firm_entity_party_id, p.note,
-               entity.display_name AS entity_display_name
+               entity.display_name AS entity_display_name,
+               le.jurisdiction     AS entity_jurisdiction
         FROM crm.firm_entity_preference p
         -- The entity by NAME, in the query. This screen is a table of country
         -- to company, and a column of uuids is the one thing it must not be.
         JOIN core.party entity ON entity.id = p.firm_entity_party_id
+        -- And where that company is REGISTERED, which is what makes the row
+        -- legible: "a client in AE is served by this company" reads very
+        -- differently once you can see the company is registered in IN. LEFT,
+        -- because the seeded default entity has no legal_entity row at all and
+        -- an unregistered issuer is a real state, not a broken join.
+        LEFT JOIN core.legal_entity le ON le.party_id = entity.id
         -- The fallback last: '*' sorts before letters in C collation and after
         -- them in most others, and a screen that puts "everywhere else" in a
         -- different place depending on the database's locale is not a screen.
@@ -104,7 +114,11 @@ export class PostgresDocumentRepository
       `;
       return rows.map((r) => ({
         preference: toPreference(r),
-        entity: { id: r.firm_entity_party_id, displayName: r.entity_display_name },
+        entity: {
+          id: r.firm_entity_party_id,
+          displayName: r.entity_display_name,
+          jurisdiction: r.entity_jurisdiction,
+        },
       }));
     });
   }
@@ -128,15 +142,22 @@ export class PostgresDocumentRepository
     });
   }
 
-  async findEntity(
-    tenantId: string,
-    partyId: string,
-  ): Promise<{ id: string; displayName: string } | null> {
+  async findEntity(tenantId: string, partyId: string): Promise<FirmEntity | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [row] = await db<{ id: string; display_name: string }[]>`
-        SELECT id, display_name FROM core.party WHERE id = ${partyId}
+      const [row] = await db<
+        { id: string; display_name: string; jurisdiction: string | null }[]
+      >`
+        SELECT p.id, p.display_name, le.jurisdiction
+        FROM core.party p
+        -- LEFT: an entity with no registration is the ordinary state, not a
+        -- missing row. G1.8's mismatch check is what cares, and it says so
+        -- itself rather than reading a null here as "not this firm's party".
+        LEFT JOIN core.legal_entity le ON le.party_id = p.id
+        WHERE p.id = ${partyId}
       `;
-      return row ? { id: row.id, displayName: row.display_name } : null;
+      return row
+        ? { id: row.id, displayName: row.display_name, jurisdiction: row.jurisdiction }
+        : null;
     });
   }
 

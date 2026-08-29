@@ -44,8 +44,20 @@ export class FakeEngagementRepo implements EngagementRepository {
   readonly lines: (LetterLine & { removed: boolean })[] = [];
   readonly clauses: LetterClause[] = [];
   readonly engagements: Engagement[] = [];
-  /** Pinned clause bodies, so `describeLetter` returns the wording that was
-   *  actually agreed rather than an empty string. Keyed by version id. */
+  /**
+   * Clause bodies this fake should return INSTEAD of the library's, keyed by
+   * version id. Empty in every test, and it exists for the case where a test
+   * wants a body the library does not hold.
+   *
+   * It used to be the ONLY source, and that was a drift worth naming: a line's
+   * pin resolved through `catalogue` — the same library the service pins from —
+   * while a CLAUSE's pin resolved through this map, which nothing ever wrote
+   * to. So every clause in the fake's read model came back with an empty title
+   * and empty text, and no test noticed, because none of them read a clause's
+   * wording until G1.8 needed to. The Postgres adapter joins the pinned version
+   * for both; the fake now does the same, and this is an override rather than
+   * the source.
+   */
   readonly clauseBodies = new Map<string, Record<string, unknown>>();
   /**
    * The library the SERVICE pins resolve against, so `describeLetter` returns
@@ -345,8 +357,19 @@ export class FakeEngagementRepo implements EngagementRepository {
         net: net(l),
       })),
       clauses: clauses.map((c) => {
-        const body = readClauseBody(this.clauseBodies.get(c.clauseVersionId) ?? {});
-        return { clause: c, key: c.clauseVersionId, version: 1, title: body.title, text: body.text };
+        // The PINNED version, the way the adapter's join reads it — with the
+        // override map first for a test that wants a body the library lacks.
+        const pin = this.catalogue?.pinned(c.clauseVersionId) ?? null;
+        const body = readClauseBody(this.clauseBodies.get(c.clauseVersionId) ?? pin?.body ?? {});
+        return {
+          clause: c,
+          key: pin?.key ?? c.clauseVersionId,
+          version: pin?.version ?? 1,
+          title: body.title,
+          text: body.text,
+          governingLaw: body.governingLaw,
+          courts: body.courts,
+        };
       }),
       totals: totals(lines, letter.currency),
       engagements: this.engagements.filter((e) => e.engagementLetterId === letterId),

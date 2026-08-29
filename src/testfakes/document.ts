@@ -12,6 +12,7 @@ import type { DocumentType, FirmEntityPreference } from "../domain/document/mode
 import { ANY_JURISDICTION } from "../domain/document/model";
 import type {
   DocumentReferences,
+  FirmEntity,
   FirmEntityPreferenceRecord,
   FirmEntityPreferenceRepository,
   NewFirmEntityPreference,
@@ -28,6 +29,16 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
   readonly rows: FirmEntityPreference[] = [];
   /** Display names, so a joined read returns something a screen could render. */
   readonly partyNames = new Map<string, string>([[SEEDED_FIRM_ENTITY, "The Firm Itself"]]);
+  /**
+   * Where each entity is REGISTERED, and the seeded one is DELIBERATELY absent.
+   *
+   * `seedFirmEntity` writes a `core.organization` and no `core.legal_entity`
+   * row — nothing knows the firm's country at `createTenant` — so an
+   * unregistered default issuer is the real state of every tenant, and a fake
+   * that handed one out would make G1.8's fail-closed refusal untestable and
+   * every drafting test quietly wrong about which firms are safe.
+   */
+  readonly partyJurisdictions = new Map<string, string>();
 
   /**
    * The fallback every tenant owns from the moment it exists.
@@ -51,11 +62,7 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
     return Promise.resolve(
       this.rowsFor(tenantId).map((preference) => ({
         preference,
-        entity: {
-          id: preference.firmEntityPartyId,
-          displayName:
-            this.partyNames.get(preference.firmEntityPartyId) ?? preference.firmEntityPartyId,
-        },
+        entity: this.entityOf(preference.firmEntityPartyId),
       })),
     );
   }
@@ -76,12 +83,19 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
     return Promise.resolve(row);
   }
 
-  findEntity(
-    _tenantId: string,
-    partyId: string,
-  ): Promise<{ id: string; displayName: string } | null> {
+  findEntity(_tenantId: string, partyId: string): Promise<FirmEntity | null> {
     const name = this.partyNames.get(partyId);
-    return Promise.resolve(name === undefined ? null : { id: partyId, displayName: name });
+    return Promise.resolve(name === undefined ? null : this.entityOf(partyId));
+  }
+
+  /** One place the two maps are read together, so a name without a
+   *  jurisdiction reads the same way through every method. */
+  private entityOf(partyId: string): FirmEntity {
+    return {
+      id: partyId,
+      displayName: this.partyNames.get(partyId) ?? partyId,
+      jurisdiction: this.partyJurisdictions.get(partyId) ?? null,
+    };
   }
 
   private rowsFor(tenantId: string): FirmEntityPreference[] {

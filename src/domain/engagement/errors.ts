@@ -25,6 +25,8 @@ export type EngagementErrorCode =
   | "NOT_A_CLAUSE"
   | "CLAUSE_NOT_PUBLISHED"
   | "CLAUSE_WRONG_JURISDICTION"
+  | "CLAUSE_LAW_NOT_ISSUERS"
+  | "ISSUER_JURISDICTION_UNKNOWN"
   | "SERVICE_NOT_QUOTABLE"
   | "ADVANCE_NOT_REQUIRED"
   | "ADVANCE_ALREADY_RECORDED"
@@ -153,6 +155,64 @@ export class ClauseWrongJurisdiction extends EngagementError {
       `the clause ${JSON.stringify(title)} applies in ${clauseJurisdictions.join(", ")} and this ` +
         `letter is written for ${letter}. A term drafted for another jurisdiction may be ` +
         `unenforceable or simply wrong here, so it is refused rather than quietly included.`,
+    );
+  }
+}
+
+/**
+ * G1.8's acceptance, as a refusal: a letter issued by the US entity cannot
+ * print Indian governing law.
+ *
+ * The sharpest finding of the project this product was designed against. The
+ * real engagement letter was issued by the firm's US entity to a US client and
+ * its standard terms named Indian law and Delhi courts. The firm's verdict was
+ * flat — "No. This is wrong. For US it's US. For UAE it's DIFC in Dubai."
+ *
+ * `ClauseWrongJurisdiction` above could not have caught it and is a different
+ * question: it asks where a clause may be USED, and the clause that went out
+ * was applicable everywhere, which was true. This asks what the clause SAYS,
+ * against who is actually contracting.
+ *
+ * The term names WHICH of the two failed — a letter can carry the right law and
+ * the wrong forum, and half the bug the firm caught was the courts.
+ */
+export class ClauseLawNotIssuers extends EngagementError {
+  constructor(title: string, term: "governing law" | "courts", named: string, issuer: string) {
+    super(
+      "CLAUSE_LAW_NOT_ISSUERS",
+      `the clause ${JSON.stringify(title)} names ${named} as its ${term}, and this letter is ` +
+        `issued by an entity registered in ${issuer}. A document cannot put another country's ` +
+        `${term} on the firm's own counterparty, so it is refused rather than printed. Use a ` +
+        `clause whose ${term} is ${issuer}, or issue the letter from the ${named} entity.`,
+    );
+  }
+}
+
+/**
+ * The check above, when there is nothing to check AGAINST.
+ *
+ * `seedFirmEntity` writes an organization and no `core.legal_entity` row, because
+ * nothing knows the firm's country at `createTenant` — so every firm's default
+ * issuing entity is unregistered until somebody registers it. That is ordinary,
+ * and it is also exactly the position from which the original letter went out.
+ *
+ * REFUSED rather than allowed, and the choice is worth stating because it is
+ * fail-closed on purpose. An unverifiable law is the state the bug lived in; if
+ * this passed silently the check would be absent precisely where it is needed,
+ * and present only for firms that had already done the work that makes them
+ * safe. It costs nothing to any existing flow — a clause naming a law is
+ * refused, a clause naming none is untouched, and `governingLaw` was added
+ * yesterday, so no letter anywhere pins a clause this can refuse.
+ */
+export class IssuerJurisdictionUnknown extends EngagementError {
+  constructor(title: string, entityName: string) {
+    super(
+      "ISSUER_JURISDICTION_UNKNOWN",
+      `the clause ${JSON.stringify(title)} names a governing law or a forum, and this letter is ` +
+        `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction — so ` +
+        `there is nothing to check the term against. Register that entity (its jurisdiction, ` +
+        `entity type and incorporation) and the clause goes on, or use a clause that names ` +
+        `neither term.`,
     );
   }
 }

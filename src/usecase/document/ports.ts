@@ -23,7 +23,29 @@ export interface NewFirmEntityPreference {
  */
 export interface FirmEntityPreferenceRecord {
   readonly preference: FirmEntityPreference;
-  readonly entity: { readonly id: string; readonly displayName: string };
+  readonly entity: FirmEntity;
+}
+
+/**
+ * One of the firm's OWN entities, as the two questions about it are asked
+ * together: which company is contracting, and where it is registered.
+ *
+ * `jurisdiction` comes from `core.legal_entity` and is NULL when the party has
+ * no registration recorded — which is the state of every firm's seeded default
+ * entity, because `seedFirmEntity` writes an organization and nothing knows the
+ * country at `createTenant`. Null is therefore an ordinary answer and not a
+ * fault, but it is the answer G1.8's mismatch check cannot work with, so it is
+ * carried here rather than looked up separately by whoever needs it.
+ *
+ * It also belongs on the preferences SCREEN. The rule that table states is "a
+ * client in AE is served by this company" — and which country that company is
+ * registered in is the fact that makes the row legible or obviously wrong.
+ */
+export interface FirmEntity {
+  readonly id: string;
+  readonly displayName: string;
+  /** ISO 3166-1 alpha-2, upper case, or null when unregistered. */
+  readonly jurisdiction: string | null;
 }
 
 export interface FirmEntityPreferenceRepository {
@@ -39,10 +61,7 @@ export interface FirmEntityPreferenceRepository {
   /** Confirm the party is this firm's before it is named as an issuer, so a bad
    *  id is a 404 naming the id rather than a foreign-key violation surfacing as
    *  a 500. */
-  findEntity(
-    tenantId: string,
-    partyId: string,
-  ): Promise<{ readonly id: string; readonly displayName: string } | null>;
+  findEntity(tenantId: string, partyId: string): Promise<FirmEntity | null>;
 }
 
 /**

@@ -250,6 +250,16 @@ const LetterLineSchema = z
 
 /** A term, as it was PINNED. Not redacted by the fee axis: what the firm
  *  undertook is the work, not the money. */
+/** A term of the contract that belongs to a jurisdiction: the code that makes
+ *  it comparable and the words the document prints. Both halves — neither does
+ *  the other's job. */
+const JurisdictionalTermSchema = z
+  .object({
+    jurisdiction: z.string().length(2),
+    text: z.string(),
+  })
+  .openapi("JurisdictionalTerm");
+
 const LetterClauseSchema = z
   .object({
     id: z.string().uuid(),
@@ -259,6 +269,19 @@ const LetterClauseSchema = z
     position: z.number().int(),
     title: z.string(),
     text: z.string(),
+    /**
+     * WHOSE LAW governs and WHERE a dispute is heard, structured — from the
+     * PINNED body, so a signed letter answers with what the client agreed to.
+     *
+     * Null on almost every clause, which is correct: confidentiality and fee
+     * terms name no law. They are on the wire because `text` alone is a
+     * paragraph, and a renderer asking "whose law does this letter name" had to
+     * read prose — which is the exact position the firm's original letter was
+     * written from. `addClause` already refuses a term that is not the issuing
+     * entity's, so what arrives here has been checked.
+     */
+    governingLaw: JurisdictionalTermSchema.nullable(),
+    courts: JurisdictionalTermSchema.nullable(),
   })
   .openapi("EngagementLetterClause");
 
@@ -767,6 +790,8 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       position: c.clause.position,
       title: c.title,
       text: c.text,
+      governingLaw: c.governingLaw === null ? null : { ...c.governingLaw },
+      courts: c.courts === null ? null : { ...c.courts },
     })),
     totals: {
       gross: fees ? record.totals.gross : null,

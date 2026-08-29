@@ -39,6 +39,7 @@ import {
   resolveEffectiveFrom,
   utcDay,
 } from "../../domain/engagement/model";
+import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
@@ -52,6 +53,7 @@ import {
   AdvanceAmountRequired,
   AdvanceNotRequired,
   AlreadySuperseded,
+  ClauseLawNotIssuers,
   ClauseNotFound,
   ClauseNotPublished,
   ClauseWrongJurisdiction,
@@ -59,6 +61,7 @@ import {
   InvalidAmount,
   InvalidDate,
   InvalidJurisdiction,
+  IssuerJurisdictionUnknown,
   InvalidLetterTransition,
   InvalidLineBillingFrequency,
   InvalidOutOfPocketEstimate,
@@ -405,11 +408,22 @@ export class EngagementService {
   /**
    * Put a clause on the letter, PINNED to the version in force right now.
    *
-   * The jurisdiction check is the interesting one. A clause scoped to another
-   * country may be unenforceable where this letter is written, or simply wrong,
-   * and including it quietly is worse than leaving a gap — so it is refused with
-   * both jurisdictions named. A clause with no scope applies everywhere, which
-   * is how the catalogue reads the same field.
+   * TWO jurisdiction checks, asking different questions of different fields,
+   * and the second is G1.8's acceptance:
+   *
+   *   - `jurisdictions` says where a clause may be USED, compared against the
+   *     jurisdiction the letter is written for. A clause scoped to another
+   *     country may be unenforceable here, or simply wrong, and including it
+   *     quietly is worse than leaving a gap. A clause with no scope applies
+   *     everywhere, which is how the catalogue reads the same field.
+   *   - `governingLaw` / `courts` say what the clause SAYS, compared against
+   *     where the ISSUING ENTITY is registered. The firm's real letter was
+   *     issued by its US entity and named Indian law and Delhi courts; the
+   *     first check could not have caught it, because that clause was
+   *     applicable everywhere and every word of it was true — the letter was
+   *     the wrong place for it.
+   *
+   * Only a clause that actually names a term is checked, and most name none.
    */
   async addClause(tenantId: string, letterId: string, clauseVersionId: string): Promise<void> {
     const letter = await this.editableOrThrow(tenantId, letterId);
@@ -423,6 +437,7 @@ export class EngagementService {
     if (!clauseApplies(body.jurisdictions, letter.jurisdiction)) {
       throw new ClauseWrongJurisdiction(body.title, body.jurisdictions, letter.jurisdiction);
     }
+    await this.refuseForeignTerms(tenantId, letter, body);
 
     await this.deps.letters.addClause({
       id: this.deps.ids.newId(),
@@ -430,6 +445,56 @@ export class EngagementService {
       engagementLetterId: letterId,
       clauseVersionId,
     });
+  }
+
+  /**
+   * G1.8 — a letter issued by the US entity cannot print Indian governing law.
+   *
+   * Both terms are checked, because the firm stated the rule for both ("For US
+   * it's US. For UAE it's DIFC in Dubai") and half the bug it caught was the
+   * forum. The comparison is on the CODE; the prose beside it is what prints.
+   *
+   * THE LIMIT, stated rather than discovered: this makes a deliberate foreign
+   * choice unrepresentable — an Indian entity contracting under English law, or
+   * naming a neutral arbitral seat, is a real arrangement in cross-border work
+   * and this refuses it. That is the firm's own rule applied as a product rule,
+   * and it is the safer direction to be wrong in for now: a wrong law on an
+   * issued document reached a client once already, and a refusal is visible in
+   * a way a bad clause is not. Making the exception representable — a term the
+   * letter records as chosen on purpose — is a decision nobody has taken, and
+   * it belongs on the letter rather than here.
+   *
+   * An unregistered issuer is refused too; `IssuerJurisdictionUnknown` carries
+   * the reasoning for the fail-closed direction.
+   */
+  private async refuseForeignTerms(
+    tenantId: string,
+    letter: EngagementLetter,
+    body: ClauseBody,
+  ): Promise<void> {
+    const terms = [
+      { term: "governing law", value: body.governingLaw },
+      { term: "courts", value: body.courts },
+    ] as const;
+    const named = terms.filter((t) => t.value !== null);
+    // The overwhelmingly common clause names neither, and asking the document
+    // module where an entity is registered on every one of them would be a
+    // query per clause to answer a question nobody asked.
+    if (named.length === 0) return;
+
+    const issuer = await this.deps.documents.issuerJurisdiction(
+      tenantId,
+      letter.issuingEntityPartyId,
+    );
+    if (issuer.jurisdiction === null) {
+      throw new IssuerJurisdictionUnknown(body.title, issuer.displayName);
+    }
+
+    for (const { term, value } of named) {
+      if (value !== null && value.jurisdiction !== issuer.jurisdiction) {
+        throw new ClauseLawNotIssuers(body.title, term, value.jurisdiction, issuer.jurisdiction);
+      }
+    }
   }
 
   async describe(tenantId: string, letterId: string): Promise<LetterView> {

@@ -2,7 +2,11 @@
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
-import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
+import type {
+  BillingBasis,
+  JurisdictionalTerm,
+  ServiceRecurrence,
+} from "../../domain/config/model";
 import type {
   BillingFrequency,
   DocumentTerms,
@@ -36,6 +40,25 @@ import type {
 export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+  /**
+   * Where the issuing entity is REGISTERED — G1.8's mismatch check.
+   *
+   * A null `jurisdiction` means the entity exists and has no registration
+   * recorded, which is the state of every firm's seeded default entity. It is
+   * not an error here; `addClause` decides what it means, and says so out loud.
+   *
+   * The NAME travels with it because the refusal has to be actionable: "issued
+   * by an entity with no registered jurisdiction" sends somebody to look up a
+   * uuid before they can act on it.
+   */
+  issuerJurisdiction(tenantId: string, firmEntityPartyId: string): Promise<IssuingEntity>;
+}
+
+/** The issuing entity, as the mismatch check needs it: what to call it, and
+ *  where it is registered. */
+export interface IssuingEntity {
+  readonly displayName: string;
+  readonly jurisdiction: string | null;
 }
 
 /**
@@ -370,6 +393,19 @@ export interface LetterClauseRecord {
   readonly version: number;
   readonly title: string;
   readonly text: string;
+  /**
+   * The STRUCTURED terms, beside the prose that prints them.
+   *
+   * This record used to carry `text` and stop, which meant the two fields G1.8
+   * added to `ClauseBody` could be stored and validated and then reached
+   * nothing: a document renderer asking "whose law does this letter name" had
+   * only a paragraph to read, which is the exact position the firm's original
+   * letter was written from. Both null is the ordinary case — most clauses name
+   * no law — and both are read from the PINNED version, so a signed letter's
+   * answer is the one the client agreed to and cannot move.
+   */
+  readonly governingLaw: JurisdictionalTerm | null;
+  readonly courts: JurisdictionalTerm | null;
 }
 
 export interface LetterFilters {

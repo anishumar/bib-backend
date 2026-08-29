@@ -511,6 +511,11 @@ export class PostgresEngagementRepository implements EngagementRepository {
             version: r.clause_version,
             title: body.title,
             text: body.text,
+            // The STRUCTURED terms, from the PINNED body — so a signed letter
+            // answers "whose law does this name" with what the client agreed
+            // to, not with what the clause says today.
+            governingLaw: body.governingLaw,
+            courts: body.courts,
           };
         }),
         totals: {

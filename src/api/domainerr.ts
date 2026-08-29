@@ -44,6 +44,29 @@ export interface MappedError {
   readonly reason?: string;
 }
 
+/**
+ * The status a family's switch falls through to when a code is UNMAPPED — and
+ * the compile error that stops it happening.
+ *
+ * Every family below is a `switch` with no `default`, so an error code nobody
+ * mapped used to fall out of its `if` and land on the final `return 500`. That
+ * is not hypothetical: G3.3 shipped `StaffGradeError` with no entry here at
+ * all, and every refusal it raised answered 500 instead of 400/404/409. Unit
+ * tests were perfectly happy — they assert on the thrown sentinel — and only an
+ * end-to-end request could see it.
+ *
+ * `code: never` is the whole mechanism. Reaching this line means the switch
+ * above did not cover its union, and TypeScript refuses to compile the call.
+ * The build breaks on the DAY a code is added, in the file that has to answer
+ * for it, instead of on the day somebody walks the API by hand.
+ *
+ * It still returns 500 at runtime rather than throwing, because a mapper that
+ * crashes turns a mislabelled error into no response at all.
+ */
+function unmapped(code: never): MappedError {
+  return { status: 500, code: "INTERNAL", message: "internal error", reason: String(code) };
+}
+
 export function mapError(err: unknown): MappedError {
   // The transport's own faults, raised before any handler runs — a malformed
   // JSON body is the everyday one. Without this branch they fell through to
@@ -79,6 +102,8 @@ export function mapError(err: unknown): MappedError {
       // MEMBERSHIP_NOT_FOUND above, because it is the same fact.
       case "SIGNATORY_NOT_A_MEMBER":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof StaffGradeError) {
@@ -96,6 +121,8 @@ export function mapError(err: unknown): MappedError {
       // reactivating the rung or choosing another, not by resending this.
       case "GRADE_NOT_ASSIGNABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof PartyError) {
@@ -118,6 +145,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DATE_RANGE":
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof LeadError) {
@@ -144,6 +173,8 @@ export function mapError(err: unknown): MappedError {
       case "SAME_STAGE":
       case "OWNER_NOT_STAFF":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof ProposalError) {
@@ -189,6 +220,8 @@ export function mapError(err: unknown): MappedError {
       case "APPROVAL_NOT_NEEDED":
       case "ALREADY_APPROVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof EngagementError) {
@@ -198,6 +231,9 @@ export function mapError(err: unknown): MappedError {
       // REQUEST, not a state the letter is in — there is no letter yet. It sat
       // in the wrong group until the end-to-end walk asked for a 400.
       // G1.6's line detail joins these, same reasoning as on a proposal.
+      // CLAUSE_LAW_NOT_ISSUERS (G1.8) sits beside CLAUSE_WRONG_JURISDICTION
+      // because it is the same kind of answer — this clause, on this letter,
+      // no — and the caller fixes it by naming a different clause.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -207,6 +243,7 @@ export function mapError(err: unknown): MappedError {
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":
       case "CLAUSE_WRONG_JURISDICTION":
+      case "CLAUSE_LAW_NOT_ISSUERS":
       case "SERVICE_NOT_QUOTABLE":
       case "SIGNATURE_INCOMPLETE":
       case "ADVANCE_AMOUNT_REQUIRED":
@@ -223,6 +260,11 @@ export function mapError(err: unknown): MappedError {
       // The two supersession refusals belong here for the same reason: one is
       // answered by signing the letter being replaced (or by editing the draft
       // instead), the other by withdrawing the replacement already in place.
+      // ISSUER_JURISDICTION_UNKNOWN (G1.8) is here rather than with the 400s
+      // for the same reason NO_ISSUING_ENTITY is below: the request is well
+      // formed and resending it changes nothing. What is missing is a row in
+      // the firm's own records — the issuing entity's registration — and the
+      // message names what to add.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -233,7 +275,10 @@ export function mapError(err: unknown): MappedError {
       case "ENGAGEMENT_NOT_ACTIVE":
       case "LETTER_NOT_SUPERSEDABLE":
       case "ALREADY_SUPERSEDED":
+      case "ISSUER_JURISDICTION_UNKNOWN":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof DocumentError) {
@@ -248,6 +293,8 @@ export function mapError(err: unknown): MappedError {
       // the call that adds it.
       case "NO_ISSUING_ENTITY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   if (err instanceof ConfigError) {
@@ -268,6 +315,8 @@ export function mapError(err: unknown): MappedError {
       case "VERSION_NOT_DRAFT":
       case "WOULD_LOCK_OUT_ADMINISTRATION":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   // Both authorization failures are 403: the caller is who they say they are
@@ -295,6 +344,8 @@ export function mapError(err: unknown): MappedError {
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "TOO_MANY_ATTEMPTS":
         return { status: 429, code: "RATE_LIMITED", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
     }
   }
   // A refused event is OUR bug, never the caller's: services build events from

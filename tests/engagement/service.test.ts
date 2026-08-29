@@ -14,7 +14,9 @@ import {
   AdvanceNotRequired,
   AlreadySuperseded,
   ClauseNotPublished,
+  ClauseLawNotIssuers,
   ClauseWrongJurisdiction,
+  IssuerJurisdictionUnknown,
   EmptyLetter,
   InvalidDate,
   InvalidJurisdiction,
@@ -65,6 +67,13 @@ const LIABILITY_IN = "00000000-0000-0000-0000-0000000000e2";
 const LIABILITY_AE = "00000000-0000-0000-0000-0000000000e3";
 /** One of the FIRM's own entities, beside the fallback it is seeded with. */
 const UAE_ENTITY = "00000000-0000-0000-0000-0000000000f2";
+/** G1.8. The firm's US and Indian entities, and the law-bearing clauses whose
+ *  terms they are compared against. */
+const US_ENTITY = "00000000-0000-0000-0000-0000000000f3";
+const IN_ENTITY = "00000000-0000-0000-0000-0000000000f4";
+const LAW_IN = "00000000-0000-0000-0000-0000000000e4";
+const LAW_US = "00000000-0000-0000-0000-0000000000e5";
+const FORUM_SG = "00000000-0000-0000-0000-0000000000e6";
 
 function setup(): ReturnType<typeof makeEngagementFakes> & { service: EngagementService } {
   const fakes = makeEngagementFakes();
@@ -88,6 +97,33 @@ function setup(): ReturnType<typeof makeEngagementFakes> & { service: Engagement
     title: "Limitation of liability (UAE)",
     text: "Liability is limited as permitted by UAE law.",
     jurisdictions: ["AE"],
+  });
+  // G1.8's fixtures. Note what LAW_IN is: applicable EVERYWHERE and naming
+  // Indian law — which is exactly the clause that went out on the firm's real
+  // US letter, and exactly the shape `jurisdictions` cannot catch, because
+  // every word of it is true.
+  fakes.library.publishClause(LAW_IN, "governing-law-in", {
+    title: "Governing law and jurisdiction",
+    text: "This engagement is governed by the laws of the Republic of India.",
+    jurisdictions: [],
+    governingLaw: { jurisdiction: "IN", text: "the laws of the Republic of India" },
+    courts: { jurisdiction: "IN", text: "the courts at New Delhi" },
+  });
+  fakes.library.publishClause(LAW_US, "governing-law-us", {
+    title: "Governing law and jurisdiction",
+    text: "This engagement is governed by the laws of the State of Delaware.",
+    jurisdictions: [],
+    governingLaw: { jurisdiction: "US", text: "the laws of the State of Delaware" },
+    courts: { jurisdiction: "US", text: "the state and federal courts of Delaware" },
+  });
+  // The right law and the WRONG forum. Half the bug the firm caught was the
+  // courts, so a check that only compared the law would pass this.
+  fakes.library.publishClause(FORUM_SG, "forum-sg", {
+    title: "Dispute resolution",
+    text: "Disputes are resolved by arbitration seated in Singapore.",
+    jurisdictions: [],
+    governingLaw: { jurisdiction: "US", text: "the laws of the State of Delaware" },
+    courts: { jurisdiction: "SG", text: "arbitration seated in Singapore" },
   });
   return { ...fakes, service: new EngagementService(fakes) };
 }
@@ -1271,5 +1307,153 @@ describe("what the signature commits to", () => {
     }
     // …and it is still deterministic, which is the whole point of it.
     expect(canonicalContent({ ...base })).toBe(rendered);
+  });
+});
+
+describe("G1.8 — a letter cannot print another country's law", () => {
+  // THE ACCEPTANCE, and the sharpest finding of the project this product was
+  // designed against. The firm's real engagement letter was issued by its US
+  // entity to a US client, and its standard terms named Indian law and Delhi
+  // courts. The verdict was flat: "No. This is wrong. For US it's US. For UAE
+  // it's DIFC in Dubai."
+  //
+  // A human review let that letter out. So the refusal is a machine equality
+  // test against where the ISSUING ENTITY is registered — not against the
+  // letter's own jurisdiction, and not against the clause's `jurisdictions`,
+  // which says where a clause may be USED and was satisfied by the real bug.
+
+  /** The firm operating two entities, each registered somewhere, with a rule
+   *  routing clients to them. This is the fixture the whole block needs. */
+  async function twoEntityFirm(): Promise<ReturnType<typeof setup>> {
+    const s = setup();
+    s.firmEntities.partyNames.set(US_ENTITY, "10x Global Inc.");
+    s.firmEntities.partyNames.set(IN_ENTITY, "10x Global Advisory Private Limited");
+    s.firmEntities.partyJurisdictions.set(US_ENTITY, "US");
+    s.firmEntities.partyJurisdictions.set(IN_ENTITY, "IN");
+    await s.firmEntities.set({
+      id: "pref-us",
+      tenantId: TENANT,
+      clientJurisdiction: "US",
+      firmEntityPartyId: US_ENTITY,
+      note: null,
+    });
+    await s.firmEntities.set({
+      id: "pref-in",
+      tenantId: TENANT,
+      clientJurisdiction: "IN",
+      firmEntityPartyId: IN_ENTITY,
+      note: null,
+    });
+    return s;
+  }
+
+  it("refuses Indian law on a letter issued by the US entity", async () => {
+    // The bug, exactly as it happened, now unrepresentable.
+    const s = await twoEntityFirm();
+    const id = await draft(s, { jurisdiction: "US" });
+    const err = await s.service.addClause(TENANT, id, LAW_IN).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClauseLawNotIssuers);
+    // The message has to name both sides, because the person reading it has to
+    // decide which of the two is wrong — the clause, or which entity is issuing.
+    expect((err as Error).message).toContain("IN");
+    expect((err as Error).message).toContain("US");
+    expect(s.letters.clauses).toHaveLength(0);
+  });
+
+  it("…and `jurisdictions` could not have caught it", async () => {
+    // The reason this check had to exist at all. LAW_IN is scoped to NOWHERE,
+    // which means everywhere — so the pre-existing check passes it, and every
+    // word of the clause is true. It was the LETTER that was the wrong place.
+    const s = await twoEntityFirm();
+    const id = await draft(s, { jurisdiction: "US" });
+    expect(s.library.pinned(LAW_IN)?.body["jurisdictions"]).toEqual([]);
+    const err = await s.service.addClause(TENANT, id, LAW_IN).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(ClauseWrongJurisdiction);
+    expect(err).toBeInstanceOf(ClauseLawNotIssuers);
+  });
+
+  it("accepts the clause whose law IS the issuer's", async () => {
+    const s = await twoEntityFirm();
+    const us = await draft(s, { jurisdiction: "US" });
+    await expect(s.service.addClause(TENANT, us, LAW_US)).resolves.toBeUndefined();
+    // And the same firm's Indian entity takes the Indian clause — the rule is
+    // the issuer, not a country this product has an opinion about.
+    const ind = await draft(s, { jurisdiction: "IN" });
+    await expect(s.service.addClause(TENANT, ind, LAW_IN)).resolves.toBeUndefined();
+  });
+
+  it("refuses the right law with the wrong forum", async () => {
+    // Half the bug the firm caught was the COURTS, so a check comparing only
+    // `governingLaw` would let this through: Delaware law, Singapore seat, on a
+    // letter from the US entity.
+    const s = await twoEntityFirm();
+    const id = await draft(s, { jurisdiction: "US" });
+    const err = await s.service.addClause(TENANT, id, FORUM_SG).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ClauseLawNotIssuers);
+    expect((err as Error).message).toContain("courts");
+    expect((err as Error).message).toContain("SG");
+  });
+
+  it("refuses a law-bearing clause when the issuer has no registered jurisdiction", async () => {
+    // FAIL-CLOSED, and this is the case that matters most in practice: every
+    // firm's seeded default entity is an organization with no legal_entity row,
+    // because nothing knows the firm's country at createTenant. That is the
+    // exact position the original letter was written from, so passing here
+    // would put the check everywhere except where the bug lives.
+    const s = setup();
+    const id = await draft(s);
+    const err = await s.service.addClause(TENANT, id, LAW_IN).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(IssuerJurisdictionUnknown);
+    // Actionable: it names the entity to go and register, not a uuid.
+    expect((err as Error).message).toContain("The Firm Itself");
+  });
+
+  it("leaves a clause that names neither term completely alone", async () => {
+    // The cost of the rule above, bounded. Most clauses name no law —
+    // confidentiality, fees, scope — and an unregistered issuer must not stop a
+    // firm drafting with them. Nothing about the check reaches these.
+    const s = setup();
+    const id = await draft(s);
+    await expect(s.service.addClause(TENANT, id, SCOPE_CLAUSE)).resolves.toBeUndefined();
+    await expect(s.service.addClause(TENANT, id, LIABILITY_IN)).resolves.toBeUndefined();
+  });
+
+  it("hands the structured terms to whatever renders the letter", async () => {
+    // The other half of the wiring. LetterClauseRecord used to carry `text` and
+    // stop, so the fields G1.8 added could be stored, validated and refused
+    // against — and then reached nothing. A renderer asking "whose law does
+    // this letter name" had a paragraph to read, which is the position the
+    // original letter was written from.
+    const s = await twoEntityFirm();
+    const id = await draft(s, { jurisdiction: "US" });
+    await s.service.addClause(TENANT, id, LAW_US);
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+
+    const record = await s.letters.describeLetter(TENANT, id);
+    const law = record?.clauses.find((c) => c.title.startsWith("Governing law"));
+    expect(law?.governingLaw).toEqual({
+      jurisdiction: "US",
+      text: "the laws of the State of Delaware",
+    });
+    expect(law?.courts?.jurisdiction).toBe("US");
+    // And null is a real answer beside it, not an absent field.
+    const scope = record?.clauses.find((c) => c.title === "Scope of work");
+    expect(scope?.governingLaw).toBeNull();
+    expect(scope?.courts).toBeNull();
+  });
+
+  it("keeps the terms the client agreed to after signature", async () => {
+    // Read from the PINNED version, so a clause the firm rewrites tomorrow does
+    // not change what a signed letter says its governing law is.
+    const s = await twoEntityFirm();
+    const id = await draft(s, { jurisdiction: "US" });
+    await completeTerms(s, id);
+    await s.service.addClause(TENANT, id, LAW_US);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya Menon" }, ACTOR);
+
+    const record = await s.letters.describeLetter(TENANT, id);
+    const law = record?.clauses.find((c) => c.title.startsWith("Governing law"));
+    expect(law?.governingLaw?.text).toBe("the laws of the State of Delaware");
   });
 });

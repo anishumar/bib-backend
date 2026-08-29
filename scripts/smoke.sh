@@ -49,6 +49,20 @@ chk() { # chk <label> <expected> <actual>
 }
 code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
+# THE WALK'S OWN BUDGET, and it is nearly spent. This script makes ~250 requests
+# from one client address in a few seconds, against a general limiter of 300 a
+# minute (BIB_RATELIMIT_GENERAL_PER_MINUTE). So: one run fits, TWO RUNS INSIDE A
+# MINUTE DO NOT — the second one drowns in 429s partway through, which reads
+# like a pile of broken features rather than a spent budget. That already cost
+# an investigation once (G1.8), and the same trap in the sign-in bucket cost
+# another, which is what the message at the end of `seed` is about.
+#
+# If you add a section and the run starts failing from the middle onward with
+# `got 429`, the walk has outgrown the limit — check that before checking the
+# feature. The fix is to spend fewer requests here, not to raise the product's
+# default: a limit the smoke walk cannot live under is one a real client cannot
+# either, and finding that out is part of what this script is for.
+
 echo; echo "── 1. The provisioning surface needs a platform key ────────────────"
 chk "no key is refused"        401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -d '{}')"
 chk "wrong key is refused"     401 "$(code -XPOST $API/internal/v1/tenants -H "$H" -H 'authorization: Bearer wrong' -d '{}')"
@@ -316,9 +330,9 @@ echo; echo "── 8. Whose law governs — a clause says it in two halves ─�
 # through once, on a letter that reached a client. The code makes the term
 # comparable, the words make it printable, and neither does the other's job.
 #
-# The WIRING half — resolving the law from the ISSUING ENTITY and refusing a
-# mismatch — needs G1.2's issuing entity and is not built. Nothing here asserts
-# it; this section proves only that the two halves can be stated and stored.
+# The WIRING half is built now: `addClause` resolves where the ISSUING ENTITY is
+# registered and refuses a term that is not its. Proven at the end of this
+# section, on the letter the firm actually caught.
 LAWCLAUSE='{"key":"governing-law-in","body":{"title":"Governing law and jurisdiction","text":"This engagement is governed by the laws of the Republic of India.","jurisdictions":["IN"],"governingLaw":{"jurisdiction":"IN","text":"the laws of the Republic of India"},"courts":{"jurisdiction":"IN","text":"the courts at Bengaluru"}}}'
 chk "a clause names its law and its courts" 201 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$LAWCLAUSE")"
 chk "…and publishes"                        200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause/governing-law-in/versions/1/publish -H "$H")"
@@ -359,13 +373,82 @@ print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 
 LAWORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Harbour Ridge Advisory Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 LAWELDRAFT='{"partyId":"'$LAWORG'","jurisdiction":"IN","title":"Harbour Ridge - terms","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}'
 LAWEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$LAWELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-chk "the clause with both terms goes on"    204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$LAWV'"}')"
-chk "…and so does the one with neither"     204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$PLAINV'"}')"
+
+# ── G1.8, the WIRING half ──────────────────────────────────────────────────
+# FAIL-CLOSED FIRST, and this is the state every firm starts in. `createTenant`
+# seeds the firm's own entity as an organization with no `core.legal_entity`
+# row, because nothing knows the firm's country at creation — so there is
+# nothing to compare a governing law against, and the clause is refused rather
+# than printed unchecked. 409, not 400: the request is fine, a row is missing.
+chk "an unregistered issuer refuses a law"  409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$LAWV'"}')"
+chk "…while a clause naming no law goes on" 204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$PLAINV'"}')"
+
+# Register the firm's own entity in India, and the same clause is now checkable
+# and correct. This is the whole remedy the refusal above asks for.
+FIRMENT=$(curl -s -b $J/partner.txt $API/api/v1/firm-entities/preferences | python3 -c '
+import sys, json
+print(next(p["firmEntityPartyId"] for p in json.load(sys.stdin)["preferences"] if p["clientJurisdiction"] == "*"))')
+chk "register the firm entity in IN"        201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/organizations/$FIRMENT/legal-entities -H "$H" -d '{"jurisdiction":"IN","entityType":"private_limited"}')"
+REGD=$(curl -s -b $J/partner.txt $API/api/v1/firm-entities/preferences | python3 -c '
+import sys, json
+print(next(p["firmEntity"]["jurisdiction"] for p in json.load(sys.stdin)["preferences"] if p["clientJurisdiction"] == "*"))')
+chk "…and the rule screen shows where"      "IN" "$REGD"
+chk "…now the Indian clause goes on"        204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$LAWEL/clauses -H "$H" -d '{"clauseVersionId":"'$LAWV'"}')"
+
 PRINTED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$LAWEL | python3 -c '
 import sys, json
 cs = {c["key"]: c["text"] for c in json.load(sys.stdin)["clauses"]}
 print("%s/%s" % (cs["governing-law-in"][:8], cs["confidentiality"][:10]))')
 chk "…and the letter prints both"           "This eng/Each party" "$PRINTED"
+
+# The STRUCTURED terms reach the wire beside the prose. Without this the two
+# fields could be stored, validated and refused against, and then reach nothing:
+# a renderer asking "whose law does this letter name" had a paragraph to read,
+# which is the position the firm's original letter was written from.
+STRUCT=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$LAWEL | python3 -c '
+import sys, json
+cs = {c["key"]: c for c in json.load(sys.stdin)["clauses"]}
+law, plain = cs["governing-law-in"], cs["confidentiality"]
+print("%s/%s/%s" % (law["governingLaw"]["jurisdiction"], law["courts"]["text"],
+                    plain["governingLaw"] is None))')
+chk "…and hands over the terms structured"  "IN/the courts at Bengaluru/True" "$STRUCT"
+
+# THE ACCEPTANCE, and the sharpest finding of the original project: the real
+# letter was issued by the firm's US entity to a US client and its standard
+# terms named Indian law and Delhi courts. A human review let it out. Here the
+# firm opens a US entity, routes US clients to it, and the SAME Indian clause is
+# refused on the letter that entity issues — note the clause is scoped to IN
+# and the letter is written for US, so the message has to say which check bit.
+USORG=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"10x Global Inc."}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
+chk "the firm opens a US entity"            201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/organizations/$USORG/legal-entities -H "$H" -d '{"jurisdiction":"US","entityType":"other"}')"
+chk "…and routes US clients to it"          200 "$(code -b $J/partner.txt -XPOST $API/api/v1/firm-entities/preferences -H "$H" -d '{"clientJurisdiction":"US","firmEntityPartyId":"'$USORG'","note":"US clients contract with the US entity."}')"
+USLAW='{"key":"governing-law-us","body":{"title":"Governing law and jurisdiction","text":"This engagement is governed by the laws of the State of Delaware.","jurisdictions":[],"governingLaw":{"jurisdiction":"US","text":"the laws of the State of Delaware"},"courts":{"jurisdiction":"US","text":"the state and federal courts of Delaware"}}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$USLAW"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause/governing-law-us/versions/1/publish -H "$H"
+USLAWV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/governing-law-us | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+# An UNSCOPED Indian-law clause, which is what the real one was: `jurisdictions`
+# is empty, so the pre-existing check passes it and every word of it is true.
+ANYLAW='{"key":"governing-law-any","body":{"title":"Governing law","text":"This engagement is governed by the laws of the Republic of India.","jurisdictions":[],"governingLaw":{"jurisdiction":"IN","text":"the laws of the Republic of India"},"courts":{"jurisdiction":"IN","text":"the courts at New Delhi"}}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$ANYLAW"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/clause/governing-law-any/versions/1/publish -H "$H"
+ANYLAWV=$(curl -s -b $J/partner.txt $API/api/v1/config/clause/governing-law-any | python3 -c '
+import sys, json
+print(next(v["id"] for v in json.load(sys.stdin)["versions"] if v["version"] == 1))')
+USELDRAFT='{"partyId":"'$LAWORG'","jurisdiction":"US","title":"Harbour Ridge US - terms","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}'
+USEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$USELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+ISSUER=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$USEL | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["issuingEntity"]["displayName"])')
+chk "a US letter is issued by the US entity" "10x Global Inc." "$ISSUER"
+chk "…and it REFUSES Indian governing law"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$USEL/clauses -H "$H" -d '{"clauseVersionId":"'$ANYLAWV'"}')"
+WHY=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$USEL/clauses -H "$H" -d '{"clauseVersionId":"'$ANYLAWV'"}' | python3 -c '
+import sys, json
+e = json.load(sys.stdin)["error"]
+print("%s/%s" % (e["reason"], "IN" in e["message"] and "US" in e["message"]))')
+chk "…naming both sides of the mismatch"    "CLAUSE_LAW_NOT_ISSUERS/True" "$WHY"
+chk "…while ITS OWN law goes on"            204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$USEL/clauses -H "$H" -d '{"clauseVersionId":"'$USLAWV'"}')"
 
 echo; echo "── 9. The lead pipeline — dedup before create ──────────────────────"
 PAN2=AAACL5678M
