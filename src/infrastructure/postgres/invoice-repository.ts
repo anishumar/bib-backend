@@ -37,12 +37,22 @@
 // by definition a total order.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { Invoice, InvoiceLine, InvoiceStatus } from "../../domain/invoice/model";
+import type {
+  CreditNote,
+  Invoice,
+  InvoiceBalance,
+  InvoiceLine,
+  InvoiceStatus,
+  Payment,
+} from "../../domain/invoice/model";
 import {
+  DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   financialYearOf,
   formatInvoiceNumber,
+  isCreditReason,
   isInvoiceStatus,
+  isPaymentMethod,
 } from "../../domain/invoice/model";
 import type {
   InvoiceFilters,
@@ -51,8 +61,10 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  NewCreditNote,
   NewInvoice,
   NewInvoiceLine,
+  NewPayment,
 } from "../../usecase/invoice/ports";
 
 interface InvoiceRow {
@@ -159,9 +171,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       // first invoices do not race to create it; the SELECT below is what
       // actually orders them.
       await db`
-        INSERT INTO crm.invoice_series (tenant_id, entity_party_id, financial_year, prefix)
-        VALUES (${i.tenantId}, ${i.entityPartyId}, ${financialYear}, ${DEFAULT_SERIES_PREFIX})
-        ON CONFLICT (tenant_id, entity_party_id, financial_year) DO NOTHING
+        INSERT INTO crm.invoice_series
+          (tenant_id, entity_party_id, financial_year, document_type, prefix)
+        VALUES (${i.tenantId}, ${i.entityPartyId}, ${financialYear}, 'invoice',
+                ${DEFAULT_SERIES_PREFIX})
+        ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
       `;
 
       // 2 — THE LOCK. Everything this file exists for is this line. A second
@@ -172,6 +186,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         WHERE tenant_id = ${i.tenantId}
           AND entity_party_id = ${i.entityPartyId}
           AND financial_year = ${financialYear}
+          AND document_type = 'invoice'
         FOR UPDATE
       `;
       if (!series) {
@@ -194,6 +209,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         WHERE tenant_id = ${i.tenantId}
           AND entity_party_id = ${i.entityPartyId}
           AND financial_year = ${financialYear}
+          AND document_type = 'invoice'
       `;
 
       const [row] = await db<InvoiceRow[]>`
@@ -414,20 +430,22 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           entity_party_id: string;
           entity_name: string;
           financial_year: number;
+          document_type: string;
           prefix: string;
           last_number: number;
         }[]
       >`
         SELECT s.entity_party_id, e.display_name AS entity_name, s.financial_year,
-               s.prefix, s.last_number
+               s.document_type, s.prefix, s.last_number
         FROM crm.invoice_series s
         JOIN core.party e ON e.id = s.entity_party_id
-        ORDER BY e.display_name, s.financial_year DESC
+        ORDER BY e.display_name, s.financial_year DESC, s.document_type
       `;
       return rows.map((r) => ({
         entityPartyId: r.entity_party_id,
         entityName: r.entity_name,
         financialYear: r.financial_year,
+        documentType: r.document_type,
         prefix: r.prefix,
         lastNumber: r.last_number,
       }));
@@ -440,7 +458,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       tenantId,
       (db) => db`
         UPDATE crm.invoice_series SET prefix = ${prefix}
-        WHERE entity_party_id = ${entityPartyId}
+        WHERE entity_party_id = ${entityPartyId} AND document_type = 'invoice'
       `,
     );
   }
@@ -473,4 +491,232 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       return toInvoice(row);
     });
   }
+  // ── Money against an invoice (T3.5) ──────────────────────────────────────
+
+  async recordPayment(p: NewPayment): Promise<Payment> {
+    return withTenant(this.app, p.tenantId, async (db) => {
+      const [row] = await db<PaymentRow[]>`
+        INSERT INTO crm.payment
+          (id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note)
+        VALUES (${p.id}, ${p.tenantId}, ${p.invoiceId}, ${p.amount}, ${p.currency},
+                ${p.receivedOn}, ${p.method}, ${p.reference}, ${p.note})
+        RETURNING ${db.unsafe(PAYMENT_COLUMNS)}
+      `;
+      if (!row) throw new Error("payment insert returned no row");
+      return toPayment(row);
+    });
+  }
+
+  async listPayments(tenantId: string, invoiceId: string): Promise<readonly Payment[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<PaymentRow[]>`
+        SELECT ${db.unsafe(PAYMENT_COLUMNS)} FROM crm.payment
+        WHERE invoice_id = ${invoiceId}
+        ORDER BY received_on, created_at
+      `;
+      return rows.map(toPayment);
+    });
+  }
+
+  /**
+   * A credit note takes its number the same way an invoice does — and from a
+   * SEPARATE series, keyed on `document_type = 'credit_note'`.
+   *
+   * 0027 shipped a series key without a document type and 0028 corrected it.
+   * Borrowing the invoice counter would interleave two legal series into one
+   * sequence, which is worse than a gap: an invoice number missing because it
+   * went to a credit note is a number an auditor cannot account for.
+   */
+  async issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
+    const financialYear = financialYearOf(c.seriesDate);
+    return withTenant(this.app, c.tenantId, async (db) => {
+      await db`
+        INSERT INTO crm.invoice_series
+          (tenant_id, entity_party_id, financial_year, document_type, prefix)
+        VALUES (${c.tenantId}, ${c.entityPartyId}, ${financialYear}, 'credit_note',
+                ${DEFAULT_CREDIT_NOTE_PREFIX})
+        ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
+      `;
+
+      const [series] = await db<{ last_number: number; prefix: string }[]>`
+        SELECT last_number, prefix FROM crm.invoice_series
+        WHERE tenant_id = ${c.tenantId}
+          AND entity_party_id = ${c.entityPartyId}
+          AND financial_year = ${financialYear}
+          AND document_type = 'credit_note'
+        FOR UPDATE
+      `;
+      if (!series) {
+        throw new Error(
+          `no credit-note series for entity ${c.entityPartyId} in FY ${String(financialYear)} — ` +
+            `the row was just inserted, so this means the tenant context is not this tenant.`,
+        );
+      }
+
+      const sequence = series.last_number + 1;
+      const number = formatInvoiceNumber({ prefix: series.prefix, financialYear, sequence });
+
+      await db`
+        UPDATE crm.invoice_series SET last_number = ${sequence}
+        WHERE tenant_id = ${c.tenantId}
+          AND entity_party_id = ${c.entityPartyId}
+          AND financial_year = ${financialYear}
+          AND document_type = 'credit_note'
+      `;
+
+      const [row] = await db<CreditNoteRow[]>`
+        INSERT INTO crm.credit_note
+          (id, tenant_id, invoice_id, entity_party_id, number, financial_year, sequence_number,
+           amount, currency, issued_on, reason, note)
+        VALUES (${c.id}, ${c.tenantId}, ${c.invoiceId}, ${c.entityPartyId}, ${number},
+                ${financialYear}, ${sequence}, ${c.amount}, ${c.currency}, ${c.issuedOn},
+                ${c.reason}, ${c.note})
+        RETURNING ${db.unsafe(CREDIT_NOTE_COLUMNS)}
+      `;
+      if (!row) throw new Error("credit note insert returned no row");
+      return toCreditNote(row);
+    });
+  }
+
+  async listCreditNotes(tenantId: string, invoiceId: string): Promise<readonly CreditNote[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<CreditNoteRow[]>`
+        SELECT ${db.unsafe(CREDIT_NOTE_COLUMNS)} FROM crm.credit_note
+        WHERE invoice_id = ${invoiceId}
+        ORDER BY sequence_number
+      `;
+      return rows.map(toCreditNote);
+    });
+  }
+
+  async balanceOf(tenantId: string, invoiceId: string): Promise<InvoiceBalance | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<BalanceRow[]>`
+        SELECT ${db.unsafe(BALANCE_COLUMNS)} FROM crm.invoice_balance
+        WHERE invoice_id = ${invoiceId}
+      `;
+      return row ? toBalance(row) : null;
+    });
+  }
+
+  async outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<BalanceRow[]>`
+        SELECT ${db.unsafe(BALANCE_COLUMNS)} FROM crm.invoice_balance
+        -- ISSUED only, and outstanding only. A draft owes nothing because
+        -- nobody has been asked; a cancelled invoice owes nothing because it
+        -- was withdrawn. Both would otherwise appear in "who owes us money"
+        -- with their full total, which is the report a partner acts on.
+        WHERE status = 'issued' AND outstanding > 0
+        ORDER BY due_on NULLS LAST, invoice_id
+      `;
+      return rows.map(toBalance);
+    });
+  }
+}
+
+interface PaymentRow {
+  id: string;
+  tenant_id: string;
+  invoice_id: string;
+  amount: string;
+  currency: string;
+  received_on: Date;
+  method: string;
+  reference: string | null;
+  note: string | null;
+}
+
+const PAYMENT_COLUMNS =
+  "id, tenant_id, invoice_id, amount, currency, received_on, method, reference, note";
+
+function toPayment(r: PaymentRow): Payment {
+  if (!isPaymentMethod(r.method)) {
+    throw new Error(
+      `crm.payment holds method ${JSON.stringify(r.method)}, which is not a PaymentMethod. The ` +
+        `CHECK constraint and domain/invoice/model.ts have drifted apart.`,
+    );
+  }
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    invoiceId: r.invoice_id,
+    amount: r.amount,
+    currency: r.currency,
+    receivedOn: day(r.received_on) ?? "",
+    method: r.method,
+    reference: r.reference,
+    note: r.note,
+  };
+}
+
+interface CreditNoteRow {
+  id: string;
+  tenant_id: string;
+  invoice_id: string;
+  entity_party_id: string;
+  number: string;
+  financial_year: number;
+  sequence_number: number;
+  amount: string;
+  currency: string;
+  issued_on: Date;
+  reason: string;
+  note: string | null;
+}
+
+const CREDIT_NOTE_COLUMNS =
+  "id, tenant_id, invoice_id, entity_party_id, number, financial_year, sequence_number, " +
+  "amount, currency, issued_on, reason, note";
+
+function toCreditNote(r: CreditNoteRow): CreditNote {
+  if (!isCreditReason(r.reason)) {
+    throw new Error(
+      `crm.credit_note holds reason ${JSON.stringify(r.reason)}, which is not a CreditReason. ` +
+        `The CHECK constraint and domain/invoice/model.ts have drifted apart.`,
+    );
+  }
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    invoiceId: r.invoice_id,
+    entityPartyId: r.entity_party_id,
+    number: r.number,
+    financialYear: r.financial_year,
+    sequenceNumber: r.sequence_number,
+    amount: r.amount,
+    currency: r.currency,
+    issuedOn: day(r.issued_on) ?? "",
+    reason: r.reason,
+    note: r.note,
+  };
+}
+
+interface BalanceRow {
+  invoice_id: string;
+  party_id: string;
+  status: string;
+  currency: string;
+  due_on: Date | null;
+  invoiced: string;
+  paid: string;
+  credited: string;
+  outstanding: string;
+}
+
+const BALANCE_COLUMNS =
+  "invoice_id, party_id, status, currency, due_on, invoiced, paid, credited, outstanding";
+
+function toBalance(r: BalanceRow): InvoiceBalance {
+  return {
+    invoiceId: r.invoice_id,
+    partyId: r.party_id,
+    status: toStatus(r.status),
+    currency: r.currency,
+    dueOn: day(r.due_on),
+    invoiced: r.invoiced,
+    paid: r.paid,
+    credited: r.credited,
+    outstanding: r.outstanding,
+  };
 }

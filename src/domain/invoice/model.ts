@@ -178,3 +178,125 @@ export function isSeriesPrefix(v: string): boolean {
 }
 
 export const DEFAULT_SERIES_PREFIX = "INV";
+
+// ── Money against an invoice (T3.5) ────────────────────────────────────────
+
+/**
+ * How a payment arrived. A CLOSED SET, because a firm reconciling against a
+ * bank feed (T7.4) groups by it, and free text does not group.
+ */
+export type PaymentMethod = "bank_transfer" | "cheque" | "cash" | "card" | "upi" | "other";
+
+export const PAYMENT_METHODS: readonly PaymentMethod[] = [
+  "bank_transfer",
+  "cheque",
+  "cash",
+  "card",
+  "upi",
+  "other",
+];
+
+export function isPaymentMethod(v: string): v is PaymentMethod {
+  return (PAYMENT_METHODS as readonly string[]).includes(v);
+}
+
+/**
+ * A payment, and it is SIGNED.
+ *
+ * A bounced cheque or a reversed transfer is a NEGATIVE payment with its own
+ * date and its own reason — two rows that tell the story — rather than the
+ * original row edited into something that never happened. `bib_app` holds no
+ * DELETE grant, so this is the only way to express it, which is the intended
+ * pressure rather than a limitation worked around.
+ */
+export interface Payment {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly amount: string;
+  readonly currency: string;
+  readonly receivedOn: string;
+  readonly method: PaymentMethod;
+  /** The counterparty's own reference — a UTR, a cheque number. Free text on
+   *  purpose: normalising somebody else's identifier is how it stops matching
+   *  theirs. */
+  readonly reference: string | null;
+  readonly note: string | null;
+}
+
+/**
+ * WHY money came off an invoice. Mandatory and closed, and that is the whole
+ * value of the field.
+ *
+ * The demo's hardest-won finding about revenue: without it, "revenue leakage
+ * becomes invisible — the numbers always reconcile; WHY forty thousand came off
+ * does not." Free text would satisfy NOT NULL and would not GROUP BY, which is
+ * the only thing anybody ever wants to do with it. "How much did we write off
+ * to service failures last year" is the question this exists to answer.
+ */
+export type CreditReason =
+  | "service_failure"
+  | "billing_error"
+  | "goodwill"
+  | "scope_change"
+  | "duplicate_invoice"
+  | "bad_debt";
+
+export const CREDIT_REASONS: readonly CreditReason[] = [
+  "service_failure",
+  "billing_error",
+  "goodwill",
+  "scope_change",
+  "duplicate_invoice",
+  "bad_debt",
+];
+
+export function isCreditReason(v: string): v is CreditReason {
+  return (CREDIT_REASONS as readonly string[]).includes(v);
+}
+
+/** A credit note: its OWN document, with its own consecutive series. Not an
+ *  invoice with a minus sign — under Indian GST it is a separate document type,
+ *  and interleaving the two series is worse than a gap. */
+export interface CreditNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly entityPartyId: string;
+  readonly number: string;
+  readonly financialYear: number;
+  readonly sequenceNumber: number;
+  readonly amount: string;
+  readonly currency: string;
+  readonly issuedOn: string;
+  readonly reason: CreditReason;
+  readonly note: string | null;
+}
+
+/**
+ * What an invoice still owes: invoiced − paid − credited.
+ *
+ * DERIVED, never stored. A `paid` flag and an `amount_paid` column are both
+ * caches of this addition and both drift the first time a payment is corrected,
+ * leaving an invoice that says "paid" beside arithmetic that says otherwise —
+ * and only one of them is evidence.
+ */
+export interface InvoiceBalance {
+  readonly invoiceId: string;
+  readonly partyId: string;
+  readonly status: InvoiceStatus;
+  readonly currency: string;
+  readonly dueOn: string | null;
+  readonly invoiced: string;
+  readonly paid: string;
+  readonly credited: string;
+  readonly outstanding: string;
+}
+
+/** The `document_type` half of a series key. Two legal series that must not
+ *  interleave — 0028's correction to 0027. */
+export type SeriesDocumentType = "invoice" | "credit_note";
+
+/** Credit notes read as `CN/...` by default, so the two series are
+ *  distinguishable on sight as well as by their key. */
+export const DEFAULT_CREDIT_NOTE_PREFIX = "CN";

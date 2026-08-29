@@ -220,6 +220,19 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/issue"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/cancel"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/irn"), "party:write" as const],
+  // MONEY AGAINST AN INVOICE (T3.5). Recording a payment is `party:write` —
+  // it is bookkeeping, and the person chasing a receivable is the person who
+  // marks it settled. ISSUING A CREDIT NOTE IS `tenant:admin`, and that is the
+  // considered line: it takes money off a legal document, it is the mechanism
+  // through which revenue leaks, and the reason it demands a REASON is that
+  // somebody has to answer for it later. Reading is `party:read`, with the fee
+  // axis deciding whether the amounts are visible — not this table.
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/payments"), "party:write" as const],
+  [routeKey("GET", "/api/v1/invoices/{invoiceId}/payments"), "party:read" as const],
+  [routeKey("POST", "/api/v1/invoices/{invoiceId}/credit-notes"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/invoices/{invoiceId}/credit-notes"), "party:read" as const],
+  [routeKey("GET", "/api/v1/invoices/{invoiceId}/balance"), "party:read" as const],
+  [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
   [routeKey("GET", "/api/v1/invoice-series"), "config:read" as const],
   [routeKey("POST", "/api/v1/invoice-series/{entityPartyId}/prefix"), "tenant:admin" as const],
 

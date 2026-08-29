@@ -80,6 +80,27 @@ export function isAmount(v: string): boolean {
   return AMOUNT_PATTERN.test(v);
 }
 
+const SIGNED_AMOUNT_PATTERN = /^-?\d{1,15}(?:\.\d{1,4})?$/;
+
+/**
+ * Whether a string is an amount that MAY be negative.
+ *
+ * The narrower `isAmount` above validates PRICES and is right to refuse a minus
+ * sign — a list price of "-500" would make a discount representable in two
+ * places. But a PAYMENT is signed, and deliberately: a bounced cheque or a
+ * reversed transfer is a negative payment with its own date and its own reason,
+ * two rows that tell the story, rather than the original row edited into
+ * something that never happened. `bib_app` holds no DELETE grant, so a signed
+ * amount is the only honest way to express a reversal.
+ *
+ * Use this ONLY where a negative is a real business fact. Anywhere it is not,
+ * `isAmount` is the check, and the difference between the two functions is the
+ * decision about which of the two a field is.
+ */
+export function isSignedAmount(v: string): boolean {
+  return SIGNED_AMOUNT_PATTERN.test(v);
+}
+
 /** An amount and what it is denominated in. Neither half means anything alone —
  *  which is why they are one type and never two loose fields. */
 export interface Money {

@@ -1,6 +1,16 @@
 // The seams invoicing needs from the world. Interfaces owned by this use case,
 // stated in its vocabulary; adapters in infrastructure/ implement them.
-import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTotals } from "../../domain/invoice/model";
+import type {
+  CreditNote,
+  CreditReason,
+  Invoice,
+  InvoiceBalance,
+  InvoiceLine,
+  InvoiceStatus,
+  InvoiceTotals,
+  Payment,
+  PaymentMethod,
+} from "../../domain/invoice/model";
 
 export interface NewInvoice {
   readonly id: string;
@@ -97,12 +107,61 @@ export interface InvoiceRepository {
   /** The firm's series, for the screen that names them. */
   listSeries(tenantId: string): Promise<readonly InvoiceSeriesRecord[]>;
   setSeriesPrefix(tenantId: string, entityPartyId: string, prefix: string): Promise<void>;
+
+  // ── Money against an invoice (T3.5) ───────────────────────────────────────
+
+  recordPayment(p: NewPayment): Promise<Payment>;
+  listPayments(tenantId: string, invoiceId: string): Promise<readonly Payment[]>;
+
+  /**
+   * Issue a credit note AND take its number, in one transaction — the same
+   * arrangement `create` makes, for the same reason. A credit note is its own
+   * legal document with its own consecutive series, so it cannot borrow the
+   * invoice counter and cannot be numbered by a caller.
+   */
+  issueCreditNote(c: NewCreditNote): Promise<CreditNote>;
+  listCreditNotes(tenantId: string, invoiceId: string): Promise<readonly CreditNote[]>;
+
+  /** What one invoice still owes, computed by Postgres. */
+  balanceOf(tenantId: string, invoiceId: string): Promise<InvoiceBalance | null>;
+  /** Every invoice with something still owing — "who owes us money", which is
+   *  the question the dunning ladder and every collections screen ask. */
+  outstanding(tenantId: string): Promise<readonly InvoiceBalance[]>;
+}
+
+export interface NewPayment {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly amount: string;
+  readonly currency: string;
+  readonly receivedOn: string;
+  readonly method: PaymentMethod;
+  readonly reference: string | null;
+  readonly note: string | null;
+}
+
+export interface NewCreditNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly invoiceId: string;
+  readonly entityPartyId: string;
+  readonly amount: string;
+  readonly currency: string;
+  readonly issuedOn: string;
+  readonly reason: CreditReason;
+  readonly note: string | null;
+  /** Which financial year's credit-note series this belongs to. */
+  readonly seriesDate: string;
 }
 
 export interface InvoiceSeriesRecord {
   readonly entityPartyId: string;
   readonly entityName: string;
   readonly financialYear: number;
+  /** `invoice` or `credit_note` — two legal series that must not interleave.
+   *  0028 widened the key after 0027 shipped without it. */
+  readonly documentType: string;
   readonly prefix: string;
   readonly lastNumber: number;
 }

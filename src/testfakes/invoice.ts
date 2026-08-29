@@ -10,8 +10,15 @@
 // behaviour, which is the most comfortable kind of green test and the least
 // informative. `tests/invoice/numbering.integration.test.ts` proves them
 // against a real database, the same division `FakeDocumentReferences` draws.
-import type { Invoice, InvoiceLine } from "../domain/invoice/model";
+import type {
+  CreditNote,
+  Invoice,
+  InvoiceBalance,
+  InvoiceLine,
+  Payment,
+} from "../domain/invoice/model";
 import {
+  DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   financialYearOf,
   formatInvoiceNumber,
@@ -22,8 +29,10 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  NewCreditNote,
   NewInvoice,
   NewInvoiceLine,
+  NewPayment,
 } from "../usecase/invoice/ports";
 import type { Deps } from "../usecase/invoice/service";
 import { FakeIds } from "./ids";
@@ -157,6 +166,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
         entityPartyId,
         entityName: this.nameOf(entityPartyId),
         financialYear: Number(fy),
+        documentType: "invoice",
         prefix: v.prefix,
         lastNumber: v.last,
       });
@@ -170,6 +180,88 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     }
     return Promise.resolve();
   }
+
+  // ── Money against an invoice (T3.5) ──────────────────────────────────────
+
+  readonly payments: Payment[] = [];
+  readonly creditNotes: CreditNote[] = [];
+
+  recordPayment(p: NewPayment): Promise<Payment> {
+    this.payments.push(p);
+    return Promise.resolve(p);
+  }
+
+  listPayments(_tenantId: string, invoiceId: string): Promise<readonly Payment[]> {
+    return Promise.resolve(this.payments.filter((p) => p.invoiceId === invoiceId));
+  }
+
+  issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
+    const financialYear = financialYearOf(c.seriesDate);
+    // A SEPARATE key from the invoice series — the correction 0028 made after
+    // 0027 shipped without a document type. A fake that shared the counter
+    // would let a test pass on interleaved numbering the database refuses.
+    const k = `${keyOf({ tenantId: c.tenantId, entityPartyId: c.entityPartyId, financialYear })}|credit_note`;
+    const existing = this.creditSeries.get(k) ?? { last: 0, prefix: DEFAULT_CREDIT_NOTE_PREFIX };
+    const sequence = existing.last + 1;
+    this.creditSeries.set(k, { ...existing, last: sequence });
+
+    const note: CreditNote = {
+      id: c.id,
+      tenantId: c.tenantId,
+      invoiceId: c.invoiceId,
+      entityPartyId: c.entityPartyId,
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence }),
+      financialYear,
+      sequenceNumber: sequence,
+      amount: c.amount,
+      currency: c.currency,
+      issuedOn: c.issuedOn,
+      reason: c.reason,
+      note: c.note,
+    };
+    this.creditNotes.push(note);
+    return Promise.resolve(note);
+  }
+
+  listCreditNotes(_tenantId: string, invoiceId: string): Promise<readonly CreditNote[]> {
+    return Promise.resolve(this.creditNotes.filter((c) => c.invoiceId === invoiceId));
+  }
+
+  async balanceOf(tenantId: string, invoiceId: string): Promise<InvoiceBalance | null> {
+    const invoice = await this.find(tenantId, invoiceId);
+    if (invoice === null) return null;
+    return this.balance(invoice);
+  }
+
+  async outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
+    const balances = this.invoices
+      .filter((i) => i.tenantId === tenantId && i.status === "issued")
+      .map((i) => this.balance(i));
+    return Promise.resolve(balances.filter((b) => scaled(b.outstanding) > 0n));
+  }
+
+  private balance(invoice: Invoice): InvoiceBalance {
+    const totals = this.totalsOf(invoice);
+    const paid = this.payments
+      .filter((p) => p.invoiceId === invoice.id)
+      .reduce((acc, p) => acc + scaled(p.amount), 0n);
+    const credited = this.creditNotes
+      .filter((c) => c.invoiceId === invoice.id)
+      .reduce((acc, c) => acc + scaled(c.amount), 0n);
+    return {
+      invoiceId: invoice.id,
+      partyId: invoice.partyId,
+      status: invoice.status,
+      currency: invoice.currency,
+      dueOn: invoice.dueOn,
+      invoiced: totals.total,
+      paid: unscaled(paid),
+      credited: unscaled(credited),
+      outstanding: unscaled(scaled(totals.total) - paid - credited),
+    };
+  }
+
+  private readonly creditSeries = new Map<string, { last: number; prefix: string }>();
 
   private patch(tenantId: string, invoiceId: string, over: Partial<Invoice>): Promise<Invoice> {
     const at = this.invoices.findIndex((i) => i.tenantId === tenantId && i.id === invoiceId);

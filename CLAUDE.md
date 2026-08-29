@@ -616,10 +616,26 @@ application rule is one an import or a psql session walks past. A wrong invoice 
 and reissued; the cancelled row stays in the sequence saying so, which is exactly what shows
 where a number went.
 
-**There is no `paid` status.** What has been paid is the sum of the payments against it
-(T3.5). A status saying "paid" beside a balance saying otherwise is how those two disagree,
-and only one of them is arithmetic. Totals are `security_invoker` views in `numeric`, like
-the proposal's.
+**There is no `paid` status, and no `amount_paid` column.** Both are caches of an addition
+and both drift the first time a payment is corrected, leaving an invoice that says "paid"
+beside arithmetic that says otherwise — and only one of them is evidence.
+`crm.invoice_balance` computes invoiced − paid − credited in `numeric`. Totals are
+`security_invoker` views, like the proposal's.
+
+**A payment is SIGNED** (T3.5). A bounced cheque is a negative payment with its own date and
+note — two rows that tell the story — not the original row edited into something that never
+happened; `bib_app` holds no DELETE grant, so this is the only honest way to express a
+reversal. `isSignedAmount` sits beside `isAmount` in the money domain precisely so that which
+fields may go negative is a decision somebody took rather than a regex nobody read.
+Overpayment is allowed. Money attaches only to an ISSUED invoice — a draft has asked for
+nothing, a cancelled one is a refund — enforced by a trigger as well as the service.
+
+**A credit note is its own document with its own consecutive series**, keyed
+`document_type = 'credit_note'`; interleaving it with the invoice series would leave an
+invoice number an auditor cannot account for. **Its reason is mandatory and closed**, because
+without it the numbers always reconcile and *why* money came off does not — and "how much did
+we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
+travels in the ledger payload for the same reason.
 
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 

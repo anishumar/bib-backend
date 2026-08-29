@@ -1305,7 +1305,53 @@ open and are recorded above; neither blocks Phase 2.
   > how 31 March ends up answered differently on the two sides.
   >
   > Gate: `npm run check` 766 · `test:integration` 243 · `smoke` **225 passed, 0 failed**.
-- [ ] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
+- [~] `(A)` **T3.5** **Payments + dunning**: `payment`, `credit_note` (reason CHECK), ladder D+3/D+7/D+15 → terminal (credit hold/legal, partner sign-off). *Acc: worker climbs the ladder; terminal needs partner approval.*
+  > **[x] Payments and credit notes done (2026-08-29). Migration 0028. [ ] The DUNNING LADDER
+  > is not built, and it is the half the acceptance line actually names** — the worker, the
+  > D+3/D+7/D+15 rungs and the partner sign-off on the terminal step. Marked `[~]` rather than
+  > ticked, because a task whose acceptance is half unbuilt is not done and ticking it would
+  > make this board say something untrue. The ladder needs the ledger and the scheduler
+  > together, and `outstanding()` — "who owes the firm money" — is the query it will climb.
+  >
+  > **THE BALANCE IS A SUM, and there is no `paid` flag anywhere.** Both a flag and an
+  > `amount_paid` column are caches of an addition, and both drift the first time a payment is
+  > corrected — leaving an invoice that says "paid" beside arithmetic that says otherwise, where
+  > only one of the two is evidence. `crm.invoice_balance` computes invoiced − paid − credited
+  > in `numeric`, `security_invoker`, over three tables.
+  >
+  > **A PAYMENT IS SIGNED.** A bounced cheque is a NEGATIVE payment with its own date and its
+  > own note — two rows that tell the story — rather than the original row edited into something
+  > that never happened. `bib_app` holds no DELETE grant, so it is the only honest way to
+  > express a reversal, and `isSignedAmount` joins `isAmount` in the money domain to say which
+  > fields may go negative and which may not. Overpayment is ALLOWED: a client settling two
+  > invoices with one transfer is real, and the balance simply goes negative.
+  >
+  > **THE CREDIT REASON IS MANDATORY AND CLOSED**, which was the demo's hardest-won finding
+  > about revenue — without it "the numbers always reconcile; WHY forty thousand came off does
+  > not". Closed rather than free text because *"how much did we write off to service failures
+  > last year"* is a GROUP BY, and prose does not group. The reason is in the ledger payload
+  > too: an event recording the amount and not the category would reproduce exactly the
+  > blindness the column exists to remove.
+  >
+  > **A SECOND CORRECTION TO 0027, found by building on it.** `crm.invoice_series` had no
+  > `document_type` — an omission, and the proof is one table over, where `crm.document_ref_series`
+  > has had one since 0020. A credit note is its own legal document with its own consecutive
+  > series, and borrowing the invoice counter would interleave two series into one sequence:
+  > an invoice number missing because a credit note took it is a number an auditor cannot
+  > account for, which is worse than having no gap rule at all. 0028 widens the key; `crm.invoice`
+  > gains a `series_type` pinned by a CHECK so its foreign key survives rather than being dropped.
+  >
+  > **AND A REAL BUG THAT SHIPPED IN T3.4, fixed forward by 0029.**
+  > `invoice_issued_has_date_chk` was written as `(status = 'issued') = (issued_on IS NOT NULL)`,
+  > which forbids the ordinary act of **cancelling an issued invoice**: the status moves to
+  > `cancelled` while `issued_on` stays set — correctly, because the document WAS issued and a
+  > copy is with the client. Every cancellation test in T3.4 cancelled a DRAFT, the one state
+  > where both sides of the equality are false and it happens to hold; T3.5's first payment test
+  > cancelled an issued one and found it. The rule is three cases, not an equality between two
+  > independent facts, and it is now written that way. A regression test sits in T3.4's own file,
+  > where it should have been.
+  >
+  > Gate: `npm run check` 780 · `test:integration` 255 · `smoke` **227 passed, 0 failed**.
 - [ ] `(A)` **T3.6** **P8 Documents + P9 client data**: `document`/`document_version`/`document_link` content-hashed, storage **port**; every byte via RLS-checked route. *Acc: a doc attaches to any object; no pre-signed URL escape.*
 - [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
 

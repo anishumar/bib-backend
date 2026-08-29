@@ -289,6 +289,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_INVOICE_AMOUNT":
       case "INVALID_SERIES_PREFIX":
       case "INVALID_INVOICE_DATE":
+      case "INVALID_PAYMENT_METHOD":
+      case "INVALID_CREDIT_REASON":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
@@ -301,6 +303,8 @@ export function mapError(err: unknown): MappedError {
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
       case "IRN_ALREADY_REGISTERED":
+      case "INVOICE_NOT_ISSUED":
+      case "CREDIT_EXCEEDS_INVOICE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -14,8 +14,18 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { InvoiceService } from "../../usecase/invoice/service";
-import type { Invoice, InvoiceTotals } from "../../domain/invoice/model";
-import { INVOICE_STATUSES } from "../../domain/invoice/model";
+import type {
+  CreditNote,
+  Invoice,
+  InvoiceBalance,
+  InvoiceTotals,
+  Payment,
+} from "../../domain/invoice/model";
+import {
+  CREDIT_REASONS,
+  INVOICE_STATUSES,
+  PAYMENT_METHODS,
+} from "../../domain/invoice/model";
 import type { InvoiceRecord, InvoiceSummary } from "../../usecase/invoice/ports";
 
 export interface InvoiceDeps {
@@ -23,6 +33,8 @@ export interface InvoiceDeps {
 }
 
 const STATUS_VALUES = [...INVOICE_STATUSES] as [string, ...string[]];
+const PAYMENT_METHOD_VALUES = [...PAYMENT_METHODS] as [string, ...string[]];
+const CREDIT_REASON_VALUES = [...CREDIT_REASONS] as [string, ...string[]];
 
 /** A decimal STRING. The pattern is the contract: a client that sends a JSON
  *  number gets a 400 here rather than a rounded amount in the database. */
@@ -142,6 +154,8 @@ const SeriesSchema = z
     entityPartyId: z.string().uuid(),
     entityName: z.string(),
     financialYear: z.number().int(),
+    /** `invoice` or `credit_note` — two legal series that must not interleave. */
+    documentType: z.string(),
     prefix: z.string(),
     lastNumber: z.number().int(),
   })
@@ -333,6 +347,198 @@ const setPrefixRoute = createRoute({
   },
 });
 
+// ── Money against an invoice (T3.5) ────────────────────────────────────────
+
+const PaymentSchema = z
+  .object({
+    id: z.string().uuid(),
+    invoiceId: z.string().uuid(),
+    /** SIGNED. A bounced cheque is a NEGATIVE payment with its own date and
+     *  note — two rows that tell the story, rather than one row edited into
+     *  something that never happened. */
+    amount: Decimal,
+    currency: z.string().length(3),
+    receivedOn: z.string(),
+    method: z.enum(PAYMENT_METHOD_VALUES),
+    reference: z.string().nullable(),
+    note: z.string().nullable(),
+  })
+  .openapi("Payment");
+
+const CreditNoteSchema = z
+  .object({
+    id: z.string().uuid(),
+    invoiceId: z.string().uuid(),
+    entityPartyId: z.string().uuid(),
+    number: z.string().openapi({
+      description:
+        "`CN/2026-27/0001`. Its OWN consecutive series, keyed separately from the invoice one — " +
+        "a credit note is a distinct legal document, and interleaving the two series is worse " +
+        "than a gap.",
+    }),
+    financialYear: z.number().int(),
+    sequenceNumber: z.number().int(),
+    amount: Decimal,
+    currency: z.string().length(3),
+    issuedOn: z.string(),
+    reason: z.enum(CREDIT_REASON_VALUES).openapi({
+      description:
+        "WHY money came off. Mandatory and closed, because without it the numbers always " +
+        "reconcile and why forty thousand came off does not — and 'how much did we write off " +
+        "to service failures' is a GROUP BY, which free text cannot answer.",
+    }),
+    note: z.string().nullable(),
+  })
+  .openapi("CreditNote");
+
+const BalanceSchema = z
+  .object({
+    invoiceId: z.string().uuid(),
+    partyId: z.string().uuid(),
+    status: z.enum(STATUS_VALUES),
+    currency: z.string().length(3),
+    dueOn: z.string().nullable(),
+    invoiced: Decimal,
+    paid: Decimal,
+    credited: Decimal,
+    /** invoiced − paid − credited, computed by Postgres. Never a stored column:
+     *  a `paid` flag drifts the first time a payment is corrected. */
+    outstanding: Decimal,
+  })
+  .openapi("InvoiceBalance");
+
+const RecordPaymentRequest = z
+  .object({
+    amount: Decimal,
+    receivedOn: z.string(),
+    method: z.enum(PAYMENT_METHOD_VALUES),
+    reference: z.string().max(200).optional(),
+    note: z.string().max(2000).optional(),
+  })
+  .openapi("RecordPaymentRequest");
+
+const IssueCreditNoteRequest = z
+  .object({
+    amount: Decimal,
+    reason: z.enum(CREDIT_REASON_VALUES),
+    note: z.string().max(2000).optional(),
+    issuedOn: z.string().optional(),
+  })
+  .openapi("IssueCreditNoteRequest");
+
+const recordPaymentRoute = createRoute({
+  method: "post",
+  path: "/api/v1/invoices/{invoiceId}/payments",
+  tags: ["invoices"],
+  summary: "Record that money arrived",
+  description:
+    "Only against an ISSUED invoice. The amount is SIGNED: a bounced cheque is a negative " +
+    "payment with its own date, not the original row edited away. Overpayment is allowed — a " +
+    "client settling two invoices with one transfer is a real thing, and the balance simply " +
+    "goes negative.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: RecordPaymentRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Recorded", content: { "application/json": { schema: PaymentSchema } } },
+    400: errorResponse("Bad amount, method or date"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is not issued — a draft owes nothing, a cancelled one is a refund"),
+  },
+});
+
+const listPaymentsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoices/{invoiceId}/payments",
+  tags: ["invoices"],
+  summary: "What has been received against this invoice",
+  request: { params: z.object({ invoiceId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Payments",
+      content: { "application/json": { schema: z.object({ payments: z.array(PaymentSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const creditNoteRoute = createRoute({
+  method: "post",
+  path: "/api/v1/invoices/{invoiceId}/credit-notes",
+  tags: ["invoices"],
+  summary: "Take money off an invoice, with a reason",
+  description:
+    "Its own document with its own gapless series. The reason is mandatory and closed — " +
+    "without it revenue leakage is invisible, because the numbers always reconcile and why " +
+    "does not. A firm cannot credit more than it billed.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: IssueCreditNoteRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Issued", content: { "application/json": { schema: CreditNoteSchema } } },
+    400: errorResponse("Bad amount, or not one of the credit reasons"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is not issued, or this would credit more than was billed"),
+  },
+});
+
+const listCreditNotesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoices/{invoiceId}/credit-notes",
+  tags: ["invoices"],
+  summary: "What has been credited against this invoice",
+  request: { params: z.object({ invoiceId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Credit notes",
+      content: {
+        "application/json": { schema: z.object({ creditNotes: z.array(CreditNoteSchema) }) },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const balanceRoute = createRoute({
+  method: "get",
+  path: "/api/v1/invoices/{invoiceId}/balance",
+  tags: ["invoices"],
+  summary: "What this invoice still owes",
+  request: { params: z.object({ invoiceId: z.string().uuid() }) },
+  responses: {
+    200: { description: "The balance", content: { "application/json": { schema: BalanceSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+  },
+});
+
+const outstandingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/receivables",
+  tags: ["invoices"],
+  summary: "Who owes the firm money",
+  description:
+    "Issued invoices with something still outstanding. Drafts owe nothing because nobody has " +
+    "been asked; cancelled ones were withdrawn.",
+  responses: {
+    200: {
+      description: "Receivables",
+      content: { "application/json": { schema: z.object({ receivables: z.array(BalanceSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
 export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDeps): void {
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -422,6 +628,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           entityPartyId: r.entityPartyId,
           entityName: r.entityName,
           financialYear: r.financialYear,
+          documentType: r.documentType,
           prefix: r.prefix,
           lastNumber: r.lastNumber,
         })),
@@ -441,6 +648,96 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     );
     return c.body(null, 204);
   });
+  app.openapi(recordPaymentRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const payment = await deps.service.recordPayment(
+      { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(toPaymentBody(payment), 201);
+  });
+
+  app.openapi(listPaymentsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const payments = await deps.service.listPayments(s.tenantId, c.req.valid("param").invoiceId);
+    return c.json({ payments: payments.map(toPaymentBody) }, 200);
+  });
+
+  app.openapi(creditNoteRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const credit = await deps.service.issueCreditNote(
+      { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(toCreditNoteBody(credit), 201);
+  });
+
+  app.openapi(listCreditNotesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const notes = await deps.service.listCreditNotes(s.tenantId, c.req.valid("param").invoiceId);
+    return c.json({ creditNotes: notes.map(toCreditNoteBody) }, 200);
+  });
+
+  app.openapi(balanceRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const balance = await deps.service.balanceOf(s.tenantId, c.req.valid("param").invoiceId);
+    return c.json(toBalanceBody(balance), 200);
+  });
+
+  app.openapi(outstandingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const receivables = await deps.service.outstanding(s.tenantId);
+    return c.json({ receivables: receivables.map(toBalanceBody) }, 200);
+  });
+}
+
+function toPaymentBody(p: Payment): z.infer<typeof PaymentSchema> {
+  return {
+    id: p.id,
+    invoiceId: p.invoiceId,
+    amount: p.amount,
+    currency: p.currency,
+    receivedOn: p.receivedOn,
+    method: p.method,
+    reference: p.reference,
+    note: p.note,
+  };
+}
+
+function toCreditNoteBody(c: CreditNote): z.infer<typeof CreditNoteSchema> {
+  return {
+    id: c.id,
+    invoiceId: c.invoiceId,
+    entityPartyId: c.entityPartyId,
+    number: c.number,
+    financialYear: c.financialYear,
+    sequenceNumber: c.sequenceNumber,
+    amount: c.amount,
+    currency: c.currency,
+    issuedOn: c.issuedOn,
+    reason: c.reason,
+    note: c.note,
+  };
+}
+
+function toBalanceBody(b: InvoiceBalance): z.infer<typeof BalanceSchema> {
+  return {
+    invoiceId: b.invoiceId,
+    partyId: b.partyId,
+    status: b.status,
+    currency: b.currency,
+    dueOn: b.dueOn,
+    invoiced: b.invoiced,
+    paid: b.paid,
+    credited: b.credited,
+    outstanding: b.outstanding,
+  };
 }
 
 function toInvoiceBody(i: Invoice): z.infer<typeof InvoiceSchema> {

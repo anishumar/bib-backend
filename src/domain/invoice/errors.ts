@@ -22,7 +22,11 @@ export type InvoiceErrorCode =
   | "INVALID_INVOICE_AMOUNT"
   | "INVALID_SERIES_PREFIX"
   | "INVALID_INVOICE_DATE"
-  | "IRN_ALREADY_REGISTERED";
+  | "IRN_ALREADY_REGISTERED"
+  | "INVALID_PAYMENT_METHOD"
+  | "INVALID_CREDIT_REASON"
+  | "INVOICE_NOT_ISSUED"
+  | "CREDIT_EXCEEDS_INVOICE";
 
 export class InvoiceNotFound extends InvoiceError {
   constructor(id: string) {
@@ -121,6 +125,70 @@ export class IrnAlreadyRegistered extends InvoiceError {
       "IRN_ALREADY_REGISTERED",
       `invoice ${JSON.stringify(id)} is already registered as IRN ${JSON.stringify(irn)}. ` +
         `That is the registry's identifier for this document and cannot be replaced.`,
+    );
+  }
+}
+
+// ── Money against an invoice (T3.5) ────────────────────────────────────────
+
+export class InvalidPaymentMethod extends InvoiceError {
+  constructor(given: string, valid: readonly string[]) {
+    super(
+      "INVALID_PAYMENT_METHOD",
+      `${JSON.stringify(given)} is not a payment method. Valid: ${valid.join(", ")}. It is a ` +
+        `closed set because reconciling against a bank feed groups by it, and free text does ` +
+        `not group.`,
+    );
+  }
+}
+
+export class InvalidCreditReason extends InvoiceError {
+  constructor(given: string, valid: readonly string[]) {
+    super(
+      "INVALID_CREDIT_REASON",
+      `${JSON.stringify(given)} is not a credit reason. Valid: ${valid.join(", ")}. A reason is ` +
+        `mandatory and closed: without it the numbers always reconcile and WHY money came off ` +
+        `an invoice does not, which is how revenue leakage becomes invisible.`,
+    );
+  }
+}
+
+/**
+ * Money can only be applied to a document that has actually been sent.
+ *
+ * Against a DRAFT there is nothing to settle — nobody has been asked for
+ * anything. Against a CANCELLED invoice it is a refund or a reallocation, and
+ * recording it here would quietly reduce the balance on a withdrawn document.
+ * The database refuses this again in a trigger.
+ */
+export class InvoiceNotIssued extends InvoiceError {
+  constructor(id: string, status: string) {
+    super(
+      "INVOICE_NOT_ISSUED",
+      `invoice ${JSON.stringify(id)} is ${status}, so money cannot be applied to it. A draft ` +
+        `has asked the client for nothing; a cancelled invoice is a refund or a reallocation, ` +
+        `not a settlement.`,
+    );
+  }
+}
+
+/**
+ * A firm cannot credit more than it billed.
+ *
+ * Not a database CHECK, and the reason is worth stating: the limit depends on
+ * the SUM of every other credit note against the invoice, which a row-level
+ * constraint cannot see. It is enforced here and asserted in an integration
+ * test; making it structural would need an exclusion constraint or a trigger
+ * summing siblings, and that is a heavier mechanism than the risk earns while
+ * issuing a credit note is a deliberate, permissioned act.
+ */
+export class CreditExceedsInvoice extends InvoiceError {
+  constructor(id: string, requested: string, remaining: string) {
+    super(
+      "CREDIT_EXCEEDS_INVOICE",
+      `crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
+        `${remaining} of it is uncredited. Credit the remainder, or check whether this belongs ` +
+        `against a different invoice.`,
     );
   }
 }

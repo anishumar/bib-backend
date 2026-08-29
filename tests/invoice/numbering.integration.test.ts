@@ -129,18 +129,21 @@ describe("A GAP IS IMPOSSIBLE — the acceptance", () => {
       .begin(async (tx) => {
         await tx`SELECT set_config('app.tenant_id', ${tenant}, true)`;
         await tx`
-          INSERT INTO crm.invoice_series (tenant_id, entity_party_id, financial_year, prefix)
-          VALUES (${tenant}, ${entity}, 2026, 'INV')
-          ON CONFLICT (tenant_id, entity_party_id, financial_year) DO NOTHING
+          INSERT INTO crm.invoice_series
+            (tenant_id, entity_party_id, financial_year, document_type, prefix)
+          VALUES (${tenant}, ${entity}, 2026, 'invoice', 'INV')
+          ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
         `;
         const [row] = await tx<{ last_number: number }[]>`
           SELECT last_number FROM crm.invoice_series
           WHERE tenant_id = ${tenant} AND entity_party_id = ${entity} AND financial_year = 2026
+            AND document_type = 'invoice'
           FOR UPDATE
         `;
         await tx`
           UPDATE crm.invoice_series SET last_number = ${(row?.last_number ?? 0) + 1}
           WHERE tenant_id = ${tenant} AND entity_party_id = ${entity} AND financial_year = 2026
+            AND document_type = 'invoice'
         `;
         // The invoice write fails — a validation, a constraint, a crash. What
         // happens to the number it had already taken is the whole question.
@@ -169,6 +172,31 @@ describe("A GAP IS IMPOSSIBLE — the acceptance", () => {
     expect(sequences).toEqual([1, 2, 3, 4, 5, 6].map((n) => before + n));
     // Stated as the acceptance states it: no gaps, and no repeats.
     expect(new Set(raised.map((i) => i.number)).size).toBe(6);
+  });
+
+  it("cancels an ISSUED invoice, and it keeps the date it went out with", async () => {
+    // THE BUG 0029 FIXED, and the reason it escaped: every cancellation test in
+    // this file cancelled a DRAFT, which is the one state where 0027's
+    // `(status = 'issued') = (issued_on IS NOT NULL)` happens to hold. On an
+    // issued invoice the status moves to `cancelled` while `issued_on` stays
+    // set — correctly, because the document WAS issued and a copy is with the
+    // client — and the equality failed with 23514.
+    const invoice = await service.raise(draft(), SYSTEM_ACTOR);
+    await service.addLine({
+      tenantId: tenant,
+      invoiceId: invoice.id,
+      description: "Advisory",
+      quantity: "1",
+      unitAmount: "1000",
+    });
+    const issued = await service.issue(tenant, invoice.id, SYSTEM_ACTOR);
+    expect(issued.issuedOn).not.toBeNull();
+
+    const cancelled = await service.cancel(tenant, invoice.id, SYSTEM_ACTOR);
+    expect(cancelled.status).toBe("cancelled");
+    // The date SURVIVES. "It was never issued" and "it was issued and then
+    // withdrawn" are different facts, and only the second is true here.
+    expect(cancelled.issuedOn).toBe(issued.issuedOn);
   });
 
   it("leaves no hole when an invoice is cancelled", async () => {
@@ -295,7 +323,7 @@ async function lastNumber(entityPartyId: string, financialYear: number): Promise
   const [row] = await owner<{ last_number: number }[]>`
     SELECT last_number FROM crm.invoice_series
     WHERE tenant_id = ${tenant} AND entity_party_id = ${entityPartyId}
-      AND financial_year = ${financialYear}
+      AND financial_year = ${financialYear} AND document_type = 'invoice'
   `;
   return row?.last_number ?? 0;
 }

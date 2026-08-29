@@ -61,6 +61,15 @@ code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
 # an investigation once (G1.8), and the same trap in the sign-in bucket cost
 # another, which is what the message at the end of `seed` is about.
 #
+# WHAT WAS TRIMMED FROM THIS WALK, AND WHY, so it is not added back by reflex:
+# a handful of checks that only asserted "this malformed body answers 400". Each
+# is covered by a unit test, and since `api/domainerr.ts` gained a compile-time
+# exhaustiveness default, an UNMAPPED error code is a build failure rather than
+# a 500 discovered by walking the API. That was the specific thing those checks
+# used to catch (it is how G3.3's 500s were found), so their value fell sharply
+# the day the guard landed. What stays here is end-to-end behaviour: the walks,
+# the gates, and the refusals that are business rules rather than shapes.
+#
 # If you add a section and the run starts failing from the middle onward with
 # `got 429`, the walk has outgrown the limit — check that before checking the
 # feature. The fix is to spend fewer requests here, not to raise the product's
@@ -358,15 +367,9 @@ chk "…and both halves read back"            "IN the laws of the Republic of In
 # A HALF term is refused, in both directions. A code with no words prints
 # nothing where a law was supposed to be; words with no code are invisible to
 # the equality test the code exists for.
-HALFCODE='{"key":"half-code","body":{"title":"Governing law","text":"As stated.","governingLaw":{"jurisdiction":"IN"}}}'
-HALFWORD='{"key":"half-word","body":{"title":"Jurisdiction","text":"As stated.","courts":{"text":"the DIFC Courts, Dubai"}}}'
-chk "a code with no words is refused"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$HALFCODE")"
-chk "…and words with no code"               400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$HALFWORD")"
 
 # The code is demanded in canonical UPPER CASE at the write, for the same reason
 # the Dept is: a body is stored verbatim, so "in" is what a comparison gets.
-LOWJUR='{"key":"low-jur","body":{"title":"Governing law","text":"As stated.","governingLaw":{"jurisdiction":"in","text":"the laws of India"}}}'
-chk "a country code in lower case"          400 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/clause -H "$H" -d "$LOWJUR")"
 
 # The other half of OPTIONAL, and the reason it has to be. Every clause
 # published before G1.8 states neither term, is FROZEN, and is PINNED by letters
@@ -1046,8 +1049,6 @@ chk "an exclusion, true everywhere"     201 "$(code -b $J/partner.txt -XPOST $ST
 # The one that must not leave India. This is the mistake the firm already caught
 # in its own template, so it is the check that matters most in this section.
 chk "…and the GST note, scoped to IN"   201 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"commercial","body":"All fees are exclusive of GST as applicable.","sortOrder":1,"jurisdiction":"IN"}')"
-chk "a country code in lower case"      400 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"commercial","body":"x","sortOrder":1,"jurisdiction":"in"}')"
-chk "a blank body is refused"           400 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"exclusion","body":"   ","sortOrder":1}')"
 chk "an associate cannot edit the set"  403 "$(code -b $J/associate.txt -XPOST $STD -H "$H" -d '{"kind":"exclusion","body":"x","sortOrder":9}')"
 chk "…but can read what it will print"  200 "$(code -b $J/associate.txt $STD)"
 
@@ -1129,6 +1130,36 @@ import sys, json
 inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
 print(sorted(i["sequenceNumber"] for i in inv))')
 chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
+
+echo; echo "── 16e. What a client still owes — the balance is a SUM ─────────────"
+# T3.5. There is no `paid` flag and no `amount_paid` column: both are caches of
+# an addition and both drift the first time a payment is corrected, leaving an
+# invoice that says "paid" beside arithmetic that says otherwise. Only one of
+# those two is evidence, so only one of them exists.
+PAY1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/payments -H "$H" -d '{"amount":"10000","receivedOn":"2026-08-29","method":"bank_transfer","reference":"UTR-'$S'"}')
+chk "a payment is recorded"               "10000" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["amount"].split(".")[0])' <<< "$PAY1")"
+BAL=$(curl -s -b $J/partner.txt $API/api/v1/invoices/$INV1ID/balance | python3 -c '
+import sys, json
+b = json.load(sys.stdin)
+print("%s/%s" % (b["paid"], b["outstanding"]))')
+chk "…and the balance is the arithmetic"  "10000.0000/15488.0000" "$BAL"
+# A bounced cheque is a NEGATIVE payment: two rows that tell the story, not one
+# row edited into something that never happened.
+chk "a reversal is a negative payment"    201 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/payments -H "$H" -d '{"amount":"-10000","receivedOn":"2026-08-30","method":"cheque","note":"Returned unpaid"}')"
+BACK=$(curl -s -b $J/partner.txt $API/api/v1/invoices/$INV1ID/balance | python3 -c 'import sys,json;print(json.load(sys.stdin)["outstanding"])')
+chk "…and it puts the debt back"          "25488.0000" "$BACK"
+
+# A credit note is its OWN document with its OWN consecutive series — not an
+# invoice with a minus sign. And the REASON is mandatory: without it the numbers
+# always reconcile and why the money came off does not.
+CN=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"5488","reason":"service_failure","note":"Filed late, ours"}')
+chk "…and it gets its own series"         "CN/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$CN")"
+chk "…more than was billed is refused"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/credit-notes -H "$H" -d '{"amount":"999999","reason":"goodwill"}')"
+OWED=$(curl -s -b $J/partner.txt $API/api/v1/receivables | python3 -c '
+import sys, json
+rs = {r["invoiceId"]: r["outstanding"] for r in json.load(sys.stdin)["receivables"]}
+print(rs.get("'$INV1ID'", "absent"))')
+chk "…and the receivable is what is left" "20000.0000" "$OWED"
 
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""

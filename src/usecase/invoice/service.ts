@@ -20,13 +20,28 @@ import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
-import type { Invoice, InvoiceStatus } from "../../domain/invoice/model";
+import type {
+  CreditNote,
+  Invoice,
+  InvoiceBalance,
+  InvoiceStatus,
+  Payment,
+} from "../../domain/invoice/model";
 import {
+  CREDIT_REASONS,
+  PAYMENT_METHODS,
   canTransition,
   financialYearOf,
+  isCreditReason,
+  isPaymentMethod,
   isSeriesPrefix,
 } from "../../domain/invoice/model";
-import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import {
+  isAmount,
+  isCurrencyCode,
+  isSignedAmount,
+  normalizeCurrency,
+} from "../../domain/money/model";
 import {
   EmptyInvoice,
   InvalidInvoiceAmount,
@@ -37,6 +52,10 @@ import {
   InvoiceLineNotFound,
   InvoiceNotEditable,
   InvoiceNotFound,
+  InvoiceNotIssued,
+  InvalidCreditReason,
+  InvalidPaymentMethod,
+  CreditExceedsInvoice,
   IrnAlreadyRegistered,
 } from "../../domain/invoice/errors";
 import type {
@@ -312,6 +331,197 @@ export class InvoiceService {
    *  series an invoice would land in before raising it. */
   financialYearOf(isoDate: string): number {
     return financialYearOf(isoDate);
+  }
+
+  // ── Money against an invoice (T3.5) ──────────────────────────────────────
+
+  /**
+   * Record that money arrived.
+   *
+   * Only against an ISSUED invoice: a draft has asked the client for nothing,
+   * and a cancelled one is a refund or a reallocation rather than a settlement.
+   * The database refuses both again in a trigger, because a payment applied to
+   * a withdrawn document quietly reduces a balance nobody owes.
+   *
+   * THE AMOUNT IS SIGNED and a negative one is deliberate: a bounced cheque is
+   * a NEGATIVE payment with its own date and note — two rows that tell the
+   * story — not the original row edited into something that never happened.
+   * `bib_app` holds no DELETE grant, so this is the only way to express it.
+   *
+   * NOT REFUSED: paying more than the invoice asks for. Overpayment happens —
+   * a client settles two invoices with one transfer, or rounds up — and a firm
+   * needs to record what actually arrived rather than what the schema found
+   * tidy. The balance simply goes negative, which is what a credit on account
+   * looks like before there is a feature for it.
+   */
+  async recordPayment(
+    input: {
+      readonly tenantId: string;
+      readonly invoiceId: string;
+      readonly amount: string;
+      readonly receivedOn: string;
+      readonly method: string;
+      readonly reference?: string | undefined;
+      readonly note?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<Payment> {
+    const invoice = await this.issuedOrThrow(input.tenantId, input.invoiceId);
+    // SIGNED, unlike every other amount in this product. A negative payment is
+    // a reversal — see `isSignedAmount`. Zero is refused either way: it records
+    // nothing and would sit in the ledger claiming something happened.
+    if (!isSignedAmount(input.amount) || Number(input.amount) === 0) {
+      throw new InvalidInvoiceAmount("amount", input.amount);
+    }
+    if (!isPaymentMethod(input.method)) {
+      throw new InvalidPaymentMethod(input.method, PAYMENT_METHODS);
+    }
+    this.dateOrThrow("receivedOn", input.receivedOn);
+
+    const payment = await this.deps.invoices.recordPayment({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      invoiceId: input.invoiceId,
+      amount: input.amount,
+      // The invoice's currency, never the caller's. A payment in another
+      // currency would need a rate struck at payment time, which is a different
+      // fact from the one on the invoice — a feature, not a default.
+      currency: invoice.currency,
+      receivedOn: input.receivedOn,
+      method: input.method,
+      reference: input.reference ?? null,
+      note: input.note ?? null,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "payment.recorded",
+      objectId: payment.id,
+      actor,
+      // Ids and machine facts. The bank REFERENCE is in, because it is the
+      // counterparty's own machine identifier and is what a reconciliation
+      // dispute turns on; the free-text note is not.
+      payload: {
+        invoiceId: payment.invoiceId,
+        invoiceNumber: invoice.number,
+        amount: payment.amount,
+        currency: payment.currency,
+        receivedOn: payment.receivedOn,
+        method: payment.method,
+        reference: payment.reference,
+      },
+    });
+    return payment;
+  }
+
+  /**
+   * Take money off an invoice, with a reason.
+   *
+   * A CREDIT NOTE IS ITS OWN DOCUMENT with its own consecutive series — not an
+   * invoice with a minus sign — so its number comes from the same gapless
+   * mechanism, keyed on `document_type = 'credit_note'`.
+   *
+   * THE REASON IS MANDATORY AND CLOSED, and that is the whole value of the
+   * field: without it the numbers always reconcile and WHY forty thousand came
+   * off does not, which is how revenue leakage becomes invisible. It is a
+   * closed set rather than free text because "how much did we write off to
+   * service failures last year" is a GROUP BY, and prose does not group.
+   */
+  async issueCreditNote(
+    input: {
+      readonly tenantId: string;
+      readonly invoiceId: string;
+      readonly amount: string;
+      readonly reason: string;
+      readonly note?: string | undefined;
+      readonly issuedOn?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<CreditNote> {
+    const invoice = await this.issuedOrThrow(input.tenantId, input.invoiceId);
+    if (!isAmount(input.amount) || Number(input.amount) <= 0) {
+      throw new InvalidInvoiceAmount("amount", input.amount);
+    }
+    if (!isCreditReason(input.reason)) {
+      throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
+    }
+    const issuedOn = input.issuedOn ?? this.today();
+    this.dateOrThrow("issuedOn", issuedOn);
+
+    // A firm cannot credit more than it billed. Checked here rather than in a
+    // CHECK constraint because the limit depends on the SUM of every OTHER
+    // credit note against this invoice, which a row-level constraint cannot
+    // see — the honest place for it is the one that can read the siblings.
+    const balance = await this.deps.invoices.balanceOf(input.tenantId, input.invoiceId);
+    if (balance !== null) {
+      const remaining = Number(balance.invoiced) - Number(balance.credited);
+      if (Number(input.amount) > remaining) {
+        throw new CreditExceedsInvoice(input.invoiceId, input.amount, remaining.toFixed(4));
+      }
+    }
+
+    const credit = await this.deps.invoices.issueCreditNote({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      invoiceId: input.invoiceId,
+      entityPartyId: invoice.entityPartyId,
+      amount: input.amount,
+      currency: invoice.currency,
+      issuedOn,
+      reason: input.reason,
+      note: input.note ?? null,
+      seriesDate: issuedOn,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "credit_note.issued",
+      objectId: credit.id,
+      actor,
+      // The REASON is the point of this event. A log that recorded the amount
+      // and not the category would reproduce exactly the blindness the column
+      // exists to remove.
+      payload: {
+        number: credit.number,
+        invoiceId: credit.invoiceId,
+        invoiceNumber: invoice.number,
+        amount: credit.amount,
+        currency: credit.currency,
+        reason: credit.reason,
+      },
+    });
+    return credit;
+  }
+
+  /** What one invoice still owes — invoiced less paid less credited, computed
+   *  by Postgres. Never a stored column. */
+  async balanceOf(tenantId: string, invoiceId: string): Promise<InvoiceBalance> {
+    const balance = await this.deps.invoices.balanceOf(tenantId, invoiceId);
+    if (balance === null) throw new InvoiceNotFound(invoiceId);
+    return balance;
+  }
+
+  /** Who owes the firm money — the question every collections screen and the
+   *  dunning ladder ask. */
+  outstanding(tenantId: string): Promise<readonly InvoiceBalance[]> {
+    return this.deps.invoices.outstanding(tenantId);
+  }
+
+  listPayments(tenantId: string, invoiceId: string): Promise<readonly Payment[]> {
+    return this.deps.invoices.listPayments(tenantId, invoiceId);
+  }
+
+  listCreditNotes(tenantId: string, invoiceId: string): Promise<readonly CreditNote[]> {
+    return this.deps.invoices.listCreditNotes(tenantId, invoiceId);
+  }
+
+  /** Money only attaches to a document that has actually been sent. */
+  private async issuedOrThrow(tenantId: string, invoiceId: string): Promise<Invoice> {
+    const invoice = await this.mustFind(tenantId, invoiceId);
+    if (invoice.status !== ("issued" satisfies InvoiceStatus)) {
+      throw new InvoiceNotIssued(invoiceId, invoice.status);
+    }
+    return invoice;
   }
 
   private async mustFind(tenantId: string, invoiceId: string): Promise<Invoice> {
