@@ -1393,10 +1393,18 @@ open and are recorded above; neither blocks Phase 2.
   > reason, says "waiting for you — no agent built for this yet" on an agent step nobody has
   > built, and has the Done button that makes the whole thing usable with zero agents.
   >
-  > **NOT BUILT, and a firm needs it: a screen to WRITE a workflow template.** A process is
-  > published through the API today. `/catalogue` is the precedent for what it should look
-  > like — versions, drafts, publish — and it is the honest gap in this task alongside the
-  > merge.
+  > **The screen to WRITE a process is BUILT (2026-08-29, after the first pass).** It was the
+  > honest gap here for a few hours and it closed for the reason it was a gap: an engine whose
+  > only entrance is a curl command is not a product a firm can use, and `(B)`'s reviewer hit
+  > exactly that within minutes of the first pass landing. `/admin/workflows` — write the
+  > steps, say who does each and what it waits for, save as a DRAFT, and put a version in
+  > force as a separate act (the catalogue's pattern, not the roles screen's: publishing
+  > changes the path every future job walks). `/catalogue` gained the one field that connects
+  > a service to a process, as a picker over PUBLISHED processes only — a draft is not in
+  > force, and offering one would point a service at something no job will follow.
+  >
+  > Proven in a browser, not asserted: a process written on the screen, published, picked on a
+  > service, and the row read back out of `config.version` carrying the key.
   >
   > **Still open, and it is a CLIENT question:** which facts a branch may test. The mechanism
   > is built and proven over `recurrence` and `jurisdiction` — two facts that already exist,
