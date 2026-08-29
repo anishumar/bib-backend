@@ -1224,13 +1224,27 @@ sandbox access + credentials. **Not on any demo's critical path.**
   parsed against its own schema in strict mode — would close the class rather than the
   instance. Found the hard way (2026-08-28).
 
-- [ ] **Composite tenant keys across `core`** — `core.organization`, `core.person`,
-  `core.legal_entity`, `core.party_identifier` and `core.party_relationship` still reference
-  their parents by id alone. Foreign-key checks run as a system operation RLS does not filter,
-  so each is the hole 0006 closed for `config` and 0007 closed for `crm.lead`: one firm's row
-  can attach to another firm's object. It leaks nothing — RLS still hides the row both ways —
-  but the wall should make it unrepresentable rather than invisible. Found while building T2.1;
-  its own migration and its own commit, so the constraint change is reviewed on its own.
+- [x] **Composite tenant keys across `core`** — done, and this line was **stale for eight
+  tasks**. Migration **0015** swept all six references (`core.organization`, `core.person`,
+  `core.legal_entity`, `core.party_identifier` and both ends of `core.party_relationship`)
+  and `tests/architecture/tenant-keys.integration.test.ts` has asked the catalogue about them
+  ever since. The board said open; the schema said closed. Verified against the live
+  catalogue before ticking, not against this file.
+
+  **What was actually still open is the GUARD, and it is now fixed.** The test held the
+  schema list as a five-name array — `core`, `crm`, `config`, `tenancy`, `ledger` — under a
+  comment asking the next person to extend it. Nobody did: **T2.6 created `delivery` and the
+  array still said five**, so `delivery.job` sat outside the check from the day it existed.
+  Nothing was crossed, but the guard was not what made that true. The schemas are now
+  DERIVED the same way the constraints are — any schema holding a table with a `tenant_id`
+  column is tenant-scoped by definition — with only the catalogue schemas and `pgboss`
+  excluded, and the exclusion's reason written beside it.
+
+  A derived guard has one failure mode a listed one does not: **matching nothing and passing
+  vacuously**, which still reads as coverage. So a second test asserts the discovery itself
+  finds all six schemas before the rule is applied at all. Both were proven by a negative
+  control rather than by going green — a table with an id-only FK, created in a schema that
+  did not exist when the guard was written, turned the build red and named itself.
 
 ## From the demo, deliberately NOT on this board
 

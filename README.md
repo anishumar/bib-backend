@@ -7,10 +7,19 @@ firms. Node + TypeScript, Postgres + RLS, hexagonal architecture.
 
 ## Local setup
 
-Needs a Postgres 17/18 with `pgcrypto` and `citext`. No Docker required if you have a native
-Postgres on `:5432`.
+Needs **Node 22** (`.nvmrc` pins it; `package.json` `engines` requires it) and a Postgres
+17/18 with `pgcrypto` and `citext`. No Docker required if you have a native Postgres on
+`:5432`.
+
+Node 22 is not advisory. `pg-boss` — the delivery engine's queue (T2.6) — declares
+`node >= 22.12.0`, and npm installs it as an EMPTY DIRECTORY under an older Node rather than
+failing: the package resolves, so nothing errors, and the first symptom is
+`TS2307: Cannot find module 'pg-boss'` from `npm run typecheck`, which reads like a missing
+dependency and is not one. `nvm use` before `npm install`, and if you have already hit it,
+re-run `npm install` under Node 22 to replace the empty directory.
 
 ```bash
+nvm use                       # Node 22, per .nvmrc
 cp .env.example .env          # adjust BIB_DATABASE_URL to a superuser locally
 npm install
 createdb bib                  # or: psql -c 'create database bib'

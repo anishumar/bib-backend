@@ -29,11 +29,47 @@ afterAll(async () => {
   await Promise.all([app.end({ timeout: 5 }), owner.end({ timeout: 5 })]);
 });
 
-/** Every schema that holds tenant-scoped business data. A new one belongs here
- *  the day it is created — which is the only maintenance this test needs. */
-const SCHEMAS = ["core", "crm", "config", "tenancy", "ledger"];
+// The schema list USED to live here, as a five-name array with a comment asking
+// the next person to remember to extend it. They did not: T2.6 created
+// `delivery` and the array still said five, so `delivery.job` was outside this
+// check from the day it existed. Nothing was actually crossed — but the guard
+// was not what made that true, and a guard whose coverage depends on somebody
+// remembering is the class of thing this file exists to replace.
+//
+// So the schemas are DERIVED the same way the constraints are: any schema
+// holding a table with a `tenant_id` column is tenant-scoped business data, by
+// definition. The exclusions are the two catalogue schemas and `pgboss`, whose
+// tables are a vendor's delivery attempts (they carry no tenant_id, so they
+// never match anyway — named here so the reason is written down rather than
+// rediscovered).
+const NOT_OURS = ["pg_catalog", "information_schema", "pgboss"];
 
 describe("every tenant-scoped reference carries its tenant", () => {
+  // A DERIVED guard has one failure mode a listed one does not: matching
+  // nothing and passing vacuously. A renamed column, a typo in the exclusions,
+  // an unmigrated database — each turns this file green while checking zero
+  // tables, which is worse than the list it replaced because it still LOOKS
+  // like coverage. So the discovery is asserted before the rule is.
+  it("discovers the tenant-scoped tables at all", async () => {
+    const found = await owner<{ schema: string; tables: string }[]>`
+      SELECT n.nspname AS schema, count(*)::text AS tables
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a
+        ON a.attrelid = c.oid AND a.attname = 'tenant_id' AND a.attnum > 0
+      WHERE c.relkind = 'r' AND NOT (n.nspname = ANY(${NOT_OURS}))
+      GROUP BY 1 ORDER BY 1
+    `;
+
+    // Every schema that held tenant-scoped data when this was written. It is
+    // not the coverage list — the query above is — it is the proof that the
+    // query still finds things. A schema retired on purpose is a line deleted
+    // here with a reason; a schema that vanished by accident is a red build.
+    expect(found.map((f) => f.schema)).toEqual(
+      expect.arrayContaining(["config", "core", "crm", "delivery", "ledger", "tenancy"]),
+    );
+  });
+
   it("finds no foreign key that points at a tenant-scoped table by id alone", async () => {
     const offenders = await owner<{ table: string; constraint: string; def: string }[]>`
       WITH tenant_scoped AS (
@@ -42,7 +78,7 @@ describe("every tenant-scoped reference carries its tenant", () => {
         JOIN pg_namespace n ON n.oid = c.relnamespace
         JOIN pg_attribute a
           ON a.attrelid = c.oid AND a.attname = 'tenant_id' AND a.attnum > 0
-        WHERE c.relkind = 'r' AND n.nspname = ANY(${SCHEMAS})
+        WHERE c.relkind = 'r' AND NOT (n.nspname = ANY(${NOT_OURS}))
       )
       SELECT s.nspname || '.' || s.relname AS table,
              con.conname                   AS constraint,
