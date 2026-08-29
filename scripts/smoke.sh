@@ -1131,6 +1131,20 @@ inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
 print(sorted(i["sequenceNumber"] for i in inv))')
 chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
 
+# THE FEE AXIS, on the module where it matters most. An invoice is money end to
+# end, so a delivery colleague seeing the work but not what it was worth is the
+# whole point of the axis — and invoicing shipped without it until the demo
+# walk-through caught it, because every test asserts as the partner.
+ASSOCTOT=$(curl -s -b $J/associate.txt $API/api/v1/invoices/$INV1ID | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+print("%s/%s/%s" % (d["totals"]["total"], d["lines"][0]["unitAmount"], d["party"]["displayName"]))')
+chk "an associate sees the work, not the money" "None/None/Cobalt Foods Private Limited" "$ASSOCTOT"
+PARTNERTOT=$(curl -s -b $J/partner.txt $API/api/v1/invoices/$INV1ID | python3 -c '
+import sys, json
+print(json.load(sys.stdin)["totals"]["total"])')
+chk "…while the partner sees both"            "25488.0000" "$PARTNERTOT"
+
 echo; echo "── 16e. What a client still owes — the balance is a SUM ─────────────"
 # T3.5. There is no `paid` flag and no `amount_paid` column: both are caches of
 # an addition and both drift the first time a payment is corrected, leaving an

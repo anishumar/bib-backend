@@ -400,7 +400,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
         document: { service: documents },
-        invoice: { service: invoices, dunning },
+        invoice: { service: invoices, dunning, authz },
       },
       log,
       {

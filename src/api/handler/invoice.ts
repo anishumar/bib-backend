@@ -30,9 +30,23 @@ import {
 } from "../../domain/invoice/model";
 import { DUNNING_ACTIONS } from "../../domain/config/model";
 import type { InvoiceRecord, InvoiceSummary } from "../../usecase/invoice/ports";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 
 export interface InvoiceDeps {
   readonly service: InvoiceService;
+  /**
+   * For the FEE AXIS only. Gate 3 is middleware; nothing here re-checks a
+   * permission.
+   *
+   * An invoice is money end to end, so this matters more here than anywhere
+   * else in the product: a delivery colleague needs to see that a client was
+   * billed for the work they did, and the firm's rule is that they do not see
+   * what it was worth. Redacted rather than refused — "you may not see this"
+   * and "there is no invoice" are different answers a person acts on
+   * differently.
+   */
+  readonly authz: AuthzService;
   /** Chasing is its own use case: invoicing answers what a client owes, this
    *  answers what the firm will do about it. They meet at one query. */
   readonly dunning: DunningService;
@@ -66,7 +80,9 @@ const InvoiceSchema = z
     sequenceNumber: z.number().int(),
     status: z.enum(STATUS_VALUES),
     currency: z.string().length(3),
-    fxRate: Decimal,
+    /** NULL for somebody without commercial visibility — the fee axis. Not an
+     *  error and not zero: the record is shown, the money is not. */
+    fxRate: Decimal.nullable(),
     fxRateDate: z.string(),
     issuedOn: z.string().nullable(),
     dueOn: z.string().nullable(),
@@ -82,15 +98,17 @@ const InvoiceSchema = z
 
 const TotalsSchema = z
   .object({
+    /** Never redacted: a COUNT of lines is a fact about the work, not a
+     *  price, and it is what tells an empty draft from a zero total. */
     lineCount: z.number().int(),
-    gross: Decimal,
-    discount: Decimal,
-    net: Decimal,
-    tax: Decimal,
+    gross: Decimal.nullable(),
+    discount: Decimal.nullable(),
+    net: Decimal.nullable(),
+    tax: Decimal.nullable(),
     /** What the client owes: net of discount, plus tax. Computed by Postgres in
      *  `numeric` from a view — never a stored column, which would drift from
      *  the lines the first time one moved. */
-    total: Decimal,
+    total: Decimal.nullable(),
     currency: z.string().length(3),
   })
   .openapi("InvoiceTotals");
@@ -101,13 +119,18 @@ const InvoiceLineSchema = z
     engagementId: z.string().uuid().nullable(),
     description: z.string(),
     position: z.number().int(),
+    /** NOT redacted. What the firm did, and how much of it, is the work — and
+     *  somebody delivering it needs the quantity even when they may not see
+     *  what it was billed at. */
     quantity: Decimal,
-    unitAmount: Decimal,
+    unitAmount: Decimal.nullable(),
     currency: z.string().length(3),
-    discountPercent: Decimal,
+    discountPercent: Decimal.nullable(),
+    /** The RATE is not redacted; the amount it produced is. A tax rate is a
+     *  statutory fact about the service, not a price. */
     taxPercent: Decimal,
-    net: Decimal,
-    tax: Decimal,
+    net: Decimal.nullable(),
+    tax: Decimal.nullable(),
   })
   .openapi("InvoiceLine");
 
@@ -362,8 +385,8 @@ const PaymentSchema = z
     invoiceId: z.string().uuid(),
     /** SIGNED. A bounced cheque is a NEGATIVE payment with its own date and
      *  note — two rows that tell the story, rather than one row edited into
-     *  something that never happened. */
-    amount: Decimal,
+     *  something that never happened. Null under the fee axis. */
+    amount: Decimal.nullable(),
     currency: z.string().length(3),
     receivedOn: z.string(),
     method: z.enum(PAYMENT_METHOD_VALUES),
@@ -385,7 +408,7 @@ const CreditNoteSchema = z
     }),
     financialYear: z.number().int(),
     sequenceNumber: z.number().int(),
-    amount: Decimal,
+    amount: Decimal.nullable(),
     currency: z.string().length(3),
     issuedOn: z.string(),
     reason: z.enum(CREDIT_REASON_VALUES).openapi({
@@ -405,12 +428,16 @@ const BalanceSchema = z
     status: z.enum(STATUS_VALUES),
     currency: z.string().length(3),
     dueOn: z.string().nullable(),
-    invoiced: Decimal,
-    paid: Decimal,
-    credited: Decimal,
+    /** All four are NULL for somebody without commercial visibility — the fee
+     *  axis. An invoice is money end to end, so this is where the axis matters
+     *  most: a delivery colleague sees that the client was billed for the work
+     *  they did, and not what it was worth. */
+    invoiced: Decimal.nullable(),
+    paid: Decimal.nullable(),
+    credited: Decimal.nullable(),
     /** invoiced − paid − credited, computed by Postgres. Never a stored column:
      *  a `paid` flag drifts the first time a payment is corrected. */
-    outstanding: Decimal,
+    outstanding: Decimal.nullable(),
   })
   .openapi("InvoiceBalance");
 
@@ -583,7 +610,7 @@ const PendingDunningSchema = z
     action: DunningActionSchema,
     invoiceNumber: z.string(),
     party: z.object({ id: z.string().uuid(), displayName: z.string() }),
-    outstanding: Decimal,
+    outstanding: Decimal.nullable(),
     currency: z.string().length(3),
     dueOn: z.string().nullable(),
   })
@@ -658,11 +685,17 @@ const decideDunningRoute = createRoute({
 });
 
 export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDeps): void {
+  /** The fee axis, read once per request from the resolved principal. Gate 3
+   *  has already run; this only decides what is REDACTED, never what is
+   *  allowed. */
+  const seesFees = (principal: Principal | null): boolean =>
+    principal !== null && deps.authz.seesFees(principal);
+
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const raised = await deps.service.raise({ tenantId: s.tenantId, ...c.req.valid("json") }, s.actor);
-    return c.json(toInvoiceBody(raised), 201);
+    return c.json(toInvoiceBody(raised, seesFees(c.get("principal"))), 201);
   });
 
   app.openapi(listRoute, async (c) => {
@@ -673,12 +706,13 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
       status: q.status as InvoiceSummary["invoice"]["status"] | undefined,
       partyId: q.partyId,
     });
+    const fees = seesFees(c.get("principal"));
     return c.json(
       {
         invoices: invoices.map((r) => ({
-          invoice: toInvoiceBody(r.invoice),
+          invoice: toInvoiceBody(r.invoice, fees),
           party: { id: r.party.id, displayName: r.party.displayName },
-          totals: toTotalsBody(r.totals),
+          totals: toTotalsBody(r.totals, fees),
         })),
       },
       200,
@@ -688,7 +722,13 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(describeRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    return c.json(toRecordBody(await deps.service.describe(s.tenantId, c.req.valid("param").invoiceId)), 200);
+    return c.json(
+      toRecordBody(
+        await deps.service.describe(s.tenantId, c.req.valid("param").invoiceId),
+        seesFees(c.get("principal")),
+      ),
+      200,
+    );
   });
 
   app.openapi(addLineRoute, async (c) => {
@@ -714,14 +754,14 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const issued = await deps.service.issue(s.tenantId, c.req.valid("param").invoiceId, s.actor);
-    return c.json(toInvoiceBody(issued), 200);
+    return c.json(toInvoiceBody(issued, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(cancelRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const cancelled = await deps.service.cancel(s.tenantId, c.req.valid("param").invoiceId, s.actor);
-    return c.json(toInvoiceBody(cancelled), 200);
+    return c.json(toInvoiceBody(cancelled, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(registerIrnRoute, async (c) => {
@@ -733,7 +773,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
       c.req.valid("json").irn,
       s.actor,
     );
-    return c.json(toInvoiceBody(saved), 200);
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(listSeriesRoute, async (c) => {
@@ -773,14 +813,15 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
       { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
       s.actor,
     );
-    return c.json(toPaymentBody(payment), 201);
+    return c.json(toPaymentBody(payment, seesFees(c.get("principal"))), 201);
   });
 
   app.openapi(listPaymentsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const payments = await deps.service.listPayments(s.tenantId, c.req.valid("param").invoiceId);
-    return c.json({ payments: payments.map(toPaymentBody) }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ payments: payments.map((x) => toPaymentBody(x, fees)) }, 200);
   });
 
   app.openapi(creditNoteRoute, async (c) => {
@@ -790,31 +831,33 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
       { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
       s.actor,
     );
-    return c.json(toCreditNoteBody(credit), 201);
+    return c.json(toCreditNoteBody(credit, seesFees(c.get("principal"))), 201);
   });
 
   app.openapi(listCreditNotesRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const notes = await deps.service.listCreditNotes(s.tenantId, c.req.valid("param").invoiceId);
-    return c.json({ creditNotes: notes.map(toCreditNoteBody) }, 200);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ creditNotes: notes.map((x) => toCreditNoteBody(x, fees)) }, 200);
   });
 
   app.openapi(balanceRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const balance = await deps.service.balanceOf(s.tenantId, c.req.valid("param").invoiceId);
-    return c.json(toBalanceBody(balance), 200);
+    return c.json(toBalanceBody(balance, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(outstandingRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const receivables = await deps.service.outstanding(s.tenantId);
+    const fees = seesFees(c.get("principal"));
     return c.json(
       {
         receivables: receivables.map((r) => ({
-          balance: toBalanceBody(r.balance),
+          balance: toBalanceBody(r.balance, fees),
           number: r.number,
           party: { id: r.party.id, displayName: r.party.displayName },
         })),
@@ -827,13 +870,14 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const actions = await deps.dunning.pending(s.tenantId);
+    const fees = seesFees(c.get("principal"));
     return c.json(
       {
         actions: actions.map((a) => ({
           action: toDunningBody(a.action),
           invoiceNumber: a.invoiceNumber,
           party: { id: a.party.id, displayName: a.party.displayName },
-          outstanding: a.outstanding,
+          outstanding: fees ? a.outstanding : null,
           currency: a.currency,
           dueOn: a.dueOn,
         })),
@@ -874,11 +918,11 @@ function toDunningBody(a: DunningActionRecord): z.infer<typeof DunningActionSche
   };
 }
 
-function toPaymentBody(p: Payment): z.infer<typeof PaymentSchema> {
+function toPaymentBody(p: Payment, fees: boolean): z.infer<typeof PaymentSchema> {
   return {
     id: p.id,
     invoiceId: p.invoiceId,
-    amount: p.amount,
+    amount: fees ? p.amount : null,
     currency: p.currency,
     receivedOn: p.receivedOn,
     method: p.method,
@@ -887,7 +931,7 @@ function toPaymentBody(p: Payment): z.infer<typeof PaymentSchema> {
   };
 }
 
-function toCreditNoteBody(c: CreditNote): z.infer<typeof CreditNoteSchema> {
+function toCreditNoteBody(c: CreditNote, fees: boolean): z.infer<typeof CreditNoteSchema> {
   return {
     id: c.id,
     invoiceId: c.invoiceId,
@@ -895,7 +939,7 @@ function toCreditNoteBody(c: CreditNote): z.infer<typeof CreditNoteSchema> {
     number: c.number,
     financialYear: c.financialYear,
     sequenceNumber: c.sequenceNumber,
-    amount: c.amount,
+    amount: fees ? c.amount : null,
     currency: c.currency,
     issuedOn: c.issuedOn,
     reason: c.reason,
@@ -903,21 +947,21 @@ function toCreditNoteBody(c: CreditNote): z.infer<typeof CreditNoteSchema> {
   };
 }
 
-function toBalanceBody(b: InvoiceBalance): z.infer<typeof BalanceSchema> {
+function toBalanceBody(b: InvoiceBalance, fees: boolean): z.infer<typeof BalanceSchema> {
   return {
     invoiceId: b.invoiceId,
     partyId: b.partyId,
     status: b.status,
     currency: b.currency,
     dueOn: b.dueOn,
-    invoiced: b.invoiced,
-    paid: b.paid,
-    credited: b.credited,
-    outstanding: b.outstanding,
+    invoiced: fees ? b.invoiced : null,
+    paid: fees ? b.paid : null,
+    credited: fees ? b.credited : null,
+    outstanding: fees ? b.outstanding : null,
   };
 }
 
-function toInvoiceBody(i: Invoice): z.infer<typeof InvoiceSchema> {
+function toInvoiceBody(i: Invoice, fees: boolean): z.infer<typeof InvoiceSchema> {
   return {
     id: i.id,
     tenantId: i.tenantId,
@@ -928,7 +972,7 @@ function toInvoiceBody(i: Invoice): z.infer<typeof InvoiceSchema> {
     sequenceNumber: i.sequenceNumber,
     status: i.status,
     currency: i.currency,
-    fxRate: i.fxRate,
+    fxRate: fees ? i.fxRate : null,
     fxRateDate: i.fxRateDate,
     issuedOn: i.issuedOn,
     dueOn: i.dueOn,
@@ -938,21 +982,21 @@ function toInvoiceBody(i: Invoice): z.infer<typeof InvoiceSchema> {
   };
 }
 
-function toTotalsBody(t: InvoiceTotals): z.infer<typeof TotalsSchema> {
+function toTotalsBody(t: InvoiceTotals, fees: boolean): z.infer<typeof TotalsSchema> {
   return {
     lineCount: t.lineCount,
-    gross: t.gross,
-    discount: t.discount,
-    net: t.net,
-    tax: t.tax,
-    total: t.total,
+    gross: fees ? t.gross : null,
+    discount: fees ? t.discount : null,
+    net: fees ? t.net : null,
+    tax: fees ? t.tax : null,
+    total: fees ? t.total : null,
     currency: t.currency,
   };
 }
 
-function toRecordBody(record: InvoiceRecord): z.infer<typeof InvoiceRecordSchema> {
+function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof InvoiceRecordSchema> {
   return {
-    invoice: toInvoiceBody(record.invoice),
+    invoice: toInvoiceBody(record.invoice, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
     entity: { id: record.entity.id, displayName: record.entity.displayName },
     lines: record.lines.map((l) => ({
@@ -961,13 +1005,13 @@ function toRecordBody(record: InvoiceRecord): z.infer<typeof InvoiceRecordSchema
       description: l.line.description,
       position: l.line.position,
       quantity: l.line.quantity,
-      unitAmount: l.line.unitAmount,
+      unitAmount: fees ? l.line.unitAmount : null,
       currency: l.line.currency,
-      discountPercent: l.line.discountPercent,
+      discountPercent: fees ? l.line.discountPercent : null,
       taxPercent: l.line.taxPercent,
-      net: l.net,
-      tax: l.tax,
+      net: fees ? l.net : null,
+      tax: fees ? l.tax : null,
     })),
-    totals: toTotalsBody(record.totals),
+    totals: toTotalsBody(record.totals, fees),
   };
 }
