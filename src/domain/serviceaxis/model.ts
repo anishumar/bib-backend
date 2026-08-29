@@ -162,9 +162,23 @@ export function assignableAxes(rows: readonly ServiceAxis[]): readonly ServiceAx
  *
  * Three cases, and all three are ordinary:
  *
- *   `none` — ONE bucket holding everything, keyed `null`. Not an empty result
- *   and not a special case at the call site: a firm that does not split its work
- *   still has work, and T2.6's current behaviour is exactly this bucket.
+ *   `none` — NO MERGING. One bucket per item, each keyed `null`, so a caller
+ *   that does not special-case it gets exactly what it had before grouping
+ *   existed: one job per engagement.
+ *
+ *   That is a CORRECTION, and wiring T2.7's caller is what found it. This
+ *   branch used to return one bucket holding everything, on the stated grounds
+ *   that it "reproduces T2.6's behaviour" — and it does not. T2.6 gives one job
+ *   per ENGAGEMENT, `crm.engagement` carries `UNIQUE
+ *   (engagement_letter_line_id)`, so a three-line letter is already three jobs.
+ *   One bucket would have merged all three, which is a behaviour change for
+ *   every firm on the default setting — the exact thing G2.4 promised would not
+ *   happen until a firm chooses. `none` is a real answer meaning "we do not cut
+ *   our work up", and the honest reading of that is that nothing merges.
+ *
+ *   The pure function was green on eleven tests while saying the wrong thing,
+ *   because nothing consumed it yet. Third time on this project that the
+ *   consumer, not the unit test, found the bug.
  *
  *   A line whose service names no code on the chosen axis joins the `null`
  *   bucket alongside anything else unfiled. It is not dropped. A service the
@@ -182,7 +196,7 @@ export function groupByAxis<T>(
   codeOf: (item: T) => string | null,
 ): readonly { readonly code: string | null; readonly items: readonly T[] }[] {
   if (axis === "none") {
-    return items.length === 0 ? [] : [{ code: null, items: [...items] }];
+    return items.map((item) => ({ code: null, items: [item] }));
   }
 
   const buckets = new Map<string | null, T[]>();

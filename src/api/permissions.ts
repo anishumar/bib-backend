@@ -202,6 +202,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // A job's steps (T2.7). READ on `party:read`, like the job list it hangs off:
   // the work board is what every member of the delivery team looks at, and a
   // step's label and state carry no money and no personal data.
+  [routeKey("GET", "/api/v1/jobs/{jobId}"), "party:read" as const],
   [routeKey("GET", "/api/v1/jobs/{jobId}/steps"), "party:read" as const],
   // COMPLETING one needs `work:write` — a separate permission, because saying a
   // filing is done is not the same act as reading the board, and the record of

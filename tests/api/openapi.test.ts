@@ -42,6 +42,7 @@ import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
@@ -153,6 +154,7 @@ function deps(): RouterDeps {
         jobs: new FakeJobRepo(),
         activations: new FakeActivationFeed(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
+        splitAxis: new FakeWorkSplit(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
         events: new RecordingEventSink(),

@@ -15,6 +15,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { SchedulerService } from "../../usecase/scheduler/service";
 import type { Job } from "../../domain/scheduler/model";
+import type { JobDetail } from "../../usecase/scheduler/ports";
 import { scopeOf } from "../scope";
 
 export interface SchedulerDeps {
@@ -24,13 +25,49 @@ export interface SchedulerDeps {
 const JobSchema = z
   .object({
     id: z.string().uuid(),
-    sourceKind: z.enum(["engagement", "obligation"]).openapi({
-      description: "What caused this job to exist.",
+    sourceKind: z.enum(["engagement", "obligation", "engagement_group"]).openapi({
+      description:
+        "What caused this job to exist. `engagement_group` is several of a letter's " +
+        "engagements merged into one checklist, because the firm splits its work by Dept " +
+        "or by delivery team.",
     }),
     sourceRef: z.string().uuid().openapi({
       description:
-        "The id of that cause — an engagement, later an obligation instance. One job per " +
-        "cause per firm, so this is what makes a redelivered trigger a no-op.",
+        "The id of that cause — an engagement, later an obligation instance. For a merged " +
+        "job it names NO row: it is the group key, derived, and it exists so a redelivered " +
+        "trigger conflicts instead of building a second checklist. At most one OPEN job per " +
+        "cause per firm. To list what a merged job actually delivers, read `engagementIds`.",
+    }),
+    entityName: z.string().nullable().openapi({
+      description:
+        "The legal entity the work is delivered TO. One per job, always — merging across " +
+        "entities would break the firm's Per Company rule.",
+    }),
+    clientName: z.string().nullable().openapi({
+      description: "Who is BILLED. Not the same question as the entity, and often not the same party.",
+    }),
+    services: z
+      .array(
+        z.object({
+          engagementId: z.string().uuid(),
+          serviceName: z.string(),
+        }),
+      )
+      .openapi({
+        description:
+          "The services this job delivers, in the order their advances were recorded. One " +
+          "for an unmerged job; several for a merged one. The name is off the version the " +
+          "client's letter PINNED, so it reads as the letter wrote it.",
+      }),
+    splitAxis: z.enum(["none", "dept", "team"]).openapi({
+      description:
+        "How this job was cut, recorded at spawn. `none` is one job per engagement — the " +
+        "firm has not said it splits its work, or has said it does not.",
+    }),
+    splitCode: z.string().nullable().openapi({
+      description:
+        "The Dept or delivery team this job's work is filed under. Null on `none`, and null " +
+        "on a splitting firm whose service is filed under nothing — both real answers.",
     }),
     status: z.enum(["pending", "running", "blocked", "done", "cancelled"]).openapi({
       description:
@@ -54,14 +91,27 @@ const JobSchema = z
 
 const JobsResponse = z.object({ jobs: z.array(JobSchema) }).openapi("JobsResponse");
 
+const JobParam = z.object({
+  jobId: z.string().uuid().openapi({ param: { name: "jobId", in: "path" } }),
+});
+
 /** Field by field — never the domain object. `tenantId` is deliberately absent:
  *  the session already decided it, and echoing it back invites a client to
  *  imagine it could send a different one. */
-function toWire(j: Job): z.infer<typeof JobSchema> {
+function toWire(j: Job, detail: JobDetail | undefined): z.infer<typeof JobSchema> {
   return {
     id: j.id,
     sourceKind: j.sourceKind,
     sourceRef: j.sourceRef,
+    // An empty list rather than an omitted field. A job with no link rows is a
+    // real state — an obligation-sourced job, until T3.2 gives it something to
+    // link to — and the screen renders "no services listed" for it instead of
+    // deciding what `undefined` meant.
+    entityName: detail?.entityName ?? null,
+    clientName: detail?.clientName ?? null,
+    services: detail === undefined ? [] : detail.services.map((sv) => ({ ...sv })),
+    splitAxis: j.splitAxis,
+    splitCode: j.splitCode,
     status: j.status,
     templateVersionId: j.templateVersionId,
     runnableAt: j.runnableAt,
@@ -87,15 +137,51 @@ const listRunnableJobsRoute = createRoute({
   },
 });
 
+const getJobRoute = createRoute({
+  method: "get",
+  path: "/api/v1/jobs/{jobId}",
+  tags: ["delivery"],
+  summary: "One job — what it is for, and how it was cut",
+  description:
+    "The header the job screen shows above its steps: the company the work is delivered to, " +
+    "the services in it, and the Dept or delivery team it was cut under. Separate from the " +
+    "list because the list is deliberately only what is RUNNABLE — a job that has finished " +
+    "is absent from it, and its steps would otherwise be readable with nothing saying whose " +
+    "work they were.",
+  request: { params: JobParam },
+  responses: {
+    200: { description: "The job", content: { "application/json": { schema: JobSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read this"),
+    404: errorResponse("No such job at this firm"),
+  },
+});
+
 export function registerSchedulerRoutes(app: OpenAPIHono<AppEnv>, deps: SchedulerDeps): void {
   app.openapi(listRunnableJobsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const jobs = await deps.service.runnableJobs(s.tenantId);
-    return c.json({ jobs: jobs.map(toWire) }, 200);
+    // ONE describe for the whole page, not one per row. The lookup-per-row is
+    // the exact failure "lists return read models" exists to prevent.
+    const details = await deps.service.describeJobs(
+      s.tenantId,
+      jobs.map((j) => j.id),
+    );
+    return c.json({ jobs: jobs.map((j) => toWire(j, details.get(j.id))) }, 200);
+  });
+
+  app.openapi(getJobRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { jobId } = c.req.valid("param");
+    const job = await deps.service.getJob(s.tenantId, jobId);
+    const details = await deps.service.describeJobs(s.tenantId, [job.id]);
+    return c.json(toWire(job, details.get(job.id)), 200);
   });
 }
 
 export const schedulerRoutes = {
   listRunnableJobs: listRunnableJobsRoute,
+  getJob: getJobRoute,
 } as const;

@@ -52,24 +52,43 @@ interface SubjectRow {
   jurisdiction: string | null;
 }
 
+/** Everything in a group agrees on a fact, or the fact is UNRESOLVED.
+ *
+ *  A merged job delivers several services, and two of them can state different
+ *  recurrences. There is no honest way to pick one — and the rule this project
+ *  already settled says what to do with a fact that is not stated: keep the
+ *  step. An extra review costs an hour and a missing one costs a filing, so
+ *  disagreement resolves the same way silence does. */
+function agreed(values: readonly (string | null)[]): string | null {
+  const distinct = new Set(values.filter((v): v is string => v !== null));
+  return distinct.size === 1 ? [...distinct][0] ?? null : null;
+}
+
 export class PostgresJobSubjectRepository implements JobSubjectSource {
   constructor(private readonly app: Db) {}
 
   async subjectOf(tenantId: string, jobId: string): Promise<JobSubject | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [row] = await db<SubjectRow[]>`
+      const rows = await db<SubjectRow[]>`
         SELECT
           live.body AS body,
           le.jurisdiction AS jurisdiction
         FROM delivery.job j
-        -- source_ref is not a foreign key (it names different tables for
-        -- different source_kinds, which one column cannot express), so the kind
-        -- is checked here rather than assumed. An obligation-sourced job joins
-        -- nothing yet — T3.2 is what gives it something to join to — and comes
-        -- back with every fact null, which the orchestrator reads as "not
-        -- stated" and therefore keeps every conditional step.
+        -- THROUGH THE LINK TABLE (0046), not through source_ref. A merged job
+        -- delivers several engagements and its source_ref is a derived group
+        -- key naming no row, so joining on it would return nothing for exactly
+        -- the jobs this task exists to create. Every job has link rows,
+        -- including unmerged ones, which is why there is one join here and not
+        -- a branch on source_kind.
+        --
+        -- An obligation-sourced job has none yet — T3.2 is what gives it
+        -- something to link to — and comes back with every fact null, which the
+        -- orchestrator reads as "not stated" and therefore keeps every
+        -- conditional step.
+        JOIN delivery.job_engagement je
+          ON je.job_id = j.id AND je.tenant_id = j.tenant_id
         JOIN crm.engagement e
-          ON j.source_kind = 'engagement' AND e.id = j.source_ref AND e.tenant_id = j.tenant_id
+          ON e.id = je.engagement_id AND e.tenant_id = je.tenant_id
         JOIN crm.engagement_letter_line l
           ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
         -- Through the PINNED version to the ENTRY, and then back out to what is
@@ -87,17 +106,28 @@ export class PostgresJobSubjectRepository implements JobSubjectSource {
         LEFT JOIN core.legal_entity le
           ON le.party_id = l.entity_party_id AND le.tenant_id = l.tenant_id
         WHERE j.id = ${jobId}
+        ORDER BY je.created_at, je.engagement_id
       `;
       // No row: a job whose cause cannot be resolved. It should not happen, and
       // it is not a reason to crash a sweep over every other firm's work — the
       // orchestrator refuses that one job and says why.
-      if (!row) return null;
+      if (rows.length === 0) return null;
 
-      const service = row.body === null ? null : readServiceBody(row.body);
+      const services = rows.map((r) => (r.body === null ? null : readServiceBody(r.body)));
       return {
-        workflowTemplateKey: service?.workflowTemplateKey ?? null,
-        recurrence: service?.recurrence ?? null,
-        jurisdiction: row.jurisdiction,
+        // The workflow key is part of the GROUP KEY, so every engagement in a
+        // merged job names the same one by construction — `agreed` is the
+        // assertion of that rather than a guess, and if the invariant ever
+        // breaks the job waits visibly instead of pinning one service's process
+        // to another service's work.
+        workflowTemplateKey: agreed(services.map((s) => s?.workflowTemplateKey ?? null)),
+        // Recurrence is NOT in the key and genuinely can differ — a monthly GST
+        // filing merged with an annual return. Disagreement is unresolved, and
+        // unresolved keeps the step.
+        recurrence: agreed(services.map((s) => s?.recurrence ?? null)),
+        // One entity per job, guaranteed by the group key, for the firm's own
+        // Per Company rule.
+        jurisdiction: agreed(rows.map((r) => r.jurisdiction)),
       };
     });
   }

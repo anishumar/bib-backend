@@ -8,27 +8,39 @@
 // test pass while the property was broken in production — the opposite of what
 // the test is for.
 import type { Job, JobStatus } from "../domain/scheduler/model";
+import type { WorkSplitAxis } from "../domain/serviceaxis/model";
 import type {
   Activation,
   ActivationFeed,
+  JobDetail,
   JobQueue,
   JobRepository,
   NewJob,
   QueueHandler,
   TenantDirectory,
+  WorkSplitSource,
 } from "../usecase/scheduler/ports";
 
 export class FakeJobRepo implements JobRepository {
   readonly rows: Job[] = [];
+  /** The link table, reproduced: engagement id -> job id. A plain Map, because
+   *  its whole content is the constraint it enforces — one job per engagement. */
+  readonly links = new Map<string, string>();
 
   createIfAbsent(job: NewJob): Promise<{ job: Job; created: boolean }> {
-    // The unique key, reproduced. (tenant, kind, ref) — not the id, because the
-    // id is derived and a caller that minted it differently must STILL lose.
+    // The PARTIAL unique key, reproduced (0046): (tenant, kind, ref) among jobs
+    // that are still OPEN. Not the id, because the id is derived for one kind
+    // and random for the other, and a caller that minted it differently must
+    // STILL lose. Not every row, because a group whose job finished may legally
+    // get another one — a fake that refused that would make the case
+    // untestable and the case is real.
     const existing = this.rows.find(
       (r) =>
         r.tenantId === job.tenantId &&
         r.sourceKind === job.sourceKind &&
-        r.sourceRef === job.sourceRef,
+        r.sourceRef === job.sourceRef &&
+        r.status !== "done" &&
+        r.status !== "cancelled",
     );
     if (existing) return Promise.resolve({ job: existing, created: false });
 
@@ -39,12 +51,65 @@ export class FakeJobRepo implements JobRepository {
       sourceRef: job.sourceRef,
       status: "pending",
       templateVersionId: null,
+      splitAxis: job.splitAxis,
+      splitCode: job.splitCode,
       runnableAt: job.runnableAt,
       startedAt: null,
       finishedAt: null,
     };
     this.rows.push(row);
     return Promise.resolve({ job: row, created: true });
+  }
+
+  /** `UNIQUE (tenant_id, engagement_id)`, reproduced — and it is ABSOLUTE, not
+   *  scoped to open jobs. One engagement's work exists in exactly one job,
+   *  forever. Returns only what this call actually linked, as the adapter does,
+   *  because the caller records an event on that and nothing else. */
+  linkEngagements(
+    tenantId: string,
+    jobId: string,
+    engagementIds: readonly string[],
+  ): Promise<readonly string[]> {
+    const linked: string[] = [];
+    for (const id of engagementIds) {
+      const key = `${tenantId}:${id}`;
+      if (this.links.has(key)) continue;
+      this.links.set(key, jobId);
+      linked.push(id);
+    }
+    return Promise.resolve(linked);
+  }
+
+  /** The read model, from whatever the test put in `serviceNames`. Deliberately
+   *  thin: the join is the adapter's business, and an integration test is what
+   *  proves it. What this must reproduce is the SHAPE — one entry per job, its
+   *  services in link order — because that is what the handler maps. */
+  serviceNames = new Map<string, string>();
+  entityNames = new Map<string, string>();
+  clientNames = new Map<string, string>();
+
+  describeJobs(
+    tenantId: string,
+    jobIds: readonly string[],
+  ): Promise<ReadonlyMap<string, JobDetail>> {
+    const out = new Map<string, JobDetail>();
+    for (const jobId of jobIds) {
+      const services: { engagementId: string; serviceName: string }[] = [];
+      let entityName: string | null = null;
+      let clientName: string | null = null;
+      for (const [key, job] of this.links) {
+        const [t, engagementId] = key.split(":");
+        if (t !== tenantId || job !== jobId || !engagementId) continue;
+        services.push({
+          engagementId,
+          serviceName: this.serviceNames.get(engagementId) ?? "(unnamed service)",
+        });
+        entityName ??= this.entityNames.get(engagementId) ?? null;
+        clientName ??= this.clientNames.get(engagementId) ?? null;
+      }
+      if (services.length > 0) out.set(jobId, { entityName, clientName, services });
+    }
+    return Promise.resolve(out);
   }
 
   findById(tenantId: string, jobId: string): Promise<Job | null> {
@@ -124,10 +189,14 @@ export class FakeActivationFeed implements ActivationFeed {
     // The NOT EXISTS half. Without it the fake would hand the same activation
     // back on every sweep and the "second pass does nothing" test would be
     // measuring the job store alone rather than the feed and the store together.
+    // Over the LINK table, matching the adapter (0046). A merged job's
+    // `sourceRef` is a derived group key naming no engagement, so the old test
+    // — against `sourceRef` — would report every merged engagement as unspawned
+    // and the sweep would build it a second checklist on the very next pass.
     const spawned = new Set(
-      (this.jobs?.rows ?? [])
-        .filter((j) => j.tenantId === tenantId && j.sourceKind === "engagement")
-        .map((j) => j.sourceRef),
+      [...(this.jobs?.links.keys() ?? [])]
+        .filter((k) => k.startsWith(`${tenantId}:`))
+        .map((k) => k.slice(tenantId.length + 1)),
     );
     return Promise.resolve(
       all
@@ -135,6 +204,16 @@ export class FakeActivationFeed implements ActivationFeed {
         .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))
         .slice(0, limit),
     );
+  }
+}
+
+/** The firm's `work_split_axis`, as a value a test sets directly. Defaults to
+ *  `none`, which is the product's default and the behaviour every test written
+ *  before T2.7's merge is asserting against. */
+export class FakeWorkSplit implements WorkSplitSource {
+  constructor(public axis: WorkSplitAxis = "none") {}
+  read(): Promise<WorkSplitAxis> {
+    return Promise.resolve(this.axis);
   }
 }
 

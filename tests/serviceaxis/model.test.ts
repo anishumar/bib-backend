@@ -118,11 +118,31 @@ describe("groupByAxis — the rule that decides how many jobs an engagement beco
     { id: "payroll", dept: "FRC", team: "PAYROLL" },
   ];
 
-  it("`none` is ONE bucket holding everything — T2.6's behaviour, unchanged", () => {
+  // THE CORRECTION. This used to assert one bucket holding everything, on the
+  // stated grounds that it was "T2.6's behaviour, unchanged" — and it was not.
+  // T2.6 gives one job per ENGAGEMENT and a three-line letter is already three
+  // engagements, so one bucket would have MERGED all three for every firm on
+  // the default setting. `none` means the firm does not cut its work up, and
+  // the honest reading of that is that nothing merges either.
+  it("`none` merges nothing — one bucket per item, which is T2.6's behaviour", () => {
     const groups = groupByAxis(lines, "none", (l) => l.dept);
-    expect(groups.length).toBe(1);
-    expect(groups[0]?.code).toBeNull();
-    expect(groups[0]?.items.map((l) => l.id)).toEqual(["gst", "tds", "payroll"]);
+    expect(groups.length).toBe(3);
+    expect(groups.map((g) => g.code)).toEqual([null, null, null]);
+    expect(groups.map((g) => g.items.map((l) => l.id))).toEqual([
+      ["gst"],
+      ["tds"],
+      ["payroll"],
+    ]);
+  });
+
+  // The one thing that did NOT change: a firm on `none` whose services all sit
+  // under one team still gets a job each. `none` is not "team, unconfigured".
+  it("`none` ignores the codes entirely, even when they agree", () => {
+    const oneTeam = [
+      { id: "gst", dept: "FRC", team: "FINCOMPLIANCE" },
+      { id: "tds", dept: "FRC", team: "FINCOMPLIANCE" },
+    ];
+    expect(groupByAxis(oneTeam, "none", (l) => l.team).length).toBe(2);
   });
 
   it("`none` over nothing is nothing, not one empty bucket", () => {

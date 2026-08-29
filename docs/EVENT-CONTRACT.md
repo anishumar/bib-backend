@@ -280,7 +280,8 @@ version is exactly what gets asked about afterwards.
 |---|---|---|
 | `workflow_template.published` | workflow_template | A template version was published; running jobs pin their version. **Predates the registry** — when workflow templates become a config *kind* (T2.7), publishing one will already record `config_version.published`, and T2.7 decides whether this verb survives. |
 | `rule_pack.activated` | rule_pack | A rule-pack version became active. Never written by an agent (A10). |
-| `job.spawned` | job | The scheduler created a job from a trigger or a recurrence. |
+| `job.spawned` | job | The scheduler created a job from a trigger or a recurrence. The payload names every engagement in it and how it was cut (`splitAxis`, `splitCode`), because a merged job's cause is several engagements and its `source_ref` is a derived group key naming no row in any table. |
+| `job.scope_extended` | job | Work joined a job that was ALREADY OPEN — the second line of an engagement letter, whose advance arrived after the first. Its own verb rather than a second `job.spawned`, because "why did this job gain a service on the 14th" is a question somebody asks and a spawn event cannot answer it. The payload carries only the engagements that actually joined. |
 | `job.template_pinned` | job | A job resolved the firm's published process and PINNED the version it will walk. Everything the job does afterwards is explained by this row: editing the process later never moves a job already walking it. |
 | `job.started` | job | A job's steps were written from its pinned template and the work began. One event, not one per step. |
 | `job.step_advanced` | job | A job's step moved — set aside for a person, taken by an agent, or finished. The payload carries both sides and who was expected to do it. |

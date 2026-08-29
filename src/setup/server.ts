@@ -143,6 +143,11 @@ export function wire(cfg: Config, log: Logger): Wired {
     jobs,
     activations: jobs,
     tenants: new PostgresTenantDirectory(pools.app),
+    // ONE adapter satisfying two ports declared in two use cases — the shape
+    // AxisDirectory and RoleDirectory already have. `usecase/serviceaxis` owns
+    // the write side of this setting; the scheduler reads it, and neither
+    // imports the other.
+    splitAxis: new PostgresWorkSplitSetting(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

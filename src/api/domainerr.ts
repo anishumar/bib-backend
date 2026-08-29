@@ -10,6 +10,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
+import { SchedulerError } from "../domain/scheduler/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
 import { IdentityError } from "../domain/identity/errors";
@@ -163,6 +164,28 @@ export function mapError(err: unknown): MappedError {
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
       case "STEP_NOT_A_PERSONS":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  // FOUND BY RUNNING IT, and it is the third time on this project. The family
+  // has existed since T2.6 and had no mapping, because until `GET
+  // /api/v1/jobs/{jobId}` there was no route that could raise it — the list
+  // never looks a job up. Its first surface answered 500 to an unknown job
+  // while its own OpenAPI description promised a 404. Unit tests assert on the
+  // thrown sentinel and are perfectly happy; only a real request sees a status
+  // code.
+  if (err instanceof SchedulerError) {
+    switch (err.code) {
+      case "JOB_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // The job moved under the caller, or the value is not one the engine
+      // knows. Conflicts rather than 400s for the reason the orchestrator's own
+      // pair gives: the request said something that was true a moment ago, and
+      // the fix is to look at the job again rather than to resend this.
+      case "INVALID_TRANSITION":
+      case "INVALID_RECURRENCE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

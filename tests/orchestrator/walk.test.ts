@@ -77,6 +77,8 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
     sourceKind: "engagement",
     sourceRef: ENGAGEMENT,
     runnableAt: "2026-08-01T00:00:00.000Z",
+    splitAxis: "none" as const,
+    splitCode: null,
   });
   subjects.set(JOB, {
     workflowTemplateKey: TEMPLATE_KEY,
