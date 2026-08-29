@@ -31,6 +31,10 @@ import { PostgresRelationshipRepository } from "../../src/infrastructure/postgre
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
+import {
+  PostgresDocumentBlockRepository,
+  PostgresStandardBlockRepository,
+} from "../../src/infrastructure/postgres/block-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { PartyService } from "../../src/usecase/party/service";
@@ -69,6 +73,8 @@ const documentRepository = new PostgresDocumentRepository(app);
 const documents = new DocumentService({
   preferences: documentRepository,
   refs: documentRepository,
+  standardBlocks: new PostgresStandardBlockRepository(app),
+  blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
 });

@@ -269,6 +269,16 @@ export class EngagementService {
       effectiveFrom: input.effectiveFrom ?? null,
     });
 
+        // The firm's standard prose, COPIED onto this letter (G1.7). The letter
+    // stores its OWN jurisdiction, chosen at drafting, so unlike a proposal
+    // there is always an answer here — and a letter is the document where
+    // getting it wrong is expensive.
+    await this.deps.documents.seedBlocks(
+      letter.tenantId,
+      { kind: "engagement_letter", id: letter.id },
+      letter.jurisdiction,
+    );
+
     await this.deps.events.recordEvent({
       tenantId: letter.tenantId,
       verb: "engagement_letter.drafted",
@@ -500,10 +510,16 @@ export class EngagementService {
   async describe(tenantId: string, letterId: string): Promise<LetterView> {
     const record = await this.deps.letters.describeLetter(tenantId, letterId);
     if (record === null) throw new LetterNotFound(letterId);
-    // The one thing the repository could not answer: what each engagement is
-    // doing TODAY. The rows say when work begins; the clock says whether it
-    // has.
-    return { ...record, engagements: this.withState(record.engagements) };
+    // Two things the repository could not answer. What each engagement is doing
+    // TODAY — the rows say when work begins, the clock says whether it has. And
+    // the letter's own prose, which lives in the document module's table and is
+    // reached through the same seam this use case already asks for references
+    // and issuing entities.
+    const blocks = await this.deps.documents.listBlocks(tenantId, {
+      kind: "engagement_letter",
+      id: letterId,
+    });
+    return { ...record, engagements: this.withState(record.engagements), blocks };
   }
 
   async list(tenantId: string, filters: LetterFilters): Promise<readonly LetterSummary[]> {

@@ -1000,6 +1000,69 @@ else:
     print("no job.spawned event")')
 chk "spawned by the system, not a person" "system/True" "$SPAWNER"
 
+echo; echo "── 16c. The prose a document carries — copied, never referenced ────"
+# G1.7. Three lists appear on every document besides its priced lines: the
+# EXCLUSIONS, the COMMERCIAL notes and the TEAM block. They are not clauses — a
+# clause is a term drawn from a versioned library and pinned — they are the
+# document's own prose, and a firm edits them a line at a time.
+#
+# The acceptance has two halves that pull opposite ways: editing the standard
+# set must change the NEXT document and never an issued one (so it is a COPY),
+# and a UAE document must not print an Indian tax note.
+STD=$API/api/v1/document-blocks/standard
+chk "the standard set starts empty"     "0" "$(curl -s -b $J/partner.txt $STD | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["blocks"]))')"
+chk "an exclusion, true everywhere"     201 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"exclusion","body":"Statutory fees are not included.","sortOrder":1}')"
+# The one that must not leave India. This is the mistake the firm already caught
+# in its own template, so it is the check that matters most in this section.
+chk "…and the GST note, scoped to IN"   201 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"commercial","body":"All fees are exclusive of GST as applicable.","sortOrder":1,"jurisdiction":"IN"}')"
+chk "a country code in lower case"      400 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"commercial","body":"x","sortOrder":1,"jurisdiction":"in"}')"
+chk "a blank body is refused"           400 "$(code -b $J/partner.txt -XPOST $STD -H "$H" -d '{"kind":"exclusion","body":"   ","sortOrder":1}')"
+chk "an associate cannot edit the set"  403 "$(code -b $J/associate.txt -XPOST $STD -H "$H" -d '{"kind":"exclusion","body":"x","sortOrder":9}')"
+chk "…but can read what it will print"  200 "$(code -b $J/associate.txt $STD)"
+
+# A letter written for IN gets both lines; one written for AE gets only the one
+# that is true everywhere.
+BLKEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$LAWORG'","jurisdiction":"IN","title":"Harbour Ridge - prose","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+INBLK=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$BLKEL | python3 -c '
+import sys, json
+bs = json.load(sys.stdin)["blocks"]
+print("%d/%s" % (len(bs), any("GST" in b["body"] for b in bs)))')
+chk "an Indian letter prints the GST note" "2/True" "$INBLK"
+AEEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$LAWORG'","jurisdiction":"AE","title":"Harbour Ridge - UAE","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+AEBLK=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$AEEL | python3 -c '
+import sys, json
+bs = json.load(sys.stdin)["blocks"]
+print("%d/%s" % (len(bs), any("GST" in b["body"] for b in bs)))')
+chk "…and a UAE one does NOT"           "1/False" "$AEBLK"
+
+# The COPY, which is the whole argument against a reference: the firm rewrites
+# its standard exclusion, and the letter already issued still says what it said.
+STDID=$(curl -s -b $J/partner.txt $STD | python3 -c '
+import sys, json
+print(next(b["id"] for b in json.load(sys.stdin)["blocks"] if b["body"].startswith("Statutory")))')
+chk "the firm rewrites its exclusion"   200 "$(code -b $J/partner.txt -XPATCH $STD/$STDID -H "$H" -d '{"body":"Statutory fees, filing fees and stamp duty are not included."}')"
+UNCHANGED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$BLKEL | python3 -c '
+import sys, json
+print(any(b["body"] == "Statutory fees are not included." for b in json.load(sys.stdin)["blocks"]))')
+chk "…the issued letter is untouched"   "True" "$UNCHANGED"
+NEXTEL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$LAWORG'","jurisdiction":"IN","title":"Harbour Ridge - after","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+CHANGED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$NEXTEL | python3 -c '
+import sys, json
+print(any("stamp duty" in b["body"] for b in json.load(sys.stdin)["blocks"]))')
+chk "…while the NEXT letter carries it" "True" "$CHANGED"
+
+# "Delete the third exclusion" — the sentence this table's shape exists for.
+# Against one text column it is a string operation with nothing for a screen to
+# attach a control to.
+BLKID=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$NEXTEL | python3 -c '
+import sys, json
+print(next(b["id"] for b in json.load(sys.stdin)["blocks"] if b["kind"] == "exclusion"))')
+chk "strike one line off the letter"    204 "$(code -b $J/partner.txt -XDELETE $API/api/v1/document-blocks/$BLKID)"
+LEFT=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$NEXTEL | python3 -c '
+import sys, json
+print(len([b for b in json.load(sys.stdin)["blocks"] if b["kind"] == "exclusion"]))')
+chk "…and the others are untouched"     "0" "$LEFT"
+
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done

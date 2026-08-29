@@ -530,3 +530,88 @@ describe("and it refuses only what it should", () => {
     expect((err as Error).message).toContain("signature_reference, title");
   });
 });
+
+describe("and EVERY child of a signed letter is frozen, not just the ones we remember", () => {
+  // THE GAP THIS CLOSES. The sweep above enumerates the COLUMNS of
+  // `engagement_letter_line` from the catalogue, so a column added next month
+  // is covered the day it exists. Nothing did the same for the TABLES: `line`
+  // and `clause` got their triggers in 0017 because somebody wrote two CREATE
+  // TRIGGER statements, and a third child table would have arrived unprotected
+  // with every test in this file still green.
+  //
+  // That is not hypothetical — G1.7 added `crm.document_block`, and the prose a
+  // client agreed to is exactly as much a term of the agreement as a line is.
+  // So the rule is asked of the catalogue, the way the tenant-key guard is: any
+  // table with an `engagement_letter_id` column is a child of a letter, and a
+  // child of a letter carries the freeze.
+  /**
+   * `crm.engagement` is a child of a letter and is DELIBERATELY not frozen, and
+   * the exception is named here rather than left as a hole the query happens
+   * not to look at.
+   *
+   * It is not a TERM of the agreement; it is a CONSEQUENCE of one. Signing
+   * CREATES these rows — the fan-out is one engagement per line, in the same
+   * transaction as the signature — so a trigger refusing every write to a
+   * signed letter's children would refuse the act of signing itself. And they
+   * keep moving afterwards on purpose: an engagement starts `pending_advance`
+   * and becomes `active` when the advance is recorded, which is `recordAdvance`
+   * updating a row that hangs off a signed letter, by design.
+   *
+   * The line is: what the letter SAYS is frozen (its lines, its clauses, its
+   * prose); what the letter CAUSED has its own lifecycle. Adding a name to this
+   * list is the thing that needs an argument.
+   */
+  const NOT_TERMS = ["crm.engagement"];
+
+  it("finds no child table of an engagement letter without the freeze trigger", async () => {
+    const unguarded = await owner<{ table: string }[]>`
+      WITH children AS (
+        SELECT c.oid, n.nspname, c.relname
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_attribute a
+          ON a.attrelid = c.oid AND a.attname = 'engagement_letter_id' AND a.attnum > 0
+        WHERE c.relkind = 'r'
+      )
+      SELECT ch.nspname || '.' || ch.relname AS table
+      FROM children ch
+      WHERE ch.nspname || '.' || ch.relname <> ALL(${NOT_TERMS})
+        AND NOT EXISTS (
+        SELECT 1 FROM pg_trigger t
+        WHERE t.tgrelid = ch.oid
+          AND NOT t.tgisinternal
+          AND t.tgfoid = 'crm.refuse_signed_child_change()'::regprocedure
+      )
+      ORDER BY 1
+    `;
+
+    expect(
+      unguarded.map((u) => u.table),
+      "each of these tables hangs off an engagement letter and is NOT frozen when that letter " +
+        "is signed, so what the client agreed to can still be changed afterwards. Add:  " +
+        "CREATE TRIGGER trg_<name>_freeze BEFORE INSERT OR UPDATE OR DELETE ON <table> " +
+        "FOR EACH ROW EXECUTE FUNCTION crm.refuse_signed_child_change();",
+    ).toEqual([]);
+  });
+
+  // A derived guard's own failure mode: matching nothing and passing vacuously.
+  it("is actually looking at the child tables it thinks it is", async () => {
+    const found = await owner<{ table: string }[]>`
+      SELECT n.nspname || '.' || c.relname AS table
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a
+        ON a.attrelid = c.oid AND a.attname = 'engagement_letter_id' AND a.attnum > 0
+      WHERE c.relkind = 'r'
+      ORDER BY 1
+    `;
+    expect(found.map((f) => f.table)).toEqual(
+      expect.arrayContaining([
+        "crm.document_block",
+        "crm.engagement",
+        "crm.engagement_letter_clause",
+        "crm.engagement_letter_line",
+      ]),
+    );
+  });
+});

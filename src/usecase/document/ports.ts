@@ -1,7 +1,13 @@
 // The ports the document use case needs from the world — the seams. Interfaces
 // are owned by the use case that needs them, stated in its own vocabulary;
 // adapters in infrastructure/ implement them.
-import type { DocumentType, FirmEntityPreference } from "../../domain/document/model";
+import type {
+  BlockKind,
+  DocumentBlock,
+  DocumentType,
+  FirmEntityPreference,
+  StandardBlock,
+} from "../../domain/document/model";
 
 export interface NewFirmEntityPreference {
   readonly id: string;
@@ -76,4 +82,79 @@ export interface FirmEntityPreferenceRepository {
  */
 export interface DocumentReferences {
   next(tenantId: string, type: DocumentType, year: number): Promise<number>;
+}
+
+// ── The prose blocks (G1.7) ────────────────────────────────────────────────
+
+export interface NewStandardBlock {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: BlockKind;
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  readonly jurisdiction: string | null;
+}
+
+export interface StandardBlockEdit {
+  readonly body?: string | undefined;
+  readonly isHeading?: boolean | undefined;
+  readonly sortOrder?: number | undefined;
+  readonly jurisdiction?: string | null | undefined;
+  readonly isActive?: boolean | undefined;
+}
+
+/**
+ * Which document a block belongs to. Exactly one of the two, mirroring the
+ * CHECK on `crm.document_block` — the type makes the same statement the
+ * constraint does, so a caller cannot assemble the row the database refuses.
+ */
+export type BlockOwner =
+  | { readonly kind: "proposal"; readonly id: string }
+  | { readonly kind: "engagement_letter"; readonly id: string };
+
+export interface NewDocumentBlock {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly owner: BlockOwner;
+  readonly kind: BlockKind;
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  readonly sourceId: string | null;
+}
+
+export interface DocumentBlockEdit {
+  readonly body?: string | undefined;
+  readonly isHeading?: boolean | undefined;
+  readonly sortOrder?: number | undefined;
+}
+
+export interface StandardBlockRepository {
+  /** Every row, retired ones included — the firm's own screen has to show what
+   *  it stopped printing, or "where did this line come from" has no answer. */
+  list(tenantId: string): Promise<readonly StandardBlock[]>;
+  find(tenantId: string, id: string): Promise<StandardBlock | null>;
+  add(b: NewStandardBlock): Promise<StandardBlock>;
+  edit(tenantId: string, id: string, edit: StandardBlockEdit): Promise<StandardBlock>;
+}
+
+export interface DocumentBlockRepository {
+  list(tenantId: string, owner: BlockOwner): Promise<readonly DocumentBlock[]>;
+  find(tenantId: string, id: string): Promise<DocumentBlock | null>;
+  /**
+   * The COPY, in one statement.
+   *
+   * One call rather than one per line, because a document that carries half the
+   * firm's exclusions is worse than one that carries none: the second is
+   * obviously unfinished and the first reads as a deliberate list. The adapter
+   * writes them in a single INSERT, so the transaction is the guarantee.
+   */
+  addMany(blocks: readonly NewDocumentBlock[]): Promise<readonly DocumentBlock[]>;
+  add(b: NewDocumentBlock): Promise<DocumentBlock>;
+  edit(tenantId: string, id: string, edit: DocumentBlockEdit): Promise<DocumentBlock>;
+  /** A line struck off a document before it went out. `bib_app` holds no DELETE
+   *  grant, so this is the repository's own concern to express honestly — see
+   *  the adapter. */
+  remove(tenantId: string, id: string): Promise<void>;
 }

@@ -46,6 +46,7 @@ import { readServiceBody } from "../../domain/config/model";
 import {
   isBillingFrequency,
   isJurisdiction,
+  ANY_JURISDICTION,
   normalizeJurisdiction,
   outOfPocketProblem,
   BILLING_FREQUENCIES,
@@ -81,8 +82,8 @@ import type {
   DocumentIdentity,
   PolicyDirectory,
   ProposalFilters,
-  ProposalRecord,
   ProposalRepository,
+  ProposalView,
   ProposalSummary,
   ServiceCatalogue,
   ShareLinkTokens,
@@ -240,6 +241,22 @@ export class ProposalService {
       validUntil: input.validUntil ?? null,
     });
 
+    // The firm's standard prose, COPIED onto this document (G1.7). After the
+    // row exists, because the blocks hang off it; before the event, because a
+    // drafted proposal is one that already says what the firm always says.
+    //
+    // The jurisdiction is the CLIENT's when it is known, and `*` when it is
+    // not. That is not a shrug: `blocksFor` copies an unscoped line always and
+    // a scoped line only for its own country, so an unknown country takes the
+    // lines that are true everywhere and leaves out the ones that might not be.
+    // The alternative — copying everything — is how "exclusive of GST" reaches
+    // a UAE proposal.
+    await this.deps.documents.seedBlocks(
+      proposal.tenantId,
+      { kind: "proposal", id: proposal.id },
+      input.clientJurisdiction ?? ANY_JURISDICTION,
+    );
+
     await this.deps.events.recordEvent({
       tenantId: proposal.tenantId,
       verb: "proposal.drafted",
@@ -367,10 +384,17 @@ export class ProposalService {
     await this.deps.proposals.removeLine(tenantId, proposalId, lineId);
   }
 
-  async describe(tenantId: string, proposalId: string): Promise<ProposalRecord> {
+  async describe(tenantId: string, proposalId: string): Promise<ProposalView> {
     const record = await this.deps.proposals.describe(tenantId, proposalId);
     if (record === null) throw new ProposalNotFound(proposalId);
-    return record;
+    // The one thing the proposal repository does not own: the document's own
+    // prose lives in the document module's table, reached through the same seam
+    // this use case already asks for references and issuing entities.
+    const blocks = await this.deps.documents.listBlocks(tenantId, {
+      kind: "proposal",
+      id: proposalId,
+    });
+    return { ...record, blocks };
   }
 
   async list(tenantId: string, filters: ProposalFilters): Promise<readonly ProposalSummary[]> {

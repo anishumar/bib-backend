@@ -6,6 +6,7 @@ import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
 import type {
   BillingFrequency,
+  DocumentBlock,
   DocumentTerms,
   DocumentType,
   OutOfPocketEstimate,
@@ -34,6 +35,27 @@ import type {
 export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
+  /**
+   * COPY the firm's standard prose onto this new document (G1.7).
+   *
+   * A copy, not a reference: editing the standard exclusions changes the NEXT
+   * document and never one already issued. `jurisdiction` decides which lines
+   * come — an unscoped line always, a scoped one only for its own country, so
+   * "All fees are exclusive of GST as applicable" cannot reach a UAE document.
+   */
+  seedBlocks(
+    tenantId: string,
+    owner: { readonly kind: "proposal"; readonly id: string },
+    jurisdiction: string,
+  ): Promise<unknown>;
+  /**
+   * What this document's prose says NOW — the copy it owns, not the firm's
+   * standard set. A struck-off line is not returned.
+   */
+  listBlocks(
+    tenantId: string,
+    owner: { readonly kind: "proposal"; readonly id: string },
+  ): Promise<readonly DocumentBlock[]>;
 }
 
 export interface NewProposal {
@@ -111,6 +133,25 @@ export interface ProposalRecord {
     readonly displayName: string | null;
     readonly email: string;
   } | null;
+}
+
+/**
+ * A proposal as a SCREEN or a renderer gets it: the record, plus the document's
+ * own prose (G1.7).
+ *
+ * `blocks` is not on `ProposalRecord` because the repository does not own that
+ * table — the document use case does, and quoting reaches it through the same
+ * `DocumentIdentity` seam it already uses for references and issuing entities.
+ * The alternative was a second join in the proposal adapter, which would put
+ * knowledge of `crm.document_block` in two places and let them drift.
+ *
+ * It travels WITH the document rather than behind a second call because it is
+ * part of what the document says. A renderer that fetched lines and then had to
+ * remember a third request would print a proposal with no exclusions on it,
+ * which reads as the firm asserting no limits at all on the work it quoted for.
+ */
+export interface ProposalView extends ProposalRecord {
+  readonly blocks: readonly DocumentBlock[];
 }
 
 /**

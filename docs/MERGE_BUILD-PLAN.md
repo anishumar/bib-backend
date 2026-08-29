@@ -810,7 +810,53 @@ open and are recorded above; neither blocks Phase 2.
   > own scope wording, which is worse.
   >
   > Gate: `npm run check` 643 · `test:integration` 204 · `smoke` 182.
-- [ ] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
+- [x] `(A)` **G1.7** **The prose blocks.** `document_block` (`kind` in `exclusion` / `commercial` / `team`, `body`, `is_heading`, `sort_order`) owned by a document, and `standard_document_block` (the same plus `jurisdiction` and `is_active`) as the firm's standard set, **copied** onto each new document at creation. *Acc: a firm edits its standard exclusions and the next letter changes while every issued letter still says what it said; a UAE proposal does not print an Indian tax note.* — **§4.7.** One row per line rather than one blob per block, because that is how they are edited — a line at a time, reordered, removed — and a single text column makes "delete the third exclusion" a string operation with nothing for the UI to attach an edit control to. `jurisdiction` is load-bearing: *"All fees are exclusive of GST as applicable"* is wrong on a UAE proposal in exactly the way the firm already caught in its own template.
+  > **Done (2026-08-29). Migration 0025.** Both halves of the acceptance hold end to end: a firm
+  > rewrites its standard exclusion and the letter already issued still says what it said while
+  > the NEXT one carries the change, and a UAE letter does not print the Indian GST note.
+  >
+  > **COPIED, not referenced, and that is the whole design.** `standard_document_block` is what
+  > the firm maintains; `document_block` is what a document SAYS. A reference would be cheaper
+  > and would silently rewrite what every issued proposal and SIGNED letter says the firm
+  > excluded. It is the config registry's pinning argument reached from the other direction —
+  > and here a copy beats a pin, because these lines are meant to be EDITED per document (a
+  > client negotiates an exclusion away), which a pinned version cannot express.
+  >
+  > **ONE TABLE, TWO NULLABLE PARENTS**, exactly one set by CHECK — against the local precedent
+  > of separate line tables, and the reason is that those two differ in substance (an EL line's
+  > entity is NOT NULL, one carries `removed_at` and `effective_from`, one carries the
+  > overrides). A block is the same object on both documents, so two tables would duplicate the
+  > freeze trigger, the copy, the repository and the API to express a difference that does not
+  > exist. The composite FKs are MATCH SIMPLE, so a NULL parent skips its check.
+  >
+  > **The signed-letter freeze applies for free** — `crm.refuse_signed_child_change()` resolves
+  > its parent from `engagement_letter_id`, which this table has, and its guards are IS NOT
+  > NULL so a proposal's blocks are untouched. The exclusions a client agreed to are part of
+  > what they agreed to.
+  >
+  > **`removed_at` is the THIRD soft delete in the product**, and CLAUDE.md enumerates the other
+  > two by name, so it is argued rather than assumed: it is the same thing they are — a line
+  > struck off a document in draft — and "delete the third exclusion" is half of why this is a
+  > row per line at all. `bib_app` holds no DELETE grant on any table, so it is the only honest
+  > way to express removal.
+  >
+  > **A NEW GUARD, and it found something the moment it existed.** The freeze sweep enumerated
+  > the COLUMNS of a line from the catalogue but never the child TABLES — `line` and `clause`
+  > were frozen because somebody wrote two CREATE TRIGGER statements, and a third child table
+  > would have arrived unprotected with every test green. It is now asked of the catalogue. On
+  > its first run it named **`crm.engagement`**, which is a DELIBERATE exception now written
+  > down rather than left as a hole: signing CREATES those rows, so a freeze over them would
+  > refuse the act of signing, and `recordAdvance` moves them afterwards by design. The line is
+  > **what the letter SAYS is frozen; what the letter CAUSED has its own lifecycle**, and adding
+  > a second name to that list is what needs an argument.
+  >
+  > **The verb registry earned its keep twice.** `standard_document_block.set` had to be
+  > registered and documented in `EVENT-CONTRACT.md` before it could be emitted, and the
+  > exhaustiveness guard added with G1.8 caught all six new `DocumentError` codes as a COMPILE
+  > error the moment they were declared — the G3.3 bug, refusing to happen a second time.
+  >
+  > Gate: `npm run check` 716 · `test:integration` 222 · `smoke` **211 passed, 0 failed**.
+
 - [x] `(A)` **G1.8** **Governing law and courts.** Extend `ClauseBody` — currently `{title, text, jurisdictions[]}` — or add a clause-set concept carrying `governing_law` and `courts`, resolved from the **issuing entity's** jurisdiction (G1.2). *Acc: a letter issued by the US entity cannot print Indian governing law.* — **§4.7.** The sharpest finding of the original project: the real letter was issued by 10x US to a US client and its standard terms named Indian law and Delhi courts. The firm's verdict was flat — *"No. This is wrong. For US it's US. For UAE it's DIFC in Dubai etc."* Clauses are tagged by jurisdiction today, which is not the same thing: nothing anywhere holds the governing law, so the bug the firm already caught is representable again.
   > **[~] Schema half done (2026-08-28); the wiring half is still open.** `ClauseBody` gains
   > `governingLaw` and `courts`, each a `JurisdictionalTerm | null` — an ISO 3166-1 code AND

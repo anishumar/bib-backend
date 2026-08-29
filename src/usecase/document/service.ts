@@ -18,29 +18,53 @@ import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type { DocumentType } from "../../domain/document/model";
+import type {
+  BlockKind,
+  DocumentBlock,
+  StandardBlock,
+} from "../../domain/document/model";
 import {
   ANY_JURISDICTION,
+  blocksFor,
   formatDocumentRef,
+  isBlockKind,
+  isJurisdiction,
   isJurisdictionKey,
+  normalizeJurisdiction,
   normalizeJurisdictionKey,
   refYear,
   resolveIssuingEntity,
+  BLOCK_KINDS,
 } from "../../domain/document/model";
 import {
+  BlankBlockBody,
+  BlocksAlreadySeeded,
+  DocumentBlockNotFound,
   FirmEntityNotFound,
+  InvalidBlockKind,
   InvalidJurisdictionKey,
+  InvalidSortOrder,
   NoIssuingEntity,
+  StandardBlockNotFound,
 } from "../../domain/document/errors";
 import type {
+  BlockOwner,
+  DocumentBlockEdit,
+  DocumentBlockRepository,
   DocumentReferences,
   FirmEntity,
   FirmEntityPreferenceRecord,
   FirmEntityPreferenceRepository,
+  NewDocumentBlock,
+  StandardBlockEdit,
+  StandardBlockRepository,
 } from "./ports";
 
 export interface Deps {
   readonly preferences: FirmEntityPreferenceRepository;
   readonly refs: DocumentReferences;
+  readonly standardBlocks: StandardBlockRepository;
+  readonly blocks: DocumentBlockRepository;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -146,6 +170,234 @@ export class DocumentService {
     const entity = await this.deps.preferences.findEntity(tenantId, firmEntityPartyId);
     if (entity === null) throw new FirmEntityNotFound(firmEntityPartyId);
     return entity;
+  }
+
+  // ── The prose blocks (G1.7) ──────────────────────────────────────────────
+
+  /** The firm's standard set, retired lines included — the screen that
+   *  maintains it has to show what it stopped printing. */
+  async listStandardBlocks(tenantId: string): Promise<readonly StandardBlock[]> {
+    return this.deps.standardBlocks.list(tenantId);
+  }
+
+  async addStandardBlock(
+    input: {
+      readonly tenantId: string;
+      readonly kind: string;
+      readonly body: string;
+      readonly isHeading?: boolean | undefined;
+      readonly sortOrder: number;
+      readonly jurisdiction?: string | null | undefined;
+    },
+    actor: Actor,
+  ): Promise<StandardBlock> {
+    const kind = this.blockKindOrThrow(input.kind);
+    const body = this.bodyOrThrow(input.body);
+    this.sortOrderOrThrow(input.sortOrder);
+    const jurisdiction = this.blockJurisdictionOrThrow(input.jurisdiction ?? null);
+
+    const saved = await this.deps.standardBlocks.add({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      kind,
+      body,
+      isHeading: input.isHeading ?? false,
+      sortOrder: input.sortOrder,
+      jurisdiction,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "standard_document_block.set",
+      objectId: saved.id,
+      actor,
+      // Ids and machine facts. The BODY is deliberately absent: it is prose a
+      // person wrote, this log cannot be erased, and the row keeps it where it
+      // can be. What the log is for here is that the standard set CHANGED, when,
+      // and by whom — the same reasoning `firm_entity_preference.set` gives for
+      // omitting its note.
+      payload: {
+        kind: saved.kind,
+        sortOrder: saved.sortOrder,
+        jurisdiction: saved.jurisdiction,
+        isHeading: saved.isHeading,
+        isActive: saved.isActive,
+      },
+    });
+    return saved;
+  }
+
+  /**
+   * Edit or retire one standard line.
+   *
+   * Retiring is `isActive: false` and never a delete — the same distinction
+   * `staff_grade` draws. A line the firm has moved on from stays readable
+   * because documents issued while it was in force copied it, and "where did
+   * this line come from" has to resolve years later.
+   */
+  async editStandardBlock(
+    tenantId: string,
+    id: string,
+    edit: StandardBlockEdit,
+    actor: Actor,
+  ): Promise<StandardBlock> {
+    const existing = await this.deps.standardBlocks.find(tenantId, id);
+    if (existing === null) throw new StandardBlockNotFound(id);
+
+    const patch: StandardBlockEdit = {
+      ...(edit.body === undefined ? {} : { body: this.bodyOrThrow(edit.body) }),
+      ...(edit.isHeading === undefined ? {} : { isHeading: edit.isHeading }),
+      ...(edit.sortOrder === undefined
+        ? {}
+        : { sortOrder: this.sortOrderOrThrow(edit.sortOrder) }),
+      ...(edit.jurisdiction === undefined
+        ? {}
+        : { jurisdiction: this.blockJurisdictionOrThrow(edit.jurisdiction) }),
+      ...(edit.isActive === undefined ? {} : { isActive: edit.isActive }),
+    };
+
+    const saved = await this.deps.standardBlocks.edit(tenantId, id, patch);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "standard_document_block.set",
+      objectId: saved.id,
+      actor,
+      payload: {
+        kind: saved.kind,
+        sortOrder: saved.sortOrder,
+        jurisdiction: saved.jurisdiction,
+        isHeading: saved.isHeading,
+        isActive: saved.isActive,
+      },
+    });
+    return saved;
+  }
+
+  /**
+   * COPY the firm's standard set onto a new document — G1.7's acceptance.
+   *
+   * A copy, not a reference: editing the standard exclusions changes the NEXT
+   * document and never one already issued. The filtering rule is the domain's
+   * `blocksFor` — retired lines are not copied, and a line scoped to another
+   * country is not copied while an unscoped one always is, which is what keeps
+   * "All fees are exclusive of GST as applicable" off a UAE proposal.
+   *
+   * Refuses a second call rather than repeating or ignoring it: repeating would
+   * print the firm's exclusions twice, and ignoring would make this method mean
+   * two different things depending on what happened before.
+   */
+  async seedBlocks(
+    tenantId: string,
+    owner: BlockOwner,
+    jurisdiction: string,
+  ): Promise<readonly DocumentBlock[]> {
+    const existing = await this.deps.blocks.list(tenantId, owner);
+    if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
+
+    const standard = await this.deps.standardBlocks.list(tenantId);
+    const chosen = blocksFor(standard, normalizeJurisdiction(jurisdiction));
+    if (chosen.length === 0) return [];
+
+    // Renumbered from 1 WITHIN EACH KIND rather than carrying the standard set's
+    // own numbers across. The standard list is not contiguous — a firm inserts
+    // between two lines and retires others — and a document that prints
+    // exclusions 1, 4, 5 has a reader wondering what 2 and 3 said.
+    const next = new Map<BlockKind, number>();
+    const rows: NewDocumentBlock[] = chosen.map((b) => {
+      const order = (next.get(b.kind) ?? 0) + 1;
+      next.set(b.kind, order);
+      return {
+        id: this.deps.ids.newId(),
+        tenantId,
+        owner,
+        kind: b.kind,
+        body: b.body,
+        isHeading: b.isHeading,
+        sortOrder: order,
+        sourceId: b.id,
+      };
+    });
+    return this.deps.blocks.addMany(rows);
+  }
+
+  listBlocks(tenantId: string, owner: BlockOwner): Promise<readonly DocumentBlock[]> {
+    return this.deps.blocks.list(tenantId, owner);
+  }
+
+  /** A line written by hand on one document — a term this client negotiated
+   *  that is not in the firm's standard set. `sourceId` is null, which is what
+   *  lets a screen mark it as this document's own. */
+  async addBlock(input: {
+    readonly tenantId: string;
+    readonly owner: BlockOwner;
+    readonly kind: string;
+    readonly body: string;
+    readonly isHeading?: boolean | undefined;
+    readonly sortOrder: number;
+  }): Promise<DocumentBlock> {
+    const kind = this.blockKindOrThrow(input.kind);
+    const body = this.bodyOrThrow(input.body);
+    this.sortOrderOrThrow(input.sortOrder);
+    return this.deps.blocks.add({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      owner: input.owner,
+      kind,
+      body,
+      isHeading: input.isHeading ?? false,
+      sortOrder: input.sortOrder,
+      sourceId: null,
+    });
+  }
+
+  async editBlock(tenantId: string, id: string, edit: DocumentBlockEdit): Promise<DocumentBlock> {
+    const existing = await this.deps.blocks.find(tenantId, id);
+    if (existing === null) throw new DocumentBlockNotFound(id);
+    return this.deps.blocks.edit(tenantId, id, {
+      ...(edit.body === undefined ? {} : { body: this.bodyOrThrow(edit.body) }),
+      ...(edit.isHeading === undefined ? {} : { isHeading: edit.isHeading }),
+      ...(edit.sortOrder === undefined
+        ? {}
+        : { sortOrder: this.sortOrderOrThrow(edit.sortOrder) }),
+    });
+  }
+
+  /** Strike a line off a document. `removed_at`, because `bib_app` holds no
+   *  DELETE grant on any table in this database. */
+  async removeBlock(tenantId: string, id: string): Promise<void> {
+    const existing = await this.deps.blocks.find(tenantId, id);
+    if (existing === null) throw new DocumentBlockNotFound(id);
+    await this.deps.blocks.remove(tenantId, id);
+  }
+
+  private blockKindOrThrow(raw: string): BlockKind {
+    if (!isBlockKind(raw)) throw new InvalidBlockKind(raw, BLOCK_KINDS);
+    return raw;
+  }
+
+  /** Trimmed at the boundary, then refused if nothing is left. The database
+   *  CHECKs `btrim(body) <> ''` too; both are wanted, because a whitespace-only
+   *  line satisfies any NOT NULL and prints as a gap a reader takes for a term
+   *  somebody forgot to write. */
+  private bodyOrThrow(raw: string): string {
+    const body = raw.trim();
+    if (body === "") throw new BlankBlockBody();
+    return body;
+  }
+
+  private sortOrderOrThrow(n: number): number {
+    if (!Number.isInteger(n) || n < 1) throw new InvalidSortOrder(n);
+    return n;
+  }
+
+  /** NULL means "print everywhere" and is the ordinary case. A code is demanded
+   *  in canonical upper case for the reason G1.8 gives — the value is COMPARED,
+   *  and "in" is what a comparison would get. */
+  private blockJurisdictionOrThrow(raw: string | null): string | null {
+    if (raw === null) return null;
+    const j = normalizeJurisdiction(raw);
+    if (!isJurisdiction(j) || j !== raw) throw new InvalidJurisdictionKey(raw);
+    return j;
   }
 
   /**

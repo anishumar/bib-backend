@@ -315,3 +315,91 @@ export function outOfPocketProblem(
   }
   return null;
 }
+
+// ── The prose a document carries besides its priced lines (G1.7) ───────────
+//
+// Three lists appear on every proposal and every engagement letter: the general
+// scope EXCLUSIONS, the COMMERCIAL notes, and the TEAM the firm will deploy.
+// They are not clauses — a clause is a term of the contract, drawn from a
+// versioned library and pinned — they are the document's own prose, edited a
+// line at a time.
+
+/**
+ * Which of the three lists a line belongs to. Also the values in the `kind`
+ * CHECK on both block tables (migration 0025) — one vocabulary, two enforcers.
+ */
+export type BlockKind = "exclusion" | "commercial" | "team";
+
+export const BLOCK_KINDS: readonly BlockKind[] = ["exclusion", "commercial", "team"];
+
+export function isBlockKind(v: string): v is BlockKind {
+  return (BLOCK_KINDS as readonly string[]).includes(v);
+}
+
+/** One line of the firm's STANDARD set — what it maintains, not what any
+ *  document says. */
+export interface StandardBlock {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: BlockKind;
+  readonly body: string;
+  /** A section title rather than an item. Without it the team block — which is
+   *  a table with headings — either goes back into one text blob or needs a
+   *  second table. */
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  /** NULL prints everywhere; a code prints only on documents written for that
+   *  country. "All fees are exclusive of GST as applicable" is wrong on a UAE
+   *  proposal, which is a mistake the firm already caught in its own template. */
+  readonly jurisdiction: string | null;
+  /** Retired, never deleted — the same distinction `staff_grade` draws. A line
+   *  the firm has moved on from stays readable, because documents issued while
+   *  it was in force copied it and a reader asking where a line came from needs
+   *  it to resolve. */
+  readonly isActive: boolean;
+}
+
+/** One line of what a DOCUMENT says. A copy, owned by that document. */
+export interface DocumentBlock {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly kind: BlockKind;
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  /** Which standard line this was copied from, or null for one written by hand
+   *  on this document. A breadcrumb and not a foreign key: the standard row may
+   *  be retired or rewritten years later, and this must neither stop that nor
+   *  acquire its new wording. */
+  readonly sourceId: string | null;
+}
+
+/**
+ * Which standard lines a document written for `jurisdiction` should be seeded
+ * with, in the order they print.
+ *
+ * THE WHOLE RULE, in one pure function, because it is the acceptance of G1.7:
+ * an inactive line is never copied (the firm has moved on), and a line scoped
+ * to another country is never copied (the GST note must not reach a UAE
+ * proposal) while an unscoped line always is.
+ *
+ * The sort is (kind, sortOrder, id) — total, so two lines the firm gave the
+ * same order end up in a stable sequence rather than whatever the database
+ * returned that afternoon. `sort_order` is deliberately not unique (inserting
+ * between two lines would otherwise renumber the list), so ties are ordinary
+ * and the tiebreak is not a detail.
+ */
+export function blocksFor(
+  standard: readonly StandardBlock[],
+  jurisdiction: string,
+): readonly StandardBlock[] {
+  return standard
+    .filter((b) => b.isActive && (b.jurisdiction === null || b.jurisdiction === jurisdiction))
+    .slice()
+    .sort(
+      (a, b) =>
+        BLOCK_KINDS.indexOf(a.kind) - BLOCK_KINDS.indexOf(b.kind) ||
+        a.sortOrder - b.sortOrder ||
+        a.id.localeCompare(b.id),
+    );
+}

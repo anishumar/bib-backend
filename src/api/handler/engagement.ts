@@ -285,6 +285,22 @@ const LetterClauseSchema = z
   })
   .openapi("EngagementLetterClause");
 
+/** One line of a document's own prose (G1.7) — an exclusion, a commercial note,
+ *  or a row of the team block. A COPY the document owns, so editing the firm's
+ *  standard set changes the next document and never this one. */
+const DocumentBlockSchema = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string(),
+    isHeading: z.boolean(),
+    sortOrder: z.number().int(),
+    /** Which standard line it was copied from, or null for one written by hand
+     *  on this document — what lets a screen mark it as this document's own. */
+    sourceId: z.string().uuid().nullable(),
+  })
+  .openapi("EngagementLetterBlock");
+
 const EngagementSchema = z
   .object({
     id: z.string().uuid(),
@@ -341,6 +357,7 @@ const LetterRecordSchema = z
     supersededBy: DocumentRefSchema.nullable(),
     lines: z.array(LetterLineSchema),
     clauses: z.array(LetterClauseSchema),
+    blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
     engagements: z.array(EngagementSchema),
   })
@@ -792,6 +809,18 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       text: c.text,
       governingLaw: c.governingLaw === null ? null : { ...c.governingLaw },
       courts: c.courts === null ? null : { ...c.courts },
+    })),
+    // NOT redacted, for the same reason the clauses are not: what the firm
+    // undertook — and what it explicitly did NOT undertake — is the work, and
+    // somebody delivering it needs the exclusions even when they may not see
+    // the fee.
+    blocks: record.blocks.map((b) => ({
+      id: b.id,
+      kind: b.kind,
+      body: b.body,
+      isHeading: b.isHeading,
+      sortOrder: b.sortOrder,
+      sourceId: b.sourceId,
     })),
     totals: {
       gross: fees ? record.totals.gross : null,

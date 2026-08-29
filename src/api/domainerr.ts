@@ -285,13 +285,20 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "INVALID_JURISDICTION":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "INVALID_BLOCK_KIND":
+      case "BLANK_BLOCK_BODY":
+      case "INVALID_SORT_ORDER":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "FIRM_ENTITY_NOT_FOUND":
+      case "STANDARD_BLOCK_NOT_FOUND":
+      case "DOCUMENT_BLOCK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // NO_ISSUING_ENTITY is a CONFLICT rather than a validation failure: the
       // request is well formed and resending it changes nothing. What is
       // missing is a row in the firm's own configuration, and the message names
       // the call that adds it.
       case "NO_ISSUING_ENTITY":
+      case "BLOCKS_ALREADY_SEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

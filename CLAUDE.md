@@ -250,9 +250,11 @@ Two rules that came out of it, and both are now enforced by tests:
 - PII stays out of any append-only log (erasability).
 - **Nothing is hard-deleted, and nothing in `core` is soft-deleted either.** `bib_app` holds
   no DELETE grant on a single table in this database, so removal is impossible at the
-  database level rather than merely unimplemented. The only soft delete in the product is
-  `removed_at` on `crm.proposal_line` and `crm.engagement_letter_line` — a line struck off a
-  document before it went out. Every state transition writes an event naming its actor.
+  database level rather than merely unimplemented. The only soft deletes in the product are
+  `removed_at` on `crm.proposal_line`, `crm.engagement_letter_line` and `crm.document_block`
+  — all three the same thing, a line struck off a document before it went out. A fourth needs
+  the same argument: it is a LINE OF A DOCUMENT, removed while that document was a draft.
+  Every state transition writes an event naming its actor.
 
 **Parties are permanent — there is no `deleted_at` in `core` and there never will be (G0.3).**
 A client created by mistake is ARCHIVED, not removed: `core.party.archived_at` (migration 0035)
@@ -320,6 +322,12 @@ npm run smoke              # end-to-end against a RUNNING server: seeds a firm w
                            # inside a minute throttle, and the script says so.
 npm run arch       # the import wall, standalone
 ```
+
+**A new error family — or a new code in an existing one — is a COMPILE error until it is mapped.**
+Every family's switch in `api/domainerr.ts` ends `default: return unmapped(err.code)`, and
+`unmapped` takes `never`. Without it an unmapped code fell out of its `if` and landed on the final
+`return 500`: that is how `StaffGradeError` shipped with every refusal answering 500 instead of
+400/404/409, invisible to unit tests, which assert on the thrown sentinel and are perfectly happy.
 
 CI runs `npm run check` on every PR; a pre-push hook runs it locally. If the gate is red,
 the work is not done — fix it, do not disable the rule. If a rule is genuinely wrong, that is
@@ -532,6 +540,53 @@ difference makes everything here stricter than its proposal counterpart.
   `contract.activated` — the trigger T2.4's scheduler consumes — is not emitted until the
   advance is recorded. **Its honest limit:** a person attests the money arrived, because
   payments (T3.5) do not exist. The gate is enforced; its confirmation is an attestation.
+
+## What a document SAYS — its prose, and whose law it names (G1.7, G1.8)
+
+Two things sit beside a document's priced lines, and neither is a clause.
+
+**The prose blocks are COPIED onto a document, never referenced.** `crm.standard_document_block`
+is what the firm maintains — its exclusions, its commercial notes, its team block — and
+`crm.document_block` is what one proposal or one letter actually says. A new document copies the
+standard set at creation and owns those rows from then on, so editing the standard exclusions
+changes the NEXT document and never one already issued. That is the config registry's pinning
+argument reached from the other direction, and here a copy beats a pin because these lines are
+meant to be edited per document: a client negotiates an exclusion away, which a pinned version
+cannot express.
+
+**One row per line, not one blob per block**, because that is how they are edited — a line at a
+time, reordered, struck out. A single `exclusions text` column makes "delete the third exclusion"
+a string operation with nothing stable for a screen to attach a control to. `is_heading` is what
+keeps that from costing anything: the team block is a table with headings.
+
+**`jurisdiction` on a standard line is load-bearing.** NULL prints everywhere; a code prints only
+on a document written for that country. "All fees are exclusive of GST as applicable" is wrong on
+a UAE proposal, and it is a mistake the firm already caught in its own template. The filter is
+`blocksFor` in the domain: retired lines are never copied, an unscoped line always is, a scoped
+one only to its own country — and an UNKNOWN country (`*`, an ordinary state on a proposal) takes
+only what is true everywhere, because that is the safe direction.
+
+One table with two nullable parents and a CHECK, against the local precedent of separate line
+tables — those two differ in substance, a block does not. It inherits the signed-letter freeze for
+free, since `crm.refuse_signed_child_change()` resolves its parent from `engagement_letter_id`.
+
+**Whose law a letter names is checked against the ISSUING ENTITY.** `ClauseBody` carries
+`governingLaw` and `courts`, each an ISO code AND the words the document prints — the code cannot
+print ("the laws of the State of Delaware" does not follow from `US`) and the words cannot be
+compared. `addClause` refuses a term that is not the issuing entity's, which is the firm's sharpest
+finding made unrepresentable: its real letter was issued by the US entity and named Indian law and
+Delhi courts, and a human review let it out.
+
+That check is **not** the clause's `jurisdictions` field, and conflating them loses the bug. That
+field says where a clause may be USED; the real clause was applicable everywhere and every word of
+it was true. This says what the clause SAYS, against who is actually contracting.
+
+**An unregistered issuer is refused too**, and it is the case that decides whether the check is
+worth anything: `seedFirmEntity` writes an organization with no `core.legal_entity` row, so every
+firm's default issuer has no jurisdiction — which is exactly the position the original letter was
+written from. Its limit, stated: a deliberate foreign choice (English law under an Indian entity, a
+neutral arbitral seat) is now unrepresentable. Making the exception representable belongs on the
+LETTER and is a decision nobody has taken.
 
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 

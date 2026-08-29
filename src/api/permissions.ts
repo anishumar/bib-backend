@@ -198,6 +198,33 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/firm-entities/preferences"), "config:read" as const],
   [routeKey("POST", "/api/v1/firm-entities/preferences"), "tenant:admin" as const],
 
+  // THE FIRM'S STANDARD PROSE (G1.7) — the same split, for the same reason.
+  // Reading is `config:read`: an associate drafting a letter should see which
+  // exclusions it will carry. Writing is `tenant:admin`, because editing the
+  // standard set changes what EVERY document written from here on says — an
+  // exclusion quietly removed is a limit the firm stops asserting on work it
+  // has not been paid for yet, and nothing on a later letter would show it was
+  // ever there. Retiring travels the same route (PATCH with isActive), so it is
+  // covered by the same entry rather than needing one of its own.
+  [routeKey("GET", "/api/v1/document-blocks/standard"), "config:read" as const],
+  [routeKey("POST", "/api/v1/document-blocks/standard"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/document-blocks/standard/{blockId}"), "tenant:admin" as const],
+
+  // A DOCUMENT's own blocks are `party:write`, NOT `tenant:admin`, and the
+  // difference is the point of the copy. Editing the standard set changes every
+  // document from here on and is an administrator's decision; striking an
+  // exclusion off ONE proposal because this client negotiated it away is what
+  // drafting IS, and it is the same permission every other drafting route on
+  // both documents already takes.
+  //
+  // `party:write` rather than a `document:write` of its own, for the reason the
+  // proposal routes above give: a new permission is not a line here, it is a
+  // migration that publishes a new version of every default role, and it would
+  // buy a distinction nobody has asked for.
+  [routeKey("POST", "/api/v1/document-blocks"), "party:write" as const],
+  [routeKey("PATCH", "/api/v1/document-blocks/{blockId}"), "party:write" as const],
+  [routeKey("DELETE", "/api/v1/document-blocks/{blockId}"), "party:write" as const],
+
   // THE CONFIGURATION REGISTRY (T2.5). Reading is broad — an associate building
   // a proposal quotes from the service catalogue — and WRITING is `tenant:admin`
   // rather than a `config:write` of its own.

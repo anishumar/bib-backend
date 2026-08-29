@@ -23,7 +23,7 @@ import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { ProposalService } from "../../usecase/proposal/service";
-import type { ProposalRecord, ProposalSummary } from "../../usecase/proposal/ports";
+import type { ProposalRecord, ProposalSummary, ProposalView } from "../../usecase/proposal/ports";
 import type { ProposalStatus } from "../../domain/proposal/model";
 import type { BillingFrequency } from "../../domain/document/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
@@ -276,6 +276,22 @@ const ApproverSchema = z
   })
   .nullable();
 
+/** One line of a document's own prose (G1.7) — an exclusion, a commercial note,
+ *  or a row of the team block. A COPY the document owns, so editing the firm's
+ *  standard set changes the next document and never this one. */
+const DocumentBlockSchema = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string(),
+    isHeading: z.boolean(),
+    sortOrder: z.number().int(),
+    /** Which standard line it was copied from, or null for one written by hand
+     *  on this document — what lets a screen mark it as this document's own. */
+    sourceId: z.string().uuid().nullable(),
+  })
+  .openapi("ProposalBlock");
+
 const ProposalRecordSchema = z
   .object({
     proposal: ProposalSchema,
@@ -283,6 +299,7 @@ const ProposalRecordSchema = z
     /** The issuing entity by NAME — a letterhead prints a name, not a uuid. */
     issuingEntity: PartyRefSchema,
     lines: z.array(ProposalLineSchema),
+    blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
     approvedBy: ApproverSchema,
   })
@@ -725,7 +742,7 @@ function toTotalsBody(
   };
 }
 
-function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof ProposalRecordSchema> {
+function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof ProposalRecordSchema> {
   return {
     proposal: toProposalBody(record.proposal, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
@@ -756,6 +773,17 @@ function toRecordBody(record: ProposalRecord, fees: boolean): z.infer<typeof Pro
       billingFrequency: l.line.billingFrequency,
       pricingNote: l.line.pricingNote,
       oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
+    })),
+    // NOT redacted by the fee axis. What the firm will and will NOT do is the
+    // work, and somebody delivering it needs the exclusions even when they may
+    // not see the money.
+    blocks: record.blocks.map((b) => ({
+      id: b.id,
+      kind: b.kind,
+      body: b.body,
+      isHeading: b.isHeading,
+      sortOrder: b.sortOrder,
+      sourceId: b.sourceId,
     })),
     totals: toTotalsBody(record.totals, fees),
     approvedBy: record.approvedBy === null ? null : { ...record.approvedBy },

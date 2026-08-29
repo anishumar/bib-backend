@@ -25,6 +25,10 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
+import {
+  PostgresDocumentBlockRepository,
+  PostgresStandardBlockRepository,
+} from "../../src/infrastructure/postgres/block-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
@@ -44,6 +48,8 @@ const documentRepository = new PostgresDocumentRepository(app);
 const documents = new DocumentService({
   preferences: documentRepository,
   refs: documentRepository,
+  standardBlocks: new PostgresStandardBlockRepository(app),
+  blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
 });

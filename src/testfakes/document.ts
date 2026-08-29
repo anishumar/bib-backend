@@ -8,14 +8,26 @@
 // a transaction boundary, and a fake asserting it would be asserting its own
 // behaviour. tests/document/reference.integration.test.ts proves it against
 // real Postgres, along with `UNIQUE (tenant_id, ref)`.
-import type { DocumentType, FirmEntityPreference } from "../domain/document/model";
+import type {
+  DocumentBlock,
+  DocumentType,
+  FirmEntityPreference,
+  StandardBlock,
+} from "../domain/document/model";
 import { ANY_JURISDICTION } from "../domain/document/model";
 import type {
+  BlockOwner,
+  DocumentBlockEdit,
+  DocumentBlockRepository,
   DocumentReferences,
   FirmEntity,
   FirmEntityPreferenceRecord,
   FirmEntityPreferenceRepository,
+  NewDocumentBlock,
   NewFirmEntityPreference,
+  NewStandardBlock,
+  StandardBlockEdit,
+  StandardBlockRepository,
 } from "../usecase/document/ports";
 import type { Deps } from "../usecase/document/service";
 import { DocumentService } from "../usecase/document/service";
@@ -129,14 +141,132 @@ export class FakeDocumentReferences implements DocumentReferences {
   }
 }
 
+/**
+ * The firm's standard prose set, in memory.
+ *
+ * STARTS EMPTY, and that is the honest default rather than a convenience: no
+ * migration seeds these, so a firm has no standard exclusions until somebody
+ * writes them. A fake that handed out a set would make every drafting test
+ * assert against prose nobody configured, and would hide the case a real firm
+ * spends its first week in.
+ */
+export class FakeStandardBlockRepo implements StandardBlockRepository {
+  readonly rows: StandardBlock[] = [];
+
+  list(tenantId: string): Promise<readonly StandardBlock[]> {
+    return Promise.resolve(
+      this.rows
+        .filter((b) => b.tenantId === tenantId)
+        .slice()
+        .sort((a, b) => a.kind.localeCompare(b.kind) || a.sortOrder - b.sortOrder),
+    );
+  }
+
+  find(tenantId: string, id: string): Promise<StandardBlock | null> {
+    return Promise.resolve(
+      this.rows.find((b) => b.tenantId === tenantId && b.id === id) ?? null,
+    );
+  }
+
+  add(b: NewStandardBlock): Promise<StandardBlock> {
+    const row: StandardBlock = { ...b, isActive: true };
+    this.rows.push(row);
+    return Promise.resolve(row);
+  }
+
+  edit(tenantId: string, id: string, e: StandardBlockEdit): Promise<StandardBlock> {
+    const at = this.rows.findIndex((b) => b.tenantId === tenantId && b.id === id);
+    const existing = this.rows[at];
+    if (existing === undefined) throw new Error(`no standard block ${id}`);
+    const row: StandardBlock = {
+      ...existing,
+      ...(e.body === undefined ? {} : { body: e.body }),
+      ...(e.isHeading === undefined ? {} : { isHeading: e.isHeading }),
+      ...(e.sortOrder === undefined ? {} : { sortOrder: e.sortOrder }),
+      // `undefined` means unchanged and `null` means "print everywhere" — the
+      // same distinction the adapter's CASE expression exists for, kept here so
+      // the fake cannot disagree with it.
+      ...(e.jurisdiction === undefined ? {} : { jurisdiction: e.jurisdiction }),
+      ...(e.isActive === undefined ? {} : { isActive: e.isActive }),
+    };
+    this.rows[at] = row;
+    return Promise.resolve(row);
+  }
+}
+
+/** What each document says, in memory. Removal is `removed`, mirroring
+ *  `removed_at` — `bib_app` holds no DELETE grant, and a fake that spliced the
+ *  array would be modelling an operation the product cannot perform. */
+export class FakeDocumentBlockRepo implements DocumentBlockRepository {
+  readonly rows: (DocumentBlock & { owner: BlockOwner; removed: boolean })[] = [];
+
+  list(tenantId: string, owner: BlockOwner): Promise<readonly DocumentBlock[]> {
+    return Promise.resolve(
+      this.rows
+        .filter(
+          (b) =>
+            b.tenantId === tenantId &&
+            !b.removed &&
+            b.owner.kind === owner.kind &&
+            b.owner.id === owner.id,
+        )
+        .slice()
+        .sort((a, b) => a.kind.localeCompare(b.kind) || a.sortOrder - b.sortOrder),
+    );
+  }
+
+  find(tenantId: string, id: string): Promise<DocumentBlock | null> {
+    return Promise.resolve(
+      this.rows.find((b) => b.tenantId === tenantId && b.id === id && !b.removed) ?? null,
+    );
+  }
+
+  addMany(blocks: readonly NewDocumentBlock[]): Promise<readonly DocumentBlock[]> {
+    const saved = blocks.map((b) => ({ ...b, removed: false }));
+    this.rows.push(...saved);
+    return Promise.resolve(saved);
+  }
+
+  async add(b: NewDocumentBlock): Promise<DocumentBlock> {
+    const [saved] = await this.addMany([b]);
+    if (saved === undefined) throw new Error("document block insert returned no row");
+    return saved;
+  }
+
+  edit(tenantId: string, id: string, e: DocumentBlockEdit): Promise<DocumentBlock> {
+    const at = this.rows.findIndex((b) => b.tenantId === tenantId && b.id === id && !b.removed);
+    const existing = this.rows[at];
+    if (existing === undefined) throw new Error(`no document block ${id}`);
+    const row = {
+      ...existing,
+      ...(e.body === undefined ? {} : { body: e.body }),
+      ...(e.isHeading === undefined ? {} : { isHeading: e.isHeading }),
+      ...(e.sortOrder === undefined ? {} : { sortOrder: e.sortOrder }),
+    };
+    this.rows[at] = row;
+    return Promise.resolve(row);
+  }
+
+  remove(tenantId: string, id: string): Promise<void> {
+    const at = this.rows.findIndex((b) => b.tenantId === tenantId && b.id === id);
+    const existing = this.rows[at];
+    if (existing !== undefined) this.rows[at] = { ...existing, removed: true };
+    return Promise.resolve();
+  }
+}
+
 export function makeDocumentFakes(): Deps & {
   preferences: FakePreferenceRepo;
   refs: FakeDocumentReferences;
+  standardBlocks: FakeStandardBlockRepo;
+  blocks: FakeDocumentBlockRepo;
   events: RecordingEventSink;
 } {
   return {
     preferences: new FakePreferenceRepo(),
     refs: new FakeDocumentReferences(),
+    standardBlocks: new FakeStandardBlockRepo(),
+    blocks: new FakeDocumentBlockRepo(),
     ids: new FakeIds(),
     events: new RecordingEventSink(),
   };

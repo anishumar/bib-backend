@@ -17,6 +17,7 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { DocumentService } from "../../usecase/document/service";
+import type { BlockKind, DocumentBlock, StandardBlock } from "../../domain/document/model";
 
 export interface DocumentDeps {
   readonly service: DocumentService;
@@ -107,6 +108,208 @@ const setRoute = createRoute({
   },
 });
 
+// ── The prose blocks (G1.7) ─────────────────────────────────────────────────
+
+const StandardBlockSchema = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string(),
+    /** A section title rather than an item — the team block is a table with
+     *  headings, and without this it goes back into one text blob. */
+    isHeading: z.boolean(),
+    sortOrder: z.number().int(),
+    /** NULL prints everywhere; a code prints only on documents written for that
+     *  country. "Exclusive of GST" on a UAE proposal is the mistake it stops. */
+    jurisdiction: z.string().length(2).nullable(),
+    /** Retired, never deleted. A line the firm moved on from stays readable,
+     *  because documents issued while it was in force copied it. */
+    isActive: z.boolean(),
+  })
+  .openapi("StandardDocumentBlock");
+
+const StandardBlocksResponse = z
+  .object({ blocks: z.array(StandardBlockSchema) })
+  .openapi("StandardDocumentBlocksResponse");
+
+const AddStandardBlockRequest = z
+  .object({
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string().min(1).max(4000),
+    isHeading: z.boolean().optional(),
+    sortOrder: z.number().int().min(1),
+    jurisdiction: z.string().length(2).nullable().optional(),
+  })
+  .openapi("AddStandardDocumentBlockRequest");
+
+const EditStandardBlockRequest = z
+  .object({
+    body: z.string().min(1).max(4000).optional(),
+    isHeading: z.boolean().optional(),
+    sortOrder: z.number().int().min(1).optional(),
+    /** `null` sets it back to "print everywhere", which is a real edit and a
+     *  different thing from leaving the field out. */
+    jurisdiction: z.string().length(2).nullable().optional(),
+    isActive: z.boolean().optional(),
+  })
+  .openapi("EditStandardDocumentBlockRequest");
+
+const listBlocksRoute = createRoute({
+  method: "get",
+  path: "/api/v1/document-blocks/standard",
+  tags: ["firm-entities"],
+  summary: "The firm's standard prose — exclusions, commercial notes, the team block",
+  description:
+    "The set COPIED onto each new proposal and engagement letter. Editing it changes the next " +
+    "document and never one already issued. Retired lines are included: a document issued " +
+    "while one was live copied it, and 'where did this line come from' has to resolve.",
+  responses: {
+    200: {
+      description: "The standard set",
+      content: { "application/json": { schema: StandardBlocksResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const addBlockRoute = createRoute({
+  method: "post",
+  path: "/api/v1/document-blocks/standard",
+  tags: ["firm-entities"],
+  summary: "Add a line to the firm's standard prose",
+  request: {
+    body: { content: { "application/json": { schema: AddStandardBlockRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: StandardBlockSchema } } },
+    400: errorResponse("Not a block kind, a blank body, or a bad sort order"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const editBlockRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/document-blocks/standard/{blockId}",
+  tags: ["firm-entities"],
+  summary: "Edit or retire a line of the firm's standard prose",
+  description:
+    "Retiring is `isActive: false`, never a delete — the same distinction the grade ladder " +
+    "draws. Editing changes what the NEXT document says and nothing already issued.",
+  request: {
+    params: z.object({ blockId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EditStandardBlockRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: StandardBlockSchema } } },
+    400: errorResponse("A blank body or a bad sort order"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such standard block at this firm"),
+  },
+});
+
+// ── A DOCUMENT's own blocks ────────────────────────────────────────────────
+//
+// Keyed on the block id rather than nested under the document, because a block
+// id is unique inside a firm and the alternative is the same three routes twice
+// — once under proposals, once under letters — to express nothing.
+//
+// THIS IS WHY THE TABLE IS A ROW PER LINE. "Delete the third exclusion" is the
+// motivating sentence, and against one text column it is a string operation
+// with nothing for a screen to attach a control to.
+
+const DocumentBlockSchema = z
+  .object({
+    id: z.string().uuid(),
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string(),
+    isHeading: z.boolean(),
+    sortOrder: z.number().int(),
+    sourceId: z.string().uuid().nullable(),
+  })
+  .openapi("DocumentBlock");
+
+const AddDocumentBlockRequest = z
+  .object({
+    /** Exactly one, mirroring the CHECK on `crm.document_block`. */
+    proposalId: z.string().uuid().optional(),
+    engagementLetterId: z.string().uuid().optional(),
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string().min(1).max(4000),
+    isHeading: z.boolean().optional(),
+    sortOrder: z.number().int().min(1),
+  })
+  .refine((b) => (b.proposalId === undefined) !== (b.engagementLetterId === undefined), {
+    message: "name exactly one of proposalId or engagementLetterId",
+  })
+  .openapi("AddDocumentBlockRequest");
+
+const EditDocumentBlockRequest = z
+  .object({
+    body: z.string().min(1).max(4000).optional(),
+    isHeading: z.boolean().optional(),
+    sortOrder: z.number().int().min(1).optional(),
+  })
+  .openapi("EditDocumentBlockRequest");
+
+const addDocBlockRoute = createRoute({
+  method: "post",
+  path: "/api/v1/document-blocks",
+  tags: ["firm-entities"],
+  summary: "Write a line of prose onto one document",
+  description:
+    "A line this client negotiated that is not in the firm's standard set. `sourceId` comes " +
+    "back null, which is what lets a screen mark it as the document's own.",
+  request: {
+    body: { content: { "application/json": { schema: AddDocumentBlockRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: DocumentBlockSchema } } },
+    400: errorResponse("Not a block kind, a blank body, or a bad sort order"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    409: errorResponse("The letter is signed — its prose is frozen with its terms"),
+  },
+});
+
+const editDocBlockRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/document-blocks/{blockId}",
+  tags: ["firm-entities"],
+  summary: "Edit one line of a document's prose",
+  request: {
+    params: z.object({ blockId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EditDocumentBlockRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: DocumentBlockSchema } } },
+    400: errorResponse("A blank body or a bad sort order"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such block on any document at this firm"),
+    409: errorResponse("The letter is signed — its prose is frozen with its terms"),
+  },
+});
+
+const removeDocBlockRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/document-blocks/{blockId}",
+  tags: ["firm-entities"],
+  summary: "Strike a line off a document",
+  description:
+    "`removed_at`, not a delete — `bib_app` holds no DELETE grant on any table in this database.",
+  request: { params: z.object({ blockId: z.string().uuid() }) },
+  responses: {
+    204: { description: "Struck off" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such block on any document at this firm"),
+    409: errorResponse("The letter is signed — its prose is frozen with its terms"),
+  },
+});
+
 export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentDeps): void {
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -152,4 +355,110 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
       200,
     );
   });
+  app.openapi(listBlocksRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const blocks = await deps.service.listStandardBlocks(s.tenantId);
+    return c.json({ blocks: blocks.map(toStandardBlockBody) }, 200);
+  });
+
+  app.openapi(addBlockRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.addStandardBlock(
+      { tenantId: s.tenantId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(toStandardBlockBody(saved), 201);
+  });
+
+  app.openapi(editBlockRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.editStandardBlock(
+      s.tenantId,
+      c.req.valid("param").blockId,
+      c.req.valid("json"),
+      s.actor,
+    );
+    return c.json(toStandardBlockBody(saved), 200);
+  });
+
+  app.openapi(addDocBlockRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const saved = await deps.service.addBlock({
+      tenantId: s.tenantId,
+      owner:
+        body.proposalId === undefined
+          ? { kind: "engagement_letter", id: body.engagementLetterId ?? "" }
+          : { kind: "proposal", id: body.proposalId },
+      kind: body.kind,
+      body: body.body,
+      isHeading: body.isHeading,
+      sortOrder: body.sortOrder,
+    });
+    return c.json(toDocumentBlockBody(saved), 201);
+  });
+
+  app.openapi(editDocBlockRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.editBlock(
+      s.tenantId,
+      c.req.valid("param").blockId,
+      c.req.valid("json"),
+    );
+    return c.json(toDocumentBlockBody(saved), 200);
+  });
+
+  app.openapi(removeDocBlockRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    await deps.service.removeBlock(s.tenantId, c.req.valid("param").blockId);
+    return c.body(null, 204);
+  });
+}
+
+/** Field by field, never the domain object forwarded. zod-openapi documents a
+ *  response without validating it, so a handler that spreads an aggregate ships
+ *  fields its schema never mentions — which is exactly how `/auth/me` carried
+ *  two undocumented ones for six tasks. */
+function toStandardBlockBody(b: StandardBlock): {
+  id: string;
+  kind: BlockKind;
+  body: string;
+  isHeading: boolean;
+  sortOrder: number;
+  jurisdiction: string | null;
+  isActive: boolean;
+} {
+  return {
+    id: b.id,
+    kind: b.kind,
+    body: b.body,
+    isHeading: b.isHeading,
+    sortOrder: b.sortOrder,
+    jurisdiction: b.jurisdiction,
+    isActive: b.isActive,
+  };
+}
+
+function toDocumentBlockBody(b: DocumentBlock): {
+  id: string;
+  kind: BlockKind;
+  body: string;
+  isHeading: boolean;
+  sortOrder: number;
+  sourceId: string | null;
+} {
+  return {
+    id: b.id,
+    kind: b.kind,
+    body: b.body,
+    isHeading: b.isHeading,
+    sortOrder: b.sortOrder,
+    sourceId: b.sourceId,
+  };
 }

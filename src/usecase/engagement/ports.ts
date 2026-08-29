@@ -9,6 +9,7 @@ import type {
 } from "../../domain/config/model";
 import type {
   BillingFrequency,
+  DocumentBlock,
   DocumentTerms,
   DocumentType,
   OutOfPocketEstimate,
@@ -52,6 +53,27 @@ export interface DocumentIdentity {
    * uuid before they can act on it.
    */
   issuerJurisdiction(tenantId: string, firmEntityPartyId: string): Promise<IssuingEntity>;
+  /**
+   * COPY the firm's standard prose onto this new document (G1.7).
+   *
+   * A copy, not a reference: editing the standard exclusions changes the NEXT
+   * document and never one already issued. `jurisdiction` decides which lines
+   * come — an unscoped line always, a scoped one only for its own country, so
+   * "All fees are exclusive of GST as applicable" cannot reach a UAE document.
+   */
+  seedBlocks(
+    tenantId: string,
+    owner: { readonly kind: "engagement_letter"; readonly id: string },
+    jurisdiction: string,
+  ): Promise<unknown>;
+  /**
+   * What this document's prose says NOW — the copy it owns, not the firm's
+   * standard set. A struck-off line is not returned.
+   */
+  listBlocks(
+    tenantId: string,
+    owner: { readonly kind: "engagement_letter"; readonly id: string },
+  ): Promise<readonly DocumentBlock[]>;
 }
 
 /** The issuing entity, as the mismatch check needs it: what to call it, and
@@ -277,6 +299,17 @@ export interface LetterRecord {
  */
 export interface LetterView extends Omit<LetterRecord, "engagements"> {
   readonly engagements: readonly EngagementRecord[];
+  /**
+   * The letter's own prose — its exclusions, commercial notes and team block
+   * (G1.7).
+   *
+   * A COPY, taken at drafting from the firm's standard set, and this letter's
+   * from then on; frozen with everything else once it is signed. It is on the
+   * view rather than behind a second call because it is part of what the client
+   * agreed to, and a renderer that had to remember a third request would print
+   * an agreement missing its exclusions.
+   */
+  readonly blocks: readonly DocumentBlock[];
 }
 
 /**

@@ -37,6 +37,10 @@ import { PostgresRoundRobinAssignment } from "../infrastructure/postgres/lead-as
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
+import {
+  PostgresDocumentBlockRepository,
+  PostgresStandardBlockRepository,
+} from "../infrastructure/postgres/block-repository";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
@@ -137,9 +141,15 @@ export function wire(cfg: Config, log: Logger): Wired {
   // WHO issues the firm's documents, and what they are called. Both documents
   // ask this and neither of them is a quoting question, so it is answered once
   // here rather than twice in two modules that would drift.
+  // The prose blocks (G1.7) get their own two adapters rather than a fourth and
+  // fifth `implements` on the one above. Not tidiness: both ports declare
+  // `list`, `find`, `add` and `edit`, and one class cannot carry three meanings
+  // of `list` — the collision is the design saying these are separate concerns.
   const documents = new DocumentService({
     preferences: documentRepository,
     refs: documentRepository,
+    standardBlocks: new PostgresStandardBlockRepository(pools.app),
+    blocks: new PostgresDocumentBlockRepository(pools.app),
     ids: systemIds,
     events: ledger,
   });

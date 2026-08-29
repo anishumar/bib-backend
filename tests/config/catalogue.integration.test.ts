@@ -42,6 +42,10 @@ import { PartyService } from "../../src/usecase/party/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { DocumentService } from "../../src/usecase/document/service";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
+import {
+  PostgresDocumentBlockRepository,
+  PostgresStandardBlockRepository,
+} from "../../src/infrastructure/postgres/block-repository";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
@@ -74,6 +78,8 @@ const documentRepository = new PostgresDocumentRepository(app);
 const documents = new DocumentService({
   preferences: documentRepository,
   refs: documentRepository,
+  standardBlocks: new PostgresStandardBlockRepository(app),
+  blocks: new PostgresDocumentBlockRepository(app),
   ids: systemIds,
   events: ledger,
 });
