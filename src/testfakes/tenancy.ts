@@ -98,7 +98,7 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
   create(m: NewMembership): Promise<Membership> {
     // Ungraded on arrival, like the column: a grade is a separate decision from
     // granting access, and inventing one here would hide that from every test.
-    const row: Membership = { ...m, gradeId: null, isActive: true };
+    const row: Membership = { ...m, gradeId: null, reportsToUserId: null, isActive: true };
     this.rows.push(row);
     return Promise.resolve(row);
   }
@@ -160,6 +160,32 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
     gradeId: string | null,
   ): Promise<Membership> {
     return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, gradeId })));
+  }
+
+  updateReportsTo(
+    tenantId: string,
+    membershipId: string,
+    reportsToUserId: string | null,
+  ): Promise<Membership> {
+    return Promise.resolve(
+      this.replace(tenantId, membershipId, (r) => ({ ...r, reportsToUserId })),
+    );
+  }
+
+  reportingLines(tenantId: string): Promise<ReadonlyMap<string, string>> {
+    // STAFF and active only, exactly as the adapter filters — a fake that is
+    // laxer than the adapter is a test that passes on a rule the product does
+    // not have.
+    const pairs = this.rows
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.audience === "STAFF" &&
+          r.isActive &&
+          r.reportsToUserId !== null,
+      )
+      .map((r): [string, string] => [r.userId, r.reportsToUserId as string]);
+    return Promise.resolve(new Map(pairs));
   }
 
   private replace(

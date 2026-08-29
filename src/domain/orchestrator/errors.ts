@@ -27,7 +27,8 @@ export type OrchestratorErrorCode =
   | "STEP_NOT_WAITING"
   | "PROPOSAL_UNDECIDED"
   | "NOTHING_PROPOSED"
-  | "CORRECTION_CHANGED_NOTHING";
+  | "CORRECTION_CHANGED_NOTHING"
+  | "AWAITING_CHECK";
 
 export class JobNotFound extends OrchestratorError {
   constructor(jobId: string) {
@@ -145,6 +146,26 @@ export class CorrectionChangedNothing extends OrchestratorError {
       `the correction to step ${JSON.stringify(stepKey)} is identical to what the machine ` +
         `proposed. If it was right, accept it — recording it as a correction would say the ` +
         `machine got it wrong, and that number is the only measure of whether it is improving.`,
+    );
+  }
+}
+
+/**
+ * Somebody tried to tick off a step that is already waiting to be CHECKED
+ * (T2.9).
+ *
+ * Almost always the maker clicking Done a second time, on a screen that had not
+ * refreshed. Without this the second click would find a check already open and
+ * silently do nothing — a button that looks like it worked and did not, which
+ * is the shape of bug this codebase keeps finding by opening the page.
+ */
+export class AwaitingCheck extends OrchestratorError {
+  constructor(stepKey: string) {
+    super(
+      "AWAITING_CHECK",
+      `step ${JSON.stringify(stepKey)} is finished and waiting for somebody else to check it. ` +
+        `It is not yours to tick off again — and by the firm's own rule it could not be ` +
+        `yours to approve either.`,
     );
   }
 }

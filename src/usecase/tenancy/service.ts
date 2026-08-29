@@ -35,6 +35,11 @@ import {
 // staff-grade domain owns what a rung is and what it means to have retired one,
 // so the vocabulary for refusing comes from there.
 import { GradeNotAssignable, GradeNotFound } from "../../domain/staffgrade/errors";
+// The reporting line exists for exactly one consumer — a `reporting_line`
+// verification policy — so its rule and its refusals are owned there. Reaching
+// ACROSS the domain is what the wall permits; reaching out of it is not.
+import { walkReportingLine } from "../../domain/verification/model";
+import { ReportsToCycle, ReportsToNotAColleague } from "../../domain/verification/errors";
 import type {
   GradeDirectory,
   GradeLadderSeeder,
@@ -108,6 +113,14 @@ export interface ChangeMemberGradeInput {
   readonly membershipId: string;
   /** `null` takes them off the ladder — a real answer, not an omission. */
   readonly gradeId: string | null;
+}
+
+export interface SetReportsToInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  /** `null` clears it — a partner reports to nobody, and so does everybody at a
+   *  firm that has not filled this in. */
+  readonly reportsToUserId: string | null;
 }
 
 export interface SetFirmSignatoryInput {
@@ -588,6 +601,74 @@ export class TenancyService {
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
+
+  /**
+   * Say who somebody reports to, or clear it (T2.9).
+   *
+   * A FOURTH axis, and like the grade it grants nothing — one thing reads it, a
+   * `reporting_line` verification policy deciding who may check this person's
+   * work. It runs no `requireAdministratorSurvives` for the same reason the
+   * grade does not: clearing a reporting line locks nobody out, it merely means
+   * a firm on that rule has one fewer eligible checker, which is a state it can
+   * see on the queue and fix.
+   *
+   * Two things ARE refused, and both are refusals a database cannot make:
+   *
+   *   A MANAGER WHO IS NOT A COLLEAGUE. The foreign key points at
+   *   `tenancy.user_account`, which is GLOBAL — identity is above tenant
+   *   (ADR-02) — so the database will happily accept a stranger's id. Checked
+   *   against this firm's own active staff instead.
+   *
+   *   A LOOP. `a -> b -> a` leaves nobody in it with a manager who could check
+   *   their work, and it is silent: the queue simply never offers anybody. The
+   *   database refuses only the one-person case (`membership_reports_to_is_not_self`),
+   *   because a CHECK sees one row.
+   *
+   * Idempotent: setting the manager somebody already has records nothing.
+   */
+  async setReportsTo(input: SetReportsToInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    if (membership.reportsToUserId === input.reportsToUserId) return membership;
+
+    if (input.reportsToUserId !== null) {
+      const roster = await this.deps.memberships.listMembers(input.tenantId);
+      const manager = roster.find(
+        (m) =>
+          m.membership.userId === input.reportsToUserId &&
+          m.membership.audience === "STAFF" &&
+          m.membership.isActive,
+      );
+      // A client-portal contact is deliberately not a candidate. Putting one in
+      // the firm's reporting line would make a client eligible to check the
+      // firm's work under a `reporting_line` policy.
+      if (!manager) throw new ReportsToNotAColleague(input.reportsToUserId);
+
+      const lines = await this.deps.memberships.reportingLines(input.tenantId);
+      const cycle = walkReportingLine(lines, membership.userId, input.reportsToUserId);
+      if (cycle !== null) throw new ReportsToCycle(cycle);
+    }
+
+    const updated = await this.deps.memberships.updateReportsTo(
+      input.tenantId,
+      membership.id,
+      input.reportsToUserId,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "membership.reports_to_changed",
+      objectId: membership.id,
+      actor,
+      // Ids, never an email address — the address is personal data and this log
+      // cannot be erased. Both sides, because "when did Priya move under Anand"
+      // is the question this row is asked later.
+      payload: {
+        userId: membership.userId,
+        from: membership.reportsToUserId,
+        to: input.reportsToUserId,
+      },
+    });
+    return updated;
+  }
 
   private async memberOrThrow(tenantId: string, membershipId: string): Promise<Membership> {
     const membership = await this.deps.memberships.findById(tenantId, membershipId);

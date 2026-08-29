@@ -77,6 +77,12 @@ export class FakeJobStepRepo implements JobStepRepository {
     );
   }
 
+  findById(tenantId: string, stepId: string): Promise<JobStep | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.id === stepId) ?? null,
+    );
+  }
+
   transition(
     tenantId: string,
     stepId: string,

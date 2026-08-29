@@ -126,6 +126,27 @@ export interface MembershipRepository {
     membershipId: string,
     gradeId: string | null,
   ): Promise<Membership>;
+  /**
+   * Set who somebody reports to, or clear it (`null`). The FOURTH axis (T2.9),
+   * and like the grade it grants nothing — it is read by one thing, a
+   * `reporting_line` verification policy deciding who may check this person's
+   * work.
+   */
+  updateReportsTo(
+    tenantId: string,
+    membershipId: string,
+    reportsToUserId: string | null,
+  ): Promise<Membership>;
+  /**
+   * The reporting line as a set of `(userId -> managerUserId)` pairs, for the
+   * whole firm.
+   *
+   * Read whole rather than one at a time, because the two callers both need it
+   * that way: the cycle check walks a chain, and the queue asks "who may check
+   * this" for a screenful of steps at once. A lookup per row is the mistake this
+   * codebase has now made and fixed five times.
+   */
+  reportingLines(tenantId: string): Promise<ReadonlyMap<string, string>>;
 }
 
 /**

@@ -1588,13 +1588,126 @@ open and are recorded above; neither blocks Phase 2.
   >     machine answered — waiting for you to check it"* against *"a machine could not answer
   >     this — waiting for you to decide"*. Both rendered and looked at, with the bar, the
   >     provenance and Accept / Correct / Reject in place of Done.
-  >   · **`escalated` and `queued` land in the same place** — a blocked step on the job page.
+  >   · ~~**`escalated` and `queued` land in the same place** — a blocked step on the job page.
   >     Routing them to the right person by role, grade, load and SLA is T2.9, and this task
-  >     deliberately does not build half a queue.
+  >     deliberately does not build half a queue.~~ **CLOSED by T2.9 (2026-08-30)**: both now
+  >     open a `step_approval` and appear on `/work`'s To check tab. Note the routing that was
+  >     actually needed — the firm's own published rule, a rank threshold or a reporting line.
+  >     "Role, grade, load and SLA" was this board repeating a line the client never gave; see
+  >     T2.9.
   >
   > Gate: `npm run check` **942** · `test:integration` **308** · `smoke` **229 passed, 0
   > failed**.
-- [ ] `(B)` **T2.9** **P6 Verification queue**: routing role→skill→tier→load→SLA; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
+- [x] `(B)` **T2.9** **P6 Verification queue**: routing by the firm's own published rule — a rank threshold, a reporting line, or both; **maker≠checker as a CHECK constraint**. *Acc: the actor who produced an output cannot be its approver (DB rejects it).*
+  > **Done (2026-08-30). Migration 0048 — `delivery.step_approval`,
+  > `tenancy.membership.reports_to_user_id`, and `verification_policy`, the registry's eighth
+  > kind.**
+  >
+  > **THE BOARD'S OWN LINE WAS WRONG AND IS CORRECTED ABOVE.** It said *"routing
+  > role→skill→tier→load→SLA"*. The firm never asked for four of those five. G3.3's note
+  > already said so in this file — *"`rank` exists because that is the whole routing rule the
+  > firm actually stated — one threshold, no skill matrix, no tier-and-load"* — and `build2.md`
+  > says it again. That five-part line came from a generic plan, not from the client, and it is
+  > the second time this board has been caught carrying a plausible-looking fact the firm never
+  > gave (the first was G3.3's "nine grades, Article to Associate Director", which was ten
+  > rungs, Analyst to Partner). **No skill matrix, no tier, no load was built.**
+  >
+  > **WHAT WAS BUILT INSTEAD IS A CHOICE, BECAUSE THE CLIENT GAVE TWO ANSWERS.** The demo's own
+  > open question S3 records both, on different days: *"Manager or above is fine"* — a rank
+  > threshold — and *"manager means engagement manager"* — a named person. They are different
+  > controls (a threshold lets anyone senior enough check anyone's work; a reporting line
+  > stalls the morning that one person is on leave) and S3's own note says *"this is the
+  > maker-checker control and not a line to draw on the firm's behalf"*. So the firm draws it,
+  > from `/admin/verification`, choosing between `rank_threshold`, `reporting_line` and
+  > `reporting_line_or_rank`. The third exists because the demo raised the leave-day objection
+  > against the second and left it open; offering only two would be handing the firm a problem
+  > that was already known.
+  >
+  > **AND IT IS PER STEP, NOT PER FIRM — which came out of the industry research, not the
+  > board.** SQC 1, ICAI's own quality-control standard and what a CA firm is actually audited
+  > against, requires an engagement quality control reviewer to be BOTH *"suitably qualified"*
+  > (a rank test) AND *"independent of the engagement team"* — which a reporting line is the
+  > opposite of, since your manager is on your engagement. An ordinary manager review and an
+  > EQCR sign-off are therefore two different rules inside ONE process, and a single firm-wide
+  > switch could not express a firm that does both. A firm publishes as many policies as it has
+  > kinds of review, and a workflow step names the one that governs it.
+  >
+  > **THE ACCEPTANCE LINE IS A CHECK, AND THE MAKER IS DERIVED SO THE CHECK CANNOT BE FOOLED.**
+  > `step_approval_maker_is_not_checker` compares two columns. If a writer could set both, the
+  > way past it is to name somebody else as the maker and approve as yourself — so a BEFORE
+  > INSERT trigger reads `submitted_by` from `job_step.performed_by` and a BEFORE UPDATE trigger
+  > freezes it. `maker-checker.integration.test.ts` proves all of it as the OWNER role, going
+  > round the application entirely, including that attack specifically.
+  >
+  > **THE TENANT WALL CAUGHT A REAL BUG IN THIS MIGRATION.** `policy_version_id` referenced
+  > `config.version(id)` by id alone, which would have let one firm's approval pin another
+  > firm's review rule — a foreign-key check runs as a system operation RLS does not filter, so
+  > it violates no policy anywhere. `tenant-keys.integration.test.ts` failed on the first run
+  > after the table existed and named the constraint. It is composite now. That test asks the
+  > catalogue rather than a list, which is exactly why it covered a table added the same day.
+  >
+  > **`escalated` AND `queued` NOW LAND ON SOMEBODY'S DESK.** T2.8's stated honest limit — both
+  > ended up as a blocked step on a job page and went to nobody — is closed. `/work` has a **To
+  > check** tab showing the WHOLE FIRM's queue, not "mine": under a rank threshold there is no
+  > "mine", and a list filtered to what the viewer can act on hides that six filings have been
+  > waiting a week because nobody senior enough has looked. Each row carries the viewer's own
+  > verdict instead, and the ones they cannot take say why.
+  >
+  > **`output.approved` AND `output.rejected` WERE REGISTERED VERBS WITH NO WRITER** — the shape
+  > this codebase keeps catching, and the fourth time it has been closed rather than found.
+  > They have one now. Neither carries the note: "sent back" is the fact, and WHY is prose that
+  > can name a client in a log that cannot be erased.
+  >
+  > **A REJECTION IS NOT THE WORK.** The step stays `blocked`, the reason is kept, and the redo
+  > opens a SECOND approval row — so "this took two goes" survives, which is the only signal
+  > anywhere that explains where a week went. The same shape a retried agent run takes in 0047.
+  >
+  > **THE PERMISSION FLOOR CLOSES Q41, WITHOUT INVENTING A ROLE RULE.** `isEligible` requires
+  > `work:write` before it applies the firm's rule, on the ground that approving somebody's
+  > filing is the same kind of act as saying it was done — which that permission already gates.
+  > Without it a read-only Management membership carrying a Senior Manager grade would pass a
+  > rank threshold and be able to sign off a statutory filing, which is Q41 exactly and has
+  > never been answered. This does not decide the client's question; it applies a permission
+  > the firm already controls, and the firm can widen it on the roles screen.
+  >
+  > **Screens**: `/admin/verification` (new — the founder picks the rule, and the banner says
+  > out loud that maker≠checker is NOT a setting on the page, because a control somebody thinks
+  > is configurable is one they look for a way around), `/admin/people` gains **Reports to**,
+  > `/admin/workflows` gains a per-step *"who checks it"* picker over PUBLISHED rules only, and
+  > `/work/[jobId]` shows *"finished — waiting to be checked"* with Approve / Send back — or,
+  > for the maker, the sentence instead of the buttons.
+  >
+  > **Proven in a browser, not asserted.** A firm seeded through the real API: a signed letter
+  > spawned a job, Priya (Associate) finished a checked step and it did NOT finish, Anand
+  > (Manager) sent it back with a reason, she redid it, he approved it and the job moved on —
+  > and the record still says PRIYA did the work, not the approver. Opened as all three people:
+  > the manager sees Approve / Send back, and **the maker sees "You did this work — somebody
+  > else has to."** Over HTTP the maker's approval is a 403 in words, not a constraint
+  > violation. No console errors.
+  >
+  > **HONEST LIMITS, named rather than implied:**
+  >   · **`excludeEngagementTeam` is NOT built**, and SQC 1 wants it. "Engagement team" is an
+  >     axis this schema cannot yet name honestly — the Dept-vs-delivery-team question (G2.4)
+  >     is open with the client — and writing an independence rule on a guessed axis would be
+  >     deciding who may sign off an audit. It belongs with the answer.
+  >   · **The reporting line is NOT effective-dated.** The firm's staff sheet carries birth
+  >     dates and no joining dates, and nothing records when a reporting line STARTED, so "who
+  >     was my manager in March" has no honest answer in the column. The ledger's
+  >     `membership.reports_to_changed` answers "when did it change" from today forward. Same
+  >     decision, and the same reason, as G3.3's note about not inventing a rank.
+  >   · **NO SLA, NO DUE DATE, NO ESCALATION.** The queue is ordered oldest-first by when the
+  >     work was submitted. `service.slaDays` exists and has no real numbers in it — the firm
+  >     has not given its internal turnaround times (client ask 3.4) and has not confirmed the
+  >     escalation matrix (3.3). Ordering by a deadline this product invented would be a
+  >     priority the firm never set. It belongs with T3.1, which is where `slaDays` is already
+  >     earmarked.
+  >   · **S3 is not answered, it is made configurable.** That is the right resolution for a
+  >     product sold to other firms from day one, and it is the directive already at the top of
+  >     the demo's CLAUDE.md — but it is not the same as the client having chosen. Nobody has
+  >     told us which rule 10x itself wants, and no policy is seeded.
+  >
+  > Gate: `npm run check` **1014** · `test:integration` **338** · `smoke` **229 passed, 0
+  > failed**.
 
 **Milestone M2:** a signed engagement letter automatically spawns jobs that walk a configured step graph and land in a verification queue — the **engine runs end-to-end** with fake executors. *(This is the demoable core spine.)*
 

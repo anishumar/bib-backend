@@ -102,8 +102,8 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Seven kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`
-and `confidence_tier`; `rule_pack` joins them when T4.3 actually reads it.
+`config.version` is what it said at a point in time. Eight kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
+`confidence_tier` and `verification_policy`; `rule_pack` joins them when T4.3 actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
 
@@ -163,13 +163,16 @@ addresses, and a general staff directory is a wider decision than this screen.
 ## Seniority is a third axis, and it grants nothing (G3.3)
 
 `tenancy.staff_grade` is the firm's own ladder and `membership.grade_id` puts a person on a
-rung. Keep it clear of the other two axes: **role** says what somebody may REACH (permissions,
-gate 3), **commercial visibility** says whether they see money, and **grade** says how SENIOR
-they are. A grade carries no permission at all.
+rung. Keep it clear of the other axes: **role** says what somebody may REACH (permissions,
+gate 3), **commercial visibility** says whether they see money, **grade** says how SENIOR
+they are, and **`reports_to_user_id`** (T2.9) says who checks their work. A grade carries no
+permission at all, and neither does a reporting line.
 
 It exists for exactly one comparison — the firm's stated review rule is *"Manager or above is
 fine"* — so `rank` is a plain integer and there is no skill matrix and no tier-and-load
-routing. T2.9's verification queue and T3.1's review step are its consumers.
+routing. **T2.9 is now its consumer** and confirmed the shape: a `verification_policy` stores a
+`minGradeRank` and compares it, and nothing anywhere reads a skill or a load. T3.1's review step
+is the other.
 
 Four things about it are decisions, not details:
 
@@ -972,6 +975,81 @@ adding them later means backfilling a fact nobody recorded.
 
 **Ticking Done behind a proposal is refused** (`PROPOSAL_UNDECIDED`): it would record that a
 person did the work and leave what the machine said undecided forever.
+
+## Who may check somebody else's work (T2.9)
+
+Two rules, and only one of them is the firm's.
+
+**MAKER != CHECKER is the product's, and it is not a setting.** `step_approval_maker_is_not_checker`
+in migration 0048, for `build2.md`'s stated reason — *a rule that lives in a form is a rule that
+a script, an import or an AI agent walks straight past*. `isEligible` applies it too, so a
+person is TOLD rather than shown a constraint violation, and the wall underneath still holds for
+everything that never reaches this code. `maker-checker.integration.test.ts` proves it as the
+OWNER role.
+
+**`submitted_by` IS DERIVED AND FROZEN, and that is what makes the CHECK worth anything.** It
+compares two columns; if a writer could set both, the way past it is to name somebody else as
+the maker and approve as yourself. A BEFORE INSERT trigger reads it from
+`job_step.performed_by` and a BEFORE UPDATE trigger refuses to let it move. The application
+cannot set it, the fakes model that, and the integration test attacks it specifically. **Do not
+add a `submittedBy` to any write path.**
+
+**WHO ELSE may check is the firm's, and it is a `verification_policy` — the registry's EIGHTH
+kind.** The client gave two answers on different days and they are different controls:
+*"Manager or above is fine"* (a rank threshold) and *"manager means engagement manager"* (a
+reporting line, which stalls the morning that person is on leave). The demo's own S3 says this
+is *"the maker-checker control and not a line to draw on the firm's behalf"*, so the firm draws
+it: `rank_threshold` · `reporting_line` · `reporting_line_or_rank`. **Nothing is seeded.**
+
+**It is a kind and not a column for `confidence_tier`'s reason**: *who was allowed to approve
+this filing in March?* is an audit question, a published version is frozen, and an approval PINS
+the version it opened under. `minGradeRank` stores the RANK, not the code — the opposite of what
+a `service` body does with an axis code, because a stored code would be re-resolved against
+today's ladder and answer March's question with April's row.
+
+**And a firm publishes SEVERAL, because a step names one.** SQC 1 — ICAI's own quality-control
+standard — wants an engagement quality control reviewer to be both *suitably qualified* (a rank
+test) and *independent of the engagement team*, which a reporting line is the opposite of. An
+ordinary manager review and an EQCR sign-off are two rules inside one process. `excludeEngagementTeam`
+is deliberately NOT built: "engagement team" is the Dept-vs-delivery-team axis the client has
+not settled (G2.4), and an independence rule written on a guessed axis would decide who may sign
+off an audit.
+
+**`membership.reports_to_user_id` is a FOURTH axis and grants nothing** — role says what you may
+reach, commercial visibility whether you see money, grade how senior you are, and this one who
+checks your work under a reporting-line rule. It exists because nothing else in this schema
+records a staff reporting relationship: `core.party_relationship` is between PARTIES and a
+member of staff is a `user_account` plus a membership, never a party. **Not effective-dated**,
+and that is stated rather than implied: nothing records when a reporting line STARTED, so the
+column answers "now" and the ledger answers "when did it change". Two refusals a database cannot
+make are the service's — a manager who is not an active STAFF member of this firm (the FK points
+at a GLOBAL table and would accept a stranger), and a loop, which a CHECK cannot see past one
+row and which would silently leave everybody in it with no eligible checker.
+
+**A checked step does NOT finish.** It stays `blocked` — a fourth cause of that state, and the
+work is DONE there — `performed_by` is recorded, and an approval opens. A review that does not
+hold up the work downstream is a review nobody has to do. Approving finishes the step and
+advances the job in the same call; **rejecting moves nothing**, keeps the reason, and the redo
+opens a SECOND row so "this took two goes" survives.
+
+**`work:write` is a FLOOR under the firm's rule, never the whole answer.** Approving somebody's
+filing writes to the record of whether the work stands, so it needs the permission that already
+gates saying it was done. Without that floor a read-only Management membership carrying a Senior
+Manager grade would pass a rank threshold — which is the demo's Q41, still unanswered. This does
+not invent a role rule; it applies one the firm controls on the roles screen.
+
+**T2.9 lives on `OrchestratorService`, not in a service of its own**, the same judgement T2.8
+made about `decideProposal`: a check is part of a STEP's lifecycle. Splitting it would mean a
+handler calling two use cases or two services holding each other, since opening a check happens
+when work finishes and finishing work happens when a check passes. The RULE is pure in
+`domain/verification`.
+
+**The queue is the WHOLE FIRM's, and every row carries the viewer's verdict.** Under a rank
+threshold there is no "mine", and a list filtered to what you can act on hides that six filings
+have waited a week because nobody senior enough looked. **Ordered oldest-first, with no due
+date anywhere**: the firm has not given its turnaround times (client ask 3.4) or its escalation
+matrix (3.3), and a deadline this product invented is a priority the firm never set. `slaDays`
+stays earmarked for T3.1.
 
 ## First module
 

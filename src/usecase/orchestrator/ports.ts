@@ -55,6 +55,11 @@ export interface JobStepRepository {
 
   findByKey(tenantId: string, jobId: string, stepKey: string): Promise<JobStep | null>;
 
+  /** By step id — how a check reaches its step. An approval names the step it
+   *  is about, and the job and the key are facts ON that row rather than
+   *  something the caller should have to carry back around. */
+  findById(tenantId: string, stepId: string): Promise<JobStep | null>;
+
   /**
    * Move one step, only if it is still in the state the caller read.
    *
@@ -92,6 +97,11 @@ export interface TemplateStep {
   readonly executor: string;
   readonly dependsOn: readonly string[];
   readonly condition: { readonly fact: string; readonly equals: string } | null;
+  /** The `verification_policy` key that governs who checks this step once it is
+   *  done, or null for a step nobody checks (T2.9). Every template published
+   *  before T2.9 reads as null here, which is exactly what those processes
+   *  meant. */
+  readonly verificationPolicyKey: string | null;
 }
 
 export interface ResolvedTemplate {

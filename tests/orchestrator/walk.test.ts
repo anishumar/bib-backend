@@ -20,6 +20,12 @@ import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import {
+  FakeCheckerDirectory,
+  FakeStepApprovalRepo,
+  FakeVerificationPolicySource,
+  FakeWorkPermissions,
+} from "../../src/testfakes/verification";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import type { Job } from "../../src/domain/scheduler/model";
 import type { ResolvedTemplate, TemplateStep } from "../../src/usecase/orchestrator/ports";
@@ -44,6 +50,7 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
     executor: "human",
     dependsOn: [],
     condition: null,
+    verificationPolicyKey: null,
     ...over,
   };
 }
@@ -107,6 +114,10 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
     tiers,
     runs,
     agents,
+    checks: new FakeStepApprovalRepo(),
+    policies: new FakeVerificationPolicySource(),
+    checkers: new FakeCheckerDirectory(),
+    permissions: new FakeWorkPermissions(),
     tenants: { activeTenantIds: () => Promise.resolve([TENANT]) },
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-08-29T09:00:00.000Z")),

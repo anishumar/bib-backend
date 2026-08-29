@@ -186,6 +186,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.restored` | membership | A deactivated membership was reinstated. |
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
 | `membership.grade_changed` | membership | A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later. |
+| `membership.reports_to_changed` | membership | Who a member reports to changed (T2.9). Read by one thing — a `reporting_line` verification policy deciding who may check their work. The column is deliberately NOT effective-dated (nothing records when a reporting line started), so this trail is where "who was my manager in March" is asked. |
 | `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |
 | `staff_grade.updated` | staff_grade | A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something. |
 | `service_axis.created` | service_axis | A firm added a Dept or a delivery team to its own structure. |

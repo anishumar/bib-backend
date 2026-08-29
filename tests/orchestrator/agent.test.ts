@@ -15,6 +15,12 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeJobRepo } from "../../src/testfakes/scheduler";
 import {
+  FakeCheckerDirectory,
+  FakeStepApprovalRepo,
+  FakeVerificationPolicySource,
+  FakeWorkPermissions,
+} from "../../src/testfakes/verification";
+import {
   FakeAgentRunRepo,
   FakeAgentRuntime,
   FakeJobStepRepo,
@@ -97,7 +103,16 @@ function template(executor: string) {
   return {
     versionId: VERSION,
     label: "Monthly filing",
-    steps: [{ key: "reconcile", label: "Reconcile", executor, dependsOn: [], condition: null }],
+    steps: [
+      {
+        key: "reconcile",
+        label: "Reconcile",
+        executor,
+        dependsOn: [],
+        condition: null,
+        verificationPolicyKey: null,
+      },
+    ],
   };
 }
 
@@ -135,6 +150,10 @@ async function world(executor = "agent") {
     tiers,
     runs,
     agents,
+    checks: new FakeStepApprovalRepo(),
+    policies: new FakeVerificationPolicySource(),
+    checkers: new FakeCheckerDirectory(),
+    permissions: new FakeWorkPermissions(),
     tenants: { activeTenantIds: () => Promise.resolve([TENANT]) },
     ids: new FakeIds(),
     clock: new FakeClock(new Date(NOW)),

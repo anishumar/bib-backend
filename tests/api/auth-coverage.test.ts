@@ -80,6 +80,12 @@ import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
+import {
+  FakeCheckerDirectory,
+  FakeStepApprovalRepo,
+  FakeVerificationPolicySource,
+  FakeWorkPermissions,
+} from "../../src/testfakes/verification";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import {
@@ -143,6 +149,10 @@ function deps(): RouterDeps {
         agents: new FakeAgentRuntime(),
         tiers: new FakeTierSource(),
         runs: new FakeAgentRunRepo(),
+        checks: new FakeStepApprovalRepo(),
+        policies: new FakeVerificationPolicySource(),
+        checkers: new FakeCheckerDirectory(),
+        permissions: new FakeWorkPermissions(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),

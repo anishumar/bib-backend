@@ -27,6 +27,8 @@ import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-r
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
+import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
+import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
 import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
@@ -139,6 +141,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // waits for it to ship.
     tiers: configRepository,
     runs: new PostgresAgentRunRepository(pools.app),
+    // T2.9's three seams. `checkers` and `permissions` are the SAME two adapters
+    // the roster and the authz guard already use — one notion of who works here
+    // and one of what a role carries, because eligibility to check somebody's
+    // work must not be able to disagree with either.
+    checks: new PostgresStepApprovalRepository(pools.app),
+    policies: configRepository,
+    checkers: new PostgresMembershipRepository(pools.app),
+    permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,

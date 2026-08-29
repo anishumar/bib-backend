@@ -13,6 +13,7 @@ import type {
 } from "../../usecase/tenancy/ports";
 import type { StaffDirectory } from "../../usecase/lead/ports";
 import type { RoleHolders } from "../../usecase/config/ports";
+import type { CheckerDirectory, StaffMember } from "../../usecase/verification/ports";
 
 interface MembershipRow {
   id: string;
@@ -22,6 +23,7 @@ interface MembershipRow {
   role: string;
   commercial_visibility: boolean;
   grade_id: string | null;
+  reports_to_user_id: string | null;
   is_active: boolean;
 }
 
@@ -45,6 +47,7 @@ function toMembership(r: MembershipRow): Membership {
     role: r.role,
     commercialVisibility: r.commercial_visibility,
     gradeId: r.grade_id,
+    reportsToUserId: r.reports_to_user_id,
     isActive: r.is_active,
   };
 }
@@ -73,7 +76,7 @@ function toMemberGrade(r: MemberRow): MemberGrade | null {
 // anybody actually have", which it needs to know before it lets a firm move the
 // administrator permission onto a role nobody holds.
 export class PostgresMembershipRepository
-  implements MembershipRepository, StaffDirectory, RoleHolders
+  implements MembershipRepository, StaffDirectory, RoleHolders, CheckerDirectory
 {
   constructor(private readonly app: Db) {}
 
@@ -84,7 +87,8 @@ export class PostgresMembershipRepository
           (id, tenant_id, user_id, audience, role, commercial_visibility)
         VALUES
           (${m.id}, ${m.tenantId}, ${m.userId}, ${m.audience}, ${m.role}, ${m.commercialVisibility})
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
       `;
       if (!row) throw new Error("membership insert returned no row");
       return toMembership(row);
@@ -116,7 +120,8 @@ export class PostgresMembershipRepository
   async listByUser(userId: string): Promise<Membership[]> {
     return withIdentity(this.app, userId, async (db) => {
       const rows = await db<MembershipRow[]>`
-        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
         FROM tenancy.membership
         WHERE user_id = ${userId}
         ORDER BY created_at
@@ -153,7 +158,7 @@ export class PostgresMembershipRepository
       // RLS context, so the join cannot reach another firm's ladder.
       const rows = await db<MemberRow[]>`
         SELECT m.id, m.tenant_id, m.user_id, m.audience, m.role,
-               m.commercial_visibility, m.grade_id, m.is_active,
+               m.commercial_visibility, m.grade_id, m.reports_to_user_id, m.is_active,
                u.email::text AS email, u.display_name,
                g.code AS grade_code, g.name AS grade_name,
                g.rank AS grade_rank, g.is_active AS grade_is_active
@@ -174,7 +179,8 @@ export class PostgresMembershipRepository
   async findById(tenantId: string, membershipId: string): Promise<Membership | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<MembershipRow[]>`
-        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        SELECT id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
         FROM tenancy.membership WHERE id = ${membershipId}
       `;
       return row ? toMembership(row) : null;
@@ -186,7 +192,8 @@ export class PostgresMembershipRepository
       const [row] = await db<MembershipRow[]>`
         UPDATE tenancy.membership SET role = ${role}
         WHERE id = ${membershipId}
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
       `;
       if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
       return toMembership(row);
@@ -202,7 +209,8 @@ export class PostgresMembershipRepository
       const [row] = await db<MembershipRow[]>`
         UPDATE tenancy.membership SET is_active = ${isActive}
         WHERE id = ${membershipId}
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
       `;
       if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
       return toMembership(row);
@@ -227,10 +235,109 @@ export class PostgresMembershipRepository
       const [row] = await db<MembershipRow[]>`
         UPDATE tenancy.membership SET grade_id = ${gradeId}
         WHERE id = ${membershipId}
-        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id, is_active
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
       `;
       if (!row) throw new Error(`membership ${membershipId} vanished between the read and the write`);
       return toMembership(row);
+    });
+  }
+
+  /**
+   * Set who somebody reports to, or clear it.
+   *
+   * NO composite key here, and that is the one place in this repository where
+   * an id-only reference is right: the target is `tenancy.user_account`, a
+   * GLOBAL table (ADR-02) with no `tenant_id` to carry. The composite rule
+   * guards references between two TENANT-SCOPED tables. That the manager is a
+   * colleague rather than a stranger is checked by the service, against this
+   * firm's own roster, because a foreign key cannot express it.
+   */
+  async updateReportsTo(
+    tenantId: string,
+    membershipId: string,
+    reportsToUserId: string | null,
+  ): Promise<Membership> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<MembershipRow[]>`
+        UPDATE tenancy.membership SET reports_to_user_id = ${reportsToUserId}
+        WHERE id = ${membershipId}
+        RETURNING id, tenant_id, user_id, audience, role, commercial_visibility, grade_id,
+                  reports_to_user_id, is_active
+      `;
+      if (!row) {
+        throw new Error(`membership ${membershipId} vanished between the read and the write`);
+      }
+      return toMembership(row);
+    });
+  }
+
+  /**
+   * The firm's own staff, with the two facts a verification rule compares
+   * (T2.9).
+   *
+   * ACTIVE STAFF ONLY, and both halves matter: a deactivated membership cannot
+   * check anything (their session would not resolve either), and a
+   * CLIENT_PORTAL membership is a client — offering one as a possible reviewer
+   * of the firm's work would be a category error the screen would then have to
+   * explain.
+   *
+   * The grade is a LEFT join and stays one, for `listMembers`' reason: an
+   * ungraded person is an ordinary state, and dropping them here would hide the
+   * exact answer somebody needs — "Priya cannot approve this because nobody has
+   * put her on the ladder" is fixable; her silent absence from a list is not.
+   */
+  async activeStaff(tenantId: string): Promise<readonly StaffMember[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<
+        {
+          user_id: string;
+          membership_id: string;
+          display_name: string | null;
+          email: string;
+          role: string;
+          grade_rank: number | null;
+          grade_name: string | null;
+          reports_to_user_id: string | null;
+          is_active: boolean;
+        }[]
+      >`
+        SELECT m.user_id, m.id AS membership_id, u.display_name, u.email::text AS email,
+               m.role, g.rank AS grade_rank, g.name AS grade_name,
+               m.reports_to_user_id, m.is_active
+        FROM tenancy.membership m
+        JOIN tenancy.user_account u ON u.id = m.user_id
+        LEFT JOIN tenancy.staff_grade g ON g.id = m.grade_id
+        WHERE m.audience = 'STAFF' AND m.is_active
+        ORDER BY u.display_name NULLS LAST, u.email
+      `;
+      return rows.map((r) => ({
+        userId: r.user_id,
+        membershipId: r.membership_id,
+        // The name, falling back to the address. A reviewer picker showing a
+        // uuid is the mistake this codebase has now made and fixed five times.
+        displayName: r.display_name ?? r.email,
+        role: r.role,
+        gradeRank: r.grade_rank,
+        gradeName: r.grade_name,
+        reportsToUserId: r.reports_to_user_id,
+        isActive: r.is_active,
+      }));
+    });
+  }
+
+  async reportingLines(tenantId: string): Promise<ReadonlyMap<string, string>> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // STAFF only. A portal contact has no manager and never will, and letting
+      // one into this map would put a client inside the firm's reporting line.
+      const rows = await db<{ user_id: string; reports_to_user_id: string }[]>`
+        SELECT user_id, reports_to_user_id
+        FROM tenancy.membership
+        WHERE reports_to_user_id IS NOT NULL
+          AND audience = 'STAFF'
+          AND is_active
+      `;
+      return new Map(rows.map((r) => [r.user_id, r.reports_to_user_id]));
     });
   }
 }

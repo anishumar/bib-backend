@@ -8,6 +8,12 @@
 // wall forbids reaching OUT of domain, not across it.
 import type { ConfidenceTiers } from "../agent/model";
 import { isConfidence, tiersAreCoherent } from "../agent/model";
+// The same argument, one kind later: what a verification rule IS, and which of
+// them read a rank, is one concept `domain/verification` already owns. Restating
+// it here would create two notions of a valid rule free to drift — with the
+// drift landing on who may sign off a statutory filing.
+import type { VerificationPolicy } from "../verification/model";
+import { VERIFICATION_RULES, isVerificationRule, rulePer } from "../verification/model";
 //
 // One spine, several KINDS. The spine is the part that is hard to get right and
 // expensive to change later: how a configured thing is versioned, published,
@@ -50,7 +56,8 @@ export type ConfigKind =
   | "clause"
   | "dunning"
   | "workflow_template"
-  | "confidence_tier";
+  | "confidence_tier"
+  | "verification_policy";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -60,6 +67,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "dunning",
   "workflow_template",
   "confidence_tier",
+  "verification_policy",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -766,6 +774,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateWorkflowTemplateBody(body);
     case "confidence_tier":
       return validateConfidenceTierBody(body);
+    case "verification_policy":
+      return validateVerificationPolicyBody(body);
   }
 }
 
@@ -823,6 +833,114 @@ export function readConfidenceTierBody(body: Record<string, unknown>): Confidenc
   const reviewAt = body["reviewAt"];
   if (typeof autoCommitAt !== "number" || typeof reviewAt !== "number") return null;
   return { autoCommitAt, reviewAt };
+}
+
+const VERIFICATION_POLICY_FIELDS = ["label", "rule", "minGradeRank", "minGradeCode"];
+
+/**
+ * Who may check somebody else's work (T2.9) — the registry's eighth kind.
+ *
+ * **A kind rather than a column on the tenant, and the reason is the question
+ * it has to answer.** "Who was allowed to approve this filing in March?" is
+ * asked in an audit, and the only true answer is the rule that was in force
+ * that March. A published version is frozen and an approval PINS the version it
+ * was opened under, so raising the bar in April restates nothing.
+ *
+ * **Several per firm, not one.** SQC 1 requires an engagement quality control
+ * reviewer to be both suitably qualified AND independent of the engagement
+ * team, while an ordinary manager review is precisely the opposite — your own
+ * manager, who is on your engagement. Those are two rules inside one process,
+ * so a workflow STEP names the policy that governs it and a firm publishes as
+ * many as it has kinds of review. `confidence_tier` went the other way, with a
+ * fixed key, because there is genuinely one answer per firm there.
+ *
+ * `minGradeRank` is the RANK, resolved when the policy is written and stored as
+ * the number — the opposite of what a `service` body does with an axis code,
+ * for a reason that only applies here. A stored code would be re-resolved
+ * against today's ladder on every read, and would answer the March question
+ * with April's row, defeating the freeze this kind exists for. `minGradeCode`
+ * rides along for display and nothing compares it.
+ */
+function validateVerificationPolicyBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, VERIFICATION_POLICY_FIELDS);
+  if (unknown) return unknown;
+
+  const label = body["label"];
+  if (typeof label !== "string" || label.trim() === "") {
+    return `"label" must be a non-empty string — what a person reading the step sees, like "Manager review"`;
+  }
+
+  const rule = body["rule"];
+  if (typeof rule !== "string" || !isVerificationRule(rule)) {
+    return (
+      `"rule" must be one of ${VERIFICATION_RULES.join(", ")}. "rank_threshold" is the firm's ` +
+      `stated rule ("Manager or above is fine"); "reporting_line" is the tighter reading ` +
+      `("manager means engagement manager") and stalls when that person is away; ` +
+      `"reporting_line_or_rank" is both. Got ${describe(rule)}`
+    );
+  }
+
+  const { usesRank } = rulePer(rule);
+  const minGradeRank = body["minGradeRank"];
+  const minGradeCode = body["minGradeCode"];
+
+  if (usesRank) {
+    if (typeof minGradeRank !== "number" || !Number.isInteger(minGradeRank) || minGradeRank < 1) {
+      return (
+        `"minGradeRank" must be a whole number above zero — the rank of the lowest grade that ` +
+        `may check, taken from the firm's own ladder. Rule ${JSON.stringify(rule)} tests it. ` +
+        `Got ${describe(minGradeRank)}`
+      );
+    }
+    if (typeof minGradeCode !== "string" || minGradeCode.trim() === "") {
+      return (
+        `"minGradeCode" must name the grade "minGradeRank" came from, so a screen can say ` +
+        `"Manager" rather than "rank 7". It is never compared — the rank is`
+      );
+    }
+    return null;
+  }
+
+  // `reporting_line` tests no rank at all, so carrying one would be a knob that
+  // looks live and is not — the shape this codebase keeps catching.
+  if (minGradeRank !== null && minGradeRank !== undefined) {
+    return (
+      `rule "reporting_line" checks only who the maker reports to, so it must not carry a ` +
+      `"minGradeRank" — a threshold nothing reads is a setting that looks live. Use ` +
+      `"reporting_line_or_rank" to have both.`
+    );
+  }
+  if (minGradeCode !== null && minGradeCode !== undefined) {
+    return `rule "reporting_line" tests no grade, so "minGradeCode" must be null`;
+  }
+  return null;
+}
+
+/**
+ * Read a published `verification_policy` body back.
+ *
+ * Null when the body does not parse, and the caller reads that as "the firm has
+ * published no usable rule for this step" — which falls back to maker != checker
+ * alone, never to a threshold this code invented. Same contract as
+ * `readConfidenceTierBody`, and for the same reason.
+ */
+export function readVerificationPolicyBody(
+  body: Record<string, unknown>,
+): VerificationPolicy | null {
+  if (validateVerificationPolicyBody(body) !== null) return null;
+  const label = body["label"];
+  const rule = body["rule"];
+  if (typeof label !== "string" || typeof rule !== "string" || !isVerificationRule(rule)) {
+    return null;
+  }
+  const minGradeRank = body["minGradeRank"];
+  const minGradeCode = body["minGradeCode"];
+  return {
+    label,
+    rule,
+    minGradeRank: typeof minGradeRank === "number" ? minGradeRank : null,
+    minGradeCode: typeof minGradeCode === "string" ? minGradeCode : null,
+  };
 }
 
 const ROLE_FIELDS = ["label", "permissions"];
@@ -1496,6 +1614,21 @@ export interface WorkflowStep {
   readonly dependsOn: readonly string[];
   /** When this step applies at all. Null means always. */
   readonly condition: StepCondition | null;
+  /**
+   * The `verification_policy` key that says WHO checks this step once it is
+   * done (T2.9). Null means nobody does — which is what every step did before
+   * this field, and is the right default: a firm that has written no review
+   * rule must not have one invented for it.
+   *
+   * The KEY and not a version id, and this is the one place in a workflow body
+   * that deliberately reads live. A job PINS its template so editing the
+   * process never rewrites work in flight; the review RULE is different, and
+   * the difference is what an audit asks about. `step_approval` pins the policy
+   * version at the moment a check is opened, which is when "who was allowed to
+   * approve this" is actually decided. Pinning it a second time on the template
+   * would freeze a firm's review rule to whenever it last edited its process.
+   */
+  readonly verificationPolicyKey: string | null;
 }
 
 export interface WorkflowTemplateBody {
@@ -1504,7 +1637,14 @@ export interface WorkflowTemplateBody {
 }
 
 const WORKFLOW_FIELDS = ["label", "steps"];
-const WORKFLOW_STEP_FIELDS = ["key", "label", "executor", "dependsOn", "condition"];
+const WORKFLOW_STEP_FIELDS = [
+  "key",
+  "label",
+  "executor",
+  "dependsOn",
+  "condition",
+  "verificationPolicyKey",
+];
 
 /** A step key is a lowercase handle, like a config key and for the same reason:
  *  it is compared, stored on every row, and read in an audit trail. */
@@ -1599,6 +1739,21 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
         return `${at}.condition.equals must be a non-empty string`;
       }
     }
+
+    // Shape only. That the key names a policy this firm has actually PUBLISHED
+    // is checked at the write by the service, through a directory port — the
+    // same division `service` bodies make about an axis code, and for the same
+    // reason: this file may not reach a database, and a body frozen years ago
+    // must still parse after the policy it names has been retired.
+    const policyKey = step["verificationPolicyKey"];
+    if (policyKey !== undefined && policyKey !== null) {
+      if (typeof policyKey !== "string" || !isValidKey(policyKey)) {
+        return (
+          `${at}.verificationPolicyKey must be the key of a published verification_policy — ` +
+          `"manager_review", "eqcr" — or null for a step nobody checks. Got ${describe(policyKey)}`
+        );
+      }
+    }
   }
 
   // Every dependency must name a step this template HAS. A typo would otherwise
@@ -1689,6 +1844,12 @@ export function readWorkflowTemplate(
               fact: (s["condition"] as Record<string, unknown>)["fact"] as StepFact,
               equals: (s["condition"] as Record<string, unknown>)["equals"] as string,
             },
+      // Absent reads as null, not as a parse failure. Every template published
+      // before T2.9 has no such field, and those are processes a firm is
+      // running today — a body that stopped parsing would take their jobs with
+      // it. "Nobody checks this step" is exactly what those templates meant.
+      verificationPolicyKey:
+        typeof s["verificationPolicyKey"] === "string" ? s["verificationPolicyKey"] : null,
     }),
   );
   return { label: body["label"] as string, steps };

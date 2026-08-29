@@ -104,6 +104,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}/active"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/work-split"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/grade"), "tenant:admin" as const],
+  // WHO SOMEBODY REPORTS TO (T2.9) — `tenant:admin`, like the grade beside it
+  // and for the same reason. Under a `reporting_line` policy this column decides
+  // who may sign off whose statutory filing, so editing it is firm
+  // administration and not a profile field somebody maintains about themselves.
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/reports-to"), "tenant:admin" as const],
   // WHO BINDS THE FIRM (G1.4). The same split the firm-entity rule and the
   // configuration registry use, and for the same reason: this IS firm
   // configuration. Reading is `config:read` — an associate drafting a letter
@@ -213,6 +218,30 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // completing a step, deliberately — a firm that trusts somebody to say "this
   // filing is done" trusts them to say "the machine got it right".
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/decide"), "work:write" as const],
+
+  // THE VERIFICATION QUEUE (T2.9).
+  //
+  // The two reads are `party:read`, like the board they hang off: what is
+  // waiting to be checked is delivery state, and it carries no money. Deliberately
+  // NOT `work:write` — everybody on the team should be able to see that six
+  // filings have been sitting unreviewed for a week, including the people who
+  // cannot review them. A queue only reviewers can see is a queue nobody chases.
+  [routeKey("GET", "/api/v1/checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/jobs/{jobId}/checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/checks/{approvalId}/checkers"), "party:read" as const],
+  // DECIDING one is `work:write`, the same permission as doing the step, and
+  // that is a decision rather than a convenience: approving somebody's filing
+  // writes to the record of whether the work stands, which is the same kind of
+  // act as saying it was done. It is also the floor `isEligible` applies before
+  // the firm's own rule, which closes the demo's Q41 — a read-only Management
+  // membership carrying a Senior Manager grade would otherwise pass a rank
+  // threshold and be able to sign off a statutory filing.
+  //
+  // The permission is a FLOOR and never the whole answer: `work:write` gets you
+  // as far as the firm's published rule, which then decides. And no permission
+  // anywhere lets somebody approve their own work — that is a CHECK constraint,
+  // not a grant.
+  [routeKey("POST", "/api/v1/checks/{approvalId}/decide"), "work:write" as const],
   // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
   // configuration registry uses, and for the same reason: this IS firm
   // configuration. Reading it is `config:read` — an associate drafting a letter

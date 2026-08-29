@@ -74,6 +74,7 @@ export const EVENT_VERBS = {
   "membership.restored":         { objectType: "membership",          lane: "platform",   description: "A deactivated membership was reinstated." },
   "membership.role_changed":     { objectType: "membership",          lane: "platform",   description: "A member's role at a firm changed, and with it everything gate 3 lets them do." },
   "membership.grade_changed":    { objectType: "membership",          lane: "platform",   description: "A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later." },
+  "membership.reports_to_changed": { objectType: "membership",          lane: "platform",   description: "Who a member reports to changed. Read by one thing — a `reporting_line` verification policy deciding who may check their work — so 'who was my manager in March' is asked of this trail, because the column itself is not effective-dated." },
 
   // ── platform · the seniority ladder (G3.3) ────────────────────────────────
   // Separate from role: the role says what somebody may REACH, the grade says

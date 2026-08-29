@@ -10,6 +10,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
+import { VerificationError } from "../domain/verification/errors";
 import { SchedulerError } from "../domain/scheduler/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
@@ -179,6 +180,43 @@ export function mapError(err: unknown): MappedError {
       // well formed and what refuses it is the state of the run it is about.
       case "CORRECTION_CHANGED_NOTHING":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // The work is done and waiting for somebody ELSE to look at it (T2.9).
+      // 409 for STEP_NOT_WAITING's reason: the request was true a moment ago
+      // and the fix is to reload the job, not to resend.
+      case "AWAITING_CHECK":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  // T2.9. The 403 below is the one that matters, and it is why this family has
+  // a mapping the day it exists rather than the day somebody opens the page:
+  // NOT_ELIGIBLE_TO_CHECK reaching a browser as "internal error" is exactly the
+  // fifth bug T2.8 found, and this is the refusal a person meets most often.
+  if (err instanceof VerificationError) {
+    switch (err.code) {
+      case "APPROVAL_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // FORBIDDEN, not CONFLICT. The caller is authenticated and their request
+      // is well formed; what refuses it is who they are — they did the work, or
+      // they are not senior enough, or they are not the maker's manager. The
+      // message says which, because "you cannot check this" with no reason is
+      // how somebody concludes the button is broken.
+      case "NOT_ELIGIBLE_TO_CHECK":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // Somebody else answered first, or the step is not finished yet. Both are
+      // the state of the thing, not the shape of the request.
+      case "APPROVAL_ALREADY_DECIDED":
+      case "CHECK_ALREADY_OPEN":
+      case "STEP_NOT_CHECKABLE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // These two ARE the shape of the request: a rejection with no note, and a
+      // manager who is not a colleague. 400, and the message names what to send
+      // instead.
+      case "REJECTION_NEEDS_A_REASON":
+      case "REPORTS_TO_NOT_A_COLLEAGUE":
+      case "REPORTS_TO_CYCLE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

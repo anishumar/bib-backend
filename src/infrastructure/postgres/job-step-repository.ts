@@ -131,6 +131,15 @@ export class PostgresJobStepRepository implements JobStepRepository {
     });
   }
 
+  async findById(tenantId: string, stepId: string): Promise<JobStep | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<StepRow[]>`
+        SELECT ${db.unsafe(COLUMNS)} FROM delivery.job_step WHERE id = ${stepId}
+      `;
+      return row ? toStep(row) : null;
+    });
+  }
+
   /**
    * Compare-and-set. `WHERE status = expect` is the concurrency guard, and it is
    * in the SQL rather than in the service because a read-then-write has a race

@@ -40,6 +40,7 @@ import {
 import { ASK_A_PERSON, decideFor } from "../../domain/agent/model";
 import type { ProposalOutcome } from "../../domain/agent/model";
 import {
+  AwaitingCheck,
   JobNotFound,
   NoTemplatePublished,
   CorrectionChangedNothing,
@@ -63,6 +64,35 @@ import type {
   TemplateStep,
 } from "./ports";
 import type { JobRepository, TenantDirectory } from "../scheduler/ports";
+// T2.9 lives here rather than in a service of its own, and it is the same
+// judgement T2.8 made about `decideProposal`: a check is part of a STEP's
+// lifecycle, and this is the thing that owns a step's lifecycle. Splitting it
+// out would mean either a handler calling two use cases (which the layer rule
+// forbids for good reason) or two services holding each other, since opening a
+// check happens when work finishes and finishing work happens when a check
+// passes. The RULE is in `domain/verification`; only the orchestration is here.
+import type {
+  CheckerDirectory,
+  PendingCheck,
+  StepApprovalRepository,
+  VerificationPolicySource,
+} from "../verification/ports";
+import type {
+  CheckerCandidate,
+  Eligibility,
+  Maker,
+  StepApproval,
+  VerificationPolicy,
+} from "../../domain/verification/model";
+import { isEligible } from "../../domain/verification/model";
+import {
+  ApprovalAlreadyDecided,
+  ApprovalNotFound,
+  NotEligibleToCheck,
+  RejectionNeedsAReason,
+} from "../../domain/verification/errors";
+import type { Permission } from "../../domain/authz/model";
+import type { PermissionSource } from "../authz/ports";
 
 export interface Deps {
   readonly jobs: JobRepository;
@@ -73,6 +103,15 @@ export interface Deps {
   /** The firm's confidence thresholds, and the run book they judge (T2.8). */
   readonly tiers: TierSource;
   readonly runs: AgentRunRepository;
+  /** The firm's checks, its published rules about who may make them, and the
+   *  roster those rules are evaluated against (T2.9). */
+  readonly checks: StepApprovalRepository;
+  readonly policies: VerificationPolicySource;
+  readonly checkers: CheckerDirectory;
+  /** Resolves a role to its permissions, so eligibility can require the same
+   *  `work:write` that doing the step required. Shared with the authz service
+   *  rather than restated — one notion of what a role carries. */
+  readonly permissions: PermissionSource;
   readonly tenants: TenantDirectory;
   readonly ids: IdGen;
   readonly clock: Clock;
@@ -83,6 +122,30 @@ export interface Deps {
  *  worker, not a race to drain the table — the same reason the spawn sweep has
  *  a batch. */
 const WALK_BATCH = 100;
+
+/**
+ * A pending check, as a queue row — with the VIEWER's own verdict on it.
+ *
+ * The verdict rides on the row rather than filtering the list, because a queue
+ * that hides what you cannot take also hides that six filings have been waiting
+ * a week for somebody senior enough. A screen offers the button on `eligible`
+ * and says the reason on the rest.
+ */
+export interface CheckOnDesk extends PendingCheck {
+  /** Which rule governed it, or null when the firm had published none. Shown so
+   *  "why is only one person eligible" is answerable on the screen rather than
+   *  by reading config. */
+  readonly rule: string | null;
+  readonly viewer: Eligibility;
+}
+
+/** One member of staff, and whether they may check one particular thing. The
+ *  whole roster comes back with a verdict each — see `eligibleCheckers`. */
+export interface CheckerVerdict extends Eligibility {
+  readonly userId: string;
+  readonly displayName: string;
+  readonly gradeName: string | null;
+}
 
 export interface WalkReport {
   readonly tenantId: string;
@@ -295,26 +358,14 @@ export class OrchestratorService {
     // and tick it off the ordinary way.
     if (input.outcome === "rejected") return step;
 
-    const done = await this.deps.steps.transition(input.tenantId, step.id, "blocked", {
-      status: "done",
-      at,
-      performedBy: decidedBy,
-    });
-    if (!done) throw new StepNotWaiting(step.stepKey, "done");
-    await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
-      verb: "job.step_advanced",
-      objectId: input.jobId,
-      actor,
-      payload: {
-        stepKey: step.stepKey,
-        from: "blocked",
-        to: "done",
-        executor: step.executor,
-        outcome: input.outcome,
-      },
-    });
-    return done;
+    // Through the SAME gate a human step goes through (T2.9), and that is the
+    // decision: whether a firm's review happens must not depend on whether a
+    // machine drafted the work. The person who accepted the machine's output is
+    // the MAKER here — they own it now — which the gate records and which the
+    // database then refuses to let them approve.
+    const job = await this.deps.jobs.findById(input.tenantId, input.jobId);
+    if (!job) throw new JobNotFound(input.jobId);
+    return this.finishOrSendForChecking(input.tenantId, job, step, decidedBy, actor);
   }
 
   /**
@@ -401,8 +452,100 @@ export class OrchestratorService {
     const open = await this.deps.runs.openForStep(input.tenantId, step.id);
     if (open) throw new ProposalUndecided(step.stepKey);
 
+    // A step already waiting to be CHECKED is not a step to tick off again.
+    // Without this, the maker could re-complete their own work and the second
+    // pass would find a check already open and silently do nothing — a button
+    // that looks like it worked and did not.
+    const openCheck = await this.deps.checks.findOpenForStep(input.tenantId, step.id);
+    if (openCheck) throw new AwaitingCheck(step.stepKey);
+
+    return this.finishOrSendForChecking(input.tenantId, job, step, performedBy, actor);
+  }
+
+  /**
+   * The work is finished. Is anybody supposed to look at it? (T2.9)
+   *
+   * The one place both "a person ticked it off" and "a person accepted what a
+   * machine proposed" arrive at, because the answer must not depend on which of
+   * those it was. A firm that says a filing is reviewed by a Manager means
+   * reviewed, whoever or whatever prepared it.
+   *
+   * A step whose template names no policy finishes exactly as it did before
+   * T2.9 — which is every step of every process published until now.
+   *
+   * A step that names one does NOT become `done`. It stays `blocked`, which is
+   * already the state meaning "waiting on a person", now with a fourth cause;
+   * `performed_by` is written so the database knows who the maker was; and a
+   * `step_approval` row opens. The job does not advance, and that is the whole
+   * value of the feature — a review that does not hold up the work downstream
+   * is a review nobody has to do.
+   */
+  private async finishOrSendForChecking(
+    tenantId: string,
+    job: Job,
+    step: JobStep,
+    performedBy: string,
+    actor: Actor,
+  ): Promise<JobStep> {
     const at = this.deps.clock.now().toISOString();
-    const done = await this.deps.steps.transition(input.tenantId, step.id, "blocked", {
+    const policyKey = await this.policyKeyFor(tenantId, job, step.stepKey);
+
+    if (policyKey !== null) {
+      // blocked -> blocked, recording WHO did it. The status does not move, and
+      // the timestamp CHECK in 0044 is satisfied either way: a blocked step
+      // already has a `started_at` and must not have a `finished_at`, which is
+      // exactly true of work waiting to be checked.
+      const held = await this.deps.steps.transition(tenantId, step.id, "blocked", {
+        status: "blocked",
+        at,
+        performedBy,
+      });
+      if (!held) throw new StepNotWaiting(step.stepKey, "done");
+
+      // Resolved AFTER the maker is recorded, because the row the database
+      // derives `submitted_by` from is the one just written. Opening the check
+      // first would freeze a null maker onto it and quietly disable maker !=
+      // checker for this step.
+      const resolved = await this.deps.policies.publishedPolicy(tenantId, policyKey);
+      const approval = await this.deps.checks.openIfAbsent({
+        id: this.deps.ids.newId(),
+        tenantId,
+        jobId: job.id,
+        jobStepId: step.id,
+        // Null when the step names a policy the firm has since withdrawn. The
+        // check still opens — under maker != checker alone — because the firm
+        // said this step is reviewed, and unpublishing the rule about WHO does
+        // it is not the same as saying nobody does.
+        policyVersionId: resolved?.versionId ?? null,
+        policyKey,
+      });
+      // Null means somebody else opened one between the read and the write. That
+      // is the unique partial index doing its job, and it is not an error: the
+      // step is waiting to be checked either way, which is what the caller
+      // asked for.
+      if (approval !== null) {
+        await this.deps.events.recordEvent({
+          tenantId,
+          verb: "job.step_advanced",
+          objectId: job.id,
+          actor,
+          payload: {
+            stepKey: step.stepKey,
+            from: "blocked",
+            to: "blocked",
+            executor: step.executor,
+            awaitingCheck: true,
+            policyKey,
+            // Whether a rule was actually in force, so "why was this approved by
+            // an associate" is answerable. Never WHO — that is on the row.
+            policyResolved: resolved !== null,
+          },
+        });
+      }
+      return held;
+    }
+
+    const done = await this.deps.steps.transition(tenantId, step.id, "blocked", {
       status: "done",
       at,
       performedBy,
@@ -412,7 +555,7 @@ export class OrchestratorService {
     if (!done) throw new StepNotWaiting(step.stepKey, "done");
 
     await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
+      tenantId,
       verb: "job.step_advanced",
       objectId: job.id,
       actor,
@@ -422,8 +565,318 @@ export class OrchestratorService {
     // Immediately, not on the next tick. Finishing a step is what makes the next
     // ones ready, and a person who ticks something and sees nothing change
     // concludes the button did not work.
+    await this.advance(tenantId, job, actor);
+    return done;
+  }
+
+  /**
+   * The `verification_policy` key this step's PINNED template names, or null.
+   *
+   * From the pin, never from what is in force, for the reason the pin exists at
+   * all: a firm adding a review step to its process in April must not
+   * retroactively put a March job's finished work in front of a reviewer.
+   *
+   * A job with no pinned template has not started, so no step of it can be
+   * being completed. A template that no longer parses answers null, which is
+   * the same fact `TemplateUnreadable` reports elsewhere but must not throw
+   * here — refusing to let somebody tick off finished work because a config row
+   * went bad would strand the job entirely.
+   */
+  private async policyKeyFor(tenantId: string, job: Job, stepKey: string): Promise<string | null> {
+    if (job.templateVersionId === null) return null;
+    const template = await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
+    const def = template?.steps.find((s) => s.key === stepKey) ?? null;
+    return def?.verificationPolicyKey ?? null;
+  }
+
+  // ── the verification queue (T2.9) ──────────────────────────────────────────
+
+  /**
+   * Everything at this firm waiting to be checked, oldest first.
+   *
+   * The whole firm's, not "mine", and that is deliberate. Under a rank
+   * threshold there is no "mine" — any Manager may take any of it — and a queue
+   * filtered to what the viewer can act on hides the fact that six filings have
+   * been sitting for a week because nobody senior enough is looking. The
+   * ELIGIBILITY of the viewer rides on each row instead, so a screen can offer
+   * the button on the ones they may take and say why on the ones they may not.
+   *
+   * Oldest first, by when the work was submitted. NOT by an SLA due date: the
+   * firm has not given its internal turnaround times (client ask 3.4 is open),
+   * and `service.slaDays` has no writer with a real number in it. Ordering by a
+   * date this code invented would be a priority the firm never set.
+   */
+  async pendingChecks(tenantId: string, viewer: string | null): Promise<readonly CheckOnDesk[]> {
+    const pending = await this.deps.checks.listPending(tenantId);
+    if (pending.length === 0) return [];
+    return this.withEligibility(tenantId, pending, viewer);
+  }
+
+  /** Every check this job has ever had, the rejections included — the job
+   *  screen's read. A sent-back step that was later approved shows both, which
+   *  is the only place "this took two goes" is visible. */
+  async checksForJob(
+    tenantId: string,
+    jobId: string,
+    viewer: string | null,
+  ): Promise<readonly CheckOnDesk[]> {
+    const rows = await this.deps.checks.listForJob(tenantId, jobId);
+    if (rows.length === 0) return [];
+    return this.withEligibility(tenantId, rows, viewer);
+  }
+
+  /**
+   * A person approves or sends back somebody else's work.
+   *
+   * Every refusal here has a WALL underneath it and that is the arrangement, not
+   * a duplication: the CHECK in 0048 is what holds against a script, an import
+   * or an agent, and these are what a person is TOLD. A constraint violation
+   * reaching a browser as "internal error" is precisely the fifth bug T2.8 found
+   * by opening the page, and it was the same shape — a rule enforced only in the
+   * database, refused in no words.
+   */
+  async decideCheck(
+    input: {
+      readonly tenantId: string;
+      readonly approvalId: string;
+      readonly decision: "approved" | "rejected";
+      readonly notes: string | null;
+    },
+    actor: Actor,
+    decidedBy: string,
+  ): Promise<JobStep> {
+    const approval = await this.deps.checks.findById(input.tenantId, input.approvalId);
+    if (!approval) throw new ApprovalNotFound(input.approvalId);
+    if (approval.decision !== "pending") {
+      throw new ApprovalAlreadyDecided(input.approvalId, approval.decision);
+    }
+
+    const notes = input.notes === null ? null : input.notes.trim();
+    // Refused HERE as well as by the CHECK, for `CorrectionChangedNothing`'s
+    // reason: this is the one a PERSON hits, by clicking Send back and typing
+    // nothing, and they need a sentence rather than a constraint name.
+    if (input.decision === "rejected" && (notes === null || notes === "")) {
+      throw new RejectionNeedsAReason();
+    }
+
+    const step = await this.deps.steps.findById(input.tenantId, approval.jobStepId);
+    if (!step) throw new StepNotFound(approval.jobStepId);
+    const job = await this.deps.jobs.findById(input.tenantId, approval.jobId);
+    if (!job) throw new JobNotFound(approval.jobId);
+
+    const eligibility = await this.eligibilityOf(input.tenantId, approval, decidedBy);
+    if (!eligibility.eligible && eligibility.reason !== null) {
+      throw new NotEligibleToCheck(eligibility.reason);
+    }
+
+    const at = this.deps.clock.now().toISOString();
+    const decided = await this.deps.checks.decide(input.tenantId, approval.id, {
+      decision: input.decision,
+      notes,
+      decidedBy,
+      decidedAt: at,
+    });
+    // Somebody else answered between the read and the write. Their decision is
+    // part of the audit record and ours would overwrite it.
+    if (!decided) throw new ApprovalAlreadyDecided(input.approvalId, "decided");
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      // The two verbs registered in the event contract with no writer since the
+      // contract was written. They have one now.
+      verb: input.decision === "approved" ? "output.approved" : "output.rejected",
+      objectId: approval.id,
+      actor,
+      // Never the note. "Sent back" is the fact; WHY is prose that can name a
+      // client, and this log cannot be erased. The note lives on the row, which
+      // can be corrected and is not the audit trail.
+      payload: {
+        jobId: approval.jobId,
+        stepKey: step.stepKey,
+        policyKey: approval.policyKey,
+        checkedUnderPolicy: approval.policyVersionId !== null,
+      },
+    });
+
+    if (input.decision === "rejected") {
+      // The step does NOT move. Rejecting is not doing the work — somebody has
+      // to redo it and submit it again, and that second attempt opens a SECOND
+      // approval row, because "it was sent back once" is part of the record.
+      // The same shape a rejected agent proposal takes.
+      return step;
+    }
+
+    const done = await this.deps.steps.transition(input.tenantId, step.id, "blocked", {
+      status: "done",
+      at,
+      // The MAKER, not the checker. This column answers "who did the work", and
+      // overwriting it with the approver would erase the left-hand side of the
+      // rule that was just enforced — and make every checked step look as though
+      // the reviewer had done it.
+      performedBy: step.performedBy ?? undefined,
+    });
+    if (!done) throw new StepNotWaiting(step.stepKey, "done");
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "job.step_advanced",
+      objectId: approval.jobId,
+      actor,
+      payload: {
+        stepKey: step.stepKey,
+        from: "blocked",
+        to: "done",
+        executor: step.executor,
+        checked: true,
+      },
+    });
+
+    // Immediately, for `completeStep`'s reason — an approval is what makes the
+    // rest of the job ready, and a reviewer who approves something and sees the
+    // job sit still concludes it did not go through.
     await this.advance(input.tenantId, job, actor);
     return done;
+  }
+
+  /**
+   * Who, of the firm's own staff, may check this particular piece of work.
+   *
+   * Returned as the WHOLE roster with a verdict and a reason on each, not as a
+   * filtered list. A screen that shows four eligible names and silently omits
+   * the fifth cannot answer "why can Priya not approve this", which is the
+   * question somebody actually asks — and the answer ("she is ungraded", "she
+   * is the one who did it") is the thing that gets fixed.
+   */
+  async eligibleCheckers(
+    tenantId: string,
+    approvalId: string,
+  ): Promise<readonly CheckerVerdict[]> {
+    const approval = await this.deps.checks.findById(tenantId, approvalId);
+    if (!approval) throw new ApprovalNotFound(approvalId);
+
+    const [policy, maker, candidates] = await Promise.all([
+      this.policyOf(tenantId, approval),
+      this.makerOf(tenantId, approval),
+      this.candidates(tenantId),
+    ]);
+
+    return candidates.map((c) => ({
+      userId: c.candidate.userId,
+      displayName: c.candidate.displayName,
+      gradeName: c.candidate.gradeName,
+      ...isEligible(c.candidate, maker, policy),
+    }));
+  }
+
+  /**
+   * The rule this check was opened under.
+   *
+   * PINNED, always — `pinnedPolicy`, never `publishedPolicy`. A firm that raises
+   * its review bar this afternoon must not find this morning's open checks
+   * suddenly unapprovable by the people who were already looking at them, and an
+   * audit asking "who was allowed to approve this" must get March's answer.
+   *
+   * Null when the step named no policy, or named one the firm had already
+   * withdrawn when the check opened. Then maker != checker is the whole rule,
+   * which `isEligible` applies with a null policy.
+   */
+  private async policyOf(
+    tenantId: string,
+    approval: StepApproval,
+  ): Promise<VerificationPolicy | null> {
+    if (approval.policyVersionId === null) return null;
+    const resolved = await this.deps.policies.pinnedPolicy(tenantId, approval.policyVersionId);
+    return resolved?.policy ?? null;
+  }
+
+  /** The maker, WITH their own reporting line — the reporting-line rule asks who
+   *  THEY report to, which is a fact about them and not about the candidate. */
+  private async makerOf(tenantId: string, approval: StepApproval): Promise<Maker | null> {
+    if (approval.submittedBy === null) return null;
+    const staff = await this.deps.checkers.activeStaff(tenantId);
+    const row = staff.find((s) => s.userId === approval.submittedBy);
+    // A maker who has since been deactivated still made the work. Their
+    // reporting line is gone with their active membership, which a
+    // `reporting_line` policy correctly reads as "nobody is their manager any
+    // more" — and the firm falls back to the rank half, or to nobody, visibly.
+    return { userId: approval.submittedBy, reportsToUserId: row?.reportsToUserId ?? null };
+  }
+
+  /**
+   * The firm's staff as candidates, with `work:write` already resolved.
+   *
+   * Permissions are looked up ONCE PER ROLE rather than once per person: a
+   * hundred-person firm has five roles, and the alternative is a hundred config
+   * reads to render one screen — the per-row lookup this codebase has now been
+   * caught by five times.
+   */
+  private async candidates(
+    tenantId: string,
+  ): Promise<readonly { readonly candidate: CheckerCandidate }[]> {
+    const staff = await this.deps.checkers.activeStaff(tenantId);
+    const byRole = new Map<string, readonly Permission[]>();
+    for (const role of new Set(staff.map((s) => s.role))) {
+      byRole.set(role, await this.deps.permissions.permissionsFor(tenantId, role));
+    }
+    return staff.map((s) => ({
+      candidate: {
+        userId: s.userId,
+        displayName: s.displayName,
+        gradeRank: s.gradeRank,
+        gradeName: s.gradeName,
+        canWrite: (byRole.get(s.role) ?? []).includes("work:write"),
+      },
+    }));
+  }
+
+  /** One person's verdict on one check — what `decideCheck` refuses on, and what
+   *  a queue row carries so the screen knows whether to offer the button. */
+  private async eligibilityOf(
+    tenantId: string,
+    approval: StepApproval,
+    userId: string,
+  ): Promise<Eligibility> {
+    const [policy, maker, candidates] = await Promise.all([
+      this.policyOf(tenantId, approval),
+      this.makerOf(tenantId, approval),
+      this.candidates(tenantId),
+    ]);
+    const me = candidates.find((c) => c.candidate.userId === userId);
+    // Not on the active roster at all. Their session resolved, so they hold a
+    // membership; this is the deactivated-between-requests case, and it is a
+    // refusal rather than a crash.
+    if (!me) return { eligible: false, reason: "NO_WORK_PERMISSION" };
+    return isEligible(me.candidate, maker, policy);
+  }
+
+  /**
+   * Attach the viewer's verdict to a list of checks, resolving the roster ONCE.
+   *
+   * The loop matters: a queue of thirty rows would otherwise re-read the staff
+   * list and every role's permissions thirty times. The policy still resolves
+   * per row, because each row pins its own version and two rows can legitimately
+   * have been opened under different ones — which is exactly the case a firm
+   * that revised its rule this week produces.
+   */
+  private async withEligibility(
+    tenantId: string,
+    rows: readonly PendingCheck[],
+    viewer: string | null,
+  ): Promise<readonly CheckOnDesk[]> {
+    const candidates = await this.candidates(tenantId);
+    const me = viewer === null ? undefined : candidates.find((c) => c.candidate.userId === viewer);
+
+    const out: CheckOnDesk[] = [];
+    for (const row of rows) {
+      const policy = await this.policyOf(tenantId, row.approval);
+      const maker = await this.makerOf(tenantId, row.approval);
+      const verdict: Eligibility =
+        me === undefined
+          ? { eligible: false, reason: "NO_WORK_PERMISSION" }
+          : isEligible(me.candidate, maker, policy);
+      out.push({ ...row, rule: policy?.rule ?? null, viewer: verdict });
+    }
+    return out;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
