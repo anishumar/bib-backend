@@ -98,4 +98,30 @@ describe("the seeded obligation states and the product defaults agree", () => {
   it("gives a generated obligation somewhere to FINISH", () => {
     expect(DEFAULT_OBLIGATION_STATES.filter((s) => s.isTerminal).length).toBeGreaterThan(0);
   });
+
+  it("gives a FINISHED filing exactly one place to land", () => {
+    // 0054, and the partial unique index enforces at most one. "At least one"
+    // it cannot enforce, so the floor is here: a firm with none has a completed
+    // task and an obligation the calendar keeps showing as open, which is the
+    // silent failure this module is built against. Exactly one, because with
+    // two, where a finished filing goes is a coin toss.
+    expect(DEFAULT_OBLIGATION_STATES.filter((s) => s.isFiled)).toHaveLength(1);
+  });
+
+  it("never marks a state filed unless it is also terminal", () => {
+    // The database CHECK, restated. A filing that landed somewhere still
+    // running would be neither finished nor open.
+    for (const s of DEFAULT_OBLIGATION_STATES) {
+      expect(s.isFiled && !s.isTerminal, `${s.code} claims filed but not terminal`).toBe(false);
+    }
+  });
+
+  it("keeps the OTHER terminal state clear of it — that one is T3.3's", () => {
+    // `resolved` is the end of a deadline already missed, which a partner
+    // chose. Reading `isTerminal` to find where a filing lands would have been
+    // a coin toss between the two, which is exactly why the flag exists.
+    const terminal = DEFAULT_OBLIGATION_STATES.filter((s) => s.isTerminal);
+    expect(terminal.length).toBeGreaterThan(1);
+    expect(terminal.filter((s) => !s.isFiled).length).toBeGreaterThan(0);
+  });
 });

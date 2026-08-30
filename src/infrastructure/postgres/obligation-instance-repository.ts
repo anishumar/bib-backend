@@ -14,7 +14,7 @@
 // this query computes rather than a guess a screen makes.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { ObligationInstance } from "../../domain/obligation/model";
+import type { IsoDate, ObligationInstance } from "../../domain/obligation/model";
 import type {
   CalendarQuery,
   CalendarRow,
@@ -263,6 +263,51 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         UPDATE delivery.obligation_instance SET work_item_id = ${workItemId}
         WHERE id = ${obligationId} AND work_item_id IS NULL
       `;
+    });
+  }
+
+  async findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<InstanceRow[]>`
+        SELECT ${db.unsafe(INSTANCE_COLUMNS)} FROM delivery.obligation_instance
+        WHERE work_item_id = ${workItemId}
+      `;
+      const row = rows[0];
+      return row ? toInstance(row) : null;
+    });
+  }
+
+  async markFiled(
+    tenantId: string,
+    obligationId: string,
+    filedOn: IsoDate,
+    stateId: string,
+  ): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // `AND filed_on IS NULL` is what makes this safe to call twice. Two
+      // concurrent completions of the same task both reach here; exactly one
+      // updates a row, and only that one's caller writes `obligation.filed`.
+      // The check cannot live in the caller — between its read and its write
+      // the other request has already committed.
+      const rows = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance
+        SET filed_on = ${filedOn}::date, state_id = ${stateId}
+        WHERE id = ${obligationId} AND filed_on IS NULL
+        RETURNING id
+      `;
+      return rows.length > 0;
+    });
+  }
+
+  async clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance
+        SET filed_on = NULL, state_id = ${stateId}
+        WHERE id = ${obligationId} AND filed_on IS NOT NULL
+        RETURNING id
+      `;
+      return rows.length > 0;
     });
   }
 

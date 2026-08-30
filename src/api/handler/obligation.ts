@@ -304,7 +304,21 @@ const CalendarParams = z.object({
   to: z.string().optional(),
   entityPartyId: z.string().uuid().optional(),
   module: z.string().optional(),
-  includeSettled: z.coerce.boolean().optional(),
+  // A STRING ON THE WIRE, and not `z.coerce.boolean()`. That coercion is
+  // `Boolean(value)`, and `Boolean("false")` is TRUE — so `includeSettled=false`
+  // meant "include them", every caller unticking the box was silently ignored,
+  // and the whole filter did nothing whatever the screen showed. Found by
+  // running the chain, not by a test: the parameter parsed, the query ran, and
+  // the wrong branch is indistinguishable from the right one until a row is
+  // actually terminal — which nothing could make it until 0054.
+  //
+  // The enum also puts the accepted values in the spec, so the generated client
+  // makes the frontend say which it means instead of relying on how a boolean
+  // happens to be serialised into a query string.
+  includeSettled: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => (v === undefined ? undefined : v === "true")),
   limit: z.coerce.number().int().min(1).max(500).optional(),
 });
 

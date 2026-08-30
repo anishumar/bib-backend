@@ -122,7 +122,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // work-item service that differed between the two processes would put a
   // filing on one desk when the cron ran it and another when a person did.
   const workVocabularyRepository = new PostgresWorkVocabularyRepository(pools.app);
-  const workItems = new WorkItemService({
+  const workItems: WorkItemService = new WorkItemService({
     items: new PostgresWorkItemRepository(pools.app),
     approvals: new PostgresWorkItemApprovalRepository(pools.app),
     vocabulary: workVocabularyRepository,
@@ -142,6 +142,15 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // disagreed with the API's would put a duplicate on somebody's desk exactly
     // when nobody was watching.
     obligations: new PostgresObligationCoverage(pools.app),
+    // The return leg, wired exactly as the API wires it — see `setup/server.ts`
+    // for why the closure is what breaks the cycle. It must exist in BOTH
+    // processes for this file's own stated reason: a work-item service that
+    // behaved differently here would file an obligation when a person ticked a
+    // task and not when the worker did.
+    filings: {
+      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
+        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
+    },
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -153,7 +162,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // The same service the API holds, from the same adapters, for the reason
   // stated above the work-item service: a calendar that generated differently
   // in the worker than it reads in the browser is one nobody could debug.
-  const obligations = new ObligationService({
+  const obligations: ObligationService = new ObligationService({
     templates: new PostgresObligationTemplateRepository(pools.app),
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),

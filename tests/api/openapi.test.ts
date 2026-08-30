@@ -89,6 +89,7 @@ import {
 import {
   FakeEngagementWork,
   FakeObligationCoverage,
+  FakeObligationFiling,
   FakeReviewPermissions,
   FakeReviewPolicies,
   FakeReviewers,
@@ -241,6 +242,7 @@ function deps(): RouterDeps {
           permissions: new FakeReviewPermissions(),
           engagements: new FakeEngagementWork(),
           obligations: new FakeObligationCoverage(),
+          filings: new FakeObligationFiling(),
           ids: new FakeIds(),
           clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
           events: new RecordingEventSink(),

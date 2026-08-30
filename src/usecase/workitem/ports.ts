@@ -9,6 +9,7 @@
 // this codebase; the port is stated twice in each one's own words and satisfied
 // ONCE by the adapter. `AxisDirectory` and `RoleDirectory` already work exactly
 // this way.
+import type { Actor } from "../../domain/ledger/model";
 import type {
   ChecklistItem,
   SpocCandidate,
@@ -33,6 +34,7 @@ export interface NewWorkItemState {
   readonly isInitial: boolean;
   readonly isTerminal: boolean;
   readonly isBlocked: boolean;
+  readonly isSuccess: boolean;
   readonly sortOrder: number;
 }
 
@@ -49,6 +51,7 @@ export interface WorkItemStatePatch {
   readonly isInitial: boolean;
   readonly isTerminal: boolean;
   readonly isBlocked: boolean;
+  readonly isSuccess: boolean;
   readonly sortOrder: number;
   readonly isActive: boolean;
 }
@@ -156,6 +159,43 @@ export interface ObligationCoverage {
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>>;
+}
+
+/**
+ * Telling the calendar that the task discharging an obligation has finished —
+ * or has stopped being finished.
+ *
+ * ── THE OTHER DIRECTION, AND WHY IT IS A PORT AND NOT A CALL ───────────────
+ *
+ * `WorkItemRaiser` (in `usecase/obligation/ports.ts`) already runs the other
+ * way: the calendar raises a task. This is the return leg, and without it
+ * `obligation_instance.filed_on` had four readers and no writer — a calendar
+ * whose every row said "Pending" forever, which is how T3.2 shipped.
+ *
+ * Two use cases now name each other, so the CYCLE is real and it is broken
+ * where cycles belong: in the composition root, which is the only place that
+ * knows both services exist. Neither file imports the other; each declares the
+ * one method it needs of the other, and `setup/` satisfies both.
+ *
+ * ── IT TAKES A STATE, NOT AN EVENT ────────────────────────────────────────
+ *
+ * `discharged` is the CURRENT answer, so this is reconciliation rather than a
+ * transition: calling it twice, out of order, or after a redelivery all reach
+ * the same place, and a reopened item is the same call with a different answer
+ * rather than a second path to keep in step.
+ *
+ * **And `discharged` is terminal AND successful, never terminal alone.** A firm
+ * starts with two terminal states and one of them is Cancelled; reading
+ * `isTerminal` here would record that a statutory return had been FILED because
+ * somebody tidied their board.
+ */
+export interface ObligationFiling {
+  reconcileFiling(
+    tenantId: string,
+    workItemId: string,
+    discharged: boolean,
+    actor: Actor,
+  ): Promise<void>;
 }
 
 export interface NewWorkItem {

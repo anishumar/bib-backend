@@ -46,6 +46,7 @@ export type ObligationErrorCode =
   | "EXCEPTION_MONTH_TAKEN"
   | "EXCEPTION_ON_EVENT_RULE"
   | "NO_INITIAL_STATE"
+  | "NO_FILED_STATE"
   | "OBLIGATION_NOT_FOUND"
   | "INVALID_WINDOW";
 
@@ -268,8 +269,34 @@ export class NoInitialState extends ObligationError {
     super(
       "NO_INITIAL_STATE",
       `this firm has no obligation state marked as the starting one, so a generated filing has ` +
-        `nowhere to begin. Mark one on the compliance vocabulary screen — "Pending" is what a ` +
-        `new firm ships with.`,
+        `nowhere to begin. Every firm is seeded with one ("Pending"), and nothing in the ` +
+        `product can unmark it, so this means the states were changed outside it — restore the ` +
+        `starting flag on one of them.`,
+    );
+  }
+}
+
+/**
+ * Nowhere for a finished filing to land.
+ *
+ * Raised rather than swallowed, and that is the decision worth stating: the
+ * alternative — quietly leaving the obligation open — is the silent failure
+ * this whole module is built against, and it would be invisible on exactly the
+ * rows a firm most needs to trust. A firm cannot reach this by accident: the
+ * seed ships the state and the database allows at most one, and — unlike the
+ * work board's vocabulary — the compliance states have NO editing surface yet,
+ * so getting here means the rows were changed outside the product. The screen
+ * that would let a firm change them is an open item on the board, not something
+ * this message may pretend exists.
+ */
+export class NoFiledState extends ObligationError {
+  constructor() {
+    super(
+      "NO_FILED_STATE",
+      `this firm has no obligation state marked as the filed one, so a completed filing has ` +
+        `nowhere to land and the calendar would keep showing it as open. Every firm is seeded ` +
+        `with one ("Filed"), and nothing in the product can unmark it, so this means the ` +
+        `states were changed outside it — restore the filed flag on one of them.`,
     );
   }
 }

@@ -51,6 +51,14 @@ const WorkItemStateSchema = z
         "keep the behaviour, or tick it on 'Waiting for Client' to start demanding a reason " +
         "there too.",
     }),
+    isSuccess: z.boolean().openapi({
+      description:
+        "Reaching it means the work was actually DONE, not abandoned. Only a terminal state " +
+        "may carry it. A firm starts with TWO terminal states — Completed and Cancelled — " +
+        "and this is what tells them apart: the compliance calendar marks a filing filed " +
+        "from this flag, and cancelling a task must never record that a statutory return " +
+        "was filed.",
+    }),
     sortOrder: z.number().int(),
     isActive: z.boolean().openapi({
       description:
@@ -328,6 +336,7 @@ const CreateStateRequest = z
     isInitial: z.boolean().optional(),
     isTerminal: z.boolean().optional(),
     isBlocked: z.boolean().optional(),
+    isSuccess: z.boolean().optional(),
     sortOrder: z.number().int().optional(),
   })
   .openapi("CreateWorkItemStateRequest");
@@ -338,6 +347,7 @@ const UpdateStateRequest = z
     isInitial: z.boolean().optional(),
     isTerminal: z.boolean().optional(),
     isBlocked: z.boolean().optional(),
+    isSuccess: z.boolean().optional(),
     sortOrder: z.number().int().optional(),
     isActive: z.boolean().optional(),
   })
@@ -408,6 +418,7 @@ function toStateWire(s: WorkItemState): z.infer<typeof WorkItemStateSchema> {
     isInitial: s.isInitial,
     isTerminal: s.isTerminal,
     isBlocked: s.isBlocked,
+    isSuccess: s.isSuccess,
     sortOrder: s.sortOrder,
     isActive: s.isActive,
   };
@@ -1185,6 +1196,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         isInitial: body.isInitial,
         isTerminal: body.isTerminal,
         isBlocked: body.isBlocked,
+        isSuccess: body.isSuccess,
         sortOrder: body.sortOrder,
       },
       s.actor,
@@ -1205,6 +1217,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         isInitial: body.isInitial,
         isTerminal: body.isTerminal,
         isBlocked: body.isBlocked,
+        isSuccess: body.isSuccess,
         sortOrder: body.sortOrder,
         isActive: body.isActive,
       },

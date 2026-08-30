@@ -11,6 +11,7 @@ import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeEngagementWork,
   FakeObligationCoverage,
+  FakeObligationFiling,
   FakeReviewPermissions,
   FakeReviewPolicies,
   FakeReviewers,
@@ -55,6 +56,7 @@ async function harness() {
   const permissions = new FakeReviewPermissions();
   const engagements = new FakeEngagementWork();
   const obligations = new FakeObligationCoverage();
+  const filings = new FakeObligationFiling();
   const events = new RecordingEventSink();
   const clock = new FakeClock(new Date(NOW));
   const ids = new FakeIds();
@@ -79,6 +81,7 @@ async function harness() {
     permissions,
     engagements,
     obligations,
+    filings,
     ids,
     clock,
     events,
@@ -118,6 +121,7 @@ async function harness() {
     permissions,
     engagements,
     obligations,
+    filings,
     events,
     staff,
     clients,
@@ -447,6 +451,67 @@ describe("moving between the firm's own states", () => {
     );
     // Terminal to terminal is one state change and NOT a second completion.
     expect(h.verbs().filter((v) => v === "work_item.completed")).toHaveLength(1);
+  });
+
+  it("does NOT record a completion for a task that was CANCELLED", async () => {
+    // 0054. This fired on any terminal state until `is_success` existed, so a
+    // cancelled task counted as work the firm finished — and the verb's own
+    // description is "what did we finish last month", which a cancellation is
+    // not an answer to. Every report built on this verb would have counted them
+    // forever, silently.
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: (await stateNamed(h, "cancelled")).id },
+      ACTOR,
+    );
+    expect(h.verbs()).not.toContain("work_item.completed");
+    // The fact is not lost: the state change carries the flag, so "what did we
+    // abandon" is answerable without a verb of its own.
+    const moved = h.recorded().find((e) => e.verb === "work_item.state_changed");
+    expect(moved?.payload).toMatchObject({ isTerminal: true, isSuccess: false });
+  });
+
+  it("tells the compliance calendar on EVERY move, with the discharged answer", async () => {
+    // The return leg of `raiseForObligation`, and the one writer
+    // `obligation_instance.filed_on` has. Called on every move because the port
+    // reconciles rather than transitions — so a reopen is the same call with a
+    // different answer rather than a second path to keep in step.
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: (await stateNamed(h, "in_progress")).id },
+      ACTOR,
+    );
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: (await stateNamed(h, "completed")).id },
+      ACTOR,
+    );
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: (await stateNamed(h, "in_progress")).id },
+      ACTOR,
+    );
+
+    expect(h.filings.calls).toEqual([
+      { workItemId: item.id, discharged: false },
+      { workItemId: item.id, discharged: true },
+      { workItemId: item.id, discharged: false },
+    ]);
+  });
+
+  it("never tells the calendar a CANCELLED task discharged a filing", async () => {
+    // The trap this whole flag exists for. "Terminal" alone would record that a
+    // statutory return had been FILED because somebody tidied their board —
+    // not a missing feature but a false statement about a filing, and worse
+    // than the "Pending forever" it replaces.
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: (await stateNamed(h, "cancelled")).id },
+      ACTOR,
+    );
+    expect(h.filings.calls).toEqual([{ workItemId: item.id, discharged: false }]);
   });
 
   it("never puts the block REASON in the ledger", async () => {

@@ -205,7 +205,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   //     `permissions` — the SAME three T2.9 gave the orchestrator. One answer to
   //     "who checks whose work" at this firm, whether the work is a process step
   //     or a task; two would drift the first time a firm changed its policy.
-  const workItems = new WorkItemService({
+  const workItems: WorkItemService = new WorkItemService({
     items: new PostgresWorkItemRepository(pools.app),
     approvals: new PostgresWorkItemApprovalRepository(pools.app),
     vocabulary: workVocabularyRepository,
@@ -223,6 +223,17 @@ export function wire(cfg: Config, log: Logger): Wired {
     // see `ObligationCoverage` — so a firm with no rules keeps exactly the
     // behaviour it had before the calendar existed.
     obligations: new PostgresObligationCoverage(pools.app),
+    // THE RETURN LEG, AND THE ONE CYCLE IN THIS FILE — broken here, which is
+    // where a cycle belongs. The calendar raises a task (`workItems` below is
+    // passed to it as `WorkItemRaiser`); finishing that task files the
+    // obligation. Two use cases naming each other cannot both be constructed
+    // first, so this closure defers the lookup to CALL time — by which point
+    // `obligations` has long been assigned, since nothing calls it before a
+    // request. Neither use case imports the other; only this line knows both.
+    filings: {
+      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
+        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
+    },
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -237,7 +248,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // "what a person must do about it" is the one idea this whole module rests
   // on, and it is visible here in the type as well as in the comments.
   const obligationTemplates = new PostgresObligationTemplateRepository(pools.app);
-  const obligations = new ObligationService({
+  const obligations: ObligationService = new ObligationService({
     templates: obligationTemplates,
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),

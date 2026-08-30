@@ -104,6 +104,7 @@ afterAll(async () => {
   await owner`DELETE FROM delivery.obligation_instance WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
   await owner`DELETE FROM delivery.obligation_template_exception WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
   await owner`DELETE FROM delivery.obligation_template WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
+  await owner`DELETE FROM delivery.work_item_state WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
   await owner`DELETE FROM delivery.obligation_state WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
   await owner`DELETE FROM core.party WHERE tenant_id IN (${ids.tenantA}, ${ids.tenantB})`;
   await owner`DELETE FROM tenancy.tenant WHERE slug IN (${slugA}, ${slugB})`;
@@ -428,5 +429,124 @@ describe("at most one starting state per firm", () => {
         VALUES (${ids.tenantA}, 'both', 'Both', true, true)
       `),
     ).rejects.toThrow(/obligation_state_terminal_chk/);
+  });
+});
+
+// ── 0054: what "finished" means, on both sides of the join ─────────────────
+//
+// The two flags that close T3.2's open half, and every one of these is a rule a
+// psql session, an import or an agent has to obey too. The service tests prove
+// the BEHAVIOUR over fakes; these prove that nothing can put the database into
+// a state where the behaviour is undefined.
+
+describe("where a finished filing lands", () => {
+  it("allows exactly one filed state per firm, and refuses a second", async () => {
+    await asTenant(ids.tenantA, (tx) => tx`
+      INSERT INTO delivery.obligation_state (tenant_id, code, name, is_terminal, is_filed)
+      VALUES (${ids.tenantA}, 'filed', 'Filed', true, true)
+    `);
+    // With two, "where does a completed filing go" is a coin toss — and the
+    // answer decides whether the calendar shows a return as done.
+    await expect(
+      asTenant(ids.tenantA, (tx) => tx`
+        INSERT INTO delivery.obligation_state (tenant_id, code, name, is_terminal, is_filed)
+        VALUES (${ids.tenantA}, 'submitted', 'Submitted', true, true)
+      `),
+    ).rejects.toThrow(/idx_obligation_state_one_filed|duplicate key/);
+  });
+
+  it("is per FIRM, so another firm may still have its own", async () => {
+    // The index is partial on `(tenant_id) WHERE is_filed`. A global one would
+    // let the first firm to mark a state stop every other firm from having one.
+    await expect(
+      asTenant(ids.tenantB, (tx) => tx`
+        INSERT INTO delivery.obligation_state (tenant_id, code, name, is_terminal, is_filed)
+        VALUES (${ids.tenantB}, 'filed', 'Filed', true, true)
+      `),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses a filed state that is not terminal", async () => {
+    // A filing that landed somewhere still running would be neither finished
+    // nor open, and `canStillBeMissed` would keep saying yes about work that is
+    // already done.
+    await expect(
+      asTenant(ids.tenantA, (tx) => tx`
+        INSERT INTO delivery.obligation_state (tenant_id, code, name, is_terminal, is_filed)
+        VALUES (${ids.tenantA}, 'halfway', 'Halfway', false, true)
+      `),
+    ).rejects.toThrow(/obligation_state_filed_chk/);
+  });
+});
+
+describe("a cancelled task is not a completed one", () => {
+  it("refuses a work item state that claims success without being terminal", async () => {
+    // The flag only means anything about work that has stopped. Ticked on a
+    // running state it would file an obligation for work still in progress.
+    await expect(
+      asTenant(ids.tenantA, (tx) => tx`
+        INSERT INTO delivery.work_item_state (tenant_id, code, name, is_terminal, is_success)
+        VALUES (${ids.tenantA}, 'running_ok', 'Running OK', false, true)
+      `),
+    ).rejects.toThrow(/work_item_state_success_chk/);
+  });
+
+  it("lets a firm mark one terminal state a success and another not", async () => {
+    // Which is the whole shape 0050 shipped and 0054 made readable: Completed
+    // and Cancelled are both terminal, and only one of them is work the firm
+    // finished. No index caps this one — a firm may legitimately have several
+    // ways of finishing and several ways of giving up.
+    const rows = await asTenant(ids.tenantA, (tx) => tx<{ code: string }[]>`
+      INSERT INTO delivery.work_item_state (tenant_id, code, name, is_terminal, is_success)
+      VALUES (${ids.tenantA}, 'filed_ok', 'Filed', true, true),
+             (${ids.tenantA}, 'abandoned', 'Abandoned', true, false)
+      RETURNING code
+    `);
+    expect(rows).toHaveLength(2);
+  });
+});
+
+describe("every firm that already existed was brought forward", () => {
+  it("gives each one a filed state and a successful terminal work state", async () => {
+    // 0054's backfill, checked against the CATALOGUE rather than a list, the
+    // way `tenant-keys.integration.test.ts` does — a firm created before this
+    // migration whose flags were never set would have a completed task and an
+    // obligation the calendar shows as open forever, silently.
+    //
+    // THIS FILE'S OWN TWO FIRMS ARE EXCLUDED, and that exclusion is what makes
+    // the assertion mean anything. They are created by `beforeAll`, long after
+    // the migration ran, so the backfill never saw them — and the describes
+    // above go on to give them a filed state by hand. Without the exclusion
+    // this passes because of the test that ran before it, which is a green
+    // build proving nothing.
+    const gaps = await owner<{ slug: string }[]>`
+      SELECT t.slug FROM tenancy.tenant t
+      WHERE t.slug NOT IN (${slugA}, ${slugB})
+        AND EXISTS (SELECT 1 FROM delivery.obligation_state s WHERE s.tenant_id = t.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery.obligation_state s WHERE s.tenant_id = t.id AND s.is_filed
+        )
+    `;
+    expect(gaps.map((g) => g.slug)).toEqual([]);
+
+    const workGaps = await owner<{ slug: string }[]>`
+      SELECT t.slug FROM tenancy.tenant t
+      WHERE t.slug NOT IN (${slugA}, ${slugB})
+        AND EXISTS (SELECT 1 FROM delivery.work_item_state s WHERE s.tenant_id = t.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery.work_item_state s
+          WHERE s.tenant_id = t.id AND s.is_terminal AND s.is_success
+        )
+    `;
+    expect(workGaps.map((g) => g.slug)).toEqual([]);
+
+    // And it is not vacuous: there ARE firms in this database that predate the
+    // migration. An assertion over an empty set is one that cannot fail.
+    const [seeded] = await owner<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM tenancy.tenant t
+      WHERE t.slug NOT IN (${slugA}, ${slugB})
+        AND EXISTS (SELECT 1 FROM delivery.obligation_state s WHERE s.tenant_id = t.id)
+    `;
+    expect(Number(seeded?.n ?? 0)).toBeGreaterThan(0);
   });
 });

@@ -41,6 +41,18 @@ export interface WorkItemState {
   readonly isTerminal: boolean;
   /** The work is STUCK, and a reason becomes mandatory. See `blockedReason`. */
   readonly isBlocked: boolean;
+  /**
+   * The work was DONE, not abandoned (0054).
+   *
+   * Only meaningful on a terminal state, and the database says so. A firm
+   * starts with TWO terminal states — Completed and Cancelled — and everything
+   * that asks "did this actually happen" has to tell them apart: the compliance
+   * calendar marks an obligation filed from this flag, and `work_item.completed`
+   * fires from it, because a cancelled task is not something the firm finished.
+   *
+   * A flag rather than the code, for the reason at the top of this interface.
+   */
+  readonly isSuccess: boolean;
   readonly sortOrder: number;
   /** Whether the firm still moves work into it. Retired states still READ —
    *  items sitting in one are not orphaned — they are simply not offered. */
@@ -249,6 +261,7 @@ export interface StateDefinition {
   readonly isInitial: boolean;
   readonly isTerminal: boolean;
   readonly isBlocked: boolean;
+  readonly isSuccess: boolean;
   readonly sortOrder: number;
 }
 
@@ -273,16 +286,22 @@ export interface StateDefinition {
  * "Waiting for Client" already says whose fault the delay is, which is most of
  * what a reason field is for. A firm that wants the prose as well ticks the box
  * itself, which is the configurability being real rather than advertised.
+ *
+ * **Exactly one of the two terminal states is a SUCCESS** (0054), and that is
+ * the whole reason the flag exists. Cancelled is terminal and is not a firm
+ * finishing anything — reading `isTerminal` alone would have the compliance
+ * calendar record a statutory return as FILED because somebody tidied their
+ * board.
  */
 export const DEFAULT_WORK_ITEM_STATES: readonly StateDefinition[] = [
-  { code: "not_started", name: "Not Started", isInitial: true, isTerminal: false, isBlocked: false, sortOrder: 10 },
-  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, isBlocked: false, sortOrder: 20 },
-  { code: "waiting_client", name: "Waiting for Client", isInitial: false, isTerminal: false, isBlocked: false, sortOrder: 30 },
-  { code: "waiting_internal", name: "Waiting Internal", isInitial: false, isTerminal: false, isBlocked: false, sortOrder: 40 },
-  { code: "under_review", name: "Under Review", isInitial: false, isTerminal: false, isBlocked: false, sortOrder: 50 },
-  { code: "blocked", name: "Blocked", isInitial: false, isTerminal: false, isBlocked: true, sortOrder: 60 },
-  { code: "completed", name: "Completed", isInitial: false, isTerminal: true, isBlocked: false, sortOrder: 70 },
-  { code: "cancelled", name: "Cancelled", isInitial: false, isTerminal: true, isBlocked: false, sortOrder: 80 },
+  { code: "not_started", name: "Not Started", isInitial: true, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 10 },
+  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 20 },
+  { code: "waiting_client", name: "Waiting for Client", isInitial: false, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 30 },
+  { code: "waiting_internal", name: "Waiting Internal", isInitial: false, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 40 },
+  { code: "under_review", name: "Under Review", isInitial: false, isTerminal: false, isBlocked: false, isSuccess: false, sortOrder: 50 },
+  { code: "blocked", name: "Blocked", isInitial: false, isTerminal: false, isBlocked: true, isSuccess: false, sortOrder: 60 },
+  { code: "completed", name: "Completed", isInitial: false, isTerminal: true, isBlocked: false, isSuccess: true, sortOrder: 70 },
+  { code: "cancelled", name: "Cancelled", isInitial: false, isTerminal: true, isBlocked: false, isSuccess: false, sortOrder: 80 },
 ];
 
 export interface PriorityDefinition {

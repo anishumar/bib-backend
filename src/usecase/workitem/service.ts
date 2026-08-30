@@ -94,6 +94,7 @@ import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/mo
 import type {
   EngagementWorkSource,
   ObligationCoverage,
+  ObligationFiling,
   NewWorkItem,
   NewWorkItemPriority,
   NewWorkItemState,
@@ -128,6 +129,9 @@ export interface CreateStateInput {
   readonly isInitial?: boolean | undefined;
   readonly isTerminal?: boolean | undefined;
   readonly isBlocked?: boolean | undefined;
+  /** Reaching it means the work was DONE rather than abandoned. Only a terminal
+   *  state may carry it — see `refuseConflictingFlags`. */
+  readonly isSuccess?: boolean | undefined;
   readonly sortOrder?: number | undefined;
 }
 
@@ -139,6 +143,7 @@ export interface UpdateStateInput {
   readonly isInitial?: boolean | undefined;
   readonly isTerminal?: boolean | undefined;
   readonly isBlocked?: boolean | undefined;
+  readonly isSuccess?: boolean | undefined;
   readonly sortOrder?: number | undefined;
   readonly isActive?: boolean | undefined;
 }
@@ -185,7 +190,8 @@ export class WorkVocabularyService {
     const isInitial = input.isInitial ?? false;
     const isTerminal = input.isTerminal ?? false;
     const isBlocked = input.isBlocked ?? false;
-    this.refuseConflictingFlags(isInitial, isTerminal, isBlocked);
+    const isSuccess = input.isSuccess ?? false;
+    this.refuseConflictingFlags(isInitial, isTerminal, isBlocked, isSuccess);
 
     // Checked rather than left to the unique constraint, which would surface as
     // an unexplained 500 on a screen where the fix is obvious.
@@ -201,6 +207,7 @@ export class WorkVocabularyService {
       isInitial,
       isTerminal,
       isBlocked,
+      isSuccess,
       sortOrder,
     } satisfies NewWorkItemState);
 
@@ -209,7 +216,7 @@ export class WorkVocabularyService {
       verb: "work_item_state.created",
       objectId: state.id,
       actor,
-      payload: { code: state.code, isInitial, isTerminal, isBlocked },
+      payload: { code: state.code, isInitial, isTerminal, isBlocked, isSuccess },
     });
     return state;
   }
@@ -243,10 +250,11 @@ export class WorkVocabularyService {
       isInitial: input.isInitial ?? state.isInitial,
       isTerminal: input.isTerminal ?? state.isTerminal,
       isBlocked: input.isBlocked ?? state.isBlocked,
+      isSuccess: input.isSuccess ?? state.isSuccess,
       sortOrder: input.sortOrder ?? state.sortOrder,
       isActive: input.isActive ?? state.isActive,
     };
-    this.refuseConflictingFlags(next.isInitial, next.isTerminal, next.isBlocked);
+    this.refuseConflictingFlags(next.isInitial, next.isTerminal, next.isBlocked, next.isSuccess);
 
     // Losing the starting flag, or retiring the row that holds it, both leave
     // the firm unable to create any work at all. The same refusal, because they
@@ -259,6 +267,7 @@ export class WorkVocabularyService {
       next.isInitial !== state.isInitial ||
       next.isTerminal !== state.isTerminal ||
       next.isBlocked !== state.isBlocked ||
+      next.isSuccess !== state.isSuccess ||
       next.sortOrder !== state.sortOrder ||
       next.isActive !== state.isActive;
     if (!changed) return state;
@@ -279,6 +288,7 @@ export class WorkVocabularyService {
         ...(next.isInitial === state.isInitial ? {} : { isInitial: next.isInitial }),
         ...(next.isTerminal === state.isTerminal ? {} : { isTerminal: next.isTerminal }),
         ...(next.isBlocked === state.isBlocked ? {} : { isBlocked: next.isBlocked }),
+        ...(next.isSuccess === state.isSuccess ? {} : { isSuccess: next.isSuccess }),
         ...(next.sortOrder === state.sortOrder ? {} : { sortOrder: next.sortOrder }),
         ...(next.isActive === state.isActive ? {} : { isActive: next.isActive }),
       },
@@ -399,6 +409,7 @@ export class WorkVocabularyService {
       isInitial: s.isInitial,
       isTerminal: s.isTerminal,
       isBlocked: s.isBlocked,
+      isSuccess: s.isSuccess,
       sortOrder: s.sortOrder,
     }));
 
@@ -467,7 +478,14 @@ export class WorkVocabularyService {
     isInitial: boolean,
     isTerminal: boolean,
     isBlocked: boolean,
+    isSuccess: boolean,
   ): void {
+    if (isSuccess && !isTerminal) {
+      throw new ConflictingStateFlags(
+        "Only a state the firm treats as finished can mean the work was done: mark it " +
+          "terminal, or leave it unticked. Work that is still running has not succeeded yet.",
+      );
+    }
     if (isTerminal && isBlocked) {
       throw new ConflictingStateFlags(
         "A state cannot be both terminal and blocked: finished work is not stuck.",
@@ -505,6 +523,16 @@ export interface Deps {
   readonly permissions: ReviewPermissionSource;
   readonly engagements: EngagementWorkSource;
   readonly obligations: ObligationCoverage;
+  /**
+   * The compliance calendar, told when a filing's task settles (0054).
+   *
+   * The return leg of `ObligationRaiser`, and the one writer
+   * `obligation_instance.filed_on` has. Injected rather than called, so this
+   * service still knows nothing about obligations beyond the one sentence it
+   * has to say to them — and so the cycle between the two use cases is broken
+   * in `setup/`, which is the only place that knows both exist.
+   */
+  readonly filings: ObligationFiling;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -1022,13 +1050,23 @@ export class WorkItemService {
         toStateId: to.id,
         isBlocked: to.isBlocked,
         isTerminal: to.isTerminal,
+        // What tells a completion from a cancellation, which `isTerminal` alone
+        // cannot. Carried here so the log answers "what did we abandon" as well
+        // as "what did we finish", without a verb of its own.
+        isSuccess: to.isSuccess,
       },
     });
 
     // A separate, registered verb, because "what did we finish last month" is a
     // question somebody asks of the log and a generic state change cannot
     // answer it without knowing which states were terminal at the time.
-    if (to.isTerminal && !from.isTerminal) {
+    //
+    // TERMINAL AND SUCCESSFUL (0054). This fired on any terminal state until
+    // the flag existed, so cancelling a task counted as finishing it — and the
+    // verb's own description is "what did we finish last month", which a
+    // cancellation is not an answer to. The state change is still recorded
+    // above, carrying `isSuccess`, so "what did we abandon" is answerable too.
+    if (to.isTerminal && to.isSuccess && !(from.isTerminal && from.isSuccess)) {
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "work_item.completed",
@@ -1037,6 +1075,24 @@ export class WorkItemService {
         payload: { stateId: to.id, clientPartyId: item.clientPartyId },
       });
     }
+
+    // AND THE CALENDAR. If this item was raised for an obligation, the
+    // obligation is filed — or, moving the other way, un-filed. Called on EVERY
+    // move rather than only on the interesting ones, because the port
+    // reconciles rather than transitions and the current answer is all it
+    // needs; see `ObligationFiling`.
+    //
+    // After the move has been written, deliberately. The two are not in one
+    // transaction, so the order decides which way a failure between them falls:
+    // this way the task is done and the calendar has not caught up, which is
+    // visible and recoverable. The reverse would record a filing for work the
+    // board still shows as running.
+    await this.deps.filings.reconcileFiling(
+      input.tenantId,
+      item.id,
+      to.isTerminal && to.isSuccess,
+      actor,
+    );
     return updated;
   }
 

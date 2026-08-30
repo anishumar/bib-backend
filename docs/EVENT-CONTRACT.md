@@ -314,7 +314,8 @@ version is exactly what gets asked about afterwards.
 | `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states were initialised from the product defaults. One event, not five. |
 | `obligation.spawned` | obligation_instance | An obligation instance was created for a period. Per instance, never per sweep. |
 | `obligation.work_raised` | obligation_instance | An obligation reached T–X and became a task. The one place the calendar and the work board join. |
-| `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). |
+| `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). Written when the work item raised for it reaches a state flagged terminal **and** successful — a cancelled task is not a filing. |
+| `obligation.filing_reversed` | obligation_instance | A recorded filing was taken back, because its work item was reopened or cancelled. |
 | `obligation.missed` | obligation_instance | A statutory date passed undischarged. A state, not an error (T3.3). |
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |
 | `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. Its output is KEPT and offered as material rather than as an answer — throwing away a usable draft every time the machine is unsure is how a firm ends up redoing the work by hand anyway. |

@@ -17,6 +17,7 @@
 //   makes maker != checker worth anything — a maker the caller can set is not a
 //   control — and a fake that took it as an argument would quietly test the
 //   version of the rule that does not hold.
+import type { Actor } from "../domain/ledger/model";
 import type {
   ChecklistItem,
   SpocCandidate,
@@ -33,11 +34,12 @@ import type {
   ApprovalDecisionWrite,
   EngagementWork,
   EngagementWorkSource,
-  ObligationCoverage,
   NewWorkItem,
   NewWorkItemApproval,
   NewWorkItemPriority,
   NewWorkItemState,
+  ObligationCoverage,
+  ObligationFiling,
   ResolvedReviewPolicy,
   ReviewPermissionSource,
   ReviewPolicySource,
@@ -657,5 +659,27 @@ export class FakeObligationCoverage implements ObligationCoverage {
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
     return Promise.resolve(new Set(engagementIds.filter((id) => this.covered.has(id))));
+  }
+}
+
+/**
+ * The calendar being TOLD a filing's task has settled, faked (0054).
+ *
+ * It records rather than acts, because what the work-item side owes the
+ * calendar is one sentence and the interesting assertion is whether it said it
+ * — with the right answer to "is this discharged". The reconciliation itself is
+ * `ObligationService`'s and is tested there over a store.
+ */
+export class FakeObligationFiling implements ObligationFiling {
+  readonly calls: { workItemId: string; discharged: boolean }[] = [];
+
+  reconcileFiling(
+    _tenantId: string,
+    workItemId: string,
+    discharged: boolean,
+    _actor: Actor,
+  ): Promise<void> {
+    this.calls.push({ workItemId, discharged });
+    return Promise.resolve();
   }
 }

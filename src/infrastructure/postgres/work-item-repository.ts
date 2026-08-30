@@ -59,6 +59,7 @@ interface RecordRow extends ItemRow {
   state_is_initial: boolean;
   state_is_terminal: boolean;
   state_is_blocked: boolean;
+  state_is_success: boolean;
   state_sort_order: number;
   state_is_active: boolean;
   priority_code: string;
@@ -141,6 +142,7 @@ function toRecord(r: RecordRow): WorkItemRecord {
       isInitial: r.state_is_initial,
       isTerminal: r.state_is_terminal,
       isBlocked: r.state_is_blocked,
+      isSuccess: r.state_is_success,
       sortOrder: r.state_sort_order,
       isActive: r.state_is_active,
     },
@@ -197,6 +199,7 @@ const RECORD_SELECT = `
          ep.display_name AS entity_name,
          s.code AS state_code, s.name AS state_name, s.is_initial AS state_is_initial,
          s.is_terminal AS state_is_terminal, s.is_blocked AS state_is_blocked,
+         s.is_success AS state_is_success,
          s.sort_order AS state_sort_order, s.is_active AS state_is_active,
          p.code AS priority_code, p.name AS priority_name, p.rank AS priority_rank,
          p.is_default AS priority_is_default,

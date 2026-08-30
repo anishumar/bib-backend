@@ -322,6 +322,113 @@ describe("an obligation becomes somebody's job at T–X, and only then", () => {
   });
 });
 
+describe("the filing closes when its task does, and opens again if the task reopens", () => {
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** Generate one August obligation and put it on a desk. Returns the work item
+   *  id, which is the only handle the closing path has. */
+  async function raisedFiling(): Promise<string> {
+    await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-08-31" }, ACTOR);
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    const row = h.instances.rows.find((r) => r.workItemId !== null);
+    if (!row?.workItemId) throw new Error("nothing was raised; the harness is wrong");
+    return row.workItemId;
+  }
+
+  function filed() {
+    return h.instances.rows.filter((r) => r.filedOn !== null);
+  }
+
+  it("was the gap this closes: raising alone files nothing", async () => {
+    // T3.2's own note, as a test. `raise` deliberately does not move the state
+    // — `work_item_id` being set IS the fact that work started — so before this
+    // path existed `filed_on` had four readers and no writer at all.
+    await raisedFiling();
+    expect(filed()).toHaveLength(0);
+  });
+
+  it("files the obligation when the task is finished, and says how late", async () => {
+    const workItemId = await raisedFiling();
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+
+    const row = filed()[0];
+    expect(row?.filedOn).toBe(TODAY);
+
+    // The state moved too, and by the FLAG — a calendar whose rows all read
+    // "Pending" forever is what this closes.
+    const filedState = (await h.states.list(FIRM)).find((st) => st.isFiled);
+    expect(row?.stateId).toBe(filedState?.id);
+
+    const ev = h.events.recorded.find((e) => e.verb === "obligation.filed");
+    expect(ev).toBeDefined();
+    // Statutory date 20 Sep, filed 30 Aug: twenty-one days EARLY. The one
+    // number a partner asks for afterwards, computed once rather than by
+    // whoever reads the log.
+    expect(ev?.payload).toMatchObject({ workItemId, filedOn: TODAY, daysLate: -21 });
+  });
+
+  it("writes ONE obligation.filed however many times it is told", async () => {
+    // The call is reconciliation, not a transition: a double-click, a retry and
+    // a redelivered message all arrive here, and the guard is in the store's
+    // own WHERE clause rather than in a caller that read first.
+    const workItemId = await raisedFiling();
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+
+    expect(h.events.verbs().filter((v) => v === "obligation.filed")).toHaveLength(1);
+    expect(filed()).toHaveLength(1);
+  });
+
+  it("un-files it when the task stops being finished, and returns it to the start", async () => {
+    // Reopening or cancelling. A calendar still saying "Filed" while somebody
+    // is actively working the same thing is a second rule about one fact — and
+    // filed is TERMINAL, so `canStillBeMissed` would be false forever and T3.3
+    // could never flag it. Un-filing lets the missed sweep correct itself.
+    const workItemId = await raisedFiling();
+    await h.service.reconcileFiling(FIRM, workItemId, true, ACTOR);
+    await h.service.reconcileFiling(FIRM, workItemId, false, ACTOR);
+
+    expect(filed()).toHaveLength(0);
+    const initial = (await h.states.list(FIRM)).find((st) => st.isInitial);
+    expect(h.instances.rows[0]?.stateId).toBe(initial?.id);
+    expect(h.events.verbs()).toContain("obligation.filing_reversed");
+  });
+
+  it("says nothing at all when the task was never filed", async () => {
+    const workItemId = await raisedFiling();
+    await h.service.reconcileFiling(FIRM, workItemId, false, ACTOR);
+    expect(h.events.verbs()).not.toContain("obligation.filing_reversed");
+  });
+
+  it("ignores a work item that is not a filing", async () => {
+    // Most of a firm's board is ordinary work. This is the common case, not a
+    // miss, and it must cost one lookup and no event.
+    await firmWithGst(h);
+    const before = h.events.verbs().length;
+    await h.service.reconcileFiling(FIRM, "00000000-0000-4000-8000-0000000000ff", true, ACTOR);
+    expect(h.events.verbs()).toHaveLength(before);
+  });
+
+  it("refuses rather than quietly leaving the filing open with nowhere to land", async () => {
+    // A firm cannot reach this by accident — the seed ships the state and the
+    // database allows at most one — so getting here means somebody unflagged or
+    // retired it, which is a thing they did and can undo. Swallowing it would
+    // be the silent failure this whole module is built against.
+    const workItemId = await raisedFiling();
+    for (const st of h.states.rows) {
+      if (st.isFiled) h.states.rows[h.states.rows.indexOf(st)] = { ...st, isFiled: false };
+    }
+    await expect(h.service.reconcileFiling(FIRM, workItemId, true, ACTOR)).rejects.toThrow(
+      /no obligation state marked as the filed one/i,
+    );
+  });
+});
+
 describe("one firm's failure never stops the others", () => {
   it("catches per tenant and REPORTS the failure", async () => {
     // T3.1's lesson, written as a test this time. `sweepActivations` carried a

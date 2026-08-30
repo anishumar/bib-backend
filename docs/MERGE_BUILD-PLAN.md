@@ -2097,27 +2097,100 @@ open and are recorded above; neither blocks Phase 2.
   > board due 20 September at **High** — the statutory-default priority flag doing its job, from the
   > law, with nobody setting it.
   >
-  > **NOT DONE, AND NAMED HERE RATHER THAN LEFT TO BE DISCOVERED (2026-08-30).** `filed_on` is
-  > READ in four places and WRITTEN in none, and an obligation's state never leaves the initial
-  > one — `raise` deliberately does not move it (setting `work_item_id` IS the fact that work
-  > started) and nothing else does either. Three consequences, all visible to a user:
-  > every calendar row reads "Pending" forever; **`/calendar`'s "Include filed and resolved"
-  > checkbox does nothing**, because `is_terminal` is never true; and `obligation.filed` is a
-  > registered verb with no writer. That is exactly the shape `CLAUDE.md` warns about twice —
-  > *a column nothing writes is the feature that looks finished* — and the `resolution` columns
-  > were left out for that very reason while `filed_on` was not, which is an inconsistency I
-  > introduced.
+  > **THE OPEN HALF NAMED HERE ON 2026-08-30 IS NOW CLOSED. Migration 0054.** What was missing:
+  > `filed_on` was READ in four places and WRITTEN in none, so every calendar row said "Pending"
+  > forever, `/calendar`'s "include filed and resolved" checkbox could not change what it
+  > returned, and `obligation.filed` was a registered verb with no writer — the shape `CLAUDE.md`
+  > warns about twice. `ObligationService.reconcileFiling` is the writer, and the whole chain was
+  > walked against a running server. **T3.2's own acceptance line never depended on this**, which
+  > is why the tick stood; what follows is the close of the loop.
   >
-  > **T3.2's acceptance line still holds in full** (Apr–Jun quarter, March TDS on 30 April,
-  > twelve instances, an idempotent re-run), which is why this is ticked. What is missing is the
-  > close of the loop, and it is the FIRST thing in the next session: mark an obligation filed
-  > when its work item reaches a terminal state, emit `obligation.filed`, and the checkbox and
-  > the state column both come alive. T3.3 then owns `missed` → partner decision → `resolved`.
+  > **"TERMINAL" WAS THE WRONG RULE, ON BOTH SIDES OF THE JOIN, AND THAT IS THE DESIGN FINDING.**
+  > The note above said *mark an obligation filed when its work item reaches a terminal state*.
+  > Both halves of that sentence are ambiguous and both resolve the wrong way if left alone:
   >
-  > Gate: `npm run check` **1262 tests** · `test:integration` **403** (21 new, real Postgres) ·
-  > `npm run smoke` **261/261** (8 new). **The smoke budget is now spent — ~296 requests of 300** —
-  > so the known-open item about the edge limiter's key is no longer theoretical: the next section
-  > added to that walk does not fit.
+  > - **0050 seeds TWO terminal work item states — `completed` AND `cancelled`.** A task is
+  >   cancelled for ordinary reasons: the client left, the entity was deregistered, somebody
+  >   raised it twice. Reading `is_terminal` alone would record that a statutory return had been
+  >   FILED because a person tidied their board. That is not a missing feature, it is a FALSE
+  >   STATEMENT about a filing, and it is worse than the "Pending forever" it replaces.
+  > - **0052 seeds TWO terminal obligation states — `filed` AND `resolved`.** `resolved` is
+  >   T3.3's, the end of a deadline already missed. A filing nobody had to decide anything about
+  >   does not belong in the decision queue.
+  >
+  > So each side gained ONE flag: `work_item_state.is_success` ("the work was DONE, not
+  > abandoned") and `obligation_state.is_filed` ("a finished filing lands here"). **Flags, never
+  > a `code`** — this module's own rule, and a firm renaming Filed to "Submitted" must not switch
+  > the mechanism off. `filedState()` mirrors `initialState()`; a partial unique index caps the
+  > second at one per firm; CHECKs refuse either flag on a state that is not terminal.
+  >
+  > **BOTH DEFAULT TO FALSE, and the direction is chosen.** A firm adding its own terminal state
+  > gets `false` until somebody ticks it, so the failure is an obligation that stays OPEN —
+  > visible, on the calendar, in front of the person who can fix it. `true` would have failed the
+  > other way: filings recorded that never happened, silently, on the rows that matter most.
+  >
+  > **RECONCILIATION, NOT A TRANSITION.** `reconcileFiling(tenantId, workItemId, discharged)`
+  > takes the CURRENT answer and makes the obligation agree, and `moveToState` calls it on every
+  > move. Three things fall out: it is idempotent by construction (the guard is the repository's
+  > own `WHERE filed_on IS NULL`, so a double-click writes ONE `obligation.filed`); reopening is
+  > not a special case but the same call with a different answer; and there is no order to get
+  > wrong. **A reopened or cancelled task UN-FILES** — `moveToState` already clears `completedAt`
+  > on the way back, a calendar still saying "Filed" while somebody works the same thing is a
+  > second rule about one fact, and filed is TERMINAL, so `canStillBeMissed` would be false
+  > forever and T3.3 could never flag it. Un-filing lets the missed sweep self-correct. The
+  > withdrawal is a registered verb (`obligation.filing_reversed`), never a quiet UPDATE.
+  >
+  > **The cycle is real and is broken in `setup/`.** The calendar raises a task (`WorkItemRaiser`)
+  > and finishing that task files the obligation (`ObligationFiling`). Neither use case imports
+  > the other; each declares the one method it needs and the composition root satisfies both with
+  > a closure, in the API and the worker alike.
+  >
+  > **`filed_on` IS THE UTC DAY — DECIDED (Shrestha, 2026-08-30), and the cost is stated.** East
+  > of Greenwich a filing made after midnight local records the previous day, which is the
+  > on-time/late boundary on a statutory record. It is survivable only because the work item's
+  > `completed_at` keeps the exact instant, so `filed_on` is a convenience projection and the
+  > truth is not lost. The general fix — a firm timezone, or the caller's day on every route —
+  > is still open and still shared with `invoice`, `dunning` and `lead`.
+  >
+  > **`work_item.completed` no longer fires for a CANCELLED task**, decided in the same breath:
+  > the verb's own description is *"what did we finish last month"*, and counting cancellations
+  > poisons every report built on it. `work_item.state_changed` now carries `isSuccess`, so
+  > "what did we abandon" is answerable without a verb of its own.
+  >
+  > **WHAT RUNNING IT FOUND, AND NOTHING ELSE COULD HAVE.** `/calendar`'s checkbox was inert for
+  > TWO reasons and only one was known. The second: `includeSettled: z.coerce.boolean()`.
+  > Coercion is `Boolean(value)`, a query string carries TEXT, and **`Boolean("false")` is
+  > `true`** — so `?includeSettled=false` meant "include them", the filter was permanently on,
+  > and unticking the box was ignored. Every layer behaved: the parameter parsed, the route
+  > answered 200, the SQL ran. The two branches are indistinguishable until a row is actually
+  > terminal, which nothing could make one until this task. It is now
+  > `z.enum(["true","false"]).transform(...)`, which also puts the accepted values in the spec —
+  > and regenerating the client turned the frontend's boolean into a COMPILE ERROR, which is the
+  > seam doing exactly what it is for. `tests/api/query-booleans.test.ts` bans the coercion in
+  > every handler, because the instance is fixed and the CLASS is what recurs.
+  >
+  > **An honesty fix carried in the same commit:** `NoInitialState` and `NoFiledState` both told
+  > a partner to *"mark one on the compliance vocabulary screen"*. **That screen does not exist**
+  > — the obligation states have no editing surface at all, unlike the work board's
+  > `/admin/work-vocabulary`. Both messages now say what is true (the rows were changed outside
+  > the product), and the missing screen is an open item below rather than something an error
+  > message pretends into existence.
+  >
+  > **STILL OPEN AFTER THIS, and named rather than left:** the obligation-state vocabulary has no
+  > screen, so a firm cannot rename its own compliance states or move the two flags. It belongs
+  > with T4.3's rules page and is the standing directive's bar (*change it from a screen, not a
+  > deploy*) unmet for this one vocabulary. The work board's equivalent gained the new flag on
+  > `/admin/work-vocabulary` in this commit, offered only on a state already marked finished.
+  >
+  > Gate: `npm run check` **1280 tests** · `test:integration` **409** (6 new, real Postgres:
+  > the two CHECKs, the partial unique index, its per-tenant scope, and 0054's backfill asserted
+  > against the CATALOGUE and proved non-vacuous). **The browser walk is still owed** — the Chrome
+  > extension would not connect this session — so the chain was walked over real HTTP against the
+  > running server instead, INCLUDING the preflight sent by hand (`OPTIONS` + POST, exact origin,
+  > credentials), which is the one thing curl does not do on its own. Complete → **Filed,
+  > 2026-08-30**, row leaves the default view; reopen → **Pending**, `filed_on` null, row returns;
+  > cancel → **not filed**, and no `work_item.completed`. The ledger shows all sixteen events in
+  > order. **The smoke budget is still spent — ~296 of 300 — and nothing was added to it.**
 
 - [ ] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
   > **The decision AND its reason are both recorded** (`resolution`, `resolution_reason`, `resolved_at`). In a CA firm this moment is where money and liability are decided, and today it happens on WhatsApp and is written down nowhere. The reason is the capture-or-lose half: in eighteen months nobody remembers why a late fee was accepted rather than a provisional filing made, and that is exactly the thing worth knowing. Writes `obligation.missed`, then `obligation.filed` or a resolution.

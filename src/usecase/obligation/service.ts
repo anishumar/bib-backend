@@ -20,7 +20,9 @@
 import {
   addDays,
   coverageOf,
+  daysBetween,
   DEFAULT_OBLIGATION_STATES,
+  filedState,
   generatesDates,
   initialState,
   isDueRuleKind,
@@ -49,6 +51,7 @@ import {
   InvalidRulePack,
   InvalidRuleStatus,
   InvalidWindow,
+  NoFiledState,
   NoInitialState,
   ObligationNotFound,
   ServiceNotFound,
@@ -188,6 +191,7 @@ export class ObligationService {
       isInitial: s.isInitial,
       isTerminal: s.isTerminal,
       needsDecision: s.needsDecision,
+      isFiled: s.isFiled,
       sortOrder: s.sortOrder,
     }));
     if (missing.length === 0) return 0;
@@ -775,6 +779,104 @@ export class ObligationService {
       });
     }
     return raised;
+  }
+
+  /**
+   * Bring an obligation into line with the work item that discharges it.
+   *
+   * ── THE OTHER END OF `raise`, AND WHY IT IS RECONCILIATION ────────────────
+   *
+   * `raise` puts a task on somebody's desk. This is what happens when that task
+   * is finished — the only writer `filed_on` has, and the only thing that ever
+   * moves an obligation out of the state it was generated in.
+   *
+   * It takes the work item's CURRENT answer to "is this discharged" rather than
+   * a transition, and makes the obligation agree. That shape is chosen over an
+   * `onCompleted` / `onReopened` pair for three reasons:
+   *
+   *   · **Idempotent by construction.** A double-click, a retried request or a
+   *     redelivered call reaches the same end state, and the repository's own
+   *     WHERE clause is what decides whether an EVENT is written — so the
+   *     ledger gains one `obligation.filed`, not two.
+   *   · **Reopening is not a special case.** It is the same call with a
+   *     different answer, so there is no second path to keep in step with this
+   *     one.
+   *   · **It cannot be called in the wrong order**, because there is no order.
+   *
+   * ── WHAT `discharged` MEANS, AND WHY IT IS NOT `isTerminal` ───────────────
+   *
+   * Terminal AND successful. A firm starts with two terminal work item states
+   * and one of them is Cancelled — raised twice, client gone, entity
+   * deregistered. Reading `isTerminal` alone would record that a statutory
+   * return had been FILED because somebody tidied their board: not a missing
+   * feature but a false statement about a filing, which is worse than the
+   * "Pending forever" it replaces. 0054 is where that flag comes from.
+   *
+   * ── AND WHY A REOPENED ITEM UN-FILES ──────────────────────────────────────
+   *
+   * `WorkItemService.moveToState` already clears `completedAt` on the way back
+   * out; a calendar that kept saying "Filed" while somebody was actively
+   * working the same thing would be a second rule about the same fact. It also
+   * matters downstream: filed is terminal, and `canStillBeMissed` is false for
+   * a terminal state, so an obligation wrongly left filed could never afterwards
+   * be flagged missed. Un-filing lets T3.3's sweep pick it up again and correct
+   * itself. The withdrawal is a REGISTERED verb rather than a quiet UPDATE,
+   * because `filed_on` is a claim about a statutory date.
+   *
+   * The obligation returns to the firm's INITIAL state — where `raise` left it,
+   * since raising deliberately does not move it either.
+   */
+  async reconcileFiling(
+    tenantId: string,
+    workItemId: string,
+    discharged: boolean,
+    actor: Actor = SYSTEM_ACTOR,
+  ): Promise<void> {
+    // Most work items are not a filing. This is the ordinary answer, and it
+    // costs one indexed lookup rather than a state list nobody needs.
+    const obligation = await this.deps.instances.findByWorkItem(tenantId, workItemId);
+    if (obligation === null) return;
+
+    // Already in the shape being asked for. Checked before the state list so a
+    // repeated call is a single read.
+    if (discharged === (obligation.filedOn !== null)) return;
+
+    const states = await this.deps.states.list(tenantId);
+
+    if (discharged) {
+      const filed = filedState(states);
+      if (filed === null) throw new NoFiledState();
+      const filedOn = this.today();
+      if (!(await this.deps.instances.markFiled(tenantId, obligation.id, filedOn, filed.id))) {
+        return; // somebody else got there first; their event is the one that counts
+      }
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "obligation.filed",
+        objectId: obligation.id,
+        actor,
+        payload: {
+          workItemId,
+          filedOn,
+          statutoryDueOn: obligation.statutoryDueOn,
+          // The one number a partner asks for afterwards, computed once here
+          // rather than by whoever reads the log. Negative is early.
+          daysLate: daysBetween(obligation.statutoryDueOn, filedOn),
+        },
+      });
+      return;
+    }
+
+    const initial = initialState(states);
+    if (initial === null) throw new NoInitialState();
+    if (!(await this.deps.instances.clearFiled(tenantId, obligation.id, initial.id))) return;
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation.filing_reversed",
+      objectId: obligation.id,
+      actor,
+      payload: { workItemId, filedOn: obligation.filedOn, statutoryDueOn: obligation.statutoryDueOn },
+    });
   }
 
   // ── reading ──────────────────────────────────────────────────────────────

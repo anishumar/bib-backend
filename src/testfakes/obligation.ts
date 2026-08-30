@@ -218,9 +218,9 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             periodLabel: r.periodLabel,
             statutoryDueOn: r.statutoryDueOn,
             internalTargetOn: r.internalTargetOn,
-            stateCode: "pending",
-            stateName: "Pending",
-            isTerminal: false,
+            stateCode: r.filedOn === null ? "pending" : "filed",
+            stateName: r.filedOn === null ? "Pending" : "Filed",
+            isTerminal: r.filedOn !== null,
             needsDecision: false,
             workItemId: r.workItemId,
             filedOn: r.filedOn,
@@ -267,6 +267,35 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     // rather than a second task pointing at the same filing.
     if (row && row.workItemId === null) this.rows[i] = { ...row, workItemId };
     return Promise.resolve();
+  }
+
+  findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.workItemId === workItemId) ?? null,
+    );
+  }
+
+  markFiled(
+    tenantId: string,
+    obligationId: string,
+    filedOn: string,
+    stateId: string,
+  ): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
+    const row = this.rows[i];
+    // `AND filed_on IS NULL`, modelled — the guard that makes a second
+    // completion of the same task write no second event.
+    if (!row || row.filedOn !== null) return Promise.resolve(false);
+    this.rows[i] = { ...row, filedOn, stateId };
+    return Promise.resolve(true);
+  }
+
+  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
+    const row = this.rows[i];
+    if (!row || row.filedOn === null) return Promise.resolve(false);
+    this.rows[i] = { ...row, filedOn: null, stateId };
+    return Promise.resolve(true);
   }
 
   redateUnstarted(tenantId: string, templateId: string, leadTimeDays: number): Promise<number> {

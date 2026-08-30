@@ -29,6 +29,7 @@ function state(over: Partial<WorkItemState> & { id: string }): WorkItemState {
     isInitial: false,
     isTerminal: false,
     isBlocked: false,
+    isSuccess: false,
     sortOrder: 0,
     isActive: true,
     ...over,

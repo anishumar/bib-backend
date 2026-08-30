@@ -216,6 +216,16 @@ export interface ObligationState {
   readonly isTerminal: boolean;
   /** A partner has to choose what happens next — T3.3's queue. */
   readonly needsDecision: boolean;
+  /**
+   * Where an obligation lands when the work that discharges it is FINISHED
+   * (0054). At most one per firm, enforced by a partial unique index.
+   *
+   * `isTerminal` alone cannot answer this, because a firm starts with two
+   * terminal states and the other one is T3.3's `resolved` — the end of a
+   * deadline already missed, which a partner chose. A filing nobody had to
+   * decide anything about does not belong there.
+   */
+  readonly isFiled: boolean;
   readonly sortOrder: number;
   readonly isActive: boolean;
 }
@@ -224,6 +234,19 @@ export interface ObligationState {
  *  none — which the service refuses to generate without, by name. */
 export function initialState(states: readonly ObligationState[]): ObligationState | null {
   return states.find((s) => s.isInitial && s.isActive) ?? null;
+}
+
+/**
+ * Where a finished filing lands, or null if this firm has nowhere for one to go.
+ *
+ * The mirror of `initialState`, and it reads a FLAG for the same reason: a firm
+ * that renames Filed to "Submitted" must not thereby switch the whole closing
+ * mechanism off. Retired states are skipped — a firm that retires its filed
+ * state has said it no longer moves work there, and the service says so by name
+ * rather than filing into a state nobody uses.
+ */
+export function filedState(states: readonly ObligationState[]): ObligationState | null {
+  return states.find((s) => s.isFiled && s.isActive) ?? null;
 }
 
 /**
@@ -244,27 +267,29 @@ export interface StateDefinition {
   readonly isInitial: boolean;
   readonly isTerminal: boolean;
   readonly needsDecision: boolean;
+  readonly isFiled: boolean;
   readonly sortOrder: number;
 }
 
 /**
  * What a brand-new firm starts with.
  *
- * MUST stay identical to the `@default-obligation-states-seed` literal in
- * migration 0052 — `tests/obligation/seed-parity.test.ts` fails the build if
- * they drift. SQL cannot import TypeScript, so the duplication is unavoidable
- * and the drift is what the test prevents.
+ * MUST stay identical to the `@default-obligation-states-seed` literal in the
+ * NEWEST migration carrying it (0052, then 0054) —
+ * `tests/obligation/seed-parity.test.ts` fails the build if they drift. SQL
+ * cannot import TypeScript, so the duplication is unavoidable and the drift is
+ * what the test prevents.
  *
  * Five names, carried across the rebuild from a previous vendor's list, and
  * STILL UNCONFIRMED including for 10x itself. `missed` is deliberately not
  * terminal: a missed deadline is a state a partner resolves, not an ending.
  */
 export const DEFAULT_OBLIGATION_STATES: readonly StateDefinition[] = [
-  { code: "pending", name: "Pending", isInitial: true, isTerminal: false, needsDecision: false, sortOrder: 10 },
-  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, needsDecision: false, sortOrder: 20 },
-  { code: "filed", name: "Filed", isInitial: false, isTerminal: true, needsDecision: false, sortOrder: 30 },
-  { code: "missed", name: "Missed", isInitial: false, isTerminal: false, needsDecision: true, sortOrder: 40 },
-  { code: "resolved", name: "Resolved", isInitial: false, isTerminal: true, needsDecision: false, sortOrder: 50 },
+  { code: "pending", name: "Pending", isInitial: true, isTerminal: false, needsDecision: false, isFiled: false, sortOrder: 10 },
+  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, needsDecision: false, isFiled: false, sortOrder: 20 },
+  { code: "filed", name: "Filed", isInitial: false, isTerminal: true, needsDecision: false, isFiled: true, sortOrder: 30 },
+  { code: "missed", name: "Missed", isInitial: false, isTerminal: false, needsDecision: true, isFiled: false, sortOrder: 40 },
+  { code: "resolved", name: "Resolved", isInitial: false, isTerminal: true, needsDecision: false, isFiled: false, sortOrder: 50 },
 ];
 
 // ── periods ────────────────────────────────────────────────────────────────
@@ -303,6 +328,20 @@ function addMonths(year: number, month1: number, months: number): [number, numbe
 export function addDays(d: IsoDate, days: number): IsoDate {
   const t = Date.parse(`${d}T00:00:00Z`) + days * 86_400_000;
   return new Date(t).toISOString().slice(0, 10);
+}
+
+/**
+ * Whole days from `from` to `to`, negative when `to` is earlier.
+ *
+ * The same UTC-midnight trick as `addDays`, and for the same reason: both ends
+ * are DAYS, so no zone and no daylight saving may touch the subtraction. Used
+ * to say how late a filing was, which is the one number a partner asks about
+ * afterwards.
+ */
+export function daysBetween(from: IsoDate, to: IsoDate): number {
+  return Math.round(
+    (Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86_400_000,
+  );
 }
 
 /**

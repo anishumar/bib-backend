@@ -20,6 +20,7 @@ interface StateRow {
   is_initial: boolean;
   is_terminal: boolean;
   is_blocked: boolean;
+  is_success: boolean;
   sort_order: number;
   is_active: boolean;
 }
@@ -44,6 +45,7 @@ function toState(r: StateRow): WorkItemState {
     isInitial: r.is_initial,
     isTerminal: r.is_terminal,
     isBlocked: r.is_blocked,
+    isSuccess: r.is_success,
     sortOrder: r.sort_order,
     isActive: r.is_active,
   };
@@ -63,7 +65,8 @@ function toPriority(r: PriorityRow): WorkItemPriority {
 }
 
 const STATE_COLUMNS =
-  "id, tenant_id, code, name, is_initial, is_terminal, is_blocked, sort_order, is_active";
+  "id, tenant_id, code, name, is_initial, is_terminal, is_blocked, is_success, sort_order, " +
+  "is_active";
 const PRIORITY_COLUMNS =
   "id, tenant_id, code, name, rank, is_default, is_statutory_default, is_active";
 
@@ -108,10 +111,12 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
       if (state.isInitial) await this.clearInitial(db, null);
       const [row] = await db<StateRow[]>`
         INSERT INTO delivery.work_item_state
-          (id, tenant_id, code, name, is_initial, is_terminal, is_blocked, sort_order)
+          (id, tenant_id, code, name, is_initial, is_terminal, is_blocked, is_success,
+           sort_order)
         VALUES
           (${state.id}, ${state.tenantId}, ${state.code}, ${state.name},
-           ${state.isInitial}, ${state.isTerminal}, ${state.isBlocked}, ${state.sortOrder})
+           ${state.isInitial}, ${state.isTerminal}, ${state.isBlocked}, ${state.isSuccess},
+           ${state.sortOrder})
         RETURNING ${db.unsafe(STATE_COLUMNS)}
       `;
       if (!row) throw new Error("work_item_state insert returned no row");
@@ -136,6 +141,7 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
             is_initial  = ${patch.isInitial},
             is_terminal = ${patch.isTerminal},
             is_blocked  = ${patch.isBlocked},
+            is_success  = ${patch.isSuccess},
             sort_order  = ${patch.sortOrder},
             is_active   = ${patch.isActive}
         WHERE id = ${stateId}
@@ -237,6 +243,7 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
             is_initial: s.isInitial,
             is_terminal: s.isTerminal,
             is_blocked: s.isBlocked,
+            is_success: s.isSuccess,
             sort_order: s.sortOrder,
           })),
         )}

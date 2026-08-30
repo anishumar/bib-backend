@@ -1298,6 +1298,71 @@ wrong in a way worth naming: its sweep looked states up by the literal strings `
 lives in `is_initial` / `is_terminal` / `needs_decision`; "can this still be missed" is derived
 from the last two rather than stored as a third.
 
+### Closing a filing — and why "terminal" is the wrong rule on BOTH sides (0054)
+
+T3.2 shipped with `filed_on` READ in four places and WRITTEN in none, so every row said "Pending"
+forever and `obligation.filed` was a registered verb with no writer. The obvious close — *the work
+item reached a terminal state, so the obligation is filed* — is **ambiguous in both halves**, and
+each resolves the wrong way if left alone:
+
+- **0050 seeds TWO terminal work item states, `completed` AND `cancelled`.** Tasks are cancelled
+  for ordinary reasons: the client left, the entity was deregistered, it was raised twice. Reading
+  `is_terminal` alone records that a statutory return was FILED because somebody tidied their
+  board — not a missing feature but a FALSE STATEMENT about a filing, and worse than the "Pending
+  forever" it replaces.
+- **0052 seeds TWO terminal obligation states, `filed` AND `resolved`.** `resolved` is T3.3's —
+  the end of a deadline already missed, which a partner chose. A filing nobody had to decide
+  anything about does not belong in the decision queue.
+
+So each side carries ONE flag: **`work_item_state.is_success`** ("the work was DONE, not
+abandoned") and **`obligation_state.is_filed`** ("a finished filing lands here"). Flags rather than
+codes, for this module's own reason — a firm renaming Filed to "Submitted" must not switch the
+mechanism off. `filedState()` mirrors `initialState()`, a partial unique index caps `is_filed` at
+one per firm, and a CHECK refuses either flag on a state that is not terminal. **Both default to
+FALSE**, so a firm's own new terminal state leaves an obligation OPEN and visible rather than
+recording a filing that never happened — the safe direction, chosen.
+
+**`ObligationFiling.reconcileFiling` is the only writer, and it RECONCILES rather than transitions.**
+It takes the current answer to "is this discharged" — terminal AND successful — and makes the
+obligation agree, and `moveToState` calls it on every move. Idempotent by construction (the guard
+is the repository's `WHERE filed_on IS NULL`, so a double-click writes one event), reopening is the
+same call with a different answer rather than a second path, and there is no order to get wrong.
+**A reopened or cancelled task UN-FILES**, because `moveToState` already clears `completedAt` on the
+way back, and because filed is terminal — `canStillBeMissed` would be false forever and T3.3 could
+never flag it. Un-filing lets the missed sweep self-correct, and the withdrawal is its own verb
+(`obligation.filing_reversed`), never a quiet UPDATE.
+
+**The two use cases now name each other, and the cycle is broken in `setup/`.** The calendar raises
+a task (`WorkItemRaiser`); finishing that task files the obligation (`ObligationFiling`). Neither
+file imports the other — each declares the one method it needs and the composition root satisfies
+both with a closure, in the API and the worker alike. **Both processes must have it**, or a filing
+would close when a person ticked a task and not when the worker did.
+
+**`work_item.completed` fires only for a SUCCESSFUL terminal state.** It fired for any terminal one
+until 0054, so cancellations counted as work the firm finished — and the verb's own description is
+*"what did we finish last month"*. `work_item.state_changed` carries `isSuccess`, so "what did we
+abandon" stays answerable without a verb of its own.
+
+**`filed_on` is the UTC day, DECIDED rather than defaulted (Shrestha, 2026-08-30).** East of
+Greenwich a filing made after midnight local records the previous day, which is exactly the
+on-time/late boundary. It is survivable only because `work_item.completed_at` keeps the instant, so
+`filed_on` is a projection and the truth is not lost. The general fix is still open and still shared
+with `invoice`, `dunning` and `lead`.
+
+**A boolean query parameter is NEVER `z.coerce.boolean()`.** Coercion is `Boolean(value)`, a query
+string carries TEXT, and `Boolean("false")` is `true` — so `?includeSettled=false` meant "include
+them" and `/calendar`'s checkbox was inert whatever the screen said. Every layer behaved: it parsed,
+answered 200, and ran the wrong branch, which is indistinguishable from the right one until a row is
+actually terminal. Use `z.enum(["true","false"]).transform((v) => v === "true")`, which also puts
+the accepted values in the spec. `tests/api/query-booleans.test.ts` holds the build red on the whole
+class; JSON bodies are unaffected and `z.coerce.number()` is fine.
+
+**The obligation states still have NO screen** — unlike the work board's `/admin/work-vocabulary`,
+which gained the `is_success` tick. A firm cannot yet rename its compliance states or move these
+flags, which is the standing directive unmet for this one vocabulary; it belongs with T4.3's rules
+page. Until then, no error message may tell a partner to change them on a screen, because there
+isn't one.
+
 **Generation scope is DECIDED: only where an engagement exists.** `engagement_id` stays nullable
 so the compliance-engine reading (generate for every entity; every uncovered obligation is a sales
 lead) is a config change rather than a migration. The firm has not been asked which it wants, and
@@ -1360,7 +1425,7 @@ task on the board at High priority, from the law, with nobody setting it.
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
 Next: T3.3's missed-deadline state (which the calendar's `needs_decision` flag is already waiting
-for) and T3.7's dashboards.
+for, and which 0054's un-filing rule is what keeps honest) and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

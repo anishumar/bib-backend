@@ -110,6 +110,27 @@ describe("the seeded work vocabulary and the product defaults agree", () => {
     expect(DEFAULT_WORK_ITEM_STATES.some((s) => s.isBlocked)).toBe(true);
   });
 
+  it("ships TWO terminal states and marks only ONE of them a success", () => {
+    // 0054, and the reason it exists. Completed and Cancelled are both
+    // terminal, and a rule reading `isTerminal` alone treats them alike — which
+    // is how the compliance calendar would have recorded a statutory return as
+    // FILED because somebody tidied their board, and how `work_item.completed`
+    // came to count cancellations as work the firm finished.
+    const terminal = DEFAULT_WORK_ITEM_STATES.filter((s) => s.isTerminal);
+    expect(terminal.length).toBeGreaterThan(1);
+    expect(terminal.filter((s) => s.isSuccess)).toHaveLength(1);
+  });
+
+  it("never calls a state a success unless it is terminal", () => {
+    // The database CHECK, restated: work that is still running has not
+    // succeeded yet, so the flag means nothing on it.
+    for (const s of DEFAULT_WORK_ITEM_STATES) {
+      expect(s.isSuccess && !s.isTerminal, `${s.code} claims success but is not terminal`).toBe(
+        false,
+      );
+    }
+  });
+
   it("never flags one state two ways — each pair is a contradiction", () => {
     for (const s of DEFAULT_WORK_ITEM_STATES) {
       expect(s.isTerminal && s.isBlocked, `${s.code} is terminal AND blocked`).toBe(false);

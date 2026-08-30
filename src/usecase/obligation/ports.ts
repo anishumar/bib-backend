@@ -145,6 +145,7 @@ export interface NewObligationState {
   readonly isInitial: boolean;
   readonly isTerminal: boolean;
   readonly needsDecision: boolean;
+  readonly isFiled: boolean;
   readonly sortOrder: number;
 }
 
@@ -341,6 +342,39 @@ export interface ObligationInstanceRepository {
   /** Everything at or past its internal target with no task yet. */
   listRaisable(tenantId: string, asOf: IsoDate, limit: number): Promise<readonly RaisableObligation[]>;
   attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<void>;
+  /**
+   * The obligation a work item was raised for, if it was raised for one.
+   *
+   * The reverse of `attachWorkItem`, and the only lookup the closing path
+   * needs. Most work items are not a filing at all — a firm's board is mostly
+   * ordinary work — so this returns null far more often than not, and that is
+   * the ordinary case rather than a miss.
+   */
+  findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null>;
+  /**
+   * Record that this obligation was discharged, and move it to the firm's filed
+   * state. Returns false if it was ALREADY filed.
+   *
+   * The guard is in the WHERE clause rather than in the caller, because the
+   * caller records `obligation.filed` from the answer: two concurrent moves
+   * into a terminal state — a double-click, a retried request — must produce
+   * one event, not two, and only the database can arbitrate that. The same
+   * argument `createIfAbsent` makes about the generator.
+   */
+  markFiled(
+    tenantId: string,
+    obligationId: string,
+    filedOn: IsoDate,
+    stateId: string,
+  ): Promise<boolean>;
+  /**
+   * Take a recorded filing back and return the obligation to `stateId`.
+   * Returns false if it was not filed to begin with.
+   *
+   * Same shape and same reason as `markFiled`: the caller writes
+   * `obligation.filing_reversed` only when a filing really was withdrawn.
+   */
+  clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean>;
   /**
    * Move the INTERNAL target of everything this rule has produced that nobody
    * has started, by a new lead time.

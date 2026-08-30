@@ -70,6 +70,7 @@ interface StateRow {
   is_initial: boolean;
   is_terminal: boolean;
   needs_decision: boolean;
+  is_filed: boolean;
   sort_order: number;
   is_active: boolean;
 }
@@ -83,7 +84,8 @@ const EXCEPTION_COLUMNS =
   "period_end_month, due_rule, due_month_offset, due_day_of_month, due_days_after, note";
 
 const STATE_COLUMNS =
-  "id, tenant_id, code, name, is_initial, is_terminal, needs_decision, sort_order, is_active";
+  "id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed, sort_order, " +
+  "is_active";
 
 function toDueRule(r: TemplateRow): DueRule | null {
   if (r.due_rule === null) return null;
@@ -137,6 +139,7 @@ function toState(r: StateRow): ObligationState {
     isInitial: r.is_initial,
     isTerminal: r.is_terminal,
     needsDecision: r.needs_decision,
+    isFiled: r.is_filed,
     sortOrder: r.sort_order,
     isActive: r.is_active,
   };
@@ -383,10 +386,11 @@ export class PostgresObligationStateRepository implements ObligationStateReposit
       for (const s of states) {
         const rows = await db<StateRow[]>`
           INSERT INTO delivery.obligation_state
-            (id, tenant_id, code, name, is_initial, is_terminal, needs_decision, sort_order)
+            (id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed,
+             sort_order)
           VALUES
             (${s.id}, ${s.tenantId}, ${s.code}, ${s.name}, ${s.isInitial}, ${s.isTerminal},
-             ${s.needsDecision}, ${s.sortOrder})
+             ${s.needsDecision}, ${s.isFiled}, ${s.sortOrder})
           ON CONFLICT (tenant_id, code) DO NOTHING
           RETURNING ${db.unsafe(STATE_COLUMNS)}
         `;
