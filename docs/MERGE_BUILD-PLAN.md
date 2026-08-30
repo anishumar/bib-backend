@@ -2817,8 +2817,8 @@ each dev skins their own modules as the API stabilizes (the T6.1–T6.4 tasks be
 Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cross-app polish.
 
 ### U2 · 10X workspace (staff) — built vertically during Phases 2–5, tracked here
-- [ ] `(B)` **T6.1** App shell, auth'd nav, work board (Kanban), verification queue screen. *(with Ph2–3)*
-  > **VERIFIED 2026-08-31, and NOT ticked — one of the four is unproven.**
+- [x] `(B)` **T6.1** App shell, auth'd nav, work board (Kanban), verification queue screen. *(with Ph2–3)*
+  > **DONE 2026-08-31, and walked in the browser before the box was ticked.**
   >
   > · **App shell** — built, by `(A)`'s design system (frontend `a099fdf`): `AppShell`, a
   >   sidebar in sections, a theme switch. The per-screen navs are gone, which was the point.
@@ -2827,12 +2827,19 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   >   somebody who can use it, and the API still refuses independently.
   > · **Verification queue** — built (T2.9). `/work`'s "To check" tab, the WHOLE FIRM's queue
   >   with `viewer.eligible` and, when false, the reason in words.
-  > · **Work board (Kanban)** — was NOT built. `/work-items` was a tabbed TABLE. A board with
-  >   columns is now written (`work-items/board.tsx`) and both gates are green, **but it has
-  >   not been opened in a browser** — the Chrome extension disconnected mid-session and three
-  >   attempts to reconnect failed. This codebase's own rule is that a screen is not done until
-  >   somebody has looked at it, and two of the last three tasks found rendering faults that
-  >   typechecking was perfectly happy with. So the box stays empty until it has been walked.
+  > · **Work board (Kanban)** — was NOT built; `/work-items` was a tabbed TABLE. It is now
+  >   `work-items/board.tsx`.
+  >
+  > **WHAT THE WALK PROVED, rather than what the types allowed.** Ticking "include finished
+  > work" produced the **Completed** and **Cancelled** columns; the rest of the time they are
+  > absent, which is the terminal-state rule. And the board rendered a column headed **"Stuck"**
+  > — the firm renamed "Blocked" in an earlier session, and the board says the firm's word
+  > because the columns are its rows. That is the promise 0050 made, kept on the screen where it
+  > shows most, demonstrated rather than asserted. **The auth'd nav was walked as a NON-ADMIN
+  > too**: signed in as the associate, the whole Administration section, the audit trail and
+  > "The firm's numbers" all disappear — permissions, `ledger:read` and the fee axis
+  > respectively — and the board still renders, because `/work-vocabulary` is `party:read` like
+  > the board itself.
   >
   > **What the board is, and the two decisions in it.** The COLUMNS are the firm's own
   > `work_item_state` rows, ordered by its own `sortOrder` — 0050 made them rows precisely so a
@@ -2851,6 +2858,37 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   > **Board or list is a VIEW, not a fourth tab.** The three tabs are three different questions
   > — whose desk, nobody's desk, everybody's desk. Drawing is a different axis, and a fourth tab
   > would have left "Mine, as a board" nowhere to live.
+  >
+  > ── **FIVE THINGS LOOKING AT IT FOUND, and typechecking was happy with all five** ──
+  >
+  > 1. **The card read `2026-05-22 · late High`** — one phrase, with the priority looking like
+  >    part of the lateness. The LIST never showed it because its two facts sit in two table
+  >    cells; on a card they share a line, and a card is what somebody scans fastest.
+  > 2. **The column count sat at the far edge** of a wide column, disconnected from the state it
+  >    counts. `space-between` did that; it sits beside the name now.
+  > 3. **Four fields at four different heights** in the rule editor. `.field-row` is
+  >    `align-items: end`, so a field carrying a hint stands taller and its INPUT rides up.
+  >    `/admin/workflows` learnt this and it is written in the frontend `CLAUDE.md`; T6.4
+  >    re-made it. Every hint now sits below its row.
+  > 4. **Writing a new rule always failed on the first press.** The form opened on "it depends
+  >    on something this system does not hold" with an empty reason, so the first Write was
+  >    always a refusal. "Waiting on a fact" is the SHIPPED PACK's condition — forty-seven rules
+  >    imported from a document — not the state somebody typing a rule is in. They are writing
+  >    it because they know when it is due, so a new rule now defaults to computing a date.
+  > 5. **`/calendar`'s new deep link told a lie on one reason.** `nothing_due_yet` means the
+  >    rules match, can compute dates, and simply have no period in the window yet — nothing is
+  >    blocked — and the link beside it said "47 rules →" into a banner reading "the rules that
+  >    blocked this engagement's calendar". The link is now offered only where the reason has a
+  >    fix, which the `REASONS` table already recorded.
+  >
+  > **The supersede screen (0057) was walked in the same pass**, on a throwaway rule so the
+  > shipped pack stayed clean: written from the "Write a rule" form, handed over at 2026-09-01
+  > with the pack error firing live on the default (`firm@2026` was the rule's own pack), the
+  > was/now formula comparison updating as the day was typed, **"Handed over. 24 filings added
+  > to the calendar."**, and then the predecessor row showing *hands over on 2026-09-01* against
+  > the successor's *governs periods from 2026-09-01*. Opening the predecessor offers no "the
+  > law changed" button at all — it shows the notice instead, which is what the API would answer.
+  > Both rules and their 24 filings were deleted afterwards, scoped by `tenant_id`.
 - [ ] `(A)` **T6.2** Client 360 (as-of date), leads pipeline, proposal/EL builder. *(first screen ~week 4–5, with Ph1–2)*
 - [ ] `(A)` **T6.3** Invoicing + collections screens, leadership dashboards (MRR/DSO/ageing). *(with Ph3)*
 - [x] `(B)` **T6.4** Compliance calendar + rules screen (config a partner can edit — the "row with a screen" bar). *(with Ph3)*
@@ -2987,8 +3025,8 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   > starting exactly 2026-09-01** — not a day earlier, though the generation window reaches
   > back to June — with **zero periods duplicated per entity**. Both refusals answered 409 and
   > 400 with their sentences. The rows were then deleted, scoped by `tenant_id` this time.
-  > **The SCREEN (`supersede.tsx`) has not been walked** — same disconnected extension as
-  > T6.1's board.
+  > **The screen was walked too** — see T6.1's note, which records the whole pass and the five
+  > faults it found.
 
 ### U1 · Client portal (client) — the real Phase 6 work
 - [ ] `(A)` **T6.5** Invite + secure login, per-contact roles, status home.
