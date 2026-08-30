@@ -2555,6 +2555,22 @@ sandbox access + credentials. **Not on any demo's critical path.**
   check — every route returning an amount is exercised under both visibilities — would close
   the class. Not built.
 
+- [ ] `(A/B)` **The smoke suite has outgrown its own rate-limit budget, and reports it as 21 broken features.**
+  The general limiter allows 300 requests a minute; the suite is now 261 checks and each is one
+  or more requests. A run gets roughly 240 checks in, starts being throttled, and reports the
+  rest as **empty values and wrong status codes** — which reads exactly like broken invoicing,
+  broken collections and a broken tenant seed. Confirmed harmless: the same tree run against
+  `BIB_RATELIMIT_GENERAL_PER_MINUTE=5000` is **261 passed, 0 failed**.
+  > **This is the second time a smoke failure has pointed at the wrong place**, and that is why
+  > it is a task rather than a note. The first was the Windows `python3`/`mktemp` trap, which
+  > reported 38 checks as **403** and sent the investigation into the authorization code twice
+  > before anyone questioned the harness. Same shape both times: the harness fails, the
+  > assertion reports it as a product defect, and the message names a plausible wrong culprit.
+  > **The fix is for the script to notice a 429 and say so** — one check of the status before
+  > asserting, and a line saying the suite is over budget — not to raise the limit, which would
+  > weaken a real control to make a test pass. Whoever picks it up should also decide whether
+  > the suite should reset the limiter between sections; it is in-memory, so a restart clears it.
+
 - [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
   300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
   a firm of forty behind a single office NAT gateway — they share one bucket. Found by the
