@@ -11,8 +11,14 @@ broken. Two people adding schema at the same time collide on the next number, an
 migration is immutable once applied anywhere — so a collision is not a rename, it is one of
 us redoing the work under a new number.
 
-**`(A)` holds 0018–0039. `(B)` holds 0040+.** The board (`docs/MERGE_BUILD-PLAN.md`) is
-where that split is agreed; revisit when either range runs low.
+**`(A)` holds 0080+. `(B)` holds 0057+.** The board (`docs/MERGE_BUILD-PLAN.md`) is where that
+split is agreed; revisit when either range runs low.
+
+**The first split ran out, which is the thing to learn from.** `(A)` originally held 0018–0039
+and reached 0038 — one number left — while `(B)` was at 0056. A range sized by guess fills at
+whatever rate the work happens to need, so **a range is a block to be re-issued, not a
+territory**. 0018–0056 stay exactly where they are: applied migrations are immutable and
+renumbering them would be the one thing this file forbids.
 
 What this costs, stated rather than discovered later: the ranges fill unevenly, so `0040`
 may be applied months before `0018` exists. The migrator sorts filenames and applies
