@@ -57,8 +57,23 @@ export interface DocumentRecord {
   readonly document: StoredDocument;
   /** The client's display name, or null for the firm's own documents. */
   readonly partyName: string | null;
-  /** Who uploaded it, or null when the system generated it. */
-  readonly createdByName: string | null;
+  /**
+   * Who uploaded it. Null when the system generated it, and null when the
+   * person's account has been erased.
+   *
+   * **The EMAIL is the discriminator, not the id** — the same arrangement
+   * `EventRecord.actor` uses, and for the same reason. It carries the email as
+   * well as the name because an account may have no display name, and the first
+   * version of this field was a single `createdByName: string | null` that
+   * collapsed "the system made this" and "a person whose name is unset" into
+   * one indistinguishable null. Building the screen is what found it, which is
+   * the third time this codebase has learnt that lesson.
+   */
+  readonly createdBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
   /** Always present: a document is created with its first version in one
    *  transaction, so a document with no version is corruption, not a state. */
   readonly latestVersion: DocumentVersion;

@@ -45,6 +45,7 @@ interface DocumentRow {
   updated_at: string;
   party_name: string | null;
   created_by_name: string | null;
+  created_by_email: string | null;
   version_count: string;
   v_id: string;
   v_document_id: string;
@@ -161,7 +162,16 @@ function toRecord(r: DocumentRow): DocumentRecord {
   return {
     document: toDocument(r),
     partyName: r.party_name,
-    createdByName: r.created_by_name,
+    // Email, not id, is what says a person was behind this: the system actor
+    // has no account, and a human whose account was erased no longer joins.
+    createdBy:
+      r.created_by === null || r.created_by_email === null
+        ? null
+        : {
+            userId: r.created_by,
+            displayName: r.created_by_name,
+            email: r.created_by_email,
+          },
     latestVersion: versionOf(r, r.tenant_id),
     versionCount: Number(r.version_count),
   };
@@ -483,6 +493,7 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
              d.created_by, d.created_at, d.updated_at,
              p.display_name AS party_name,
              u.display_name AS created_by_name,
+             u.email::text  AS created_by_email,
              (SELECT count(*) FROM files.document_version dv WHERE dv.document_id = d.id)
                AS version_count,
              v.id AS v_id, v.document_id AS v_document_id, v.version_no AS v_version_no,

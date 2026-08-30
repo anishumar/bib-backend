@@ -34,6 +34,7 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
    *  real query genuinely produces (a document with no party). */
   readonly partyNames = new Map<string, string>();
   readonly userNames = new Map<string, string>();
+  readonly userEmails = new Map<string, string>();
   readonly subjectLabels = new Map<string, string>();
 
   private now(): string {
@@ -57,7 +58,18 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     return {
       document: doc,
       partyName: doc.partyId === null ? null : (this.partyNames.get(doc.partyId) ?? null),
-      createdByName: doc.createdBy === null ? null : (this.userNames.get(doc.createdBy) ?? null),
+      createdBy:
+        doc.createdBy === null
+          ? null
+          : {
+              userId: doc.createdBy,
+              displayName: this.userNames.get(doc.createdBy) ?? null,
+              // The fake defaults an email in rather than allowing null: a
+              // person with no email is not a state the database can produce
+              // (`user_account.email` is NOT NULL), and a fake that produced it
+              // would let a test pass against a shape production cannot reach.
+              email: this.userEmails.get(doc.createdBy) ?? `${doc.createdBy}@example.test`,
+            },
       latestVersion: latest,
       versionCount: versions.length,
     };
