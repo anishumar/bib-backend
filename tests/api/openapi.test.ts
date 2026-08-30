@@ -15,10 +15,14 @@ import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
 import { DocumentService } from "../../src/usecase/document/service";
 import { FileStoreService } from "../../src/usecase/filestore/service";
+import { DashboardService } from "../../src/usecase/dashboard/service";
+import { FakeDashboardRepo } from "../../src/testfakes/dashboard";
 import {
   FakeBlobStore,
   FakeContentDigest,
   FakeDocumentStoreRepo,
+  FakeRenderSource,
+  FakeRenderer,
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
@@ -290,6 +294,10 @@ function deps(): RouterDeps {
       authz: new AuthzService({ permissions }),
     },
     document: { service: new DocumentService(makeDocumentFakes()) },
+    dashboard: {
+      service: new DashboardService({ dashboards: new FakeDashboardRepo() }),
+      authz: new AuthzService({ permissions: permissions }),
+    },
     filestore: {
       service: new FileStoreService({
         documents: new FakeDocumentStoreRepo(),
@@ -298,6 +306,8 @@ function deps(): RouterDeps {
         ids: new FakeIds(),
         events: new RecordingEventSink(),
         maxUploadBytes: 25 * 1024 * 1024,
+        renderer: new FakeRenderer(),
+        renderSource: new FakeRenderSource(),
       }),
     },
     invoice: {

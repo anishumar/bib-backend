@@ -38,6 +38,8 @@ import type {
   DocumentRecord,
   DocumentStoreRepository,
 } from "./ports";
+import type { DocumentRenderer, RenderSource } from "../render/ports";
+import { NotRenderable, SourceNotFound } from "../../domain/render/errors";
 
 export interface Deps {
   readonly documents: DocumentStoreRepository;
@@ -45,6 +47,16 @@ export interface Deps {
   readonly digest: ContentDigest;
   readonly ids: IdGen;
   readonly events: EventSink;
+  /**
+   * Turning one of the product's own records into bytes (T3.8).
+   *
+   * Two ports and not one, because they answer different questions: the SOURCE
+   * knows what an engagement letter contains, the RENDERER knows what a page
+   * looks like, and neither should learn the other's job. A renderer holding a
+   * repository would duplicate read logic that already exists.
+   */
+  readonly renderer: DocumentRenderer;
+  readonly renderSource: RenderSource;
   /**
    * The largest file this store accepts, in bytes.
    *
@@ -369,6 +381,105 @@ export class FileStoreService {
     if (bytes === null) throw new BytesMissing(version.storageKey);
 
     return { version, bytes };
+  }
+
+  /**
+   * Render one of the product's own records and store the result.
+   *
+   * The rendered file is a DOCUMENT like any other — same store, same versions,
+   * same content hash. That is what makes "the letter we sent on 3 September"
+   * answerable: it is a version row, not a PDF regenerated on demand from rows
+   * that have since moved on.
+   *
+   * **Re-rendering unchanged data produces the same bytes**, which is the whole
+   * reason the renderer is deterministic — so this is safe to call twice, and
+   * the content-addressed store writes one blob either way.
+   */
+  async render(input: {
+    readonly tenantId: string;
+    readonly kind: DocumentKind;
+    readonly subjectKind: string;
+    readonly subjectRef: string;
+    readonly partyId: string | null;
+    readonly actor: Actor;
+  }): Promise<DocumentRecord> {
+    const subjectKind = this.requireSubjectKind(input.subjectKind);
+    if (!this.deps.renderSource.supports(input.kind)) {
+      throw new NotRenderable(input.kind, ["engagement_letter", "invoice"]);
+    }
+
+    const described = await this.deps.renderSource.describe({
+      tenantId: input.tenantId,
+      kind: input.kind,
+      subjectRef: input.subjectRef,
+    });
+    if (described === null) throw new SourceNotFound(input.kind, input.subjectRef);
+
+    const bytes = await this.deps.renderer.render(described);
+    const contentHash = this.deps.digest.ofBytes(bytes);
+    const { storageKey } = await this.deps.blobs.put({
+      tenantId: input.tenantId,
+      contentHash,
+      bytes,
+    });
+
+    const documentId = this.deps.ids.newId();
+    const filename = `${described.reference}.pdf`;
+    const record = await this.deps.documents.create(
+      {
+        id: documentId,
+        tenantId: input.tenantId,
+        title: `${described.documentTitle} ${described.reference}`,
+        origin: "generated",
+        kind: input.kind,
+        partyId: input.partyId,
+        createdBy: input.actor.type === "human" ? input.actor.id : null,
+      },
+      {
+        id: this.deps.ids.newId(),
+        tenantId: input.tenantId,
+        documentId,
+        contentHash,
+        byteSize: bytes.byteLength,
+        mediaType: this.deps.renderer.mediaType,
+        filename,
+        storageKey,
+        createdBy: input.actor.type === "human" ? input.actor.id : null,
+      },
+    );
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "document.stored",
+      objectId: documentId,
+      actor: input.actor,
+      payload: {
+        kind: input.kind,
+        origin: "generated",
+        versionNo: record.latestVersion.versionNo,
+        contentHash,
+        byteSize: bytes.byteLength,
+        mediaType: this.deps.renderer.mediaType,
+        renderer: this.deps.renderer.kind,
+      },
+    });
+
+    await this.attach({
+      tenantId: input.tenantId,
+      documentId,
+      subjectKind,
+      subjectRef: input.subjectRef,
+      role: "rendered",
+      actor: input.actor,
+    });
+
+    return record;
+  }
+
+  /** Whether a document of this kind can be rendered — asked by a screen before
+   *  it offers the button. */
+  canRender(kind: DocumentKind): boolean {
+    return this.deps.renderSource.supports(kind);
   }
 
   /**

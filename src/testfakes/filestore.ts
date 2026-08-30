@@ -22,6 +22,8 @@ import type {
   NewDocumentLink,
   NewDocumentVersion,
 } from "../usecase/filestore/ports";
+import type { DocumentRenderer, RenderSource } from "../usecase/render/ports";
+import type { RenderableDocument } from "../domain/render/model";
 
 export class FakeDocumentStoreRepo implements DocumentStoreRepository {
   readonly documents: StoredDocument[] = [];
@@ -34,6 +36,7 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
    *  real query genuinely produces (a document with no party). */
   readonly partyNames = new Map<string, string>();
   readonly userNames = new Map<string, string>();
+  readonly userEmails = new Map<string, string>();
   readonly subjectLabels = new Map<string, string>();
 
   private now(): string {
@@ -57,7 +60,18 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     return {
       document: doc,
       partyName: doc.partyId === null ? null : (this.partyNames.get(doc.partyId) ?? null),
-      createdByName: doc.createdBy === null ? null : (this.userNames.get(doc.createdBy) ?? null),
+      createdBy:
+        doc.createdBy === null
+          ? null
+          : {
+              userId: doc.createdBy,
+              displayName: this.userNames.get(doc.createdBy) ?? null,
+              // The fake defaults an email in rather than allowing null: a
+              // person with no email is not a state the database can produce
+              // (`user_account.email` is NOT NULL), and a fake that produced it
+              // would let a test pass against a shape production cannot reach.
+              email: this.userEmails.get(doc.createdBy) ?? `${doc.createdBy}@example.test`,
+            },
       latestVersion: latest,
       versionCount: versions.length,
     };
@@ -245,6 +259,59 @@ export class FakeBlobStore implements BlobStore {
     if (!input.storageKey.startsWith(`${input.tenantId}/`)) return Promise.resolve(null);
     return Promise.resolve(this.blobs.get(input.storageKey) ?? null);
   }
+}
+
+/**
+ * A renderer that produces bytes from the description, deterministically.
+ *
+ * Not a PDF — a stable serialisation of what it was ASKED to draw. That is the
+ * right fake for a service test: it proves the service passed the right
+ * description through and stored the result, and it proves nothing about
+ * typography, which is what the real renderer is for. The determinism is real
+ * though, because the service's whole contract is that re-rendering unchanged
+ * data yields the same hash.
+ */
+export class FakeRenderer implements DocumentRenderer {
+  readonly kind = "fake";
+  readonly mediaType = "application/pdf";
+
+  render(document: RenderableDocument): Promise<Uint8Array> {
+    return Promise.resolve(new TextEncoder().encode(JSON.stringify(document)));
+  }
+}
+
+/** Describes whatever it was told to describe. `documents` maps a subjectRef to
+ *  its description; anything absent resolves to null, which is the "no such
+ *  record" path the service turns into a refusal. */
+export class FakeRenderSource implements RenderSource {
+  readonly documents = new Map<string, RenderableDocument>();
+  renderable: string[] = ["engagement_letter", "invoice"];
+
+  supports(kind: string): boolean {
+    return this.renderable.includes(kind);
+  }
+
+  describe(input: { subjectRef: string }): Promise<RenderableDocument | null> {
+    return Promise.resolve(this.documents.get(input.subjectRef) ?? null);
+  }
+}
+
+/** A minimal description, for tests that only care that rendering happened. */
+export function aRenderableDocument(reference = "EL-2026-0001"): RenderableDocument {
+  return {
+    documentTitle: "Engagement Letter",
+    reference,
+    issuer: { name: "The Firm LLP", lines: [] },
+    recipient: { name: "Kaveri Foods", lines: [] },
+    recipientLabel: "To",
+    meta: [],
+    sections: [],
+    table: null,
+    totals: [],
+    footer: null,
+    logo: null,
+    issuedOn: "2026-08-30",
+  };
 }
 
 /** The real digest. Not a stub — a fake hash would make every dedupe and

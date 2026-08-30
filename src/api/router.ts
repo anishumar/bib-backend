@@ -12,6 +12,7 @@
 //   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
 //   /api/v1/invoices/...               invoicing, and the one gapless series (T3.4)
 //   /api/v1/documents/...              the document store — bytes, versions, links (T3.6)
+//   /api/v1/dashboard/...              MRR, ageing and DSO — behind the fee axis (T3.7)
 //   /openapi.json, /docs               generated spec + Swagger UI (gated)
 //
 // Per-module routes live in their handler module's registrar (registerTenancy…)
@@ -58,6 +59,8 @@ import { registerEngagementRoutes } from "./handler/engagement";
 import { registerDocumentRoutes } from "./handler/document";
 import { registerInvoiceRoutes } from "./handler/invoice";
 import { registerFileStoreRoutes } from "./handler/filestore";
+import { registerDashboardRoutes } from "./handler/dashboard";
+import type { DashboardDeps } from "./handler/dashboard";
 import type { FileStoreDeps } from "./handler/filestore";
 import type { InvoiceDeps } from "./handler/invoice";
 import type { LeadDeps } from "./handler/lead";
@@ -103,6 +106,7 @@ export interface RouterDeps {
   readonly document: DocumentDeps;
   readonly invoice: InvoiceDeps;
   readonly filestore: FileStoreDeps;
+  readonly dashboard: DashboardDeps;
   readonly auth: AuthDeps;
 }
 
@@ -210,6 +214,7 @@ export function buildRouter(
   registerDocumentRoutes(app, deps.document);
   registerInvoiceRoutes(app, deps.invoice);
   registerFileStoreRoutes(app, deps.filestore);
+  registerDashboardRoutes(app, deps.dashboard);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

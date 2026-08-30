@@ -821,6 +821,59 @@ honest limit is on the SCREEN: the assign form needs the roster and the Dept lis
 `tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
 `/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
 
+## Rendering a document — and why the engine is pdf-lib (T3.8)
+
+**A rendered document's content hash is evidence.** `crm.engagement_letter.signed_content_hash`
+exists so "is the file the client holds the one we issued" is a comparison rather than a matter
+of trust, and `files.document_version.content_hash` is what it compares against. So the
+renderer must be a **pure function of its input**: re-rendering unchanged data has to reproduce
+the bytes exactly.
+
+That single requirement chose the engine. A headless browser gives better fidelity and cannot
+promise byte-stability across versions — font hinting, image encoders and the PDF writer all
+move between Chromium releases, so a base-image upgrade would silently stop every re-render
+matching. pdf-lib is pure JS with no native modules and draws exactly what it is told. **The
+cost is that layout is hand-built**: there is no CSS and no automatic table, and
+`infrastructure/render/pdf-renderer.ts` carries a small column-and-flow engine. It is one file
+behind `DocumentRenderer`, so the decision is reversible — but a replacement has to answer the
+determinism question first.
+
+**pdf-lib writes CreationDate, ModDate and a Producer string from the clock and its own
+version.** All three are pinned from the document's own issue date. Without that, the test that
+renders twice passes inside one millisecond and the property fails in production.
+
+**Three collaborators, and none of them learns another's job.** `RenderableDocument`
+(`domain/render`) is a neutral description — no fonts, no margins, no page size.
+`RenderSource` (Postgres) knows what an engagement letter contains. `DocumentRenderer` knows
+what a page looks like. A renderer holding repositories would duplicate read logic that already
+exists in two services, and the duplicate is the one that drifts.
+
+**Fonts are a CHAIN, not a font (T3.9).** No single file covers what this product needs at a
+size worth shipping — measured, not assumed: Noto Sans `latin` has the em dash and *not* the
+rupee sign, `latin-ext` has the rupee sign and *not* the basic range, `devanagari` has both plus
+Devanagari. So text is segmented into runs and each is drawn with the first font that can draw
+it. Adjacent characters on the same font merge, so ordinary English is one run and one draw.
+
+Noto Sans is **OFL-1.1** and arrives as an npm dependency rather than a binary in this repo, so
+it is versioned and auditable. `subset: true` embeds only the glyphs used, which is what makes
+three fonts free: a plain English letter carries a few hundred bytes of Latin and nothing of the
+other two.
+
+`font-set.ts` imports `regenerator-runtime` and the reason is written beside it — a shim for an
+upstream packaging defect in `@pdf-lib/fontkit`, which throws only on fonts with complex shaping
+tables and therefore only on Devanagari. Do not remove it, and do not "upgrade" to `fontkit` 2.x:
+it changed the subset API pdf-lib calls.
+
+**The guard is derived from the fonts, never a hardcoded range**, so it cannot lie about what
+the renderer can draw and it narrows on its own when a font is added. **It REFUSES rather than
+mangling** — `UnrenderableText` names the character, its code point, the field and what the
+chain does carry — because dropping a letter from a client's name on a legal document is worse
+than producing nothing. CJK is the honest remaining gap.
+
+Money still prints with its ISO code (`INR 216,000.00`), and that is now a product decision
+rather than a limit: this is a cross-border product, and a bare symbol is ambiguous to a reader
+in Dubai or Delaware. One function changes it.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root

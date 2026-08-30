@@ -45,6 +45,12 @@ export interface FileStoreDeps {
 const VersionSchema = z
   .object({
     id: z.string().uuid(),
+    // The document this version belongs to. Present because bytes are fetched
+    // at `/documents/{documentId}/...` and a version handed out on its own —
+    // a brand asset carries one — was otherwise unreachable: the caller had a
+    // version id and no way to build the URL. Found by building the screen,
+    // which is the fourth time that has been the thing that found it.
+    documentId: z.string().uuid(),
     versionNo: z.number().int(),
     contentHash: z.string().openapi({
       description:
@@ -59,6 +65,14 @@ const VersionSchema = z
   })
   .openapi("DocumentVersion");
 
+const CreatedBySchema = z
+  .object({
+    userId: z.string().uuid(),
+    displayName: z.string().nullable(),
+    email: z.string(),
+  })
+  .openapi("DocumentUploader");
+
 const DocumentSchema = z
   .object({
     id: z.string().uuid(),
@@ -68,13 +82,22 @@ const DocumentSchema = z
         "Whether the product made this file or a person supplied it. An uploaded document is " +
         "the only copy in existence; a generated one could be produced again.",
     }),
-    kind: z.string(),
+    kind: z.enum(DOCUMENT_KINDS as unknown as [string, ...string[]]).openapi({
+      description:
+        "What the document is. A CLOSED set — the product's own document types, mirrored by " +
+        "the CHECK in migration 0037. Declared as an enum and not a bare string so the " +
+        "generated client keeps the closure: a screen that has to switch on this should get a " +
+        "compile error when a kind is added, not a silent default.",
+    }),
     partyId: z.string().uuid().nullable(),
     partyName: z.string().nullable().openapi({
       description: "The client's name, joined so a list never has to fetch one row per document.",
     }),
-    createdByName: z.string().nullable().openapi({
-      description: "Who uploaded it. Null means the system generated it.",
+    createdBy: CreatedBySchema.nullable().openapi({
+      description:
+        "Who uploaded it. NULL means the system generated it, or the person's account has " +
+        "been erased. The email is what distinguishes those from a person whose display name " +
+        "is simply unset — the same arrangement the audit trail's actor uses.",
     }),
     versionCount: z.number().int(),
     latestVersion: VersionSchema,
@@ -94,7 +117,12 @@ const VersionsResponse = z
 const LinkSchema = z
   .object({
     id: z.string().uuid(),
-    subjectKind: z.string(),
+    subjectKind: z.enum(SUBJECT_KINDS as unknown as [string, ...string[]]).openapi({
+      description:
+        "What the document is attached to. A CLOSED set, and the closure is load-bearing: the " +
+        "reference below carries no foreign key, so this is the only thing keeping a link " +
+        "inside a vocabulary anything can resolve.",
+    }),
     subjectRef: z.string().uuid(),
     subjectLabel: z.string().nullable().openapi({
       description:
@@ -128,6 +156,7 @@ const BrandAssetsResponse = z
 function versionToWire(v: DocumentVersion): z.infer<typeof VersionSchema> {
   return {
     id: v.id,
+    documentId: v.documentId,
     versionNo: v.versionNo,
     contentHash: v.contentHash,
     byteSize: v.byteSize,
@@ -145,7 +174,7 @@ function toWire(r: DocumentRecord): z.infer<typeof DocumentSchema> {
     kind: r.document.kind,
     partyId: r.document.partyId,
     partyName: r.partyName,
-    createdByName: r.createdByName,
+    createdBy: r.createdBy,
     versionCount: r.versionCount,
     latestVersion: versionToWire(r.latestVersion),
     createdAt: r.document.createdAt,
@@ -200,6 +229,16 @@ const UploadForm = z
   .openapi("UploadDocumentForm");
 
 const NewVersionForm = z.object({ file: binaryPart }).openapi("NewDocumentVersionForm");
+
+const RenderRequest = z
+  .object({
+    kind: z.enum(["engagement_letter", "invoice"]).openapi({
+      description: "What to render. Deliberately narrow — the API says what it can do.",
+    }),
+    subjectRef: z.string().uuid(),
+    partyId: z.string().uuid().nullable().optional(),
+  })
+  .openapi("RenderDocumentRequest");
 
 const AttachRequest = z
   .object({
@@ -356,6 +395,29 @@ const addVersionRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such document at this firm"),
     413: errorResponse("The file is larger than BIB_MAX_UPLOAD_BYTES"),
+  },
+});
+
+const renderRoute = createRoute({
+  method: "post",
+  path: "/api/v1/documents/render",
+  tags: ["documents"],
+  summary: "Produce a PDF of one of the firm's own documents",
+  description:
+    "Renders an engagement letter or an invoice, stores it as a `generated` document and " +
+    "attaches it to the record it came from. Re-rendering unchanged data produces the SAME " +
+    "bytes and therefore the same content hash — the store is content-addressed, so calling " +
+    "this twice costs one blob.",
+  request: {
+    body: { content: { "application/json": { schema: RenderRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Rendered and stored", content: { "application/json": { schema: DocumentSchema } } },
+    400: errorResponse("The document contains a character the renderer cannot draw"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write"),
+    404: errorResponse("No such record at this firm"),
+    501: errorResponse("Nothing knows how to render that kind of document yet"),
   },
 });
 
@@ -593,6 +655,24 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     return c.json(versionToWire(version), 201);
   });
 
+  app.openapi(renderRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const record = await deps.service.render({
+      tenantId: s.tenantId,
+      kind: body.kind,
+      // The subject a rendered document attaches to is the record it was
+      // rendered FROM, always — there is no case where a firm wants the PDF of
+      // an invoice filed against something else.
+      subjectKind: body.kind,
+      subjectRef: body.subjectRef,
+      partyId: body.partyId ?? null,
+      actor: s.actor,
+    });
+    return c.json(toWire(record), 201);
+  });
+
   app.openapi(attachRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -657,6 +737,7 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
 
 export const fileStoreRoutes = {
   upload: uploadRoute,
+  render: renderRoute,
   list: listRoute,
   get: getRoute,
   content: contentRoute,

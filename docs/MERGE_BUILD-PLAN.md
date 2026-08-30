@@ -1843,7 +1843,31 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` 421 tests · `test:integration` 105 · `smoke` **125 passed, 0 failed**.
   >
   > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
-- [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** *Acc: "escalate to this assignee's manager" resolves through the org chart.* — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login. This is **Gate 4 (record-scope)**, which T1.6 deferred to U1; it is pulled forward here because `(B)`'s escalation ladder needs it before the portal does. **Agree the timing rather than assuming it.**
+- [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
+  > **CORRECTED (2026-08-30), and the correction is that this task's ACCEPTANCE IS ALREADY MET
+  > by somebody else's work.** The line above was written when the escalation ladder was the
+  > reason to pull this forward from U1. **T2.9 built the org chart a different way and it
+  > works**: `tenancy.membership.reports_to_user_id` (migration 0048) is a direct user → user
+  > reporting line, with `PUT /tenancy/members/{id}/reports-to`, a `membership.reports_to_changed`
+  > event, and live consumers in `usecase/verification` and `usecase/workitem`. "Escalate to
+  > this assignee's manager" resolves today, through `membership`, without `party_id` existing.
+  >
+  > **So `(B)`'s lane is NOT waiting on `(A)` for anything.** T3.3 can be picked up now. The
+  > parking-lot question — *"pull `membership.party_id` forward from U1, or make `(B)`'s
+  > escalation wait"* — is answered by events: neither. It was overtaken.
+  >
+  > **What is genuinely left of this task is Gate 4 and only Gate 4**: which parties a CLIENT
+  > PORTAL session may see. That has no consumer until U1, and building it now would be a column
+  > with no writer — the exact thing `(B)` cited three days ago when he deliberately did NOT
+  > build `escalated_level`, and the thing T2.5 cited when it deferred `workflow_template`. So
+  > it stays open and moves to Phase 6, where its consumer is.
+  >
+  > **The reporting line and this column are not redundant, and it is worth saying why**, so
+  > nobody later "simplifies" one into the other. `reports_to_user_id` answers *who does this
+  > LOGIN escalate to* — staff, inside one firm. `party_id` would answer *which PERSON is this
+  > login* — which is what lets a portal contact be scoped to their own company's records, and
+  > what would let the firm's org chart include the majority of a firm who have a place in it
+  > and no login at all. Different questions.
 
 - [x] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
   > **Done (2026-08-30). Migrations 0050 (the vocabulary) and 0051 (the work).** Both blockers
@@ -2435,26 +2459,182 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` **939** (was 906) · `test:integration` **296** · `smoke` **229 passed,
   > 0 failed** (unchanged).
 
-- [ ] `(A)` **T3.8** **Render a document a client can be sent** — the other half of T3.6, split
-  from it deliberately rather than rushed into it. *Acc: an engagement letter and an invoice
-  each render to a file, stored as a `generated` document version, whose content hash a
-  re-render of unchanged data reproduces exactly.*
-  > **The decomposition T3.6 stopped short of, stated so it is not re-derived.** The renderer
-  > must NOT read the database itself — the service that already holds the data (engagement,
-  > invoice) builds a plain `RenderableDocument`, and the renderer turns that into bytes. A
-  > renderer holding repositories would duplicate read logic that already exists and would make
-  > the engine choice reach into the data layer.
+- [x] `(A)` **T3.8** **Render a document a client can be sent.** *Acc: an engagement letter and an invoice each render to a file, stored as a `generated` document version, whose content hash a re-render of unchanged data reproduces exactly.*
+  > **Done (2026-08-30). No migration — it is all code over T3.6's store.**
   >
-  > **The engine has to be DETERMINISTIC, and that is the whole constraint.** A document's
-  > content hash is evidence — it is what proves the file a client holds is the one the firm
-  > issued (T2.3's `content_hash` finally has something to point at). A headless browser does
-  > not guarantee byte-identical output across versions; a pure-layout library does. That
-  > argues for pdf-lib or pdfkit over puppeteer, and it also removes chromium from the
-  > container. **Not decided — it is a real trade against fidelity and it is worth ten minutes
-  > with `(B)` rather than a unilateral `npm install`.**
+  > **THE ENGINE DECISION, MADE AND ARGUED: pdf-lib, not a headless browser.** The obvious
+  > approach is HTML + CSS through Chromium and it was rejected on one requirement that
+  > outranks fidelity here — **a rendered document's content hash is evidence.** Chromium does
+  > not promise byte-identical output across versions (font hinting, image encoders and the PDF
+  > writer all move), so a firm upgrading a base image would watch every re-render stop matching
+  > with nothing to say why. It also puts ~300 MB of browser in the container.
   >
-  > `brand_asset` (T3.6) is the input this needs and already exists, so nothing blocks it.
-- [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
+  > pdf-lib is pure JS, MIT, four pure-JS dependencies, no native modules. **The cost, stated
+  > rather than discovered: layout is hand-built** — there is no CSS and no automatic table, so
+  > `infrastructure/render/pdf-renderer.ts` carries a small column-and-flow engine. That is the
+  > honest price of reproducible bytes, and it is a one-file decision behind `DocumentRenderer`.
+  >
+  > **DETERMINISM PROVEN THREE WAYS.** pdf-lib writes CreationDate, ModDate and a Producer
+  > string from the clock and its own version by default; all three are pinned from the
+  > DOCUMENT's issue date. A unit test renders twice **1.1 seconds apart** and compares hashes,
+  > with a control that asserts the bytes DO change when content changes. And end to end
+  > against a real letter: three renders through the API, one hash, **one blob on disk** —
+  > because the store is content-addressed, re-rendering costs nothing.
+  >
+  > **THE DECOMPOSITION T3.6 DELIBERATELY STOPPED SHORT OF.** `RenderableDocument` is a neutral
+  > description; `RenderSource` (Postgres) knows what an engagement letter contains;
+  > `DocumentRenderer` (pdf-lib) knows what a page looks like. Neither learns the other's job,
+  > which is what T3.6's note said the follow-up had to get right.
+  >
+  > ── **TWO REAL LIMITS, BOTH FOUND BY RUNNING IT** ─────────────────────────────
+  >
+  > **1. The built-in PDF fonts cover Latin-1 and NOTHING ELSE — the rupee sign is undrawable.**
+  > In an Indian compliance product. Found on the first render. Money is therefore written with
+  > its ISO code (`INR 216,000.00`), which is independently the better choice on a cross-border
+  > document anyway — G1.8 exists because the same letter may be read in Dubai, where a bare
+  > symbol is ambiguous. **The renderer refuses rather than mangling**: `UnrenderableText` names
+  > the character, its code point and the field it appeared in, because silently dropping a
+  > letter from a client's name on a legal document is worse than producing nothing. **A client
+  > whose name is not Latin-1 — Devanagari, Chinese — cannot have a document rendered today.**
+  > That is the real limit and the fix is embedding a Unicode font (see the open item below).
+  >
+  > **2. The guard immediately caught MY OWN bug**, which is the best evidence it works: the
+  > "not stated" fallback used an em dash (U+2014). Now the word "Not stated", which is better
+  > on a legal document anyway — a dash in a fee column is ambiguous between "nothing" and
+  > "nobody said".
+  >
+  > **One more found by rendering an invoice**: the source read `invoice_line_amount.amount`,
+  > and that view exposes `gross`/`net`/`tax`. A column that does not exist, invisible to every
+  > unit test because the fake does not have a schema.
+  >
+  > **Screens**: the Files panel gained a **Generate PDF** button on `/engagement-letters/[id]`
+  > and `/invoices/[id]` only — the two things that can be rendered. Pressing it twice is safe
+  > and the panel says so.
+  >
+  > Gate: `npm run check` **1303** · `test:integration` **416** · `smoke` **261 passed, 0
+  > failed**. Verified in a browser: a real letter rendered, downloaded, and its file's sha256
+  > compared to the stored content hash — equal.
+
+- [x] `(A)` **T3.9** **Embed a Unicode font in the renderer.** *Acc: a client whose registered name is in Devanagari gets a correct PDF, and `₹` prints.*
+  > **Done (2026-08-30). No migration — dependencies and one new file.**
+  >
+  > **"EMBED A UNICODE FONT" TURNED OUT TO BE THE WRONG SHAPE, and measuring said so.** There is
+  > no single file that covers what this product needs at a size worth shipping. Asking
+  > `hasGlyphForCodePoint` of the actual files:
+  >
+  > | subset | covers |
+  > |---|---|
+  > | `latin` | the basic range, and the em dash. **No rupee sign.** |
+  > | `latin-ext` | the rupee sign, Polish, the ruble. **Not the basic range.** |
+  > | `devanagari` | Devanagari, and the rupee sign again |
+  >
+  > So it is a **CHAIN with fallback**: text is segmented into runs and each is drawn with the
+  > first font that can draw it, which is what a browser does and what pdf-lib leaves to the
+  > caller. Adjacent characters resolving to the same font are merged, so ordinary English is
+  > one run and one draw call.
+  >
+  > **THE GUARD IS NOW DERIVED FROM THE FONTS, not a hardcoded range.** T3.8's version tested
+  > against Latin-1 by hand; it now asks the loaded chain. It therefore cannot lie about what
+  > the renderer can draw, and it narrows on its own the day a font is added.
+  >
+  > **LICENSING, which is why this was its own task.** Noto Sans, **OFL-1.1**, which expressly
+  > permits embedding and redistribution — and it arrives as an npm dependency
+  > (`@fontsource/noto-sans`) rather than a binary committed here, so it is versioned, auditable
+  > and updated like anything else. Nobody has to decide whether a font in `git log` was
+  > licensed.
+  >
+  > **SUBSETTING IS WHAT MAKES THREE FONTS FREE.** `subset: true` embeds only the glyphs used, so
+  > a letter in plain English carries a few hundred bytes of Latin and *nothing* of the other
+  > two. A document mixing Devanagari, Latin-Extended and the rupee sign is **15 KB**.
+  >
+  > **DETERMINISM SURVIVES**, which was the one thing that could have killed this: the fonts are
+  > files embedded identically every time, and subsetting is a function of the glyphs used. The
+  > test that renders twice 1.1 seconds apart still passes, and a real letter rendered twice
+  > through the live API produced one hash.
+  >
+  > ── **THE DEPENDENCY FIGHT, recorded so nobody repeats it** ────────────────────
+  >
+  > `fontkit` 2.x was tried FIRST and is wrong: it changed the subset API pdf-lib 1.x calls, so
+  > every font fails with `subset.encodeStream is not a function`.
+  >
+  > `@pdf-lib/fontkit` is the bundle pdf-lib expects — and it is compiled with regenerator and
+  > shipped WITHOUT its runtime, so it throws `regeneratorRuntime is not defined` the moment it
+  > walks a font with complex shaping tables. **Latin does not have them and Devanagari does**,
+  > so it failed only on the script this task exists to support, and only on the last test.
+  > `regenerator-runtime` is imported once in `font-set.ts` with that whole explanation beside
+  > it. It is a shim for an upstream packaging defect, not a bandaid, and saying which is the
+  > point of the comment.
+  >
+  > **The ISO code stays.** `INR 216,000.00` was originally forced (the symbol was undrawable)
+  > and is now a product decision on the reason that was always stronger: this is a cross-border
+  > product, and a bare symbol is ambiguous to a reader in Dubai or Delaware. A firm that wants
+  > `₹` can have it by changing one function — which it could not before.
+  >
+  > **What is still refused: CJK**, and every script the chain does not carry. Adding one is
+  > another font in the chain rather than a change of approach, and the error names the
+  > character, its code point, the field, and what the chain does carry.
+  >
+  > Gate: `npm run check` **1306** · `test:integration` **416** · `smoke` **261 passed, 0
+  > failed**. Verified by looking at the PDF: a Devanagari client name, `₹216,000.00`, Société
+  > Générale · Zürich, an em dash, and Devanagari and Latin mixed inside one table row.
+
+- [x] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
+  > **Done (2026-08-30). Migration 0038 — two VIEWS and no tables.**
+  >
+  > **The acceptance decided the whole design.** "Figures reconcile to underlying rows, not
+  > cached columns" means there is no `mrr` column anywhere and no nightly job that fills one:
+  > `crm.engagement_mrr` and `crm.receivable_ageing` are views over the rows, exactly as
+  > `crm.invoice_totals` (0027) is. Proven rather than asserted — the integration test computes
+  > MRR a second time from the base tables, never touching the view, and asserts the two are
+  > equal. Against the dev database that is **₹31,20,000 both ways**.
+  >
+  > The cost, stated: they recompute on every read. Right at this size, and when it stops being
+  > right the answer is a materialised view with a stated refresh — never a column somebody
+  > updates by hand, which is the thing the acceptance forbids.
+  >
+  > **THE REAL FEATURE IS `excluded_because`, NOT THE MRR NUMBER.** Four things are not monthly
+  > recurring revenue and each is named rather than dropped: `one_time` (charged once — real
+  > revenue, not recurring), `custom_frequency` (the firm said custom BECAUSE no formula fits;
+  > guessing invents revenue), `no_frequency_stated`, and `unpriced` (G1.6's real state — work
+  > agreed and not yet priced). **The first run against the dev database found 1,490 engagements
+  > stating no frequency against 34 that counted.** A total that silently dropped them would
+  > have read ₹31.2 lakh and looked complete. This is G1.6's "an unpriced line stops being a
+  > lie" applied to a headline figure.
+  >
+  > **Every figure is converted at the rate stored on the DOCUMENT**, never one looked up today
+  > — the letter's `fx_rate` for a fee, the invoice's for a receivable. Re-converting at
+  > today's rate would change last quarter's MRR every morning, which is the exact thing 0009's
+  > reporting-currency rule exists to prevent. Proven: 100 USD/month on a letter struck at 80
+  > contributes ₹8,000.
+  >
+  > **DSO returns NULL when the firm billed nothing, never 0.** "0 days" reads as excellent
+  > collections; the truth is there is not enough billing to say. It is the one calculation in
+  > TypeScript rather than SQL, because the division is a DEFINITION and belongs somewhere
+  > readable and tested. The window is 90 days and is a constant, not a parameter — two screens
+  > computing DSO over different windows would produce two numbers both called DSO.
+  >
+  > **THE FEE AXIS GATES HERE RATHER THAN REDACTING, and it is the first place in the product
+  > that does.** Everywhere else `withFeeVisibility` nulls an amount and leaves the record, so
+  > "you may not see this" never looks like "there is no fee". That is wrong when the whole
+  > response is money: a redacted dashboard is a page of nulls, which says "this firm has no
+  > revenue". So the routes refuse with a message naming the fix, and the home page offers the
+  > link only on `commercialVisibility`. **Worth knowing: a partner does NOT have it by
+  > default** — it is a separate flag on the membership, and a partner without it is refused.
+  >
+  > **`security_invoker = true` on both views**, and the integration test is the only thing that
+  > would ever catch its absence: a plain view runs as its OWNER, who is not subject to the row
+  > policies, so a totals view over tenant-scoped tables would be a hole straight through the
+  > tenant wall that every other test would pass.
+  >
+  > **Two things the screens found in my own code before anyone else could**: the first cut of
+  > the ageing total summed the buckets in TypeScript (`Number` + `toFixed`) — breaking the rule
+  > this product keeps everywhere, that only the database adds money up — and is now one query
+  > with GROUPING SETS. And the overview handler forwarded the service's own object straight to
+  > the wire; the compiler refused it, because the domain carries `bucket` and `reason` as
+  > strings while the wire declares closed enums. That is `api/domainerr.ts`'s trick working on
+  > a response instead of an error.
+  >
+  > Screens: `/dashboard`. Gate: `npm run check` **1287** · `test:integration` **416**.
 
 **Milestone M3:** full compliance cycle (spawn → work → verify → file → invoice → collect) runs with humans in the loop; money is gapless and auditable.
 
@@ -2586,6 +2766,22 @@ sandbox access + credentials. **Not on any demo's critical path.**
   check — every route returning an amount is exercised under both visibilities — would close
   the class. Not built.
 
+- [ ] `(A/B)` **The smoke suite has outgrown its own rate-limit budget, and reports it as 21 broken features.**
+  The general limiter allows 300 requests a minute; the suite is now 261 checks and each is one
+  or more requests. A run gets roughly 240 checks in, starts being throttled, and reports the
+  rest as **empty values and wrong status codes** — which reads exactly like broken invoicing,
+  broken collections and a broken tenant seed. Confirmed harmless: the same tree run against
+  `BIB_RATELIMIT_GENERAL_PER_MINUTE=5000` is **261 passed, 0 failed**.
+  > **This is the second time a smoke failure has pointed at the wrong place**, and that is why
+  > it is a task rather than a note. The first was the Windows `python3`/`mktemp` trap, which
+  > reported 38 checks as **403** and sent the investigation into the authorization code twice
+  > before anyone questioned the harness. Same shape both times: the harness fails, the
+  > assertion reports it as a product defect, and the message names a plausible wrong culprit.
+  > **The fix is for the script to notice a 429 and say so** — one check of the status before
+  > asserting, and a line saying the suite is over budget — not to raise the limit, which would
+  > weaken a real control to make a test pass. Whoever picks it up should also decide whether
+  > the suite should reset the limiter between sections; it is in-memory, so a restart clears it.
+
 - [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
   300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
   a firm of forty behind a single office NAT gateway — they share one bucket. Found by the
@@ -2661,7 +2857,11 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
   holds is *"nothing pointed at it at the instant it was archived"*, which is weaker than the
   `CLAUDE.md` paragraph reads. Decide later whether capture should refuse an archived party or
   quietly unarchive it — both are defensible and neither should be guessed.
-- **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
+- ~~**G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.~~
+  **Answered by events (2026-08-30): neither.** T2.9 built the reporting line on `membership`
+  itself (`reports_to_user_id`, 0048) and escalation resolves through it today. What is left of
+  G3.4 is Gate 4, whose consumer is U1 — so it moves to Phase 6 rather than being pulled
+  forward. See G3.4's own note.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
 - ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled
   (2026-08-28): no.** The key stays on `core.party`, and Incorporation is why. That service

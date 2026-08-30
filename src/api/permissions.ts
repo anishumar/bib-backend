@@ -434,8 +434,24 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // which is a record-scope question (Gate 4, U1) and not a role question — and
   // answering a role question with a permission would make the real answer
   // harder to add later.
+  // THE DASHBOARDS (T3.7). `party:read` is the ROLE gate, and it is deliberately
+  // not the whole story: every one of these routes ALSO requires commercial
+  // visibility, checked in the handler rather than here.
+  //
+  // Two axes, and this table only knows about one. The fee axis is a flag on the
+  // membership and is orthogonal to the role by design (CLAUDE.md) — a manager
+  // who may read every client is not automatically somebody who may see what the
+  // firm earns. Putting it in this table would collapse the two into one, which
+  // is the thing the fifth axis exists to prevent.
+  [routeKey("GET", "/api/v1/dashboard/overview"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/receivables/by-client"), "party:read" as const],
+
   [routeKey("GET", "/api/v1/documents"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents"), "party:write" as const],
+  // Rendering WRITES — it stores a document and attaches it — so `party:write`,
+  // the same permission every other drafting route on these documents takes.
+  [routeKey("POST", "/api/v1/documents/render"), "party:write" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/content"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/versions"), "party:read" as const],

@@ -68,6 +68,10 @@ import {
   Sha256ByteDigest,
 } from "../infrastructure/storage/filesystem-blob-store";
 import { FileStoreService } from "../usecase/filestore/service";
+import { PdfLibRenderer } from "../infrastructure/render/pdf-renderer";
+import { PostgresRenderSource } from "../infrastructure/postgres/render-source";
+import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboard-repository";
+import { DashboardService } from "../usecase/dashboard/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
 import {
@@ -383,13 +387,29 @@ export function wire(cfg: Config, log: Logger): Wired {
   // else, which is what makes replacing the filesystem stub with an object
   // store a one-line change in this file. `validateServer` has already refused
   // to boot a production-like environment on the stub by the time this runs.
+  // The blob store is named once and handed to BOTH the document store and the
+  // render source — the source needs it to fetch a firm's logo, and giving it
+  // its own instance would mean two objects believing they own the same files.
+  const blobs = new FilesystemBlobStore(cfg.storage.root);
   const fileStore = new FileStoreService({
     documents: new PostgresDocumentStoreRepository(pools.app),
-    blobs: new FilesystemBlobStore(cfg.storage.root),
+    blobs,
     digest: new Sha256ByteDigest(),
     ids: systemIds,
     events: ledger,
     maxUploadBytes: cfg.storage.maxUploadBytes,
+    // pdf-lib, chosen for DETERMINISM rather than fidelity: a rendered
+    // document's content hash is evidence, and a headless browser's bytes are
+    // not stable across versions. See the renderer's own header.
+    renderer: new PdfLibRenderer(),
+    renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
+  });
+
+  // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one
+  // repository: every number is derived from rows at read time, so there is
+  // nothing to inject a clock or an id generator for.
+  const dashboards = new DashboardService({
+    dashboards: new PostgresDashboardRepository(pools.app),
   });
 
   // CHASING is its own use case, and it runs in TWO places: the worker sweeps
@@ -667,6 +687,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         document: { service: documents },
         invoice: { service: invoices, dunning, authz },
         filestore: { service: fileStore },
+        dashboard: { service: dashboards, authz },
       },
       log,
       {
