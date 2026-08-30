@@ -2184,13 +2184,44 @@ open and are recorded above; neither blocks Phase 2.
   >
   > Gate: `npm run check` **1280 tests** · `test:integration` **409** (6 new, real Postgres:
   > the two CHECKs, the partial unique index, its per-tenant scope, and 0054's backfill asserted
-  > against the CATALOGUE and proved non-vacuous). **The browser walk is still owed** — the Chrome
-  > extension would not connect this session — so the chain was walked over real HTTP against the
-  > running server instead, INCLUDING the preflight sent by hand (`OPTIONS` + POST, exact origin,
-  > credentials), which is the one thing curl does not do on its own. Complete → **Filed,
-  > 2026-08-30**, row leaves the default view; reopen → **Pending**, `filed_on` null, row returns;
-  > cancel → **not filed**, and no `work_item.completed`. The ledger shows all sixteen events in
-  > order. **The smoke budget is still spent — ~296 of 300 — and nothing was added to it.**
+  > against the CATALOGUE and proved non-vacuous). **The smoke budget is still spent — ~296 of
+  > 300 — and nothing was added to it.**
+  >
+  > **WHAT WAS DONE IN THE BROWSER, AND WHAT WAS NOT — stated exactly, because the difference is
+  > the whole reason this project insists on the browser.**
+  >
+  > **Driven by CLICKING, and this is the acceptance:** `/calendar` opened at **162 rows, every
+  > one "Pending"**. Clicked "on the board →" on GSTR-3B / Lakeview Logistics / Aug 2026, chose
+  > **Completed** in the state dropdown, clicked **Save**. Back on `/calendar` the tab read
+  > **Due (161)** — the filed row had left the default view, which is the checkbox's "off"
+  > branch doing something for the first time in this product. Ticking **"Include filed and
+  > resolved"** (a real click) took it to **162** and the row read
+  > *"2026-09-20 · **Filed** 2026-08-30"* — the state pill and the filed date, both of which
+  > could not exist before this task. `/admin/work-vocabulary` renders the new **"Done, not
+  > dropped"** column: ticked on Completed, **clear on Cancelled**, and DISABLED on every
+  > non-terminal row. No console errors and no CORS failures on any page.
+  >
+  > **NOT driven by clicking:** after the first Save, the extension's synthetic clicks stopped
+  > reaching React in that tab — the button was enabled, `elementFromPoint` confirmed the click
+  > landed on it, and no request was made, no handler ran, no error appeared. It failed the same
+  > way for every later transition and on the vocabulary page too, so it is the automation and
+  > not the product; the same calls succeed from the page's own `fetch`. **Reopen, cancel and the
+  > vocabulary toggle were therefore verified by fetch issued FROM the page** — real browser,
+  > real cookie, real cross-origin preflight, which is stronger than curl and weaker than a
+  > click. Results: Completed → **Filed 2026-08-30**, default view 161; Cancelled → **Pending,
+  > `filed_on` null**, default view 162 (a cancellation un-files, and files nothing); the
+  > vocabulary **PATCH** — the very verb T3.1 found missing from the CORS allowlist — answered
+  > **200** cross-origin with credentials, and ticking "done" on a state that is not terminal was
+  > refused **400** with the sentence a partner can act on. The ledger carries all sixteen events
+  > in order, `obligation.filed` with `daysLate: -21`.
+  >
+  > **The demo data was left exactly as it was found** (task Not Started, obligation Pending,
+  > `filed_on` null, Cancelled back to `is_success = false`).
+  >
+  > **What is still owed, and it is small:** clicking Save on a state move a SECOND time in one
+  > session, and clicking the new vocabulary tick. Both were exercised at the API from the
+  > browser; neither has been exercised by a finger. Worth retrying at the top of T3.3, whose
+  > screens will need the same controls anyway.
 
 - [ ] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
   > **The decision AND its reason are both recorded** (`resolution`, `resolution_reason`, `resolved_at`). In a CA firm this moment is where money and liability are decided, and today it happens on WhatsApp and is written down nowhere. The reason is the capture-or-lose half: in eighteen months nobody remembers why a late fee was accepted rather than a provisional filing made, and that is exactly the thing worth knowing. Writes `obligation.missed`, then `obligation.filed` or a resolution.
