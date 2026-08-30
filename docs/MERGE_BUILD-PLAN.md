@@ -2097,6 +2097,23 @@ open and are recorded above; neither blocks Phase 2.
   > board due 20 September at **High** — the statutory-default priority flag doing its job, from the
   > law, with nobody setting it.
   >
+  > **NOT DONE, AND NAMED HERE RATHER THAN LEFT TO BE DISCOVERED (2026-08-30).** `filed_on` is
+  > READ in four places and WRITTEN in none, and an obligation's state never leaves the initial
+  > one — `raise` deliberately does not move it (setting `work_item_id` IS the fact that work
+  > started) and nothing else does either. Three consequences, all visible to a user:
+  > every calendar row reads "Pending" forever; **`/calendar`'s "Include filed and resolved"
+  > checkbox does nothing**, because `is_terminal` is never true; and `obligation.filed` is a
+  > registered verb with no writer. That is exactly the shape `CLAUDE.md` warns about twice —
+  > *a column nothing writes is the feature that looks finished* — and the `resolution` columns
+  > were left out for that very reason while `filed_on` was not, which is an inconsistency I
+  > introduced.
+  >
+  > **T3.2's acceptance line still holds in full** (Apr–Jun quarter, March TDS on 30 April,
+  > twelve instances, an idempotent re-run), which is why this is ticked. What is missing is the
+  > close of the loop, and it is the FIRST thing in the next session: mark an obligation filed
+  > when its work item reaches a terminal state, emit `obligation.filed`, and the checkbox and
+  > the state column both come alive. T3.3 then owns `missed` → partner decision → `resolved`.
+  >
   > Gate: `npm run check` **1262 tests** · `test:integration` **403** (21 new, real Postgres) ·
   > `npm run smoke` **261/261** (8 new). **The smoke budget is now spent — ~296 requests of 300** —
   > so the known-open item about the edge limiter's key is no longer theoretical: the next section
