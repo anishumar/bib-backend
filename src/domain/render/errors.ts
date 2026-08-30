@@ -16,10 +16,12 @@ export type RenderErrorCode = "UNRENDERABLE_TEXT" | "NOT_RENDERABLE" | "SOURCE_N
 /**
  * The document contains a character the current renderer cannot draw.
  *
- * THE HONEST LIMIT OF THE PDF ENGINE, surfaced rather than worked around. The
- * standard PDF fonts use WinAnsi, which covers Latin-1 and no more — so the
- * rupee sign, Devanagari, Chinese characters and the em dash in some positions
- * are all outside it.
+ * THE HONEST LIMIT OF THE FONT CHAIN, surfaced rather than worked around.
+ *
+ * T3.9 embedded Noto Sans as latin + latin-ext + devanagari, so the rupee sign,
+ * Devanagari and Latin-Extended all draw now. What is still outside it is CJK
+ * and every script the chain does not carry — and adding one is another font in
+ * the chain, not a change of approach.
  *
  * Two things were rejected in favour of this error. **Silently dropping the
  * character** would put a client's name on a legal document with a letter
@@ -35,10 +37,11 @@ export class UnrenderableText extends RenderError {
     super(
       "UNRENDERABLE_TEXT",
       `${field} contains ${JSON.stringify(character)} (U+${code.toString(16).toUpperCase().padStart(4, "0")}), ` +
-        `which the built-in PDF fonts cannot draw — they cover Latin-1 and no more. This is a ` +
-        `limit of the current renderer, not of the data: nothing is wrong with the record. ` +
-        `Amounts are written with their ISO code (INR 1,000.00) rather than a currency symbol ` +
-        `for exactly this reason. Embedding a Unicode font is the real fix and is on the board.`,
+        `which none of this renderer's fonts can draw. It carries Noto Sans in Latin, ` +
+        `Latin-Extended and Devanagari — so accents, the rupee sign and Devanagari are all ` +
+        `fine, and this character is outside all three. This is a limit of the renderer, not ` +
+        `of the data: nothing is wrong with the record. Supporting it means adding a font to ` +
+        `the chain in infrastructure/render/font-set.ts.`,
     );
   }
 }

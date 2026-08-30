@@ -7,17 +7,19 @@
 //
 // ── MONEY IS WRITTEN WITH ITS ISO CODE, NOT ITS SYMBOL ─────────────────────
 //
-// "INR 18,000.00", never "₹18,000.00", and there are two independent reasons.
+// "INR 18,000.00", never "₹18,000.00", and this is now a PRODUCT decision
+// rather than a technical one.
 //
-// The built-in PDF fonts encode Latin-1 and no more, so the rupee sign is
-// literally undrawable by the current renderer — which is a limit, and it is
-// named in `UnrenderableText` rather than hidden.
+// It began as both. The built-in PDF fonts could not draw the rupee sign at
+// all, so the ISO code was the only option — and T3.9 removed that constraint:
+// the renderer carries Noto Sans latin-ext and draws ₹ perfectly well now.
 //
-// But the ISO code is also simply BETTER here, and would be worth choosing even
-// with a Unicode font. This is a cross-border product: G1.8 exists because a
-// letter issued by the US entity must not print Indian law, and the same
-// document may be read in Dubai by somebody for whom a bare symbol is ambiguous.
-// A three-letter code is unambiguous everywhere.
+// The choice stands anyway, on the reason that was always the stronger of the
+// two. This is a CROSS-BORDER product — G1.8 exists because a letter issued by
+// the US entity must not print Indian law — and the same invoice may be read in
+// Dubai or Delaware by somebody for whom a bare symbol is ambiguous or simply
+// unfamiliar. A three-letter ISO code is unambiguous everywhere, and a firm that
+// wants the symbol can now have it by changing this one function.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";

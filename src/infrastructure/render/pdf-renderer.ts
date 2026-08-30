@@ -35,8 +35,20 @@
 // It also writes a Producer string carrying its own version. Pinned too — an
 // npm upgrade must not silently change every future document's hash while the
 // content is identical.
-import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
-import type { PDFFont, PDFPage } from "pdf-lib";
+//
+// ── FONTS (T3.9) ───────────────────────────────────────────────────────────
+//
+// Noto Sans, embedded as a CHAIN of three subsets with fallback — see
+// `font-set.ts` for why one font was not enough. The built-in PDF fonts this
+// shipped on first covered Latin-1 and nothing else, which made the rupee sign
+// undrawable in an Indian compliance product.
+//
+// Determinism survives it: the fonts are files on disk, embedded identically
+// every time, and subsetting is a function of which glyphs the document uses.
+// The test that renders twice a second apart covers this.
+import { PDFDocument, rgb } from "pdf-lib";
+import type { PDFPage } from "pdf-lib";
+import { FontSet } from "./font-set";
 import type { RenderableDocument, Section } from "../../domain/render/model";
 import { wrapParagraph } from "../../domain/render/model";
 import { UnrenderableText } from "../../domain/render/errors";
@@ -68,6 +80,35 @@ interface Cursor {
   y: number;
 }
 
+/**
+ * One weight of the chain, with the two operations the layout needs.
+ *
+ * It exists so the drawing code below reads exactly as it did when there was a
+ * single `PDFFont` — `widthOfTextAtSize` and a draw — while underneath, text
+ * that spans scripts is segmented and drawn run by run.
+ */
+class Face {
+  constructor(
+    private readonly fonts: FontSet,
+    private readonly bold: boolean,
+  ) {}
+
+  widthOfTextAtSize(text: string, size: number): number {
+    return this.fonts.widthOf(text, size, this.bold);
+  }
+
+  /** Draws left to right, advancing by each run's measured width. A document in
+   *  one script is one run and one draw call. */
+  draw(page: PDFPage, text: string, x: number, y: number, size: number, color: typeof INK): void {
+    let cursorX = x;
+    for (const run of this.fonts.segment(text)) {
+      const font = this.fonts.font(run.fontIndex, this.bold);
+      page.drawText(run.text, { x: cursorX, y, size, font, color });
+      cursorX += font.widthOfTextAtSize(run.text, size);
+    }
+  }
+}
+
 export class PdfLibRenderer implements DocumentRenderer {
   readonly kind = "pdf-lib";
   readonly mediaType = "application/pdf";
@@ -77,8 +118,6 @@ export class PdfLibRenderer implements DocumentRenderer {
     // it cannot encode, deep inside a draw call, with a message naming neither
     // the field nor the document. Scanning first means the refusal says WHERE —
     // and it means a half-drawn page is never produced.
-    assertRenderable(doc);
-
     const pdf = await PDFDocument.create();
 
     // ── The determinism block. See the file header. ──────────────────────
@@ -91,8 +130,18 @@ export class PdfLibRenderer implements DocumentRenderer {
     pdf.setCreator("BiB");
     pdf.setTitle(`${doc.documentTitle} ${doc.reference}`);
 
-    const body = await pdf.embedFont(StandardFonts.Helvetica);
-    const bold = await pdf.embedFont(StandardFonts.HelveticaBold);
+    // The font chain, loaded into THIS document. Fonts embed into a specific
+    // PDF, so a shared instance would leak one document's glyph subset into
+    // another's.
+    const fonts = await FontSet.load(pdf);
+    // CHECKED AGAINST THE FONTS ACTUALLY LOADED, not a hardcoded range. The
+    // guard therefore cannot lie about what this renderer can draw, and it
+    // narrows on its own the day the chain gains a script. It runs BEFORE
+    // anything is drawn, so a half-page is never produced.
+    assertRenderable(doc, fonts);
+
+    const body = new Face(fonts, false);
+    const bold = new Face(fonts, true);
 
     const cursor: Cursor = { page: pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: 0 };
     cursor.y = PAGE_HEIGHT - MARGIN_TOP;
@@ -122,15 +171,16 @@ export class PdfLibRenderer implements DocumentRenderer {
   private text(
     cursor: Cursor,
     value: string,
-    opts: { x?: number; size?: number; font: PDFFont; color?: typeof INK },
+    opts: { x?: number; size?: number; font: Face; color?: typeof INK },
   ): void {
-    cursor.page.drawText(value, {
-      x: opts.x ?? MARGIN_X,
-      y: cursor.y,
-      size: opts.size ?? SIZE_BODY,
-      font: opts.font,
-      color: opts.color ?? INK,
-    });
+    opts.font.draw(
+      cursor.page,
+      value,
+      opts.x ?? MARGIN_X,
+      cursor.y,
+      opts.size ?? SIZE_BODY,
+      opts.color ?? INK,
+    );
   }
 
   /** Right-aligned, which a money column needs and pdf-lib does not do. */
@@ -138,17 +188,11 @@ export class PdfLibRenderer implements DocumentRenderer {
     cursor: Cursor,
     value: string,
     right: number,
-    opts: { size?: number; font: PDFFont; color?: typeof INK },
+    opts: { size?: number; font: Face; color?: typeof INK },
   ): void {
     const size = opts.size ?? SIZE_BODY;
     const width = opts.font.widthOfTextAtSize(value, size);
-    cursor.page.drawText(value, {
-      x: right - width,
-      y: cursor.y,
-      size,
-      font: opts.font,
-      color: opts.color ?? INK,
-    });
+    opts.font.draw(cursor.page, value, right - width, cursor.y, size, opts.color ?? INK);
   }
 
   private rule(pdf: PDFDocument, cursor: Cursor): void {
@@ -167,8 +211,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     pdf: PDFDocument,
     cursor: Cursor,
     doc: RenderableDocument,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
   ): Promise<void> {
     // The logo, when the firm has set one for this issuing entity. Absent is an
     // ordinary state and the document simply leads with its title — a firm that
@@ -196,8 +240,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   private drawParties(
     cursor: Cursor,
     doc: RenderableDocument,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
     pdf: PDFDocument,
   ): void {
     const rightX = MARGIN_X + CONTENT_WIDTH / 2;
@@ -224,8 +268,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   private drawMeta(
     cursor: Cursor,
     doc: RenderableDocument,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
     pdf: PDFDocument,
   ): void {
     if (doc.meta.length === 0) return;
@@ -234,12 +278,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     let x = MARGIN_X;
     const per = CONTENT_WIDTH / doc.meta.length;
     for (const row of doc.meta) {
-      cursor.page.drawText(row.label, {
-        x, y: cursor.y, size: SIZE_SMALL, font: bold, color: MUTED,
-      });
-      cursor.page.drawText(row.value, {
-        x, y: cursor.y - SIZE_BODY * LEADING, size: SIZE_BODY, font: body, color: INK,
-      });
+      bold.draw(cursor.page, row.label, x, cursor.y, SIZE_SMALL, MUTED);
+      body.draw(cursor.page, row.value, x, cursor.y - SIZE_BODY * LEADING, SIZE_BODY, INK);
       x += per;
     }
     this.advance(pdf, cursor, SIZE_BODY * LEADING);
@@ -248,8 +288,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   private drawSection(
     cursor: Cursor,
     section: Section,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
     pdf: PDFDocument,
   ): void {
     this.advance(pdf, cursor, 22);
@@ -272,8 +312,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   private drawTable(
     cursor: Cursor,
     doc: RenderableDocument,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
     pdf: PDFDocument,
   ): void {
     const table = doc.table;
@@ -321,9 +361,9 @@ export class PdfLibRenderer implements DocumentRenderer {
           const y = top - j * SIZE_BODY * LEADING;
           if (align === "right") {
             const lw = body.widthOfTextAtSize(line, SIZE_BODY);
-            cursor.page.drawText(line, { x: x + w - lw, y, size: SIZE_BODY, font: body, color: INK });
+            body.draw(cursor.page, line, x + w - lw, y, SIZE_BODY, INK);
           } else {
-            cursor.page.drawText(line, { x, y, size: SIZE_BODY, font: body, color: INK });
+            body.draw(cursor.page, line, x, y, SIZE_BODY, INK);
           }
         });
       });
@@ -335,8 +375,8 @@ export class PdfLibRenderer implements DocumentRenderer {
   private drawTotals(
     cursor: Cursor,
     doc: RenderableDocument,
-    body: PDFFont,
-    bold: PDFFont,
+    body: Face,
+    bold: Face,
     pdf: PDFDocument,
   ): void {
     const right = PAGE_WIDTH - MARGIN_X;
@@ -354,17 +394,11 @@ export class PdfLibRenderer implements DocumentRenderer {
 
   /** Footer on EVERY page, not just the last: a page of an engagement letter
    *  that arrives on its own must still say which document it belongs to. */
-  private drawFooter(pdf: PDFDocument, doc: RenderableDocument, body: PDFFont): void {
+  private drawFooter(pdf: PDFDocument, doc: RenderableDocument, body: Face): void {
     const pages = pdf.getPages();
     pages.forEach((page, i) => {
       const label = `${doc.footer ?? ""}   ·   ${doc.reference}   ·   page ${String(i + 1)} of ${String(pages.length)}`;
-      page.drawText(label, {
-        x: MARGIN_X,
-        y: MARGIN_BOTTOM - 26,
-        size: SIZE_SMALL,
-        font: body,
-        color: MUTED,
-      });
+      body.draw(page, label, MARGIN_X, MARGIN_BOTTOM - 26, SIZE_SMALL, MUTED);
     });
   }
 }
@@ -376,15 +410,13 @@ export class PdfLibRenderer implements DocumentRenderer {
  * through because the layout handles them; everything else outside the range is
  * refused by name.
  */
-function assertRenderable(doc: RenderableDocument): void {
+function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
   const check = (field: string, value: string | null): void => {
     if (value === null) return;
     for (const ch of value) {
-      const code = ch.codePointAt(0) ?? 0;
       if (ch === "\n" || ch === "\t") continue;
-      // Latin-1 printable, which is what WinAnsiEncoding covers in practice.
-      if (code >= 0x20 && code <= 0x7e) continue;
-      if (code >= 0xa0 && code <= 0xff) continue;
+      const code = ch.codePointAt(0) ?? 0;
+      if (fonts.canRender(code)) continue;
       throw new UnrenderableText(field, ch);
     }
   };

@@ -66,34 +66,66 @@ describe("the renderer is a pure function of its input", () => {
   });
 });
 
-describe("the renderer refuses what it cannot draw, by name", () => {
-  it("refuses a character outside Latin-1 and says which", async () => {
-    // Silently dropping it would put a client's name on a legal document with a
-    // letter missing, which is worse than producing nothing at all.
+describe("the font chain draws what the built-in fonts could not (T3.9)", () => {
+  // Every one of these was a REFUSAL on T3.8's built-in fonts, which encoded
+  // Latin-1 and nothing else. They are the reason the chain exists.
+
+  it("draws the rupee sign — the one this product hits first", async () => {
+    const bytes = await new PdfLibRenderer().render(
+      doc({ totals: [{ label: "Total", value: "₹18,000.00", emphasis: true }] }),
+    );
+    expect(new TextDecoder().decode(bytes.slice(0, 5))).toBe("%PDF-");
+  });
+
+  it("draws Devanagari, so a client's registered name can be its real one", async () => {
+    const bytes = await new PdfLibRenderer().render(
+      doc({ recipient: { name: "कावेरी फूड्स", lines: [] } }),
+    );
+    expect(bytes.byteLength).toBeGreaterThan(0);
+  });
+
+  it("draws an em dash and Latin-Extended accents", async () => {
+    const bytes = await new PdfLibRenderer().render(
+      doc({
+        footer: "this — dash — is fine now",
+        recipient: { name: "Société Générale Zürich Łódź", lines: ["Ñ"] },
+      }),
+    );
+    expect(bytes.byteLength).toBeGreaterThan(0);
+  });
+
+  it("draws MIXED scripts in one string, which is what the segmentation is for", async () => {
+    // A line no single font in the chain can draw on its own: the Latin word
+    // comes from one file, the rupee from another, the Devanagari from a third.
+    const bytes = await new PdfLibRenderer().render(
+      doc({ sections: [{ heading: "Fee", paragraphs: ["Total ₹1,000 — कावेरी"] }] }),
+    );
+    expect(bytes.byteLength).toBeGreaterThan(0);
+  });
+});
+
+describe("and it still refuses, by name, what the chain does not cover", () => {
+  it("refuses CJK — the honest remaining limit", async () => {
+    // Noto Sans latin + latin-ext + devanagari does not include CJK, and adding
+    // it is another font in the chain rather than a change of approach.
+    // Refusing beats mangling: a client's name with a character missing on a
+    // legal document is worse than producing nothing.
     await expect(
       new PdfLibRenderer().render(doc({ recipient: { name: "株式会社", lines: [] } })),
     ).rejects.toThrow(RenderError);
   });
 
-  it("names the rupee sign, which is the one a firm here will hit first", async () => {
+  it("names the character and the field it appeared in", async () => {
     await expect(
-      new PdfLibRenderer().render(
-        doc({ totals: [{ label: "Total", value: "₹18,000", emphasis: true }] }),
-      ),
-    ).rejects.toThrow(/U\+20B9/);
+      new PdfLibRenderer().render(doc({ footer: "株" })),
+    ).rejects.toThrow(/the footer contains/);
   });
 
   it("refuses BEFORE drawing, so no half-page is produced", async () => {
+    // The guard runs against the fonts actually loaded, before the first draw.
     await expect(
-      new PdfLibRenderer().render(doc({ footer: "this — dash — is not drawable" })),
-    ).rejects.toThrow(/U\+2014/);
-  });
-
-  it("allows Latin-1, which covers the accents a firm actually types", async () => {
-    const bytes = await new PdfLibRenderer().render(
-      doc({ recipient: { name: "Société Générale Zürich", lines: ["Ñ"] } }),
-    );
-    expect(bytes.byteLength).toBeGreaterThan(0);
+      new PdfLibRenderer().render(doc({ documentTitle: "株式会社" })),
+    ).rejects.toThrow(RenderError);
   });
 });
 

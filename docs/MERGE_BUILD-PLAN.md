@@ -2484,18 +2484,68 @@ open and are recorded above; neither blocks Phase 2.
   > failed**. Verified in a browser: a real letter rendered, downloaded, and its file's sha256
   > compared to the stored content hash — equal.
 
-- [ ] `(A)` **T3.9** **Embed a Unicode font in the renderer.** *Acc: a client whose registered
-  name is in Devanagari or Chinese gets a correct PDF, and `₹` prints.*
-  > Split out of T3.8 rather than bundled, because it is a **licensing and packaging decision**
-  > and not a coding one: it means committing a font binary (Noto Sans / DejaVu, both OFL — but
-  > somebody should agree to it), adding `@pdf-lib/fontkit`, and subsetting on embed so a
-  > two-page letter does not carry a 400 KB font.
+- [x] `(A)` **T3.9** **Embed a Unicode font in the renderer.** *Acc: a client whose registered name is in Devanagari gets a correct PDF, and `₹` prints.*
+  > **Done (2026-08-30). No migration — dependencies and one new file.**
   >
-  > **Not urgent, and worth saying why**: every firm this product has been built against so far
-  > types Latin-1, money already prints correctly with its ISO code, and the renderer REFUSES
-  > loudly rather than mangling — so the failure is visible and explicable rather than silent.
-  > It becomes urgent the day a client's registered name is not Latin-1, which in India is
-  > entirely possible.
+  > **"EMBED A UNICODE FONT" TURNED OUT TO BE THE WRONG SHAPE, and measuring said so.** There is
+  > no single file that covers what this product needs at a size worth shipping. Asking
+  > `hasGlyphForCodePoint` of the actual files:
+  >
+  > | subset | covers |
+  > |---|---|
+  > | `latin` | the basic range, and the em dash. **No rupee sign.** |
+  > | `latin-ext` | the rupee sign, Polish, the ruble. **Not the basic range.** |
+  > | `devanagari` | Devanagari, and the rupee sign again |
+  >
+  > So it is a **CHAIN with fallback**: text is segmented into runs and each is drawn with the
+  > first font that can draw it, which is what a browser does and what pdf-lib leaves to the
+  > caller. Adjacent characters resolving to the same font are merged, so ordinary English is
+  > one run and one draw call.
+  >
+  > **THE GUARD IS NOW DERIVED FROM THE FONTS, not a hardcoded range.** T3.8's version tested
+  > against Latin-1 by hand; it now asks the loaded chain. It therefore cannot lie about what
+  > the renderer can draw, and it narrows on its own the day a font is added.
+  >
+  > **LICENSING, which is why this was its own task.** Noto Sans, **OFL-1.1**, which expressly
+  > permits embedding and redistribution — and it arrives as an npm dependency
+  > (`@fontsource/noto-sans`) rather than a binary committed here, so it is versioned, auditable
+  > and updated like anything else. Nobody has to decide whether a font in `git log` was
+  > licensed.
+  >
+  > **SUBSETTING IS WHAT MAKES THREE FONTS FREE.** `subset: true` embeds only the glyphs used, so
+  > a letter in plain English carries a few hundred bytes of Latin and *nothing* of the other
+  > two. A document mixing Devanagari, Latin-Extended and the rupee sign is **15 KB**.
+  >
+  > **DETERMINISM SURVIVES**, which was the one thing that could have killed this: the fonts are
+  > files embedded identically every time, and subsetting is a function of the glyphs used. The
+  > test that renders twice 1.1 seconds apart still passes, and a real letter rendered twice
+  > through the live API produced one hash.
+  >
+  > ── **THE DEPENDENCY FIGHT, recorded so nobody repeats it** ────────────────────
+  >
+  > `fontkit` 2.x was tried FIRST and is wrong: it changed the subset API pdf-lib 1.x calls, so
+  > every font fails with `subset.encodeStream is not a function`.
+  >
+  > `@pdf-lib/fontkit` is the bundle pdf-lib expects — and it is compiled with regenerator and
+  > shipped WITHOUT its runtime, so it throws `regeneratorRuntime is not defined` the moment it
+  > walks a font with complex shaping tables. **Latin does not have them and Devanagari does**,
+  > so it failed only on the script this task exists to support, and only on the last test.
+  > `regenerator-runtime` is imported once in `font-set.ts` with that whole explanation beside
+  > it. It is a shim for an upstream packaging defect, not a bandaid, and saying which is the
+  > point of the comment.
+  >
+  > **The ISO code stays.** `INR 216,000.00` was originally forced (the symbol was undrawable)
+  > and is now a product decision on the reason that was always stronger: this is a cross-border
+  > product, and a bare symbol is ambiguous to a reader in Dubai or Delaware. A firm that wants
+  > `₹` can have it by changing one function — which it could not before.
+  >
+  > **What is still refused: CJK**, and every script the chain does not carry. Adding one is
+  > another font in the chain rather than a change of approach, and the error names the
+  > character, its code point, the field, and what the chain does carry.
+  >
+  > Gate: `npm run check` **1306** · `test:integration` **416** · `smoke` **261 passed, 0
+  > failed**. Verified by looking at the PDF: a Devanagari client name, `₹216,000.00`, Société
+  > Générale · Zürich, an em dash, and Devanagari and Latin mixed inside one table row.
 
 - [x] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
   > **Done (2026-08-30). Migration 0038 — two VIEWS and no tables.**
