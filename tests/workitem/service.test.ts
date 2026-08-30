@@ -10,6 +10,7 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeEngagementWork,
+  FakeObligationCoverage,
   FakeReviewPermissions,
   FakeReviewPolicies,
   FakeReviewers,
@@ -53,6 +54,7 @@ async function harness() {
   const reviewers = new FakeReviewers();
   const permissions = new FakeReviewPermissions();
   const engagements = new FakeEngagementWork();
+  const obligations = new FakeObligationCoverage();
   const events = new RecordingEventSink();
   const clock = new FakeClock(new Date(NOW));
   const ids = new FakeIds();
@@ -76,6 +78,7 @@ async function harness() {
     reviewers,
     permissions,
     engagements,
+    obligations,
     ids,
     clock,
     events,
@@ -114,6 +117,7 @@ async function harness() {
     reviewers,
     permissions,
     engagements,
+    obligations,
     events,
     staff,
     clients,

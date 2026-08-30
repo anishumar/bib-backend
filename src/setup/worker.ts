@@ -22,6 +22,7 @@ import { LedgerService } from "../usecase/ledger/service";
 import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { WorkItemService } from "../usecase/workitem/service";
+import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
@@ -33,6 +34,16 @@ import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/c
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
+import {
+  PostgresObligationExceptionRepository,
+  PostgresObligationStateRepository,
+  PostgresObligationTemplateRepository,
+} from "../infrastructure/postgres/obligation-rule-repository";
+import {
+  PostgresCalendarSource,
+  PostgresObligationInstanceRepository,
+} from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
 import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
@@ -58,6 +69,12 @@ export const DUNNING_QUEUE = "billing.dunning";
  *  again — this one is minutes rather than hours or days, because what it is
  *  waiting for is not a clock but a colleague finishing a step. */
 export const ORCHESTRATOR_QUEUE = "delivery.orchestrate";
+/** The compliance calendar (T3.2): generate a year ahead, then raise a task for
+ *  anything that has reached its internal target. Its own queue rather than a
+ *  step inside the spawn sweep, because it runs on a different cadence — once a
+ *  day rather than every few minutes — and because a firm's calendar failing
+ *  must not stop its engagements being spawned. */
+export const OBLIGATION_QUEUE = "delivery.obligations";
 
 export interface WiredWorker {
   readonly pools: Pools;
@@ -65,6 +82,7 @@ export interface WiredWorker {
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
   readonly orchestrator: OrchestratorService;
+  readonly obligations: ObligationService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -119,6 +137,31 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     reviewers: memberships,
     permissions: configRepository,
     engagements: new PostgresEngagementWorkSource(pools.app),
+    // T3.2, and it matters MORE here than in the API: this is the process that
+    // actually spawns engagement tasks, so a worker whose coverage check
+    // disagreed with the API's would put a duplicate on somebody's desk exactly
+    // when nobody was watching.
+    obligations: new PostgresObligationCoverage(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // THE COMPLIANCE CALENDAR (T3.2) — the sweep that materialises it, and the
+  // one that turns an obligation into a task at T-X.
+  //
+  // The same service the API holds, from the same adapters, for the reason
+  // stated above the work-item service: a calendar that generated differently
+  // in the worker than it reads in the browser is one nobody could debug.
+  const obligations = new ObligationService({
+    templates: new PostgresObligationTemplateRepository(pools.app),
+    exceptions: new PostgresObligationExceptionRepository(pools.app),
+    states: new PostgresObligationStateRepository(pools.app),
+    instances: new PostgresObligationInstanceRepository(pools.app),
+    calendarSource: new PostgresCalendarSource(pools.app),
+    services: configRepository,
+    workItems,
+    tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -213,6 +256,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     scheduler,
     dunning,
     orchestrator,
+    obligations,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -274,6 +318,37 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(ORCHESTRATOR_QUEUE, cfg.worker.orchestratorCron);
+
+      await queue.register(OBLIGATION_QUEUE, async () => {
+        const reports = await obligations.sweep();
+        for (const r of reports) {
+          if (r.failure !== undefined) {
+            // One firm's failure never stops the others — T3.1's lesson, and
+            // it is REPORTED rather than swallowed, because a firm silently
+            // skipped forever is worse than a sweep that stops.
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "obligation sweep failed");
+            continue;
+          }
+          if (r.created === 0 && r.raised === 0 && r.uncoveredEngagements === 0) continue;
+          // `uncoveredEngagements` is the number nobody would think to log and
+          // is the one that matters: engagements the firm is delivering that the
+          // calendar produced NOTHING for. Most are perfectly ordinary advisory
+          // work; some are a rule the firm has not finished writing, and the
+          // coverage screen says which is which. Logging it means the hole is
+          // visible from the worker as well as from the browser.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              created: r.created,
+              raised: r.raised,
+              uncoveredEngagements: r.uncoveredEngagements,
+              rulesWithNoSubjects: r.rulesWithNoSubjects.length,
+            },
+            "obligation sweep",
+          );
+        }
+      });
+      await queue.schedule(OBLIGATION_QUEUE, cfg.worker.obligationCron);
     },
   };
 }

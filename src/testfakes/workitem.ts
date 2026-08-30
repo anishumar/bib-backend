@@ -33,6 +33,7 @@ import type {
   ApprovalDecisionWrite,
   EngagementWork,
   EngagementWorkSource,
+  ObligationCoverage,
   NewWorkItem,
   NewWorkItemApproval,
   NewWorkItemPriority,
@@ -637,5 +638,24 @@ export class FakeEngagementWork implements EngagementWorkSource {
     engagementIds: readonly string[],
   ): Promise<readonly EngagementWork[]> {
     return Promise.resolve(this.rows.filter((r) => engagementIds.includes(r.engagementId)));
+  }
+}
+
+/**
+ * The compliance calendar's coverage, faked.
+ *
+ * EMPTY BY DEFAULT, and that default is the one the tests should have: a firm
+ * with no compliance rules gets the engagement's own task, exactly as it did
+ * before T3.2 existed. Every existing spawn test therefore stays honest without
+ * being touched. A test that wants the other branch adds an id to `covered`.
+ */
+export class FakeObligationCoverage implements ObligationCoverage {
+  readonly covered = new Set<string>();
+
+  coveredEngagements(
+    _tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    return Promise.resolve(new Set(engagementIds.filter((id) => this.covered.has(id))));
   }
 }

@@ -1334,6 +1334,71 @@ r = rs.get("'$INV1ID'")
 print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
 chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
 
+echo; echo "── 16f. The compliance calendar — generated, never typed ────────────"
+# T3.2. What this section can prove that a unit test cannot: the firm got its
+# rules AT PROVISIONING, the gates on them are the ones intended, and — the one
+# that matters most — an empty calendar EXPLAINS ITSELF.
+#
+# EIGHT REQUESTS, and that number was chosen rather than landed on. The walk was
+# already at ~288 of a 300/minute budget before this section, and the header
+# says the fix is to spend fewer requests here rather than raise the product's
+# default. So this covers the seeding, both gates and the coverage answer, and
+# nothing that a unit test already covers: the date arithmetic, the March TDS
+# exception and the re-run idempotency are all in tests/obligation/.
+#
+# THE BUDGET IS NOW SPENT: ~296 of 300. The next section genuinely does not fit,
+# and the known-open item about the limiter's key is no longer theoretical.
+RULES=$(curl -s -b $J/partner.txt $API/api/v1/obligation-rules)
+# A NEW FIRM IS NEVER LOOKING AT AN EMPTY RULES SCREEN. Fifty-seven rules from
+# the firm's own applicability sheet arrive with the tenant — ten that produce
+# dates, and forty-seven that say, by name, what they are still waiting for.
+COUNTS=$(python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["rules"]
+gen = [r for r in rs if r["coverage"] == "generating"]
+print("%d/%d" % (len(rs), len(gen)))' <<< "$RULES")
+chk "a new firm is seeded with the India pack" "57/10" "$COUNTS"
+# EVERY ONE OF THEM UNCONFIRMED, India included: the dates came from a previous
+# vendor's document, not from a partner ticking them against the statute.
+UNCONF=$(python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["rules"]
+print("yes" if all(r["status"] == "unconfirmed" for r in rs) else "no")' <<< "$RULES")
+chk "…and every date is marked unconfirmed"  yes "$UNCONF"
+# THE FORTY-SEVEN ARE NOT FAILURES. Each carries the firm's own words for what
+# is missing, and a rule with no formula and no reason would be indistinguishable
+# from an unfinished import.
+REASONED=$(python3 -c '
+import sys, json
+rs = [r for r in json.load(sys.stdin)["rules"] if r["dueRule"] is None]
+print("yes" if rs and all(r["unresolvedReason"] for r in rs) else "no")' <<< "$RULES")
+chk "…and every rule with no formula says why" yes "$REASONED"
+GSTR=$(python3 -c '
+import sys, json
+r = next(r for r in json.load(sys.stdin)["rules"] if r["name"] == "GSTR-3B")
+print("%s/%s/%s" % (r["recurrence"], r["dueRule"]["dueMonthOffset"], r["dueRule"]["dueDayOfMonth"]))' <<< "$RULES")
+chk "…GSTR-3B is the 20th of the month after" "monthly/1/20" "$GSTR"
+
+# THE ANSWER TO AN EMPTY CALENDAR, which is the whole reason this endpoint
+# exists. This firm has live engagements and no matching rules, so it MUST get a
+# reason rather than a blank screen — a firm that cannot tell "nothing is owed"
+# from "a rule is missing" cannot tell either from broken software.
+COVER=$(curl -s -b $J/partner.txt $API/api/v1/calendar/coverage | python3 -c '
+import sys, json
+gaps = json.load(sys.stdin)["gaps"]
+print("yes" if gaps and all(g["reason"] for g in gaps) else "no")')
+chk "an uncovered engagement says WHY"      yes "$COVER"
+
+# The gates. Reading the calendar is `party:read` — what a client owes is
+# delivery state and everybody on the team needs it. WRITING a rule is
+# `tenant:admin`, a deliberate step up from `work:write`: a wrong due date costs
+# the CLIENT a penalty, and confirming one is a partner taking responsibility.
+chk "an associate may read the calendar"    200 "$(code -b $J/associate.txt $API/api/v1/calendar)"
+chk "…but may not write a compliance rule"  403 "$(code -b $J/associate.txt -XPOST $API/api/v1/obligation-rules -H "$H" -d '{"jurisdiction":"IN","name":"Made up","recurrence":"annual","dueRule":null,"unresolvedReason":"x","rulePack":"x@1"}')"
+# And the audience gate, ahead of the role gate: a client contact reaches the
+# portal paths and nothing else, so the whole firm's calendar is not one of them.
+chk "…and a client contact reaches none of it" 403 "$(code -b $J/client.txt $API/api/v1/calendar)"
+
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""
 for i in $(seq 1 12); do last=$(code -XPOST $API/api/v1/auth/login -H "$H" -d '{"email":"nobody@example.com","password":"guess"}'); done

@@ -117,6 +117,11 @@ describe("createTenant", () => {
       "config_registry.seeded",
       "grade_ladder.seeded",
       "work_vocabulary.seeded",
+      // T3.2's two, and the ORDER is load-bearing: the states a filing can be
+      // in have to exist before the rules that produce filings, or a firm would
+      // hold a rule pack that cannot generate into anything.
+      "obligation_vocabulary.seeded",
+      "obligation_rules.seeded",
       "party.created",
     ]);
   });

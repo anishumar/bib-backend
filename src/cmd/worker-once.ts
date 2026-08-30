@@ -107,6 +107,39 @@ async function main(): Promise<void> {
       }
       console.log();
     }
+
+    // THE COMPLIANCE CALENDAR (T3.2), last, and after the spawn on purpose: an
+    // engagement activated a moment ago should have its filings materialised on
+    // the same run rather than "next time".
+    const calendar = await wired.obligations.sweep();
+    const brokenCalendars = calendar.filter((r) => r.failure !== undefined);
+    for (const r of brokenCalendars) {
+      console.log(`  ! firm ${r.tenantId}: calendar sweep FAILED — ${r.failure ?? ""}`);
+    }
+    const generated = calendar.reduce((n, r) => n + r.created, 0);
+    const raisedTasks = calendar.reduce((n, r) => n + r.raised, 0);
+    const uncovered = calendar.reduce((n, r) => n + r.uncoveredEngagements, 0);
+
+    if (generated === 0 && raisedTasks === 0) {
+      console.log("  nothing to generate — no live engagement is covered by a rule that dates.");
+    } else {
+      if (generated > 0) console.log(`  generated ${String(generated)} obligation(s)`);
+      if (raisedTasks > 0) {
+        console.log(`  raised ${String(raisedTasks)} task(s) at T-X`);
+      }
+    }
+    // PRINTED WHETHER OR NOT ANYTHING GENERATED, and that is the point. An
+    // empty calendar with nothing said about it is indistinguishable from
+    // broken software; this line is the difference between "nothing is owed"
+    // and "nothing was worked out, and here is where to look".
+    if (uncovered > 0) {
+      console.log(
+        `  ${String(uncovered)} live engagement(s) produced NO calendar rows — ` +
+          `open /calendar/coverage to see why (most will be advisory work with no ` +
+          `compliance rule, which is normal)`,
+      );
+    }
+    console.log();
   } finally {
     await wired.pools.close();
   }

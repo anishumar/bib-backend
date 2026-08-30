@@ -12,8 +12,21 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { WorkVocabularyService } from "../usecase/workitem/service";
 import { FakeWorkVocabularyRepo } from "./workitem";
+import { ObligationService } from "../usecase/obligation/service";
+import {
+  FakeCalendarSource,
+  FakeObligationExceptionRepo,
+  FakeObligationInstanceRepo,
+  FakeObligationServices,
+  FakeObligationStateRepo,
+  FakeObligationTemplateRepo,
+  FakeObligationTenants,
+  FakeWorkItemRaiser,
+} from "./obligation";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
+  ObligationRuleSeeder,
+  ObligationVocabularySeeder,
   GradeDirectory,
   GradeLadderSeeder,
   WorkVocabularySeeder,
@@ -215,12 +228,17 @@ export function makeFakes(): {
   gradeSeeder: GradeLadderSeeder;
   gradeDirectory: GradeDirectory;
   workVocabularySeeder: WorkVocabularySeeder;
+  obligationVocabularySeeder: ObligationVocabularySeeder;
+  obligationRuleSeeder: ObligationRuleSeeder;
   /** The rows the seeder wrote, so a test can look at what a new firm got. */
   config: FakeConfigRepo;
   /** The rungs a new firm got, for the same reason. */
   grades: FakeStaffGradeRepo;
   /** The states and priorities a new firm got — same reason again. */
   workVocabulary: FakeWorkVocabularyRepo;
+  /** The compliance rules a new firm got, so a test can assert the pack landed
+   *  rather than trusting that it did. */
+  obligationTemplates: FakeObligationTemplateRepo;
   ids: FakeIds;
   events: RecordingEventSink;
 } {
@@ -237,6 +255,22 @@ export function makeFakes(): {
   const memberships = new FakeMembershipRepo();
   const grades = new FakeStaffGradeRepo();
   const workVocabulary = new FakeWorkVocabularyRepo();
+  const obligationTemplates = new FakeObligationTemplateRepo();
+  const obligationExceptions = new FakeObligationExceptionRepo();
+  obligationTemplates.exceptions = obligationExceptions;
+  const obligations = new ObligationService({
+    templates: obligationTemplates,
+    exceptions: obligationExceptions,
+    states: new FakeObligationStateRepo(),
+    instances: new FakeObligationInstanceRepo(),
+    calendarSource: new FakeCalendarSource(),
+    services: new FakeObligationServices(),
+    workItems: new FakeWorkItemRaiser(),
+    tenants: new FakeObligationTenants(),
+    ids,
+    clock: { now: () => new Date("2026-08-30T00:00:00Z") },
+    events,
+  });
   memberships.users = users;
   memberships.grades = grades;
   return {
@@ -262,6 +296,14 @@ export function makeFakes(): {
       events,
     }),
     workVocabulary,
+    // And the compliance calendar's two halves (T3.2), the REAL service over
+    // in-memory stores for the third time and the same reason: a tenancy test
+    // fails if provisioning stops giving a firm its obligation states (nothing
+    // can be generated) or its rule pack (an empty calendar with no explanation,
+    // which is the exact silence this module exists to prevent).
+    obligationVocabularySeeder: obligations,
+    obligationRuleSeeder: obligations,
+    obligationTemplates,
     // `holders: memberships` mirrors the composition root exactly, so a tenancy
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".

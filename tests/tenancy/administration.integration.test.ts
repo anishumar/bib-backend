@@ -40,6 +40,16 @@ import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { LastAdministrator } from "../../src/domain/tenancy/errors";
+import {
+  PostgresObligationExceptionRepository,
+  PostgresObligationStateRepository,
+  PostgresObligationTemplateRepository,
+} from "../../src/infrastructure/postgres/obligation-rule-repository";
+import {
+  PostgresCalendarSource,
+  PostgresObligationInstanceRepository,
+} from "../../src/infrastructure/postgres/obligation-instance-repository";
+import { ObligationService } from "../../src/usecase/obligation/service";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -64,6 +74,27 @@ const staffGrades = new StaffGradeService({
   events: ledger,
 });
 
+// T3.2's seeder, built once and passed as both ports — they are two methods on
+// one service, and constructing it twice would give a firm two rule packs.
+const obligationServiceForSeeding = new ObligationService({
+  templates: new PostgresObligationTemplateRepository(app),
+  exceptions: new PostgresObligationExceptionRepository(app),
+  states: new PostgresObligationStateRepository(app),
+  instances: new PostgresObligationInstanceRepository(app),
+  calendarSource: new PostgresCalendarSource(app),
+  services: configRepository,
+  // Nothing in a provisioning test raises a task, so the raiser refuses rather
+  // than pretending — a fake that silently returned an id would let a broken
+  // wiring pass.
+  workItems: {
+    raiseForObligation: () => Promise.reject(new Error("not used in this test")),
+  },
+  tenants: { activeTenantIds: () => Promise.resolve([]) },
+  ids: systemIds,
+  clock: systemClock,
+  events: ledger,
+});
+
 const tenancy = new TenancyService({
   tenants: new PostgresTenantRepository(app),
   users,
@@ -79,6 +110,12 @@ const tenancy = new TenancyService({
   // T3.1. The real service over the real table, like the two seeders above:
   // provisioning that stopped giving a firm its work-item states would leave it
   // unable to record a single task, and this test is what would catch it.
+  // T3.2. The real service over the real tables, on the same reasoning: a firm
+  // provisioned without obligation STATES cannot have a filing generated at
+  // all, and one without RULES gets an empty calendar with nothing explaining
+  // why — which is the exact silence the coverage screen exists to break.
+  obligationVocabularySeeder: obligationServiceForSeeding,
+  obligationRuleSeeder: obligationServiceForSeeding,
   workVocabularySeeder: new WorkVocabularyService({
     vocabulary: new PostgresWorkVocabularyRepository(app),
     ids: systemIds,

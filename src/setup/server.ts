@@ -32,6 +32,16 @@ import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/c
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
+import {
+  PostgresObligationExceptionRepository,
+  PostgresObligationStateRepository,
+  PostgresObligationTemplateRepository,
+} from "../infrastructure/postgres/obligation-rule-repository";
+import {
+  PostgresCalendarSource,
+  PostgresObligationInstanceRepository,
+} from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
 import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import {
   PostgresServiceAxisRepository,
@@ -78,6 +88,7 @@ import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
+import { ObligationService } from "../usecase/obligation/service";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
@@ -206,6 +217,35 @@ export function wire(cfg: Config, log: Logger): Wired {
     reviewers: memberships,
     permissions: configRepository,
     engagements: new PostgresEngagementWorkSource(pools.app),
+    // T3.2. Where a compliance rule already covers an engagement, the CALENDAR
+    // puts a task on somebody's desk once per period and this must not add a
+    // thirteenth that can never be completed. Derived rather than configured —
+    // see `ObligationCoverage` — so a firm with no rules keeps exactly the
+    // behaviour it had before the calendar existed.
+    obligations: new PostgresObligationCoverage(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // THE COMPLIANCE CALENDAR (T3.2). The API holds it for its READS and its rule
+  // writes; the SWEEP that materialises the calendar runs in the worker, over
+  // the same service, so there is one definition of what a rule produces.
+  //
+  // `workItems` is passed as the `WorkItemRaiser` port rather than as the
+  // service itself: the boundary between "what the law asks of the entity" and
+  // "what a person must do about it" is the one idea this whole module rests
+  // on, and it is visible here in the type as well as in the comments.
+  const obligationTemplates = new PostgresObligationTemplateRepository(pools.app);
+  const obligations = new ObligationService({
+    templates: obligationTemplates,
+    exceptions: new PostgresObligationExceptionRepository(pools.app),
+    states: new PostgresObligationStateRepository(pools.app),
+    instances: new PostgresObligationInstanceRepository(pools.app),
+    calendarSource: new PostgresCalendarSource(pools.app),
+    services: configRepository,
+    workItems,
+    tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -395,6 +435,18 @@ export function wire(cfg: Config, log: Logger): Wired {
     // to configure that before it can record any work would be a worse first
     // day than the roles problem above.
     workVocabularySeeder: workVocabulary,
+    // And the compliance calendar's two halves (T3.2), for the same reason a
+    // third time. A firm with no obligation STATES cannot have a filing
+    // generated at all; a firm with no RULES has an empty calendar and no
+    // explanation for it, which is the exact silence this module was built to
+    // prevent. Both are idempotent, and the rule pack never overwrites a rule a
+    // partner has since confirmed.
+    obligationVocabularySeeder: {
+      seedDefaultStates: (tenantId, actor) => obligations.seedDefaultStates(tenantId, actor),
+    },
+    obligationRuleSeeder: {
+      seedIndiaRulePack: (tenantId, actor) => obligations.seedIndiaRulePack(tenantId, actor),
+    },
     ids: systemIds,
     events: ledger,
   });
@@ -592,6 +644,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
         workItems: { service: workItems, vocabulary: workVocabulary },
+        obligations: { service: obligations },
         orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },

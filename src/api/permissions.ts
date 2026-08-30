@@ -311,6 +311,32 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // answer — it gets you as far as the firm's published rule, which then
   // decides — and no permission anywhere lets somebody approve their own work:
   // that is a CHECK constraint, not a grant.
+  // THE COMPLIANCE CALENDAR (T3.2). READS are `party:read`, the same permission
+  // the work board takes: what a client owes and by when is delivery state, it
+  // carries no money, and everybody on the team needs to see it — including the
+  // people who cannot change it.
+  //
+  // WRITING A RULE is `tenant:admin`, and that is a deliberate step UP from
+  // `work:write`. A due date is a RULE and a wrong one costs the CLIENT a
+  // penalty rather than costing the firm an afternoon; confirming one is a
+  // partner taking responsibility for it against the statute. That is the same
+  // class of act as describing the firm's own Depts, not the same class as
+  // ticking a task done.
+  [routeKey("GET", "/api/v1/obligation-rules"), "party:read" as const],
+  [routeKey("POST", "/api/v1/obligation-rules"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/seed-india"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/obligation-rules/{ruleId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/{ruleId}/exceptions"), "tenant:admin" as const],
+  [
+    routeKey("DELETE", "/api/v1/obligation-rules/{ruleId}/exceptions/{periodEndMonth}"),
+    "tenant:admin" as const,
+  ],
+  [routeKey("GET", "/api/v1/calendar"), "party:read" as const],
+  // The coverage screen is the ANSWER to an empty calendar, so it is readable by
+  // whoever can read the calendar. Hiding it behind admin would mean the person
+  // who notices the gap cannot see why it is there.
+  [routeKey("GET", "/api/v1/calendar/coverage"), "party:read" as const],
+
   [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
   [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
   [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],

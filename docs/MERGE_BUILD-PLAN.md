@@ -1983,7 +1983,7 @@ open and are recorded above; neither blocks Phase 2.
 >
 > The condition SHAPE was widened for this ahead of time — see the note under T2.7.
 
-- [ ] `(B)` **T3.2** **Obligations — the compliance calendar.** `obligation_template` → `obligation_instance`, statutory **and** internal-target dates, T–X lead time, financial-year periods. *Acc: an Indian quarter is Apr–Jun; March TDS exception resolves to 30 Apr; a monthly obligation spawns twelve instances a year out; re-running the generator changes nothing.*
+- [x] `(B)` **T3.2** **Obligations — the compliance calendar.** `obligation_template` → `obligation_instance`, statutory **and** internal-target dates, T–X lead time, financial-year periods. *Acc: an Indian quarter is Apr–Jun; March TDS exception resolves to 30 Apr; a monthly obligation spawns twelve instances a year out; re-running the generator changes nothing.*
   > **The one idea that makes this work: an obligation is not a task.** The obligation is what the LAW requires of the ENTITY — Kaveri Foods must file GSTR-3B for August by 20 September. The task is what somebody at the firm must DO about it. Merge them and the calendar can never be generated, only typed in by hand, which is the exact Excel work being replaced. Nobody adds a row to this calendar: it falls out of which entities exist, what each bought, and what the law says about that combination. If a human could add an entry, the calendar could drift from the law — and then it is Excel again, only now inside Postgres.
   >
   > **DECIDED (both devs): obligation templates keep their own tables, not a config-registry kind.** `CLAUDE.md` prescribes the registry for a template or a rule pack, and it was weighed and set aside — the generator queries these rules rather than reading one at a time, the exception rows want a real foreign key to the rule they modify, and this shape is proven: it ran in the demo and generated a real calendar. **The cost, stated rather than discovered later:** the registry would have supplied versioning, publishing, freezing and pinning for free. So `rule_pack` (e.g. `gst-in@2026.07`) and `status` are not decoration — a revision must be a NEW template row rather than an edit, an instance must pin the version that produced it, and a superseded row stays readable. Without that, *"why was this due then?"* is unanswerable. **This deviation gets written into `CLAUDE.md` with its reasoning** — the repo's own rule is that a rule that seems wrong is a design conversation landed with its reasoning, never a quiet exception.
@@ -1996,6 +1996,111 @@ open and are recorded above; neither blocks Phase 2.
   > - **`obligation_template_exception`** — a row against the rule, keyed by the month the filed PERIOD ends in, carrying the same due-rule shapes plus a mandatory note. March TDS is due 30 April while the other eleven months are due on the 7th. A template holds one formula, and reading only the normal half produces a rule that is right eleven months a year and quietly wrong every April — the worst available failure, because nobody re-reads a date that looks right and the cost lands on the client. **Not a condition language:** the firm said its only exceptions are month-based and only on TDS.
   > - **States as ROWS**, with `is_terminal` and `needs_decision` flags, because the vocabulary is unconfirmed and renaming one should be an `UPDATE`.
   > - **Generation scope — DECIDED: only where an engagement exists.** The CRM reading, *"track our work"*. Keep `engagement_id` nullable anyway so the compliance-engine reading (*"track their compliance"*, where every uncovered obligation is a sales lead) stays a config change rather than a migration. The firm has not been asked which it ultimately wants.
+
+  > **Done (2026-08-30). Migrations 0052 (`obligation_template` + `_exception` + `obligation_state`)
+  > and 0053 (`obligation_instance`).** Every line of the acceptance is proven, and three of the
+  > four are proven as ARITHMETIC in `tests/obligation/periods.test.ts` because they are pure: an
+  > Indian quarter is Apr–Jun (and a calendar-year country's is Jan–Mar, same code, one field);
+  > March TDS resolves to 30 April while the other eleven months are the 7th; a monthly rule gives
+  > twelve periods a year out. The fourth needs a store, so it is `service.test.ts`: twelve
+  > obligations on the first run, ZERO on the second, structurally — `UNIQUE (tenant, template,
+  > entity, period_start)` with `ON CONFLICT DO NOTHING`, never a read-then-write, because the
+  > sweep can run concurrently with itself after a redelivery.
+  >
+  > **THE 55-ROW SHEET IS ALL THERE, AS 57 ROWS, AND ONLY TEN OF THEM PRODUCE A DATE.** That ratio
+  > is the deliverable, not a shortfall. `domain/obligation/rulepack-in.ts` encodes a due date ONLY
+  > where the firm's own sheet states one — not where it is publicly known, not where the author
+  > remembers it. MSME-1 is genuinely due 31 October and 30 April and the pack does not say so,
+  > because the sheet says *"applicable half-yearly deadlines"*; `tests/obligation/rulepack.test.ts`
+  > PINS the generating count at ten and names all ten, so "helpfully" dating an undated obligation
+  > fails the build rather than shipping. The 57 is 55 sheet lines plus two: GSTR-1 and GSTR-3B each
+  > occupy one line describing TWO regimes ("Monthly / Quarterly"), and folding them would have
+  > meant inventing the QRMP date or losing the monthly one.
+  >
+  > The forty-seven that cannot compute carry `unresolved_reason` in the firm's own terms and appear
+  > on the rules screen saying what they still need. The demo handed those back BY NAME in a log; a
+  > log is not an answer. *"We read your sheet, here is the one fact we still need for AOC-4"* is a
+  > far better question to put to a partner than *"what is your compliance calendar"*.
+  >
+  > **THE SILENT HOLE IS CLOSED BY DERIVATION, NOT BY A SETTING — and this is the design decision
+  > worth reading.** A recurring engagement now gets one task PER PERIOD from the calendar, so
+  > `spawnForEngagements` must not also add its own (due `effective_from + slaDays`, never
+  > completable, indistinguishable from a real task — four hundred clients times three services is
+  > twelve hundred of them). The obvious mechanism is a flag on the service. A flag can be WRONG,
+  > and being wrong means SILENCE: no engagement task and no calendar rows either. So the
+  > discriminator is DERIVED (`ObligationCoverage`, `infrastructure/postgres/obligation-coverage.ts`)
+  > from the generator's own predicate — an active rule, with a formula, not event-driven, naming
+  > this engagement's service and the entity's country. **The failure then inverts: a firm with no
+  > rules is not covered, so it gets exactly the behaviour it had before T3.2 existed, and the board
+  > can never end up empty.**
+  >
+  > On top of that, `GET /api/v1/calendar/coverage` names every live engagement the calendar
+  > produced nothing for AND WHY, in five reasons of which none is an error — the commonest,
+  > `no_rule_names_this_service`, is the ordinary state of advisory work. The worker logs the count
+  > every sweep and `worker:once` prints it whether or not anything generated, because an empty
+  > calendar with nothing said about it is indistinguishable from broken software.
+  >
+  > **`obligation_template` is its own table and not a config-registry kind, and the cost is paid
+  > rather than waved through.** The registry would have given versioning, publishing, freezing and
+  > pinning; it was set aside because the generator reads every rule in one set-based pass, an
+  > exception needs a real FK to the rule it modifies, and this shape is proven. So `rule_pack` is
+  > part of the rule's IDENTITY (a revision is a new row, never an edit), `supersedes_id` is the
+  > chain, and an instance pins its template — which is what makes *"why was this due then?"*
+  > answerable. **Written into `CLAUDE.md` with the reasoning**, as the repo's own rule requires.
+  >
+  > **Everything seeds `unconfirmed`, India included, and every lead time seeds ZERO.** The dates
+  > came from a previous vendor's document; T–X is the firm's own working practice and appears
+  > nowhere in the sheet. A guessed lead time is a commitment the firm never made, so the zero is a
+  > blank a partner fills in on `/admin/obligation-rules` — visibly useless until they do.
+  >
+  > **THRESHOLDS ARE STILL NOT BUILT, AND THIS TASK IS WHY THAT IS NOW A DECISION RATHER THAN A
+  > GAP.** The note above this task argues the firm's commonest rule is a threshold and that a
+  > numeric operator must arrive with the fact it compares. It has not, deliberately: generation
+  > scope is DECIDED as "only where an engagement exists", which means *"does Tax Audit apply?"* is
+  > already answered by the client having BOUGHT it. A turnover store would be a table with no
+  > writer — nothing in the product captures one, and books integration is Phase 7 — so `gte`/`lte`
+  > would still be a control that looks live and is inert. **The threshold layer belongs with the
+  > compliance-engine reading** (generate for every entity, uncovered = a sales lead), which is
+  > `obligation_instance.engagement_id` being nullable and is a question nobody has put to the firm.
+  > Every rule's `applicabilityNote` carries the sheet's own threshold text verbatim, so the day
+  > that question is answered the specification is already here.
+  >
+  > **What USING the screens found, none of which any test caught:**
+  >
+  > - **The batch insert never ran.** postgres.js infers a JSON type for a string parameter and
+  >   encodes it AGAIN, so a plain `::jsonb` produced a jsonb STRING and every sweep died with
+  >   *"cannot call jsonb_to_recordset on a non-array"*. Casting to text first fixes it. The unit
+  >   tests use a fake repository and the integration test inserted rows by hand, so **neither ever
+  >   executed the statement** — only `npm run worker:once` did.
+  > - **The coverage reason was wrong on the commonest case.** It compared the rule's
+  >   `service_entry_id` to the engagement's, which is never true for a rule that names NO service —
+  >   and every rule in the shipped pack names none, because a pack cannot know a firm's catalogue
+  >   keys. A firm that had just loaded 57 rules was told none of them named its services. Fixed to
+  >   the generator's own predicate, and a fifth reason added: `entity_not_registered`, which was the
+  >   real answer and is a one-field fix somebody can actually make.
+  > - **A lead time moved nothing for twelve months.** The sweep materialises a year ahead and
+  >   generation is idempotent, so setting T–X changed only periods that did not exist yet.
+  >   `redateUnstarted` now moves the INTERNAL target of everything nobody has started — never the
+  >   statutory date, and never a filing already raised as a task, because that has a date its owner
+  >   is working to.
+  > - **Two id-only foreign keys**, caught by `tenant-keys.integration.test.ts` rather than by me:
+  >   `service_entry_id` and `supersedes_id` both had to carry the tenant. That test asks the
+  >   catalogue rather than a list, which is why a table written today is covered the day it exists.
+  > - Grammar and prose on the rules screen ("1 are triggered", *"Once a year, day 15 3 months
+  >   after"*, and an event-driven rule claiming *"30 days after the period ends"* when it has no
+  >   period at all). The types were perfectly happy with every one of them.
+  >
+  > `/calendar` (with its coverage tab) and `/admin/obligation-rules` are the screens; both are on
+  > the workspace home and the admin bar. **The whole chain was walked in the browser**: load the
+  > pack, register a company, sweep, watch 162 obligations appear, set a lead time on the rules
+  > screen, sweep again, and find *"GSTR-3B — Lakeview Foods Private Limited — Aug 2026"* on the
+  > board due 20 September at **High** — the statutory-default priority flag doing its job, from the
+  > law, with nobody setting it.
+  >
+  > Gate: `npm run check` **1262 tests** · `test:integration` **403** (21 new, real Postgres) ·
+  > `npm run smoke` **261/261** (8 new). **The smoke budget is now spent — ~296 requests of 300** —
+  > so the known-open item about the edge limiter's key is no longer theoretical: the next section
+  > added to that walk does not fit.
 
 - [ ] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
   > **The decision AND its reason are both recorded** (`resolution`, `resolution_reason`, `resolved_at`). In a CA firm this moment is where money and liability are decided, and today it happens on WhatsApp and is written down nowhere. The reason is the capture-or-lose half: in eighteen months nobody remembers why a late fee was accepted rather than a provisional filing made, and that is exactly the thing worth knowing. Writes `obligation.missed`, then `obligation.filed` or a resolution.

@@ -1225,12 +1225,142 @@ runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches 
 state BEFORE the composite foreign key does, and answers with a sentence naming the state and
 the firm. Both defences are real; the trigger is the outer one.
 
+## The compliance calendar — generated, never typed (T3.2)
+
+`delivery.obligation_template` + `_exception` + `obligation_state` (0052) and
+`delivery.obligation_instance` (0053).
+
+**AN OBLIGATION IS NOT A TASK, and everything here follows from that.** The obligation is what
+the LAW requires of the ENTITY — Kaveri Foods must file GSTR-3B for August by 20 September. The
+task (`delivery.work_item`) is what somebody at the firm must DO about it. Merge them and the
+calendar can never be GENERATED, only typed, which is the exact Excel this product replaces.
+Nobody adds a row: it falls out of which entities exist, what each bought, and what the law says
+about that combination. **There is no create endpoint for an instance and there must not be one**
+— if a human could add a calendar entry, the calendar could drift from the statute.
+
+**These are their own tables and NOT a config-registry kind — the deviation `CLAUDE.md` requires
+to be written down with its reasoning.** The registry is prescribed for a template or a rule
+pack, and it was weighed and set aside for three reasons: the generator reads EVERY rule in one
+set-based pass while the registry answers one key at a time; an exception needs a real foreign
+key to the rule it modifies, which inside a jsonb body is a string somebody has to keep true; and
+this shape is proven — it ran in the approved demo and produced a real calendar.
+
+**The cost is stated rather than discovered later, and paid.** The registry would have supplied
+versioning, publishing, freezing and pinning for free, so this table supplies them itself:
+`rule_pack` is part of the rule's IDENTITY (the unique key is `(tenant, jurisdiction, name,
+rule_pack)`), which makes a revision a NEW ROW and never an edit; `supersedes_id` is the chain;
+retiring is `is_active` and the old row stays readable forever; and an instance PINS its template.
+Without all four, *"why was this due then?"* — the one question an audit actually asks — is
+unanswerable. The same shape of deviation `staff_grade` makes, and recorded here for the same
+reason.
+
+**`due_rule` IS NULLABLE, and that is the most consequential decision in the module.** The firm's
+own applicability sheet holds 55 obligations; ten of them are formulas. The rest are not, and the
+vagueness is CORRECT: *"within a statutory period after the AGM"* depends on an AGM date,
+*"State-specific"* is a different day in Maharashtra and Karnataka, *"within 7 working days"*
+needs a holiday calendar nothing here holds. The demo converted what it could and handed the rest
+back BY NAME in a log. **A log is not an answer**, so all of them are ROWS: the computable ones
+carry a due rule and generate, the rest carry a mandatory `unresolved_reason` in the firm's own
+terms and say on the rules screen exactly what they still need.
+
+`domain/obligation/rulepack-in.ts` therefore follows one rule without exception: **a due date is
+encoded ONLY where the firm's own sheet states one.** Not where it is publicly known, not where
+you remember it. MSME-1 is genuinely due 31 October and 30 April and the pack does not say so.
+`tests/obligation/rulepack.test.ts` PINS the generating count at ten and names all ten, so
+"helpfully" dating an undated obligation is a red build rather than a wrong date reaching a
+client. A fake VALUE is survivable; a fake RULE is not.
+
+**The date arithmetic is pure and has no `Date` in it.** `domain/obligation/model.ts` works in
+`YYYY-MM-DD` strings: every date it produces is a statutory deadline somebody is held to, so it
+has to be exhaustively testable, and a function that reaches for `new Date()` cannot be. The
+fiscal year is on the RULE (4 for India), because an Indian quarter runs Apr–Jun and computing
+quarters on the calendar is the mistake that looks right three times out of four.
+
+**The exception is a ROW against the rule, keyed on the month the PERIOD ends in** — not the month
+it is due, because the due month is exactly what the exception changes. March's TDS is due 30
+April while the other eleven months are the 7th; a template holds one formula, and reading only
+the normal half gives a rule that is right eleven months a year and quietly wrong every April.
+That is the worst failure available: nobody re-reads a date that looks right, and the cost lands
+on the client as a penalty. Withdrawing an exception is `is_active = false`, never a DELETE —
+`bib_app` holds no DELETE grant on any of the four tables.
+
+**Two dates, and the difference is the point.** `statutory_due_on` is the law's and missing it is
+the client's money; `internal_target_on` is T–X, the firm's own, and it is the actionable one —
+finding out you are late on the day you are late is useless. Every screen orders by the internal
+target. **A new lead time RE-DATES what is already generated** (`redateUnstarted`), because the
+sweep materialises a year ahead and generation is idempotent: without it a partner sets T–X and
+watches nothing happen for twelve months. It moves only rows nobody has started, and never the
+statutory date.
+
+**States are ROWS and NOTHING compares a `code`** — 0050's argument, and the demo got this half
+wrong in a way worth naming: its sweep looked states up by the literal strings `'pending'` and
+`'in_progress'`, which hardcodes the very names the firm was promised it could change. Meaning
+lives in `is_initial` / `is_terminal` / `needs_decision`; "can this still be missed" is derived
+from the last two rather than stored as a third.
+
+**Generation scope is DECIDED: only where an engagement exists.** `engagement_id` stays nullable
+so the compliance-engine reading (generate for every entity; every uncovered obligation is a sales
+lead) is a config change rather than a migration. The firm has not been asked which it wants, and
+this schema does not answer it for them. **The floor matters as much as the scope:** generation
+reaches ninety days back so a client who signed last month gets the period already under way, and
+`CalendarSubject.effectiveFrom` stops that same reach-back inventing missed deadlines — onboard
+four hundred clients without it and a partner's decision queue fills with thousands of deadlines
+nobody ever had.
+
+**THRESHOLDS ARE STILL NOT BUILT, AND THAT IS NOW A DECISION.** The firm's commonest applicability
+rule is a threshold, and `StepOperator` still has no `gte`/`lte` for the same reason it never did:
+nothing in this schema stores a turnover, an employee count or a paid-up capital. Under the decided
+scope it does not need to — *"does Tax Audit apply?"* is answered by the client having BOUGHT it.
+The threshold layer belongs with the compliance-engine reading, and every seeded rule carries the
+sheet's own threshold text in `applicabilityNote` so the specification is ready the day that
+question is answered.
+
+### The silent hole, and why the cure is a derivation rather than a setting
+
+A recurring engagement now gets one task PER PERIOD from the calendar, so `spawnForEngagements`
+must not also raise its own — that row is due `effective_from + slaDays`, can never be completed
+while the engagement runs a year, and is indistinguishable from a real task. Four hundred clients
+times three recurring services is twelve hundred of them.
+
+The obvious mechanism is a flag on the service. **A flag can be WRONG, and being wrong means
+SILENCE**: no engagement task and no calendar rows either. So the discriminator is DERIVED —
+`ObligationCoverage` asks the GENERATOR'S OWN PREDICATE (an active rule, with a formula, not
+event-driven, naming this engagement's service and the entity's country). **The failure then
+inverts: a firm with no rules is not covered, so it gets exactly the behaviour it had before this
+existed, and the board can never end up empty.**
+
+`GET /api/v1/calendar/coverage` is the other half: every live engagement the calendar produced
+nothing for, WITH A REASON, and **none of the five reasons is an error** — the commonest,
+`no_rule_names_this_service`, is the ordinary state of advisory work. The worker logs the count
+every sweep and `worker:once` prints it whether or not anything generated. An empty calendar with
+nothing said about it is indistinguishable from broken software, and that is the failure this
+whole mechanism exists to prevent.
+
+### What running it found, and what none of the tests did
+
+- **The batch insert never executed.** postgres.js infers a JSON type for a string parameter and
+  encodes it AGAIN, so `${json}::jsonb` produced a jsonb STRING and every sweep died with *"cannot
+  call jsonb_to_recordset on a non-array"*. `::text::jsonb` is the fix. Unit tests use a fake
+  repository and the integration test inserted rows by hand, so **neither ever ran the statement**.
+  If you add a repository method with non-trivial SQL, run it.
+- **The coverage reason was wrong on its commonest case** — it required a rule to name the
+  engagement's service, and every rule in the shipped pack names none (a pack cannot know a firm's
+  catalogue keys). Fixed to the generator's predicate, and `entity_not_registered` added, which was
+  the real answer.
+- **Two id-only foreign keys**, caught by `tenant-keys.integration.test.ts` and not by review.
+  `service_entry_id` and `supersedes_id` both carry the tenant now.
+
+`/calendar` and `/admin/obligation-rules` are the screens, and the whole chain was walked in the
+browser — load the pack, register a company, sweep, set a lead time, sweep, and find the GSTR-3B
+task on the board at High priority, from the law, with nobody setting it.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
-`scheduler`, the `orchestrator`, `invoicing` and `work items` are built.
-Next: T3.2's compliance calendar, T3.3's missed-deadline state and T3.7's dashboards.
+`scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
+Next: T3.3's missed-deadline state (which the calendar's `needs_decision` flag is already waiting
+for) and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

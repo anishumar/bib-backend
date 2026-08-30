@@ -93,6 +93,7 @@ import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/v
 import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
 import type {
   EngagementWorkSource,
+  ObligationCoverage,
   NewWorkItem,
   NewWorkItemPriority,
   NewWorkItemState,
@@ -503,6 +504,7 @@ export interface Deps {
   readonly reviewers: ReviewerDirectory;
   readonly permissions: ReviewPermissionSource;
   readonly engagements: EngagementWorkSource;
+  readonly obligations: ObligationCoverage;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -740,8 +742,19 @@ export class WorkItemService {
     const priorities = await this.deps.vocabulary.listPriorities(tenantId);
     const work = await this.deps.engagements.workFor(tenantId, engagementIds);
 
+    // WHERE THE COMPLIANCE CALENDAR OWNS THE DESK, THIS DOES NOT (T3.2).
+    //
+    // A recurring engagement gets one task PER PERIOD from the calendar, each
+    // with its own statutory date. One more here, due `effective_from +
+    // slaDays` and never completable, would be a thirteenth row on the board
+    // that nobody can tell from a real one. See `ObligationCoverage` for why
+    // this is derived rather than a flag — the short version is that a wrong
+    // flag means silence, and a derived miss means today's behaviour.
+    const covered = await this.deps.obligations.coveredEngagements(tenantId, engagementIds);
+
     let created = 0;
     for (const w of work) {
+      if (covered.has(w.engagementId)) continue;
       // Statutory work is what a STATUTE dates, and an engagement's SLA is the
       // firm's own promise. So a work item spawned from an engagement is NOT
       // statutory — T3.2's obligations are what set that flag, from the law.
@@ -788,6 +801,98 @@ export class WorkItemService {
       if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, "spoc");
     }
     return created;
+  }
+
+  /**
+   * Raise the task an OBLIGATION is owed — the `WorkItemRaiser` port T3.2 calls
+   * at T–X.
+   *
+   * THE ONE PLACE THE CALENDAR AND THE WORK BOARD MEET. The obligation is what
+   * the law asks of the entity; this is what somebody at the firm must do about
+   * it, and keeping them two tables is what lets the calendar be generated at
+   * all (migration 0052 argues it).
+   *
+   * `isStatutoryDue` is TRUE here and false on `spawnForEngagements`, and that
+   * asymmetry is the flag's whole purpose: a statute set this date, so the
+   * firm's own rule — *"due dates that are statutory should anyway be high
+   * priority"* — applies, mechanically, without anybody remembering to set it.
+   *
+   * The due date is the STATUTORY one, never the internal target. The target is
+   * only what caused the task to appear this early; the law is what it is due
+   * by, and showing the earlier date as the deadline would make every filing
+   * look late a fortnight before it was.
+   *
+   * Routing reuses the engagement's own account team, so an obligation lands on
+   * the same desk the engagement would have — and refuses to guess in exactly
+   * the same way, with the same sentence, because a wrong assignee is worse
+   * than none.
+   */
+  async raiseForObligation(
+    tenantId: string,
+    input: {
+      readonly entityPartyId: string;
+      readonly engagementId: string | null;
+      readonly serviceEntryId: string | null;
+      readonly title: string;
+      readonly description: string | null;
+      readonly dueOn: string;
+    },
+    actor: Actor,
+  ): Promise<string> {
+    const state = await this.requireInitialState(tenantId);
+    const priority = await this.requireDefaultPriority(tenantId, true);
+
+    // The engagement carries the client, the Dept and the pinned service. An
+    // obligation with no engagement is representable (0053 keeps the column
+    // nullable for the compliance-engine reading) and lands on the entity with
+    // no Dept to route on — visibly unassigned rather than guessed at.
+    const work =
+      input.engagementId === null
+        ? []
+        : await this.deps.engagements.workFor(tenantId, [input.engagementId]);
+    const w = work[0];
+
+    const clientPartyId = w?.clientPartyId ?? input.entityPartyId;
+    const routing = await this.routeToSpoc(
+      tenantId,
+      clientPartyId,
+      w?.deptCode ?? null,
+      input.dueOn,
+    );
+
+    const item = await this.deps.items.create({
+      id: this.deps.ids.newId(),
+      tenantId,
+      clientPartyId,
+      entityPartyId: input.entityPartyId,
+      // NOT linked to the engagement, and this is load-bearing:
+      // `idx_work_item_one_per_engagement` allows ONE work item per engagement,
+      // which is exactly right for the engagement's own task and exactly wrong
+      // for twelve monthly filings under one engagement. The obligation row is
+      // what ties this task to its engagement — `obligation_instance` carries
+      // both — so nothing is lost and the unique index stays meaningful.
+      engagementId: null,
+      jobId: null,
+      serviceVersionId: w?.serviceVersionId ?? null,
+      deptAxisId: routing.axisId,
+      title: input.title,
+      description: input.description,
+      stateId: state.id,
+      priorityId: priority.id,
+      assigneeUserId: routing.outcome.userId,
+      assignmentNote: routing.outcome.note,
+      dueOn: input.dueOn,
+      isStatutoryDue: true,
+      // No SLA snapshot. The firm's turnaround promise is about work it agreed
+      // to do; this date came from a statute, and copying an SLA onto it would
+      // make a filing look late against a commitment nobody made about it.
+      slaDaysSnapshot: null,
+      isClientVisible: true,
+    } satisfies NewWorkItem);
+
+    await this.recordCreated(item, actor, "obligation");
+    if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, "spoc");
+    return item.id;
   }
 
   // ── changing ─────────────────────────────────────────────────────────────
@@ -1432,7 +1537,10 @@ export class WorkItemService {
   private async recordCreated(
     item: WorkItem,
     actor: Actor,
-    origin: "manual" | "engagement",
+    // `obligation` is T3.2's: a task the LAW caused, not the firm's own promise
+    // or somebody typing. The three are genuinely different provenance and the
+    // dashboards will want to tell them apart.
+    origin: "manual" | "engagement" | "obligation",
   ): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId: item.tenantId,

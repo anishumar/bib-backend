@@ -122,6 +122,42 @@ export interface WorkVocabularyRepository {
 
 // ── the work item ──────────────────────────────────────────────────────────
 
+/**
+ * Which engagements the COMPLIANCE CALENDAR will produce work for.
+ *
+ * ── WHY THIS PORT EXISTS, AND WHY IT IS NOT A SETTING ──────────────────────
+ *
+ * T3.2 gives a recurring engagement one work item PER PERIOD — twelve GSTR-3B
+ * tasks a year, each with its own statutory date. `spawnForEngagements` gives
+ * every engagement ONE work item, once, at activation, due `effective_from +
+ * slaDays`. Run both and a GST client's board carries a thirteenth row that can
+ * never be completed (the engagement runs a year), whose due date means nothing,
+ * and which is indistinguishable from a real task. Four hundred clients times
+ * three recurring services is twelve hundred of them.
+ *
+ * So the engagement's own task is skipped where the calendar covers it — and the
+ * discriminator is DERIVED here rather than configured, which is the whole point:
+ *
+ *   * A flag on the service could be wrong, and being wrong means SILENCE — no
+ *     engagement task and no calendar rows either.
+ *   * Derived, the failure inverts. A firm that has not written its GST rules
+ *     is not covered, so it gets exactly today's behaviour and a task on
+ *     somebody's desk. **The board can never end up empty.**
+ *
+ * The predicate is the generator's own: an ACTIVE rule, carrying a due formula,
+ * that is not event-driven, naming this engagement's catalogue service and the
+ * entity's own country. `ObligationService.coverage` reports the engagements
+ * that fall on the other side of it, with a reason, so a partner sees the gap
+ * rather than wondering.
+ */
+export interface ObligationCoverage {
+  /** The subset of `engagementIds` the calendar will generate for. */
+  coveredEngagements(
+    tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>>;
+}
+
 export interface NewWorkItem {
   readonly id: string;
   readonly tenantId: string;

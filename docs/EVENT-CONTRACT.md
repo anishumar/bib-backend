@@ -306,7 +306,14 @@ version is exactly what gets asked about afterwards.
 | `work_item_priority.created` | work_item_priority | A firm added a priority to its own work vocabulary. |
 | `work_item_priority.updated` | work_item_priority | Renamed, re-ranked, or made the default for ordinary or for STATUTORY work. The statutory default is the firm's rule "statutory due dates are high priority anyway" made mechanical, so moving it changes the urgency of every filing created afterwards. |
 | `work_vocabulary.seeded` | tenant | A new tenant's work-item states and priorities were initialised from the product defaults. One event, not twelve. The names are the previous vendor's and are unconfirmed — which costs nothing, because they are rows. |
-| `obligation.spawned` | obligation_instance | An obligation instance was created for a period. |
+| `obligation_rule.created` | obligation_template | A compliance rule was written — what the law asks of an entity, and when (T3.2). |
+| `obligation_rule.updated` | obligation_template | A rule was edited, confirmed against the statute, or retired. `status` → confirmed is a partner taking responsibility for a date. |
+| `obligation_rule.exception_added` | obligation_template | A rule gained an exception for one period — March TDS due 30 April. The NOTE stays on the row; only the month and the replacement rule travel here. |
+| `obligation_rule.exception_removed` | obligation_template | An exception was withdrawn, so the rule's own formula governs that period again. |
+| `obligation_rules.seeded` | tenant | A firm was given the shipped India rule pack. Payload counts what generates and what is waiting on a fact the firm has not given. |
+| `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states were initialised from the product defaults. One event, not five. |
+| `obligation.spawned` | obligation_instance | An obligation instance was created for a period. Per instance, never per sweep. |
+| `obligation.work_raised` | obligation_instance | An obligation reached T–X and became a task. The one place the calendar and the work board join. |
 | `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). |
 | `obligation.missed` | obligation_instance | A statutory date passed undischarged. A state, not an error (T3.3). |
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |

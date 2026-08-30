@@ -44,6 +44,8 @@ import type {
   GradeDirectory,
   GradeLadderSeeder,
   WorkVocabularySeeder,
+  ObligationVocabularySeeder,
+  ObligationRuleSeeder,
   MemberGrade,
   IssuingEntitySeeder,
   MemberRecord,
@@ -69,6 +71,8 @@ export interface Deps {
   /** A new firm's seniority ladder, written as its own rows (G3.3). */
   readonly gradeSeeder: GradeLadderSeeder;
   readonly workVocabularySeeder: WorkVocabularySeeder;
+  readonly obligationVocabularySeeder: ObligationVocabularySeeder;
+  readonly obligationRuleSeeder: ObligationRuleSeeder;
   /** What this firm's rungs ARE, for the two things a grade assignment must
    *  refuse: a grade this firm never defined, and one it has retired. */
   readonly gradeDirectory: GradeDirectory;
@@ -241,6 +245,12 @@ export class TenancyService {
     // fix it from `/admin/work-vocabulary`. The reverse cannot be fixed from
     // inside the product at all.
     await this.deps.workVocabularySeeder.seedDefaultVocabulary(tenant.id, actor);
+
+    // The compliance calendar's two halves (T3.2), in this order: the states a
+    // filing can be in, then the rules that produce filings. A rule pack loaded
+    // before there is a state to generate into would be rules that cannot run.
+    await this.deps.obligationVocabularySeeder.seedDefaultStates(tenant.id, actor);
+    await this.deps.obligationRuleSeeder.seedIndiaRulePack(tenant.id, actor);
     // And its own entity, with the fallback rule naming it as the issuer of the
     // firm's documents — for the same reason, one step further on. Both
     // documents carry `issuing_entity_party_id NOT NULL` (0021), so a firm with

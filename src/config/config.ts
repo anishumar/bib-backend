@@ -78,6 +78,12 @@ const EnvSchema = z.object({
   // review may start. The sweep is cheap: one indexed read per firm, over the
   // partial index that excludes finished jobs.
   BIB_WORKER_ORCHESTRATOR_CRON: z.string().min(1).default("*/5 * * * *"),
+  // ONCE A DAY, not every five minutes. A statutory due date does not move
+  // between breakfast and lunch, and the sweep materialises a YEAR ahead — so
+  // running it hourly would re-propose thousands of rows the unique key would
+  // reject, to discover nothing. 02:15 is after midnight in every Indian time
+  // zone offset, so "today" has actually rolled over.
+  BIB_WORKER_OBLIGATION_CRON: z.string().min(1).default("15 2 * * *"),
   // How long a shutdown waits for a sweep already in flight. Long enough for the
   // slowest one, finite so a wedged handler cannot hold a deploy open forever.
   BIB_WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(45_000),
@@ -171,6 +177,7 @@ export interface WorkerConfig {
    *  counted in DAYS, so sweeping more often only re-reads the same answer. */
   readonly dunningCron: string;
   readonly orchestratorCron: string;
+  readonly obligationCron: string;
   /** How long `stop()` waits for work in flight before the hard stop. */
   readonly shutdownGraceMs: number;
 }
@@ -248,6 +255,7 @@ export function load(): Config {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,
       dunningCron: env.BIB_WORKER_DUNNING_CRON,
       orchestratorCron: env.BIB_WORKER_ORCHESTRATOR_CRON,
+      obligationCron: env.BIB_WORKER_OBLIGATION_CRON,
       shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
     },
     db: {

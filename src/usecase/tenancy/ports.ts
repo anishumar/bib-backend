@@ -233,6 +233,34 @@ export interface RoleDirectory {
  * nobody can sign in to. Making it a port keeps that requirement visible here
  * instead of buried in provisioning scripts.
  */
+/**
+ * A new firm's obligation STATES — the `ObligationService.seedDefaultStates`
+ * seam, and it is here for `WorkVocabularySeeder`'s reason.
+ *
+ * A firm with no state marked as the starting one cannot have a single filing
+ * generated. Telling it to go and configure that before the compliance calendar
+ * will do anything would be a worse first day than the roles problem, and the
+ * firm has not been asked what to call these anyway.
+ */
+export interface ObligationVocabularySeeder {
+  seedDefaultStates(tenantId: string, actor: Actor): Promise<number>;
+}
+
+/**
+ * A new firm's compliance RULES — the shipped India pack.
+ *
+ * THE OTHER HALF OF THE SILENCE CURE. A firm with no rules has an empty
+ * calendar and nothing on any screen explaining why, which is indistinguishable
+ * from broken software. Fifty-seven rules arrive at creation: ten produce dates
+ * and the rest say, by name, what they are still waiting on from the firm.
+ *
+ * Idempotent on a rule's identity, so it never overwrites one a partner has
+ * since confirmed or given a lead time to.
+ */
+export interface ObligationRuleSeeder {
+  seedIndiaRulePack(tenantId: string, actor: Actor): Promise<number>;
+}
+
 export interface RoleRegistrySeeder {
   /** Returns the role keys written, for the caller's audit trail. */
   seedDefaultRoles(tenantId: string, actor: Actor): Promise<readonly string[]>;

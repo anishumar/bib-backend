@@ -106,6 +106,7 @@ import {
 } from "../../src/testfakes/identity";
 import {
   FakeEngagementWork,
+  FakeObligationCoverage,
   FakeReviewPermissions,
   FakeReviewPolicies,
   FakeReviewers,
@@ -118,6 +119,17 @@ import {
   FakeWorkVocabularyRepo,
 } from "../../src/testfakes/workitem";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
+import { ObligationService } from "../../src/usecase/obligation/service";
+import {
+  FakeCalendarSource,
+  FakeObligationExceptionRepo,
+  FakeObligationInstanceRepo,
+  FakeObligationServices,
+  FakeObligationStateRepo,
+  FakeObligationTemplateRepo,
+  FakeObligationTenants,
+  FakeWorkItemRaiser,
+} from "../../src/testfakes/obligation";
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
 const INTERNAL_CLIENTS = [
@@ -149,7 +161,28 @@ const SESSION_TENANT = "00000000-0000-4000-8000-000000000007";
 
 function deps(): RouterDeps {
   const fakes = makeFakes();
+  const obligationTemplates = new FakeObligationTemplateRepo();
+  const obligationExceptions = new FakeObligationExceptionRepo();
+  obligationTemplates.exceptions = obligationExceptions;
   return {
+    // T3.2. These tests only ask what the ROUTER exposes and what an anonymous
+    // caller gets, so the service is real over empty stores — enough to answer,
+    // and nothing invented.
+    obligations: {
+      service: new ObligationService({
+        templates: obligationTemplates,
+        exceptions: obligationExceptions,
+        states: new FakeObligationStateRepo(),
+        instances: new FakeObligationInstanceRepo(),
+        calendarSource: new FakeCalendarSource(),
+        services: new FakeObligationServices(),
+        workItems: new FakeWorkItemRaiser(),
+        tenants: new FakeObligationTenants(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     tenancy: { service: new TenancyService(fakes) },
     scheduler: {
       service: new SchedulerService({
@@ -213,6 +246,7 @@ function deps(): RouterDeps {
           reviewers: new FakeReviewers(),
           permissions: new FakeReviewPermissions(),
           engagements: new FakeEngagementWork(),
+          obligations: new FakeObligationCoverage(),
           ids: new FakeIds(),
           clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
           events: new RecordingEventSink(),

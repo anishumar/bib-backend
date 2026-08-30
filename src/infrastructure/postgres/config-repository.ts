@@ -53,6 +53,7 @@ import type {
   PublishOutcome,
   SeedRow,
 } from "../../usecase/config/ports";
+import type { ServiceDirectory as ObligationServiceDirectory } from "../../usecase/obligation/ports";
 import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
 import type { Amount } from "../../domain/money/model";
 
@@ -115,9 +116,27 @@ export class PostgresConfigRepository
     PolicyDirectory,
     TemplateSource,
     TierSource,
-    VerificationPolicySource
+    VerificationPolicySource,
+    ObligationServiceDirectory
 {
   constructor(private readonly app: Db) {}
+
+  /**
+   * The `ServiceDirectory` port T3.2 declares — does this catalogue ENTRY exist?
+   *
+   * The entry and not a version, deliberately: a compliance rule is about what
+   * the firm SELLS, and a firm publishing v4 of 'gst-filing' has not stopped
+   * owing its clients GSTR-3B. Pinning a version on a rule would quietly stop
+   * it generating the day somebody edited the catalogue.
+   */
+  async serviceKey(tenantId: string, entryId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ key: string }[]>`
+        SELECT key FROM config.entry WHERE id = ${entryId} AND kind = 'service'
+      `;
+      return row?.key ?? null;
+    });
+  }
 
   async define(entry: NewEntry, firstDraft: NewVersion): Promise<DefinedEntry> {
     return withTenant(this.app, entry.tenantId, async (db) => {
