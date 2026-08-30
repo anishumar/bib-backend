@@ -68,6 +68,8 @@ import {
   Sha256ByteDigest,
 } from "../infrastructure/storage/filesystem-blob-store";
 import { FileStoreService } from "../usecase/filestore/service";
+import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboard-repository";
+import { DashboardService } from "../usecase/dashboard/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
 import {
@@ -392,6 +394,13 @@ export function wire(cfg: Config, log: Logger): Wired {
     maxUploadBytes: cfg.storage.maxUploadBytes,
   });
 
+  // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one
+  // repository: every number is derived from rows at read time, so there is
+  // nothing to inject a clock or an id generator for.
+  const dashboards = new DashboardService({
+    dashboards: new PostgresDashboardRepository(pools.app),
+  });
+
   // CHASING is its own use case, and it runs in TWO places: the worker sweeps
   // the ladder, and a partner decides the terminal rung from a request. Only
   // the second half is wired here — `setup/worker.ts` builds its own graph, as
@@ -667,6 +676,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         document: { service: documents },
         invoice: { service: invoices, dunning, authz },
         filestore: { service: fileStore },
+        dashboard: { service: dashboards, authz },
       },
       log,
       {

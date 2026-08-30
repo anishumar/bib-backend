@@ -1843,7 +1843,31 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` 421 tests · `test:integration` 105 · `smoke` **125 passed, 0 failed**.
   >
   > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
-- [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** *Acc: "escalate to this assignee's manager" resolves through the org chart.* — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login. This is **Gate 4 (record-scope)**, which T1.6 deferred to U1; it is pulled forward here because `(B)`'s escalation ladder needs it before the portal does. **Agree the timing rather than assuming it.**
+- [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
+  > **CORRECTED (2026-08-30), and the correction is that this task's ACCEPTANCE IS ALREADY MET
+  > by somebody else's work.** The line above was written when the escalation ladder was the
+  > reason to pull this forward from U1. **T2.9 built the org chart a different way and it
+  > works**: `tenancy.membership.reports_to_user_id` (migration 0048) is a direct user → user
+  > reporting line, with `PUT /tenancy/members/{id}/reports-to`, a `membership.reports_to_changed`
+  > event, and live consumers in `usecase/verification` and `usecase/workitem`. "Escalate to
+  > this assignee's manager" resolves today, through `membership`, without `party_id` existing.
+  >
+  > **So `(B)`'s lane is NOT waiting on `(A)` for anything.** T3.3 can be picked up now. The
+  > parking-lot question — *"pull `membership.party_id` forward from U1, or make `(B)`'s
+  > escalation wait"* — is answered by events: neither. It was overtaken.
+  >
+  > **What is genuinely left of this task is Gate 4 and only Gate 4**: which parties a CLIENT
+  > PORTAL session may see. That has no consumer until U1, and building it now would be a column
+  > with no writer — the exact thing `(B)` cited three days ago when he deliberately did NOT
+  > build `escalated_level`, and the thing T2.5 cited when it deferred `workflow_template`. So
+  > it stays open and moves to Phase 6, where its consumer is.
+  >
+  > **The reporting line and this column are not redundant, and it is worth saying why**, so
+  > nobody later "simplifies" one into the other. `reports_to_user_id` answers *who does this
+  > LOGIN escalate to* — staff, inside one firm. `party_id` would answer *which PERSON is this
+  > login* — which is what lets a portal contact be scoped to their own company's records, and
+  > what would let the firm's org chart include the majority of a firm who have a place in it
+  > and no login at all. Different questions.
 
 - [x] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
   > **Done (2026-08-30). Migrations 0050 (the vocabulary) and 0051 (the work).** Both blockers
@@ -2423,7 +2447,63 @@ open and are recorded above; neither blocks Phase 2.
   > with `(B)` rather than a unilateral `npm install`.**
   >
   > `brand_asset` (T3.6) is the input this needs and already exists, so nothing blocks it.
-- [ ] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
+- [x] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
+  > **Done (2026-08-30). Migration 0038 — two VIEWS and no tables.**
+  >
+  > **The acceptance decided the whole design.** "Figures reconcile to underlying rows, not
+  > cached columns" means there is no `mrr` column anywhere and no nightly job that fills one:
+  > `crm.engagement_mrr` and `crm.receivable_ageing` are views over the rows, exactly as
+  > `crm.invoice_totals` (0027) is. Proven rather than asserted — the integration test computes
+  > MRR a second time from the base tables, never touching the view, and asserts the two are
+  > equal. Against the dev database that is **₹31,20,000 both ways**.
+  >
+  > The cost, stated: they recompute on every read. Right at this size, and when it stops being
+  > right the answer is a materialised view with a stated refresh — never a column somebody
+  > updates by hand, which is the thing the acceptance forbids.
+  >
+  > **THE REAL FEATURE IS `excluded_because`, NOT THE MRR NUMBER.** Four things are not monthly
+  > recurring revenue and each is named rather than dropped: `one_time` (charged once — real
+  > revenue, not recurring), `custom_frequency` (the firm said custom BECAUSE no formula fits;
+  > guessing invents revenue), `no_frequency_stated`, and `unpriced` (G1.6's real state — work
+  > agreed and not yet priced). **The first run against the dev database found 1,490 engagements
+  > stating no frequency against 34 that counted.** A total that silently dropped them would
+  > have read ₹31.2 lakh and looked complete. This is G1.6's "an unpriced line stops being a
+  > lie" applied to a headline figure.
+  >
+  > **Every figure is converted at the rate stored on the DOCUMENT**, never one looked up today
+  > — the letter's `fx_rate` for a fee, the invoice's for a receivable. Re-converting at
+  > today's rate would change last quarter's MRR every morning, which is the exact thing 0009's
+  > reporting-currency rule exists to prevent. Proven: 100 USD/month on a letter struck at 80
+  > contributes ₹8,000.
+  >
+  > **DSO returns NULL when the firm billed nothing, never 0.** "0 days" reads as excellent
+  > collections; the truth is there is not enough billing to say. It is the one calculation in
+  > TypeScript rather than SQL, because the division is a DEFINITION and belongs somewhere
+  > readable and tested. The window is 90 days and is a constant, not a parameter — two screens
+  > computing DSO over different windows would produce two numbers both called DSO.
+  >
+  > **THE FEE AXIS GATES HERE RATHER THAN REDACTING, and it is the first place in the product
+  > that does.** Everywhere else `withFeeVisibility` nulls an amount and leaves the record, so
+  > "you may not see this" never looks like "there is no fee". That is wrong when the whole
+  > response is money: a redacted dashboard is a page of nulls, which says "this firm has no
+  > revenue". So the routes refuse with a message naming the fix, and the home page offers the
+  > link only on `commercialVisibility`. **Worth knowing: a partner does NOT have it by
+  > default** — it is a separate flag on the membership, and a partner without it is refused.
+  >
+  > **`security_invoker = true` on both views**, and the integration test is the only thing that
+  > would ever catch its absence: a plain view runs as its OWNER, who is not subject to the row
+  > policies, so a totals view over tenant-scoped tables would be a hole straight through the
+  > tenant wall that every other test would pass.
+  >
+  > **Two things the screens found in my own code before anyone else could**: the first cut of
+  > the ageing total summed the buckets in TypeScript (`Number` + `toFixed`) — breaking the rule
+  > this product keeps everywhere, that only the database adds money up — and is now one query
+  > with GROUPING SETS. And the overview handler forwarded the service's own object straight to
+  > the wire; the compiler refused it, because the domain carries `bucket` and `reason` as
+  > strings while the wire declares closed enums. That is `api/domainerr.ts`'s trick working on
+  > a response instead of an error.
+  >
+  > Screens: `/dashboard`. Gate: `npm run check` **1287** · `test:integration` **416**.
 
 **Milestone M3:** full compliance cycle (spawn → work → verify → file → invoice → collect) runs with humans in the loop; money is gapless and auditable.
 
@@ -2646,7 +2726,11 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
   holds is *"nothing pointed at it at the instant it was archived"*, which is weaker than the
   `CLAUDE.md` paragraph reads. Decide later whether capture should refuse an archived party or
   quietly unarchive it — both are defensible and neither should be guessed.
-- **G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.
+- ~~**G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.~~
+  **Answered by events (2026-08-30): neither.** T2.9 built the reporting line on `membership`
+  itself (`reports_to_user_id`, 0048) and escalation resolves through it today. What is left of
+  G3.4 is Gate 4, whose consumer is U1 — so it moves to Phase 6 rather than being pulled
+  forward. See G3.4's own note.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
 - ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled
   (2026-08-28): no.** The key stays on `core.party`, and Incorporation is why. That service
