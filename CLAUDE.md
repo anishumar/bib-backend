@@ -1368,10 +1368,24 @@ on the client as a penalty. Withdrawing an exception is `is_active = false`, nev
 **Two dates, and the difference is the point.** `statutory_due_on` is the law's and missing it is
 the client's money; `internal_target_on` is T–X, the firm's own, and it is the actionable one —
 finding out you are late on the day you are late is useless. Every screen orders by the internal
-target. **A new lead time RE-DATES what is already generated** (`redateUnstarted`), because the
-sweep materialises a year ahead and generation is idempotent: without it a partner sets T–X and
-watches nothing happen for twelve months. It moves only rows nobody has started, and never the
-statutory date.
+target. **ANY DATE-CHANGING EDIT RE-DATES WHAT IS ALREADY GENERATED** (`listUnstarted` +
+`restate`, T6.4), because the sweep materialises a year ahead and generation is idempotent on
+`(tenant, template, entity, period_start)`: without it a partner changes a rule and watches
+nothing happen for twelve months. It moves only rows nobody has started — a task on a desk keeps
+the date its owner is working to — and the caller REPORTS how many it therefore could not touch,
+because a partial change presented as a whole one is how a deadline moves without anybody being
+told.
+
+It re-derives with **`scheduleFor`, the generator's own function**, never arithmetic in an UPDATE:
+a second implementation of the due-date rules parts company from the first the moment an exception
+is involved, which is exactly the case a partner is most likely to be editing.
+
+**And it restates the STATUTORY date, which is the reverse of what the lead-time-only version
+did.** A lead time is the firm's own practice and the law's date is not in question there. When
+the FORMULA changes it is the other way round: the old statutory date was this system's guess from
+a vendor's document, and the new one is the firm's answer. Leaving a date now known to be wrong,
+on the grounds that the law's date is not ours to change, keeps a wrong legal deadline out of
+respect for the law.
 
 **States are ROWS and NOTHING compares a `code`** — 0050's argument, and the demo got this half
 wrong in a way worth naming: its sweep looked states up by the literal strings `'pending'` and
@@ -1529,6 +1543,58 @@ compliance calendar made answered **500 "internal error"** — precisely the fai
 records `StaffGradeError` having, made a second time, and invisible for the same reason: unit tests
 assert on the thrown sentinel. It surfaced only because T3.3's refusals are read by a partner on a
 screen. If you add an error family, the mapping is part of the same commit.
+
+### Editing a rule, and the two things that are not the same edit (T6.4)
+
+The rules screen could write three fields; the API had taken a full `dueRule`, a new rule and
+exceptions since T3.2 **with no caller anywhere**. So forty-seven of the fifty-seven shipped rules
+were never going to start generating however well the firm knew the answer, and "config a partner
+can edit without a deploy" was true of a quarter of the row. That is the gap T6.4 closed, and
+three decisions in it are worth keeping.
+
+**A CORRECTION AND AN AMENDMENT ARE DIFFERENT OPERATIONS, and `status` already says which is
+which.** Effective-dated regulatory data separates "we recorded the fact wrong" — fix it, and
+everything derived from it — from "the law changed from a date" — a new record, the old one still
+explaining what it explained. Everything here ships `unconfirmed` precisely because nobody has
+checked it against the statute, so an edit there is a CORRECTION and restates in place. A
+period-specific legal change is an EXCEPTION, which is what a CBDT or GST extension actually is
+and which 0052 already built. **Effective-dated supersession is NOT built**, and the blocker is
+concrete rather than a preference: the generation window is `today−90 … today+365` for every
+generating rule, so a superseding row would immediately re-generate periods the retired one
+already produced — different `template_id`, so the re-run key does not catch it, and the calendar
+would show each filing twice. It needs an `effective_from` on the template.
+
+**AN EXCEPTION IS A DATE CHANGE TOO, and adding one moves rows that already exist.** March's TDS
+is generated eleven months before anybody writes the carve-out saying March is due on 30 April.
+Before T6.4 the exception was right on paper and absent from every row it was written for — the
+same silence 0054 and T3.3 each closed once. Withdrawing one restates the same way.
+
+**THE PERIOD SHAPE IS PART OF THE IDENTITY ONCE ROWS EXIST** (`PERIOD_SHAPE_LOCKED`, 409, and not
+400 — the request is well formed and what refuses it is the filings the rule has produced).
+`recurrence` and `fiscal_year_start_month` decide where a period BEGINS and `period_start` is the
+re-run key, so moving either under existing rows orphans all of them, the next sweep generates a
+second copy of work already done, and nothing reports an error. They are editable exactly while
+the rule has produced nothing — the state of all forty-seven a partner has to answer.
+
+**ANSWERING A RULE FILLS THE CALENDAR NOW; WRITING ONE DOES NOT.** `updateRule` generates for that
+template alone when the rule CROSSES into producing dates, because the partner has just been asked
+a question and is owed the result of their answer. `createRule` deliberately does not: somebody
+writing a rule types the formula first and the March carve-out second, so generating on the first
+save fills a year of calendar from a half-written rule. A brand-new rule is what the nightly sweep
+is for. Neither path raises tasks or flags anything missed — those are the sweep's, and having
+them fall out of a config edit would let a partner correcting a typo put work on somebody's desk.
+
+**Every rule write returns a `RuleEffect`** — `restated` / `locked` / `spawned` — and both
+exception verbs carry the first two on the event, which they did not until reading the ledger
+after using the screen showed `obligation_rule.updated` carrying it and them not. Never the note:
+prose does not `GROUP BY` and this log cannot be erased.
+
+**`restate`'s SQL is executed by an integration test, not a fake.** It uses the same
+`jsonb_to_recordset(…::text::jsonb)` construction as the batch insert, whose double cast exists
+because postgres.js re-encodes a string parameter as JSON and every sweep died on it — found by
+RUNNING the worker, since the unit tests use a fake and the old integration test inserted rows by
+hand. `tests/obligation/restate.integration.test.ts` also proves the WHERE clause refuses a row
+somebody picked up between the read and the write, which is what makes the reported count honest.
 
 ### The silent hole, and why the cure is a derivation rather than a setting
 

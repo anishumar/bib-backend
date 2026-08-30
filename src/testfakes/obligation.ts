@@ -5,7 +5,6 @@
 // work-item fakes do. A stub that recorded "createIfAbsent was called twice"
 // could not have proved the acceptance line, because the whole claim is that
 // the SECOND call changes nothing — and only a store can show that.
-import { internalTargetDate } from "../domain/obligation/model";
 import type {
   DueRuleException,
   ObligationInstance,
@@ -36,11 +35,13 @@ import type {
   RaisableObligation,
   ResolutionOptionPatch,
   ResolutionOptionRepository,
+  RestatedInstance,
   ServiceDirectory,
   SpawnedInstance,
   TemplatePatch,
   TemplateRecord,
   TenantDirectory,
+  UnstartedInstance,
   WorkItemRaiser,
 } from "../usecase/obligation/ports";
 
@@ -554,20 +555,48 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     return Promise.resolve(true);
   }
 
-  redateUnstarted(tenantId: string, templateId: string, leadTimeDays: number): Promise<number> {
+  listUnstarted(tenantId: string, templateId: string): Promise<readonly UnstartedInstance[]> {
+    return Promise.resolve(
+      this.rows
+        .filter(
+          (r) =>
+            r.tenantId === tenantId &&
+            r.templateId === templateId &&
+            // Only what nobody has started — a task on a desk keeps the date
+            // its owner is working to.
+            r.workItemId === null &&
+            r.filedOn === null,
+        )
+        .map((r) => ({
+          id: r.id,
+          periodStart: r.periodStart,
+          periodEnd: r.periodEnd,
+          periodLabel: r.periodLabel,
+          statutoryDueOn: r.statutoryDueOn,
+          internalTargetOn: r.internalTargetOn,
+        })),
+    );
+  }
+
+  restate(tenantId: string, rows: readonly RestatedInstance[]): Promise<number> {
     let moved = 0;
-    this.rows.forEach((r, i) => {
-      if (r.tenantId !== tenantId || r.templateId !== templateId) return;
-      // Only what nobody has started — a task on a desk keeps the date its
-      // owner is working to.
-      if (r.workItemId !== null || r.filedOn !== null) return;
-      const target = internalTargetDate(r.statutoryDueOn, leadTimeDays);
-      if (target === r.internalTargetOn) return;
-      this.rows[i] = { ...r, internalTargetOn: target };
+    for (const next of rows) {
+      const i = this.rows.findIndex((r) => r.id === next.id && r.tenantId === tenantId);
+      const held = this.rows[i];
+      if (i < 0 || !held) continue;
+      // The same guard the SQL carries: the ids came from a snapshot, and
+      // between that read and this write somebody may have picked the task up.
+      if (held.workItemId !== null || held.filedOn !== null) continue;
+      this.rows[i] = {
+        ...held,
+        statutoryDueOn: next.statutoryDueOn,
+        internalTargetOn: next.internalTargetOn,
+      };
       moved += 1;
-    });
+    }
     return Promise.resolve(moved);
   }
+
 
   countFor(tenantId: string, templateId: string): Promise<number> {
     return Promise.resolve(

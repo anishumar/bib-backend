@@ -27,7 +27,9 @@ import type {
   NewObligationInstance,
   ObligationInstanceRepository,
   RaisableObligation,
+  RestatedInstance,
   SpawnedInstance,
+  UnstartedInstance,
 } from "../../usecase/obligation/ports";
 
 /**
@@ -498,30 +500,71 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     });
   }
 
-  async redateUnstarted(
+  async listUnstarted(
     tenantId: string,
     templateId: string,
-    leadTimeDays: number,
-  ): Promise<number> {
+  ): Promise<readonly UnstartedInstance[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      // The statutory date is untouched — the law's, not the firm's — and the
-      // clamp lives in the arithmetic: GREATEST is what stops a long lead time
-      // pushing the target past the deadline, which the CHECK would refuse
-      // anyway. Only rows nobody has started; see the port.
-      const rows = await db<{ id: string }[]>`
-        UPDATE delivery.obligation_instance
-        SET internal_target_on = LEAST(
-              statutory_due_on,
-              statutory_due_on - (${leadTimeDays}::integer * INTERVAL '1 day')
-            )::date
+      // `::text` on every date, which is the pattern `day.ts` names as the
+      // better answer where a query is being written anyway: Postgres renders
+      // the day, no `Date` is constructed, and no zone is involved at any
+      // point. Only rows nobody has started — see the port.
+      const rows = await db<
+        {
+          id: string;
+          period_start: string;
+          period_end: string;
+          period_label: string;
+          statutory_due_on: string;
+          internal_target_on: string;
+        }[]
+      >`
+        SELECT id, period_start::text, period_end::text, period_label,
+               statutory_due_on::text, internal_target_on::text
+        FROM delivery.obligation_instance
         WHERE template_id = ${templateId}
           AND work_item_id IS NULL
           AND filed_on IS NULL
-        RETURNING id
+        ORDER BY period_start
       `;
-      return rows.length;
+      return rows.map((r) => ({
+        id: r.id,
+        periodStart: r.period_start,
+        periodEnd: r.period_end,
+        periodLabel: r.period_label,
+        statutoryDueOn: r.statutory_due_on,
+        internalTargetOn: r.internal_target_on,
+      }));
     });
   }
+
+  async restate(tenantId: string, rows: readonly RestatedInstance[]): Promise<number> {
+    if (rows.length === 0) return 0;
+    return withTenant(this.app, tenantId, async (db) => {
+      // ONE statement for the batch, same `jsonb_to_recordset` shape as the
+      // insert above and the same DOUBLE CAST for the same reason.
+      //
+      // The WHERE clause repeats the unstarted test rather than trusting the
+      // ids handed in. Between the read and this write somebody may have picked
+      // a task up, and a rule edit must not move a date out from under them —
+      // the read is a snapshot, this guard is the truth. The count returned is
+      // therefore what was ACTUALLY moved, which is the number the screen
+      // shows.
+      const updated = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance AS o
+        SET statutory_due_on   = r."statutoryDueOn"::date,
+            internal_target_on = r."internalTargetOn"::date
+        FROM jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb)
+          AS r(id uuid, "statutoryDueOn" text, "internalTargetOn" text)
+        WHERE o.id = r.id
+          AND o.work_item_id IS NULL
+          AND o.filed_on IS NULL
+        RETURNING o.id
+      `;
+      return updated.length;
+    });
+  }
+
 
   async countFor(tenantId: string, templateId: string): Promise<number> {
     return withTenant(this.app, tenantId, async (db) => {

@@ -89,7 +89,7 @@ type H = ReturnType<typeof harness>;
 async function firmWithGst(h: H, over: { leadTimeDays?: number; effectiveFrom?: string } = {}) {
   await h.service.seedDefaultStates(FIRM, ACTOR);
   h.services.keys.set(SERVICE, "gst-filing");
-  const rule = await h.service.createRule(
+  const { rule } = await h.service.createRule(
     {
       tenantId: FIRM,
       jurisdiction: "IN",
@@ -582,7 +582,12 @@ describe("writing a rule", () => {
     // coming from the firm.
     const rule = await firmWithGst(h);
     expect(rule.status).toBe("unconfirmed");
-    const confirmed = await h.service.updateRule(FIRM, rule.id, { status: "confirmed" }, ACTOR);
+    const { rule: confirmed } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { status: "confirmed" },
+      ACTOR,
+    );
     expect(confirmed.status).toBe("confirmed");
     const event = h.events.recorded.find((e) => e.verb === "obligation_rule.updated");
     expect(event?.payload).toMatchObject({ statusFrom: "unconfirmed", statusTo: "confirmed" });
@@ -602,7 +607,7 @@ describe("writing a rule", () => {
 
   it("lets a lead time be set later, which is what the shipped zero is for", async () => {
     const rule = await firmWithGst(h);
-    const updated = await h.service.updateRule(FIRM, rule.id, { leadTimeDays: 8 }, ACTOR);
+    const { rule: updated } = await h.service.updateRule(FIRM, rule.id, { leadTimeDays: 8 }, ACTOR);
     expect(updated.leadTimeDays).toBe(8);
     await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-08-31" }, ACTOR);
     expect(h.instances.rows[0]?.internalTargetOn).toBe("2026-09-12");
@@ -626,7 +631,167 @@ describe("writing a rule", () => {
 
     const updates = h.events.recorded.filter((e) => e.verb === "obligation_rule.updated");
     const event = updates[updates.length - 1];
-    expect(event?.payload).toMatchObject({ leadTimeFrom: 0, leadTimeTo: 6, redated: 3 });
+    expect(event?.payload).toMatchObject({
+      leadTimeFrom: 0,
+      leadTimeTo: 6,
+      restated: 3,
+      // Nothing was already on a desk, so nothing was left behind.
+      locked: 0,
+    });
+  });
+
+  it("MOVES the statutory date too when the FORMULA changes, not just the target", async () => {
+    // The reversal that matters, and the reason this is not the lead-time
+    // version of the same thing. A lead time is the firm's own practice and the
+    // law's date is not in question; when the FORMULA changes, the old
+    // statutory date was this system's guess from a vendor's document and the
+    // new one is the firm's answer. Leaving a date we now know to be wrong,
+    // out of respect for the law, keeps a wrong legal deadline.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+    expect(h.instances.rows.find((r) => r.periodLabel === "Aug 2026")?.statutoryDueOn).toBe(
+      "2026-09-20",
+    );
+
+    // The 11th of the following month, not the 20th.
+    const { effect } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null } },
+      ACTOR,
+    );
+    expect(effect).toEqual({ restated: 3, locked: 0, spawned: 0 });
+    const august = h.instances.rows.find((r) => r.periodLabel === "Aug 2026");
+    expect(august?.statutoryDueOn).toBe("2026-09-11");
+    // Lead time is zero here, so the target follows the statutory date.
+    expect(august?.internalTargetOn).toBe("2026-09-11");
+  });
+
+  it("reports the filings it could NOT move, rather than reporting a whole change", async () => {
+    // A partial change reported as a whole one is how a deadline moves without
+    // anybody being told.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+
+    const { effect } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null } },
+      ACTOR,
+    );
+    expect(effect.locked).toBe(1);
+    expect(effect.restated).toBe(2);
+  });
+
+  it("fills the calendar the moment a rule that was waiting on a fact is answered", async () => {
+    // The whole point of the rules screen. Forty-seven of the fifty-seven
+    // shipped rules have no formula; supplying one has to produce filings there
+    // and then, not at the worker's next pass — a control that appears to work
+    // and does nothing until tomorrow is the trap this codebase keeps naming.
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "gst-filing");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "IN",
+        serviceEntryId: SERVICE,
+        name: "PF monthly return",
+        recurrence: "monthly",
+        fiscalYearStartMonth: 4,
+        dueRule: null,
+        unresolvedReason: "Due date depends on the State the establishment is registered in.",
+        leadTimeDays: 0,
+        rulePack: "gst-in@2026.07",
+      },
+      ACTOR,
+    );
+    h.calendarSource.subjects.push({
+      entityPartyId: ENTITY,
+      engagementId: ENGAGEMENT,
+      effectiveFrom: "2026-01-01",
+      jurisdiction: "IN",
+      entityType: "private_limited",
+      serviceEntryId: SERVICE,
+    });
+    // Creating it generated NOTHING — a half-written rule must not fill a
+    // calendar, and a brand-new rule is what the nightly sweep is for.
+    expect(h.instances.rows).toHaveLength(0);
+
+    const { effect } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      {
+        dueRule: { kind: "days_after", dueMonthOffset: null, dueDayOfMonth: null, dueDaysAfter: 15 },
+        unresolvedReason: null,
+      },
+      ACTOR,
+    );
+    expect(effect.spawned).toBeGreaterThan(0);
+    expect(h.instances.rows.length).toBe(effect.spawned);
+    // Nothing to restate: it had produced nothing to restate.
+    expect(effect.restated).toBe(0);
+  });
+
+  it("spawns nothing when a rule that was ALREADY generating is merely corrected", async () => {
+    // The periods exist. Restating them is the whole of it — and the period
+    // shape is locked once rows exist, so no correction can produce new ones.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+    const before = h.instances.rows.length;
+
+    const { effect } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null } },
+      ACTOR,
+    );
+    expect(effect.spawned).toBe(0);
+    expect(h.instances.rows).toHaveLength(before);
+  });
+
+  it("restates nothing when the edit could not have changed a date", async () => {
+    // Renaming the authority changes nothing about when anything is due, and a
+    // response claiming it moved every filing would be a lie a partner acts on.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+
+    const { effect } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { authority: "GSTN", status: "confirmed" },
+      ACTOR,
+    );
+    expect(effect).toEqual({ restated: 0, locked: 0, spawned: 0 });
+  });
+
+  it("refuses to change the period shape once the rule has produced filings", async () => {
+    // `period_start` is the key every generated filing is deduplicated on.
+    // Moving monthly to quarterly under existing rows would orphan all of them,
+    // the next sweep would generate a second copy of work already done, and
+    // nothing would report an error.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-10-31" }, ACTOR);
+
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { recurrence: "quarterly" }, ACTOR),
+    ).rejects.toMatchObject({ code: "PERIOD_SHAPE_LOCKED" });
+    await expect(
+      h.service.updateRule(FIRM, rule.id, { fiscalYearStartMonth: 1 }, ACTOR),
+    ).rejects.toMatchObject({ code: "PERIOD_SHAPE_LOCKED" });
+  });
+
+  it("allows the period shape to change while the rule has produced nothing", async () => {
+    // Which is the state of all forty-seven rules a partner actually has to
+    // answer for.
+    const rule = await firmWithGst(h);
+    const { rule: updated } = await h.service.updateRule(
+      FIRM,
+      rule.id,
+      { recurrence: "quarterly" },
+      ACTOR,
+    );
+    expect(updated.recurrence).toBe("quarterly");
   });
 
   it("never re-dates a filing somebody has already started", async () => {
@@ -650,7 +815,7 @@ describe("exceptions", () => {
 
   it("changes the date for one period and leaves the other eleven", async () => {
     await h.service.seedDefaultStates(FIRM, ACTOR);
-    const tds = await h.service.createRule(
+    const { rule: tds } = await h.service.createRule(
       {
         tenantId: FIRM,
         jurisdiction: "IN",
@@ -725,7 +890,7 @@ describe("exceptions", () => {
 
   it("refuses an exception on an event-driven rule, which has no periods", async () => {
     await h.service.seedDefaultStates(FIRM, ACTOR);
-    const rule = await h.service.createRule(
+    const { rule } = await h.service.createRule(
       {
         tenantId: FIRM,
         jurisdiction: "IN",
@@ -747,6 +912,39 @@ describe("exceptions", () => {
         ACTOR,
       ),
     ).rejects.toThrow(/no periods/);
+  });
+
+  it("MOVES the filings already generated for the period it carves out", async () => {
+    // March's TDS is generated eleven months before anybody adds the carve-out
+    // saying March is due on 30 April. Without this the exception is right on
+    // paper and absent from every row it was written for.
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-04-01", to: "2027-03-31" }, ACTOR);
+    const march = () => h.instances.rows.find((r) => r.periodLabel === "Mar 2027");
+    expect(march()?.statutoryDueOn).toBe("2027-04-20");
+
+    const { effect } = await h.service.addException(
+      FIRM,
+      rule.id,
+      {
+        periodEndMonth: 3,
+        kind: "day_of_month",
+        dueMonthOffset: 1,
+        dueDayOfMonth: 30,
+        note: "March is the year end, and the statute gives until the 30th.",
+      },
+      ACTOR,
+    );
+    expect(effect).toEqual({ restated: 1, locked: 0, spawned: 0 });
+    expect(march()?.statutoryDueOn).toBe("2027-04-30");
+    // The other eleven are untouched — that is what makes it an exception.
+    expect(h.instances.rows.filter((r) => r.statutoryDueOn.endsWith("-20"))).toHaveLength(11);
+
+    // And withdrawing it puts the period back under the rule's own formula,
+    // which is a date change in exactly the same way.
+    const back = await h.service.removeException(FIRM, rule.id, 3, ACTOR);
+    expect(back).toEqual({ restated: 1, locked: 0, spawned: 0 });
+    expect(march()?.statutoryDueOn).toBe("2027-04-20");
   });
 
   it("withdraws by flag, never by destroying the row", async () => {

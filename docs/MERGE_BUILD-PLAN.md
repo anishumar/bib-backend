@@ -2820,8 +2820,94 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
 - [ ] `(B)` **T6.1** App shell, auth'd nav, work board (Kanban), verification queue screen. *(with Ph2–3)*
 - [ ] `(A)` **T6.2** Client 360 (as-of date), leads pipeline, proposal/EL builder. *(first screen ~week 4–5, with Ph1–2)*
 - [ ] `(A)` **T6.3** Invoicing + collections screens, leadership dashboards (MRR/DSO/ageing). *(with Ph3)*
-- [ ] `(B)` **T6.4** Compliance calendar + rules screen (config a partner can edit — the "row with a screen" bar). *(with Ph3)*
+- [x] `(B)` **T6.4** Compliance calendar + rules screen (config a partner can edit — the "row with a screen" bar). *(with Ph3)*
   > The calendar view, the partner's decision queue (T3.3), and a rules page a partner can actually use — **including confirming an `unconfirmed` rule**, which is what makes T3.2's seeding honest rather than a permanent asterisk. *Acc: a partner changes a due-date rule without a deploy, and the screen shows which rules the firm has not yet confirmed.* Config held as rows is only half the promise if editing it still needs a developer — that is the "row with a screen" bar. The demo's `10xcrm/src/app/calendar/rules/` is 627 lines and is the working spec.
+  >
+  > **DONE.** The calendar, the decision queue and the confirmation tick shipped with T3.2/T3.3;
+  > the half that had not was the FORMULA. The API had taken a full `dueRule`, a new rule and
+  > exceptions since T3.2 **with no caller anywhere** — the screen wrote three fields out of
+  > twelve — so forty-seven shipped rules were never going to start generating however well the
+  > firm knew the answer. Walked in the browser: answered `DPDP compliance` and watched **4
+  > filings appear**, added a March carve-out and watched **those 4 move**, withdrew it and
+  > watched them move back. That test data was reverted afterwards; see the open items.
+  >
+  > **An edit MOVES the calendar that is already there, and says how much.** Generation is
+  > idempotent on `(tenant, template, entity, period_start)` and the sweep materialises a year
+  > ahead, so without this a partner corrects a formula and the next twelve months keep the old
+  > date forever — the trap `redateUnstarted` was built for, reached from the other side. So
+  > `redateUnstarted` is gone and `listUnstarted` + `restate` replace it, re-deriving dates with
+  > **`scheduleFor` — the generator's own function**, never arithmetic in SQL, which would be a
+  > second implementation of the due-date rules that parts company the first time an exception is
+  > involved. Every rule write returns a `RuleEffect` (`restated` / `locked` / `spawned`) and the
+  > screen shows all three: **`locked` is the half nobody would ask for** — the filings already on
+  > somebody's desk, left alone — and a partial change reported as a whole one is how a deadline
+  > moves without anybody being told.
+  >
+  > **It restates the STATUTORY date, and that is a deliberate reversal.** A lead time is the
+  > firm's own practice and the law's date is not in question there; when the FORMULA changes, the
+  > old statutory date was this system's guess from a vendor's document and the new one is the
+  > firm's answer. Leaving a date we now know to be wrong, on the grounds that the law's date is
+  > not ours to change, would keep a wrong legal deadline out of respect for the law.
+  >
+  > **The period shape is locked once rows exist** (`PERIOD_SHAPE_LOCKED`, 409). `recurrence` and
+  > `fiscalYearStartMonth` decide where a period BEGINS and `period_start` is the dedup key, so
+  > moving either under existing rows orphans all of them, the next sweep generates a second copy
+  > of work already done, and nothing reports an error. Editable exactly while the rule has
+  > produced nothing — which is the state of all forty-seven a partner has to answer.
+  >
+  > **Answering a rule fills the calendar NOW; creating one does not.** `updateRule` generates on
+  > the CROSSING into producing dates, because the partner has just been asked a question and is
+  > owed the result of their answer. `createRule` deliberately does not: somebody writing a rule
+  > types the formula first and the March carve-out second, so generating on the first save would
+  > put a year of filings on the calendar from a half-written rule. A brand-new rule is what the
+  > nightly sweep is for, and the screen says so rather than leaving somebody watching an empty
+  > calendar.
+  >
+  > **What was decided rather than asked, and on what.** Industry practice on effective-dated
+  > regulatory data separates a CORRECTION (the fact was recorded wrong — fix it, and everything
+  > derived from it) from an AMENDMENT (the law changed from a date — a new record, the old one
+  > still explaining what it explained). This schema already encodes which is which: `status`
+  > `unconfirmed` means nobody has checked the date against the statute, so an edit there is a
+  > correction; a period-specific legal change is an EXCEPTION, which is what a CBDT or GST
+  > extension actually is and which was already built. So a formula edit is in-place and restates,
+  > an exception is the amendment path, and effective-dated supersession is NOT built — below.
+  >
+  > **The count is the control, and there is no onboarding checklist.** "47 waiting on a fact" is
+  > now a button that filters. A separate "answer these 47" checklist was considered and refused:
+  > a checklist measures COMPLETION, and most firms will rightly never answer rules their clients
+  > do not owe, so a permanent 12/47 is a product nagging about work nobody should do. The
+  > outcome-linked surface already existed and was unread — `CoverageGap.blockedRuleIds` has been
+  > on `/calendar/coverage` since T3.2 with no consumer, so every engagement there sent a partner
+  > to a list of fifty-seven to find the two that concerned them. The coverage tab now deep-links
+  > `?rules=...` and the rules screen focuses exactly those.
+  >
+  > **A firm's own rules go in `firm@<year>`**, prefilled and editable, kept clear of the shipped
+  > `gst-in@...` / `in-firm-sheet@...` namespace so re-seeding a vendor pack can never collide
+  > with an answer the firm wrote itself. The unique key is `(tenant, jurisdiction, name,
+  > rule_pack)`, so the namespace is the collision boundary rather than a label.
+  >
+  > **`restate`'s SQL is executed by an integration test, not a fake.**
+  > `tests/obligation/restate.integration.test.ts` runs the real repository. It uses the same
+  > `jsonb_to_recordset(...::text::jsonb)` construction whose sibling four hundred lines above
+  > needed the double cast to run at all — a bug found by RUNNING the worker, because the unit
+  > tests use a fake and the old integration test inserted rows by hand. It also proves the WHERE
+  > clause refuses a row somebody picked up between the read and the write, which is what makes
+  > the reported count honest.
+  >
+  > **Found by reading the ledger after using the screen:** `obligation_rule.updated` carried what
+  > an edit did to the calendar and the two exception verbs did not. Both carry `restated` and
+  > `locked` now. Neither carries the note — prose does not `GROUP BY`, and this log cannot be
+  > erased.
+  >
+  > **STILL OPEN, named rather than left implied.** A CONFIRMED rule whose formula the law
+  > genuinely changes mid-life should become a new row with `supersedes_id` and a cutover — the
+  > calendar world's "edit this and all following". It is not built, and the blocker is concrete:
+  > the generation window is `today-90 ... today+365` for every generating rule, so a superseding
+  > rule would immediately re-generate periods the retired one already produced. Different
+  > `template_id`, so the dedup key does not catch it, and the calendar would show each filing
+  > twice. That needs an `effective_from` on the template (migration 0057+), and it is a task
+  > rather than a footnote. In-place editing plus exceptions covers what a firm can actually do
+  > today, and the screen warns before editing a confirmed rule's formula.
 
 ### U1 · Client portal (client) — the real Phase 6 work
 - [ ] `(A)` **T6.5** Invite + secure login, per-contact roles, status home.
@@ -2842,6 +2928,30 @@ sandbox access + credentials. **Not on any demo's critical path.**
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).
 - [ ] `(A)` **T7.4** Banking feed (payment reconciliation), payments (Razorpay/Stripe).
 - [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), email (Gmail/M365), WhatsApp (P10 transport).
+
+---
+
+## The local demo database is not clean, and this is the list
+
+Not security, and not blocking — but it has to be true before anybody is onboarded onto this
+data, and each line is something a session did on purpose and wrote down rather than left for
+somebody to find.
+
+- **T3.3's walk back-dated 7 obligations across both `demo-*` firms and recorded 3 decisions.**
+  The state renamed to "Missed" was renamed back. The ledger events are append-only and stay.
+- **T6.4's walk answered `DPDP compliance`, which generated 4 filings, then added and withdrew a
+  March exception.** All of it was reverted afterwards: the 4 instances and the exception row
+  were deleted as `bib_owner` and the rule's `due_rule` is `NULL` again with the shipped
+  `unresolved_reason` restored byte for byte (verified against `rulepack-in.ts`, and every one of
+  the 37 tenants now holds one identical string). **The revert's own mistake is recorded because
+  it matters more than the walk:** the first restoring `UPDATE` carried no `tenant_id` filter and
+  therefore rewrote that reason on **all 37 tenants**, not the one firm. It is recoverable only
+  because nothing could ever have edited that column before this task — the formula editor is
+  what T6.4 built — so the shipped text was provably still the true value everywhere. **A psql
+  session gets no RLS.** Scope every manual `UPDATE` in this database by `tenant_id`, or use the
+  app.
+- **The ledger keeps all of it**, including the reverted rule edits, and that is correct: they
+  happened.
 
 ---
 

@@ -140,6 +140,29 @@ const RuleSchema = z
   })
   .openapi("ObligationRule");
 
+const RuleEffectSchema = z
+  .object({
+    restated: z.number().int().openapi({
+      description:
+        "Filings already on the calendar whose dates this edit MOVED. The sweep materialises a " +
+        "year ahead and generation is idempotent, so an edit that did not restate would be " +
+        "invisible until next year — this number is how the screen proves it was not.",
+    }),
+    locked: z.number().int().openapi({
+      description:
+        "Filings this edit could NOT touch, because somebody has already picked them up or " +
+        "filed them. A task on a desk keeps the date its owner is working to. Shown rather " +
+        "than hidden: a partial change reported as a whole one is how a deadline moves without " +
+        "anybody being told.",
+    }),
+    spawned: z.number().int().openapi({
+      description:
+        "Filings this rule newly put on the calendar. Non-zero when a rule that was waiting on " +
+        "a fact has just been given its formula — which is the whole point of the screen.",
+    }),
+  })
+  .openapi("ObligationRuleEffect");
+
 const CalendarRowSchema = z
   .object({
     id: z.string().uuid(),
@@ -411,7 +434,12 @@ const createRuleRoute = createRoute({
     body: { content: { "application/json": { schema: CreateRuleRequest } }, required: true },
   },
   responses: {
-    201: { description: "Written", content: { "application/json": { schema: RuleSchema } } },
+    201: {
+      description: "Written",
+      content: {
+        "application/json": { schema: z.object({ rule: RuleSchema, effect: RuleEffectSchema }) },
+      },
+    },
     400: errorResponse(
       "A half-stated due formula, or a rule with neither a formula nor a reason for not having one",
     ),
@@ -436,7 +464,12 @@ const updateRuleRoute = createRoute({
     body: { content: { "application/json": { schema: UpdateRuleRequest } }, required: true },
   },
   responses: {
-    200: { description: "Updated", content: { "application/json": { schema: RuleSchema } } },
+    200: {
+      description: "Updated",
+      content: {
+        "application/json": { schema: z.object({ rule: RuleSchema, effect: RuleEffectSchema }) },
+      },
+    },
     400: errorResponse("A half-stated formula, or a formula and an unresolved reason together"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
@@ -458,7 +491,14 @@ const addExceptionRoute = createRoute({
     body: { content: { "application/json": { schema: AddExceptionRequest } }, required: true },
   },
   responses: {
-    201: { description: "Added", content: { "application/json": { schema: ExceptionSchema } } },
+    201: {
+      description: "Added",
+      content: {
+        "application/json": {
+          schema: z.object({ exception: ExceptionSchema, effect: RuleEffectSchema }),
+        },
+      },
+    },
     400: errorResponse("A half-stated formula, a missing note, or an event-driven rule"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
@@ -474,7 +514,10 @@ const withdrawExceptionRoute = createRoute({
   summary: "Withdraw an exception, so the rule's own formula governs that period again",
   request: { params: ExceptionParam },
   responses: {
-    204: { description: "Withdrawn" },
+    200: {
+      description: "Withdrawn, and what that did to the calendar",
+      content: { "application/json": { schema: z.object({ effect: RuleEffectSchema }) } },
+    },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
     404: errorResponse("No such rule, or no exception for that month"),
@@ -886,14 +929,20 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
-    const created = await deps.service.createRule({ tenantId: s.tenantId, ...body }, s.actor);
+    const { rule, effect } = await deps.service.createRule(
+      { tenantId: s.tenantId, ...body },
+      s.actor,
+    );
     const [record] = (await deps.service.listRules(s.tenantId)).filter(
-      (r) => r.template.id === created.id,
+      (r) => r.template.id === rule.id,
     );
     return c.json(
-      ruleToWire(
-        record ?? { template: created, exceptions: [], serviceName: null, instanceCount: 0 },
-      ),
+      {
+        rule: ruleToWire(
+          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+        ),
+        effect,
+      },
       201,
     );
   });
@@ -902,14 +951,22 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { ruleId } = c.req.valid("param");
-    const updated = await deps.service.updateRule(s.tenantId, ruleId, c.req.valid("json"), s.actor);
+    const { rule, effect } = await deps.service.updateRule(
+      s.tenantId,
+      ruleId,
+      c.req.valid("json"),
+      s.actor,
+    );
     const [record] = (await deps.service.listRules(s.tenantId)).filter(
       (r) => r.template.id === ruleId,
     );
     return c.json(
-      ruleToWire(
-        record ?? { template: updated, exceptions: [], serviceName: null, instanceCount: 0 },
-      ),
+      {
+        rule: ruleToWire(
+          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+        ),
+        effect,
+      },
       200,
     );
   });
@@ -919,7 +976,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     if (!s.ok) return c.json(s.deny, s.status);
     const { ruleId } = c.req.valid("param");
     const body = c.req.valid("json");
-    const created = await deps.service.addException(
+    const { exception: created, effect } = await deps.service.addException(
       s.tenantId,
       ruleId,
       {
@@ -934,12 +991,15 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     );
     return c.json(
       {
-        periodEndMonth: created.periodEndMonth,
-        kind: created.kind,
-        dueMonthOffset: created.dueMonthOffset,
-        dueDayOfMonth: created.dueDayOfMonth,
-        dueDaysAfter: created.dueDaysAfter,
-        note: created.note,
+        exception: {
+          periodEndMonth: created.periodEndMonth,
+          kind: created.kind,
+          dueMonthOffset: created.dueMonthOffset,
+          dueDayOfMonth: created.dueDayOfMonth,
+          dueDaysAfter: created.dueDaysAfter,
+          note: created.note,
+        },
+        effect,
       },
       201,
     );
@@ -949,8 +1009,12 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { ruleId, periodEndMonth } = c.req.valid("param");
-    await deps.service.removeException(s.tenantId, ruleId, periodEndMonth, s.actor);
-    return c.body(null, 204);
+    const effect = await deps.service.removeException(s.tenantId, ruleId, periodEndMonth, s.actor);
+    // 200 AND A BODY, not the 204 this was. Withdrawing an exception puts a
+    // period back under the rule's own formula, which moves dates that are
+    // already on the calendar — and a caller told only "no content" has no way
+    // to know that happened.
+    return c.json({ effect }, 200);
   });
 
   app.openapi(calendarRoute, async (c) => {

@@ -304,8 +304,13 @@ export function mapError(err: unknown): MappedError {
       // move has to reach the person who can move it. Before T3.3 there was no
       // screen and no honest answer; a 500 would have been closer to the truth
       // then and is the wrong answer now.
+      // `PERIOD_SHAPE_LOCKED` is a 409 and not a 400 on the same reasoning: the
+      // request is well formed, and what refuses it is the filings this rule
+      // has already produced. The caller fixes it by retiring the rule and
+      // writing a new one, which is somewhere else entirely.
       case "TEMPLATE_KEY_TAKEN":
       case "TEMPLATE_RETIRED":
+      case "PERIOD_SHAPE_LOCKED":
       case "EXCEPTION_MONTH_TAKEN":
       case "VOCABULARY_CODE_TAKEN":
       case "NO_INITIAL_STATE":

@@ -62,7 +62,8 @@ export type ObligationErrorCode =
   | "CONFLICTING_STATE_FLAGS"
   | "LAST_INITIAL_STATE"
   | "LAST_DESTINATION_STATE"
-  | "INVALID_SORT_ORDER";
+  | "INVALID_SORT_ORDER"
+  | "PERIOD_SHAPE_LOCKED";
 
 // ── the rule ───────────────────────────────────────────────────────────────
 
@@ -189,6 +190,19 @@ export class InvalidRuleStatus extends ObligationError {
       `status ${JSON.stringify(value)} must be "unconfirmed" or "confirmed". Confirming a rule ` +
         `is a partner saying they have checked this date against the statute — the shipped ` +
         `dates came from a document, not from the firm.`,
+    );
+  }
+}
+
+export class PeriodShapeLocked extends ObligationError {
+  constructor(field: string, instanceCount: number) {
+    super(
+      "PERIOD_SHAPE_LOCKED",
+      `${field} decides where a period STARTS and ends, and this rule has already produced ` +
+        `${String(instanceCount)} filing${instanceCount === 1 ? "" : "s"} that are keyed on ` +
+        `those boundaries. Changing it now would orphan every one of them — last quarter's ` +
+        `return would stop matching any quarter. Retire this rule and write a new one instead; ` +
+        `the retired row goes on explaining the filings it produced.`,
     );
   }
 }

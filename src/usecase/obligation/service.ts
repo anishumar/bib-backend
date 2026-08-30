@@ -61,6 +61,7 @@ import {
   NoResolutionState,
   NotAwaitingDecision,
   ObligationNotFound,
+  PeriodShapeLocked,
   ResolutionOptionNotFound,
   ResolutionOptionRetired,
   ResolutionReasonRequired,
@@ -93,6 +94,7 @@ import type {
   ObligationStateRepository,
   ObligationTemplateRepository,
   ResolutionOptionRepository,
+  RestatedInstance,
   ServiceDirectory,
   TemplateEdit,
   TemplateRecord,
@@ -202,6 +204,30 @@ export interface CreateRuleInput {
   readonly rulePack: string;
   readonly supersedesId?: string | null | undefined;
 }
+
+/**
+ * What a rule write did to the calendar that already exists.
+ *
+ * Every rule write returns one, and the screen shows it, because the failure
+ * mode this whole mechanism guards against is SILENCE: a partner edits a
+ * formula, the response says "saved", and whether that moved fourteen filings
+ * or none is invisible until somebody misses one.
+ *
+ * `locked` is the half nobody would think to ask for, and the half that matters
+ * most: the filings this could not touch because somebody has already picked
+ * them up. A partial change reported as a whole one is how a deadline moves
+ * without anybody being told.
+ */
+export interface RuleEffect {
+  /** Un-started filings whose dates this moved. */
+  readonly restated: number;
+  /** Filings already raised or filed, left exactly as they were. */
+  readonly locked: number;
+  /** Filings this rule newly put on the calendar. */
+  readonly spawned: number;
+}
+
+const NO_EFFECT: RuleEffect = { restated: 0, locked: 0, spawned: 0 };
 
 export class ObligationService {
   constructor(private readonly deps: Deps) {}
@@ -357,13 +383,106 @@ export class ObligationService {
     return created;
   }
 
+  /**
+   * Re-derive the dates of everything this rule has produced that nobody has
+   * started, from the rule as it NOW stands.
+   *
+   * ── WHY `scheduleFor` AND NOT SQL ───────────────────────────────────────
+   *
+   * Because it is the function the generator itself uses. Doing the arithmetic
+   * in an UPDATE would be a second implementation of the due-date rules, and
+   * the two would part company the first time an exception was involved —
+   * which is exactly the case a partner is most likely to be editing.
+   *
+   * ── WHY THE STATUTORY DATE MOVES HERE ───────────────────────────────────
+   *
+   * The lead-time-only version of this deliberately never touched it: a lead
+   * time is the firm's own practice and the law's date was not in question.
+   * When the FORMULA changes it is the other way round. The old statutory date
+   * was this system's guess from a vendor's document; the new one is the firm's
+   * answer. Leaving a date we now know to be wrong, because "the law's date is
+   * not ours to change", would keep a wrong legal deadline on the grounds of
+   * respecting the law.
+   */
+  private async restateUnstarted(
+    tenantId: string,
+    template: ObligationTemplate,
+    exceptions: readonly DueRuleException[],
+  ): Promise<{ readonly restated: number; readonly locked: number }> {
+    const unstarted = await this.deps.instances.listUnstarted(tenantId, template.id);
+    const total = await this.deps.instances.countFor(tenantId, template.id);
+    const locked = total - unstarted.length;
+
+    const moved: RestatedInstance[] = [];
+    for (const row of unstarted) {
+      const schedule = scheduleFor(template, exceptions, {
+        start: row.periodStart,
+        end: row.periodEnd,
+        label: row.periodLabel,
+      });
+      // The formula was REMOVED — the rule now says it is waiting on a fact.
+      // The rows it already produced keep the dates they were generated with,
+      // because "we no longer know when this is due" is not the same statement
+      // as "this is no longer due", and blanking a date a client is working to
+      // would be the second of those.
+      if (!schedule) continue;
+      if (
+        schedule.statutoryDueOn === row.statutoryDueOn &&
+        schedule.internalTargetOn === row.internalTargetOn
+      ) {
+        continue;
+      }
+      moved.push({
+        id: row.id,
+        statutoryDueOn: schedule.statutoryDueOn,
+        internalTargetOn: schedule.internalTargetOn,
+      });
+    }
+
+    return { restated: await this.deps.instances.restate(tenantId, moved), locked };
+  }
+
+  /**
+   * Materialise what a rule implies, right now, for that rule alone.
+   *
+   * ── THE CONTROL THAT LOOKS LIVE AND IS INERT ────────────────────────────
+   *
+   * Forty-seven of the fifty-seven shipped rules have no formula. The whole
+   * point of the rules screen is that a partner can supply one. Without this
+   * they would supply it, the row would say "producing dates", and the calendar
+   * would stay empty until the worker's next pass — up to a day, and on a
+   * developer's machine where no worker runs, forever. Nothing would look
+   * broken, which is the worst version.
+   *
+   * It generates only; it does NOT raise tasks or flag anything missed. Those
+   * are the sweep's, and having them fall out of a config edit would mean a
+   * partner correcting a typo could put work on somebody's desk.
+   */
+  private async spawnFor(
+    tenantId: string,
+    templateId: string,
+    actor: Actor,
+  ): Promise<number> {
+    const today = this.today();
+    const report = await this.generate(
+      tenantId,
+      { from: addDays(today, -REACH_BACK_DAYS), to: addDays(today, HORIZON_DAYS) },
+      actor,
+      templateId,
+    );
+    return report.created;
+  }
+
   // ── writing rules ────────────────────────────────────────────────────────
 
   async listRules(tenantId: string): Promise<readonly TemplateRecord[]> {
     return this.deps.templates.list(tenantId);
   }
 
-  async createRule(input: CreateRuleInput, actor: Actor): Promise<ObligationTemplate> {
+  async createRule(
+    input: CreateRuleInput,
+    actor: Actor,
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
     const name = input.name.trim();
     if (name.length === 0) throw new TemplateNameRequired();
     if (!/^[A-Z]{2}$/.test(input.jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
@@ -424,7 +543,16 @@ export class ObligationService {
         leadTimeDays: created.leadTimeDays,
       },
     });
-    return created;
+
+    // ── AND IT DOES NOT GENERATE HERE, DELIBERATELY ────────────────────────
+    //
+    // `updateRule` does, when a rule crosses into producing dates. This does
+    // not, and the difference is not an oversight. A partner writing a rule
+    // from scratch types the formula first and the March carve-out second —
+    // generating on the first save would put a year of filings on the calendar
+    // from a rule that is still half written, and every one of them would then
+    // need restating. A brand-new rule is what the nightly sweep is FOR.
+    return { rule: created, effect: NO_EFFECT };
   }
 
   /**
@@ -449,7 +577,7 @@ export class ObligationService {
     templateId: string,
     edit: TemplateEdit & { readonly status?: string | undefined },
     actor: Actor,
-  ): Promise<ObligationTemplate> {
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
     const current = await this.deps.templates.findById(tenantId, templateId);
     if (!current) throw new TemplateNotFound(templateId);
 
@@ -468,6 +596,31 @@ export class ObligationService {
     }
     const status = edit.status ?? current.status;
     if (!isRuleStatus(String(status))) throw new InvalidRuleStatus(String(status));
+
+    // ── THE PERIOD SHAPE IS PART OF THE IDENTITY ONCE ROWS EXIST ───────────
+    //
+    // `recurrence` and the fiscal year start are not ordinary fields: between
+    // them they decide where a period BEGINS, and `period_start` is the key
+    // every generated filing is deduplicated on. Moving either under existing
+    // rows would orphan all of them — last quarter's return would match no
+    // quarter, the next sweep would generate a second copy of work already
+    // done, and nothing would report an error.
+    //
+    // So they are editable exactly while the rule has produced nothing, which
+    // is the state of all forty-seven rules a partner actually has to answer
+    // for. A rule that IS generating and needs a different shape is a new rule;
+    // the old one retires and goes on explaining the filings it made.
+    const shapeChanged =
+      recurrence !== current.recurrence || fiscalYearStartMonth !== current.fiscalYearStartMonth;
+    if (shapeChanged) {
+      const produced = await this.deps.instances.countFor(tenantId, templateId);
+      if (produced > 0) {
+        throw new PeriodShapeLocked(
+          recurrence !== current.recurrence ? "How often the filing comes round" : "The financial year start",
+          produced,
+        );
+      }
+    }
 
     const serviceEntryId =
       edit.serviceEntryId === undefined ? current.serviceEntryId : edit.serviceEntryId;
@@ -503,17 +656,38 @@ export class ObligationService {
       isActive: edit.isActive ?? current.isActive,
     });
 
-    // A NEW LEAD TIME MOVES THE CALENDAR THAT IS ALREADY THERE.
+    // AN EDIT MOVES THE CALENDAR THAT IS ALREADY THERE.
     //
     // Found by using the rules screen. The sweep materialises a year ahead and
-    // generation is idempotent, so without this a partner could set T-X and
-    // watch nothing happen for twelve months — a control that looks live and is
-    // inert, which is the trap this codebase keeps naming. It moves only rows
-    // nobody has started, and never the statutory date.
-    const redated =
-      updated.leadTimeDays === current.leadTimeDays
-        ? 0
-        : await this.deps.instances.redateUnstarted(tenantId, templateId, updated.leadTimeDays);
+    // generation is idempotent, so without this a partner could change a rule
+    // and watch nothing happen for twelve months — a control that looks live
+    // and is inert, which is the trap this codebase keeps naming.
+    //
+    // Only the fields that DECIDE A DATE trigger it. Renaming the authority or
+    // pointing the rule at a different catalogue service changes nothing about
+    // when anything is due, and a response claiming it moved 162 filings would
+    // be a lie a partner would act on.
+    const datesChanged =
+      updated.leadTimeDays !== current.leadTimeDays ||
+      !sameDueRule(current.dueRule, updated.dueRule);
+    const exceptions = await this.deps.exceptions.listFor(tenantId, templateId);
+    const moved = datesChanged
+      ? await this.restateUnstarted(tenantId, updated, exceptions)
+      : { restated: 0, locked: 0 };
+
+    // AND IT MAY NOW PRODUCE FILINGS IT NEVER HAS.
+    //
+    // The CROSSING, not any formula change. Forty-seven of the fifty-seven
+    // shipped rules say "waiting on a fact"; a rule that has sat on that screen
+    // for six weeks and is now answered must fill the calendar there and then,
+    // because the partner has just been asked a question and is owed the result
+    // of their answer. A correction to a rule that was ALREADY generating
+    // spawns nothing — the periods exist, and restating them is the whole of
+    // it, since the period shape is locked once rows exist.
+    const spawned =
+      !generatesDates(current) && generatesDates(updated)
+        ? await this.spawnFor(tenantId, templateId, actor)
+        : 0;
 
     await this.deps.events.recordEvent({
       tenantId,
@@ -529,20 +703,30 @@ export class ObligationService {
           : { statusFrom: current.status, statusTo: updated.status }),
         ...(updated.leadTimeDays === current.leadTimeDays
           ? {}
+          : { leadTimeFrom: current.leadTimeDays, leadTimeTo: updated.leadTimeDays }),
+        ...(sameDueRule(current.dueRule, updated.dueRule)
+          ? {}
           : {
-              leadTimeFrom: current.leadTimeDays,
-              leadTimeTo: updated.leadTimeDays,
-              // How many filings this actually moved. The number a partner
-              // wants back, and the one that makes the change auditable.
-              redated,
+              // The formula itself, both sides. NOT prose — this is data, it
+              // groups, and "which rules did this firm restate in March" is a
+              // question the ledger should be able to answer without a join.
+              dueRuleFrom: current.dueRule,
+              dueRuleTo: updated.dueRule,
             }),
+        // WHAT IT DID TO THE CALENDAR, always, even when it is zero. A change
+        // that moved nothing and a change that moved fourteen filings are
+        // different events, and eighteen months later the difference is the
+        // only thing anybody wants from this row.
+        ...(moved.restated === 0 && moved.locked === 0 && spawned === 0
+          ? {}
+          : { restated: moved.restated, locked: moved.locked, spawned }),
         ...(updated.isActive === current.isActive ? {} : { isActive: updated.isActive }),
         ...(coverageOf(updated) === coverageOf(current)
           ? {}
           : { coverageFrom: coverageOf(current), coverageTo: coverageOf(updated) }),
       },
     });
-    return updated;
+    return { rule: updated, effect: { ...moved, spawned } };
   }
 
   async addException(
@@ -557,7 +741,7 @@ export class ObligationService {
       readonly note: string;
     },
     actor: Actor,
-  ): Promise<DueRuleException> {
+  ): Promise<{ readonly exception: DueRuleException; readonly effect: RuleEffect }> {
     const template = await this.deps.templates.findById(tenantId, templateId);
     if (!template) throw new TemplateNotFound(templateId);
     if (template.recurrence === "event") throw new ExceptionOnEventRule();
@@ -589,6 +773,23 @@ export class ObligationService {
     });
     if (!created) throw new ExceptionMonthTaken(input.periodEndMonth);
 
+    // AN EXCEPTION IS A DATE CHANGE, and the calendar already holds the period
+    // it applies to. March's TDS is generated eleven months before anybody adds
+    // the carve-out saying March is due on the 30th of April — so without this
+    // the exception would be right on paper and absent from every row it was
+    // written for. Nothing new is spawned: an exception restates a period, it
+    // does not create one.
+    //
+    // BEFORE the event, so the count can go ON it. `obligation_rule.updated`
+    // has carried what an edit did to the calendar since T3.2 and this verb did
+    // not — found by reading the ledger after using the screen, which is the
+    // only place the asymmetry shows.
+    const moved = await this.restateUnstarted(
+      tenantId,
+      template,
+      await this.deps.exceptions.listFor(tenantId, templateId),
+    );
+
     await this.deps.events.recordEvent({
       tenantId,
       verb: "obligation_rule.exception_added",
@@ -602,9 +803,11 @@ export class ObligationService {
         dueMonthOffset: created.dueMonthOffset,
         dueDayOfMonth: created.dueDayOfMonth,
         dueDaysAfter: created.dueDaysAfter,
+        restated: moved.restated,
+        locked: moved.locked,
       },
     });
-    return created;
+    return { exception: created, effect: { ...moved, spawned: 0 } };
   }
 
   async removeException(
@@ -612,7 +815,7 @@ export class ObligationService {
     templateId: string,
     periodEndMonth: number,
     actor: Actor,
-  ): Promise<void> {
+  ): Promise<RuleEffect> {
     const template = await this.deps.templates.findById(tenantId, templateId);
     if (!template) throw new TemplateNotFound(templateId);
     const held = await this.deps.exceptions.listFor(tenantId, templateId);
@@ -620,13 +823,23 @@ export class ObligationService {
       throw new ExceptionNotFound(String(periodEndMonth));
     }
     await this.deps.exceptions.withdraw(tenantId, templateId, periodEndMonth);
+    // Withdrawing one puts the period back under the rule's own formula, which
+    // is a date change in exactly the same way adding it was — and the count
+    // goes on the event for the same reason it does there.
+    const moved = await this.restateUnstarted(
+      tenantId,
+      template,
+      await this.deps.exceptions.listFor(tenantId, templateId),
+    );
+
     await this.deps.events.recordEvent({
       tenantId,
       verb: "obligation_rule.exception_removed",
       objectId: templateId,
       actor,
-      payload: { periodEndMonth },
+      payload: { periodEndMonth, restated: moved.restated, locked: moved.locked },
     });
+    return { ...moved, spawned: 0 };
   }
 
   // ── generating ───────────────────────────────────────────────────────────
@@ -692,6 +905,15 @@ export class ObligationService {
     tenantId: string,
     window: { readonly from: IsoDate; readonly to: IsoDate },
     actor: Actor = SYSTEM_ACTOR,
+    /**
+     * One rule only, for the write path.
+     *
+     * A partner who has just given a rule its formula is told how many filings
+     * that produced, in the same response. Without the filter the reply would
+     * be the whole firm's sweep and the number would answer a question nobody
+     * asked; with it, the work is bounded by the one rule they edited.
+     */
+    onlyTemplateId?: string,
   ): Promise<Omit<GenerateReport, "raised" | "missed" | "uncoveredEngagements">> {
     if (!isIsoDate(window.from) || !isIsoDate(window.to) || window.from > window.to) {
       throw new InvalidWindow(window.from, window.to);
@@ -721,6 +943,7 @@ export class ObligationService {
       // The generator's own filter, named once in the domain so the rules
       // screen and this loop cannot disagree about what "generating" means.
       if (!generatesDates(template)) continue;
+      if (onlyTemplateId !== undefined && template.id !== onlyTemplateId) continue;
 
       const subjects = await this.deps.calendarSource.subjectsFor(tenantId, {
         jurisdiction: template.jurisdiction,
@@ -1226,6 +1449,24 @@ function readDueRule(
 
 /** Empty string and whitespace mean "cleared", not "a blank value". Every
  *  optional text column on a rule takes the same reading. */
+/**
+ * Whether two formulas say the same thing.
+ *
+ * Field by field rather than by reference, because `updateRule` resolves an
+ * absent `dueRule` to the CURRENT one — so the two are frequently different
+ * objects holding identical values, and a reference test would restate the
+ * whole calendar every time somebody ticked "confirmed".
+ */
+function sameDueRule(a: DueRule | null, b: DueRule | null): boolean {
+  if (a === null || b === null) return a === b;
+  return (
+    a.kind === b.kind &&
+    a.dueMonthOffset === b.dueMonthOffset &&
+    a.dueDayOfMonth === b.dueDayOfMonth &&
+    a.dueDaysAfter === b.dueDaysAfter
+  );
+}
+
 function trimToNull(v: string | null | undefined): string | null {
   return (v ?? "").trim() || null;
 }

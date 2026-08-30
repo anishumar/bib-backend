@@ -449,6 +449,29 @@ export interface CalendarQuery {
   readonly limit?: number | undefined;
 }
 
+/**
+ * An un-started obligation, as the restater reads it: the period it covers and
+ * the dates it currently holds — everything needed to decide whether the rule
+ * as it now stands would have produced something different.
+ */
+export interface UnstartedInstance {
+  readonly id: string;
+  readonly periodStart: IsoDate;
+  readonly periodEnd: IsoDate;
+  readonly periodLabel: string;
+  readonly statutoryDueOn: IsoDate;
+  readonly internalTargetOn: IsoDate;
+}
+
+/** One row's new dates. Only rows that actually MOVED are sent — a restate
+ *  that rewrote every row to the value it already held would report a number a
+ *  partner reads as "this changed 162 filings". */
+export interface RestatedInstance {
+  readonly id: string;
+  readonly statutoryDueOn: IsoDate;
+  readonly internalTargetOn: IsoDate;
+}
+
 export interface ObligationInstanceRepository {
   /**
    * Propose a batch and return the rows that were actually NEW.
@@ -549,26 +572,46 @@ export interface ObligationInstanceRepository {
     },
   ): Promise<boolean>;
   /**
-   * Move the INTERNAL target of everything this rule has produced that nobody
-   * has started, by a new lead time.
+   * Everything this rule has produced that nobody has started, with the period
+   * each row covers and the dates it currently holds.
+   *
+   * ── WHY THE PERIOD COMES BACK TOO ─────────────────────────────────────
+   *
+   * Because the caller re-derives the dates with `scheduleFor`, which is the
+   * SAME function the generator uses. An UPDATE doing the arithmetic in SQL
+   * would be a second implementation of the due-date rules, and the two would
+   * disagree the first time an exception was involved — which is exactly the
+   * case a partner is most likely to be editing.
+   */
+  listUnstarted(tenantId: string, templateId: string): Promise<readonly UnstartedInstance[]>;
+  /**
+   * Write back dates recomputed from the rule as it now stands.
    *
    * ── WHY THIS EXISTS, AND WHY IT TOUCHES ONLY THE UNSTARTED ─────────────────
    *
-   * Found by using the screen. A partner sets a lead time and expects the
-   * calendar to move — but generation is idempotent, and the sweep materialises
-   * a YEAR ahead, so without this the change would touch nothing at all until
+   * Found by using the screen. A partner edits a rule and expects the calendar
+   * to move — but generation is idempotent on
+   * `(tenant, template, entity, period_start)`, and the sweep materialises a
+   * YEAR ahead, so without this the change would touch nothing at all until
    * next year's periods came round. A control that appears to work and quietly
    * does nothing for twelve months is worse than one that is missing.
    *
-   * It moves the internal target and NEVER the statutory date: one is the
-   * firm's own working practice and is theirs to change, the other is the law's
-   * and is not.
+   * It restates the STATUTORY date as well as the internal one, and that is a
+   * deliberate reversal of what the lead-time-only version of this did. A lead
+   * time is the firm's own practice and the statutory date is not in question
+   * there; but when the FORMULA changes, the old statutory date was this
+   * system's guess from a vendor's document and the new one is the firm's own
+   * answer. Leaving a date we now know to be wrong, on the grounds that "the
+   * law's date is not ours to change", would be the wrong way round — nobody
+   * is changing the law, somebody is finally recording it.
    *
-   * And it stops at anything already RAISED or FILED. A task on somebody's desk
-   * has a date they are working to; re-dating it underneath them is how a
-   * deadline moves without anybody being told.
+   * It stops at anything already RAISED or FILED, which is what `listUnstarted`
+   * excludes. A task on somebody's desk has a date they are working to;
+   * re-dating it underneath them is how a deadline moves without anybody being
+   * told. The caller reports how many it therefore could NOT touch, because a
+   * silent partial change is the failure mode here.
    */
-  redateUnstarted(tenantId: string, templateId: string, leadTimeDays: number): Promise<number>;
+  restate(tenantId: string, rows: readonly RestatedInstance[]): Promise<number>;
   countFor(tenantId: string, templateId: string): Promise<number>;
 }
 
