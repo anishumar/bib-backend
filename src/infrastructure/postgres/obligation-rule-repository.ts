@@ -56,6 +56,8 @@ interface TemplateRow {
   supersedes_id: string | null;
   status: string;
   is_active: boolean;
+  effective_from: string | null;
+  effective_to: string | null;
 }
 
 interface ExceptionRow {
@@ -85,7 +87,11 @@ interface StateRow {
 const TEMPLATE_COLUMNS =
   "id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority, " +
   "recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month, " +
-  "due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id, status, is_active";
+  "due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id, status, " +
+  // `::text` on both dates, which is what `day.ts` names as the better answer
+  // where a query is being written anyway: Postgres renders the day, no `Date`
+  // is constructed, and no zone is involved at any point.
+  "is_active, effective_from::text, effective_to::text";
 
 const EXCEPTION_COLUMNS =
   "period_end_month, due_rule, due_month_offset, due_day_of_month, due_days_after, note";
@@ -123,6 +129,8 @@ function toTemplate(r: TemplateRow): ObligationTemplate {
     supersedesId: r.supersedes_id,
     status: r.status as ObligationTemplate["status"],
     isActive: r.is_active,
+    effectiveFrom: r.effective_from,
+    effectiveTo: r.effective_to,
   };
 }
 
@@ -169,13 +177,15 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
         INSERT INTO delivery.obligation_template
           (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
-           due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id)
+           due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
+           effective_from, effective_to)
         VALUES
           (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
-           ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${t.supersedesId})
+           ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${t.supersedesId},
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date)
         -- The rule's own identity. A revision is a NEW row under a new pack, so
         -- a conflict here means "we already have this exact rule" and the seed
         -- must leave the firm's own confirmations and lead times alone.
@@ -184,6 +194,51 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       `;
       const row = rows[0];
       return row ? toTemplate(row) : null;
+    });
+  }
+
+  async supersede(
+    tenantId: string,
+    predecessorId: string,
+    t: NewObligationTemplate,
+  ): Promise<ObligationTemplate> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // ONE TRANSACTION, and `withTenant` is already one — see the port for why
+      // each half alone is a broken calendar. The cutover day is the successor's
+      // `effective_from`, so there is a single value and the two rows cannot
+      // disagree about it.
+      const closed = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_template
+        SET effective_to = ${t.effectiveFrom}::date
+        WHERE id = ${predecessorId}
+        RETURNING id
+      `;
+      if (closed.length === 0) throw new Error("obligation_template predecessor vanished");
+
+      const rows = await db<TemplateRow[]>`
+        INSERT INTO delivery.obligation_template
+          (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
+           recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
+           due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
+           effective_from, effective_to)
+        VALUES
+          (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
+           ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
+           ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
+           ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
+           ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${predecessorId},
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date)
+        RETURNING ${db.unsafe(TEMPLATE_COLUMNS)}
+      `;
+      const row = rows[0];
+      // No `ON CONFLICT` here, deliberately: a successor colliding on
+      // (tenant, jurisdiction, name, rule_pack) means the firm already wrote
+      // this amendment, and swallowing that would close the predecessor a
+      // SECOND time against a successor somebody else made. The unique
+      // violation rolls the whole transaction back, which is the correct
+      // outcome, and the service turns it into a sentence.
+      if (!row) throw new Error("obligation_template successor insert returned nothing");
+      return toTemplate(row);
     });
   }
 

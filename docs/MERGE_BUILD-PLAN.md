@@ -2818,6 +2818,39 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
 
 ### U2 · 10X workspace (staff) — built vertically during Phases 2–5, tracked here
 - [ ] `(B)` **T6.1** App shell, auth'd nav, work board (Kanban), verification queue screen. *(with Ph2–3)*
+  > **VERIFIED 2026-08-31, and NOT ticked — one of the four is unproven.**
+  >
+  > · **App shell** — built, by `(A)`'s design system (frontend `a099fdf`): `AppShell`, a
+  >   sidebar in sections, a theme switch. The per-screen navs are gone, which was the point.
+  > · **Auth'd nav** — built. Every sidebar entry carries `needs: "<permission>"` and the fee
+  >   axis carries a `when` predicate, all resolved from `/auth/me`. A link is offered only to
+  >   somebody who can use it, and the API still refuses independently.
+  > · **Verification queue** — built (T2.9). `/work`'s "To check" tab, the WHOLE FIRM's queue
+  >   with `viewer.eligible` and, when false, the reason in words.
+  > · **Work board (Kanban)** — was NOT built. `/work-items` was a tabbed TABLE. A board with
+  >   columns is now written (`work-items/board.tsx`) and both gates are green, **but it has
+  >   not been opened in a browser** — the Chrome extension disconnected mid-session and three
+  >   attempts to reconnect failed. This codebase's own rule is that a screen is not done until
+  >   somebody has looked at it, and two of the last three tasks found rendering faults that
+  >   typechecking was perfectly happy with. So the box stays empty until it has been walked.
+  >
+  > **What the board is, and the two decisions in it.** The COLUMNS are the firm's own
+  > `work_item_state` rows, ordered by its own `sortOrder` — 0050 made them rows precisely so a
+  > firm could rename "Blocked" to "Stuck", and a board with hardcoded columns takes that back
+  > on the screen where it shows most. A state with no items still gets a column, because
+  > "nothing is under review" is a fact worth seeing and a board that changed shape as work
+  > moved would be unreadable week to week.
+  >
+  > **THERE IS NO DRAG-AND-DROP, deliberately.** Moving an item into a state the firm has
+  > flagged `is_blocked` REQUIRES a written reason — the service refuses without one and so
+  > does a trigger — so a drag would produce a refusal with nowhere to type the answer. And
+  > every state change writes an audit event naming its actor, which is not a thing to make one
+  > pixel of slippage away from. A card links to the item, where the state picker already opens
+  > the reason box the moment a blocked state is chosen.
+  >
+  > **Board or list is a VIEW, not a fourth tab.** The three tabs are three different questions
+  > — whose desk, nobody's desk, everybody's desk. Drawing is a different axis, and a fourth tab
+  > would have left "Mine, as a board" nowhere to live.
 - [ ] `(A)` **T6.2** Client 360 (as-of date), leads pipeline, proposal/EL builder. *(first screen ~week 4–5, with Ph1–2)*
 - [ ] `(A)` **T6.3** Invoicing + collections screens, leadership dashboards (MRR/DSO/ageing). *(with Ph3)*
 - [x] `(B)` **T6.4** Compliance calendar + rules screen (config a partner can edit — the "row with a screen" bar). *(with Ph3)*
@@ -2899,15 +2932,63 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   > `locked` now. Neither carries the note — prose does not `GROUP BY`, and this log cannot be
   > erased.
   >
-  > **STILL OPEN, named rather than left implied.** A CONFIRMED rule whose formula the law
-  > genuinely changes mid-life should become a new row with `supersedes_id` and a cutover — the
-  > calendar world's "edit this and all following". It is not built, and the blocker is concrete:
-  > the generation window is `today-90 ... today+365` for every generating rule, so a superseding
-  > rule would immediately re-generate periods the retired one already produced. Different
-  > `template_id`, so the dedup key does not catch it, and the calendar would show each filing
-  > twice. That needs an `effective_from` on the template (migration 0057+), and it is a task
-  > rather than a footnote. In-place editing plus exceptions covers what a firm can actually do
-  > today, and the screen warns before editing a confirmed rule's formula.
+  > ~~**STILL OPEN**: a CONFIRMED rule whose formula the law genuinely changes mid-life should
+  > become a new row with `supersedes_id` and a cutover.~~ **BUILT 2026-08-31, migration 0057.**
+  > See below.
+  >
+  > ── **SUPERSESSION — the amendment, as against the correction (0057)** ──
+  >
+  > A rule now has a WINDOW: `effective_from` / `effective_to`, half-open, both nullable, both
+  > null on every row that exists — so applying it moved no calendar and changed no firm's
+  > behaviour.
+  >
+  > **The window is tested against the PERIOD START, never the due date**, and that is the
+  > decision the whole thing turns on. The rule governing a filing is the one in force for the
+  > PERIOD BEING FILED: August's return is August's law even though it falls due on 20
+  > September, so a change effective 1 September must not reach back and restate August.
+  > Testing the due date would move every date by exactly one period and look entirely
+  > plausible. `governsPeriod` in the domain names it once, so the generator and the screen
+  > cannot disagree.
+  >
+  > **Half-open, and the demo already made the inclusive mistake once.** `effective_to` is the
+  > first day NOT in force, so a rule ending on the 1st and its successor starting on the 1st
+  > govern one period each. Inclusive bounds gave the demo two SPOCs on every changeover day;
+  > the same error here is two filings for one return, generated under different template ids
+  > that the re-run key `(tenant, template, entity, period_start)` cannot deduplicate.
+  >
+  > **`supersede` is ONE repository method and one transaction, and that is the point.** Each
+  > half alone is a silently broken calendar in opposite directions: a closed predecessor with
+  > no successor stops the firm's clients being told about a filing they still owe, and a
+  > successor written while the predecessor is still open puts every later return on the
+  > calendar TWICE. `supersede.integration.test.ts` proves the rollback specifically — a
+  > successor colliding on the rule's identity leaves the predecessor OPEN — because that is
+  > the property a fake cannot establish and the one that costs money when it is wrong.
+  >
+  > **The predecessor is CLOSED, not retired.** Retiring stops it generating at all, including
+  > for periods before the cutover that the ninety-day reach-back has not materialised yet — a
+  > client onboarded last month would silently lose the period it was engaged for. A window
+  > says WHICH PERIODS each row governs, which is the actual question; `is_active` says whether
+  > the row is switched on, which is not.
+  >
+  > **Three refusals, each with a sentence:** a cutover at or before the rule's own start
+  > (`CUTOVER_BEFORE_START` — the rule would govern nothing), a successor reusing the
+  > predecessor's pack (`SUCCESSOR_NEEDS_ITS_OWN_PACK` — a pack is part of the identity, so it
+  > would collide on the unique key), and superseding a rule that already hands over
+  > (`ALREADY_SUPERSEDED`, 409 — two successors covering one period is two filings for one
+  > return). All three fire BEFORE the write, so a refusal never leaves a half-closed rule.
+  >
+  > **`obligation_rule.superseded` is the new verb**, carrying the cutover, both packs and both
+  > formulas — "which rule was this return due under" is the question an audit asks, and the
+  > answer moved on a date. The contract-parity test caught it missing from
+  > `EVENT-CONTRACT.md` on the first run, which is that test doing exactly its job.
+  >
+  > **Walked through the real API with a real session**, on a throwaway rule so the shipped 57
+  > were untouched: created, superseded at 2026-09-01, and the successor generated **24 filings
+  > starting exactly 2026-09-01** — not a day earlier, though the generation window reaches
+  > back to June — with **zero periods duplicated per entity**. Both refusals answered 409 and
+  > 400 with their sentences. The rows were then deleted, scoped by `tenant_id` this time.
+  > **The SCREEN (`supersede.tsx`) has not been walked** — same disconnected extension as
+  > T6.1's board.
 
 ### U1 · Client portal (client) — the real Phase 6 work
 - [ ] `(A)` **T6.5** Invite + secure login, per-contact roles, status home.
@@ -3124,6 +3205,12 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
   itself (`reports_to_user_id`, 0048) and escalation resolves through it today. What is left of
   G3.4 is Gate 4, whose consumer is U1 — so it moves to Phase 6 rather than being pulled
   forward. See G3.4's own note.
+- **G3.4, re-checked 2026-08-31 because a stale note said `(B)`'s escalation needed it.** It
+  does not, and the note was wrong: T2.9's `membership.reports_to_user_id` (0048) already
+  answers "escalate to this assignee's manager", with live consumers in `usecase/verification`
+  and `usecase/workitem`. What is left of G3.4 is Gate 4 — which parties a CLIENT PORTAL
+  session may see — it is `(A)`'s, its only consumer is U1, and building it now would be a
+  column with no writer. It stays in Phase 6, which is on the far side of the pause.
 - **G1.1** — the document reference generator: per entity per year, or one continuous series.
 - ~~**G0.1** — must an EL line name an entity the firm has already incorporated?~~ **Settled
   (2026-08-28): no.** The key stays on `core.party`, and Incorporation is why. That service

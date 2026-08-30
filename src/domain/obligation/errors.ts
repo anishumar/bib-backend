@@ -63,7 +63,11 @@ export type ObligationErrorCode =
   | "LAST_INITIAL_STATE"
   | "LAST_DESTINATION_STATE"
   | "INVALID_SORT_ORDER"
-  | "PERIOD_SHAPE_LOCKED";
+  | "PERIOD_SHAPE_LOCKED"
+  | "INVALID_CUTOVER"
+  | "CUTOVER_BEFORE_START"
+  | "ALREADY_SUPERSEDED"
+  | "SUCCESSOR_NEEDS_ITS_OWN_PACK";
 
 // ── the rule ───────────────────────────────────────────────────────────────
 
@@ -190,6 +194,51 @@ export class InvalidRuleStatus extends ObligationError {
       `status ${JSON.stringify(value)} must be "unconfirmed" or "confirmed". Confirming a rule ` +
         `is a partner saying they have checked this date against the statute — the shipped ` +
         `dates came from a document, not from the firm.`,
+    );
+  }
+}
+
+export class InvalidCutover extends ObligationError {
+  constructor(value: string) {
+    super(
+      "INVALID_CUTOVER",
+      `${JSON.stringify(value)} is not a day. The date a law changes must be written ` +
+        `YYYY-MM-DD, because it is compared against the first day of a filing PERIOD — ` +
+        `August's return is August's law even though it falls due in September.`,
+    );
+  }
+}
+
+export class CutoverBeforeStart extends ObligationError {
+  constructor(cutover: string, start: string) {
+    super(
+      "CUTOVER_BEFORE_START",
+      `This rule only began governing periods from ${start}, so a change taking effect ` +
+        `${cutover} would leave it governing nothing at all. If the earlier rule was wrong, ` +
+        `correct it rather than superseding it — its dates were never confirmed against the ` +
+        `statute in the first place.`,
+    );
+  }
+}
+
+export class AlreadySuperseded extends ObligationError {
+  constructor(name: string, endsOn: string) {
+    super(
+      "ALREADY_SUPERSEDED",
+      `${name} already hands over on ${endsOn}, so it is not the rule in force. Amend the one ` +
+        `that governs periods from then on — superseding this row a second time would leave ` +
+        `two successors covering the same periods, which is two filings for one return.`,
+    );
+  }
+}
+
+export class SuccessorNeedsItsOwnPack extends ObligationError {
+  constructor(pack: string) {
+    super(
+      "SUCCESSOR_NEEDS_ITS_OWN_PACK",
+      `The new rule needs a rule pack of its own — ${JSON.stringify(pack)} is the one it ` +
+        `replaces. A pack is part of a rule's identity, which is what lets a filing made last ` +
+        `year still name the version it was due under. Try dating it, as the shipped packs do.`,
     );
   }
 }

@@ -310,6 +310,7 @@ version is exactly what gets asked about afterwards.
 | `obligation_rule.updated` | obligation_template | A rule was edited, confirmed against the statute, or retired. `status` → confirmed is a partner taking responsibility for a date. |
 | `obligation_rule.exception_added` | obligation_template | A rule gained an exception for one period — March TDS due 30 April. The NOTE stays on the row; only the month and the replacement rule travel here. |
 | `obligation_rule.exception_removed` | obligation_template | An exception was withdrawn, so the rule's own formula governs that period again. |
+| `obligation_rule.superseded` | obligation_template | The LAW changed from a day, so a rule handed over to a successor. Not an edit and not a retirement: the predecessor goes on governing every period before the cutover. Payload carries the cutover, both rule packs and both formulas. |
 | `obligation_rules.seeded` | tenant | A firm was given the shipped India rule pack. Payload counts what generates and what is waiting on a fact the firm has not given. |
 | `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states and resolution options were initialised from the product defaults. One event, not nine. |
 | `obligation_state.created` | obligation_state | A firm added a state to its compliance vocabulary. The FLAGS are mechanism, not appearance: which state a generated filing starts in, where a finished one lands, where a passed deadline goes. |

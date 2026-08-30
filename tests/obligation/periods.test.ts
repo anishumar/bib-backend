@@ -51,6 +51,8 @@ function rule(over: Partial<ObligationTemplate> = {}): ObligationTemplate {
     supersedesId: null,
     status: "unconfirmed",
     isActive: true,
+    effectiveFrom: null,
+    effectiveTo: null,
     ...over,
   };
 }

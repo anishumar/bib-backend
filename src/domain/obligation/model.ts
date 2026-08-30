@@ -157,6 +157,18 @@ export interface ObligationTemplate {
   readonly supersedesId: string | null;
   readonly status: RuleStatus;
   readonly isActive: boolean;
+  /**
+   * The first period START this rule governs. Null means from the beginning.
+   *
+   * Half-open with `effectiveTo`, and tested against the period's START rather
+   * than its due date: the rule that governs a filing is the one in force for
+   * the PERIOD BEING FILED. August's return is August's law even though it
+   * falls due on 20 September.
+   */
+  readonly effectiveFrom: IsoDate | null;
+  /** The first period start this rule does NOT govern — the day its successor
+   *  takes over. Null means forever. */
+  readonly effectiveTo: IsoDate | null;
 }
 
 // ── what a rule is actually doing, and why ─────────────────────────────────
@@ -191,6 +203,33 @@ export function coverageOf(t: ObligationTemplate): RuleCoverage {
  *  filter, named once so the screen and the sweep cannot disagree about it. */
 export function generatesDates(t: ObligationTemplate): boolean {
   return coverageOf(t) === "generating";
+}
+
+/**
+ * Whether this rule governs a period beginning on `periodStart`.
+ *
+ * ── THE HALF-OPEN BOUND IS THE WHOLE FUNCTION ─────────────────────────────
+ *
+ * `effectiveTo` is the first day NOT in force, so a rule ending 2027-04-01 and
+ * its successor starting 2027-04-01 govern one period each and never the same
+ * one. An inclusive bound would give April to both — and two rules governing
+ * one period is TWO FILINGS for one return, generated under different template
+ * ids that the re-run key cannot deduplicate. The demo made the inclusive
+ * mistake on client assignments and showed two SPOCs on every changeover day;
+ * the cost here is a client filing twice.
+ *
+ * ── AND IT IS THE PERIOD START, NOT THE STATUTORY DATE ────────────────────
+ *
+ * Named once, here, so the generator and the screen cannot disagree about it.
+ * A law changing on 1 September must not reach back and restate August's
+ * return, which falls due on 20 September under August's rule. Testing the due
+ * date would move every date by exactly one period and look entirely
+ * plausible.
+ */
+export function governsPeriod(t: ObligationTemplate, periodStart: IsoDate): boolean {
+  if (t.effectiveFrom !== null && periodStart < t.effectiveFrom) return false;
+  if (t.effectiveTo !== null && periodStart >= t.effectiveTo) return false;
+  return true;
 }
 
 // ── the state an obligation is in ──────────────────────────────────────────

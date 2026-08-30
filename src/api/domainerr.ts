@@ -277,6 +277,9 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_LEAD_TIME":
       case "INVALID_RULE_PACK":
       case "INVALID_RULE_STATUS":
+      case "INVALID_CUTOVER":
+      case "CUTOVER_BEFORE_START":
+      case "SUCCESSOR_NEEDS_ITS_OWN_PACK":
       case "INVALID_PERIOD_END_MONTH":
       case "EXCEPTION_NOTE_REQUIRED":
       case "EXCEPTION_ON_EVENT_RULE":
@@ -306,11 +309,14 @@ export function mapError(err: unknown): MappedError {
       // then and is the wrong answer now.
       // `PERIOD_SHAPE_LOCKED` is a 409 and not a 400 on the same reasoning: the
       // request is well formed, and what refuses it is the filings this rule
-      // has already produced. The caller fixes it by retiring the rule and
-      // writing a new one, which is somewhere else entirely.
+      // has already produced. The caller fixes it by superseding the rule,
+      // which is somewhere else entirely. `ALREADY_SUPERSEDED` is a 409 for the
+      // same shape of reason — what refuses it is a handover the firm has
+      // already recorded.
       case "TEMPLATE_KEY_TAKEN":
       case "TEMPLATE_RETIRED":
       case "PERIOD_SHAPE_LOCKED":
+      case "ALREADY_SUPERSEDED":
       case "EXCEPTION_MONTH_TAKEN":
       case "VOCABULARY_CODE_TAKEN":
       case "NO_INITIAL_STATE":

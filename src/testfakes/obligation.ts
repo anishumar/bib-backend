@@ -73,6 +73,38 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     return Promise.resolve(row);
   }
 
+  supersede(
+    tenantId: string,
+    predecessorId: string,
+    t: NewObligationTemplate,
+  ): Promise<ObligationTemplate> {
+    // BOTH HALVES OR NEITHER, the same as the SQL. The fake models the
+    // atomicity rather than only the happy path: a test that could observe a
+    // closed predecessor with no successor would be exercising a state the real
+    // repository cannot produce.
+    const i = this.rows.findIndex((r) => r.id === predecessorId && r.tenantId === tenantId);
+    const predecessor = this.rows[i];
+    if (i < 0 || !predecessor) throw new Error("obligation_template predecessor vanished");
+    const taken = this.rows.some(
+      (r) =>
+        r.tenantId === t.tenantId &&
+        r.jurisdiction === t.jurisdiction &&
+        r.name === t.name &&
+        r.rulePack === t.rulePack,
+    );
+    if (taken) throw new Error("obligation_template successor conflicted");
+
+    const successor: ObligationTemplate = {
+      ...t,
+      supersedesId: predecessorId,
+      status: "unconfirmed",
+      isActive: true,
+    };
+    this.rows[i] = { ...predecessor, effectiveTo: t.effectiveFrom };
+    this.rows.push(successor);
+    return Promise.resolve(successor);
+  }
+
   findById(tenantId: string, templateId: string): Promise<ObligationTemplate | null> {
     return Promise.resolve(
       this.rows.find((r) => r.tenantId === tenantId && r.id === templateId) ?? null,

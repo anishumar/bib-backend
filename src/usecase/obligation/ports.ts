@@ -41,6 +41,11 @@ export interface NewObligationTemplate {
   readonly leadTimeDays: number;
   readonly rulePack: string;
   readonly supersedesId: string | null;
+  /** The first period start this rule governs, half-open with `effectiveTo`.
+   *  Null on both is the ordinary case and means "always" — a rule nobody has
+   *  had to amend, which is all of them until somebody supersedes one. */
+  readonly effectiveFrom: IsoDate | null;
+  readonly effectiveTo: IsoDate | null;
 }
 
 /** What a partner may change on a rule after it exists. Deliberately short: the
@@ -105,6 +110,36 @@ export interface ObligationTemplateRepository {
   createIfAbsent(template: NewObligationTemplate): Promise<ObligationTemplate | null>;
   findById(tenantId: string, templateId: string): Promise<ObligationTemplate | null>;
   update(tenantId: string, templateId: string, patch: TemplatePatch): Promise<ObligationTemplate>;
+  /**
+   * Close one rule at a day and open its successor on the same day, ATOMICALLY.
+   *
+   * ── WHY IT IS ONE METHOD AND NOT TWO CALLS ────────────────────────────────
+   *
+   * Because each half alone is a broken calendar, in opposite directions, and
+   * both are silent:
+   *
+   *   · predecessor closed, successor missing → the firm's clients stop being
+   *     told about a filing they still owe. Nothing errors; the calendar is
+   *     simply short from that day on.
+   *   · successor written, predecessor still open → BOTH govern every period
+   *     after the cutover, under different template ids that the re-run key
+   *     `(tenant, template, entity, period_start)` cannot deduplicate. Every
+   *     return appears twice, and the second one is indistinguishable from real
+   *     work.
+   *
+   * A service that made two calls would leave one of those states behind on
+   * every crash, redelivery and dropped connection. One transaction, or the
+   * amendment did not happen.
+   *
+   * The successor carries `supersedes_id`, which is the chain that lets a
+   * filing made in 2026 still explain its own date after the law changed in
+   * 2027.
+   */
+  supersede(
+    tenantId: string,
+    predecessorId: string,
+    successor: NewObligationTemplate,
+  ): Promise<ObligationTemplate>;
   /** Every rule at the firm, retired ones included — the rules screen shows
    *  them, because a retired rule still explains an old filing's date. */
   list(tenantId: string): Promise<readonly TemplateRecord[]>;

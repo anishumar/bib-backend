@@ -25,6 +25,7 @@ import {
   DEFAULT_RESOLUTION_OPTIONS,
   filedState,
   generatesDates,
+  governsPeriod,
   initialState,
   isDueRuleKind,
   isIsoDate,
@@ -60,8 +61,12 @@ import {
   NoMissedState,
   NoResolutionState,
   NotAwaitingDecision,
+  AlreadySuperseded,
+  CutoverBeforeStart,
+  InvalidCutover,
   ObligationNotFound,
   PeriodShapeLocked,
+  SuccessorNeedsItsOwnPack,
   ResolutionOptionNotFound,
   ResolutionOptionRetired,
   ResolutionReasonRequired,
@@ -339,6 +344,8 @@ export class ObligationService {
         // commitment the firm never made.
         leadTimeDays: 0,
         rulePack: INDIA_RULE_PACK,
+      effectiveFrom: null,
+      effectiveTo: null,
         supersedesId: null,
       });
       if (!template) continue;
@@ -420,6 +427,12 @@ export class ObligationService {
         end: row.periodEnd,
         label: row.periodLabel,
       });
+      // OUTSIDE THIS RULE'S WINDOW, so it is not this rule's to restate — its
+      // successor governs that period now. Leaving the row alone is right:
+      // deleting it would erase a filing that is genuinely owed, and moving it
+      // to the successor's formula is the successor's job on its own next
+      // sweep.
+      if (!governsPeriod(template, row.periodStart)) continue;
       // The formula was REMOVED — the rule now says it is waiting on a fact.
       // The rows it already produced keep the dates they were generated with,
       // because "we no longer know when this is due" is not the same statement
@@ -526,6 +539,10 @@ export class ObligationService {
       leadTimeDays: input.leadTimeDays,
       rulePack,
       supersedesId: input.supersedesId ?? null,
+      // A rule written from scratch governs every period. Superseding is a
+      // different operation with its own method — see `supersedeRule`.
+      effectiveFrom: null,
+      effectiveTo: null,
     });
     if (!created) throw new TemplateKeyTaken(input.jurisdiction, name, rulePack);
 
@@ -572,6 +589,155 @@ export class ObligationService {
    * those filings were due when they were — so a revised rule is a new row
    * under a new pack, and `supersedes_id` is the chain between them.
    */
+  /**
+   * The law changed, from a day. Close this rule there and open its successor.
+   *
+   * ── WHY THIS IS NOT `updateRule` ──────────────────────────────────────────
+   *
+   * `updateRule` is a CORRECTION: the India pack's dates came from a previous
+   * vendor's document, everything ships `unconfirmed`, and a partner supplying
+   * the real formula is recording the law properly for the first time rather
+   * than changing it. So it edits in place and restates the filings already
+   * generated, which is right — those dates were this system's guess.
+   *
+   * This is an AMENDMENT. The old formula was CORRECT for every period before
+   * the cutover, and a filing made under it has to go on explaining its own
+   * date forever. Editing in place would silently restate why those filings
+   * were due when they were, which is the exact thing this table's immutable
+   * identity and its `supersedes_id` chain exist to prevent.
+   *
+   * ── WHY IT IS NOT "RETIRE THE OLD ONE AND WRITE A NEW ONE" EITHER ────────
+   *
+   * That was already possible and it is wrong in both directions, silently:
+   * a new rule with no window regenerates every period the old one produced
+   * (a different `template_id`, so the re-run key cannot deduplicate, and every
+   * return appears twice), while retiring the old one stops it generating for
+   * periods BEFORE the cutover that the ninety-day reach-back has not reached
+   * yet. The window says WHICH PERIODS each row governs, which is the actual
+   * question.
+   *
+   * The predecessor is deliberately NOT retired. It still governs its own
+   * periods, it still generates them if the reach-back finds one, and it stays
+   * `generating` on the screen — with an end date beside it, which is a
+   * different and truer thing to show than "retired".
+   */
+  async supersedeRule(
+    tenantId: string,
+    predecessorId: string,
+    input: {
+      readonly effectiveFrom: string;
+      readonly dueRule: DueRule | null;
+      readonly unresolvedReason?: string | null | undefined;
+      readonly leadTimeDays?: number | undefined;
+      readonly rulePack: string;
+      readonly authority?: string | null | undefined;
+      readonly module?: string | null | undefined;
+      readonly entityType?: string | null | undefined;
+      readonly serviceEntryId?: string | null | undefined;
+    },
+    actor: Actor,
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
+    const current = await this.deps.templates.findById(tenantId, predecessorId);
+    if (!current) throw new TemplateNotFound(predecessorId);
+
+    if (!isIsoDate(input.effectiveFrom)) throw new InvalidCutover(input.effectiveFrom);
+    // A cutover at or before the predecessor's own start leaves it governing
+    // nothing, which the CHECK refuses anyway — refused here so the caller gets
+    // a sentence rather than a constraint name.
+    if (current.effectiveFrom !== null && input.effectiveFrom <= current.effectiveFrom) {
+      throw new CutoverBeforeStart(input.effectiveFrom, current.effectiveFrom);
+    }
+    // Superseding a rule that has ALREADY been superseded would leave two
+    // successors for one period, which is the duplicate this whole mechanism
+    // exists to prevent. Amend the one actually in force.
+    if (current.effectiveTo !== null) {
+      throw new AlreadySuperseded(current.name, current.effectiveTo);
+    }
+
+    const rulePack = input.rulePack.trim();
+    if (rulePack.length === 0) throw new InvalidRulePack(input.rulePack);
+    // The pack is part of the identity, so a successor sharing its
+    // predecessor's pack collides on `(tenant, jurisdiction, name, rule_pack)`.
+    // Refused here with the reason rather than as a unique violation.
+    if (rulePack === current.rulePack) throw new SuccessorNeedsItsOwnPack(current.rulePack);
+
+    const dueRule = readDueRule(input.dueRule);
+    const unresolvedReason = (input.unresolvedReason ?? "").trim() || null;
+    if (dueRule === null && unresolvedReason === null) throw new UnresolvedReasonRequired();
+    if (dueRule !== null && unresolvedReason !== null) throw new UnresolvedReasonNotAllowed();
+
+    const leadTimeDays = input.leadTimeDays ?? current.leadTimeDays;
+    if (!Number.isInteger(leadTimeDays) || leadTimeDays < 0) {
+      throw new InvalidLeadTime(leadTimeDays);
+    }
+
+    const serviceEntryId =
+      input.serviceEntryId === undefined ? current.serviceEntryId : input.serviceEntryId;
+    if (serviceEntryId !== null && serviceEntryId !== current.serviceEntryId) {
+      const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
+      if (key === null) throw new ServiceNotFound(serviceEntryId);
+    }
+
+    // The IDENTITY carries over: same jurisdiction, same name, same period
+    // shape. A successor that changed the name would be a different obligation,
+    // and one that changed the recurrence would orphan the predecessor's rows
+    // the same way editing it in place would.
+    const successor = await this.deps.templates.supersede(tenantId, predecessorId, {
+      id: this.deps.ids.newId(),
+      tenantId,
+      jurisdiction: current.jurisdiction,
+      entityType: input.entityType === undefined ? current.entityType : trimToNull(input.entityType),
+      serviceEntryId,
+      module: input.module === undefined ? current.module : trimToNull(input.module),
+      name: current.name,
+      authority: input.authority === undefined ? current.authority : trimToNull(input.authority),
+      recurrence: current.recurrence,
+      fiscalYearStartMonth: current.fiscalYearStartMonth,
+      dueRule,
+      unresolvedReason,
+      leadTimeDays,
+      rulePack,
+      supersedesId: predecessorId,
+      effectiveFrom: input.effectiveFrom,
+      effectiveTo: null,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation_rule.superseded",
+      objectId: successor.id,
+      actor,
+      payload: {
+        name: successor.name,
+        supersedesId: predecessorId,
+        effectiveFrom: input.effectiveFrom,
+        rulePackFrom: current.rulePack,
+        rulePackTo: successor.rulePack,
+        dueRuleFrom: current.dueRule,
+        dueRuleTo: successor.dueRule,
+      },
+    });
+
+    // WHAT THE PREDECESSOR ALREADY PRODUCED PAST THE CUTOVER.
+    //
+    // The reach-back may have materialised periods that now belong to the
+    // successor, so they are still on the predecessor's formula. Restating
+    // under the predecessor deliberately SKIPS them — they are not its periods
+    // any more — and the successor generates its own. The old rows are left
+    // where they are rather than deleted: `bib_app` holds no DELETE grant, and
+    // a filing somebody may already have started is not this operation's to
+    // remove. Reported so the partner knows.
+    const stranded = (await this.deps.instances.listUnstarted(tenantId, predecessorId)).filter(
+      (r) => r.periodStart >= input.effectiveFrom,
+    ).length;
+
+    const spawned = generatesDates(successor)
+      ? await this.spawnFor(tenantId, successor.id, actor)
+      : 0;
+
+    return { rule: successor, effect: { restated: 0, locked: stranded, spawned } };
+  }
+
   async updateRule(
     tenantId: string,
     templateId: string,
@@ -964,6 +1130,12 @@ export class ObligationService {
 
       for (const period of periods) {
         if (full) break;
+        // THE RULE THAT GOVERNS A PERIOD IS THE ONE IN FORCE FOR IT (0057).
+        // Without this a superseding rule regenerates every period its
+        // predecessor already produced — a different `template_id`, so the
+        // re-run key cannot catch it, and the calendar shows each filing twice
+        // with nothing reporting an error.
+        if (!governsPeriod(template, period.start)) continue;
         const schedule = scheduleFor(template, exceptions, period);
         if (!schedule) continue;
 

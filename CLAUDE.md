@@ -1589,6 +1589,35 @@ exception verbs carry the first two on the event, which they did not until readi
 after using the screen showed `obligation_rule.updated` carrying it and them not. Never the note:
 prose does not `GROUP BY` and this log cannot be erased.
 
+**A RULE HAS A WINDOW, AND IT IS TESTED AGAINST THE PERIOD START (0057).**
+`effective_from` / `effective_to`, half-open, both nullable and both null on every row that
+existed before it — so applying it moved no calendar. It is what makes an AMENDMENT expressible
+at all: the correction path edits in place, and this one closes a rule at a day and opens its
+successor on the same day.
+
+**The period start, never the due date.** The rule that governs a filing is the one in force for
+the PERIOD BEING FILED — August's return is August's law even though it falls due on 20
+September. `governsPeriod` in the domain names it once, so the generator and the screen cannot
+disagree; testing the due date instead would shift every date by exactly one period and look
+entirely plausible.
+
+**Half-open, `[from, to)`,** like `client_assignment` and `party_identifier`. The demo used an
+inclusive bound on assignments and showed two SPOCs on every changeover day; the same mistake
+here is two rules governing one period, which is two filings for one return under template ids
+the re-run key cannot deduplicate.
+
+**`supersede` is ONE method and one transaction**, because each half alone is a silently broken
+calendar in opposite directions: a closed predecessor with no successor stops the firm's clients
+being told about a filing they still owe, and an un-closed predecessor puts every later return on
+the calendar twice. `supersede.integration.test.ts` proves the ROLLBACK specifically — a
+colliding successor leaves the predecessor open — which is the property a fake cannot establish.
+
+**The predecessor is CLOSED, not retired**, and the difference is not cosmetic. Retiring stops it
+generating at all, including for periods before the cutover that the ninety-day reach-back has
+not materialised yet, so a client onboarded last month would silently lose the period it was
+engaged for. A window says WHICH PERIODS a row governs; `is_active` says whether it is switched
+on. Different questions.
+
 **`restate`'s SQL is executed by an integration test, not a fake.** It uses the same
 `jsonb_to_recordset(…::text::jsonb)` construction as the batch insert, whose double cast exists
 because postgres.js re-encodes a string parameter as JSON and every sweep died on it — found by

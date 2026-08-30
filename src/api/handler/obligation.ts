@@ -132,6 +132,19 @@ const RuleSchema = z
     supersedesId: z.string().uuid().nullable(),
     status: RuleStatus,
     isActive: z.boolean(),
+    effectiveFrom: z.string().nullable().openapi({
+      description:
+        "The first period START this rule governs — null means from the beginning. Tested " +
+        "against the period rather than the due date: August's return is August's law even " +
+        "though it falls due on 20 September.",
+    }),
+    effectiveTo: z.string().nullable().openapi({
+      description:
+        "The first period start this rule does NOT govern — the day its successor takes over. " +
+        "Half-open, so a rule ending on the 1st and its successor starting on the 1st govern " +
+        "one period each and never the same one. Null means forever, which is every rule " +
+        "nobody has had to amend.",
+    }),
     coverage: Coverage,
     exceptions: z.array(ExceptionSchema),
     instanceCount: z.number().int().openapi({
@@ -274,6 +287,8 @@ function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
     supersedesId: t.supersedesId,
     status: t.status,
     isActive: t.isActive,
+    effectiveFrom: t.effectiveFrom,
+    effectiveTo: t.effectiveTo,
     // DERIVED here rather than stored, so the screen and the generator cannot
     // disagree about what a rule is doing.
     coverage: coverageOf(t),
@@ -324,6 +339,30 @@ const UpdateRuleRequest = z
     isActive: z.boolean().optional(),
   })
   .openapi("UpdateObligationRuleRequest");
+
+const SupersedeRuleRequest = z
+  .object({
+    effectiveFrom: z.string().openapi({
+      description:
+        "The day the new rule takes over, as a PERIOD start. Half-open: the predecessor governs " +
+        "every period beginning before this day and the successor every period from it, so " +
+        "exactly one rule governs each return.",
+    }),
+    rulePack: z.string().min(1).openapi({
+      description:
+        "The successor's OWN pack, and it may not be the predecessor's — a pack is part of a " +
+        "rule's identity, which is what lets a filing made last year still name the version it " +
+        "was due under.",
+    }),
+    dueRule: DueRuleSchema.nullable(),
+    unresolvedReason: z.string().nullable().optional(),
+    leadTimeDays: z.number().int().min(0).optional(),
+    authority: z.string().nullable().optional(),
+    module: z.string().nullable().optional(),
+    entityType: z.string().nullable().optional(),
+    serviceEntryId: z.string().uuid().nullable().optional(),
+  })
+  .openapi("SupersedeObligationRuleRequest");
 
 const AddExceptionRequest = z
   .object({
@@ -474,6 +513,43 @@ const updateRuleRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
     404: errorResponse("No such rule at this firm"),
+  },
+});
+
+const supersedeRuleRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligation-rules/{ruleId}/supersede",
+  tags: ["obligations"],
+  summary: "The law changed from a day — hand this rule over to a successor",
+  description:
+    "NOT an edit and NOT a retirement. Editing a rule in place is a CORRECTION — the shipped " +
+    "dates came from a document and everything ships `unconfirmed`, so supplying the real " +
+    "formula is recording the law properly for the first time. This is an AMENDMENT: the old " +
+    "formula was RIGHT for every period before the cutover, and a filing made under it has to " +
+    "go on explaining its own date. So the predecessor is closed at the cutover rather than " +
+    "retired — it still governs its own periods — and the successor opens on the same day, in " +
+    "ONE transaction, because either half alone is a silently broken calendar: a missing " +
+    "successor stops the firm's clients being told about a filing they still owe, and an " +
+    "un-closed predecessor puts every later return on the calendar TWICE.",
+  request: {
+    params: RuleParam,
+    body: { content: { "application/json": { schema: SupersedeRuleRequest } }, required: true },
+  },
+  responses: {
+    201: {
+      description: "The successor, and what it did to the calendar",
+      content: {
+        "application/json": { schema: z.object({ rule: RuleSchema, effect: RuleEffectSchema }) },
+      },
+    },
+    400: errorResponse(
+      "A cutover that is not a day, one at or before this rule's own start, a half-stated " +
+        "formula, or a successor reusing the predecessor's rule pack",
+    ),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such rule at this firm"),
+    409: errorResponse("This rule already hands over on a day, so it is not the one in force"),
   },
 });
 
@@ -968,6 +1044,41 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
         effect,
       },
       200,
+    );
+  });
+
+  app.openapi(supersedeRuleRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { ruleId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const { rule, effect } = await deps.service.supersedeRule(
+      s.tenantId,
+      ruleId,
+      {
+        effectiveFrom: body.effectiveFrom,
+        rulePack: body.rulePack,
+        dueRule: body.dueRule,
+        unresolvedReason: body.unresolvedReason,
+        leadTimeDays: body.leadTimeDays,
+        authority: body.authority,
+        module: body.module,
+        entityType: body.entityType,
+        serviceEntryId: body.serviceEntryId,
+      },
+      s.actor,
+    );
+    const [record] = (await deps.service.listRules(s.tenantId)).filter(
+      (r) => r.template.id === rule.id,
+    );
+    return c.json(
+      {
+        rule: ruleToWire(
+          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+        ),
+        effect,
+      },
+      201,
     );
   });
 
