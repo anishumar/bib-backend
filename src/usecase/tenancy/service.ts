@@ -43,6 +43,7 @@ import { ReportsToCycle, ReportsToNotAColleague } from "../../domain/verificatio
 import type {
   GradeDirectory,
   GradeLadderSeeder,
+  WorkVocabularySeeder,
   MemberGrade,
   IssuingEntitySeeder,
   MemberRecord,
@@ -67,6 +68,7 @@ export interface Deps {
   readonly roleDirectory: RoleDirectory;
   /** A new firm's seniority ladder, written as its own rows (G3.3). */
   readonly gradeSeeder: GradeLadderSeeder;
+  readonly workVocabularySeeder: WorkVocabularySeeder;
   /** What this firm's rungs ARE, for the two things a grade assignment must
    *  refuse: a grade this firm never defined, and one it has retired. */
   readonly gradeDirectory: GradeDirectory;
@@ -226,6 +228,19 @@ export class TenancyService {
     // the screen. The reverse — a ladder nobody can reach because gate 3
     // refuses every request — cannot be fixed from inside the product.
     await this.deps.gradeSeeder.seedDefaultGrades(tenant.id, actor);
+
+    // And its own words for work — the states a task moves through and the
+    // priorities it can carry (T3.1). Rows rather than an enum, because the
+    // vocabulary is the firm's: renaming "Waiting Internal" or deciding that
+    // statutory work is Critical must be an UPDATE on a screen, not a deploy.
+    // A firm with none of them cannot create a single work item, so it belongs
+    // at creation for the two seeders above's reason.
+    //
+    // Last of the three, and the ordering is the same argument again: a firm
+    // with roles, a ladder and no work vocabulary can be administered and can
+    // fix it from `/admin/work-vocabulary`. The reverse cannot be fixed from
+    // inside the product at all.
+    await this.deps.workVocabularySeeder.seedDefaultVocabulary(tenant.id, actor);
     // And its own entity, with the fallback rule naming it as the issuer of the
     // firm's documents — for the same reason, one step further on. Both
     // documents carry `issuing_entity_party_id NOT NULL` (0021), so a firm with

@@ -10,10 +10,13 @@ import type { RoleHolders } from "../usecase/config/ports";
 import { NoAxesDefined } from "./serviceaxis";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
+import { WorkVocabularyService } from "../usecase/workitem/service";
+import { FakeWorkVocabularyRepo } from "./workitem";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
   GradeDirectory,
   GradeLadderSeeder,
+  WorkVocabularySeeder,
   MemberRecord,
   MembershipRepository,
   NewMembership,
@@ -211,10 +214,13 @@ export function makeFakes(): {
   roleDirectory: RoleDirectory;
   gradeSeeder: GradeLadderSeeder;
   gradeDirectory: GradeDirectory;
+  workVocabularySeeder: WorkVocabularySeeder;
   /** The rows the seeder wrote, so a test can look at what a new firm got. */
   config: FakeConfigRepo;
   /** The rungs a new firm got, for the same reason. */
   grades: FakeStaffGradeRepo;
+  /** The states and priorities a new firm got — same reason again. */
+  workVocabulary: FakeWorkVocabularyRepo;
   ids: FakeIds;
   events: RecordingEventSink;
 } {
@@ -230,6 +236,7 @@ export function makeFakes(): {
   const users = new FakeUserRepo();
   const memberships = new FakeMembershipRepo();
   const grades = new FakeStaffGradeRepo();
+  const workVocabulary = new FakeWorkVocabularyRepo();
   memberships.users = users;
   memberships.grades = grades;
   return {
@@ -245,6 +252,16 @@ export function makeFakes(): {
     gradeSeeder: new StaffGradeService({ grades, ids, events }),
     gradeDirectory: grades,
     grades,
+    // The REAL WorkVocabularyService over an in-memory store, on the same
+    // reasoning as the two above: a tenancy test then fails if provisioning
+    // stops giving a new firm its work-item states, which is the thing that
+    // would leave it unable to record a single task.
+    workVocabularySeeder: new WorkVocabularyService({
+      vocabulary: workVocabulary,
+      ids,
+      events,
+    }),
+    workVocabulary,
     // `holders: memberships` mirrors the composition root exactly, so a tenancy
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".

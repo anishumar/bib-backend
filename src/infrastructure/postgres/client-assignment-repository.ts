@@ -21,6 +21,8 @@ import type {
   HandoverClose,
   NewClientAssignment,
 } from "../../usecase/clientassignment/ports";
+import type { SpocDirectory } from "../../usecase/workitem/ports";
+import type { SpocCandidate } from "../../domain/workitem/model";
 
 interface AssignmentRow {
   id: string;
@@ -88,7 +90,20 @@ const COLUMNS =
   "id, tenant_id, client_party_id, role, axis_id, user_id, " +
   "valid_from::text AS valid_from, valid_to::text AS valid_to";
 
-export class PostgresClientAssignmentRepository implements ClientAssignmentRepository {
+/**
+ * ONE adapter over `crm.client_assignment`, serving TWO ports.
+ *
+ * `ClientAssignmentRepository` is G3.2's own write and read side.
+ * `SpocDirectory` is T3.1's single question — *who does this client talk to
+ * about FRC work, on this day* — asked when a filing needs routing. Two
+ * adapters over one table would eventually disagree about what "in force"
+ * means, and here that would mean a filing routed to somebody whose handover
+ * finished last week. The same arrangement `PostgresServiceAxisRepository` and
+ * `PostgresConfigRepository` already have.
+ */
+export class PostgresClientAssignmentRepository
+  implements ClientAssignmentRepository, SpocDirectory
+{
   constructor(private readonly app: Db) {}
 
   /**
@@ -275,6 +290,54 @@ export class PostgresClientAssignmentRepository implements ClientAssignmentRepos
         // role arriving from a future migration is dropped instead of widening
         // the union by a cast.
         roles: r.roles.filter(isAssignmentRole),
+      }));
+    });
+  }
+
+  /**
+   * Who the client talks to about ONE part of the work, on one day — T3.1's
+   * routing read.
+   *
+   * A LIST, always. G3.2 deliberately allows more than one SPOC per Dept (leave
+   * cover, a joint SPOC on a group, a fortnight's parallel handover), and what
+   * to DO with two is `resolveAssignee`'s decision in the domain, not this
+   * query's. Returning "the first one" here would bury a product rule in an
+   * ORDER BY.
+   *
+   * Half-open, `[valid_from, valid_to)`, like every effective-dated read in
+   * this product — so a handover that closes at D and opens at D returns
+   * exactly one person on D, never two.
+   *
+   * `onDate` is the CALLER's calendar day and never `CURRENT_DATE`. The
+   * database server's day is UTC's; the firm's is its own, and for five and a
+   * half hours every morning in India those are different dates — a SPOC whose
+   * term starts on the firm's today would be invisible to this query and the
+   * filing would land in the unassigned queue for the rest of the morning.
+   */
+  async spocsFor(
+    tenantId: string,
+    clientPartyId: string,
+    axisId: string,
+    onDate: string,
+  ): Promise<readonly SpocCandidate[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<
+        { user_id: string; display_name: string | null; email: string }[]
+      >`
+        SELECT a.user_id, u.display_name, u.email::text AS email
+        FROM crm.client_assignment a
+        JOIN tenancy.user_account u ON u.id = a.user_id
+        WHERE a.client_party_id = ${clientPartyId}
+          AND a.role = 'spoc'
+          AND a.axis_id = ${axisId}
+          AND a.valid_from <= ${onDate}::date
+          AND (a.valid_to IS NULL OR a.valid_to > ${onDate}::date)
+        ORDER BY u.display_name, u.email
+      `;
+      return rows.map((r) => ({
+        userId: r.user_id,
+        displayName: r.display_name,
+        email: r.email,
       }));
     });
   }

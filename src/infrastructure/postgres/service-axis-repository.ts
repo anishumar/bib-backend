@@ -17,6 +17,7 @@ import type {
 } from "../../usecase/serviceaxis/ports";
 import type { AxisDirectory, KnownAxis } from "../../usecase/config/ports";
 import type { AssignableAxisDirectory } from "../../usecase/clientassignment/ports";
+import type { WorkAxisDirectory } from "../../usecase/workitem/ports";
 
 interface AxisRow {
   id: string;
@@ -60,11 +61,17 @@ const COLUMNS = "id, tenant_id, axis, code, name, sort_order, is_active";
  * adapter because it is one table — two would eventually disagree, and a SPOC
  * would end up assigned to a Dept the picker never offered.
  *
- * The three `implements` are what makes the agreement a COMPILE error rather
+ * `WorkAxisDirectory` is T3.1's, and it is the reason `findByCode` exists as a
+ * port at all: a pinned service body carries `module: "FRC"` — the CODE, never
+ * the uuid — so the chain from a service to a client's Dept SPOC has to pass
+ * through this lookup. A FOURTH seam on the same adapter, for the same reason
+ * as the third.
+ *
+ * The four `implements` are what makes the agreement a COMPILE error rather
  * than a discovery: if any port's shape drifts, this line fails, in one place.
  */
 export class PostgresServiceAxisRepository
-  implements ServiceAxisRepository, AxisDirectory, AssignableAxisDirectory
+  implements ServiceAxisRepository, AxisDirectory, AssignableAxisDirectory, WorkAxisDirectory
 {
   constructor(private readonly app: Db) {}
 

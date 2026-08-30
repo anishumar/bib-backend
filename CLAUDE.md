@@ -1129,12 +1129,108 @@ date anywhere**: the firm has not given its turnaround times (client ask 3.4) or
 matrix (3.3), and a deadline this product invented is a priority the firm never set. `slaDays`
 stays earmarked for T3.1.
 
+## Work items — the row on somebody's desk, and the firm's own words for it (T3.1)
+
+`delivery.work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`
+(0051), over `work_item_state` + `work_item_priority` (0050).
+
+**IT IS NOT `job_step`, and merging them would have cost both halves.** A JOB is HOW work
+gets done — which template, which steps, which agent — and its states are the ENGINE's,
+identical at every firm. A WORK ITEM is WHAT is owed and WHOSE it is, and its states are the
+FIRM's own words. Merge them and ad hoc work ("prepare the board minutes") has no home at
+all, and a firm ends up renaming the engine's mechanics to get its own board to read
+properly. `work_item.job_id` is nullable in both directions: many items may share one merged
+job, and an item may have no job.
+
+**MEANING IS A FLAG; NAMES ARE THE FIRM'S. Nothing in the product compares a state's or a
+priority's `code`.** Rows buy the firm its vocabulary and immediately take something away: a
+CHECK cannot say "a blocked item owes a reason", because it cannot see a word in another
+table. The naive fix is `code = 'blocked'` — which hardcodes the very name the firm was
+promised it could change, and the first rename switches the rule off *silently*. So
+`is_initial` / `is_terminal` / `is_blocked` and `is_default` / `is_statutory_default` / `rank`
+carry every rule, and `enforce_work_item_state_facts` (a trigger, because a CHECK cannot join)
+reads those flags. **The smoke walk renames "Blocked" to "Stuck" and then proves the reason is
+still demanded** — the only way to test a promise like this.
+
+**"At most one" is a partial unique index; "at least one" is the service.** A firm may never
+end up with no starting state, no default priority or no statutory default — each leaves it
+unable to create a single task — and Postgres cannot express a constraint over the ABSENCE of
+rows. So the floor lives in `WorkVocabularyService`, and marking another row moves the flag in
+the SAME statement rather than leaving a window with none.
+
+**`is_statutory_default` is the firm's own rule made mechanical** — *"due dates that are
+statutory should anyway be high priority"*. A flag rather than the constant `'high'`, so a
+firm that decides statutory work is Critical moves a tick. **Work spawned from an ENGAGEMENT
+is deliberately NOT statutory:** an engagement's SLA is the firm's own promise, and defaulting
+it true would put every piece of advisory work on the statutory priority and make the flag
+meaningless the day it matters. T3.2's obligations set it, from the law.
+
+**Routing refuses to guess, and the refusal is a SENTENCE.** One SPOC for the service's Dept →
+assigned. None, or more than one (G3.2 allows several) → UNASSIGNED with `assignment_note`
+saying which. Falling back to the Key Manager and taking the first SPOC are both rules the
+firm never gave, and **a wrong assignee is worse than none**: it sits on a desk whose owner
+believes it is not theirs, while unassigned work is visible in a queue that gets chased. The
+note is what makes that queue clearable rather than a pile.
+
+**`slaDays` is PINNED and the Dept is LIVE, on the same row.** A catalogue revision must not
+make finished work retroactively late (G2.3), so the SLA is snapshotted from the version the
+client SIGNED. A client agreed to the service and not to which of our departments delivers it,
+so the Dept comes from what is published NOW — the same rule `unspawnedActivations` applies to
+the grouping facts, and **the two must not drift**, or a job cut by one Dept would put its task
+on another's desk. The due date's base is `crm.engagement.effective_from`, a `date` column,
+never `signed_at`: turning an instant into a calendar day is a day out either side of midnight
+UTC.
+
+**A SECOND approval table, and the RULE is not duplicated.** `work_item_approval` exists
+because `step_approval` hangs off a `job_step`, so work with no template could never be
+reviewed — and *"every task is mostly reviewed"* is the client's words about the TASK. What is
+reused unchanged is T2.9's `isEligible`, `VerificationPolicy` and the grade/reporting-line
+comparison: one answer to "who checks whose work", two tables recording the answers.
+`submitted_by` is DERIVED from the item's assignee and FROZEN by trigger, exactly as T2.9's is.
+**Do not add a `submittedBy` to any write path.**
+
+**A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
+is finished" is what it says. Cancelling stays allowed: cancelling something that never
+started is a real act, and refusing it would trap the item. The cycle check walks the edge
+list in the domain, because reachability is not expressible in a CHECK — the database catches
+only the self-edge.
+
+**`escalated_level` / `escalated_at` are deliberately NOT built.** The demo has them; the
+escalation ladder is T3.3 and needs G3.4. A column with no writer is the feature that looks
+finished.
+
+### Three things this task found, and none was in T3.1
+
+**`sweepActivations` promised per-tenant isolation from T2.6 and did not do it.** Its own
+comment said *"one firm's failure must not stop the others"*; a throw in `spawnForTenant`
+propagated out of the loop and every firm after it was skipped, silently. One firm with no
+work vocabulary stopped the calendar for every client of every firm. Each firm is caught now
+and the failure is REPORTED — `SweepReport.failure`, printed by `worker:once` — because a
+silently skipped firm is worse than a stopped sweep, which at least gets noticed.
+
+**A work-item failure must never lose the JOB.** Two facts: a job is the record that work is
+OWED, a task is whose desk it lands on. `spawnForEngagements` is caught inside the sweep and
+counted as `tasksFailed`; the job stands.
+
+**PATCH WAS MISSING FROM THE CORS ALLOWLIST, since CORS was added.** T3.1 registered the first
+routes that use it. The browser answers the preflight 204, reads the header, sees its method
+is absent and DISCARDS the request — no server log, no status code, surfacing as "TypeError:
+Failed to fetch" and reading as a dead endpoint. **`npm run smoke` could never have caught it:
+curl does not preflight.** Found by clicking a checkbox on a screen.
+`tests/api/cors-methods.test.ts` reads every verb the handlers register and fails if the list
+falls behind.
+
+**And a comment in 0051 was wrong until the integration test ran.** A BEFORE INSERT trigger
+runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches a cross-tenant
+state BEFORE the composite foreign key does, and answers with a sentence naming the state and
+the firm. Both defences are real; the trigger is the outer one.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
-`scheduler`, the `orchestrator` and `invoicing` are built.
-Next: T3.1's work items (which reads G3.2's SPOC), T3.2's compliance calendar and T3.7's dashboards.
+`scheduler`, the `orchestrator`, `invoicing` and `work items` are built.
+Next: T3.2's compliance calendar, T3.3's missed-deadline state and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

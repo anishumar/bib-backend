@@ -31,6 +31,8 @@ import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
+import { WorkVocabularyService } from "../../src/usecase/workitem/service";
+import { PostgresWorkVocabularyRepository } from "../../src/infrastructure/postgres/work-vocabulary-repository";
 import { PostgresStaffGradeRepository } from "../../src/infrastructure/postgres/staff-grade-repository";
 import { IdentityService } from "../../src/usecase/identity/service";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
@@ -74,6 +76,14 @@ const tenancy = new TenancyService({
   roleDirectory: configRepository,
   gradeSeeder: { seedDefaultGrades: (t, a) => staffGrades.seedDefaultGrades(t, a) },
   gradeDirectory: staffGradeRepository,
+  // T3.1. The real service over the real table, like the two seeders above:
+  // provisioning that stopped giving a firm its work-item states would leave it
+  // unable to record a single task, and this test is what would catch it.
+  workVocabularySeeder: new WorkVocabularyService({
+    vocabulary: new PostgresWorkVocabularyRepository(app),
+    ids: systemIds,
+    events: ledger,
+  }),
   ids: systemIds,
   events: ledger,
 });

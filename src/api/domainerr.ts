@@ -10,6 +10,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
+import { WorkItemError } from "../domain/workitem/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
 import { VerificationError } from "../domain/verification/errors";
 import { SchedulerError } from "../domain/scheduler/errors";
@@ -297,6 +298,64 @@ export function mapError(err: unknown): MappedError {
       case "ASSIGNMENT_ALREADY_ENDED":
       case "ASSIGNMENT_DUPLICATE":
       case "ASSIGNMENT_PREDATES_INCUMBENT":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof WorkItemError) {
+    switch (err.code) {
+      // Malformed in shape or incoherent on its face — the caller fixes the
+      // request. The two flag rules are here rather than with the conflicts
+      // because a state that is both terminal and blocked is wrong whatever
+      // state the firm is in.
+      case "INVALID_VOCABULARY_CODE":
+      case "INVALID_RANK":
+      case "INVALID_SORT_ORDER":
+      case "INVALID_DUE_DATE":
+      case "WORK_ITEM_TITLE_REQUIRED":
+      case "CONFLICTING_STATE_FLAGS":
+      case "BLOCK_REASON_REQUIRED":
+      case "REVIEW_REJECTION_NEEDS_NOTE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "WORK_ITEM_NOT_FOUND":
+      case "WORK_ITEM_CLIENT_NOT_FOUND":
+      case "STATE_NOT_FOUND":
+      case "PRIORITY_NOT_FOUND":
+      case "CHECKLIST_ITEM_NOT_FOUND":
+      case "DEPENDENCY_NOT_FOUND":
+      case "REVIEW_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // 403, and these two are the only ones here. Both are a refusal about WHO
+      // the caller is rather than about the state of the firm's records — you
+      // may not check this work, and you may not check your own — so a caller
+      // that retried with a different body would be told the same thing. That
+      // is what separates them from the conflicts below.
+      case "REVIEW_SELF_APPROVAL":
+      case "REVIEWER_NOT_ELIGIBLE":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // Conflicts, on `AssignmentDuplicate`'s reasoning: every one is a
+      // well-formed request refused by the state of the firm's own records — a
+      // client it has put away, a state it has retired, a review somebody else
+      // already decided, a dependency that would close a loop, a vocabulary row
+      // that is the last of its kind. The caller fixes each on another screen
+      // or with another value, never by resending this.
+      case "VOCABULARY_CODE_TAKEN":
+      case "STATE_RETIRED":
+      case "PRIORITY_RETIRED":
+      case "NO_INITIAL_STATE":
+      case "NO_DEFAULT_PRIORITY":
+      case "LAST_INITIAL_STATE":
+      case "LAST_DEFAULT_PRIORITY":
+      case "WORK_ITEM_CLIENT_ARCHIVED":
+      case "ASSIGNEE_NOT_STAFF":
+      case "WORK_ITEM_ALREADY_IN_STATE":
+      case "WORK_ITEM_BLOCKED_BY_DEPENDENCY":
+      case "CHECKLIST_ITEM_DONE":
+      case "DEPENDENCY_CYCLE":
+      case "DEPENDENCY_EXISTS":
+      case "REVIEW_ALREADY_OPEN":
+      case "REVIEW_ALREADY_DECIDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -179,6 +179,29 @@ export interface GradeLadderSeeder {
 }
 
 /**
+ * Giving a brand-new firm its own words for work (T3.1).
+ *
+ * The same shape and the same argument as the two seeders around it: work-item
+ * STATES and PRIORITIES are rows, so the firm can rename "Blocked" or decide
+ * that statutory work is Critical without a deploy — and a firm with none of
+ * them cannot create a single work item, because there is no state to create it
+ * in and no priority to give it.
+ *
+ * Ordered LAST of the three, deliberately. A firm that ends up with roles, a
+ * ladder and no work vocabulary can still be administered and can fix it from
+ * the screen; the reverse cannot be fixed from inside the product.
+ *
+ * Satisfied by `WorkVocabularyService.seedDefaultVocabulary` in the composition
+ * root, so neither module imports the other.
+ */
+export interface WorkVocabularySeeder {
+  /** Returns the state and priority codes written, for the caller's audit
+   *  trail. Empty when the firm already had them — the seeder is idempotent,
+   *  because `createTenant` and it share no unit of work. */
+  seedDefaultVocabulary(tenantId: string, actor: Actor): Promise<readonly string[]>;
+}
+
+/**
  * What the firm's roles are, and what they carry.
  *
  * Tenancy needs this to refuse two things it could otherwise do quietly: assign

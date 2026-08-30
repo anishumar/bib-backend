@@ -1845,8 +1845,118 @@ open and are recorded above; neither blocks Phase 2.
   > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
 - [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** *Acc: "escalate to this assignee's manager" resolves through the org chart.* — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login. This is **Gate 4 (record-scope)**, which T1.6 deferred to U1; it is pulled forward here because `(B)`'s escalation ladder needs it before the portal does. **Agree the timing rather than assuming it.**
 
-- [ ] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
-  > Blocked on **G3.2** (the SPOC the acceptance names) and **G2.3** (`slaDays`, snapshotted at creation so a catalogue revision cannot make finished work retroactively late). From the demo, worth carrying across: `is_statutory_due` is what makes priority derivable — *"due dates that are statutory should anyway be high priority"* — and `blocked_reason` + `blocked_at` are the capture-or-lose pair, because "Blocked" as a state records that work is stuck and never why, and a year later "are our delays ours or the client's" has no query that can answer it.
+- [x] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
+  > **Done (2026-08-30). Migrations 0050 (the vocabulary) and 0051 (the work).** Both blockers
+  > were open: G2.3's `slaDays` (A, 28 Aug) and G3.2's SPOC (B, 30 Aug).
+  >
+  > **THE ACCEPTANCE LINE, AS A CHAIN OF COLUMNS.** `engagement_letter.party_id` → the CLIENT ·
+  > `line.entity_party_id` → WHICH company · `line.service_version_id` → `body.module = "FRC"`
+  > → `tenancy.service_axis` → `crm.client_assignment (client, 'spoc', dept, on date)` → the
+  > assignee. Every link is a column, which is what makes the routing a QUERY rather than a
+  > rule somebody remembers. Proven end to end in `npm run smoke`.
+  >
+  > **`work_item` IS NOT `job_step`, AND MERGING THEM WOULD HAVE COST BOTH HALVES.** A JOB is
+  > HOW work gets done — which template, which steps, which agent — and its states are the
+  > engine's, identical at every firm. A WORK ITEM is WHAT is owed and WHOSE it is, and its
+  > states are the firm's own words. Merge them and ad hoc work ("prepare the board minutes")
+  > has no home at all, and a firm ends up renaming the engine's mechanics to get its own board
+  > to read properly. `work_item.job_id` is nullable in both directions.
+  >
+  > **THE FLAGS ARE THE WHOLE DESIGN, and they are what makes "rows not enums" mean anything.**
+  > Rows buy the firm its vocabulary and immediately take something away: a CHECK cannot say
+  > "a blocked item owes a reason", because it cannot see a word in another table. The naive
+  > fix is `code = 'blocked'` in code — which hardcodes the very name the firm was promised it
+  > could change, and the first rename switches the rule off silently. So MEANING lives in
+  > booleans (`is_initial`, `is_terminal`, `is_blocked` · `is_default`, `is_statutory_default`)
+  > and NAMES live in text. **Nothing in the product compares a code.** The smoke walk renames
+  > "Blocked" to "Stuck" and then proves the reason is still demanded, which is the only way to
+  > test a promise like this.
+  >
+  > **`is_statutory_default` is the firm's rule made mechanical** — *"due dates that are
+  > statutory should anyway be high priority"* — a FLAG rather than the constant `'high'`, so a
+  > firm that decides statutory work is Critical moves a tick. Work spawned from an ENGAGEMENT
+  > is deliberately **not** statutory: an engagement's SLA is the firm's own promise, and
+  > defaulting it true would put every piece of advisory work on the statutory priority and
+  > make the flag meaningless the day it matters. T3.2's obligations set it, from the law.
+  >
+  > **TWO SPOCs, OR NONE — the decision G3.2 deferred to here, taken (Shrestha, 2026-08-30).**
+  > Exactly one → assign. None, or more than one → UNASSIGNED with an `assignment_note` saying
+  > which. Falling back to the Key Manager and taking the first SPOC are both rules the firm
+  > never gave, and a WRONG assignee is worse than none: it sits on a desk whose owner believes
+  > it is not theirs, whereas unassigned work is visible in a queue that gets chased. The note
+  > is what makes that queue clearable rather than a pile — `/work-items`' Unassigned tab is
+  > the screen it exists for.
+  >
+  > **`slaDays` is PINNED and the Dept is LIVE, in the same row, and that asymmetry is
+  > argued.** A catalogue revision must not make finished work retroactively late (G2.3), so
+  > the SLA is snapshotted from the version the client SIGNED. But a client agreed to the
+  > service, not to which of our departments delivers it, so the Dept is read from what is
+  > published NOW — the same rule `unspawnedActivations` already applies to the grouping facts,
+  > and the two must not drift or a job cut by one Dept would put its task on another's desk.
+  > The smoke walk publishes a third `bookkeeping` version to prove both halves at once.
+  >
+  > **The due date's base is `crm.engagement.effective_from`, a `date` column** — not
+  > `signed_at`, which is a timestamptz. Turning an instant into a calendar day is a day out
+  > for anybody east or west of UTC, and the firm already has the calendar-native field.
+  >
+  > **A SECOND approval table beside `step_approval`, and the rule is NOT duplicated.**
+  > `delivery.work_item_approval` exists because a step approval hangs off a `job_step`, so
+  > work with no template could never be reviewed — and *"every task is mostly reviewed"* is
+  > the client's words about the TASK. What is reused unchanged is T2.9's `isEligible`,
+  > `VerificationPolicy` and the grade/reporting-line comparison: one answer to "who checks
+  > whose work" at this firm, two tables recording the answers. `submitted_by` is DERIVED from
+  > the item's assignee and FROZEN by trigger, exactly as T2.9's is — a maker the writer could
+  > choose is not a maker-checker control.
+  >
+  > **A dependency is enforced on STARTING, not on finishing**, because that is what it says:
+  > "this cannot start until that is finished". Cancelling stays allowed — cancelling something
+  > that never started is a real act, and refusing it would trap the item.
+  >
+  > **`escalated_level` / `escalated_at` are deliberately NOT built.** The demo has them, and
+  > the escalation ladder is T3.3 and G3.4. A column with no writer is the "feature that looks
+  > finished" this codebase keeps being caught by. Stated here rather than ticked quietly.
+  >
+  > ── **THREE REAL BUGS THIS TASK FOUND, and none of them was in T3.1** ──
+  >
+  > **1. `sweepActivations` promised per-tenant isolation since T2.6 and did not do it.** Its
+  > own comment said *"one firm's failure must not stop the others"*; a throw in
+  > `spawnForTenant` propagated straight out of the loop and every firm after it was skipped,
+  > silently. One firm with no work-item states stopped the calendar for every client of every
+  > firm on the box. Each firm is caught now and the failure is REPORTED (`SweepReport.failure`,
+  > printed by `worker:once`) rather than swallowed — a silently skipped firm is worse than a
+  > stopped sweep, because a stopped one gets noticed. Two tests in `tests/scheduler/`.
+  >
+  > **2. A work-item failure must never lose the JOB.** They are two facts: a job is the record
+  > that work is OWED, a task is whose desk it lands on. `spawnForEngagements` is caught inside
+  > the sweep and counted (`tasksFailed`), so the job stands and the number is printed.
+  >
+  > **3. PATCH WAS MISSING FROM THE CORS ALLOWLIST, since CORS was added.** T3.1 registered the
+  > first routes that use it. The browser answers the preflight 204, reads the header, sees
+  > PATCH is not on it and DISCARDS the request — no server log, no status code, surfacing as
+  > "TypeError: Failed to fetch" and reading as a dead endpoint. **`npm run smoke` could never
+  > have caught it**: curl does not preflight, and every one of those PATCH calls passed. Found
+  > by clicking a checkbox on `/admin/work-vocabulary`. `tests/api/cors-methods.test.ts` now
+  > reads every verb the handlers register and fails if the list falls behind — verified by
+  > negative control (removing PATCH turns exactly that test red).
+  >
+  > **Also corrected: 0051's own comment was wrong.** It called the cross-tenant-state branch of
+  > `enforce_work_item_state_facts` "unreachable behind the composite FK". A BEFORE INSERT
+  > trigger runs AHEAD of constraint validation, so the trigger gets there FIRST and answers
+  > with a sentence naming the state and the firm. Both defences are real; the trigger is the
+  > outer one. Found by the integration test, which asserts both.
+  >
+  > **Screens** (`../bib-frontend`): **`/work-items`** the board — Mine · Unassigned ·
+  > Everything, overdue first, the browser's own calendar day; **`/work-items/[id]`** the task —
+  > checklist, dependencies, every review including the ones that sent it back; and
+  > **`/admin/work-vocabulary`**, which is the standing directive made visible: the firm renames
+  > a state, adds a ninth, or moves what statutory work gets, from a screen.
+  >
+  > **Two things the screen found that the types were happy with:** the Owner fact printed the
+  > assignment note AND the callout below repeated it verbatim, and a two-word state name
+  > wrapped inside its pill and rendered as a broken circle. Both fixed.
+  >
+  > Gate: `npm run check` **1172 tests** · `test:integration` **382** (27 new, real Postgres) ·
+  > `npm run smoke` **253/253** · every screen opened in the browser.
 
 > ### The client's own applicability rules arrived (2026-08-30) — read this before T3.2
 >

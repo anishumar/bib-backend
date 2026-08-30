@@ -21,11 +21,19 @@ import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
 import { LedgerService } from "../usecase/ledger/service";
 import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
+import { WorkItemService } from "../usecase/workitem/service";
 import { DunningService } from "../usecase/dunning/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
+import { PostgresServiceAxisRepository } from "../infrastructure/postgres/service-axis-repository";
+import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
+import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
+import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
+import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
+import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
@@ -79,6 +87,43 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // they belong to the same RLS-aware adapter rather than to two.
   const jobs = new PostgresJobRepository(pools.app);
 
+  // Constructed above the scheduler, because the work-item service below needs
+  // it and the scheduler needs the work-item service. ONE adapter over the
+  // config tables in this process, exactly as in the API: the orchestrator's
+  // templates, its confidence tiers, its verification policies and the work
+  // item's review policies are all config reads, and two adapters would
+  // eventually disagree about what "published" means.
+  const configRepository = new PostgresConfigRepository(pools.app);
+  const memberships = new PostgresMembershipRepository(pools.app);
+
+  // T3.1 — THE TASKS a spawned job puts on people's desks.
+  //
+  // The worker constructs the same graph the API does, from the same adapters,
+  // because this is the process that actually calls it: the sweep spawns a job
+  // and hands the engagements it just linked to `spawnForEngagements`. A
+  // work-item service that differed between the two processes would put a
+  // filing on one desk when the cron ran it and another when a person did.
+  const workVocabularyRepository = new PostgresWorkVocabularyRepository(pools.app);
+  const workItems = new WorkItemService({
+    items: new PostgresWorkItemRepository(pools.app),
+    approvals: new PostgresWorkItemApprovalRepository(pools.app),
+    vocabulary: workVocabularyRepository,
+    clients: new PostgresPartyRepository(pools.app),
+    staff: memberships,
+    // G3.2's adapter, asked the one question the acceptance line turns on: who
+    // does this client talk to about this Dept's work, on the day the work
+    // begins.
+    spocs: new PostgresClientAssignmentRepository(pools.app),
+    axes: new PostgresServiceAxisRepository(pools.app),
+    policies: configRepository,
+    reviewers: memberships,
+    permissions: configRepository,
+    engagements: new PostgresEngagementWorkSource(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const scheduler = new SchedulerService({
     jobs,
     activations: jobs,
@@ -91,6 +136,11 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // the write side of this setting; the scheduler reads it, and neither
     // imports the other.
     splitAxis: new PostgresWorkSplitSetting(pools.app),
+    // T3.1. The tasks ride on the spawn because "work became owed" is ONE fact:
+    // a second sweep would leave a job showing no tasks for as long as it was
+    // behind, which is a board that says a client is being looked after when
+    // nobody has it.
+    workItems,
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -120,7 +170,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // and the catalogue. Two instances would be two adapters over the same table
   // free to disagree about what is published — and one of the two answers here
   // decides whether a machine may act with nobody watching.
-  const configRepository = new PostgresConfigRepository(pools.app);
+
   const orchestrator = new OrchestratorService({
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
@@ -147,7 +197,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // work must not be able to disagree with either.
     checks: new PostgresStepApprovalRepository(pools.app),
     policies: configRepository,
-    checkers: new PostgresMembershipRepository(pools.app),
+    checkers: memberships,
     permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,

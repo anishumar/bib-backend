@@ -51,6 +51,7 @@ import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -85,6 +86,20 @@ import {
   FakeSessionRepo,
   FakeTokenFactory,
 } from "../../src/testfakes/identity";
+import {
+  FakeEngagementWork,
+  FakeReviewPermissions,
+  FakeReviewPolicies,
+  FakeReviewers,
+  FakeSpocDirectory,
+  FakeWorkAxes,
+  FakeWorkItemApprovalRepo,
+  FakeWorkItemClients,
+  FakeWorkItemRepo,
+  FakeWorkItemStaff,
+  FakeWorkVocabularyRepo,
+} from "../../src/testfakes/workitem";
+import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
 
 const silentLog = { info() {}, warn() {}, error() {} };
 
@@ -170,6 +185,40 @@ function deps(): RouterDeps {
         events: makeFakes().events,
       }),
     },
+    // T3.1. Every port is a fake, because these two tests are about the ROUTER —
+    // that every registered route is gated and that the spec renders — and not
+    // about what a work item does.
+    workItems: (() => {
+      const vocabulary = new FakeWorkVocabularyRepo();
+      const items = new FakeWorkItemRepo();
+      const approvals = new FakeWorkItemApprovalRepo();
+      items.vocabulary = vocabulary;
+      items.approvals = approvals;
+      approvals.items = items;
+      return {
+        service: new WorkItemService({
+          items,
+          approvals,
+          vocabulary,
+          clients: new FakeWorkItemClients(),
+          staff: new FakeWorkItemStaff(),
+          spocs: new FakeSpocDirectory(),
+          axes: new FakeWorkAxes(),
+          policies: new FakeReviewPolicies(),
+          reviewers: new FakeReviewers(),
+          permissions: new FakeReviewPermissions(),
+          engagements: new FakeEngagementWork(),
+          ids: new FakeIds(),
+          clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
+          events: new RecordingEventSink(),
+        }),
+        vocabulary: new WorkVocabularyService({
+          vocabulary,
+          ids: new FakeIds(),
+          events: new RecordingEventSink(),
+        }),
+      };
+    })(),
     clientAssignments: {
       service: new ClientAssignmentService({
         assignments: new FakeClientAssignmentRepo(),
@@ -187,6 +236,7 @@ function deps(): RouterDeps {
         activations: new FakeActivationFeed(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         splitAxis: new FakeWorkSplit(),
+        workItems: new FakeWorkItemSpawner(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
         events: new RecordingEventSink(),

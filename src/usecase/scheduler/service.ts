@@ -27,6 +27,7 @@ import type {
   JobRepository,
   NewJob,
   TenantDirectory,
+  WorkItemSpawner,
   WorkSplitSource,
 } from "./ports";
 
@@ -35,6 +36,15 @@ export interface Deps {
   readonly activations: ActivationFeed;
   readonly tenants: TenantDirectory;
   readonly splitAxis: WorkSplitSource;
+  /**
+   * Work items (T3.1) — the tasks a spawned job puts on people's desks.
+   *
+   * A SEAM, not a service call: this use case does not know what an assignee or
+   * a due date is. It rides on the spawn because "work became owed" is one
+   * fact, and a second sweep would leave a job showing no tasks for as long as
+   * it was behind.
+   */
+  readonly workItems: WorkItemSpawner;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -74,6 +84,24 @@ const KEY_SEP = "\u001f";
 
 export interface SweepReport {
   readonly tenantId: string;
+  /**
+   * Why this firm's sweep did not run at all, or null when it did.
+   *
+   * A firm is skipped rather than the whole sweep stopping — see
+   * `sweepActivations` — and the message is carried out so the worker can log
+   * WHICH firm and WHY. A silently skipped firm is a calendar that stops
+   * without anybody being told.
+   */
+  readonly failure?: string;
+  /**
+   * Engagements that got a job but no TASK (T3.1).
+   *
+   * The two are separate facts and the second must never undo the first: a job
+   * is the record that work is OWED, and losing it because a task could not be
+   * routed would lose the work entirely. So a task failure is counted here and
+   * logged, and the job stands.
+   */
+  readonly tasksFailed: number;
   readonly spawned: number;
   /** Activations that already had a job — the redelivery case, and the number
    *  that proves idempotency is working rather than merely intended. */
@@ -168,15 +196,37 @@ export class SchedulerService {
    * One pass over every firm: turn released engagements into jobs.
    *
    * The outer loop is the tenant list because a worker has no session, and
-   * everything below it is tenant-scoped by RLS. Each firm is independent, so
-   * one firm's failure must not stop the others — a single bad row would
-   * otherwise silently stop the calendar for every client of every firm.
+   * everything below it is tenant-scoped by RLS.
+   *
+   * ── ONE FIRM'S FAILURE MUST NOT STOP THE OTHERS ──────────────────────────
+   *
+   * This comment said exactly that from T2.6 and the code did not do it: a
+   * throw in `spawnForTenant` propagated straight out of the loop and every
+   * firm after it in the list was skipped, silently, until somebody read a
+   * worker log. T3.1 is what found it — a single firm with no work-item states
+   * stopped the calendar for every client of every firm on the box.
+   *
+   * So each firm is caught, and the failure is REPORTED rather than swallowed:
+   * `failure` on the report is what the worker logs, and `worker:once` prints.
+   * A sweep that quietly skipped a firm forever would be worse than one that
+   * stopped, because at least a stopped one is noticed.
    */
   async sweepActivations(actor: Actor = SYSTEM_ACTOR): Promise<readonly SweepReport[]> {
     const tenantIds = await this.deps.tenants.activeTenantIds();
     const reports: SweepReport[] = [];
     for (const tenantId of tenantIds) {
-      reports.push(await this.spawnForTenant(tenantId, actor));
+      try {
+        reports.push(await this.spawnForTenant(tenantId, actor));
+      } catch (err: unknown) {
+        reports.push({
+          tenantId,
+          spawned: 0,
+          alreadySpawned: 0,
+          extended: 0,
+          tasksFailed: 0,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return reports;
   }
@@ -200,6 +250,7 @@ export class SchedulerService {
     let spawned = 0;
     let alreadySpawned = 0;
     let extended = 0;
+    let tasksFailed = 0;
 
     for (const group of groupActivations(pending, axis)) {
       const engagementIds = group.activations.map((a) => a.engagementId);
@@ -212,6 +263,31 @@ export class SchedulerService {
       // linking conditionally would leave a created job with no rows in it if
       // anything below threw.
       const linked = await this.deps.jobs.linkEngagements(tenantId, result.job.id, engagementIds);
+
+      // THE TASKS, for whatever actually joined — on a job this call created
+      // (everything joins) and on one it found already open (only the new
+      // lines). Idempotent on its own side, so a redelivered sweep adds
+      // nothing, and AFTER the link for the same reason the link comes first:
+      // a work item pointing at a job that has no engagements on it would be a
+      // task nothing can explain.
+      //
+      // Deliberately not inside the `if (result.created)` branch. The second
+      // line of a letter whose advance arrived a week later joins an OPEN job,
+      // and it is a real piece of work that somebody has to do — leaving it
+      // task-less is exactly the hole `job.scope_extended` exists to make
+      // visible.
+      //
+      // CAUGHT, because the two are separate facts and the second must never
+      // undo the first. A job is the record that work is OWED; a task is whose
+      // desk it lands on. If the firm has no work-item states, or the routing
+      // cannot resolve, the JOB still stands and the number is reported — the
+      // alternative is losing the record that the client is owed anything at
+      // all, which is strictly worse than a job with nothing on a desk yet.
+      try {
+        await this.deps.workItems.spawnForEngagements(tenantId, result.job.id, linked, actor);
+      } catch {
+        tasksFailed += linked.length;
+      }
 
       if (result.created) {
         spawned += 1;
@@ -263,7 +339,7 @@ export class SchedulerService {
         },
       });
     }
-    return { tenantId, spawned, alreadySpawned, extended };
+    return { tenantId, spawned, alreadySpawned, extended, tasksFailed };
   }
 
   /**

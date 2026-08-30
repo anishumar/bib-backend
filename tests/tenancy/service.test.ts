@@ -101,10 +101,11 @@ describe("createTenant", () => {
   });
 
   it("records each seeding as one fact, after the tenant's own creation", async () => {
-    // One event for four roles, one for ten rungs, one for the firm's own
-    // entity: sixteen rows for what are really three facts would bury the
-    // events a person actually caused. All three come after the tenant, because
-    // it has to exist before anything can be configured against it.
+    // One event for four roles, one for ten rungs, one for twelve work-item
+    // states and priorities, one for the firm's own entity: twenty-eight rows
+    // for what are really four facts would bury the events a person actually
+    // caused. All four come after the tenant, because it has to exist before
+    // anything can be configured against it.
     //
     // `party.created` is the firm's OWN entity — the party module records the
     // same verb for every other party, and leaving this one unrecorded would
@@ -115,6 +116,7 @@ describe("createTenant", () => {
       "tenant.created",
       "config_registry.seeded",
       "grade_ladder.seeded",
+      "work_vocabulary.seeded",
       "party.created",
     ]);
   });

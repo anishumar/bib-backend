@@ -8,6 +8,7 @@
 // and the replacement should cost one adapter.
 import type { Job, JobSource, JobStatus } from "../../domain/scheduler/model";
 import type { WorkSplitAxis } from "../../domain/serviceaxis/model";
+import type { Actor } from "../../domain/ledger/model";
 
 export interface NewJob {
   readonly id: string;
@@ -199,6 +200,38 @@ export interface Activation {
    * workflow version.
    */
   readonly workflowKey: string | null;
+}
+
+/**
+ * Turning an engagement into work on somebody's DESK (T3.1).
+ *
+ * The scheduler creates the JOB — how the work gets done, which template it
+ * walks. It does not know what an assignee, a due date or a priority is, and it
+ * should not: those belong to the work item, whose whole reason for existing is
+ * that ad hoc work has them too and has no job at all.
+ *
+ * So this is a seam and not a call into another service. Declared here in the
+ * scheduler's own vocabulary, satisfied by `WorkItemService.spawnForEngagements`
+ * in the composition root — two use cases never import each other in this
+ * codebase.
+ *
+ * It rides on the spawn rather than running on its own timer because the two
+ * are ONE fact: work became owed. Two sweeps would mean a job with no tasks on
+ * it for as long as the second was behind, which is a work board that says a
+ * client is being looked after when nobody has it.
+ *
+ * IDEMPOTENT, and the caller relies on it: every path into the sweep is
+ * at-least-once, and the implementation conflicts on `(tenant_id,
+ * engagement_id)` rather than counting on the caller to be careful. Returns how
+ * many were actually created, for the sweep's log.
+ */
+export interface WorkItemSpawner {
+  spawnForEngagements(
+    tenantId: string,
+    jobId: string,
+    engagementIds: readonly string[],
+    actor: Actor,
+  ): Promise<number>;
 }
 
 export interface ActivationFeed {

@@ -1,0 +1,1483 @@
+// The work-item use case (T3.1) — the row on somebody's desk, and the rules
+// that decide whose. No I/O, no SQL, no HTTP: everything outside arrives as an
+// injected port, so this reads as a description of what the business does and
+// is testable with in-memory fakes and zero infrastructure.
+//
+// Two services, because they are two different things with two different
+// audiences and two different permissions:
+//
+//   WorkVocabularyService  the firm's own words — states and priorities. An
+//                          ADMIN screen, `tenant:admin`, changed rarely.
+//   WorkItemService        the work itself. Everybody's screen, all day.
+//
+// ── THE ONE THING TO READ BEFORE CHANGING ANYTHING HERE ────────────────────
+//
+// Nothing in this file compares a state's or a priority's `code`. Every rule
+// reads a FLAG — `isInitial`, `isTerminal`, `isBlocked`, `isDefault`,
+// `isStatutoryDefault`, `rank`. That is not a style preference: migration 0050
+// made these rows so the firm could rename "Blocked" or add a ninth state
+// without a deploy, and a rule keyed on a name switches itself off the first
+// time somebody exercises exactly the freedom the rows were there to give.
+import type { Clock } from "../../platform/clock";
+import type { IdGen } from "../../platform/ids";
+import type { Actor } from "../../domain/ledger/model";
+import type { EventSink } from "../ledger/ports";
+import type {
+  ChecklistItem,
+  WorkItem,
+  WorkItemApproval,
+  WorkItemCheck,
+  WorkItemDependency,
+  WorkItemPriority,
+  WorkItemRecord,
+  WorkItemState,
+} from "../../domain/workitem/model";
+import {
+  DEFAULT_WORK_ITEM_PRIORITIES,
+  DEFAULT_WORK_ITEM_STATES,
+  boardOrder,
+  defaultPriorityFor,
+  dueOnFrom,
+  initialState,
+  isIsoDate,
+  isValidRank,
+  isValidVocabularyCode,
+  normalizeVocabularyCode,
+  priorityOrder,
+  resolveAssignee,
+  stateOrder,
+  wouldCycle,
+} from "../../domain/workitem/model";
+import {
+  AssigneeNotStaff,
+  BlockReasonRequired,
+  ChecklistItemDone,
+  ChecklistItemNotFound,
+  ConflictingStateFlags,
+  DependencyCycle,
+  DependencyExists,
+  DependencyNotFound,
+  InvalidDueDate,
+  InvalidRank,
+  InvalidSortOrder,
+  InvalidVocabularyCode,
+  LastDefaultPriority,
+  LastInitialState,
+  NoDefaultPriority,
+  NoInitialState,
+  PriorityNotFound,
+  PriorityRetired,
+  ReviewAlreadyDecided,
+  ReviewAlreadyOpen,
+  ReviewNotFound,
+  ReviewRejectionNeedsNote,
+  ReviewSelfApproval,
+  ReviewerNotEligible,
+  StateNotFound,
+  StateRetired,
+  VocabularyCodeTaken,
+  WorkItemAlreadyInState,
+  WorkItemBlockedByDependency,
+  WorkItemClientArchived,
+  WorkItemClientNotFound,
+  WorkItemNotFound,
+  WorkItemTitleRequired,
+} from "../../domain/workitem/errors";
+// T2.9's rule about who may check whose work, reused UNCHANGED. A second
+// implementation of maker != checker plus a grade threshold is a second answer
+// to the same question, and the two would drift the first time a firm changed
+// its policy. `usecase/scheduler` imports `domain/serviceaxis` the same way and
+// for the same reason: a use case may reach a sibling DOMAIN, never a sibling
+// use case.
+import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/verification/model";
+import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
+import type {
+  EngagementWorkSource,
+  NewWorkItem,
+  NewWorkItemPriority,
+  NewWorkItemState,
+  ReviewPermissionSource,
+  ReviewPolicySource,
+  ReviewerDirectory,
+  ReviewerRow,
+  SpocDirectory,
+  WorkAxisDirectory,
+  WorkItemApprovalRepository,
+  WorkItemClientDirectory,
+  WorkItemFilter,
+  WorkItemRepository,
+  WorkItemStaffDirectory,
+  WorkVocabularyRepository,
+} from "./ports";
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  The firm's own words
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface VocabularyDeps {
+  readonly vocabulary: WorkVocabularyRepository;
+  readonly ids: IdGen;
+  readonly events: EventSink;
+}
+
+export interface CreateStateInput {
+  readonly tenantId: string;
+  readonly code: string;
+  readonly name: string;
+  readonly isInitial?: boolean | undefined;
+  readonly isTerminal?: boolean | undefined;
+  readonly isBlocked?: boolean | undefined;
+  readonly sortOrder?: number | undefined;
+}
+
+export interface UpdateStateInput {
+  readonly tenantId: string;
+  readonly stateId: string;
+  /** Absent means unchanged, for each independently. */
+  readonly name?: string | undefined;
+  readonly isInitial?: boolean | undefined;
+  readonly isTerminal?: boolean | undefined;
+  readonly isBlocked?: boolean | undefined;
+  readonly sortOrder?: number | undefined;
+  readonly isActive?: boolean | undefined;
+}
+
+export interface CreatePriorityInput {
+  readonly tenantId: string;
+  readonly code: string;
+  readonly name: string;
+  readonly rank: number;
+  readonly isDefault?: boolean | undefined;
+  readonly isStatutoryDefault?: boolean | undefined;
+}
+
+export interface UpdatePriorityInput {
+  readonly tenantId: string;
+  readonly priorityId: string;
+  readonly name?: string | undefined;
+  readonly rank?: number | undefined;
+  readonly isDefault?: boolean | undefined;
+  readonly isStatutoryDefault?: boolean | undefined;
+  readonly isActive?: boolean | undefined;
+}
+
+export class WorkVocabularyService {
+  constructor(private readonly deps: VocabularyDeps) {}
+
+  /** The states, in the order the firm arranged them, retired ones included —
+   *  an admin needs to see what was stopped and bring it back. */
+  async listStates(tenantId: string): Promise<readonly WorkItemState[]> {
+    return stateOrder(await this.deps.vocabulary.listStates(tenantId));
+  }
+
+  /** Most urgent first. */
+  async listPriorities(tenantId: string): Promise<readonly WorkItemPriority[]> {
+    return priorityOrder(await this.deps.vocabulary.listPriorities(tenantId));
+  }
+
+  async createState(input: CreateStateInput, actor: Actor): Promise<WorkItemState> {
+    const code = normalizeVocabularyCode(input.code);
+    if (!isValidVocabularyCode(code)) throw new InvalidVocabularyCode(input.code);
+    const sortOrder = input.sortOrder ?? 0;
+    if (!Number.isInteger(sortOrder)) throw new InvalidSortOrder(sortOrder);
+
+    const isInitial = input.isInitial ?? false;
+    const isTerminal = input.isTerminal ?? false;
+    const isBlocked = input.isBlocked ?? false;
+    this.refuseConflictingFlags(isInitial, isTerminal, isBlocked);
+
+    // Checked rather than left to the unique constraint, which would surface as
+    // an unexplained 500 on a screen where the fix is obvious.
+    if (await this.deps.vocabulary.findStateByCode(input.tenantId, code)) {
+      throw new VocabularyCodeTaken("state", code);
+    }
+
+    const state = await this.deps.vocabulary.createState({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      code,
+      name: input.name,
+      isInitial,
+      isTerminal,
+      isBlocked,
+      sortOrder,
+    } satisfies NewWorkItemState);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item_state.created",
+      objectId: state.id,
+      actor,
+      payload: { code: state.code, isInitial, isTerminal, isBlocked },
+    });
+    return state;
+  }
+
+  /**
+   * Rename a state, re-flag it, reorder it, retire it, or any combination.
+   *
+   * Two rules live here that the database cannot express, and both are about
+   * the ABSENCE of a row:
+   *
+   *   The firm may never end up with NO starting state. A partial unique index
+   *   enforces at most one and cannot enforce at least one, so the floor is
+   *   here — and un-marking the only one is refused with a sentence saying to
+   *   mark another first, which is two ticks and never a moment with none.
+   *
+   *   Marking a state as the starting one CLEARS the flag on the previous
+   *   holder, in the same statement. Otherwise the write would conflict with a
+   *   row the caller is on their way to changing.
+   *
+   * Idempotent: a patch that changes nothing records nothing, because nothing
+   * happened to record.
+   */
+  async updateState(input: UpdateStateInput, actor: Actor): Promise<WorkItemState> {
+    const state = await this.requireState(input.tenantId, input.stateId);
+    if (input.sortOrder !== undefined && !Number.isInteger(input.sortOrder)) {
+      throw new InvalidSortOrder(input.sortOrder);
+    }
+
+    const next = {
+      name: input.name ?? state.name,
+      isInitial: input.isInitial ?? state.isInitial,
+      isTerminal: input.isTerminal ?? state.isTerminal,
+      isBlocked: input.isBlocked ?? state.isBlocked,
+      sortOrder: input.sortOrder ?? state.sortOrder,
+      isActive: input.isActive ?? state.isActive,
+    };
+    this.refuseConflictingFlags(next.isInitial, next.isTerminal, next.isBlocked);
+
+    // Losing the starting flag, or retiring the row that holds it, both leave
+    // the firm unable to create any work at all. The same refusal, because they
+    // are the same hole.
+    const losesInitial = state.isInitial && (!next.isInitial || !next.isActive);
+    if (losesInitial) throw new LastInitialState();
+
+    const changed =
+      next.name !== state.name ||
+      next.isInitial !== state.isInitial ||
+      next.isTerminal !== state.isTerminal ||
+      next.isBlocked !== state.isBlocked ||
+      next.sortOrder !== state.sortOrder ||
+      next.isActive !== state.isActive;
+    if (!changed) return state;
+
+    const updated = await this.deps.vocabulary.updateState(input.tenantId, state.id, next);
+
+    // BOTH sides of whatever changed. "The flag moved" is not the useful fact a
+    // year later; "it stopped being terminal on the 4th, which is why these
+    // items lost their completion date" is.
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item_state.updated",
+      objectId: state.id,
+      actor,
+      payload: {
+        code: state.code,
+        ...(next.name === state.name ? {} : { nameFrom: state.name, nameTo: next.name }),
+        ...(next.isInitial === state.isInitial ? {} : { isInitial: next.isInitial }),
+        ...(next.isTerminal === state.isTerminal ? {} : { isTerminal: next.isTerminal }),
+        ...(next.isBlocked === state.isBlocked ? {} : { isBlocked: next.isBlocked }),
+        ...(next.sortOrder === state.sortOrder ? {} : { sortOrder: next.sortOrder }),
+        ...(next.isActive === state.isActive ? {} : { isActive: next.isActive }),
+      },
+    });
+    return updated;
+  }
+
+  async createPriority(input: CreatePriorityInput, actor: Actor): Promise<WorkItemPriority> {
+    const code = normalizeVocabularyCode(input.code);
+    if (!isValidVocabularyCode(code)) throw new InvalidVocabularyCode(input.code);
+    if (!isValidRank(input.rank)) throw new InvalidRank(input.rank);
+
+    if (await this.deps.vocabulary.findPriorityByCode(input.tenantId, code)) {
+      throw new VocabularyCodeTaken("priority", code);
+    }
+
+    const priority = await this.deps.vocabulary.createPriority({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      code,
+      name: input.name,
+      rank: input.rank,
+      isDefault: input.isDefault ?? false,
+      isStatutoryDefault: input.isStatutoryDefault ?? false,
+    } satisfies NewWorkItemPriority);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item_priority.created",
+      objectId: priority.id,
+      actor,
+      payload: {
+        code: priority.code,
+        rank: priority.rank,
+        isDefault: priority.isDefault,
+        isStatutoryDefault: priority.isStatutoryDefault,
+      },
+    });
+    return priority;
+  }
+
+  /** The same shape as `updateState`, and the same two absence rules: a firm
+   *  may end up with no CRITICAL priority, but never with no default and never
+   *  with no statutory default — new work would have nothing to be created
+   *  with. */
+  async updatePriority(input: UpdatePriorityInput, actor: Actor): Promise<WorkItemPriority> {
+    const priority = await this.requirePriority(input.tenantId, input.priorityId);
+    if (input.rank !== undefined && !isValidRank(input.rank)) throw new InvalidRank(input.rank);
+
+    const next = {
+      name: input.name ?? priority.name,
+      rank: input.rank ?? priority.rank,
+      isDefault: input.isDefault ?? priority.isDefault,
+      isStatutoryDefault: input.isStatutoryDefault ?? priority.isStatutoryDefault,
+      isActive: input.isActive ?? priority.isActive,
+    };
+
+    if (priority.isDefault && (!next.isDefault || !next.isActive)) {
+      throw new LastDefaultPriority("default");
+    }
+    if (priority.isStatutoryDefault && (!next.isStatutoryDefault || !next.isActive)) {
+      throw new LastDefaultPriority("statutory default");
+    }
+
+    const changed =
+      next.name !== priority.name ||
+      next.rank !== priority.rank ||
+      next.isDefault !== priority.isDefault ||
+      next.isStatutoryDefault !== priority.isStatutoryDefault ||
+      next.isActive !== priority.isActive;
+    if (!changed) return priority;
+
+    const updated = await this.deps.vocabulary.updatePriority(
+      input.tenantId,
+      priority.id,
+      next,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item_priority.updated",
+      objectId: priority.id,
+      actor,
+      payload: {
+        code: priority.code,
+        ...(next.name === priority.name ? {} : { nameFrom: priority.name, nameTo: next.name }),
+        ...(next.rank === priority.rank ? {} : { rankFrom: priority.rank, rankTo: next.rank }),
+        ...(next.isDefault === priority.isDefault ? {} : { isDefault: next.isDefault }),
+        ...(next.isStatutoryDefault === priority.isStatutoryDefault
+          ? {}
+          : { isStatutoryDefault: next.isStatutoryDefault }),
+        ...(next.isActive === priority.isActive ? {} : { isActive: next.isActive }),
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Give a brand-new firm its starting vocabulary — the `WorkVocabularySeeder`
+   * port tenancy calls from `createTenant`.
+   *
+   * Idempotent, and that is not defensive coding: `createTenant` and this share
+   * no unit of work, so a retry after a partial failure must not produce a
+   * second "In Progress". Rows that already exist are left exactly as they are,
+   * because by then they may be the firm's own edits.
+   *
+   * ONE event, not twelve — a firm receiving its starting vocabulary is one
+   * fact.
+   */
+  async seedDefaultVocabulary(tenantId: string, actor: Actor): Promise<readonly string[]> {
+    const heldStates = new Set((await this.deps.vocabulary.listStates(tenantId)).map((s) => s.code));
+    const missingStates: NewWorkItemState[] = DEFAULT_WORK_ITEM_STATES.filter(
+      (s) => !heldStates.has(s.code),
+    ).map((s) => ({
+      id: this.deps.ids.newId(),
+      tenantId,
+      code: s.code,
+      name: s.name,
+      isInitial: s.isInitial,
+      isTerminal: s.isTerminal,
+      isBlocked: s.isBlocked,
+      sortOrder: s.sortOrder,
+    }));
+
+    const heldPriorities = new Set(
+      (await this.deps.vocabulary.listPriorities(tenantId)).map((p) => p.code),
+    );
+    const missingPriorities: NewWorkItemPriority[] = DEFAULT_WORK_ITEM_PRIORITIES.filter(
+      (p) => !heldPriorities.has(p.code),
+    ).map((p) => ({
+      id: this.deps.ids.newId(),
+      tenantId,
+      code: p.code,
+      name: p.name,
+      rank: p.rank,
+      isDefault: p.isDefault,
+      isStatutoryDefault: p.isStatutoryDefault,
+    }));
+
+    if (missingStates.length === 0 && missingPriorities.length === 0) return [];
+
+    const states =
+      missingStates.length > 0 ? await this.deps.vocabulary.createStates(missingStates) : [];
+    const priorities =
+      missingPriorities.length > 0
+        ? await this.deps.vocabulary.createPriorities(missingPriorities)
+        : [];
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "work_vocabulary.seeded",
+      objectId: tenantId,
+      actor,
+      payload: { states: states.length, priorities: priorities.length },
+    });
+    return [...states.map((s) => s.code), ...priorities.map((p) => p.code)];
+  }
+
+  // ── internals ────────────────────────────────────────────────────────────
+
+  private async requireState(tenantId: string, stateId: string): Promise<WorkItemState> {
+    const state = await this.deps.vocabulary.findState(tenantId, stateId);
+    if (!state) throw new StateNotFound(stateId);
+    return state;
+  }
+
+  private async requirePriority(
+    tenantId: string,
+    priorityId: string,
+  ): Promise<WorkItemPriority> {
+    const priority = await this.deps.vocabulary.findPriority(tenantId, priorityId);
+    if (!priority) throw new PriorityNotFound(priorityId);
+    return priority;
+  }
+
+  /**
+   * The three flag pairs that cannot both be true.
+   *
+   * Also CHECK constraints, and refused here so the answer is a sentence rather
+   * than a constraint violation on a screen where the fix is a tick. Each pair
+   * would demand contradictory things of every item in the state: a terminal
+   * blocked state wants a completion time and a block reason at once, and
+   * 0051's trigger would refuse every write into it with a message about a
+   * field the admin never saw.
+   */
+  private refuseConflictingFlags(
+    isInitial: boolean,
+    isTerminal: boolean,
+    isBlocked: boolean,
+  ): void {
+    if (isTerminal && isBlocked) {
+      throw new ConflictingStateFlags(
+        "A state cannot be both terminal and blocked: finished work is not stuck.",
+      );
+    }
+    if (isInitial && isTerminal) {
+      throw new ConflictingStateFlags(
+        "A state cannot be both the starting state and a terminal one: new work would be " +
+          "created already finished.",
+      );
+    }
+    if (isInitial && isBlocked) {
+      throw new ConflictingStateFlags(
+        "A state cannot be both the starting state and a blocked one: every new work item " +
+          "would need a block reason before it could exist.",
+      );
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  The work itself
+// ═══════════════════════════════════════════════════════════════════════════
+
+export interface Deps {
+  readonly items: WorkItemRepository;
+  readonly approvals: WorkItemApprovalRepository;
+  readonly vocabulary: WorkVocabularyRepository;
+  readonly clients: WorkItemClientDirectory;
+  readonly staff: WorkItemStaffDirectory;
+  readonly spocs: SpocDirectory;
+  readonly axes: WorkAxisDirectory;
+  readonly policies: ReviewPolicySource;
+  readonly reviewers: ReviewerDirectory;
+  readonly permissions: ReviewPermissionSource;
+  readonly engagements: EngagementWorkSource;
+  readonly ids: IdGen;
+  readonly clock: Clock;
+  readonly events: EventSink;
+}
+
+export interface CreateWorkItemInput {
+  readonly tenantId: string;
+  readonly clientPartyId: string;
+  readonly entityPartyId?: string | null | undefined;
+  readonly title: string;
+  readonly description?: string | null | undefined;
+  readonly priorityId?: string | undefined;
+  readonly assigneeUserId?: string | null | undefined;
+  readonly dueOn?: string | null | undefined;
+  readonly isStatutoryDue?: boolean | undefined;
+  readonly isClientVisible?: boolean | undefined;
+  /** The caller's calendar day, used for the SPOC lookup. Defaults to the
+   *  server's, which is the only honest fallback for an API caller that did not
+   *  say — see `today()`. */
+  readonly asOf?: string | undefined;
+}
+
+export interface UpdateWorkItemInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly title?: string | undefined;
+  readonly description?: string | null | undefined;
+  readonly priorityId?: string | undefined;
+  readonly dueOn?: string | null | undefined;
+  readonly isClientVisible?: boolean | undefined;
+}
+
+export interface MoveStateInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly stateId: string;
+  /** Required when the target state is one the firm has marked as BLOCKED, and
+   *  refused otherwise. */
+  readonly blockedReason?: string | null | undefined;
+}
+
+export interface AssignWorkItemInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  /** Null takes it off the desk it is on. */
+  readonly assigneeUserId: string | null;
+}
+
+export interface RequestReviewInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  /**
+   * Which of the firm's published rules decides who may check this.
+   *
+   * OPTIONAL, and a default was deliberately not invented. There is no template
+   * step here to name one (that is where T2.9 gets its key), and picking a rule
+   * on the firm's behalf would be this product deciding who signs off its work.
+   * Absent means maker != checker alone — exactly what T2.9 does for a step
+   * whose firm has published no rule, and strictly more than the nothing that
+   * existed before.
+   */
+  readonly policyKey?: string | null | undefined;
+}
+
+export interface DecideReviewInput {
+  readonly tenantId: string;
+  readonly approvalId: string;
+  readonly decision: "approved" | "rejected";
+  readonly notes?: string | null | undefined;
+  readonly decidedBy: string;
+}
+
+/** One person who might check a work item, with the answer and its reason. */
+export interface CheckerOption {
+  readonly userId: string;
+  readonly displayName: string;
+  readonly gradeName: string | null;
+  readonly eligible: boolean;
+  /** What to SAY when they are not. A refusal with no reason is how somebody
+   *  concludes the button is broken. */
+  readonly reason: string | null;
+}
+
+/** One work item and everything its own screen shows. */
+export interface WorkItemDetail {
+  readonly record: WorkItemRecord;
+  readonly checklist: readonly ChecklistItem[];
+  readonly dependencies: readonly WorkItemDependency[];
+  /** Every review it has ever had, newest first — the rejections are the
+   *  point. */
+  readonly reviews: readonly WorkItemCheck[];
+}
+
+export class WorkItemService {
+  constructor(private readonly deps: Deps) {}
+
+  // ── reading ──────────────────────────────────────────────────────────────
+
+  /**
+   * The board.
+   *
+   * `today` is the CALLER's calendar day, because "overdue" is the first thing
+   * the ordering asks and the server's day is not the firm's — a server in UTC
+   * is a day behind a firm in India every morning. A browser sends its own.
+   */
+  async board(
+    tenantId: string,
+    filter: WorkItemFilter,
+    asOf?: string,
+  ): Promise<readonly WorkItemRecord[]> {
+    const today = asOf ?? this.today();
+    if (!isIsoDate(today)) throw new InvalidDueDate(today);
+    return boardOrder(await this.deps.items.list(tenantId, filter), today);
+  }
+
+  async detail(tenantId: string, workItemId: string): Promise<WorkItemDetail> {
+    const record = await this.deps.items.findRecord(tenantId, workItemId);
+    if (!record) throw new WorkItemNotFound(workItemId);
+    return {
+      record,
+      checklist: await this.deps.items.listChecklist(tenantId, workItemId),
+      dependencies: (await this.deps.items.listAllDependencies(tenantId)).filter(
+        (d) => d.workItemId === workItemId,
+      ),
+      reviews: await this.deps.approvals.listForWorkItem(tenantId, workItemId),
+    };
+  }
+
+  /** Everything waiting to be checked at this firm, oldest first. */
+  async pendingChecks(tenantId: string): Promise<readonly WorkItemCheck[]> {
+    return this.deps.approvals.listPending(tenantId);
+  }
+
+  // ── creating ─────────────────────────────────────────────────────────────
+
+  /**
+   * Raise a work item by hand — ad hoc work, which is real work.
+   *
+   * The assignee is either named by the caller or ROUTED: with no name given,
+   * the client's Dept SPOC is looked up the same way a spawned filing's is,
+   * except that a hand-raised item has no service and therefore no Dept, so the
+   * lookup has nothing to join on and the item is created unassigned with a
+   * note saying so. That is honest rather than clever: routing needs a Dept,
+   * and ad hoc work does not have one until somebody says which.
+   */
+  async create(input: CreateWorkItemInput, actor: Actor): Promise<WorkItem> {
+    const title = input.title.trim();
+    if (title.length === 0) throw new WorkItemTitleRequired();
+
+    const client = await this.deps.clients.findParty(input.tenantId, input.clientPartyId);
+    if (!client) throw new WorkItemClientNotFound(input.clientPartyId);
+    if (client.archivedAt !== null) throw new WorkItemClientArchived(client.displayName);
+
+    if (input.entityPartyId !== undefined && input.entityPartyId !== null) {
+      const entity = await this.deps.clients.findParty(input.tenantId, input.entityPartyId);
+      if (!entity) throw new WorkItemClientNotFound(input.entityPartyId);
+    }
+
+    const dueOn = input.dueOn ?? null;
+    if (dueOn !== null && !isIsoDate(dueOn)) throw new InvalidDueDate(dueOn);
+
+    const isStatutoryDue = input.isStatutoryDue ?? false;
+    const state = await this.requireInitialState(input.tenantId);
+    const priority =
+      input.priorityId !== undefined
+        ? await this.requireAssignablePriority(input.tenantId, input.priorityId)
+        : await this.requireDefaultPriority(input.tenantId, isStatutoryDue);
+
+    let assigneeUserId: string | null = null;
+    let assignmentNote: string | null = null;
+    if (input.assigneeUserId !== undefined && input.assigneeUserId !== null) {
+      await this.requireStaff(input.tenantId, input.assigneeUserId);
+      assigneeUserId = input.assigneeUserId;
+    } else {
+      assignmentNote =
+        `Raised by hand with no Dept, so there was nothing to route on. Pick somebody, or ` +
+        `raise it from an engagement and the client's Dept SPOC gets it automatically.`;
+    }
+
+    const item = await this.deps.items.create({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      clientPartyId: input.clientPartyId,
+      entityPartyId: input.entityPartyId ?? null,
+      engagementId: null,
+      jobId: null,
+      serviceVersionId: null,
+      deptAxisId: null,
+      title,
+      description: input.description ?? null,
+      stateId: state.id,
+      priorityId: priority.id,
+      assigneeUserId,
+      assignmentNote,
+      dueOn,
+      isStatutoryDue,
+      slaDaysSnapshot: null,
+      isClientVisible: input.isClientVisible ?? true,
+    } satisfies NewWorkItem);
+
+    await this.recordCreated(item, actor, "manual");
+    return item;
+  }
+
+  /**
+   * THE ACCEPTANCE LINE: turn engagements into work that arrives pre-assigned
+   * to the client's Dept SPOC.
+   *
+   * Called by the scheduler as it spawns or extends a job — one trigger, one
+   * pass, with the engagement already in hand. Satisfies the
+   * `WorkItemSpawner` port that use case declares in its own vocabulary, so
+   * neither imports the other.
+   *
+   * IDEMPOTENT, structurally. Every route into the sweep is at-least-once — a
+   * redelivered pg-boss message, a restarted worker, a replayed activation —
+   * and `createIfAbsentForEngagement` turns the second attempt into a null the
+   * loop skips. A second work item would be a second task on somebody's desk
+   * for work already being done, and nothing on the screen could tell them
+   * apart.
+   *
+   * Returns how many were actually created, for the sweep's log.
+   */
+  async spawnForEngagements(
+    tenantId: string,
+    jobId: string,
+    engagementIds: readonly string[],
+    actor: Actor,
+  ): Promise<number> {
+    if (engagementIds.length === 0) return 0;
+
+    // Read once, outside the loop. A partner editing the vocabulary halfway
+    // through a sweep must not give two filings from one letter two different
+    // starting states.
+    const state = await this.requireInitialState(tenantId);
+    const priorities = await this.deps.vocabulary.listPriorities(tenantId);
+    const work = await this.deps.engagements.workFor(tenantId, engagementIds);
+
+    let created = 0;
+    for (const w of work) {
+      // Statutory work is what a STATUTE dates, and an engagement's SLA is the
+      // firm's own promise. So a work item spawned from an engagement is NOT
+      // statutory — T3.2's obligations are what set that flag, from the law.
+      // Defaulting it true here would put every piece of advisory work on the
+      // statutory priority and make the flag meaningless the day it matters.
+      const priority = defaultPriorityFor(priorities, false);
+      if (!priority) throw new NoDefaultPriority();
+
+      const routing = await this.routeToSpoc(
+        tenantId,
+        w.clientPartyId,
+        w.deptCode,
+        w.effectiveFrom,
+      );
+
+      const item = await this.deps.items.createIfAbsentForEngagement({
+        id: this.deps.ids.newId(),
+        tenantId,
+        clientPartyId: w.clientPartyId,
+        entityPartyId: w.entityPartyId,
+        engagementId: w.engagementId,
+        jobId,
+        serviceVersionId: w.serviceVersionId,
+        deptAxisId: routing.axisId,
+        title: w.serviceName,
+        description: null,
+        stateId: state.id,
+        priorityId: priority.id,
+        assigneeUserId: routing.outcome.userId,
+        assignmentNote: routing.outcome.note,
+        dueOn: dueOnFrom(w.effectiveFrom, w.slaDays),
+        isStatutoryDue: false,
+        // The SLA in force AT CREATION, copied. A later catalogue revision must
+        // not make finished work retroactively late — G2.3's whole argument.
+        slaDaysSnapshot: w.slaDays,
+        isClientVisible: true,
+      } satisfies NewWorkItem);
+
+      // Null means one already exists for this engagement: a redelivery, and
+      // the correct answer is to do nothing and record nothing.
+      if (!item) continue;
+      created += 1;
+      await this.recordCreated(item, actor, "engagement");
+      if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, "spoc");
+    }
+    return created;
+  }
+
+  // ── changing ─────────────────────────────────────────────────────────────
+
+  async update(input: UpdateWorkItemInput, actor: Actor): Promise<WorkItem> {
+    const item = await this.requireItem(input.tenantId, input.workItemId);
+
+    if (input.title !== undefined && input.title.trim().length === 0) {
+      throw new WorkItemTitleRequired();
+    }
+    if (input.dueOn !== undefined && input.dueOn !== null && !isIsoDate(input.dueOn)) {
+      throw new InvalidDueDate(input.dueOn);
+    }
+    if (input.priorityId !== undefined) {
+      await this.requireAssignablePriority(input.tenantId, input.priorityId);
+    }
+
+    // Absent fields are resolved to their current values HERE rather than in
+    // the adapter, which is this codebase's convention (`StaffGradeService`):
+    // the SQL is then one statement with no branch per column.
+    const patch = {
+      title: input.title === undefined ? item.title : input.title.trim(),
+      description: input.description === undefined ? item.description : input.description,
+      priorityId: input.priorityId ?? item.priorityId,
+      dueOn: input.dueOn === undefined ? item.dueOn : input.dueOn,
+      isClientVisible: input.isClientVisible ?? item.isClientVisible,
+    };
+    const changed =
+      patch.title !== item.title ||
+      patch.description !== item.description ||
+      patch.priorityId !== item.priorityId ||
+      patch.dueOn !== item.dueOn ||
+      patch.isClientVisible !== item.isClientVisible;
+    if (!changed) return item;
+
+    const updated = await this.deps.items.update(input.tenantId, item.id, patch);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item.updated",
+      objectId: item.id,
+      actor,
+      // Machine facts, and both sides of each. A moved DUE DATE is the one that
+      // matters: "why was this late" is answered by somebody having moved it,
+      // and a payload that only said "it was edited" could not answer it. The
+      // TITLE and DESCRIPTION are prose a person wrote about a client's work
+      // and stay off this log, which cannot be erased — that a title changed is
+      // recorded, what it changed to is not.
+      payload: {
+        ...(patch.title === item.title ? {} : { titleChanged: true }),
+        ...(patch.description === item.description ? {} : { descriptionChanged: true }),
+        ...(patch.priorityId === item.priorityId
+          ? {}
+          : { priorityFrom: item.priorityId, priorityTo: patch.priorityId }),
+        ...(patch.dueOn === item.dueOn ? {} : { dueOnFrom: item.dueOn, dueOnTo: patch.dueOn }),
+        ...(patch.isClientVisible === item.isClientVisible
+          ? {}
+          : { isClientVisible: patch.isClientVisible }),
+      },
+    });
+    return updated;
+  }
+
+  /**
+   * Move a work item to another of the firm's states.
+   *
+   * Everything the database will demand of the row is computed HERE and written
+   * in one statement, because 0051's trigger refuses a row whose state and
+   * timestamps disagree. Three facts follow from the target state's FLAGS and
+   * never from its name:
+   *
+   *   isBlocked   a reason is mandatory, and `blockedAt` is stamped. The
+   *               capture-or-lose pair, taken at the one moment the answer is
+   *               still obvious to everybody.
+   *   not blocked the pair is CLEARED. Leaving a block must not leave a stale
+   *               sentence on running work; the history is in the ledger, which
+   *               is the thing that cannot be edited.
+   *   isTerminal  `completedAt` is stamped, and cleared again on the way back
+   *               when work is reopened.
+   *
+   * And one rule that is not about timestamps: STARTING is refused while the
+   * item is still waiting on unfinished work. That is what a dependency SAYS —
+   * "this cannot start until that is finished" — so it is enforced rather than
+   * displayed. Moving straight to a terminal state is allowed: cancelling
+   * something that never started is a real act, and refusing it would trap the
+   * item.
+   */
+  async moveToState(input: MoveStateInput, actor: Actor): Promise<WorkItem> {
+    const item = await this.requireItem(input.tenantId, input.workItemId);
+    const from = await this.requireStateRow(input.tenantId, item.stateId);
+    const to = await this.requireStateRow(input.tenantId, input.stateId);
+
+    if (to.id === from.id) throw new WorkItemAlreadyInState(to.name);
+    if (!to.isActive) throw new StateRetired(to.name);
+
+    const reason = (input.blockedReason ?? "").trim();
+    if (to.isBlocked && reason.length === 0) throw new BlockReasonRequired(to.name);
+
+    if (from.isInitial && !to.isTerminal) {
+      const blockers = await this.deps.items.openBlockers(input.tenantId, item.id);
+      if (blockers.length > 0) {
+        throw new WorkItemBlockedByDependency(blockers.map((b) => b.title));
+      }
+    }
+
+    const now = this.deps.clock.now().toISOString();
+    const updated = await this.deps.items.setState(input.tenantId, item.id, {
+      stateId: to.id,
+      blockedReason: to.isBlocked ? reason : null,
+      blockedAt: to.isBlocked ? now : null,
+      // Set once, on the first move out of the starting state, and never
+      // cleared afterwards: "when did somebody first pick this up" is a fact
+      // that stays true even if the work is later reopened.
+      startedAt: item.startedAt ?? (from.isInitial ? now : null),
+      completedAt: to.isTerminal ? (item.completedAt ?? now) : null,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item.state_changed",
+      objectId: item.id,
+      actor,
+      // Ids and machine facts. The block REASON is deliberately absent: it is
+      // prose a person wrote, it routinely names a client or a colleague, and
+      // this log cannot be erased. The row keeps it where it can be.
+      payload: {
+        fromStateId: from.id,
+        toStateId: to.id,
+        isBlocked: to.isBlocked,
+        isTerminal: to.isTerminal,
+      },
+    });
+
+    // A separate, registered verb, because "what did we finish last month" is a
+    // question somebody asks of the log and a generic state change cannot
+    // answer it without knowing which states were terminal at the time.
+    if (to.isTerminal && !from.isTerminal) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "work_item.completed",
+        objectId: item.id,
+        actor,
+        payload: { stateId: to.id, clientPartyId: item.clientPartyId },
+      });
+    }
+    return updated;
+  }
+
+  /** Put it on somebody's desk, or take it off. Taking it off records WHY as a
+   *  note, so the unassigned queue stays readable rather than becoming a pile
+   *  of rows with no explanation. */
+  async assign(input: AssignWorkItemInput, actor: Actor): Promise<WorkItem> {
+    const item = await this.requireItem(input.tenantId, input.workItemId);
+    if (input.assigneeUserId !== null) {
+      await this.requireStaff(input.tenantId, input.assigneeUserId);
+    }
+    if (item.assigneeUserId === input.assigneeUserId) return item;
+
+    const updated = await this.deps.items.setAssignee(
+      input.tenantId,
+      item.id,
+      input.assigneeUserId,
+      input.assigneeUserId === null ? "Taken off a desk by hand; nobody has it now." : null,
+    );
+    await this.recordAssigned(updated, actor, "manual");
+    return updated;
+  }
+
+  // ── the checklist ────────────────────────────────────────────────────────
+
+  async addChecklistItem(
+    tenantId: string,
+    workItemId: string,
+    label: string,
+    sortOrder?: number,
+  ): Promise<ChecklistItem> {
+    await this.requireItem(tenantId, workItemId);
+    if (label.trim().length === 0) throw new WorkItemTitleRequired();
+    const existing = await this.deps.items.listChecklist(tenantId, workItemId);
+    return this.deps.items.addChecklistItem({
+      id: this.deps.ids.newId(),
+      tenantId,
+      workItemId,
+      label: label.trim(),
+      // Appended by default, in tens so a firm can slot one between two later
+      // without renumbering — the same reason `sort_order` is not contiguous.
+      sortOrder: sortOrder ?? (existing.length + 1) * 10,
+    });
+  }
+
+  /**
+   * Tick or untick a line.
+   *
+   * No ledger event, deliberately. A checklist tick is not a state transition
+   * of the business — it is somebody's working note on their own task, and the
+   * row already carries who and when. Recording twelve events per filing would
+   * bury the transitions that matter in a log that cannot be pruned.
+   */
+  async setChecklistDone(
+    tenantId: string,
+    checklistItemId: string,
+    done: boolean,
+    userId: string,
+  ): Promise<ChecklistItem> {
+    const line = await this.deps.items.findChecklistItem(tenantId, checklistItemId);
+    if (!line) throw new ChecklistItemNotFound(checklistItemId);
+    if (done === (line.doneAt !== null)) return line;
+    return this.deps.items.setChecklistDone(
+      tenantId,
+      checklistItemId,
+      done ? this.deps.clock.now().toISOString() : null,
+      done ? userId : null,
+    );
+  }
+
+  /** Remove an UNTICKED line. A ticked one is refused here and by a trigger:
+   *  the tick is the record that somebody did it, and it lives nowhere else. */
+  async removeChecklistItem(tenantId: string, checklistItemId: string): Promise<void> {
+    const line = await this.deps.items.findChecklistItem(tenantId, checklistItemId);
+    if (!line) throw new ChecklistItemNotFound(checklistItemId);
+    if (line.doneAt !== null) throw new ChecklistItemDone();
+    await this.deps.items.removeChecklistItem(tenantId, checklistItemId);
+  }
+
+  // ── dependencies ─────────────────────────────────────────────────────────
+
+  /**
+   * "This cannot start until that is finished."
+   *
+   * The cycle check walks the whole edge list in the DOMAIN, because
+   * reachability is not expressible in a CHECK constraint — the database
+   * catches only the self-edge. A cycle that got in would produce work nothing
+   * can ever start, with nothing on the screen saying why.
+   */
+  async addDependency(
+    tenantId: string,
+    workItemId: string,
+    dependsOnWorkItemId: string,
+    actor: Actor,
+  ): Promise<WorkItemDependency> {
+    await this.requireItem(tenantId, workItemId);
+    await this.requireItem(tenantId, dependsOnWorkItemId);
+
+    const edges = await this.deps.items.listAllDependencies(tenantId);
+    if (
+      edges.some(
+        (e) => e.workItemId === workItemId && e.dependsOnWorkItemId === dependsOnWorkItemId,
+      )
+    ) {
+      throw new DependencyExists();
+    }
+    if (wouldCycle(edges, workItemId, dependsOnWorkItemId)) throw new DependencyCycle();
+
+    const dep = await this.deps.items.addDependency({
+      id: this.deps.ids.newId(),
+      tenantId,
+      workItemId,
+      dependsOnWorkItemId,
+    });
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "work_item.dependency_added",
+      objectId: workItemId,
+      actor,
+      payload: { dependencyId: dep.id, dependsOnWorkItemId },
+    });
+    return dep;
+  }
+
+  /** Removing one is a normal act and the row carries no history of its own —
+   *  but WHO removed the thing that was holding work back is worth keeping, so
+   *  the event is recorded even though the row is not. */
+  async removeDependency(
+    tenantId: string,
+    dependencyId: string,
+    actor: Actor,
+  ): Promise<void> {
+    const dep = await this.deps.items.findDependency(tenantId, dependencyId);
+    if (!dep) throw new DependencyNotFound(dependencyId);
+    await this.deps.items.removeDependency(tenantId, dependencyId);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "work_item.dependency_removed",
+      objectId: dep.workItemId,
+      actor,
+      payload: { dependencyId, dependsOnWorkItemId: dep.dependsOnWorkItemId },
+    });
+  }
+
+  // ── review ───────────────────────────────────────────────────────────────
+
+  /**
+   * Send work to be checked.
+   *
+   * The MAKER is not a parameter and cannot be: the database derives it from
+   * the item's assignee and freezes it. A maker the caller could choose is not
+   * a maker-checker control, because the way past the constraint would be to
+   * name somebody else as the maker and approve it yourself.
+   *
+   * The state is deliberately NOT moved to "Under Review". There is no flag
+   * saying which of the firm's states means that, and comparing the code is the
+   * one thing this module never does — so the firm moves it, and the board
+   * shows the open review beside whatever state it is actually in.
+   */
+  async requestReview(input: RequestReviewInput, actor: Actor): Promise<WorkItemApproval> {
+    const item = await this.requireItem(input.tenantId, input.workItemId);
+
+    let policyVersionId: string | null = null;
+    let policyKey: string | null = null;
+    if (input.policyKey !== undefined && input.policyKey !== null && input.policyKey.length > 0) {
+      const resolved = await this.deps.policies.publishedPolicy(
+        input.tenantId,
+        input.policyKey,
+      );
+      // A named rule the firm has not published is a refusal and not a silent
+      // fall-through to "no rule": the caller asked for a particular bar, and
+      // quietly opening the check without it would be this product lowering it.
+      if (!resolved) throw new ReviewerNotEligible(
+        `This firm has published no verification policy called ${JSON.stringify(input.policyKey)}. ` +
+          `Publish it on the verification screen, or send the work for review with no ` +
+          `particular rule — the maker still cannot be the checker.`,
+      );
+      policyVersionId = resolved.versionId;
+      policyKey = resolved.key;
+    }
+
+    const approval = await this.deps.approvals.openIfAbsent({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      workItemId: item.id,
+      policyVersionId,
+      policyKey,
+    });
+    // Null means the unique partial index refused a second open check —
+    // somebody clicked twice, or two people clicked together.
+    if (!approval) throw new ReviewAlreadyOpen();
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item.review_requested",
+      objectId: approval.id,
+      actor,
+      payload: {
+        workItemId: item.id,
+        policyKey,
+        policyVersionId,
+        // Whether there is a maker AT ALL is the fact that decides whether
+        // maker != checker can bite; the id itself is already on the row.
+        hasMaker: approval.submittedBy !== null,
+      },
+    });
+    return approval;
+  }
+
+  /**
+   * Who may check this, and what to say to everybody who may not.
+   *
+   * The rule is T2.9's `isEligible`, unchanged — maker != checker first and
+   * regardless of policy, then `work:write`, then the firm's own published
+   * rule. One answer to "who checks whose work" at this firm, whether the work
+   * is a process step or a task.
+   */
+  async eligibleCheckers(
+    tenantId: string,
+    approvalId: string,
+  ): Promise<readonly CheckerOption[]> {
+    const approval = await this.requireApproval(tenantId, approvalId);
+    const policy = await this.pinnedPolicyOf(tenantId, approval);
+    const staff = await this.deps.reviewers.activeStaff(tenantId);
+    const maker = this.makerOf(approval, staff);
+    const candidates = await this.candidates(tenantId, staff);
+
+    return candidates.map((candidate) => {
+      const verdict = isEligible(candidate, maker, policy);
+      return {
+        userId: candidate.userId,
+        displayName: candidate.displayName,
+        gradeName: candidate.gradeName,
+        eligible: verdict.eligible,
+        reason: verdict.reason === null ? null : INELIGIBILITY_MESSAGES[verdict.reason],
+      };
+    });
+  }
+
+  /**
+   * Approve the work, or send it back.
+   *
+   * Two refusals before the write and both matter. Self-approval is refused
+   * here so the answer is a sentence — but the CHECK constraint is what makes
+   * it true for a script, an import or an agent that never reaches this code.
+   * And a rejection with no note is refused because WHY work came back is the
+   * only signal that ever explains rework; marking the task Completed later
+   * erases the fact that it was rejected at all.
+   */
+  async decideReview(input: DecideReviewInput, actor: Actor): Promise<WorkItemApproval> {
+    const approval = await this.requireApproval(input.tenantId, input.approvalId);
+    if (approval.decision !== "pending") throw new ReviewAlreadyDecided(approval.decision);
+
+    const notes = (input.notes ?? "").trim();
+    if (input.decision === "rejected" && notes.length === 0) {
+      throw new ReviewRejectionNeedsNote();
+    }
+    if (approval.submittedBy !== null && approval.submittedBy === input.decidedBy) {
+      throw new ReviewSelfApproval();
+    }
+
+    const policy = await this.pinnedPolicyOf(input.tenantId, approval);
+    const staff = await this.deps.reviewers.activeStaff(input.tenantId);
+    const me = (await this.candidates(input.tenantId, staff)).find(
+      (c) => c.userId === input.decidedBy,
+    );
+    // Not on the active roster at all. Their session resolved, so they hold a
+    // membership; this is the deactivated-between-requests case, and it is a
+    // refusal rather than a crash.
+    if (!me) throw new AssigneeNotStaff(input.decidedBy);
+    const verdict = isEligible(me, this.makerOf(approval, staff), policy);
+    if (!verdict.eligible) {
+      throw new ReviewerNotEligible(
+        verdict.reason === null ? "You may not check this." : INELIGIBILITY_MESSAGES[verdict.reason],
+      );
+    }
+
+    const decided = await this.deps.approvals.decide(input.tenantId, input.approvalId, {
+      decision: input.decision,
+      notes: notes.length > 0 ? notes : null,
+      decidedBy: input.decidedBy,
+      decidedAt: this.deps.clock.now().toISOString(),
+    });
+    // Null means somebody else decided it between the read and the write, and
+    // their decision is the one that stands.
+    if (!decided) throw new ReviewAlreadyDecided("decided by somebody else");
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb:
+        input.decision === "approved" ? "work_item.review_approved" : "work_item.review_rejected",
+      objectId: decided.id,
+      actor,
+      // The NOTE is not in the payload: it is prose a reviewer wrote about a
+      // colleague's work, and this log cannot be erased. The row keeps it.
+      payload: {
+        workItemId: decided.workItemId,
+        policyKey: decided.policyKey,
+        hasMaker: decided.submittedBy !== null,
+      },
+    });
+    return decided;
+  }
+
+  // ── internals ────────────────────────────────────────────────────────────
+
+  /**
+   * The server's calendar day — the fallback, never the answer when a caller
+   * has one.
+   *
+   * THE SERVER'S "TODAY" IS NOT THE FIRM'S. The clock here is the process's,
+   * which in production is UTC, and a firm in India is a day ahead of it every
+   * morning until half past five. This product has already been bitten: a
+   * client handed over at 04:11 was absent from its holder's own book because
+   * the row started "tomorrow" as far as the server was concerned. Every path
+   * a screen uses sends its own date; this is the honest fallback for an API
+   * caller that did not say.
+   */
+  private today(): string {
+    return this.deps.clock.now().toISOString().slice(0, 10);
+  }
+
+  private async requireItem(tenantId: string, workItemId: string): Promise<WorkItem> {
+    const item = await this.deps.items.findById(tenantId, workItemId);
+    if (!item) throw new WorkItemNotFound(workItemId);
+    return item;
+  }
+
+  private async requireStateRow(tenantId: string, stateId: string): Promise<WorkItemState> {
+    const state = await this.deps.vocabulary.findState(tenantId, stateId);
+    if (!state) throw new StateNotFound(stateId);
+    return state;
+  }
+
+  private async requireInitialState(tenantId: string): Promise<WorkItemState> {
+    const state = initialState(await this.deps.vocabulary.listStates(tenantId));
+    if (!state) throw new NoInitialState();
+    return state;
+  }
+
+  private async requireDefaultPriority(
+    tenantId: string,
+    isStatutoryDue: boolean,
+  ): Promise<WorkItemPriority> {
+    const priority = defaultPriorityFor(
+      await this.deps.vocabulary.listPriorities(tenantId),
+      isStatutoryDue,
+    );
+    if (!priority) throw new NoDefaultPriority();
+    return priority;
+  }
+
+  private async requireAssignablePriority(
+    tenantId: string,
+    priorityId: string,
+  ): Promise<WorkItemPriority> {
+    const priority = await this.deps.vocabulary.findPriority(tenantId, priorityId);
+    if (!priority) throw new PriorityNotFound(priorityId);
+    if (!priority.isActive) throw new PriorityRetired(priority.name);
+    return priority;
+  }
+
+  private async requireStaff(tenantId: string, userId: string): Promise<void> {
+    if (!(await this.deps.staff.isActiveStaff(tenantId, userId))) {
+      throw new AssigneeNotStaff(userId);
+    }
+  }
+
+  /**
+   * A service's Dept code, turned into a SPOC or an honest refusal to guess.
+   *
+   * Three ways this can fail to produce a name, and each gets its own sentence
+   * on the row rather than a silent null: the service is filed under no Dept,
+   * the firm has no such Dept any more, or `resolveAssignee`'s two cases (none,
+   * or several). An unassigned queue is only chased if each row says what to
+   * do about it.
+   */
+  private async routeToSpoc(
+    tenantId: string,
+    clientPartyId: string,
+    deptCode: string | null,
+    onDate: string,
+  ): Promise<{
+    readonly axisId: string | null;
+    readonly outcome: { readonly userId: string | null; readonly note: string | null };
+  }> {
+    if (deptCode === null) {
+      return {
+        axisId: null,
+        outcome: {
+          userId: null,
+          note:
+            `This service is not filed under a Dept, so there was no SPOC to route to. ` +
+            `Setting a Dept on the service in the catalogue routes work like this ` +
+            `automatically from then on.`,
+        },
+      };
+    }
+
+    const axis = await this.deps.axes.findByCode(tenantId, "dept", deptCode);
+    if (!axis) {
+      return {
+        axisId: null,
+        outcome: {
+          userId: null,
+          note:
+            `The service names Dept ${JSON.stringify(deptCode)}, which is not one of this ` +
+            `firm's Depts, so there was no SPOC to route to. Add it on the structure screen ` +
+            `or correct the service.`,
+        },
+      };
+    }
+
+    const spocs = await this.deps.spocs.spocsFor(tenantId, clientPartyId, axis.id, onDate);
+    return { axisId: axis.id, outcome: resolveAssignee(spocs, axis.name) };
+  }
+
+  private async requireApproval(
+    tenantId: string,
+    approvalId: string,
+  ): Promise<WorkItemApproval> {
+    const approval = await this.deps.approvals.findById(tenantId, approvalId);
+    if (!approval) throw new ReviewNotFound(approvalId);
+    return approval;
+  }
+
+  /** What the check was OPENED under, whatever is in force now. Null when the
+   *  row no longer parses as a policy — history that fails to read is a fact
+   *  about the past, not today's rule applied retroactively. */
+  private async pinnedPolicyOf(
+    tenantId: string,
+    approval: WorkItemApproval,
+  ): Promise<VerificationPolicy | null> {
+    if (approval.policyVersionId === null) return null;
+    const resolved = await this.deps.policies.pinnedPolicy(tenantId, approval.policyVersionId);
+    return resolved?.policy ?? null;
+  }
+
+  /**
+   * The firm's staff as candidates, with `work:write` already resolved.
+   *
+   * Permissions are looked up ONCE PER ROLE rather than once per person: a
+   * hundred-person firm has five roles, and the alternative is a hundred config
+   * reads to render one screen — the per-row lookup this codebase has been
+   * caught by five times. Identical in shape to the orchestrator's own
+   * `candidates`, because it is the same question about the same people.
+   */
+  private async candidates(
+    tenantId: string,
+    staff: readonly ReviewerRow[],
+  ): Promise<readonly CheckerCandidate[]> {
+    const byRole = new Map<string, readonly string[]>();
+    for (const role of new Set(staff.map((s) => s.role))) {
+      byRole.set(role, await this.deps.permissions.permissionsFor(tenantId, role));
+    }
+    return staff.map((s) => ({
+      userId: s.userId,
+      displayName: s.displayName,
+      gradeRank: s.gradeRank,
+      gradeName: s.gradeName,
+      // Checking somebody's work writes to the record of who did it, so it is
+      // the same permission as doing it. This is the FLOOR the firm's own rule
+      // then sits on top of — it closes the demo's Q41, where a read-only
+      // Management membership carrying a Senior Manager grade would otherwise
+      // pass a rank threshold and sign off a statutory filing.
+      canWrite: (byRole.get(s.role) ?? []).includes("work:write"),
+    }));
+  }
+
+  /**
+   * The maker, with their own reporting line attached.
+   *
+   * The line travels WITH the maker rather than being looked up per candidate,
+   * because the reporting-line rule asks "is this candidate the person the
+   * MAKER reports to" — a fact about the maker. Comparing the other way round
+   * is the maker-checker rule inverted, and would make exactly one person
+   * eligible: the one who is always forbidden.
+   *
+   * Null when the item was unassigned when the check was opened. Then maker !=
+   * checker is vacuous — there is no self to be — and a `reporting_line` policy
+   * matches nobody, which the screen says out loud.
+   */
+  private makerOf(
+    approval: WorkItemApproval,
+    staff: readonly { readonly userId: string; readonly reportsToUserId: string | null }[],
+  ): Maker | null {
+    if (approval.submittedBy === null) return null;
+    const row = staff.find((s) => s.userId === approval.submittedBy);
+    return {
+      userId: approval.submittedBy,
+      // A maker who has since left the firm is off the active roster; their
+      // reporting line is then unknown rather than absent, and null is the
+      // honest value — a `reporting_line` policy matches nobody and says so.
+      reportsToUserId: row?.reportsToUserId ?? null,
+    };
+  }
+
+  private async recordCreated(
+    item: WorkItem,
+    actor: Actor,
+    origin: "manual" | "engagement",
+  ): Promise<void> {
+    await this.deps.events.recordEvent({
+      tenantId: item.tenantId,
+      verb: "work_item.created",
+      objectId: item.id,
+      actor,
+      // Ids and machine facts. The TITLE is absent: it is copied from a service
+      // name today but is prose the moment somebody edits it, and it routinely
+      // names a client ("Kaveri Foods — GST"). The assignment NOTE is absent
+      // for the stronger reason that it names people.
+      payload: {
+        origin,
+        clientPartyId: item.clientPartyId,
+        entityPartyId: item.entityPartyId,
+        engagementId: item.engagementId,
+        jobId: item.jobId,
+        stateId: item.stateId,
+        priorityId: item.priorityId,
+        dueOn: item.dueOn,
+        isStatutoryDue: item.isStatutoryDue,
+        slaDays: item.slaDaysSnapshot,
+        assigned: item.assigneeUserId !== null,
+      },
+    });
+  }
+
+  private async recordAssigned(
+    item: WorkItem,
+    actor: Actor,
+    how: "spoc" | "manual",
+  ): Promise<void> {
+    await this.deps.events.recordEvent({
+      tenantId: item.tenantId,
+      verb: "work_item.assigned",
+      objectId: item.id,
+      actor,
+      // `how` is the fact worth keeping: "the router did this" and "a partner
+      // overrode it" are different answers to the same later question, and
+      // nothing else in the row distinguishes them.
+      payload: {
+        how,
+        userId: item.assigneeUserId,
+        deptAxisId: item.deptAxisId,
+        clientPartyId: item.clientPartyId,
+      },
+    });
+  }
+}

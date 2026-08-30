@@ -269,6 +269,67 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // anywhere lets somebody approve their own work — that is a CHECK constraint,
   // not a grant.
   [routeKey("POST", "/api/v1/checks/{approvalId}/decide"), "work:write" as const],
+
+  // WORK ITEMS (T3.1) — the row on somebody's desk.
+  //
+  // READS are `party:read`, the same permission the job board and the
+  // verification queue take, and for the same reason: what is owed, whose it is
+  // and what is late is delivery state, it carries no money, and everybody on
+  // the team needs to see it — including the people who cannot act on it. A
+  // board only the assignee can see is a board nobody chases.
+  //
+  // WRITES are `work:write`, which is the permission this table is FOR. Saying
+  // a filing is done, moving it, or putting it on somebody's desk is doing the
+  // work, not reading the board, and the record of who did it is worth only as
+  // much as the gate in front of it. Deliberately not `party:write`: raising a
+  // task for a client is not the same act as editing the client.
+  [routeKey("GET", "/api/v1/work-items"), "party:read" as const],
+  [routeKey("GET", "/api/v1/work-items/{workItemId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-items"), "work:write" as const],
+  [routeKey("PATCH", "/api/v1/work-items/{workItemId}"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/state"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/assignee"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/checklist"), "work:write" as const],
+  [
+    routeKey("POST", "/api/v1/work-items/{workItemId}/checklist/{checklistItemId}"),
+    "work:write" as const,
+  ],
+  [
+    routeKey("DELETE", "/api/v1/work-items/{workItemId}/checklist/{checklistItemId}"),
+    "work:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/dependencies"), "work:write" as const],
+  [
+    routeKey("DELETE", "/api/v1/work-items/{workItemId}/dependencies/{dependencyId}"),
+    "work:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/review"), "work:write" as const],
+  // The work-item review queue, split exactly as T2.9's step queue is: the two
+  // reads are `party:read` so everybody can see what is waiting, and DECIDING is
+  // `work:write`, because approving somebody's filing writes to the record of
+  // whether the work stands. The permission is a FLOOR and never the whole
+  // answer — it gets you as far as the firm's published rule, which then
+  // decides — and no permission anywhere lets somebody approve their own work:
+  // that is a CHECK constraint, not a grant.
+  [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],
+
+  // THE FIRM'S OWN WORDS FOR WORK (T3.1). The same split the grade ladder and
+  // the Dept lists take, and the same argument: READING is `party:read`,
+  // because every board renders these names and a person who cannot read them
+  // sees uuids. WRITING is `tenant:admin`, because these rows are not labels —
+  // the FLAGS on them decide what every work item in that state must carry, and
+  // moving the statutory default changes the urgency of every filing created
+  // afterwards. That is a decision at the level of deciding what a role means.
+  [routeKey("GET", "/api/v1/work-vocabulary"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-vocabulary/states"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/work-vocabulary/states/{stateId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/work-vocabulary/priorities"), "tenant:admin" as const],
+  [
+    routeKey("PATCH", "/api/v1/work-vocabulary/priorities/{priorityId}"),
+    "tenant:admin" as const,
+  ],
   // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
   // configuration registry uses, and for the same reason: this IS firm
   // configuration. Reading it is `config:read` — an associate drafting a letter

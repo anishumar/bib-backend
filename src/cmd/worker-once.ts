@@ -27,6 +27,26 @@ async function main(): Promise<void> {
     const reports = await wired.scheduler.sweepActivations();
     const spawned = reports.reduce((n, r) => n + r.spawned, 0);
     const already = reports.reduce((n, r) => n + r.alreadySpawned, 0);
+    const tasksFailed = reports.reduce((n, r) => n + r.tasksFailed, 0);
+    const skipped = reports.filter((r) => r.failure !== undefined);
+
+    // PRINTED FIRST, and loudly. A firm the sweep could not run at all is the
+    // one thing on this screen somebody has to act on — and before T3.1 found
+    // it, one such firm silently stopped every firm after it in the list.
+    for (const r of skipped) {
+      console.log(`
+  !! firm ${r.tenantId} was SKIPPED: ${r.failure ?? ""}`);
+    }
+    if (tasksFailed > 0) {
+      // The job stands; the task did not. Separate numbers because they are
+      // separate facts, and because a job with nothing on anybody's desk looks
+      // exactly like a job nobody has started.
+      console.log(
+        `
+  !! ${String(tasksFailed)} engagement(s) got a job but NO TASK — the work is ` +
+          `recorded as owed and is on nobody's desk`,
+      );
+    }
 
     if (spawned === 0 && already === 0) {
       console.log("\n  nothing to spawn — no activated contract is without a job.\n");
