@@ -47,8 +47,22 @@ export type ObligationErrorCode =
   | "EXCEPTION_ON_EVENT_RULE"
   | "NO_INITIAL_STATE"
   | "NO_FILED_STATE"
+  | "NO_MISSED_STATE"
+  | "NO_RESOLUTION_STATE"
   | "OBLIGATION_NOT_FOUND"
-  | "INVALID_WINDOW";
+  | "INVALID_WINDOW"
+  | "RESOLUTION_OPTION_NOT_FOUND"
+  | "RESOLUTION_OPTION_RETIRED"
+  | "RESOLUTION_REASON_REQUIRED"
+  | "ALREADY_DECIDED"
+  | "NOT_AWAITING_DECISION"
+  | "INVALID_VOCABULARY_CODE"
+  | "VOCABULARY_CODE_TAKEN"
+  | "STATE_NOT_FOUND"
+  | "CONFLICTING_STATE_FLAGS"
+  | "LAST_INITIAL_STATE"
+  | "LAST_DESTINATION_STATE"
+  | "INVALID_SORT_ORDER";
 
 // ── the rule ───────────────────────────────────────────────────────────────
 
@@ -269,9 +283,9 @@ export class NoInitialState extends ObligationError {
     super(
       "NO_INITIAL_STATE",
       `this firm has no obligation state marked as the starting one, so a generated filing has ` +
-        `nowhere to begin. Every firm is seeded with one ("Pending"), and nothing in the ` +
-        `product can unmark it, so this means the states were changed outside it — restore the ` +
-        `starting flag on one of them.`,
+        `nowhere to begin. Every firm is seeded with one ("Pending") and the product refuses to ` +
+        `unmark the last one, so this means the states were changed outside it — mark one as ` +
+        `the starting state on the compliance vocabulary screen.`,
     );
   }
 }
@@ -283,11 +297,9 @@ export class NoInitialState extends ObligationError {
  * alternative — quietly leaving the obligation open — is the silent failure
  * this whole module is built against, and it would be invisible on exactly the
  * rows a firm most needs to trust. A firm cannot reach this by accident: the
- * seed ships the state and the database allows at most one, and — unlike the
- * work board's vocabulary — the compliance states have NO editing surface yet,
- * so getting here means the rows were changed outside the product. The screen
- * that would let a firm change them is an open item on the board, not something
- * this message may pretend exists.
+ * seed ships the state and the database allows at most one. Since T3.3 there IS
+ * a screen — `/admin/obligation-vocabulary` — so the message may finally name
+ * it, which it deliberately did not while there was none.
  */
 export class NoFiledState extends ObligationError {
   constructor() {
@@ -295,8 +307,189 @@ export class NoFiledState extends ObligationError {
       "NO_FILED_STATE",
       `this firm has no obligation state marked as the filed one, so a completed filing has ` +
         `nowhere to land and the calendar would keep showing it as open. Every firm is seeded ` +
-        `with one ("Filed"), and nothing in the product can unmark it, so this means the ` +
-        `states were changed outside it — restore the filed flag on one of them.`,
+        `with one ("Filed") — mark one of your compliance states as the filed one on the ` +
+        `compliance vocabulary screen.`,
+    );
+  }
+}
+
+export class NoMissedState extends ObligationError {
+  constructor() {
+    super(
+      "NO_MISSED_STATE",
+      `this firm has no obligation state marked as the missed one, so a deadline that passes ` +
+        `has nowhere to go and nothing would ever reach the decision queue. Every firm is ` +
+        `seeded with one ("Missed") — mark one of your compliance states as the missed one on ` +
+        `the compliance vocabulary screen. It has to be a state that needs a decision, which ` +
+        `is what puts the filing in front of a partner rather than quietly filing it away.`,
+    );
+  }
+}
+
+export class NoResolutionState extends ObligationError {
+  constructor() {
+    super(
+      "NO_RESOLUTION_STATE",
+      `this firm has no obligation state marked as the resolution one, so a filing a partner ` +
+        `has decided will never be made has nowhere to end. Every firm is seeded with one ` +
+        `("Resolved") — mark one of your compliance states as the resolution one on the ` +
+        `compliance vocabulary screen. Only a state that ends the matter can be it.`,
+    );
+  }
+}
+
+// ── the decision ───────────────────────────────────────────────────────────
+
+export class ResolutionOptionNotFound extends ObligationError {
+  constructor(ref: string) {
+    super(
+      "RESOLUTION_OPTION_NOT_FOUND",
+      `no resolution option ${JSON.stringify(ref)} at this firm. The options are the firm's ` +
+        `own list of answers to a passed deadline — file provisionally, accept the late fee, ` +
+        `file a nil return — and they are edited on the compliance vocabulary screen.`,
+    );
+  }
+}
+
+export class ResolutionOptionRetired extends ObligationError {
+  constructor(name: string) {
+    super(
+      "RESOLUTION_OPTION_RETIRED",
+      `${JSON.stringify(name)} is no longer one of this firm's resolution options. Decisions ` +
+        `already recorded against it stay exactly as they were — a retired option is one the ` +
+        `firm has stopped choosing, not one it never chose. Pick a current option.`,
+    );
+  }
+}
+
+export class ResolutionReasonRequired extends ObligationError {
+  constructor() {
+    super(
+      "RESOLUTION_REASON_REQUIRED",
+      `say why. In eighteen months nobody remembers why a late fee was accepted rather than a ` +
+        `provisional filing made, and that is exactly the thing worth knowing — it is what ` +
+        `answers the client who asks what the penalty was for. The option says what was done; ` +
+        `this says why.`,
+    );
+  }
+}
+
+export class AlreadyDecided extends ObligationError {
+  constructor() {
+    super(
+      "ALREADY_DECIDED",
+      `somebody has already decided what happens about this deadline. A decision is not ` +
+        `overwritten — that would destroy the only record of what was originally chosen and ` +
+        `why. If the decision needs to change, record the new one against the filing it ` +
+        `produces.`,
+    );
+  }
+}
+
+export class NotAwaitingDecision extends ObligationError {
+  constructor(stateName: string) {
+    super(
+      "NOT_AWAITING_DECISION",
+      `this filing is ${JSON.stringify(stateName)}, which is not a state waiting on a ` +
+        `decision. Only a deadline that has actually passed undischarged reaches the queue — ` +
+        `if this one is late and is not here, the nightly sweep has not run yet.`,
+    );
+  }
+}
+
+// ── the firm's own vocabulary ──────────────────────────────────────────────
+
+export class StateNotFound extends ObligationError {
+  constructor(ref: string) {
+    super("STATE_NOT_FOUND", `no obligation state ${JSON.stringify(ref)} at this firm`);
+  }
+}
+
+export class InvalidVocabularyCode extends ObligationError {
+  constructor(value: string) {
+    super(
+      "INVALID_VOCABULARY_CODE",
+      `${JSON.stringify(value)} is not a usable handle. Use lower case letters, digits and ` +
+        `underscores — "awaiting_client". It is the firm's stable handle for this row and is ` +
+        `never shown to anybody; the NAME is what appears on screen and may be changed freely.`,
+    );
+  }
+}
+
+export class VocabularyCodeTaken extends ObligationError {
+  constructor(what: string, code: string) {
+    super(
+      "VOCABULARY_CODE_TAKEN",
+      `this firm already has ${what === "state" ? "an obligation state" : "a resolution option"} ` +
+        `with the handle ${JSON.stringify(code)}. Rename the existing one, or bring it back if ` +
+        `it was retired.`,
+    );
+  }
+}
+
+export class InvalidSortOrder extends ObligationError {
+  constructor(value: number) {
+    super(
+      "INVALID_SORT_ORDER",
+      `sort order ${JSON.stringify(value)} must be a whole number. It only decides the order ` +
+        `things appear in; gaps are fine and are the point — leave room to insert one later.`,
+    );
+  }
+}
+
+/**
+ * Two flags that cannot both be true of one state.
+ *
+ * A single error carrying a SENTENCE rather than one class per pair. The pairs
+ * are not interesting to a caller — the reason is, and every one of these
+ * refusals is read by a partner rearranging their own vocabulary, who needs to
+ * know which tick to move rather than which constraint fired.
+ */
+export class ConflictingStateFlags extends ObligationError {
+  constructor(why: string) {
+    super("CONFLICTING_STATE_FLAGS", why);
+  }
+}
+
+/**
+ * The firm is about to end up with nowhere for something to go.
+ *
+ * One error for the three destinations that are not `initial`, each carrying
+ * its OWN consequence in the sentence — because "you cannot untick this" is
+ * useless and "nothing would ever reach your decision queue again" is not. Each
+ * of these silently disables a whole mechanism: a firm would see filings that
+ * never close, or deadlines that pass and are never asked about, with no error
+ * anywhere. The flag can still MOVE — marking another state clears this one in
+ * the same statement — so this refuses only leaving the firm with none.
+ */
+export class LastDestinationState extends ObligationError {
+  constructor(which: "filed" | "missed" | "resolution") {
+    super(
+      "LAST_DESTINATION_STATE",
+      which === "filed"
+        ? `this is the state a completed filing lands in, and a firm cannot have none — every ` +
+            `filing your team finishes would stay showing as open on the calendar. Mark another ` +
+            `state as the filed one first; that moves the flag in one step.`
+        : which === "missed"
+          ? `this is the state a passed deadline moves to, and a firm cannot have none — ` +
+              `nothing would ever reach the decision queue again, and a missed filing would ` +
+              `sit on the calendar with nobody asked about it. Mark another state as the ` +
+              `missed one first; that moves the flag in one step.`
+          : `this is the state a filing ends in when a partner decides it will never be made, ` +
+              `and a firm cannot have none — that decision would have nowhere to land. Mark ` +
+              `another state as the resolution one first; that moves the flag in one step.`,
+    );
+  }
+}
+
+export class LastInitialState extends ObligationError {
+  constructor() {
+    super(
+      "LAST_INITIAL_STATE",
+      `this is the state new filings start in, and a firm cannot have none — every obligation ` +
+        `the calendar generates would have nowhere to begin. Mark another state as the ` +
+        `starting one first; doing that moves the flag in one step, so there is never a moment ` +
+        `with none.`,
     );
   }
 }

@@ -11,6 +11,7 @@ import type {
   ObligationInstance,
   ObligationState,
   ObligationTemplate,
+  ResolutionOption,
 } from "../domain/obligation/model";
 import type { Actor } from "../domain/ledger/model";
 import type {
@@ -18,16 +19,23 @@ import type {
   CalendarRow,
   CalendarSource,
   CalendarSubject,
+  CompliancePolicySource,
   CoverageGap,
+  DecisionRow,
+  MissableObligation,
   NewException,
   NewObligationInstance,
   NewObligationState,
   NewObligationTemplate,
+  NewResolutionOption,
   ObligationExceptionRepository,
   ObligationInstanceRepository,
+  ObligationStatePatch,
   ObligationStateRepository,
   ObligationTemplateRepository,
   RaisableObligation,
+  ResolutionOptionPatch,
+  ResolutionOptionRepository,
   ServiceDirectory,
   SpawnedInstance,
   TemplatePatch,
@@ -164,6 +172,135 @@ export class FakeObligationStateRepo implements ObligationStateRepository {
     this.rows.push(...made);
     return Promise.resolve(made);
   }
+
+  create(state: NewObligationState): Promise<ObligationState> {
+    this.clearDestinations(state, null);
+    const made: ObligationState = { ...state, isActive: true };
+    this.rows.push(made);
+    return Promise.resolve(made);
+  }
+
+  findById(tenantId: string, stateId: string): Promise<ObligationState | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.id === stateId) ?? null,
+    );
+  }
+
+  findByCode(tenantId: string, code: string): Promise<ObligationState | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.code === code) ?? null,
+    );
+  }
+
+  update(
+    tenantId: string,
+    stateId: string,
+    patch: ObligationStatePatch,
+  ): Promise<ObligationState> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === stateId);
+    const held = this.rows[i];
+    if (i < 0 || held === undefined) {
+      return Promise.reject(new Error(`no state ${stateId}`));
+    }
+    this.clearDestinations(patch, stateId);
+    const next: ObligationState = { ...held, ...patch };
+    this.rows[i] = next;
+    return Promise.resolve(next);
+  }
+
+  /**
+   * The same release-then-claim the Postgres adapter does in one transaction.
+   *
+   * MODELLED rather than skipped, because a fake that lets two rows hold
+   * `is_missed` would let a unit test pass on a vocabulary the database refuses
+   * — and `missedState()` would then be answering with whichever row happened to
+   * be first in the array.
+   */
+  private clearDestinations(
+    flags: {
+      readonly isInitial: boolean;
+      readonly isFiled: boolean;
+      readonly isMissed: boolean;
+      readonly isResolution: boolean;
+    },
+    exceptId: string | null,
+  ): void {
+    for (let i = 0; i < this.rows.length; i += 1) {
+      const r = this.rows[i];
+      if (r === undefined || r.id === exceptId) continue;
+      this.rows[i] = {
+        ...r,
+        isInitial: flags.isInitial ? false : r.isInitial,
+        isFiled: flags.isFiled ? false : r.isFiled,
+        isMissed: flags.isMissed ? false : r.isMissed,
+        isResolution: flags.isResolution ? false : r.isResolution,
+      };
+    }
+  }
+}
+
+export class FakeResolutionOptionRepo implements ResolutionOptionRepository {
+  readonly rows: ResolutionOption[] = [];
+
+  list(tenantId: string): Promise<readonly ResolutionOption[]> {
+    return Promise.resolve(this.rows.filter((r) => r.tenantId === tenantId));
+  }
+
+  createMany(options: readonly NewResolutionOption[]): Promise<readonly ResolutionOption[]> {
+    const made = options
+      .filter((o) => !this.rows.some((r) => r.tenantId === o.tenantId && r.code === o.code))
+      .map((o): ResolutionOption => ({ ...o, status: "unconfirmed", isActive: true }));
+    this.rows.push(...made);
+    return Promise.resolve(made);
+  }
+
+  create(option: NewResolutionOption): Promise<ResolutionOption> {
+    const made: ResolutionOption = { ...option, status: "unconfirmed", isActive: true };
+    this.rows.push(made);
+    return Promise.resolve(made);
+  }
+
+  findById(tenantId: string, optionId: string): Promise<ResolutionOption | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.id === optionId) ?? null,
+    );
+  }
+
+  findByCode(tenantId: string, code: string): Promise<ResolutionOption | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.code === code) ?? null,
+    );
+  }
+
+  update(
+    tenantId: string,
+    optionId: string,
+    patch: ResolutionOptionPatch,
+  ): Promise<ResolutionOption> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === optionId);
+    const held = this.rows[i];
+    if (i < 0 || held === undefined) {
+      return Promise.reject(new Error(`no resolution option ${optionId}`));
+    }
+    const next: ResolutionOption = { ...held, ...patch };
+    this.rows[i] = next;
+    return Promise.resolve(next);
+  }
+}
+
+/**
+ * The firm's go-live floor, settable by a test.
+ *
+ * Null by default, which is what an unpublished policy means and therefore the
+ * behaviour every existing test already assumes: no floor, everything is asked
+ * about.
+ */
+export class FakeCompliancePolicySource implements CompliancePolicySource {
+  floor: string | null = null;
+
+  missedFromOn(_tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.floor);
+  }
 }
 
 export class FakeObligationInstanceRepo implements ObligationInstanceRepository {
@@ -183,7 +320,14 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
           x.periodStart === r.periodStart,
       );
       if (held) continue;
-      this.rows.push({ ...r, workItemId: null, filedOn: null });
+      this.rows.push({
+        ...r,
+        workItemId: null,
+        filedOn: null,
+        resolutionOptionId: null,
+        resolutionReason: null,
+        resolvedAt: null,
+      });
       made.push({
         id: r.id,
         templateId: r.templateId,
@@ -224,6 +368,10 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             needsDecision: false,
             workItemId: r.workItemId,
             filedOn: r.filedOn,
+            resolutionOptionId: r.resolutionOptionId,
+            resolutionName: null,
+            resolutionReason: r.resolutionReason,
+            resolvedAt: r.resolvedAt,
             ruleUnconfirmed: true,
             rulePack: "test",
           }),
@@ -295,6 +443,114 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     const row = this.rows[i];
     if (!row || row.filedOn === null) return Promise.resolve(false);
     this.rows[i] = { ...row, filedOn: null, stateId };
+    return Promise.resolve(true);
+  }
+
+  /**
+   * The sweep's candidates.
+   *
+   * `states` is injected rather than looked up, because this fake holds
+   * instances and not vocabulary — the service passes the same list it read.
+   * The conditions mirror `shouldBeFlaggedMissed` exactly, and the FLAGS are
+   * what decide, never a code.
+   */
+  states: ObligationState[] = [];
+
+  listMissable(
+    tenantId: string,
+    asOf: string,
+    floor: string | null,
+    limit: number,
+  ): Promise<readonly MissableObligation[]> {
+    const out = this.rows
+      .filter((r) => {
+        if (r.tenantId !== tenantId) return false;
+        if (r.statutoryDueOn >= asOf) return false;
+        if (r.filedOn !== null) return false;
+        if (r.resolvedAt !== null) return false;
+        if (floor !== null && r.statutoryDueOn < floor) return false;
+        const st = this.states.find((x) => x.id === r.stateId);
+        return st !== undefined && !st.isTerminal && !st.needsDecision;
+      })
+      .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn))
+      .slice(0, limit)
+      .map(
+        (r): MissableObligation => ({
+          id: r.id,
+          statutoryDueOn: r.statutoryDueOn,
+          entityPartyId: r.entityPartyId,
+          templateName: r.templateId,
+          periodLabel: r.periodLabel,
+          workItemId: r.workItemId,
+        }),
+      );
+    return Promise.resolve(out);
+  }
+
+  markMissed(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
+    const held = this.rows[i];
+    if (i < 0 || held === undefined) return Promise.resolve(false);
+    // The guard is re-checked here and not only in `listMissable`, because that
+    // is what the adapter's WHERE clause does — and it is what makes a second
+    // sweep over the same row write no second event.
+    const st = this.states.find((x) => x.id === held.stateId);
+    if (held.filedOn !== null || held.resolvedAt !== null) return Promise.resolve(false);
+    if (st === undefined || st.isTerminal || st.needsDecision) return Promise.resolve(false);
+    this.rows[i] = { ...held, stateId };
+    return Promise.resolve(true);
+  }
+
+  decisionQueue(tenantId: string, limit: number): Promise<readonly DecisionRow[]> {
+    const out = this.rows
+      .filter((r) => {
+        if (r.tenantId !== tenantId) return false;
+        if (r.resolvedAt !== null || r.filedOn !== null) return false;
+        const st = this.states.find((x) => x.id === r.stateId);
+        return st !== undefined && st.needsDecision;
+      })
+      .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn))
+      .slice(0, limit)
+      .map((r): DecisionRow => {
+        const st = this.states.find((x) => x.id === r.stateId);
+        return {
+          id: r.id,
+          name: r.templateId,
+          authority: null,
+          module: null,
+          entityPartyId: r.entityPartyId,
+          entityName: null,
+          clientName: null,
+          periodLabel: r.periodLabel,
+          statutoryDueOn: r.statutoryDueOn,
+          internalTargetOn: r.internalTargetOn,
+          stateId: r.stateId,
+          stateCode: st?.code ?? "",
+          stateName: st?.name ?? "",
+          workItemId: r.workItemId,
+          ruleUnconfirmed: true,
+        };
+      });
+    return Promise.resolve(out);
+  }
+
+  recordResolution(
+    tenantId: string,
+    obligationId: string,
+    decision: { readonly optionId: string; readonly reason: string; readonly stateId: string },
+  ): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
+    const held = this.rows[i];
+    if (i < 0 || held === undefined) return Promise.resolve(false);
+    // `resolved_at IS NULL` — the double-submit guard, modelled.
+    if (held.resolvedAt !== null) return Promise.resolve(false);
+    this.rows[i] = {
+      ...held,
+      resolutionOptionId: decision.optionId,
+      resolutionReason: decision.reason,
+      resolvedAt: "2026-01-01T00:00:00.000Z",
+      stateId: decision.stateId,
+    };
     return Promise.resolve(true);
   }
 

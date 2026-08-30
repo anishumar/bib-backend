@@ -311,12 +311,17 @@ version is exactly what gets asked about afterwards.
 | `obligation_rule.exception_added` | obligation_template | A rule gained an exception for one period — March TDS due 30 April. The NOTE stays on the row; only the month and the replacement rule travel here. |
 | `obligation_rule.exception_removed` | obligation_template | An exception was withdrawn, so the rule's own formula governs that period again. |
 | `obligation_rules.seeded` | tenant | A firm was given the shipped India rule pack. Payload counts what generates and what is waiting on a fact the firm has not given. |
-| `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states were initialised from the product defaults. One event, not five. |
+| `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states and resolution options were initialised from the product defaults. One event, not nine. |
+| `obligation_state.created` | obligation_state | A firm added a state to its compliance vocabulary. The FLAGS are mechanism, not appearance: which state a generated filing starts in, where a finished one lands, where a passed deadline goes. |
+| `obligation_state.updated` | obligation_state | Renamed, re-flagged, reordered or retired. Both sides of whatever changed — "it stopped being the missed state on the 4th" is the only thing that explains a decision queue which silently stopped filling. Never a delete. |
+| `obligation_resolution_option.created` | obligation_resolution_option | A firm added an answer to its list of what may be decided about a passed deadline. Carries `closesWithoutFiling`, the fork between filing late and never filing. |
+| `obligation_resolution_option.updated` | obligation_resolution_option | Renamed, re-pointed, confirmed, reordered or retired. Confirming matters on its own: the four shipped options came from a previous vendor's app and seed `unconfirmed`. |
 | `obligation.spawned` | obligation_instance | An obligation instance was created for a period. Per instance, never per sweep. |
 | `obligation.work_raised` | obligation_instance | An obligation reached T–X and became a task. The one place the calendar and the work board join. |
 | `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). Written when the work item raised for it reaches a state flagged terminal **and** successful — a cancelled task is not a filing. |
 | `obligation.filing_reversed` | obligation_instance | A recorded filing was taken back, because its work item was reopened or cancelled. |
-| `obligation.missed` | obligation_instance | A statutory date passed undischarged. A state, not an error (T3.3). |
+| `obligation.missed` | obligation_instance | A statutory date passed undischarged and the sweep moved it to the firm's `is_missed` state. A state, not an error (T3.3). Per instance, never per sweep. |
+| `obligation.resolved` | obligation_instance | A partner decided what happens about a deadline already missed. Payload carries the OPTION and `closesWithoutFiling`, never the free-text reason — that is a partner's words about a client, may name a person, and lives in the erasable row (§3.4). |
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |
 | `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. Its output is KEPT and offered as material rather than as an answer — throwing away a usable draft every time the machine is unsure is how a firm ends up redoing the work by hand anyway. |
 | `agent_run.decided` | agent_run | A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values: accepted-vs-corrected is the entire accuracy signal and belongs in the log, while an agent's output can hold a client's own data, which may not enter a log that cannot be erased. |

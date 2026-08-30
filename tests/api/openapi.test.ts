@@ -106,13 +106,16 @@ import {
   FakeWorkVocabularyRepo,
 } from "../../src/testfakes/workitem";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
+import { ObligationVocabularyService } from "../../src/usecase/obligation/vocabulary";
 import { ObligationService } from "../../src/usecase/obligation/service";
 import {
   FakeCalendarSource,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
+  FakeCompliancePolicySource,
   FakeObligationStateRepo,
+  FakeResolutionOptionRepo,
   FakeObligationTemplateRepo,
   FakeObligationTenants,
   FakeWorkItemRaiser,
@@ -183,13 +186,21 @@ function deps(): RouterDeps {
         templates: obligationTemplates,
         exceptions: obligationExceptions,
         states: new FakeObligationStateRepo(),
+        resolutionOptions: new FakeResolutionOptionRepo(),
         instances: new FakeObligationInstanceRepo(),
+        compliancePolicy: new FakeCompliancePolicySource(),
         calendarSource: new FakeCalendarSource(),
         services: new FakeObligationServices(),
         workItems: new FakeWorkItemRaiser(),
         tenants: new FakeObligationTenants(),
         ids: new FakeIds(),
         clock: { now: () => new Date("2026-08-30T00:00:00.000Z") },
+        events: new RecordingEventSink(),
+      }),
+      vocabulary: new ObligationVocabularyService({
+        states: new FakeObligationStateRepo(),
+        resolutionOptions: new FakeResolutionOptionRepo(),
+        ids: new FakeIds(),
         events: new RecordingEventSink(),
       }),
     },

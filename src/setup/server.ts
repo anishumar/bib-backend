@@ -35,6 +35,7 @@ import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/w
 import {
   PostgresObligationExceptionRepository,
   PostgresObligationStateRepository,
+  PostgresResolutionOptionRepository,
   PostgresObligationTemplateRepository,
 } from "../infrastructure/postgres/obligation-rule-repository";
 import {
@@ -93,6 +94,7 @@ import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
+import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
@@ -256,13 +258,30 @@ export function wire(cfg: Config, log: Logger): Wired {
     templates: obligationTemplates,
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),
+    resolutionOptions: new PostgresResolutionOptionRepository(pools.app),
     instances: new PostgresObligationInstanceRepository(pools.app),
+    // The firm's go-live floor, read from the config registry it is published
+    // in. `configRepository` already implements two other ports for this
+    // module's neighbours; this is the third, and it stays a PORT so the
+    // compliance use case never imports the registry's own service.
+    compliancePolicy: configRepository,
     calendarSource: new PostgresCalendarSource(pools.app),
     services: configRepository,
     workItems,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
+    events: ledger,
+  });
+
+  // The firm's own words for that calendar (T3.3). Its own service rather than
+  // more methods on `ObligationService`, which is already the generator, the
+  // raiser, the sweep and the decision queue — and it reads the SAME flag
+  // helpers, so a screen and a rule cannot disagree about what a flag means.
+  const obligationVocabulary = new ObligationVocabularyService({
+    states: new PostgresObligationStateRepository(pools.app),
+    resolutionOptions: new PostgresResolutionOptionRepository(pools.app),
+    ids: systemIds,
     events: ledger,
   });
 
@@ -675,7 +694,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
         workItems: { service: workItems, vocabulary: workVocabulary },
-        obligations: { service: obligations },
+        obligations: { service: obligations, vocabulary: obligationVocabulary },
         orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },

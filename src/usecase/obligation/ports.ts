@@ -20,6 +20,7 @@ import type {
   ObligationInstance,
   ObligationState,
   ObligationTemplate,
+  ResolutionOption,
 } from "../../domain/obligation/model.js";
 
 // ── rules ──────────────────────────────────────────────────────────────────
@@ -146,12 +147,91 @@ export interface NewObligationState {
   readonly isTerminal: boolean;
   readonly needsDecision: boolean;
   readonly isFiled: boolean;
+  readonly isMissed: boolean;
+  readonly isResolution: boolean;
   readonly sortOrder: number;
+}
+
+/** What an admin may change on a state. Every field independently optional:
+ *  absent means unchanged, which is what lets one screen control rename,
+ *  re-flag, reorder and retire without four endpoints. */
+export interface ObligationStatePatch {
+  readonly name: string;
+  readonly isInitial: boolean;
+  readonly isTerminal: boolean;
+  readonly needsDecision: boolean;
+  readonly isFiled: boolean;
+  readonly isMissed: boolean;
+  readonly isResolution: boolean;
+  readonly sortOrder: number;
+  readonly isActive: boolean;
 }
 
 export interface ObligationStateRepository {
   list(tenantId: string): Promise<readonly ObligationState[]>;
   createMany(states: readonly NewObligationState[]): Promise<readonly ObligationState[]>;
+  create(state: NewObligationState): Promise<ObligationState>;
+  findById(tenantId: string, stateId: string): Promise<ObligationState | null>;
+  findByCode(tenantId: string, code: string): Promise<ObligationState | null>;
+  /**
+   * Apply the whole patch, clearing any DESTINATION flag this row is taking
+   * from another in the SAME statement.
+   *
+   * The clear cannot be a separate call: `is_initial`, `is_filed`, `is_missed`
+   * and `is_resolution` each carry a per-tenant partial unique index, so
+   * writing the new holder before releasing the old one conflicts with a row
+   * the caller is on its way to changing. 0050 learnt this for the work board;
+   * this is the same shape with four flags instead of one.
+   */
+  update(
+    tenantId: string,
+    stateId: string,
+    patch: ObligationStatePatch,
+  ): Promise<ObligationState>;
+}
+
+// ── the firm's answers to "the date passed — now what?" ────────────────────
+
+export interface NewResolutionOption {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly code: string;
+  readonly name: string;
+  readonly closesWithoutFiling: boolean;
+  readonly sortOrder: number;
+}
+
+export interface ResolutionOptionPatch {
+  readonly name: string;
+  readonly closesWithoutFiling: boolean;
+  readonly status: ResolutionOption["status"];
+  readonly sortOrder: number;
+  readonly isActive: boolean;
+}
+
+export interface ResolutionOptionRepository {
+  list(tenantId: string): Promise<readonly ResolutionOption[]>;
+  createMany(options: readonly NewResolutionOption[]): Promise<readonly ResolutionOption[]>;
+  create(option: NewResolutionOption): Promise<ResolutionOption>;
+  findById(tenantId: string, optionId: string): Promise<ResolutionOption | null>;
+  findByCode(tenantId: string, code: string): Promise<ResolutionOption | null>;
+  update(
+    tenantId: string,
+    optionId: string,
+    patch: ResolutionOptionPatch,
+  ): Promise<ResolutionOption>;
+}
+
+/**
+ * How far back the missed-deadline sweep is allowed to ask.
+ *
+ * A PORT rather than a call into `ConfigService`, for the reason
+ * `CalendarSource` is one: the compliance module must not import the registry's
+ * use case to read one date. It returns null when the firm has published no
+ * `compliance_policy`, and null means NO FLOOR — see `CompliancePolicyBody`.
+ */
+export interface CompliancePolicySource {
+  missedFromOn(tenantId: string): Promise<IsoDate | null>;
 }
 
 // ── from a rule to the entities it reaches ─────────────────────────────────
@@ -280,10 +360,47 @@ export interface CalendarRow {
   readonly needsDecision: boolean;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
+  /** What was decided about it, once somebody has. `resolutionName` is joined
+   *  rather than left as an id for the reason every read model in this codebase
+   *  joins its names: a list returning uuids is one somebody fetches per row. */
+  readonly resolutionOptionId: string | null;
+  readonly resolutionName: string | null;
+  readonly resolutionReason: string | null;
+  readonly resolvedAt: string | null;
   /** The rule behind this row is not confirmed by the firm. SHOWN, never
    *  hidden: the date came from a document rather than from a partner. */
   readonly ruleUnconfirmed: boolean;
   readonly rulePack: string;
+}
+
+/**
+ * One row of the partner's decision queue — a deadline that has passed with
+ * nothing filed and nobody having decided anything.
+ *
+ * Separate from `CalendarRow` rather than a filter over it, because the two are
+ * read for different reasons and carry different things. The calendar is a
+ * WINDOW over dates and this is a WORKLIST with no window at all: an obligation
+ * missed in April is still owed in September, and a date filter would quietly
+ * drop the oldest and most expensive rows off the bottom of the queue.
+ */
+export interface DecisionRow {
+  readonly id: string;
+  readonly name: string;
+  readonly authority: string | null;
+  readonly module: string | null;
+  readonly entityPartyId: string;
+  readonly entityName: string | null;
+  readonly clientName: string | null;
+  readonly periodLabel: string;
+  readonly statutoryDueOn: IsoDate;
+  readonly internalTargetOn: IsoDate;
+  readonly stateId: string;
+  readonly stateCode: string;
+  readonly stateName: string;
+  /** The task raised for it, if one was — a partner deciding "file it late"
+   *  wants to see whether anybody is already on it. */
+  readonly workItemId: string | null;
+  readonly ruleUnconfirmed: boolean;
 }
 
 /** A row the generator actually created — enough to record the event that says
@@ -308,6 +425,17 @@ export interface RaisableObligation {
   readonly authority: string | null;
   readonly serviceEntryId: string | null;
   readonly entityName: string | null;
+}
+
+/** An obligation the sweep is about to flag. Enough to write the event that
+ *  says so, and nothing more — the same contract `SpawnedInstance` has. */
+export interface MissableObligation {
+  readonly id: string;
+  readonly statutoryDueOn: IsoDate;
+  readonly entityPartyId: string;
+  readonly templateName: string;
+  readonly periodLabel: string;
+  readonly workItemId: string | null;
 }
 
 export interface CalendarQuery {
@@ -375,6 +503,51 @@ export interface ObligationInstanceRepository {
    * `obligation.filing_reversed` only when a filing really was withdrawn.
    */
   clearFiled(tenantId: string, obligationId: string, stateId: string): Promise<boolean>;
+  /**
+   * Everything whose statutory date has passed with nothing filed, nobody
+   * having decided, and whose state can still be missed.
+   *
+   * `floor` is the firm's published go-live date, or null for no floor. It is a
+   * PARAMETER rather than a filter the caller applies afterwards, because the
+   * rows excluded by it are the bulk of what a newly onboarded firm has and
+   * fetching them to drop them is the expensive half.
+   */
+  listMissable(
+    tenantId: string,
+    asOf: IsoDate,
+    floor: IsoDate | null,
+    limit: number,
+  ): Promise<readonly MissableObligation[]>;
+  /**
+   * Move one obligation into the firm's missed state. Returns false if it had
+   * already moved — somebody filed it, or another sweep got there first.
+   *
+   * The guard is in the WHERE clause and not in the caller, `markFiled`'s
+   * arrangement and its reason: the caller writes `obligation.missed` from the
+   * answer, so two concurrent sweeps produce one event rather than two, and
+   * only the database can arbitrate that.
+   */
+  markMissed(tenantId: string, obligationId: string, stateId: string): Promise<boolean>;
+  /** Everything waiting on a partner, oldest statutory date first — the ones
+   *  that have been late longest are the ones costing money. */
+  decisionQueue(tenantId: string, limit: number): Promise<readonly DecisionRow[]>;
+  /**
+   * Record what a partner decided, and move the obligation where that decision
+   * sends it. Returns false if somebody had already decided.
+   *
+   * One statement for the same reason `markFiled` is one: the caller writes
+   * `obligation.resolved` from the answer, and a double-clicked form must leave
+   * one decision and one event rather than two of each.
+   */
+  recordResolution(
+    tenantId: string,
+    obligationId: string,
+    decision: {
+      readonly optionId: string;
+      readonly reason: string;
+      readonly stateId: string;
+    },
+  ): Promise<boolean>;
   /**
    * Move the INTERNAL target of everything this rule has produced that nobody
    * has started, by a new lead time.

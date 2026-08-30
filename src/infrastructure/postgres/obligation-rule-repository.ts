@@ -18,14 +18,19 @@ import type {
   DueRuleException,
   ObligationState,
   ObligationTemplate,
+  ResolutionOption,
 } from "../../domain/obligation/model";
 import type {
   NewException,
   NewObligationState,
   NewObligationTemplate,
+  NewResolutionOption,
   ObligationExceptionRepository,
+  ObligationStatePatch,
   ObligationStateRepository,
   ObligationTemplateRepository,
+  ResolutionOptionPatch,
+  ResolutionOptionRepository,
   TemplatePatch,
   TemplateRecord,
 } from "../../usecase/obligation/ports";
@@ -71,6 +76,8 @@ interface StateRow {
   is_terminal: boolean;
   needs_decision: boolean;
   is_filed: boolean;
+  is_missed: boolean;
+  is_resolution: boolean;
   sort_order: number;
   is_active: boolean;
 }
@@ -84,8 +91,8 @@ const EXCEPTION_COLUMNS =
   "period_end_month, due_rule, due_month_offset, due_day_of_month, due_days_after, note";
 
 const STATE_COLUMNS =
-  "id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed, sort_order, " +
-  "is_active";
+  "id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed, is_missed, " +
+  "is_resolution, sort_order, is_active";
 
 function toDueRule(r: TemplateRow): DueRule | null {
   if (r.due_rule === null) return null;
@@ -140,6 +147,8 @@ function toState(r: StateRow): ObligationState {
     isTerminal: r.is_terminal,
     needsDecision: r.needs_decision,
     isFiled: r.is_filed,
+    isMissed: r.is_missed,
+    isResolution: r.is_resolution,
     sortOrder: r.sort_order,
     isActive: r.is_active,
   };
@@ -377,6 +386,82 @@ export class PostgresObligationStateRepository implements ObligationStateReposit
     });
   }
 
+  async create(state: NewObligationState): Promise<ObligationState> {
+    return withTenant(this.app, state.tenantId, async (db) => {
+      // A new row may arrive already holding a destination flag, so the same
+      // clear-then-write the update path needs applies here too — otherwise
+      // creating "Late" as the missed state conflicts with the seeded "Missed".
+      await clearDestinations(db, state, null);
+      const rows = await db<StateRow[]>`
+        INSERT INTO delivery.obligation_state
+          (id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed,
+           is_missed, is_resolution, sort_order)
+        VALUES
+          (${state.id}, ${state.tenantId}, ${state.code}, ${state.name}, ${state.isInitial},
+           ${state.isTerminal}, ${state.needsDecision}, ${state.isFiled}, ${state.isMissed},
+           ${state.isResolution}, ${state.sortOrder})
+        RETURNING ${db.unsafe(STATE_COLUMNS)}
+      `;
+      const row = rows[0];
+      if (!row) throw new Error(`obligation state ${state.code} was not created`);
+      return toState(row);
+    });
+  }
+
+  async findById(tenantId: string, stateId: string): Promise<ObligationState | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<StateRow[]>`
+        SELECT ${db.unsafe(STATE_COLUMNS)} FROM delivery.obligation_state
+        WHERE id = ${stateId}
+      `;
+      const row = rows[0];
+      return row ? toState(row) : null;
+    });
+  }
+
+  async findByCode(tenantId: string, code: string): Promise<ObligationState | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<StateRow[]>`
+        SELECT ${db.unsafe(STATE_COLUMNS)} FROM delivery.obligation_state
+        WHERE code = ${code}
+      `;
+      const row = rows[0];
+      return row ? toState(row) : null;
+    });
+  }
+
+  async update(
+    tenantId: string,
+    stateId: string,
+    patch: ObligationStatePatch,
+  ): Promise<ObligationState> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Release any destination this row is TAKING from another, before writing
+      // it. Each of the four carries a per-tenant partial unique index, so the
+      // write would otherwise conflict with a row the caller is on its way to
+      // changing — and doing it in the other order would leave an instant with
+      // no holder at all, which is what the service refuses to allow.
+      await clearDestinations(db, patch, stateId);
+      const rows = await db<StateRow[]>`
+        UPDATE delivery.obligation_state
+        SET name = ${patch.name},
+            is_initial = ${patch.isInitial},
+            is_terminal = ${patch.isTerminal},
+            needs_decision = ${patch.needsDecision},
+            is_filed = ${patch.isFiled},
+            is_missed = ${patch.isMissed},
+            is_resolution = ${patch.isResolution},
+            sort_order = ${patch.sortOrder},
+            is_active = ${patch.isActive}
+        WHERE id = ${stateId}
+        RETURNING ${db.unsafe(STATE_COLUMNS)}
+      `;
+      const row = rows[0];
+      if (!row) throw new Error(`obligation state ${stateId} was not found to update`);
+      return toState(row);
+    });
+  }
+
   async createMany(states: readonly NewObligationState[]): Promise<readonly ObligationState[]> {
     if (states.length === 0) return [];
     const tenantId = states[0]?.tenantId;
@@ -387,10 +472,10 @@ export class PostgresObligationStateRepository implements ObligationStateReposit
         const rows = await db<StateRow[]>`
           INSERT INTO delivery.obligation_state
             (id, tenant_id, code, name, is_initial, is_terminal, needs_decision, is_filed,
-             sort_order)
+             is_missed, is_resolution, sort_order)
           VALUES
             (${s.id}, ${s.tenantId}, ${s.code}, ${s.name}, ${s.isInitial}, ${s.isTerminal},
-             ${s.needsDecision}, ${s.isFiled}, ${s.sortOrder})
+             ${s.needsDecision}, ${s.isFiled}, ${s.isMissed}, ${s.isResolution}, ${s.sortOrder})
           ON CONFLICT (tenant_id, code) DO NOTHING
           RETURNING ${db.unsafe(STATE_COLUMNS)}
         `;
@@ -399,5 +484,191 @@ export class PostgresObligationStateRepository implements ObligationStateReposit
       }
       return out;
     });
+  }
+}
+
+interface OptionRow {
+  id: string;
+  tenant_id: string;
+  code: string;
+  name: string;
+  closes_without_filing: boolean;
+  status: string;
+  sort_order: number;
+  is_active: boolean;
+}
+
+const OPTION_COLUMNS =
+  "id, tenant_id, code, name, closes_without_filing, status, sort_order, is_active";
+
+function toOption(r: OptionRow): ResolutionOption {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    code: r.code,
+    name: r.name,
+    closesWithoutFiling: r.closes_without_filing,
+    status: r.status as ResolutionOption["status"],
+    sortOrder: r.sort_order,
+    isActive: r.is_active,
+  };
+}
+
+/**
+ * The firm's own answers to a passed deadline (T3.3).
+ *
+ * Plain rows with no destination flags and therefore no clear-then-write dance:
+ * unlike the states, nothing here is "the one". A firm may hold four options or
+ * fourteen, and the only uniqueness is the code.
+ */
+export class PostgresResolutionOptionRepository implements ResolutionOptionRepository {
+  constructor(private readonly app: Db) {}
+
+  async list(tenantId: string): Promise<readonly ResolutionOption[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<OptionRow[]>`
+        SELECT ${db.unsafe(OPTION_COLUMNS)} FROM delivery.obligation_resolution_option
+        ORDER BY sort_order
+      `;
+      return rows.map(toOption);
+    });
+  }
+
+  async createMany(
+    options: readonly NewResolutionOption[],
+  ): Promise<readonly ResolutionOption[]> {
+    if (options.length === 0) return [];
+    const tenantId = options[0]?.tenantId;
+    if (!tenantId) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      const out: ResolutionOption[] = [];
+      for (const o of options) {
+        // `DO NOTHING`, like the states: seeding shares no unit of work with
+        // `createTenant`, so a retry after a partial failure must not produce a
+        // second "Accept the late fee", and a row that exists may by then be
+        // the firm's own edit of it.
+        const rows = await db<OptionRow[]>`
+          INSERT INTO delivery.obligation_resolution_option
+            (id, tenant_id, code, name, closes_without_filing, sort_order)
+          VALUES
+            (${o.id}, ${o.tenantId}, ${o.code}, ${o.name}, ${o.closesWithoutFiling},
+             ${o.sortOrder})
+          ON CONFLICT (tenant_id, code) DO NOTHING
+          RETURNING ${db.unsafe(OPTION_COLUMNS)}
+        `;
+        const row = rows[0];
+        if (row) out.push(toOption(row));
+      }
+      return out;
+    });
+  }
+
+  async create(option: NewResolutionOption): Promise<ResolutionOption> {
+    return withTenant(this.app, option.tenantId, async (db) => {
+      const rows = await db<OptionRow[]>`
+        INSERT INTO delivery.obligation_resolution_option
+          (id, tenant_id, code, name, closes_without_filing, sort_order)
+        VALUES
+          (${option.id}, ${option.tenantId}, ${option.code}, ${option.name},
+           ${option.closesWithoutFiling}, ${option.sortOrder})
+        RETURNING ${db.unsafe(OPTION_COLUMNS)}
+      `;
+      const row = rows[0];
+      if (!row) throw new Error(`resolution option ${option.code} was not created`);
+      return toOption(row);
+    });
+  }
+
+  async findById(tenantId: string, optionId: string): Promise<ResolutionOption | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<OptionRow[]>`
+        SELECT ${db.unsafe(OPTION_COLUMNS)} FROM delivery.obligation_resolution_option
+        WHERE id = ${optionId}
+      `;
+      const row = rows[0];
+      return row ? toOption(row) : null;
+    });
+  }
+
+  async findByCode(tenantId: string, code: string): Promise<ResolutionOption | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<OptionRow[]>`
+        SELECT ${db.unsafe(OPTION_COLUMNS)} FROM delivery.obligation_resolution_option
+        WHERE code = ${code}
+      `;
+      const row = rows[0];
+      return row ? toOption(row) : null;
+    });
+  }
+
+  async update(
+    tenantId: string,
+    optionId: string,
+    patch: ResolutionOptionPatch,
+  ): Promise<ResolutionOption> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<OptionRow[]>`
+        UPDATE delivery.obligation_resolution_option
+        SET name = ${patch.name},
+            closes_without_filing = ${patch.closesWithoutFiling},
+            status = ${patch.status},
+            sort_order = ${patch.sortOrder},
+            is_active = ${patch.isActive}
+        WHERE id = ${optionId}
+        RETURNING ${db.unsafe(OPTION_COLUMNS)}
+      `;
+      const row = rows[0];
+      if (!row) throw new Error(`resolution option ${optionId} was not found to update`);
+      return toOption(row);
+    });
+  }
+}
+
+/**
+ * Take each destination flag off whoever currently holds it, except the row
+ * about to hold it.
+ *
+ * One statement per flag rather than one clever statement, because each is a
+ * different partial index and a combined `UPDATE ... SET` would clear flags the
+ * caller is not claiming. `exceptId` is null on create, where there is no row
+ * to exempt yet.
+ *
+ * It runs inside the caller's `withTenant` transaction, so the release and the
+ * claim commit together: there is never a moment, visible to anybody, where the
+ * firm has no starting state or no missed state.
+ */
+async function clearDestinations(
+  db: Parameters<Parameters<typeof withTenant>[2]>[0],
+  flags: {
+    readonly isInitial: boolean;
+    readonly isFiled: boolean;
+    readonly isMissed: boolean;
+    readonly isResolution: boolean;
+  },
+  exceptId: string | null,
+): Promise<void> {
+  if (flags.isInitial) {
+    await db`
+      UPDATE delivery.obligation_state SET is_initial = false
+      WHERE is_initial AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
+    `;
+  }
+  if (flags.isFiled) {
+    await db`
+      UPDATE delivery.obligation_state SET is_filed = false
+      WHERE is_filed AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
+    `;
+  }
+  if (flags.isMissed) {
+    await db`
+      UPDATE delivery.obligation_state SET is_missed = false
+      WHERE is_missed AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
+    `;
+  }
+  if (flags.isResolution) {
+    await db`
+      UPDATE delivery.obligation_state SET is_resolution = false
+      WHERE is_resolution AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
+    `;
   }
 }

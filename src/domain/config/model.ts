@@ -57,7 +57,8 @@ export type ConfigKind =
   | "dunning"
   | "workflow_template"
   | "confidence_tier"
-  | "verification_policy";
+  | "verification_policy"
+  | "compliance_policy";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -68,6 +69,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "workflow_template",
   "confidence_tier",
   "verification_policy",
+  "compliance_policy",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -776,6 +778,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateConfidenceTierBody(body);
     case "verification_policy":
       return validateVerificationPolicyBody(body);
+    case "compliance_policy":
+      return validateCompliancePolicyBody(body);
   }
 }
 
@@ -941,6 +945,101 @@ export function readVerificationPolicyBody(
     minGradeRank: typeof minGradeRank === "number" ? minGradeRank : null,
     minGradeCode: typeof minGradeCode === "string" ? minGradeCode : null,
   };
+}
+
+/**
+ * When this firm's compliance calendar goes live — the registry's ninth kind
+ * (T3.3, 0055).
+ *
+ * ── WHY THIS EXISTS AT ALL ────────────────────────────────────────────────
+ *
+ * Obligation generation reaches back ninety days, so a firm onboarding in
+ * September with engagements dated May gets four months of obligations whose
+ * statutory dates have all passed. Every one of them is genuinely late by the
+ * arithmetic — and every one of them was filed months ago, in the Excel this
+ * product replaces. Without a floor, a firm's first morning on the decision
+ * queue is several hundred rows of questions it already answered, and the one
+ * screen whose entire value is being trusted stops being trusted immediately.
+ *
+ * ── AND WHY IT IS THE FIRM'S ANSWER RATHER THAN OURS ──────────────────────
+ *
+ * "Do we ask about periods that closed before we started using this?" is a
+ * question about how a firm wants to migrate, and it has been sitting open
+ * since before the rebuild. A number picked here would be that question
+ * answered by whoever wrote the constant. So it is a published policy: the firm
+ * sets a date on a screen, the registry versions it, and the ledger shows who
+ * moved it — which matters, because moving this date forward makes filings stop
+ * being asked about, and that is exactly the kind of change an audit asks about
+ * later.
+ *
+ * ── UNSET IS A REAL ANSWER ────────────────────────────────────────────────
+ *
+ * A firm that has published nothing has NO floor: every overdue obligation
+ * reaches the queue, which is the behaviour the system already has. Unlike the
+ * discount policy — where silence means "nothing is allowed" because the
+ * fail-open reading cannot be audited — the safe direction here is to show MORE
+ * rather than less. A hidden missed deadline is the failure this whole module
+ * exists to prevent.
+ */
+export interface CompliancePolicyBody {
+  /**
+   * The earliest STATUTORY date the missed-deadline sweep will ask about.
+   * `YYYY-MM-DD`, or null for "no floor, ask about everything".
+   *
+   * A day, never an instant, for the reason every date in the compliance module
+   * is: "the 20th" in a process running in one zone is the 19th in another, and
+   * for a statutory deadline that is a penalty rather than a rounding error.
+   */
+  readonly missedFromOn: string | null;
+}
+
+const COMPLIANCE_POLICY_FIELDS = ["missedFromOn"];
+
+/** One entry per firm. There is one calendar, so there is one go-live date —
+ *  unlike `policy`, which is keyed by what it governs because a firm has many
+ *  unrelated limits. */
+export const COMPLIANCE_POLICY_KEY = "default";
+
+/** `YYYY-MM-DD`, and a real day — the fourth copy of this check in `domain/`,
+ *  which is the duplication a schema-less layer pays instead of importing
+ *  sideways between modules. */
+const CALENDAR_DAY = /^\d{4}-\d{2}-\d{2}$/;
+
+function isCalendarDay(v: string): boolean {
+  if (!CALENDAR_DAY.test(v)) return false;
+  const [y, m, d] = v.split("-").map(Number) as [number, number, number];
+  if (m < 1 || m > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+function validateCompliancePolicyBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, COMPLIANCE_POLICY_FIELDS);
+  if (unknown) return unknown;
+
+  const from = body["missedFromOn"];
+  if (from === null || from === undefined) return null;
+  if (typeof from !== "string" || !isCalendarDay(from)) {
+    return (
+      `"missedFromOn" must be a calendar day as "YYYY-MM-DD" — "2026-04-01" — or null for ` +
+      `no floor at all. A day and never a timestamp: a statutory date is the same day in ` +
+      `every zone, and an instant is not. Got ${describe(from)}`
+    );
+  }
+  return null;
+}
+
+/**
+ * The go-live date a stored compliance policy carries, or null when the firm
+ * has not set one.
+ *
+ * Null is "no floor" rather than "unknown", and both the unpublished case and
+ * an explicit null land there on purpose — a firm that has never answered and a
+ * firm that answered "ask me about everything" want the same behaviour, and
+ * distinguishing them would only produce a third code path nobody reads.
+ */
+export function readMissedFromOn(body: Record<string, unknown>): string | null {
+  const from = body["missedFromOn"];
+  return typeof from === "string" && isCalendarDay(from) ? from : null;
 }
 
 const ROLE_FIELDS = ["label", "permissions"];

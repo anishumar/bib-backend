@@ -22,6 +22,8 @@ import type {
   CalendarSubject,
   CoverageGap,
   CoverageGapReason,
+  DecisionRow,
+  MissableObligation,
   NewObligationInstance,
   ObligationInstanceRepository,
   RaisableObligation,
@@ -53,12 +55,16 @@ interface InstanceRow {
   state_id: string;
   work_item_id: string | null;
   filed_on: string | null;
+  resolution_option_id: string | null;
+  resolution_reason: string | null;
+  resolved_at: string | null;
 }
 
 const INSTANCE_COLUMNS =
   "id, tenant_id, template_id, entity_party_id, engagement_id, period_start::text, " +
   "period_end::text, period_label, statutory_due_on::text, internal_target_on::text, " +
-  "state_id, work_item_id, filed_on::text";
+  "state_id, work_item_id, filed_on::text, resolution_option_id, resolution_reason, " +
+  "resolved_at::text";
 
 function toInstance(r: InstanceRow): ObligationInstance {
   return {
@@ -75,6 +81,9 @@ function toInstance(r: InstanceRow): ObligationInstance {
     stateId: r.state_id,
     workItemId: r.work_item_id,
     filedOn: r.filed_on,
+    resolutionOptionId: r.resolution_option_id,
+    resolutionReason: r.resolution_reason,
+    resolvedAt: r.resolved_at,
   };
 }
 
@@ -151,7 +160,9 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           period_label: string; statutory_due_on: string; internal_target_on: string;
           state_code: string; state_name: string; is_terminal: boolean; needs_decision: boolean;
           work_item_id: string | null; filed_on: string | null; rule_status: string;
-          rule_pack: string;
+          rule_pack: string; resolution_option_id: string | null;
+          resolution_name: string | null; resolution_reason: string | null;
+          resolved_at: string | null;
         }[]
       >`
         SELECT oi.id,
@@ -165,6 +176,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
                s.code AS state_code, s.name AS state_name,
                s.is_terminal, s.needs_decision,
                oi.work_item_id, oi.filed_on::text,
+               oi.resolution_option_id, ro.name AS resolution_name,
+               oi.resolution_reason, oi.resolved_at::text,
                t.status AS rule_status, t.rule_pack
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t
@@ -177,6 +190,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           ON e.id = oi.engagement_id AND e.tenant_id = oi.tenant_id
         LEFT JOIN core.party cp
           ON cp.id = e.party_id AND cp.tenant_id = oi.tenant_id
+        LEFT JOIN delivery.obligation_resolution_option ro
+          ON ro.id = oi.resolution_option_id AND ro.tenant_id = oi.tenant_id
         WHERE (${query.from ?? null}::date IS NULL OR oi.internal_target_on >= ${query.from ?? null}::date)
           AND (${query.to ?? null}::date IS NULL OR oi.internal_target_on <= ${query.to ?? null}::date)
           AND (${query.entityPartyId ?? null}::uuid IS NULL OR oi.entity_party_id = ${query.entityPartyId ?? null}::uuid)
@@ -203,6 +218,10 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           needsDecision: r.needs_decision,
           workItemId: r.work_item_id,
           filedOn: r.filed_on,
+          resolutionOptionId: r.resolution_option_id,
+          resolutionName: r.resolution_name,
+          resolutionReason: r.resolution_reason,
+          resolvedAt: r.resolved_at,
           // SHOWN, never hidden. The date came from a document rather than from
           // a partner, and a plausible-looking wrong rule is the dangerous kind.
           ruleUnconfirmed: r.rule_status !== "confirmed",
@@ -305,6 +324,174 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         UPDATE delivery.obligation_instance
         SET filed_on = NULL, state_id = ${stateId}
         WHERE id = ${obligationId} AND filed_on IS NOT NULL
+        RETURNING id
+      `;
+      return rows.length > 0;
+    });
+  }
+
+  async listMissable(
+    tenantId: string,
+    asOf: string,
+    floor: string | null,
+    limit: number,
+  ): Promise<readonly MissableObligation[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Every condition `shouldBeFlaggedMissed` names, in SQL, because the sweep
+      // must not fetch rows in order to drop them: on a newly onboarded firm the
+      // rows excluded by `floor` are the bulk of the table.
+      //
+      // `can still be missed` is the two FLAGS and never a code — the same rule
+      // the whole module keeps. A row already in the missed state carries
+      // `needs_decision`, so it does not come back on the next sweep, and that
+      // is the entire idempotency story.
+      const rows = await db<
+        {
+          id: string; statutory_due_on: string; entity_party_id: string;
+          template_name: string; period_label: string; work_item_id: string | null;
+        }[]
+      >`
+        SELECT oi.id, oi.statutory_due_on::text, oi.entity_party_id,
+               t.name AS template_name, oi.period_label, oi.work_item_id
+        FROM delivery.obligation_instance oi
+        JOIN delivery.obligation_template t
+          ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
+        JOIN delivery.obligation_state s
+          ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+        WHERE oi.statutory_due_on < ${asOf}::date
+          AND oi.filed_on IS NULL
+          AND oi.resolved_at IS NULL
+          AND NOT s.is_terminal
+          AND NOT s.needs_decision
+          AND (${floor}::date IS NULL OR oi.statutory_due_on >= ${floor}::date)
+        ORDER BY oi.statutory_due_on
+        LIMIT ${limit}
+      `;
+      return rows.map(
+        (r): MissableObligation => ({
+          id: r.id,
+          statutoryDueOn: r.statutory_due_on,
+          entityPartyId: r.entity_party_id,
+          templateName: r.template_name,
+          periodLabel: r.period_label,
+          workItemId: r.work_item_id,
+        }),
+      );
+    });
+  }
+
+  async markMissed(tenantId: string, obligationId: string, stateId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The WHERE clause re-states the guard rather than trusting the list that
+      // produced this id, and that is `markFiled`'s argument: between the read
+      // and this write somebody may have filed it or another sweep may have
+      // moved it. Exactly one caller updates a row, and only that one writes
+      // `obligation.missed`.
+      const rows = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance oi
+        SET state_id = ${stateId}
+        FROM delivery.obligation_state s
+        WHERE oi.id = ${obligationId}
+          AND s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+          AND oi.filed_on IS NULL
+          AND oi.resolved_at IS NULL
+          AND NOT s.is_terminal
+          AND NOT s.needs_decision
+        RETURNING oi.id
+      `;
+      return rows.length > 0;
+    });
+  }
+
+  async decisionQueue(tenantId: string, limit: number): Promise<readonly DecisionRow[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Ordered on the STATUTORY date and oldest first — the opposite end from
+      // `calendar`, and deliberately. The calendar is about what is coming and
+      // sorts on the internal target; this is about what has already gone
+      // wrong, and the row that has been late longest is the one costing money.
+      //
+      // No date window at all. An obligation missed in April is still owed in
+      // September, and a window would drop exactly those rows off the bottom.
+      const rows = await db<
+        {
+          id: string; name: string; authority: string | null; module: string | null;
+          entity_party_id: string; entity_name: string | null; client_name: string | null;
+          period_label: string; statutory_due_on: string; internal_target_on: string;
+          state_id: string; state_code: string; state_name: string;
+          work_item_id: string | null; rule_status: string;
+        }[]
+      >`
+        SELECT oi.id,
+               t.name, t.authority, t.module,
+               oi.entity_party_id,
+               ep.display_name AS entity_name,
+               cp.display_name AS client_name,
+               oi.period_label,
+               oi.statutory_due_on::text,
+               oi.internal_target_on::text,
+               s.id AS state_id, s.code AS state_code, s.name AS state_name,
+               oi.work_item_id,
+               t.status AS rule_status
+        FROM delivery.obligation_instance oi
+        JOIN delivery.obligation_template t
+          ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
+        JOIN delivery.obligation_state s
+          ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+        LEFT JOIN core.party ep
+          ON ep.id = oi.entity_party_id AND ep.tenant_id = oi.tenant_id
+        LEFT JOIN crm.engagement e
+          ON e.id = oi.engagement_id AND e.tenant_id = oi.tenant_id
+        LEFT JOIN core.party cp
+          ON cp.id = e.party_id AND cp.tenant_id = oi.tenant_id
+        WHERE s.needs_decision
+          AND oi.resolved_at IS NULL
+          AND oi.filed_on IS NULL
+        ORDER BY oi.statutory_due_on, t.name
+        LIMIT ${limit}
+      `;
+      return rows.map(
+        (r): DecisionRow => ({
+          id: r.id,
+          name: r.name,
+          authority: r.authority,
+          module: r.module,
+          entityPartyId: r.entity_party_id,
+          entityName: r.entity_name,
+          clientName: r.client_name,
+          periodLabel: r.period_label,
+          statutoryDueOn: r.statutory_due_on,
+          internalTargetOn: r.internal_target_on,
+          stateId: r.state_id,
+          stateCode: r.state_code,
+          stateName: r.state_name,
+          workItemId: r.work_item_id,
+          ruleUnconfirmed: r.rule_status !== "confirmed",
+        }),
+      );
+    });
+  }
+
+  async recordResolution(
+    tenantId: string,
+    obligationId: string,
+    decision: { readonly optionId: string; readonly reason: string; readonly stateId: string },
+  ): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // `AND resolved_at IS NULL` is what makes a double-submitted form leave
+      // ONE decision. It cannot live in the caller: between its read and its
+      // write the other request has already committed, and the second write
+      // would silently replace a partner's recorded reason with another.
+      //
+      // `now()` rather than a value passed in, unlike `filed_on`. This is an
+      // INSTANT — when somebody clicked — and not a claim about a statutory
+      // date, so it has no calendar-day question to get wrong.
+      const rows = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance
+        SET resolution_option_id = ${decision.optionId},
+            resolution_reason    = ${decision.reason},
+            resolved_at          = now(),
+            state_id             = ${decision.stateId}
+        WHERE id = ${obligationId} AND resolved_at IS NULL
         RETURNING id
       `;
       return rows.length > 0;

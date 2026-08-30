@@ -102,8 +102,9 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Eight kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
-`confidence_tier` and `verification_policy`; `rule_pack` joins them when T4.3 actually reads it.
+`config.version` is what it said at a point in time. Nine kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
+`confidence_tier`, `verification_policy` and `compliance_policy`; `rule_pack` joins them when T4.3
+actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
 
@@ -1410,11 +1411,10 @@ actually terminal. Use `z.enum(["true","false"]).transform((v) => v === "true")`
 the accepted values in the spec. `tests/api/query-booleans.test.ts` holds the build red on the whole
 class; JSON bodies are unaffected and `z.coerce.number()` is fine.
 
-**The obligation states still have NO screen** — unlike the work board's `/admin/work-vocabulary`,
-which gained the `is_success` tick. A firm cannot yet rename its compliance states or move these
-flags, which is the standing directive unmet for this one vocabulary; it belongs with T4.3's rules
-page. Until then, no error message may tell a partner to change them on a screen, because there
-isn't one.
+**The obligation states have a screen since T3.3** — `/admin/obligation-vocabulary`, the
+counterpart of `/admin/work-vocabulary`. Until it existed, every *"mark another state as the X
+one"* message in this module described a control nobody could reach, and `NoFiledState`'s own
+comment said so; both are corrected. A refusal here may now name the screen, because there is one.
 
 **Generation scope is DECIDED: only where an engagement exists.** `engagement_id` stays nullable
 so the compliance-engine reading (generate for every entity; every uncovered obligation is a sales
@@ -1432,6 +1432,76 @@ scope it does not need to — *"does Tax Audit apply?"* is answered by the clien
 The threshold layer belongs with the compliance-engine reading, and every seeded rule carries the
 sheet's own threshold text in `applicabilityNote` so the specification is ready the day that
 question is answered.
+
+### A missed deadline is a state, and the decision about it is a record (T3.3, 0055/0056)
+
+`obligation.missed` was a REGISTERED VERB WITH NO WRITER from T3.2 until now — the same trap 0054
+closed for `obligation.filed`, left open a second time. The sweep writes it, and nothing about that
+path throws, retries or hides: a passed statutory date moves a row to a state and asks a person.
+
+**THE SWEEP NEEDS A DESTINATION, AND `needs_decision` IS NOT ONE.** "Move it to the state with
+`needs_decision`" works only while a firm has exactly one, and nothing says it must — `missed` and
+later `disputed` are both waiting on a person and only one is where a passed date belongs. So the
+vocabulary is now two kinds of flag, and the split is the thing to keep:
+
+- **destinations** — `is_initial` · `is_filed` · `is_missed` · `is_resolution`. *A filing moves HERE
+  when X happens.* At most one holder each (partial unique index), never none (the service refuses,
+  naming what would stop working), and a state may hold at most one of the four (a CHECK).
+- **behaviours** — `is_terminal` · `needs_decision`. *Once a filing is here, this is true of it.*
+  Any number of states may carry them.
+
+`is_resolution` exists for 0054's own reason reached from the other side: a firm has two terminal
+states, and "terminal and not filed" is a definition by subtraction that breaks the day it adds a
+third. A CHECK also refuses `is_missed` on a state that does not need a decision — without it a
+firm could point the sweep at an ordinary working state and every overdue filing would move there
+in silence.
+
+**THE OPTIONS ARE ROWS AND SEED `unconfirmed`.** `delivery.obligation_resolution_option` holds the
+firm's answers — provisional filing · late fee · nil return · not applicable, and deliberately no
+"ignore", because a passed deadline is a fork with consequences either way and a dismissable one
+would hide what the queue exists to surface. Rows rather than a CHECK for two reasons: a firm edits
+its own list on a screen, and *"how many late fees did we accept this quarter"* is a `GROUP BY` that
+free text cannot answer. `unconfirmed` because the demo's `docs/OPEN-QUESTIONS.md` carries them as
+**Q57, still OPEN** — described in a conversation is not confirmed against a list.
+
+**`closes_without_filing` IS THE FORK, AND IT IS A COLUMN.** False means the filing still has to
+happen: back to the INITIAL state, `raise` puts it on a desk again, and 0054 files it late with
+`daysLate` on the event. True means it never will: into the resolution state, and over. A firm
+adding *"client deregistered mid-year"* says which it means without a deploy.
+
+**`resolved_at` IS ALSO THE LOOP GUARD.** An obligation sent back to work has a statutory date in
+the past forever, so without it the next sweep re-flags the row and the partner is asked the same
+question every morning until the filing is made. That is why it is a column and not only a ledger
+event — the sweep's WHERE clause cannot read the ledger.
+
+**THE REASON IS MANDATORY AND IS NOT IN THE LOG.** Refused by the service and by
+`obligation_instance_resolution_chk` (all three columns or none; a blank reason is not a reason),
+because a partner in a hurry meets the form and an import does not. `obligation.resolved` carries
+the OPTION and never the reason: it is free text about a client and may name a person, which §3.4
+keeps out of a log that cannot be erased. So the reason exists in the erasable row and nowhere else.
+
+**THE GO-LIVE FLOOR IS A KNOB, NOT AN ANSWER.** `compliance_policy` (the registry's ninth kind, key
+`default`) holds `missedFromOn`. Generation reaches ninety days back, so a firm onboarding with
+older engagements gets months of obligations whose dates have all passed and were filed in Excel —
+its first decision queue would be hundreds of answered questions. This is the demo's **Q56, also
+still OPEN**, and its own note calls the ninety days *"a working value, not a decision"*, so the
+firm sets the date and the registry versions it. **UNSET means NO FLOOR**, which is the behaviour
+the system already had — and the OPPOSITE default from the discount policy, deliberately: there,
+silence means zero because a fail-open reading cannot be audited; here the failure to avoid is a
+hidden missed deadline, so the safe direction is to show more.
+
+**`obligation:resolve` IS THE EIGHTH PERMISSION (0056), partner-only by default.** Not
+`tenant:admin`, though that is partner-only today: a firm wanting a senior manager to decide filings
+without also handing them the roster and the roles could not express that, and roles are config rows
+precisely so it can. Not `work:write` either — that is the ordinary act of ticking off the step you
+performed, and this commits the CLIENT'S money and is the one delivery decision a client may later
+dispute. 0012 and 0045 are the precedent, cost included.
+
+**`ObligationError` HAD NO ENTRY IN `api/domainerr.ts`, AND HAD NOT SINCE T3.2.** Every refusal the
+compliance calendar made answered **500 "internal error"** — precisely the failure this file already
+records `StaffGradeError` having, made a second time, and invisible for the same reason: unit tests
+assert on the thrown sentinel. It surfaced only because T3.3's refusals are read by a partner on a
+screen. If you add an error family, the mapping is part of the same commit.
 
 ### The silent hole, and why the cure is a derivation rather than a setting
 
@@ -1477,8 +1547,8 @@ task on the board at High priority, from the law, with nobody setting it.
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
-Next: T3.3's missed-deadline state (which the calendar's `needs_decision` flag is already waiting
-for, and which 0054's un-filing rule is what keeps honest) and T3.7's dashboards.
+T3.3's missed-deadline state and T3.7's dashboards are built. Next on `(B)`'s lane: the
+escalation ladder (G3.4, which needs `membership.party_id`) and T4.x's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

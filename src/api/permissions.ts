@@ -337,6 +337,49 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // who notices the gap cannot see why it is there.
   [routeKey("GET", "/api/v1/calendar/coverage"), "party:read" as const],
 
+  // THE MISSED-DEADLINE QUEUE (T3.3), and the read and the write are a
+  // deliberate step apart.
+  //
+  // READING is `party:read`, like the calendar it hangs off. A list filtered to
+  // what you personally may act on would hide that six filings have been late
+  // for a week because nobody senior enough looked — which is the failure this
+  // queue exists to surface, reached from the inside.
+  //
+  // DECIDING is `obligation:resolve`, an eighth permission and its own
+  // migration (0056). NOT `work:write`, which is the ordinary act of ticking
+  // off the step you just performed: choosing between a provisional filing and
+  // accepting a late fee commits the CLIENT'S money and moves liability onto
+  // the firm, and it is the one delivery decision a client may later dispute.
+  // NOT `tenant:admin` either, though that is partner-only today — a firm that
+  // wants its senior manager to decide filings without also handing them the
+  // ability to add users and rewrite roles could not express that, and roles
+  // are held as config rows precisely so it can.
+  [routeKey("GET", "/api/v1/calendar/decisions"), "party:read" as const],
+  [routeKey("POST", "/api/v1/obligations/{obligationId}/resolve"), "obligation:resolve" as const],
+
+  // THE FIRM'S OWN WORDS FOR COMPLIANCE (T3.3) — the counterpart of
+  // `/work-vocabulary` and the same split, for the same reason. Reading is
+  // `party:read`: the states are on every calendar row already, and an
+  // associate wanting to know what "Resolved" means should not need admin.
+  // Writing is `tenant:admin`, because these flags are MECHANISM — which state
+  // a generated filing starts in, where a completed one lands, where a passed
+  // deadline goes — and moving one silently changes what the nightly sweep
+  // does to every client's filings.
+  [routeKey("GET", "/api/v1/obligation-vocabulary"), "party:read" as const],
+  [routeKey("POST", "/api/v1/obligation-vocabulary/states"), "tenant:admin" as const],
+  [
+    routeKey("PATCH", "/api/v1/obligation-vocabulary/states/{stateId}"),
+    "tenant:admin" as const,
+  ],
+  [
+    routeKey("POST", "/api/v1/obligation-vocabulary/resolution-options"),
+    "tenant:admin" as const,
+  ],
+  [
+    routeKey("PATCH", "/api/v1/obligation-vocabulary/resolution-options/{optionId}"),
+    "tenant:admin" as const,
+  ],
+
   [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
   [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
   [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],

@@ -2247,8 +2247,142 @@ open and are recorded above; neither blocks Phase 2.
   > browser; neither has been exercised by a finger. Worth retrying at the top of T3.3, whose
   > screens will need the same controls anyway.
 
-- [ ] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
-  > **The decision AND its reason are both recorded** (`resolution`, `resolution_reason`, `resolved_at`). In a CA firm this moment is where money and liability are decided, and today it happens on WhatsApp and is written down nowhere. The reason is the capture-or-lose half: in eighteen months nobody remembers why a late fee was accepted rather than a provisional filing made, and that is exactly the thing worth knowing. Writes `obligation.missed`, then `obligation.filed` or a resolution.
+- [x] `(B)` **T3.3** **Missed-deadline state**: past statutory date → partner decision queue (provisional filing vs late fee), logged. *Acc: a missed deadline is a state, not an error; partner choice writes an event.*
+  > **Done (2026-08-30). Migrations 0055 and 0056.** Both halves of the acceptance hold: the
+  > sweep MOVES a row to a state and throws nothing, and the partner's choice writes
+  > `obligation.resolved` naming the option. Gates on the merged tree: `check` **1356**,
+  > `test:integration` **429**.
+  >
+  > **`obligation.missed` was a registered verb with no writer — the SAME trap 0054 closed for
+  > `obligation.filed`, left open a second time.** If you find a third, treat it the same way.
+  >
+  > ── THE SWEEP NEEDED A DESTINATION, AND `needs_decision` IS NOT ONE ──────────────
+  >
+  > The obvious rule is "move it to the state with `needs_decision`", and it works only while a
+  > firm has exactly one. Nothing says it must: `missed` and, later, `disputed` are both waiting
+  > on a person and only one of them is where a passed statutory date belongs. So `is_missed` is
+  > a DESTINATION flag, and `is_resolution` is its sibling for the reason 0054 could not use
+  > `is_terminal` — a firm has two terminal states and "terminal and not filed" is a definition
+  > by subtraction that breaks the day a firm adds a third. The vocabulary now reads:
+  >
+  > | | |
+  > |---|---|
+  > | **destinations** `is_initial` · `is_filed` · `is_missed` · `is_resolution` | *a filing moves HERE when X happens* — at most one holder each, partial unique index, and the service refuses to leave the firm with none |
+  > | **behaviours** `is_terminal` · `needs_decision` | *once a filing is here, this is true of it* — any number of states |
+  >
+  > A CHECK refuses `is_missed` on a state that does not need a decision: without it a firm
+  > could point the sweep at an ordinary working state and every overdue filing would move there
+  > in silence, which is indistinguishable from the product not working.
+  >
+  > ── THE OPTIONS ARE ROWS, AND UNCONFIRMED ────────────────────────────────────────
+  >
+  > `delivery.obligation_resolution_option` seeds the demo's four — provisional filing · late fee
+  > · nil return · not applicable — and there is deliberately **no "ignore"**. They are rows and
+  > not a CHECK for two reasons: a firm edits its own list on a screen, and *"how many late fees
+  > did we accept this quarter"* is a `GROUP BY` that free text cannot answer. They seed
+  > **`unconfirmed`**, the same word `obligation_template.status` uses, because the demo's own
+  > `docs/OPEN-QUESTIONS.md` still carries them as **Q57 `OPEN`** — *"taken from the firm's own
+  > described practice"* is not the same as confirmed against this list.
+  >
+  > **`closes_without_filing` is the fork, and it is a COLUMN rather than a branch.** False —
+  > file provisionally, accept the late fee, file a nil return — means the filing still has to
+  > happen, so the obligation goes back to the INITIAL state, `raise` puts it on a desk again,
+  > and 0054 records it filed, late, with `daysLate` on the event. True — it never applied —
+  > ends it in the resolution state. A firm adding *"client deregistered mid-year"* says which it
+  > means without a deploy.
+  >
+  > ── AND WHY GOING BACK TO WORK DOES NOT LOOP ─────────────────────────────────────
+  >
+  > An obligation sent back has a statutory date in the past **forever**, so without a second
+  > fact the next sweep re-flags it and the partner is asked the same question every morning
+  > until the filing is made. `resolved_at` is that fact, and it is why this is a column rather
+  > than only a ledger event: the sweep's WHERE clause cannot read the ledger. Proven by running
+  > the worker twice after a decision — the row stayed put and `obligation.missed` stayed at 3.
+  >
+  > ── THE REASON IS MANDATORY, AND IT IS NOT IN THE LOG ────────────────────────────
+  >
+  > Refused by the service AND by `obligation_instance_resolution_chk` (all three columns or
+  > none, and a blank reason is not a reason), because a partner in a hurry meets the form and an
+  > import does not. But `obligation.resolved` carries the OPTION and never the reason: it is a
+  > partner's free text about a client and may name a person, which §3.4 keeps out of a log that
+  > cannot be erased. **So the reason lives in the erasable row and nowhere else, and 0055's own
+  > down migration says that rollback is the one operation that loses it.**
+  >
+  > ── THE GO-LIVE FLOOR: A KNOB, NOT AN ANSWER (`compliance_policy`, the registry's 9th kind) ──
+  >
+  > Generation reaches ninety days back, so a firm onboarding in September with engagements dated
+  > May gets four months of obligations whose dates have all passed — every one of them already
+  > filed in Excel. Its first decision queue would be hundreds of answered questions, and the one
+  > screen whose whole value is being trusted would not be. **This is the demo's Q56, also still
+  > `OPEN`**, and its own note calls the ninety days *"a working value, not a decision"*.
+  >
+  > So the firm sets a date on a screen and the registry versions it — which also answers *"why
+  > did these forty filings stop being asked about?"* a year later. **UNSET means NO FLOOR**, the
+  > behaviour the system already had: unlike the discount policy, where silence means zero
+  > because the fail-open reading cannot be audited, the safe direction here is to show MORE. A
+  > hidden missed deadline is the failure this module exists to prevent.
+  >
+  > ── `obligation:resolve`, THE EIGHTH PERMISSION (0056) ───────────────────────────
+  >
+  > Partner-only by default, and its own permission rather than `tenant:admin` — which is
+  > partner-only today and would have worked on day one and been wrong by month two. A firm
+  > wanting its senior manager to decide filings without also handing them the ability to add
+  > users and rewrite roles could not express that, and roles are config rows precisely so it
+  > can. Not `work:write` either: that is the ordinary act of ticking off the step you performed,
+  > and this commits the CLIENT'S money. 0012 and 0045 are the precedent, including the cost —
+  > a published version is frozen, so the migration archives and republishes for the firms that
+  > have not customised the role, and leaves alone the ones that have.
+  >
+  > ── THE SCREENS ─────────────────────────────────────────────────────────────────
+  >
+  > `/calendar` gains a third tab, **toned whenever it is non-empty rather than only when
+  > selected** — every other badge there is a filter, this one is a queue of undecided client
+  > money. `daysLate` is computed from the day the BROWSER sends (G3.2's lesson: a UTC day is
+  > yesterday in Delhi each morning, and this is the screen about exactly that). The form is
+  > collapsed until somebody acts, and it names where the filing goes next **before** the click,
+  > so a partner never has to know which option means which.
+  >
+  > **`/admin/obligation-vocabulary` is new, and it closes the standing directive's one unmet
+  > vocabulary.** 0052 held these as rows so a firm could rename them and nothing could write
+  > them; every *"mark another state as the X one"* message in this module was describing a
+  > control that did not exist — including `NoFiledState`'s, whose comment said so and has now
+  > been corrected. The four destinations are RADIOS, because a checkbox that refuses to be
+  > unticked reads as broken.
+  >
+  > ── A REAL BUG THAT SHIPPED IN T3.2, FOUND WHILE WIRING THIS ─────────────────────
+  >
+  > **`ObligationError` had no entry in `api/domainerr.ts`.** Every refusal the compliance
+  > calendar made — a rule not found, a jurisdiction typed wrong, an exception month already
+  > taken — has been answering **500 "internal error"** since T3.2. It is exactly the failure
+  > that file's own header describes `StaffGradeError` having, made a second time, and invisible
+  > for the same reason: unit tests assert on the thrown sentinel and are perfectly happy. It
+  > surfaced because T3.3's refusals are read by a partner on a screen — *"say why"* answering
+  > 500 with no message would have been the third time. Mapped now, and confirmed over HTTP:
+  > a blank reason answers **400** with its own sentence, a second decision **409**.
+  >
+  > ── WHAT RUNNING IT PROVED, AND WHAT IS OWED ─────────────────────────────────────
+  >
+  > Walked in the browser as the partner: the badge counted 3, the queue rendered oldest-first
+  > (100 · 55 · 10 days late), the form's fork hint appeared on selecting an option, and
+  > **clicking Record decision wrote the whole chain** — state back to `pending`, reason stored,
+  > `resolved_at` stamped, `obligation.resolved` in the ledger carrying the option and no reason.
+  > The badge then read 2. Two further sweeps did not re-flag it.
+  >
+  > **The rename promise was proven END TO END**: the missed state was renamed to *"Late —
+  > partner to decide"*, another obligation was back-dated, and the sweep flagged it into the
+  > renamed state. The demo's `stateByCode('missed')` would have broken there in silence.
+  >
+  > **Owed, and it is tooling rather than product:** the extension's synthetic clicks stopped
+  > reaching React after the first successful save — the same wall recorded at the top of T3.2 —
+  > so the CLOSING fork and every vocabulary write were exercised over HTTP with a real session
+  > and a real permission check, not with a finger. Both refusals answered correctly
+  > (`LAST_DESTINATION_STATE` 409, `ALREADY_DECIDED` 409). Retry at the top of the next task.
+  >
+  > **Demo data was CHANGED and is not restored.** Seven obligations across the two `demo-*`
+  > firms were back-dated so anything could be overdue at all (their engagements are recent, so
+  > the earliest real statutory date was 2026-09-07), and three decisions were recorded against
+  > them. The state name was put back to "Missed"; the ledger events are append-only and stay.
+
 
 ### Lane A — money & documents
 - [x] `(A)` **T3.4** **C6 Invoicing**: **gapless per-entity series** (trigger-frozen), IRN field, `invoice`/`invoice_line`, balance is a sum. *Acc: numbers cannot be edited; a gap is impossible under concurrency.*

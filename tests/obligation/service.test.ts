@@ -13,7 +13,9 @@ import {
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
+  FakeCompliancePolicySource,
   FakeObligationStateRepo,
+  FakeResolutionOptionRepo,
   FakeObligationTemplateRepo,
   FakeObligationTenants,
   FakeWorkItemRaiser,
@@ -35,7 +37,12 @@ function harness() {
   const exceptions = new FakeObligationExceptionRepo();
   templates.exceptions = exceptions;
   const states = new FakeObligationStateRepo();
+  const resolutionOptions = new FakeResolutionOptionRepo();
   const instances = new FakeObligationInstanceRepo();
+  // The instance fake reads the FLAGS off the state list, exactly as the sweep
+  // does, so a test that renames a state proves the rule still holds.
+  instances.states = states.rows;
+  const compliancePolicy = new FakeCompliancePolicySource();
   const calendarSource = new FakeCalendarSource();
   const services = new FakeObligationServices();
   const workItems = new FakeWorkItemRaiser();
@@ -47,7 +54,9 @@ function harness() {
     templates,
     exceptions,
     states,
+    resolutionOptions,
     instances,
+    compliancePolicy,
     calendarSource,
     services,
     workItems,
@@ -62,7 +71,9 @@ function harness() {
     templates,
     exceptions,
     states,
+    resolutionOptions,
     instances,
+    compliancePolicy,
     calendarSource,
     services,
     workItems,

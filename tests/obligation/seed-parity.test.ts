@@ -13,10 +13,14 @@
 // statutory deadline that reaches nobody at all.
 import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_OBLIGATION_STATES } from "../../src/domain/obligation/model";
+import {
+  DEFAULT_OBLIGATION_STATES,
+  DEFAULT_RESOLUTION_OPTIONS,
+} from "../../src/domain/obligation/model";
 
 const MIGRATIONS = "migrations";
 const STATES_MARKER = "@default-obligation-states-seed";
+const OPTIONS_MARKER = "@default-resolution-options-seed";
 
 /**
  * The seed from the NEWEST migration that carries one.
@@ -116,6 +120,58 @@ describe("the seeded obligation states and the product defaults agree", () => {
     }
   });
 
+  it("gives a PASSED deadline exactly one place to go", () => {
+    // 0055, and the same argument `isFiled` makes one flag earlier. With none,
+    // the nightly sweep throws `NoMissedState` and no missed deadline ever
+    // reaches a partner — the silence this whole feature exists to break. With
+    // two, where an overdue filing goes is a coin toss.
+    expect(DEFAULT_OBLIGATION_STATES.filter((s) => s.isMissed)).toHaveLength(1);
+  });
+
+  it("sends it somewhere that actually ASKS somebody", () => {
+    // The refusal that makes the flag worth having. A firm could otherwise mark
+    // an ordinary working state as the missed one, and every overdue filing
+    // would move there silently and be asked about by nobody — indistinguishable
+    // from the product not working.
+    for (const s of DEFAULT_OBLIGATION_STATES) {
+      expect(s.isMissed && !s.needsDecision, `${s.code} is missed but asks nobody`).toBe(false);
+    }
+  });
+
+  it("gives a partner's DECISION exactly one place to end", () => {
+    expect(DEFAULT_OBLIGATION_STATES.filter((s) => s.isResolution)).toHaveLength(1);
+  });
+
+  it("never marks a state a resolution unless it is also terminal", () => {
+    for (const s of DEFAULT_OBLIGATION_STATES) {
+      expect(
+        s.isResolution && !s.isTerminal,
+        `${s.code} claims resolution but not terminal`,
+      ).toBe(false);
+    }
+  });
+
+  it("never gives one state two destinations", () => {
+    // The four are answers to four different questions — where filings start,
+    // where a finished one lands, where an overdue one goes, where a decision
+    // ends one. A row claiming two makes every rule that reads them disagree
+    // about what it is.
+    for (const s of DEFAULT_OBLIGATION_STATES) {
+      const held = [s.isInitial, s.isFiled, s.isMissed, s.isResolution].filter(Boolean).length;
+      expect(held, `${s.code} claims ${held} destinations`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it("keeps FILED and RESOLVED apart — they are different endings", () => {
+    // The distinction 0054 could not express and 0055 finally names. One is a
+    // filing that was made; the other is a filing a partner decided would never
+    // be made. Collapsing them would record a statutory return as filed because
+    // somebody accepted that it never applied.
+    const filed = DEFAULT_OBLIGATION_STATES.find((s) => s.isFiled);
+    const resolved = DEFAULT_OBLIGATION_STATES.find((s) => s.isResolution);
+    expect(filed?.code).not.toBe(resolved?.code);
+  });
+
   it("keeps the OTHER terminal state clear of it — that one is T3.3's", () => {
     // `resolved` is the end of a deadline already missed, which a partner
     // chose. Reading `isTerminal` to find where a filing lands would have been
@@ -123,5 +179,39 @@ describe("the seeded obligation states and the product defaults agree", () => {
     const terminal = DEFAULT_OBLIGATION_STATES.filter((s) => s.isTerminal);
     expect(terminal.length).toBeGreaterThan(1);
     expect(terminal.filter((s) => !s.isFiled).length).toBeGreaterThan(0);
+  });
+});
+
+describe("the seeded resolution options and the product defaults agree", () => {
+  it("seeds exactly the options the code would", () => {
+    const { file, rows } = newestSeed(OPTIONS_MARKER);
+    expect(rows, `${file} seeds different options from DEFAULT_RESOLUTION_OPTIONS`).toEqual(
+      DEFAULT_RESOLUTION_OPTIONS.map((o) => ({ ...o })),
+    );
+  });
+
+  it("has one option per code", () => {
+    const codes = DEFAULT_RESOLUTION_OPTIONS.map((o) => o.code);
+    expect(new Set(codes).size).toBe(codes.length);
+  });
+
+  it("offers BOTH forks, or the fork is not a fork", () => {
+    // `closesWithoutFiling` is the only branch this feature has. A seeded list
+    // where every option means the same thing would leave a firm unable to
+    // express one of the two real answers on the day it needed to, and the
+    // failure would look like the product simply not having the option.
+    expect(DEFAULT_RESOLUTION_OPTIONS.some((o) => o.closesWithoutFiling)).toBe(true);
+    expect(DEFAULT_RESOLUTION_OPTIONS.some((o) => !o.closesWithoutFiling)).toBe(true);
+  });
+
+  it("has no option meaning 'ignore'", () => {
+    // Carried across from the demo deliberately, and worth a test because it is
+    // the kind of convenience somebody adds later without noticing what it
+    // costs. A passed statutory date is a fork with consequences either way; an
+    // option that let one be dismissed would hide the thing this queue exists
+    // to surface, and it would be the option everybody clicked.
+    for (const o of DEFAULT_RESOLUTION_OPTIONS) {
+      expect(o.code).not.toMatch(/ignore|dismiss|skip/);
+    }
   });
 });

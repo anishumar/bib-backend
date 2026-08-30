@@ -36,9 +36,11 @@ import type {
 } from "../../domain/config/model";
 import {
   CONFIDENCE_TIER_KEY,
+  COMPLIANCE_POLICY_KEY,
   DISCOUNT_POLICY_KEY,
   readConfidenceTierBody,
   readMaxDiscountPercent,
+  readMissedFromOn,
   readRolePermissions,
   readWorkflowTemplate,
   readVerificationPolicyBody,
@@ -475,6 +477,31 @@ export class PostgresConfigRepository
         WHERE e.kind = 'policy' AND e.key = ${DISCOUNT_POLICY_KEY}
       `;
       return row ? readMaxDiscountPercent(row.body) : null;
+    });
+  }
+
+  /**
+   * When this firm's compliance calendar goes live (`CompliancePolicySource`).
+   *
+   * The same shape as `maxDiscountPercent` and the OPPOSITE default, which is
+   * the part worth reading twice. No published discount policy means ZERO —
+   * nothing is allowed — because a firm that never set a limit has not decided
+   * anything goes. No published compliance policy means NO FLOOR — everything
+   * is asked about — because the failure to avoid here is a missed deadline
+   * nobody was told about, and hiding rows is the direction that produces it.
+   *
+   * Live rather than pinned: a firm that moves its go-live date expects the
+   * queue to change tonight.
+   */
+  async missedFromOn(tenantId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ body: Record<string, unknown> }[]>`
+        SELECT v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'compliance_policy' AND e.key = ${COMPLIANCE_POLICY_KEY}
+      `;
+      return row ? readMissedFromOn(row.body) : null;
     });
   }
 

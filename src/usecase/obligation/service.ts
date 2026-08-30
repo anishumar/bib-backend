@@ -22,6 +22,7 @@ import {
   coverageOf,
   daysBetween,
   DEFAULT_OBLIGATION_STATES,
+  DEFAULT_RESOLUTION_OPTIONS,
   filedState,
   generatesDates,
   initialState,
@@ -29,7 +30,9 @@ import {
   isIsoDate,
   isObligationRecurrence,
   isRuleStatus,
+  missedState,
   periodsBetween,
+  resolutionState,
   scheduleFor,
   type DueRule,
   type DueRuleException,
@@ -51,9 +54,16 @@ import {
   InvalidRulePack,
   InvalidRuleStatus,
   InvalidWindow,
+  AlreadyDecided,
   NoFiledState,
   NoInitialState,
+  NoMissedState,
+  NoResolutionState,
+  NotAwaitingDecision,
   ObligationNotFound,
+  ResolutionOptionNotFound,
+  ResolutionOptionRetired,
+  ResolutionReasonRequired,
   ServiceNotFound,
   TemplateKeyTaken,
   TemplateNameRequired,
@@ -74,12 +84,15 @@ import type {
   CalendarQuery,
   CalendarRow,
   CalendarSource,
+  CompliancePolicySource,
   CoverageGap,
+  DecisionRow,
   NewObligationInstance,
   ObligationExceptionRepository,
   ObligationInstanceRepository,
   ObligationStateRepository,
   ObligationTemplateRepository,
+  ResolutionOptionRepository,
   ServiceDirectory,
   TemplateEdit,
   TemplateRecord,
@@ -116,11 +129,30 @@ const REACH_BACK_DAYS = 90;
  */
 const GENERATE_BATCH = 500;
 const RAISE_BATCH = 500;
+/**
+ * How many obligations one sweep may flag missed for one firm.
+ *
+ * Capped like the other two and for the same reason, with one extra: this is
+ * the batch a newly onboarded firm meets first. Four hundred clients with
+ * historic engagements and no published floor date produce thousands of
+ * candidates on the first night, and each one is a row in a partner's queue.
+ * The cap spreads it, and because flagging is idempotent — the missed state
+ * cannot still be missed — spreading it costs only nights.
+ */
+const MISS_BATCH = 500;
+
+/** How many rows the decision queue returns at once. A partner works the
+ *  oldest first; a page bigger than this is a list nobody reads to the end. */
+const DECISION_QUEUE_LIMIT = 200;
 
 export interface GenerateReport {
   readonly tenantId: string;
   readonly created: number;
   readonly raised: number;
+  /** Deadlines that passed undischarged on this pass. Counted into the worker's
+   *  own log, because a queue nobody is told about is the silence this module
+   *  exists to break. */
+  readonly missed: number;
   /** Rules that reached no entity — usually a country with no clients yet, and
    *  a normal state rather than a misconfiguration. */
   readonly rulesWithNoSubjects: readonly string[];
@@ -135,7 +167,11 @@ export interface Deps {
   readonly templates: ObligationTemplateRepository;
   readonly exceptions: ObligationExceptionRepository;
   readonly states: ObligationStateRepository;
+  readonly resolutionOptions: ResolutionOptionRepository;
   readonly instances: ObligationInstanceRepository;
+  /** The firm's published go-live date, behind a port so this module does not
+   *  import the config registry's use case to read one date. */
+  readonly compliancePolicy: CompliancePolicySource;
   readonly calendarSource: CalendarSource;
   readonly services: ServiceDirectory;
   readonly workItems: WorkItemRaiser;
@@ -192,9 +228,35 @@ export class ObligationService {
       isTerminal: s.isTerminal,
       needsDecision: s.needsDecision,
       isFiled: s.isFiled,
+      isMissed: s.isMissed,
+      isResolution: s.isResolution,
       sortOrder: s.sortOrder,
     }));
-    if (missing.length === 0) return 0;
+
+    // The options are seeded on the same call rather than a second port,
+    // because they are half of one vocabulary: a firm with a missed state and
+    // no options has a queue nobody can clear. Independently idempotent, since
+    // a firm that already has states may still be missing these.
+    const heldOptions = new Set(
+      (await this.deps.resolutionOptions.list(tenantId)).map((o) => o.code),
+    );
+    const missingOptions = DEFAULT_RESOLUTION_OPTIONS.filter((o) => !heldOptions.has(o.code)).map(
+      (o) => ({
+        id: this.deps.ids.newId(),
+        tenantId,
+        code: o.code,
+        name: o.name,
+        closesWithoutFiling: o.closesWithoutFiling,
+        sortOrder: o.sortOrder,
+      }),
+    );
+    if (missingOptions.length > 0) {
+      await this.deps.resolutionOptions.createMany(missingOptions);
+    }
+
+    if (missing.length === 0) {
+      return missingOptions.length === 0 ? 0 : missingOptions.length;
+    }
 
     await this.deps.states.createMany(missing);
     // ONE event, not five — a firm receiving its starting vocabulary is one
@@ -204,7 +266,10 @@ export class ObligationService {
       verb: "obligation_vocabulary.seeded",
       objectId: tenantId,
       actor,
-      payload: { states: missing.map((s) => s.code) },
+      payload: {
+        states: missing.map((s) => s.code),
+        resolutionOptions: missingOptions.map((o) => o.code),
+      },
     });
     return missing.length;
   }
@@ -584,6 +649,7 @@ export class ObligationService {
           tenantId,
           created: 0,
           raised: 0,
+          missed: 0,
           rulesWithNoSubjects: [],
           uncoveredEngagements: 0,
           failure: err instanceof Error ? err.message : String(err),
@@ -601,11 +667,17 @@ export class ObligationService {
       actor,
     );
     const raised = await this.raise(tenantId, today, actor);
+    // AFTER `raise`, deliberately. An obligation that reaches its internal
+    // target and its statutory date in the same sweep — a rule with no lead
+    // time, or a firm whose worker has been down a week — should still get the
+    // task raised for it before it is flagged, because "file it late" is the
+    // commonest decision and a partner choosing it wants somebody already on it.
+    const missed = await this.markMissed(tenantId, today, actor);
     // Counted every sweep rather than on request, so the number reaches the
     // worker log as well as the screen. A gap nobody looks at is the silence
     // this whole mechanism exists to break.
     const gaps = await this.deps.calendarSource.gaps(tenantId);
-    return { ...generated, raised, uncoveredEngagements: gaps.length };
+    return { ...generated, raised, missed, uncoveredEngagements: gaps.length };
   }
 
   /**
@@ -620,7 +692,7 @@ export class ObligationService {
     tenantId: string,
     window: { readonly from: IsoDate; readonly to: IsoDate },
     actor: Actor = SYSTEM_ACTOR,
-  ): Promise<Omit<GenerateReport, "raised" | "uncoveredEngagements">> {
+  ): Promise<Omit<GenerateReport, "raised" | "missed" | "uncoveredEngagements">> {
     if (!isIsoDate(window.from) || !isIsoDate(window.to) || window.from > window.to) {
       throw new InvalidWindow(window.from, window.to);
     }
@@ -779,6 +851,204 @@ export class ObligationService {
       });
     }
     return raised;
+  }
+
+  /**
+   * Flag every deadline that has passed with nothing filed — the writer
+   * `obligation.missed` has been waiting for since T3.2.
+   *
+   * ── A MISSED DEADLINE IS A STATE, NOT AN ERROR ────────────────────────────
+   *
+   * That is the acceptance line and it is also the implementation. Nothing here
+   * throws, retries, alerts or hides: the row moves to a state the firm marked
+   * as needing a decision, and a partner is then asked. A system that treated a
+   * passed statutory date as a fault would have to decide what to do about it,
+   * and deciding is the one thing this module must not do — it is where the
+   * client money and the firm liability are settled, and that belongs to a
+   * person.
+   *
+   * ── WHY THE STATUTORY DATE AND NOT THE INTERNAL TARGET ────────────────────
+   *
+   * T–X is the firm own working practice. Missing it means the firm is behind,
+   * which the work board already shows as an overdue task with somebody name on
+   * it. Missing the STATUTORY date means the client pays a penalty, and that is
+   * a different question needing a different person. Two escalations, and this
+   * is only the second one.
+   *
+   * ── AND WHY IT NEEDS NO IDEMPOTENCY MACHINERY ─────────────────────────────
+   *
+   * The missed state itself is the guard. It carries `needsDecision`, so
+   * `canStillBeMissed` is false for it, so the next sweep does not see the row
+   * at all — the same shape 0054 used, where the repository WHERE clause is
+   * what decides whether an event is written. Two sweeps racing produce one
+   * move and one event, arbitrated by the database rather than by care.
+   *
+   * ── THE FLOOR ────────────────────────────────────────────────────────────
+   *
+   * `compliance_policy` is the firm own answer to "do we want to be asked about
+   * periods that closed before we started using this?". Unset means no floor
+   * and everything is asked about, which is the behaviour this system already
+   * had. It is read ONCE per sweep rather than per row: it is one date, and a
+   * read per row over a first-night batch of five hundred is five hundred round
+   * trips for an answer that cannot change between them.
+   */
+  async markMissed(
+    tenantId: string,
+    asOf: IsoDate,
+    actor: Actor = SYSTEM_ACTOR,
+  ): Promise<number> {
+    const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
+    const candidates = await this.deps.instances.listMissable(tenantId, asOf, floor, MISS_BATCH);
+    // Asked AFTER the candidates, so a firm with nothing overdue never pays for
+    // the state list — which is every firm on most nights.
+    if (candidates.length === 0) return 0;
+
+    const missed = missedState(await this.deps.states.list(tenantId));
+    if (missed === null) throw new NoMissedState();
+
+    let flagged = 0;
+    for (const o of candidates) {
+      if (!(await this.deps.instances.markMissed(tenantId, o.id, missed.id))) {
+        continue; // somebody filed it, or another sweep got there first
+      }
+      flagged += 1;
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "obligation.missed",
+        objectId: o.id,
+        actor,
+        payload: {
+          statutoryDueOn: o.statutoryDueOn,
+          asOf,
+          // Positive, always: this only ever runs after the date has passed.
+          // Computed once here rather than by whoever reads the log, the same
+          // arrangement `obligation.filed` makes with the same number.
+          daysLate: daysBetween(o.statutoryDueOn, asOf),
+          workItemId: o.workItemId,
+        },
+      });
+    }
+    return flagged;
+  }
+
+  /**
+   * Everything waiting on a partner — the queue itself.
+   *
+   * NOT a window, and that is the difference from `calendar()`. An obligation
+   * missed in April is still owed in September, and a date filter would drop
+   * the oldest rows off the bottom of the list — which are exactly the ones
+   * that have been costing money longest.
+   */
+  async decisionQueue(tenantId: string): Promise<readonly DecisionRow[]> {
+    return this.deps.instances.decisionQueue(tenantId, DECISION_QUEUE_LIMIT);
+  }
+
+  /**
+   * Record what a partner decided about a deadline already missed.
+   *
+   * ── THE REASON IS THE HALF THIS EXISTS FOR ────────────────────────────────
+   *
+   * The option can be counted — "how many late fees did we accept this quarter"
+   * is a GROUP BY over a column. The reason cannot, and it is still the more
+   * valuable of the two: in eighteen months nobody remembers why a late fee was
+   * accepted rather than a provisional filing made, and that is the question a
+   * client actually asks. So it is mandatory, refused here AND by a CHECK in
+   * 0055, because this is the one field somebody in a hurry will try to skip.
+   *
+   * ── WHERE THE OBLIGATION GOES IS THE OPTION TO SAY, NOT THIS CODE ─────────
+   *
+   * `closesWithoutFiling` is a column on the firm own option row, so the fork
+   * is data rather than a branch on a code:
+   *
+   *   false — the filing still has to happen. Back to the firm INITIAL state,
+   *           where `raise` picks it up again and puts a task on somebody desk;
+   *           when that task finishes, 0054 records it filed, late, with
+   *           `daysLate` on the event. Nothing here has to know how it ends.
+   *   true  — it never will. Into the firm RESOLUTION state, and over.
+   *
+   * A firm adding "client deregistered mid-year" says which of the two it means
+   * on a screen, and this code does not change.
+   *
+   * ── AND WHY GOING BACK TO WORK DOES NOT LOOP ──────────────────────────────
+   *
+   * An obligation sent back to the initial state still has a statutory date in
+   * the past, forever. Without a second fact it would be re-flagged the very
+   * next night and the decision asked for again every morning until the filing
+   * was made. `resolved_at` is that fact — and it is why this is a column
+   * rather than only a ledger event, because the sweep WHERE clause cannot read
+   * the ledger.
+   *
+   * A decision is never overwritten. Somebody who changes their mind records
+   * the outcome against the filing it produces, rather than rewriting what was
+   * first chosen and why — this row is the only copy of that.
+   */
+  async resolve(
+    tenantId: string,
+    obligationId: string,
+    decision: { readonly optionId: string; readonly reason: string },
+    actor: Actor,
+  ): Promise<void> {
+    const reason = decision.reason.trim();
+    if (reason === "") throw new ResolutionReasonRequired();
+
+    const obligation = await this.deps.instances.findById(tenantId, obligationId);
+    if (obligation === null) throw new ObligationNotFound(obligationId);
+    if (obligation.resolvedAt !== null) throw new AlreadyDecided();
+
+    const states = await this.deps.states.list(tenantId);
+    const current = states.find((st) => st.id === obligation.stateId);
+    // Only a state the firm marked as needing a decision may be decided about,
+    // and it is a FLAG rather than a code. This is the refusal that keeps the
+    // queue meaningful: without it any row at all could be resolved from a
+    // stale screen, including one somebody is actively working on.
+    if (current === undefined || !current.needsDecision) {
+      throw new NotAwaitingDecision(current?.name ?? "in an unknown state");
+    }
+
+    const option = await this.deps.resolutionOptions.findById(tenantId, decision.optionId);
+    if (option === null) throw new ResolutionOptionNotFound(decision.optionId);
+    // A retired option still EXPLAINS decisions already recorded against it —
+    // the row is never deleted — but a firm that retired one has said it no
+    // longer chooses it.
+    if (!option.isActive) throw new ResolutionOptionRetired(option.name);
+
+    const destination = option.closesWithoutFiling
+      ? resolutionState(states)
+      : initialState(states);
+    if (destination === null) {
+      throw option.closesWithoutFiling ? new NoResolutionState() : new NoInitialState();
+    }
+
+    if (
+      !(await this.deps.instances.recordResolution(tenantId, obligationId, {
+        optionId: option.id,
+        reason,
+        stateId: destination.id,
+      }))
+    ) {
+      // A double-submitted form. The first one is the decision that counts and
+      // its event is the one in the log.
+      throw new AlreadyDecided();
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation.resolved",
+      objectId: obligationId,
+      actor,
+      payload: {
+        // The option and NEVER the reason. The reason is a partner free text
+        // about a client and may name a person; section 3.4 of the event
+        // contract keeps personal data out of a log that cannot be erased, so
+        // it lives in the erasable row and only there.
+        resolutionOptionId: option.id,
+        resolutionCode: option.code,
+        closesWithoutFiling: option.closesWithoutFiling,
+        statutoryDueOn: obligation.statutoryDueOn,
+        daysLate: daysBetween(obligation.statutoryDueOn, this.today()),
+        movedToStateId: destination.id,
+      },
+    });
   }
 
   /**

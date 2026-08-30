@@ -15,12 +15,19 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { ObligationService } from "../../usecase/obligation/service";
-import { coverageOf } from "../../domain/obligation/model";
+import type { ObligationVocabularyService } from "../../usecase/obligation/vocabulary";
+import {
+  coverageOf,
+  daysBetween,
+  type ObligationState,
+  type ResolutionOption,
+} from "../../domain/obligation/model";
 import type { TemplateRecord } from "../../usecase/obligation/ports";
 import { scopeOf } from "../scope";
 
 export interface ObligationDeps {
   readonly service: ObligationService;
+  readonly vocabulary: ObligationVocabularyService;
 }
 
 // ── Shared vocabulary ───────────────────────────────────────────────────────
@@ -164,6 +171,19 @@ const CalendarRowSchema = z
         "started' — a year of those is the calendar's normal state, not a backlog.",
     }),
     filedOn: z.string().nullable(),
+    resolutionOptionId: z.string().uuid().nullable(),
+    resolutionName: z.string().nullable().openapi({
+      description:
+        "What the partner chose, in the firm's own words. Joined rather than left as an id: a " +
+        "list that returns uuids is one somebody has to fetch per row.",
+    }),
+    resolutionReason: z.string().nullable().openapi({
+      description:
+        "WHY they chose it. The half nobody remembers eighteen months later, and the reason " +
+        "this feature exists — it is deliberately NOT in the audit log, because it is a " +
+        "partner's free text about a client and may name a person.",
+    }),
+    resolvedAt: z.string().nullable(),
     ruleUnconfirmed: z.boolean().openapi({
       description:
         "The rule behind this date has not been confirmed by the firm. Shown rather than " +
@@ -501,6 +521,352 @@ const coverageRoute = createRoute({
   },
 });
 
+// ── the decision queue (T3.3) ───────────────────────────────────────────────
+
+const DecisionRowSchema = z
+  .object({
+    id: z.string().uuid(),
+    name: z.string(),
+    authority: z.string().nullable(),
+    module: z.string().nullable(),
+    entityPartyId: z.string().uuid(),
+    entityName: z.string().nullable(),
+    clientName: z.string().nullable(),
+    periodLabel: z.string(),
+    statutoryDueOn: z.string().openapi({
+      description:
+        "The date that passed. This list is ordered by it, OLDEST FIRST — the row that has " +
+        "been late longest is the one costing the most.",
+    }),
+    internalTargetOn: z.string(),
+    daysLate: z.number().int().openapi({
+      description:
+        "How many days past the statutory date, as of the caller's own day. Computed on the " +
+        "server from the date the CALLER sent, so a partner in Delhi opening this at 04:11 " +
+        "does not read yesterday's number.",
+    }),
+    stateId: z.string().uuid(),
+    stateCode: z.string(),
+    stateName: z.string(),
+    workItemId: z.string().uuid().nullable().openapi({
+      description:
+        "The task raised for it, if one was. A partner choosing 'file it late' wants to see " +
+        "whether somebody is already on it.",
+    }),
+    ruleUnconfirmed: z.boolean(),
+  })
+  .openapi("DecisionRow");
+
+const DecisionQueryParams = z.object({
+  asOf: z.string().optional().openapi({
+    description:
+      "The caller's own calendar day, YYYY-MM-DD. Only `daysLate` depends on it — which rows " +
+      "are in the queue is decided by the nightly sweep, not by this read. Omitted falls back " +
+      "to the server's day, which is a day out for anyone east of Greenwich each morning.",
+  }),
+});
+
+const decisionQueueRoute = createRoute({
+  method: "get",
+  path: "/api/v1/calendar/decisions",
+  tags: ["obligations"],
+  summary: "Deadlines that have passed, waiting on a partner",
+  description:
+    "A WORKLIST, not a window — deliberately unlike /calendar. An obligation missed in April " +
+    "is still owed in September, so there is no date filter: one would drop exactly the oldest " +
+    "and most expensive rows off the bottom. Reading it is `party:read`, like the calendar it " +
+    "hangs off — everybody on the team should be able to see that six filings have been late " +
+    "for a week. DECIDING is a different permission.",
+  request: { query: DecisionQueryParams },
+  responses: {
+    200: {
+      description: "The queue",
+      content: {
+        "application/json": { schema: z.object({ rows: z.array(DecisionRowSchema) }) },
+      },
+    },
+    400: errorResponse("An asOf that is not YYYY-MM-DD"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
+  },
+});
+
+const ResolveBody = z.object({
+  resolutionOptionId: z.string().uuid().openapi({
+    description:
+      "One of the firm's own resolution options. A row and not an enum, so the list is the " +
+      "firm's to change — and so 'how many late fees did we accept this quarter' is a GROUP BY.",
+  }),
+  reason: z.string().min(1).openapi({
+    description:
+      "WHY. Mandatory, and the point of the whole endpoint: in eighteen months nobody " +
+      "remembers why a late fee was accepted rather than a provisional filing made, and that " +
+      "is the question the client actually asks.",
+  }),
+});
+
+const resolveRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligations/{obligationId}/resolve",
+  tags: ["obligations"],
+  summary: "Record what the firm decided about a deadline it missed",
+  description:
+    "Where the obligation goes next is the OPTION's to say, not this call's: an option marked " +
+    "`closesWithoutFiling` ends it, and any other sends it back to be filed late — after " +
+    "which the ordinary completion path files it, with `daysLate` on the event. A decision is " +
+    "never overwritten; a second attempt is refused rather than replacing the first.",
+  request: {
+    params: z.object({ obligationId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ResolveBody } }, required: true },
+  },
+  responses: {
+    204: { description: "Recorded" },
+    400: errorResponse("No reason given"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The role may not decide about a missed deadline"),
+    404: errorResponse("No such obligation, or no such resolution option"),
+    409: errorResponse(
+      "Already decided, not waiting on a decision, or the firm has nowhere for the decision " +
+        "to send it",
+    ),
+  },
+});
+
+// ── the firm's own compliance vocabulary (T3.3) ─────────────────────────────
+//
+// The counterpart of `/work-vocabulary`, and it should have existed since T3.2:
+// the states were held as rows precisely so a firm could rename them, and until
+// now nothing could. Every "mark another state as the X one" message in this
+// module was describing a control that did not exist.
+
+const ObligationStateSchema = z
+  .object({
+    id: z.string().uuid(),
+    code: z.string().openapi({
+      description:
+        "The firm's stable handle. NEVER compared by any rule in this product — the meaning " +
+        "is entirely in the flags, which is what makes renaming safe.",
+    }),
+    name: z.string(),
+    isInitial: z.boolean().openapi({
+      description: "Where a newly generated filing starts. At most one, and never none.",
+    }),
+    isTerminal: z.boolean(),
+    needsDecision: z.boolean().openapi({
+      description: "A person has to choose what happens next. Puts the row in the queue.",
+    }),
+    isFiled: z.boolean().openapi({
+      description: "Where a filing lands once the work discharging it is finished.",
+    }),
+    isMissed: z.boolean().openapi({
+      description:
+        "Where the nightly sweep sends a filing whose statutory date passed undischarged. " +
+        "Has to be a state that needs a decision, or the filing would move there and nobody " +
+        "would be asked about it.",
+    }),
+    isResolution: z.boolean().openapi({
+      description:
+        "Where a filing ends when a partner decides it will never be made. The OTHER terminal " +
+        "state — distinct from filed, which is where one lands when it actually was.",
+    }),
+    sortOrder: z.number().int(),
+    isActive: z.boolean(),
+  })
+  .openapi("ObligationState");
+
+const ResolutionOptionSchema = z
+  .object({
+    id: z.string().uuid(),
+    code: z.string(),
+    name: z.string(),
+    closesWithoutFiling: z.boolean().openapi({
+      description:
+        "THE FORK. False — 'file provisionally', 'accept the late fee' — means the filing " +
+        "still has to happen, so the obligation goes back to be worked and filed late. True — " +
+        "'not applicable to this entity' — means it never will, and the obligation ends.",
+    }),
+    status: RuleStatus.openapi({
+      description:
+        "The four shipped options came from a previous vendor's app and match what the firm " +
+        "described its practice to be — but nobody has confirmed the LIST, so they ship " +
+        "'unconfirmed'. Confirming one is a partner saying it is actually theirs.",
+    }),
+    sortOrder: z.number().int(),
+    isActive: z.boolean(),
+  })
+  .openapi("ResolutionOption");
+
+const vocabularyRoute = createRoute({
+  method: "get",
+  path: "/api/v1/obligation-vocabulary",
+  tags: ["obligations"],
+  summary: "The firm's own words for its compliance calendar",
+  description:
+    "Retired rows are returned on purpose: an admin needs to see what was stopped in order to " +
+    "bring it back, and obligations sitting in a retired state still carry it.",
+  responses: {
+    200: {
+      description: "The vocabulary",
+      content: {
+        "application/json": {
+          schema: z.object({
+            states: z.array(ObligationStateSchema),
+            resolutionOptions: z.array(ResolutionOptionSchema),
+          }),
+        },
+      },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
+  },
+});
+
+const StateFlags = {
+  isInitial: z.boolean().optional(),
+  isTerminal: z.boolean().optional(),
+  needsDecision: z.boolean().optional(),
+  isFiled: z.boolean().optional(),
+  isMissed: z.boolean().optional(),
+  isResolution: z.boolean().optional(),
+  sortOrder: z.number().int().optional(),
+};
+
+const createStateRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligation-vocabulary/states",
+  tags: ["obligations"],
+  summary: "Add a state to the firm's compliance vocabulary",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ code: z.string(), name: z.string(), ...StateFlags }),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    201: {
+      description: "Created",
+      content: { "application/json": { schema: ObligationStateSchema } },
+    },
+    400: errorResponse("A malformed handle or sort order"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The role may not administer the firm"),
+    409: errorResponse("That handle is taken, or the flags contradict each other"),
+  },
+});
+
+const updateStateRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/obligation-vocabulary/states/{stateId}",
+  tags: ["obligations"],
+  summary: "Rename, re-flag, reorder or retire a compliance state",
+  description:
+    "Marking a state as one of the four destinations CLEARS that flag on whoever held it, in " +
+    "the same statement — so there is never a moment where the firm has none. What is refused " +
+    "is leaving it with none: untick nothing, mark another instead.",
+  request: {
+    params: z.object({ stateId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().optional(),
+            ...StateFlags,
+            isActive: z.boolean().optional(),
+          }),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "Updated",
+      content: { "application/json": { schema: ObligationStateSchema } },
+    },
+    400: errorResponse("A malformed sort order"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The role may not administer the firm"),
+    404: errorResponse("No such state"),
+    409: errorResponse(
+      "The flags contradict each other, or this is the last state holding a destination",
+    ),
+  },
+});
+
+const createOptionRoute = createRoute({
+  method: "post",
+  path: "/api/v1/obligation-vocabulary/resolution-options",
+  tags: ["obligations"],
+  summary: "Add an answer to the firm's list of what may be decided about a missed deadline",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            code: z.string(),
+            name: z.string(),
+            closesWithoutFiling: z.boolean().optional(),
+            sortOrder: z.number().int().optional(),
+          }),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    201: {
+      description: "Created",
+      content: { "application/json": { schema: ResolutionOptionSchema } },
+    },
+    400: errorResponse("A malformed handle or sort order"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The role may not administer the firm"),
+    409: errorResponse("That handle is taken"),
+  },
+});
+
+const updateOptionRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/obligation-vocabulary/resolution-options/{optionId}",
+  tags: ["obligations"],
+  summary: "Rename, re-point, confirm, reorder or retire a resolution option",
+  description:
+    "Changing `closesWithoutFiling` affects only decisions taken from then on. Obligations " +
+    "already resolved under it keep the state they were moved to, because that is where a " +
+    "partner actually sent them.",
+  request: {
+    params: z.object({ optionId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            name: z.string().optional(),
+            closesWithoutFiling: z.boolean().optional(),
+            status: RuleStatus.optional(),
+            sortOrder: z.number().int().optional(),
+            isActive: z.boolean().optional(),
+          }),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "Updated",
+      content: { "application/json": { schema: ResolutionOptionSchema } },
+    },
+    400: errorResponse("A malformed sort order or status"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The role may not administer the firm"),
+    404: errorResponse("No such option"),
+  },
+});
+
 export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: ObligationDeps): void {
   app.openapi(listRulesRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
@@ -614,6 +980,10 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
           needsDecision: r.needsDecision,
           workItemId: r.workItemId,
           filedOn: r.filedOn,
+          resolutionOptionId: r.resolutionOptionId,
+          resolutionName: r.resolutionName,
+          resolutionReason: r.resolutionReason,
+          resolvedAt: r.resolvedAt,
           ruleUnconfirmed: r.ruleUnconfirmed,
           rulePack: r.rulePack,
         })),
@@ -642,6 +1012,144 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
       200,
     );
   });
+
+  app.openapi(decisionQueueRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { asOf } = c.req.valid("query");
+    const rows = await deps.service.decisionQueue(s.tenantId);
+    // `daysLate` is computed against the CALLER's day, not the server's. G3.2
+    // learnt this the hard way: a panel opened at 04:11 in Delhi read the
+    // previous day's answer, and here that would understate how late a filing
+    // is by one on every row, every morning.
+    const today = asOf ?? new Date().toISOString().slice(0, 10);
+    return c.json(
+      {
+        rows: rows.map((r) => ({
+          id: r.id,
+          name: r.name,
+          authority: r.authority,
+          module: r.module,
+          entityPartyId: r.entityPartyId,
+          entityName: r.entityName,
+          clientName: r.clientName,
+          periodLabel: r.periodLabel,
+          statutoryDueOn: r.statutoryDueOn,
+          internalTargetOn: r.internalTargetOn,
+          daysLate: daysBetween(r.statutoryDueOn, today),
+          stateId: r.stateId,
+          stateCode: r.stateCode,
+          stateName: r.stateName,
+          workItemId: r.workItemId,
+          ruleUnconfirmed: r.ruleUnconfirmed,
+        })),
+      },
+      200,
+    );
+  });
+
+  app.openapi(resolveRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { obligationId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.resolve(
+      s.tenantId,
+      obligationId,
+      { optionId: body.resolutionOptionId, reason: body.reason },
+      s.actor,
+    );
+    return c.body(null, 204);
+  });
+
+  app.openapi(vocabularyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const [states, options] = await Promise.all([
+      deps.vocabulary.listStates(s.tenantId),
+      deps.vocabulary.listResolutionOptions(s.tenantId),
+    ]);
+    return c.json(
+      {
+        states: states.map(stateToWire),
+        resolutionOptions: options.map(optionToWire),
+      },
+      200,
+    );
+  });
+
+  app.openapi(createStateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const state = await deps.vocabulary.createState(
+      { tenantId: s.tenantId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(stateToWire(state), 201);
+  });
+
+  app.openapi(updateStateRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { stateId } = c.req.valid("param");
+    const state = await deps.vocabulary.updateState(
+      { tenantId: s.tenantId, stateId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(stateToWire(state), 200);
+  });
+
+  app.openapi(createOptionRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const option = await deps.vocabulary.createResolutionOption(
+      { tenantId: s.tenantId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(optionToWire(option), 201);
+  });
+
+  app.openapi(updateOptionRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { optionId } = c.req.valid("param");
+    const option = await deps.vocabulary.updateResolutionOption(
+      { tenantId: s.tenantId, optionId, ...c.req.valid("json") },
+      s.actor,
+    );
+    return c.json(optionToWire(option), 200);
+  });
+}
+
+// Field by field, never the domain object: zod-openapi documents a response
+// without validating it, so a field on the wire but not in the schema is one
+// the generated frontend client cannot see.
+function stateToWire(s: ObligationState) {
+  return {
+    id: s.id,
+    code: s.code,
+    name: s.name,
+    isInitial: s.isInitial,
+    isTerminal: s.isTerminal,
+    needsDecision: s.needsDecision,
+    isFiled: s.isFiled,
+    isMissed: s.isMissed,
+    isResolution: s.isResolution,
+    sortOrder: s.sortOrder,
+    isActive: s.isActive,
+  };
+}
+
+function optionToWire(o: ResolutionOption) {
+  return {
+    id: o.id,
+    code: o.code,
+    name: o.name,
+    closesWithoutFiling: o.closesWithoutFiling,
+    status: o.status,
+    sortOrder: o.sortOrder,
+    isActive: o.isActive,
+  };
 }
 
 export const obligationRoutes = {
@@ -653,4 +1161,11 @@ export const obligationRoutes = {
   withdrawException: withdrawExceptionRoute,
   calendar: calendarRoute,
   coverage: coverageRoute,
+  decisionQueue: decisionQueueRoute,
+  resolve: resolveRoute,
+  vocabulary: vocabularyRoute,
+  createState: createStateRoute,
+  updateState: updateStateRoute,
+  createResolutionOption: createOptionRoute,
+  updateResolutionOption: updateOptionRoute,
 } as const;

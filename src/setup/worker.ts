@@ -37,6 +37,7 @@ import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/w
 import {
   PostgresObligationExceptionRepository,
   PostgresObligationStateRepository,
+  PostgresResolutionOptionRepository,
   PostgresObligationTemplateRepository,
 } from "../infrastructure/postgres/obligation-rule-repository";
 import {
@@ -166,7 +167,13 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     templates: new PostgresObligationTemplateRepository(pools.app),
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),
+    resolutionOptions: new PostgresResolutionOptionRepository(pools.app),
     instances: new PostgresObligationInstanceRepository(pools.app),
+    // The firm's go-live floor, read from the config registry it is published
+    // in. `configRepository` already implements two other ports for this
+    // module's neighbours; this is the third, and it stays a PORT so the
+    // compliance use case never imports the registry's own service.
+    compliancePolicy: configRepository,
     calendarSource: new PostgresCalendarSource(pools.app),
     services: configRepository,
     workItems,

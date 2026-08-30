@@ -226,6 +226,26 @@ export interface ObligationState {
    * decide anything about does not belong there.
    */
   readonly isFiled: boolean;
+  /**
+   * Where an obligation lands when its statutory date passes undischarged
+   * (0055). At most one per firm, enforced by a partial unique index.
+   *
+   * A DESTINATION, and that is why `needsDecision` could not do this job.
+   * `needsDecision` is a description — this state is waiting on a person — and
+   * a firm may well end up with two such states, `missed` and later `disputed`.
+   * With two, "where does the sweep put an overdue filing" is a coin toss. The
+   * same argument 0054 made about `isTerminal`, one flag later.
+   */
+  readonly isMissed: boolean;
+  /**
+   * Where an obligation lands when a partner decides it will never be filed
+   * (0055). At most one per firm.
+   *
+   * The mirror of `isFiled`, and it exists for the reason `isFiled` does: a
+   * firm has two terminal states, and "terminal and not filed" is a definition
+   * by subtraction that stops being true the moment a firm adds a third.
+   */
+  readonly isResolution: boolean;
   readonly sortOrder: number;
   readonly isActive: boolean;
 }
@@ -250,6 +270,27 @@ export function filedState(states: readonly ObligationState[]): ObligationState 
 }
 
 /**
+ * Where an overdue obligation goes, or null if this firm has nowhere to put one.
+ *
+ * A FLAG, for the reason the whole module reads flags: the demo this was built
+ * from found this state with `stateByCode('missed')`, alongside `'pending'` and
+ * `'in_progress'` — so a firm renaming Missed to "Late" would have switched the
+ * entire sweep off in silence, on the rows that matter most. Retired states are
+ * skipped: a firm that retires its missed state has said it no longer sends
+ * work there, and the sweep says so by name rather than filing rows into a
+ * state nobody looks at.
+ */
+export function missedState(states: readonly ObligationState[]): ObligationState | null {
+  return states.find((s) => s.isMissed && s.isActive) ?? null;
+}
+
+/** Where an obligation ends when a partner decides it will never be filed, or
+ *  null if the firm has nowhere for one to go. */
+export function resolutionState(states: readonly ObligationState[]): ObligationState | null {
+  return states.find((s) => s.isResolution && s.isActive) ?? null;
+}
+
+/**
  * Whether an obligation in this state can still be MISSED.
  *
  * Derived from the two flags rather than stored as a third, so a firm adding a
@@ -268,6 +309,8 @@ export interface StateDefinition {
   readonly isTerminal: boolean;
   readonly needsDecision: boolean;
   readonly isFiled: boolean;
+  readonly isMissed: boolean;
+  readonly isResolution: boolean;
   readonly sortOrder: number;
 }
 
@@ -285,12 +328,169 @@ export interface StateDefinition {
  * terminal: a missed deadline is a state a partner resolves, not an ending.
  */
 export const DEFAULT_OBLIGATION_STATES: readonly StateDefinition[] = [
-  { code: "pending", name: "Pending", isInitial: true, isTerminal: false, needsDecision: false, isFiled: false, sortOrder: 10 },
-  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, needsDecision: false, isFiled: false, sortOrder: 20 },
-  { code: "filed", name: "Filed", isInitial: false, isTerminal: true, needsDecision: false, isFiled: true, sortOrder: 30 },
-  { code: "missed", name: "Missed", isInitial: false, isTerminal: false, needsDecision: true, isFiled: false, sortOrder: 40 },
-  { code: "resolved", name: "Resolved", isInitial: false, isTerminal: true, needsDecision: false, isFiled: false, sortOrder: 50 },
+  { code: "pending", name: "Pending", isInitial: true, isTerminal: false, needsDecision: false, isFiled: false, isMissed: false, isResolution: false, sortOrder: 10 },
+  { code: "in_progress", name: "In Progress", isInitial: false, isTerminal: false, needsDecision: false, isFiled: false, isMissed: false, isResolution: false, sortOrder: 20 },
+  { code: "filed", name: "Filed", isInitial: false, isTerminal: true, needsDecision: false, isFiled: true, isMissed: false, isResolution: false, sortOrder: 30 },
+  { code: "missed", name: "Missed", isInitial: false, isTerminal: false, needsDecision: true, isFiled: false, isMissed: true, isResolution: false, sortOrder: 40 },
+  { code: "resolved", name: "Resolved", isInitial: false, isTerminal: true, needsDecision: false, isFiled: false, isMissed: false, isResolution: true, sortOrder: 50 },
 ];
+
+// ── what a partner may choose about a deadline already missed ──────────────
+
+/**
+ * One entry in the firm's own list of answers to "the date passed — now what?"
+ *
+ * ROWS, and the reason is not the usual one. Renaming matters, but what matters
+ * more is that a closed list can be COUNTED: "how many did we accept a late fee
+ * on this quarter" is a `GROUP BY` over a column and free text cannot answer it,
+ * which is the question a partner actually asks. The reason stays free text
+ * beside the option, because no list will ever contain "the client's accountant
+ * was on leave and the books arrived on the 19th".
+ */
+export interface ResolutionOption {
+  readonly id: string;
+  readonly tenantId: string;
+  /** The firm's stable handle. Never compared by any rule here. */
+  readonly code: string;
+  readonly name: string;
+  /**
+   * WHAT HAPPENS TO THE OBLIGATION, and the only branch this whole feature has.
+   *
+   * False — "file it provisionally", "accept the late fee", "file a nil return"
+   * — the filing still has to happen. The obligation goes back to the firm's
+   * initial state and the task is raised again; when that work finishes, 0054's
+   * `reconcileFiling` records it filed, late, with `daysLate` on the event.
+   * Nothing in this module has to know how that ends.
+   *
+   * True — "it never applied to this entity" — the filing will never happen and
+   * the obligation ends in the firm's resolution state.
+   *
+   * A COLUMN rather than a branch on `code`, so a firm adding "client
+   * deregistered mid-year" says which of the two it means without a deploy.
+   */
+  readonly closesWithoutFiling: boolean;
+  /** Whether the FIRM has confirmed this option belongs on its list. See
+   *  `RuleStatus` — same word, same reason, and these four came from the same
+   *  previous vendor's document. */
+  readonly status: RuleStatus;
+  readonly sortOrder: number;
+  readonly isActive: boolean;
+}
+
+export interface ResolutionOptionDefinition {
+  readonly code: string;
+  readonly name: string;
+  readonly closesWithoutFiling: boolean;
+  readonly sortOrder: number;
+}
+
+/**
+ * What a brand-new firm starts with.
+ *
+ * MUST stay identical to the `@default-resolution-options-seed` literal in the
+ * NEWEST migration carrying it (0055) — `tests/obligation/seed-parity.test.ts`
+ * fails the build if they drift.
+ *
+ * Four options, carried across the rebuild from a previous vendor's app, where
+ * they were a hardcoded TypeScript literal in a form component. They match what
+ * the firm described its practice to be, and they are STILL UNCONFIRMED as a
+ * LIST — described in a conversation is not the same as checked against these
+ * four, and the firm's own open-questions file has carried that distinction
+ * since before the rebuild.
+ *
+ * There is deliberately no option meaning "ignore". A passed statutory date is
+ * a fork with consequences either way, and a list that let one be dismissed
+ * would hide the thing this queue exists to surface.
+ */
+export const DEFAULT_RESOLUTION_OPTIONS: readonly ResolutionOptionDefinition[] = [
+  { code: "provisional_filing", name: "File provisionally", closesWithoutFiling: false, sortOrder: 10 },
+  { code: "late_fee", name: "Accept the late fee", closesWithoutFiling: false, sortOrder: 20 },
+  { code: "nil_return", name: "Nil return", closesWithoutFiling: false, sortOrder: 30 },
+  { code: "not_applicable", name: "Not applicable to this entity", closesWithoutFiling: true, sortOrder: 40 },
+];
+
+/**
+ * Whether this obligation is one the sweep should be flagging.
+ *
+ * Every condition the decision queue depends on, in one place so the sweep, the
+ * screen and the tests cannot disagree:
+ *
+ *   · the statutory date has passed — the LAW's date, never the firm's own
+ *     internal target. Missing T–X means the firm is behind and the work board
+ *     already shows it; missing this one costs the client money.
+ *   · nothing was filed. 0054 owns `filedOn`, and un-filing a reopened item is
+ *     what lets this sweep correct itself rather than needing a second rule.
+ *   · nobody has decided about it yet. An obligation sent BACK to work after a
+ *     partner chose "file it late" still has a statutory date in the past
+ *     forever, so without this it would be re-flagged every single night.
+ *   · the state it is in can still be missed.
+ *   · it falls on or after the firm's go-live floor, when the firm has set one.
+ *
+ * `floor` is null when the firm has published no `compliance_policy`, and null
+ * means NO floor rather than "today" — a firm that has not answered has not
+ * asked us to hide anything.
+ */
+export function shouldBeFlaggedMissed(
+  o: {
+    readonly statutoryDueOn: IsoDate;
+    readonly filedOn: IsoDate | null;
+    readonly resolvedAt: string | null;
+  },
+  state: ObligationState,
+  today: IsoDate,
+  floor: IsoDate | null,
+): boolean {
+  if (o.statutoryDueOn >= today) return false;
+  if (o.filedOn !== null) return false;
+  if (o.resolvedAt !== null) return false;
+  if (floor !== null && o.statutoryDueOn < floor) return false;
+  return canStillBeMissed(state);
+}
+
+/**
+ * A code is a lowercase handle, 2-40 chars.
+ *
+ * Duplicated from `domain/workitem/model.ts` rather than imported, and the arch
+ * wall requires it: the two domains are siblings and neither may import the
+ * other. The same duplication `isIsoDate` already carries, three times over.
+ */
+export function isValidVocabularyCode(code: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9_-]{0,38}[a-z0-9])$/.test(code);
+}
+
+export function normalizeVocabularyCode(code: string): string {
+  return code.trim().toLowerCase();
+}
+
+/**
+ * Which single DESTINATION a state is, or null for an ordinary working state.
+ *
+ * The four destination flags are mutually exclusive — 0055 checks it — so this
+ * collapses them to the one answer a screen and a refusal both want. Named here
+ * rather than written out at each call site so "what are the destinations" has
+ * one definition, and adding a fifth is one edit.
+ */
+export type StateDestination = "initial" | "filed" | "missed" | "resolution";
+
+export const STATE_DESTINATIONS: readonly StateDestination[] = [
+  "initial",
+  "filed",
+  "missed",
+  "resolution",
+];
+
+export function destinationOf(flags: {
+  readonly isInitial: boolean;
+  readonly isFiled: boolean;
+  readonly isMissed: boolean;
+  readonly isResolution: boolean;
+}): StateDestination | null {
+  if (flags.isInitial) return "initial";
+  if (flags.isFiled) return "filed";
+  if (flags.isMissed) return "missed";
+  if (flags.isResolution) return "resolution";
+  return null;
+}
 
 // ── periods ────────────────────────────────────────────────────────────────
 
@@ -505,6 +705,14 @@ export interface ObligationInstance {
   readonly stateId: string;
   readonly workItemId: string | null;
   readonly filedOn: IsoDate | null;
+  /** What the partner chose when the statutory date passed unfiled, and why.
+   *  All three together or all three null — 0055 checks it in the database
+   *  because a decision with no reason is what this feature exists to prevent. */
+  readonly resolutionOptionId: string | null;
+  readonly resolutionReason: string | null;
+  /** An instant, not a day: unlike `filedOn` this is not a claim about a
+   *  statutory date, it is when a person clicked. */
+  readonly resolvedAt: string | null;
 }
 
 /**

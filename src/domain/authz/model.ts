@@ -28,6 +28,7 @@ export type Permission =
   | "config:read"
   | "proposal:approve"
   | "work:write"
+  | "obligation:resolve"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -37,6 +38,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "config:read",
   "proposal:approve",
   "work:write",
+  "obligation:resolve",
   "tenant:admin",
 ];
 
@@ -66,6 +68,11 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "Say that a step of a client's work is done. This is the record of WHO did the work, so " +
     "it is its own permission rather than part of reading the board — and it is what T2.9's " +
     "maker-checker rule will compare against.",
+  "obligation:resolve":
+    "Decide what happens about a statutory deadline that has already passed — file it late, " +
+    "accept the penalty, or record that it never applied. Separate from doing the work, " +
+    "because this commits the CLIENT'S money and is the one delivery decision a client may " +
+    "later dispute.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -116,6 +123,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "tenant:admin",
       "proposal:approve",
       "work:write",
+      "obligation:resolve",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.

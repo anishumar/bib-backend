@@ -11,6 +11,7 @@ import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { WorkItemError } from "../domain/workitem/errors";
+import { ObligationError } from "../domain/obligation/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
 import { VerificationError } from "../domain/verification/errors";
 import { SchedulerError } from "../domain/scheduler/errors";
@@ -241,6 +242,82 @@ export function mapError(err: unknown): MappedError {
       // the fix is to look at the job again rather than to resend this.
       case "INVALID_TRANSITION":
       case "INVALID_RECURRENCE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  // ── the compliance calendar (T3.2, mapped at T3.3) ───────────────────────
+  //
+  // THIS FAMILY SHIPPED WITH NO ENTRY HERE, and every refusal it makes has been
+  // answering 500 "internal error" since T3.2 — a rule not found, a jurisdiction
+  // typed wrong, an exception month already taken. Exactly the failure this
+  // file's own header describes `StaffGradeError` having, made a second time,
+  // and invisible for the same reason: unit tests assert on the thrown sentinel
+  // and are perfectly happy with it.
+  //
+  // It surfaced while wiring T3.3, whose refusals a partner reads on a screen —
+  // "say why" answering 500 with no message would have been the third time.
+  if (err instanceof ObligationError) {
+    switch (err.code) {
+      // Malformed or incoherent on its face: the caller fixes the request.
+      //
+      // `RESOLUTION_REASON_REQUIRED` is the one a partner meets most, and the
+      // one that decides this whole block is worth writing: a decision with no
+      // reason is refused, and the sentence saying why has to reach the form
+      // rather than a 500 page.
+      case "TEMPLATE_NAME_REQUIRED":
+      case "INVALID_JURISDICTION":
+      case "INVALID_RECURRENCE":
+      case "INVALID_FISCAL_YEAR_START":
+      case "INVALID_DUE_RULE":
+      case "INCOMPLETE_DUE_RULE":
+      case "UNRESOLVED_REASON_REQUIRED":
+      case "UNRESOLVED_REASON_NOT_ALLOWED":
+      case "INVALID_LEAD_TIME":
+      case "INVALID_RULE_PACK":
+      case "INVALID_RULE_STATUS":
+      case "INVALID_PERIOD_END_MONTH":
+      case "EXCEPTION_NOTE_REQUIRED":
+      case "EXCEPTION_ON_EVENT_RULE":
+      case "INVALID_WINDOW":
+      case "INVALID_VOCABULARY_CODE":
+      case "INVALID_SORT_ORDER":
+      case "RESOLUTION_REASON_REQUIRED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+
+      case "TEMPLATE_NOT_FOUND":
+      case "EXCEPTION_NOT_FOUND":
+      case "SERVICE_NOT_FOUND":
+      case "OBLIGATION_NOT_FOUND":
+      case "STATE_NOT_FOUND":
+      case "RESOLUTION_OPTION_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+
+      // Conflicts, on `AXIS_NOT_ASSIGNABLE`'s reasoning: every one of these is
+      // a well-formed request refused by the state of the firm's own rows, and
+      // the caller fixes it somewhere else rather than by resending this.
+      //
+      // The four "no X state" cases are here and not 500 deliberately. They
+      // ARE a misconfiguration — but one a firm can now cause and now fix from
+      // `/admin/obligation-vocabulary`, so the message naming which flag to
+      // move has to reach the person who can move it. Before T3.3 there was no
+      // screen and no honest answer; a 500 would have been closer to the truth
+      // then and is the wrong answer now.
+      case "TEMPLATE_KEY_TAKEN":
+      case "TEMPLATE_RETIRED":
+      case "EXCEPTION_MONTH_TAKEN":
+      case "VOCABULARY_CODE_TAKEN":
+      case "NO_INITIAL_STATE":
+      case "NO_FILED_STATE":
+      case "NO_MISSED_STATE":
+      case "NO_RESOLUTION_STATE":
+      case "RESOLUTION_OPTION_RETIRED":
+      case "ALREADY_DECIDED":
+      case "NOT_AWAITING_DECISION":
+      case "CONFLICTING_STATE_FLAGS":
+      case "LAST_INITIAL_STATE":
+      case "LAST_DESTINATION_STATE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

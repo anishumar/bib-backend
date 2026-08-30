@@ -43,6 +43,7 @@ import { LastAdministrator } from "../../src/domain/tenancy/errors";
 import {
   PostgresObligationExceptionRepository,
   PostgresObligationStateRepository,
+  PostgresResolutionOptionRepository,
   PostgresObligationTemplateRepository,
 } from "../../src/infrastructure/postgres/obligation-rule-repository";
 import {
@@ -80,7 +81,9 @@ const obligationServiceForSeeding = new ObligationService({
   templates: new PostgresObligationTemplateRepository(app),
   exceptions: new PostgresObligationExceptionRepository(app),
   states: new PostgresObligationStateRepository(app),
+  resolutionOptions: new PostgresResolutionOptionRepository(app),
   instances: new PostgresObligationInstanceRepository(app),
+  compliancePolicy: configRepository,
   calendarSource: new PostgresCalendarSource(app),
   services: configRepository,
   // Nothing in a provisioning test raises a task, so the raiser refuses rather

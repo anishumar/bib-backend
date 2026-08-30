@@ -39,6 +39,7 @@ export const KIND_VALUES = [
   "workflow_template",
   "confidence_tier",
   "verification_policy",
+  "compliance_policy",
 ] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────
