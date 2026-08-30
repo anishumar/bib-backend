@@ -449,6 +449,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
 
   [routeKey("GET", "/api/v1/documents"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents"), "party:write" as const],
+  // Rendering WRITES — it stores a document and attaches it — so `party:write`,
+  // the same permission every other drafting route on these documents takes.
+  [routeKey("POST", "/api/v1/documents/render"), "party:write" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/content"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/versions"), "party:read" as const],

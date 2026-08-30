@@ -821,6 +821,42 @@ honest limit is on the SCREEN: the assign form needs the roster and the Dept lis
 `tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
 `/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
 
+## Rendering a document — and why the engine is pdf-lib (T3.8)
+
+**A rendered document's content hash is evidence.** `crm.engagement_letter.signed_content_hash`
+exists so "is the file the client holds the one we issued" is a comparison rather than a matter
+of trust, and `files.document_version.content_hash` is what it compares against. So the
+renderer must be a **pure function of its input**: re-rendering unchanged data has to reproduce
+the bytes exactly.
+
+That single requirement chose the engine. A headless browser gives better fidelity and cannot
+promise byte-stability across versions — font hinting, image encoders and the PDF writer all
+move between Chromium releases, so a base-image upgrade would silently stop every re-render
+matching. pdf-lib is pure JS with no native modules and draws exactly what it is told. **The
+cost is that layout is hand-built**: there is no CSS and no automatic table, and
+`infrastructure/render/pdf-renderer.ts` carries a small column-and-flow engine. It is one file
+behind `DocumentRenderer`, so the decision is reversible — but a replacement has to answer the
+determinism question first.
+
+**pdf-lib writes CreationDate, ModDate and a Producer string from the clock and its own
+version.** All three are pinned from the document's own issue date. Without that, the test that
+renders twice passes inside one millisecond and the property fails in production.
+
+**Three collaborators, and none of them learns another's job.** `RenderableDocument`
+(`domain/render`) is a neutral description — no fonts, no margins, no page size.
+`RenderSource` (Postgres) knows what an engagement letter contains. `DocumentRenderer` knows
+what a page looks like. A renderer holding repositories would duplicate read logic that already
+exists in two services, and the duplicate is the one that drifts.
+
+**THE HONEST LIMIT: the built-in PDF fonts cover Latin-1 and nothing else.** The rupee sign is
+undrawable, in an Indian compliance product. Money is therefore written with its ISO code
+(`INR 216,000.00`) — independently the better choice on a cross-border document, since the same
+letter may be read where a bare symbol is ambiguous. **The renderer REFUSES rather than
+mangling**: `UnrenderableText` names the character, its code point and the field, because
+dropping a letter from a client's name on a legal document is worse than producing nothing. A
+client whose registered name is not Latin-1 cannot have a document rendered today; embedding a
+Unicode font is T3.9, and it is a licensing decision as much as a coding one.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root

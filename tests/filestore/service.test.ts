@@ -5,6 +5,9 @@ import {
   FakeBlobStore,
   FakeContentDigest,
   FakeDocumentStoreRepo,
+  FakeRenderSource,
+  FakeRenderer,
+  aRenderableDocument,
 } from "../../src/testfakes/filestore";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
@@ -21,6 +24,7 @@ function makeService(maxUploadBytes = 1024 * 1024) {
   const documents = new FakeDocumentStoreRepo();
   const blobs = new FakeBlobStore();
   const events = new RecordingEventSink();
+  const renderSource = new FakeRenderSource();
   const service = new FileStoreService({
     documents,
     blobs,
@@ -28,8 +32,10 @@ function makeService(maxUploadBytes = 1024 * 1024) {
     ids: new FakeIds(),
     events,
     maxUploadBytes,
+    renderer: new FakeRenderer(),
+    renderSource,
   });
-  return { service, documents, blobs, events };
+  return { service, documents, blobs, events, renderSource };
 }
 
 function bytes(text: string): Uint8Array {
@@ -353,5 +359,71 @@ describe("brand assets", () => {
     await expect(service.requireBrandAsset(TENANT, PARTY, "letterhead")).rejects.toThrow(
       /no active letterhead/,
     );
+  });
+});
+
+describe("rendering one of the product's own records", () => {
+  it("stores the result as a GENERATED document and attaches it", async () => {
+    const { service, renderSource, events } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0007"));
+
+    const record = await service.render({
+      tenantId: TENANT,
+      kind: "engagement_letter",
+      subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT,
+      partyId: PARTY,
+      actor,
+    });
+
+    expect(record.document.origin).toBe("generated");
+    expect(record.document.title).toContain("EL-2026-0007");
+    expect(record.latestVersion.filename).toBe("EL-2026-0007.pdf");
+    expect(record.latestVersion.mediaType).toBe("application/pdf");
+
+    // Attached in the same act, so the letter's own page shows it.
+    const links = await service.linksOf(TENANT, record.document.id);
+    expect(links[0]?.link.role).toBe("rendered");
+    expect(events.recorded.some((e) => e.verb === "document.stored")).toBe(true);
+  });
+
+  it("re-rendering unchanged data produces the SAME bytes", async () => {
+    // The property the whole engine choice rests on. Two documents, because
+    // rendering twice is two acts — but ONE blob, because the store is
+    // content-addressed and the bytes are identical.
+    const { service, renderSource, blobs } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0008"));
+
+    const first = await service.render({
+      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT, partyId: PARTY, actor,
+    });
+    const second = await service.render({
+      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT, partyId: PARTY, actor,
+    });
+
+    expect(second.latestVersion.contentHash).toBe(first.latestVersion.contentHash);
+    expect(blobs.blobs.size).toBe(1);
+  });
+
+  it("refuses a kind nothing knows how to describe, and names what it can", async () => {
+    const { service } = makeService();
+    await expect(
+      service.render({
+        tenantId: TENANT, kind: "working_paper", subjectKind: "engagement",
+        subjectRef: ENGAGEMENT, partyId: null, actor,
+      }),
+    ).rejects.toThrow(/Renderable today: engagement_letter, invoice/);
+  });
+
+  it("refuses a record that does not exist rather than rendering an empty page", async () => {
+    const { service } = makeService();
+    await expect(
+      service.render({
+        tenantId: TENANT, kind: "invoice", subjectKind: "invoice",
+        subjectRef: "77777777-7777-7777-7777-777777777777", partyId: null, actor,
+      }),
+    ).rejects.toThrow(/no invoice/);
   });
 });

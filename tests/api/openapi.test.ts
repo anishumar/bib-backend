@@ -21,6 +21,8 @@ import {
   FakeBlobStore,
   FakeContentDigest,
   FakeDocumentStoreRepo,
+  FakeRenderSource,
+  FakeRenderer,
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
@@ -304,6 +306,8 @@ function deps(): RouterDeps {
         ids: new FakeIds(),
         events: new RecordingEventSink(),
         maxUploadBytes: 25 * 1024 * 1024,
+        renderer: new FakeRenderer(),
+        renderSource: new FakeRenderSource(),
       }),
     },
     invoice: {

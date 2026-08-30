@@ -2428,25 +2428,75 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` **939** (was 906) · `test:integration` **296** · `smoke` **229 passed,
   > 0 failed** (unchanged).
 
-- [ ] `(A)` **T3.8** **Render a document a client can be sent** — the other half of T3.6, split
-  from it deliberately rather than rushed into it. *Acc: an engagement letter and an invoice
-  each render to a file, stored as a `generated` document version, whose content hash a
-  re-render of unchanged data reproduces exactly.*
-  > **The decomposition T3.6 stopped short of, stated so it is not re-derived.** The renderer
-  > must NOT read the database itself — the service that already holds the data (engagement,
-  > invoice) builds a plain `RenderableDocument`, and the renderer turns that into bytes. A
-  > renderer holding repositories would duplicate read logic that already exists and would make
-  > the engine choice reach into the data layer.
+- [x] `(A)` **T3.8** **Render a document a client can be sent.** *Acc: an engagement letter and an invoice each render to a file, stored as a `generated` document version, whose content hash a re-render of unchanged data reproduces exactly.*
+  > **Done (2026-08-30). No migration — it is all code over T3.6's store.**
   >
-  > **The engine has to be DETERMINISTIC, and that is the whole constraint.** A document's
-  > content hash is evidence — it is what proves the file a client holds is the one the firm
-  > issued (T2.3's `content_hash` finally has something to point at). A headless browser does
-  > not guarantee byte-identical output across versions; a pure-layout library does. That
-  > argues for pdf-lib or pdfkit over puppeteer, and it also removes chromium from the
-  > container. **Not decided — it is a real trade against fidelity and it is worth ten minutes
-  > with `(B)` rather than a unilateral `npm install`.**
+  > **THE ENGINE DECISION, MADE AND ARGUED: pdf-lib, not a headless browser.** The obvious
+  > approach is HTML + CSS through Chromium and it was rejected on one requirement that
+  > outranks fidelity here — **a rendered document's content hash is evidence.** Chromium does
+  > not promise byte-identical output across versions (font hinting, image encoders and the PDF
+  > writer all move), so a firm upgrading a base image would watch every re-render stop matching
+  > with nothing to say why. It also puts ~300 MB of browser in the container.
   >
-  > `brand_asset` (T3.6) is the input this needs and already exists, so nothing blocks it.
+  > pdf-lib is pure JS, MIT, four pure-JS dependencies, no native modules. **The cost, stated
+  > rather than discovered: layout is hand-built** — there is no CSS and no automatic table, so
+  > `infrastructure/render/pdf-renderer.ts` carries a small column-and-flow engine. That is the
+  > honest price of reproducible bytes, and it is a one-file decision behind `DocumentRenderer`.
+  >
+  > **DETERMINISM PROVEN THREE WAYS.** pdf-lib writes CreationDate, ModDate and a Producer
+  > string from the clock and its own version by default; all three are pinned from the
+  > DOCUMENT's issue date. A unit test renders twice **1.1 seconds apart** and compares hashes,
+  > with a control that asserts the bytes DO change when content changes. And end to end
+  > against a real letter: three renders through the API, one hash, **one blob on disk** —
+  > because the store is content-addressed, re-rendering costs nothing.
+  >
+  > **THE DECOMPOSITION T3.6 DELIBERATELY STOPPED SHORT OF.** `RenderableDocument` is a neutral
+  > description; `RenderSource` (Postgres) knows what an engagement letter contains;
+  > `DocumentRenderer` (pdf-lib) knows what a page looks like. Neither learns the other's job,
+  > which is what T3.6's note said the follow-up had to get right.
+  >
+  > ── **TWO REAL LIMITS, BOTH FOUND BY RUNNING IT** ─────────────────────────────
+  >
+  > **1. The built-in PDF fonts cover Latin-1 and NOTHING ELSE — the rupee sign is undrawable.**
+  > In an Indian compliance product. Found on the first render. Money is therefore written with
+  > its ISO code (`INR 216,000.00`), which is independently the better choice on a cross-border
+  > document anyway — G1.8 exists because the same letter may be read in Dubai, where a bare
+  > symbol is ambiguous. **The renderer refuses rather than mangling**: `UnrenderableText` names
+  > the character, its code point and the field it appeared in, because silently dropping a
+  > letter from a client's name on a legal document is worse than producing nothing. **A client
+  > whose name is not Latin-1 — Devanagari, Chinese — cannot have a document rendered today.**
+  > That is the real limit and the fix is embedding a Unicode font (see the open item below).
+  >
+  > **2. The guard immediately caught MY OWN bug**, which is the best evidence it works: the
+  > "not stated" fallback used an em dash (U+2014). Now the word "Not stated", which is better
+  > on a legal document anyway — a dash in a fee column is ambiguous between "nothing" and
+  > "nobody said".
+  >
+  > **One more found by rendering an invoice**: the source read `invoice_line_amount.amount`,
+  > and that view exposes `gross`/`net`/`tax`. A column that does not exist, invisible to every
+  > unit test because the fake does not have a schema.
+  >
+  > **Screens**: the Files panel gained a **Generate PDF** button on `/engagement-letters/[id]`
+  > and `/invoices/[id]` only — the two things that can be rendered. Pressing it twice is safe
+  > and the panel says so.
+  >
+  > Gate: `npm run check` **1303** · `test:integration` **416** · `smoke` **261 passed, 0
+  > failed**. Verified in a browser: a real letter rendered, downloaded, and its file's sha256
+  > compared to the stored content hash — equal.
+
+- [ ] `(A)` **T3.9** **Embed a Unicode font in the renderer.** *Acc: a client whose registered
+  name is in Devanagari or Chinese gets a correct PDF, and `₹` prints.*
+  > Split out of T3.8 rather than bundled, because it is a **licensing and packaging decision**
+  > and not a coding one: it means committing a font binary (Noto Sans / DejaVu, both OFL — but
+  > somebody should agree to it), adding `@pdf-lib/fontkit`, and subsetting on embed so a
+  > two-page letter does not carry a 400 KB font.
+  >
+  > **Not urgent, and worth saying why**: every firm this product has been built against so far
+  > types Latin-1, money already prints correctly with its ISO code, and the renderer REFUSES
+  > loudly rather than mangling — so the failure is visible and explicable rather than silent.
+  > It becomes urgent the day a client's registered name is not Latin-1, which in India is
+  > entirely possible.
+
 - [x] `(A)` **T3.7** **C7 dashboards** (read models): MRR, DSO, ageing by client/service/owner. *Acc: figures reconcile to underlying rows, not cached columns.*
   > **Done (2026-08-30). Migration 0038 — two VIEWS and no tables.**
   >

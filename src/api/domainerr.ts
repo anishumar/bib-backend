@@ -25,6 +25,7 @@ import { EngagementError } from "../domain/engagement/errors";
 import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
 import { FileStoreError } from "../domain/filestore/errors";
+import { RenderError } from "../domain/render/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -598,6 +599,24 @@ export function mapError(err: unknown): MappedError {
       // says plainly that storage lost it.
       case "BYTES_MISSING":
         return { status: 502, code: "UPSTREAM_FAILURE", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof RenderError) {
+    switch (err.code) {
+      // 422 would be the pedantic answer for UNRENDERABLE_TEXT and this project
+      // does not emit it; 400 with the character named is more use than a
+      // status nobody's client branches on. The MESSAGE is the actionable part.
+      case "UNRENDERABLE_TEXT":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // NOT_IMPLEMENTED, not VALIDATION: the caller asked for something
+      // reasonable that this product cannot do YET, and saying so plainly is
+      // the honest-registry habit applied to a response.
+      case "NOT_RENDERABLE":
+        return { status: 501, code: "NOT_IMPLEMENTED", message: err.message, reason: err.code };
+      case "SOURCE_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

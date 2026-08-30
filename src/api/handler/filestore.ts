@@ -230,6 +230,16 @@ const UploadForm = z
 
 const NewVersionForm = z.object({ file: binaryPart }).openapi("NewDocumentVersionForm");
 
+const RenderRequest = z
+  .object({
+    kind: z.enum(["engagement_letter", "invoice"]).openapi({
+      description: "What to render. Deliberately narrow — the API says what it can do.",
+    }),
+    subjectRef: z.string().uuid(),
+    partyId: z.string().uuid().nullable().optional(),
+  })
+  .openapi("RenderDocumentRequest");
+
 const AttachRequest = z
   .object({
     subjectKind: z.enum(SUBJECT_KINDS as unknown as [string, ...string[]]),
@@ -385,6 +395,29 @@ const addVersionRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such document at this firm"),
     413: errorResponse("The file is larger than BIB_MAX_UPLOAD_BYTES"),
+  },
+});
+
+const renderRoute = createRoute({
+  method: "post",
+  path: "/api/v1/documents/render",
+  tags: ["documents"],
+  summary: "Produce a PDF of one of the firm's own documents",
+  description:
+    "Renders an engagement letter or an invoice, stores it as a `generated` document and " +
+    "attaches it to the record it came from. Re-rendering unchanged data produces the SAME " +
+    "bytes and therefore the same content hash — the store is content-addressed, so calling " +
+    "this twice costs one blob.",
+  request: {
+    body: { content: { "application/json": { schema: RenderRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Rendered and stored", content: { "application/json": { schema: DocumentSchema } } },
+    400: errorResponse("The document contains a character the renderer cannot draw"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write"),
+    404: errorResponse("No such record at this firm"),
+    501: errorResponse("Nothing knows how to render that kind of document yet"),
   },
 });
 
@@ -622,6 +655,24 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     return c.json(versionToWire(version), 201);
   });
 
+  app.openapi(renderRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const record = await deps.service.render({
+      tenantId: s.tenantId,
+      kind: body.kind,
+      // The subject a rendered document attaches to is the record it was
+      // rendered FROM, always — there is no case where a firm wants the PDF of
+      // an invoice filed against something else.
+      subjectKind: body.kind,
+      subjectRef: body.subjectRef,
+      partyId: body.partyId ?? null,
+      actor: s.actor,
+    });
+    return c.json(toWire(record), 201);
+  });
+
   app.openapi(attachRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -686,6 +737,7 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
 
 export const fileStoreRoutes = {
   upload: uploadRoute,
+  render: renderRoute,
   list: listRoute,
   get: getRoute,
   content: contentRoute,
