@@ -186,6 +186,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `membership.restored` | membership | A deactivated membership was reinstated. |
 | `membership.role_changed` | membership | A member's role changed, and with it everything gate 3 lets them do. |
 | `membership.grade_changed` | membership | A member's SENIORITY changed — a different axis from role. It decides who may sign off another person's work, so who moved whom, and when, is exactly what gets asked about later. |
+| `membership.reports_to_changed` | membership | Who a member reports to changed (T2.9). Read by one thing — a `reporting_line` verification policy deciding who may check their work. The column is deliberately NOT effective-dated (nothing records when a reporting line started), so this trail is where "who was my manager in March" is asked. |
 | `staff_grade.created` | staff_grade | A firm added a rung to its own hierarchy — one its starting ladder did not have. |
 | `staff_grade.updated` | staff_grade | A rung was renamed, re-ranked, or stopped/resumed being promoted through. The payload carries both sides of whatever changed. Never a delete: a rung somebody held is part of why they could approve something. |
 | `service_axis.created` | service_axis | A firm added a Dept or a delivery team to its own structure. |
@@ -206,6 +207,8 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
 | `party_relationship.ended` | party_relationship | A relationship was closed with a valid_to date. |
+| `client_assignment.created` | client_assignment | Somebody at the firm was put in charge of a client — the Key Manager, or a SPOC for one Dept or delivery team. A key-manager handover carries `handedOverFrom`. |
+| `client_assignment.ended` | client_assignment | An assignment was closed — somebody stopped holding a client with nobody named in their place. NOT a delete. |
 
 > **`membership.revoked` was registered from the first draft of this contract and written by
 > nothing for six tasks.** The vocabulary was agreed before the capability existed, and a verb
@@ -288,13 +291,35 @@ version is exactly what gets asked about afterwards.
 | `job.step_skipped` | job | A step will not happen: its condition did not hold, or something it depends on was skipped. NOT the same as done, and recorded as loudly. The payload carries the FACT and its values, never the prose note — a sentence does not GROUP BY, and this log cannot be erased. |
 | `job.step_failed` | job | An agent could not complete a step. Terminal for the step; the job blocks. |
 | `job.completed` | job | A job reached a terminal step. |
-| `work_item.assigned` | work_item | Routed to a person. |
-| `work_item.completed` | work_item | Finished. |
-| `obligation.spawned` | obligation_instance | An obligation instance was created for a period. |
-| `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). |
+| `work_item.created` | work_item | Work landed on the board — spawned from an engagement, or raised by hand. `origin` says which, because "where did this task come from" is the first question asked about one nobody recognises. The TITLE is not in the payload: it is a service name today and prose the moment somebody edits it, and it routinely names a client. |
+| `work_item.assigned` | work_item | Routed to a person, or taken off their desk. `how` distinguishes the ROUTER's answer (the client's Dept SPOC, G3.2) from a human override — two different answers to the same later question, and nothing else in the row tells them apart. |
+| `work_item.updated` | work_item | A due date, priority or client-visibility edit, with both sides of each change. A MOVED DUE DATE is what answers "why was this late" — a payload saying only that something was edited could not. Title and description are prose about a client's work and stay off this log: THAT they changed is recorded, what they changed to is not. |
+| `work_item.state_changed` | work_item | Moved between the firm's own states (T3.1 makes those ROWS, not an enum). Carries both state ids and the two FLAGS that changed what the row must hold — `isBlocked`, `isTerminal` — rather than the names, which are the firm's to rename. The block REASON is deliberately absent: prose a person wrote, routinely naming a colleague or a client, in a log that cannot be erased. |
+| `work_item.completed` | work_item | Reached a state the firm has marked TERMINAL. Its own verb beside `state_changed`, because "what did we finish last month" cannot be answered from a generic move without knowing which states were terminal at the time. |
+| `work_item.dependency_added` | work_item | One work item was made to wait on another. objectType is the WAITING item — that is whose timeline the delay belongs on. |
+| `work_item.dependency_removed` | work_item | A dependency was lifted. The row is deleted and carries no history of its own, so this event is the only record that somebody removed the thing holding work back. |
+| `work_item.review_requested` | work_item_approval | A work item was sent to be checked. Carries the PINNED policy version, so a firm raising its bar in April never restates what was allowed in March, and `hasMaker` — whether there is anybody for maker != checker to bite on at all. |
+| `work_item.review_approved` | work_item_approval | A checker approved a work item. Never the person who did it — a CHECK constraint, not a UI rule. The note stays on the row. |
+| `work_item.review_rejected` | work_item_approval | Sent back. Recorded as loudly as an approval: marking the task Completed later erases the fact that it was rejected at all, and how often work comes back is the only honest measure of whether the process works. |
+| `work_item_state.created` | work_item_state | A firm added a state to its own work vocabulary. Logged because the FLAGS on it — starting, terminal, blocked — decide what every work item in that state must carry. |
+| `work_item_state.updated` | work_item_state | Renamed, re-flagged, reordered or retired. Both sides of whatever changed: "it stopped being terminal on the 4th" is what explains a board that suddenly reads differently. Never a delete. |
+| `work_item_priority.created` | work_item_priority | A firm added a priority to its own work vocabulary. |
+| `work_item_priority.updated` | work_item_priority | Renamed, re-ranked, or made the default for ordinary or for STATUTORY work. The statutory default is the firm's rule "statutory due dates are high priority anyway" made mechanical, so moving it changes the urgency of every filing created afterwards. |
+| `work_vocabulary.seeded` | tenant | A new tenant's work-item states and priorities were initialised from the product defaults. One event, not twelve. The names are the previous vendor's and are unconfirmed — which costs nothing, because they are rows. |
+| `obligation_rule.created` | obligation_template | A compliance rule was written — what the law asks of an entity, and when (T3.2). |
+| `obligation_rule.updated` | obligation_template | A rule was edited, confirmed against the statute, or retired. `status` → confirmed is a partner taking responsibility for a date. |
+| `obligation_rule.exception_added` | obligation_template | A rule gained an exception for one period — March TDS due 30 April. The NOTE stays on the row; only the month and the replacement rule travel here. |
+| `obligation_rule.exception_removed` | obligation_template | An exception was withdrawn, so the rule's own formula governs that period again. |
+| `obligation_rules.seeded` | tenant | A firm was given the shipped India rule pack. Payload counts what generates and what is waiting on a fact the firm has not given. |
+| `obligation_vocabulary.seeded` | tenant | A new tenant's obligation states were initialised from the product defaults. One event, not five. |
+| `obligation.spawned` | obligation_instance | An obligation instance was created for a period. Per instance, never per sweep. |
+| `obligation.work_raised` | obligation_instance | An obligation reached T–X and became a task. The one place the calendar and the work board join. |
+| `obligation.filed` | obligation_instance | Discharged (filed / paid / submitted). Written when the work item raised for it reaches a state flagged terminal **and** successful — a cancelled task is not a filing. |
+| `obligation.filing_reversed` | obligation_instance | A recorded filing was taken back, because its work item was reopened or cancelled. |
 | `obligation.missed` | obligation_instance | A statutory date passed undischarged. A state, not an error (T3.3). |
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |
-| `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. |
+| `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. Its output is KEPT and offered as material rather than as an answer — throwing away a usable draft every time the machine is unsure is how a firm ends up redoing the work by hand anyway. |
+| `agent_run.decided` | agent_run | A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values: accepted-vs-corrected is the entire accuracy signal and belongs in the log, while an agent's output can hold a client's own data, which may not enter a log that cannot be erased. |
 | `output.approved` | verification | A checker approved an output. Never the actor that produced it. |
 | `output.rejected` | verification | Sent back. |
 

@@ -18,15 +18,24 @@
 // running entirely on human steps is a supported, permanent way to use this
 // product, not a development shortcut.
 //
-// T2.8 replaces it with a runtime that has confidence tiers and guardrails. The
-// seam it plugs into is already the one the orchestrator uses, so that
-// replacement is a line in `setup/`.
+// T2.8 built the guardrails around this seam — confidence tiers, the decision
+// rule and `delivery.agent_run` — and left this in place, which is the point of
+// having done it in that order. The rails exist before anything runs on them, so
+// the first real agent is a line in `setup/` and not a negotiation about what it
+// is allowed to do while somebody is waiting for it to ship.
 import type { AgentOutcome, AgentRuntime } from "../../usecase/orchestrator/ports";
 
 export class NoAgentsBuiltYet implements AgentRuntime {
   /** False for everything, because it is true for everything. */
   canRun(): boolean {
     return false;
+  }
+
+  /** Named rather than left blank. A run this produced would be attributable to
+   *  "no agent", which is the truth and is greppable; an empty string would look
+   *  like a column somebody forgot to fill. */
+  provenance(): { model: string; promptVersion: string } {
+    return { model: "none", promptVersion: "none" };
   }
 
   /**

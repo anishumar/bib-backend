@@ -91,6 +91,28 @@ export interface Membership {
    * value that decides who may sign off a statutory filing.
    */
   readonly gradeId: string | null;
+  /**
+   * Who this person reports to, as a `user_account` id (T2.9, migration 0048).
+   *
+   * A FOURTH axis and it grants nothing either — it exists because one of the
+   * two review rules the firm gave is a reporting line, not a rank: "manager
+   * means engagement manager". Without this column that rule cannot even be
+   * offered on the screen, because nothing else in this schema records a staff
+   * reporting relationship. `core.party_relationship` is between PARTIES, and a
+   * member of staff is a `user_account` plus this row, never a party.
+   *
+   * Null for a partner, for every portal contact, and for everybody at a firm
+   * that has not filled it in — which is every firm the day 0048 applies. A
+   * `reporting_line` policy then matches nobody, and the screen says exactly
+   * that rather than silently approving nothing.
+   *
+   * NOT effective-dated, and that is a stated limit. The firm's staff sheet
+   * carries birth dates and no joining dates, and nothing records when a
+   * reporting line STARTED, so "who was my manager in March" has no honest
+   * answer here — better than an effective-dated table whose every row begins
+   * on the day of the import and answers it confidently and wrongly.
+   */
+  readonly reportsToUserId: string | null;
   readonly isActive: boolean;
 }
 

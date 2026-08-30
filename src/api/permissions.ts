@@ -53,6 +53,33 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // that carries it to every tenant that has not customised its roles.
   [routeKey("POST", "/api/v1/parties/{partyId}/archive"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/{partyId}/unarchive"), "party:write" as const],
+
+  // WHO OWNS A CLIENT (G3.2) reuses the party permissions, and that is argued
+  // rather than assumed.
+  //
+  // It is not `tenant:admin`: the ladder and the Depts are the firm describing
+  // ITSELF, and this is a fact about one client's relationship with it — the
+  // same kind of fact as its identifiers and its leads, which `party:write`
+  // already covers. Naming somebody the Key Manager grants them nothing; the
+  // permission axis is untouched by it.
+  //
+  // A new `client:assign` would be the tighter answer and it is not free:
+  // permissions reach existing firms as config rows, so one costs a migration
+  // that carries it to every tenant that has not customised its roles (T2.5's
+  // rule). And a firm that wants only partners reassigning clients can do most
+  // of it today — publish a role without `party:write`, this afternoon, with no
+  // deploy. Revisit when one asks, as `proposal:approve` was.
+  [routeKey("GET", "/api/v1/parties/{partyId}/assignments"), "party:read" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/assignments"), "party:write" as const],
+  [
+    routeKey("POST", "/api/v1/parties/{partyId}/assignments/{assignmentId}/end"),
+    "party:write" as const,
+  ],
+  // "My clients" is a read of the caller's OWN book and still takes
+  // `party:read`, because it returns the firm's clients by name — the thing
+  // that permission governs. It is not `NO_PERMISSION_REQUIRED` just because
+  // the rows happen to be the caller's.
+  [routeKey("GET", "/api/v1/my-clients"), "party:read" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
@@ -104,6 +131,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}/active"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/work-split"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/grade"), "tenant:admin" as const],
+  // WHO SOMEBODY REPORTS TO (T2.9) — `tenant:admin`, like the grade beside it
+  // and for the same reason. Under a `reporting_line` policy this column decides
+  // who may sign off whose statutory filing, so editing it is firm
+  // administration and not a profile field somebody maintains about themselves.
+  [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/reports-to"), "tenant:admin" as const],
   // WHO BINDS THE FIRM (G1.4). The same split the firm-entity rule and the
   // configuration registry use, and for the same reason: this IS firm
   // configuration. Reading is `config:read` — an associate drafting a letter
@@ -208,6 +240,122 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // filing is done is not the same act as reading the board, and the record of
   // WHO did it is worth only as much as the gate in front of it.
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
+  // Deciding a machine's output is doing the work, not reading the board: the
+  // row it writes is the record of who checked it. Same permission as
+  // completing a step, deliberately — a firm that trusts somebody to say "this
+  // filing is done" trusts them to say "the machine got it right".
+  [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/decide"), "work:write" as const],
+
+  // THE VERIFICATION QUEUE (T2.9).
+  //
+  // The two reads are `party:read`, like the board they hang off: what is
+  // waiting to be checked is delivery state, and it carries no money. Deliberately
+  // NOT `work:write` — everybody on the team should be able to see that six
+  // filings have been sitting unreviewed for a week, including the people who
+  // cannot review them. A queue only reviewers can see is a queue nobody chases.
+  [routeKey("GET", "/api/v1/checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/jobs/{jobId}/checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/checks/{approvalId}/checkers"), "party:read" as const],
+  // DECIDING one is `work:write`, the same permission as doing the step, and
+  // that is a decision rather than a convenience: approving somebody's filing
+  // writes to the record of whether the work stands, which is the same kind of
+  // act as saying it was done. It is also the floor `isEligible` applies before
+  // the firm's own rule, which closes the demo's Q41 — a read-only Management
+  // membership carrying a Senior Manager grade would otherwise pass a rank
+  // threshold and be able to sign off a statutory filing.
+  //
+  // The permission is a FLOOR and never the whole answer: `work:write` gets you
+  // as far as the firm's published rule, which then decides. And no permission
+  // anywhere lets somebody approve their own work — that is a CHECK constraint,
+  // not a grant.
+  [routeKey("POST", "/api/v1/checks/{approvalId}/decide"), "work:write" as const],
+
+  // WORK ITEMS (T3.1) — the row on somebody's desk.
+  //
+  // READS are `party:read`, the same permission the job board and the
+  // verification queue take, and for the same reason: what is owed, whose it is
+  // and what is late is delivery state, it carries no money, and everybody on
+  // the team needs to see it — including the people who cannot act on it. A
+  // board only the assignee can see is a board nobody chases.
+  //
+  // WRITES are `work:write`, which is the permission this table is FOR. Saying
+  // a filing is done, moving it, or putting it on somebody's desk is doing the
+  // work, not reading the board, and the record of who did it is worth only as
+  // much as the gate in front of it. Deliberately not `party:write`: raising a
+  // task for a client is not the same act as editing the client.
+  [routeKey("GET", "/api/v1/work-items"), "party:read" as const],
+  [routeKey("GET", "/api/v1/work-items/{workItemId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-items"), "work:write" as const],
+  [routeKey("PATCH", "/api/v1/work-items/{workItemId}"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/state"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/assignee"), "work:write" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/checklist"), "work:write" as const],
+  [
+    routeKey("POST", "/api/v1/work-items/{workItemId}/checklist/{checklistItemId}"),
+    "work:write" as const,
+  ],
+  [
+    routeKey("DELETE", "/api/v1/work-items/{workItemId}/checklist/{checklistItemId}"),
+    "work:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/dependencies"), "work:write" as const],
+  [
+    routeKey("DELETE", "/api/v1/work-items/{workItemId}/dependencies/{dependencyId}"),
+    "work:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/review"), "work:write" as const],
+  // The work-item review queue, split exactly as T2.9's step queue is: the two
+  // reads are `party:read` so everybody can see what is waiting, and DECIDING is
+  // `work:write`, because approving somebody's filing writes to the record of
+  // whether the work stands. The permission is a FLOOR and never the whole
+  // answer — it gets you as far as the firm's published rule, which then
+  // decides — and no permission anywhere lets somebody approve their own work:
+  // that is a CHECK constraint, not a grant.
+  // THE COMPLIANCE CALENDAR (T3.2). READS are `party:read`, the same permission
+  // the work board takes: what a client owes and by when is delivery state, it
+  // carries no money, and everybody on the team needs to see it — including the
+  // people who cannot change it.
+  //
+  // WRITING A RULE is `tenant:admin`, and that is a deliberate step UP from
+  // `work:write`. A due date is a RULE and a wrong one costs the CLIENT a
+  // penalty rather than costing the firm an afternoon; confirming one is a
+  // partner taking responsibility for it against the statute. That is the same
+  // class of act as describing the firm's own Depts, not the same class as
+  // ticking a task done.
+  [routeKey("GET", "/api/v1/obligation-rules"), "party:read" as const],
+  [routeKey("POST", "/api/v1/obligation-rules"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/seed-india"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/obligation-rules/{ruleId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/obligation-rules/{ruleId}/exceptions"), "tenant:admin" as const],
+  [
+    routeKey("DELETE", "/api/v1/obligation-rules/{ruleId}/exceptions/{periodEndMonth}"),
+    "tenant:admin" as const,
+  ],
+  [routeKey("GET", "/api/v1/calendar"), "party:read" as const],
+  // The coverage screen is the ANSWER to an empty calendar, so it is readable by
+  // whoever can read the calendar. Hiding it behind admin would mean the person
+  // who notices the gap cannot see why it is there.
+  [routeKey("GET", "/api/v1/calendar/coverage"), "party:read" as const],
+
+  [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
+  [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],
+
+  // THE FIRM'S OWN WORDS FOR WORK (T3.1). The same split the grade ladder and
+  // the Dept lists take, and the same argument: READING is `party:read`,
+  // because every board renders these names and a person who cannot read them
+  // sees uuids. WRITING is `tenant:admin`, because these rows are not labels —
+  // the FLAGS on them decide what every work item in that state must carry, and
+  // moving the statutory default changes the urgency of every filing created
+  // afterwards. That is a decision at the level of deciding what a role means.
+  [routeKey("GET", "/api/v1/work-vocabulary"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-vocabulary/states"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/work-vocabulary/states/{stateId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/work-vocabulary/priorities"), "tenant:admin" as const],
+  [
+    routeKey("PATCH", "/api/v1/work-vocabulary/priorities/{priorityId}"),
+    "tenant:admin" as const,
+  ],
   // WHICH OF THE FIRM'S OWN ENTITIES ISSUES (G1.2). The same split the
   // configuration registry uses, and for the same reason: this IS firm
   // configuration. Reading it is `config:read` — an associate drafting a letter

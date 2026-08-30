@@ -10,10 +10,26 @@ import type { RoleHolders } from "../usecase/config/ports";
 import { NoAxesDefined } from "./serviceaxis";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
+import { WorkVocabularyService } from "../usecase/workitem/service";
+import { FakeWorkVocabularyRepo } from "./workitem";
+import { ObligationService } from "../usecase/obligation/service";
+import {
+  FakeCalendarSource,
+  FakeObligationExceptionRepo,
+  FakeObligationInstanceRepo,
+  FakeObligationServices,
+  FakeObligationStateRepo,
+  FakeObligationTemplateRepo,
+  FakeObligationTenants,
+  FakeWorkItemRaiser,
+} from "./obligation";
 import type { Membership, Tenant, UserAccount } from "../domain/tenancy/model";
 import type {
+  ObligationRuleSeeder,
+  ObligationVocabularySeeder,
   GradeDirectory,
   GradeLadderSeeder,
+  WorkVocabularySeeder,
   MemberRecord,
   MembershipRepository,
   NewMembership,
@@ -98,7 +114,7 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
   create(m: NewMembership): Promise<Membership> {
     // Ungraded on arrival, like the column: a grade is a separate decision from
     // granting access, and inventing one here would hide that from every test.
-    const row: Membership = { ...m, gradeId: null, isActive: true };
+    const row: Membership = { ...m, gradeId: null, reportsToUserId: null, isActive: true };
     this.rows.push(row);
     return Promise.resolve(row);
   }
@@ -162,6 +178,32 @@ export class FakeMembershipRepo implements MembershipRepository, RoleHolders {
     return Promise.resolve(this.replace(tenantId, membershipId, (r) => ({ ...r, gradeId })));
   }
 
+  updateReportsTo(
+    tenantId: string,
+    membershipId: string,
+    reportsToUserId: string | null,
+  ): Promise<Membership> {
+    return Promise.resolve(
+      this.replace(tenantId, membershipId, (r) => ({ ...r, reportsToUserId })),
+    );
+  }
+
+  reportingLines(tenantId: string): Promise<ReadonlyMap<string, string>> {
+    // STAFF and active only, exactly as the adapter filters — a fake that is
+    // laxer than the adapter is a test that passes on a rule the product does
+    // not have.
+    const pairs = this.rows
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.audience === "STAFF" &&
+          r.isActive &&
+          r.reportsToUserId !== null,
+      )
+      .map((r): [string, string] => [r.userId, r.reportsToUserId as string]);
+    return Promise.resolve(new Map(pairs));
+  }
+
   private replace(
     tenantId: string,
     membershipId: string,
@@ -185,10 +227,18 @@ export function makeFakes(): {
   roleDirectory: RoleDirectory;
   gradeSeeder: GradeLadderSeeder;
   gradeDirectory: GradeDirectory;
+  workVocabularySeeder: WorkVocabularySeeder;
+  obligationVocabularySeeder: ObligationVocabularySeeder;
+  obligationRuleSeeder: ObligationRuleSeeder;
   /** The rows the seeder wrote, so a test can look at what a new firm got. */
   config: FakeConfigRepo;
   /** The rungs a new firm got, for the same reason. */
   grades: FakeStaffGradeRepo;
+  /** The states and priorities a new firm got — same reason again. */
+  workVocabulary: FakeWorkVocabularyRepo;
+  /** The compliance rules a new firm got, so a test can assert the pack landed
+   *  rather than trusting that it did. */
+  obligationTemplates: FakeObligationTemplateRepo;
   ids: FakeIds;
   events: RecordingEventSink;
 } {
@@ -204,6 +254,23 @@ export function makeFakes(): {
   const users = new FakeUserRepo();
   const memberships = new FakeMembershipRepo();
   const grades = new FakeStaffGradeRepo();
+  const workVocabulary = new FakeWorkVocabularyRepo();
+  const obligationTemplates = new FakeObligationTemplateRepo();
+  const obligationExceptions = new FakeObligationExceptionRepo();
+  obligationTemplates.exceptions = obligationExceptions;
+  const obligations = new ObligationService({
+    templates: obligationTemplates,
+    exceptions: obligationExceptions,
+    states: new FakeObligationStateRepo(),
+    instances: new FakeObligationInstanceRepo(),
+    calendarSource: new FakeCalendarSource(),
+    services: new FakeObligationServices(),
+    workItems: new FakeWorkItemRaiser(),
+    tenants: new FakeObligationTenants(),
+    ids,
+    clock: { now: () => new Date("2026-08-30T00:00:00Z") },
+    events,
+  });
   memberships.users = users;
   memberships.grades = grades;
   return {
@@ -219,6 +286,24 @@ export function makeFakes(): {
     gradeSeeder: new StaffGradeService({ grades, ids, events }),
     gradeDirectory: grades,
     grades,
+    // The REAL WorkVocabularyService over an in-memory store, on the same
+    // reasoning as the two above: a tenancy test then fails if provisioning
+    // stops giving a new firm its work-item states, which is the thing that
+    // would leave it unable to record a single task.
+    workVocabularySeeder: new WorkVocabularyService({
+      vocabulary: workVocabulary,
+      ids,
+      events,
+    }),
+    workVocabulary,
+    // And the compliance calendar's two halves (T3.2), the REAL service over
+    // in-memory stores for the third time and the same reason: a tenancy test
+    // fails if provisioning stops giving a firm its obligation states (nothing
+    // can be generated) or its rule pack (an empty calendar with no explanation,
+    // which is the exact silence this module exists to prevent).
+    obligationVocabularySeeder: obligations,
+    obligationRuleSeeder: obligations,
+    obligationTemplates,
     // `holders: memberships` mirrors the composition root exactly, so a tenancy
     // test exercises the real coupling between the roster and the registry
     // rather than a stub that always answers "nobody holds anything".

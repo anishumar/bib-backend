@@ -28,6 +28,14 @@ function check(over: Record<string, unknown> = {}): string | null {
   return validateBody("workflow_template", body(over));
 }
 
+/** One step carrying one condition — the shape most of the condition tests
+ *  differ by, so they differ by that alone. */
+function condition(c: Record<string, unknown>): string | null {
+  return check({
+    steps: [{ key: "s1", label: "A", executor: "human", dependsOn: [], condition: c }],
+  });
+}
+
 describe("a well-formed process", () => {
   it("is accepted", () => {
     expect(check()).toBeNull();
@@ -64,11 +72,62 @@ describe("a well-formed process", () => {
             label: "Annual summary",
             executor: "human",
             dependsOn: [],
+            condition: { fact: "recurrence", op: "equals", value: "annually" },
+          },
+        ],
+      }),
+    ).toBeNull();
+  });
+
+  // THE LEGACY SHAPE, and it is not deprecated — it is frozen into every
+  // version published before operators existed, and a published body can never
+  // be rewritten. If this ever stops parsing, those firms' jobs stop walking.
+  it("still accepts the pre-operator shape, forever", () => {
+    expect(
+      check({
+        steps: [
+          {
+            key: "annual",
+            label: "Annual summary",
+            executor: "human",
+            dependsOn: [],
             condition: { fact: "recurrence", equals: "annually" },
           },
         ],
       }),
     ).toBeNull();
+  });
+
+  it("refuses a body carrying BOTH shapes", () => {
+    // Somebody's half-finished edit. Guessing which half they meant is how a
+    // step quietly starts applying to the wrong clients.
+    const problem = condition({ fact: "recurrence", equals: "annually", op: "not_equals" });
+    expect(problem).toMatch(/both/);
+  });
+
+  it("accepts each of the four operators", () => {
+    expect(condition({ fact: "jurisdiction", op: "equals", value: "IN" })).toBeNull();
+    expect(condition({ fact: "jurisdiction", op: "not_equals", value: "IN" })).toBeNull();
+    expect(condition({ fact: "jurisdiction", op: "in", value: ["IN", "AE"] })).toBeNull();
+    expect(condition({ fact: "jurisdiction", op: "not_in", value: ["IN"] })).toBeNull();
+  });
+
+  it("refuses an operator it cannot evaluate — including the numeric ones", () => {
+    // `gte` arrives with the first numeric FACT, which arrives with the data.
+    // Until then it would sit in a picker beside `jurisdiction` and compare a
+    // string, which is a control that looks live and is inert.
+    const problem = condition({ fact: "jurisdiction", op: "gte", value: "5" });
+    expect(problem).toMatch(/equals, not_equals, in, not_in/);
+    expect(problem).toMatch(/numeric/);
+  });
+
+  it("refuses a list operator given a single value, and the reverse", () => {
+    expect(condition({ fact: "jurisdiction", op: "in", value: "IN" })).toMatch(/array/);
+    expect(condition({ fact: "jurisdiction", op: "equals", value: ["IN"] })).toMatch(/string/);
+  });
+
+  it("refuses an EMPTY list — a step that never runs is not a condition", () => {
+    expect(condition({ fact: "jurisdiction", op: "in", value: [] })).toMatch(/non-empty array/);
   });
 });
 
@@ -211,7 +270,15 @@ describe("reading a stored body back", () => {
         ],
       }),
     );
-    expect(template?.steps[0]?.condition).toEqual({ fact: "jurisdiction", equals: "AE" });
+    // NORMALISED on the way out. The stored body above is the legacy shape —
+    // what every version published before operators existed carries — and the
+    // reader turns it into the one shape the engine evaluates. A published
+    // version is frozen, so this is not a migration waiting to happen.
+    expect(template?.steps[0]?.condition).toEqual({
+      fact: "jurisdiction",
+      op: "equals",
+      value: "AE",
+    });
     expect(template?.steps[0]?.executor).toBe("agent_with_approval");
   });
 });

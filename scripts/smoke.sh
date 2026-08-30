@@ -1034,6 +1034,161 @@ else:
     print("no job.spawned event")')
 chk "spawned by the system, not a person" "system/True" "$SPAWNER"
 
+echo; echo "── 16b-2. Work items — what is owed, and whose desk it is on ───────"
+# T3.1. The sweep above created two JOBS. A job is HOW work gets done — which
+# template, which steps. It has no assignee, no due date and no state in the
+# firm's own words, which is what this section is about.
+#
+# The two work items it produced are the HONEST GAP first: `gst-filing` is filed
+# under no Dept and states no SLA, so there is nothing to route on and nothing
+# to date from. The item is created anyway — losing the task because we could
+# not decide who it belonged to is the worst failure available here — and it
+# says WHY in a sentence, which is what makes an unassigned queue something a
+# person can clear.
+WI=$API/api/v1/work-items
+SPAWNED=$(curl -s -b $J/partner.txt $WI | python3 -c '
+import sys, json
+items = json.load(sys.stdin)["items"]
+mine = [i for i in items if i["engagementId"] is not None]
+print("%d/%s/%s" % (
+    len(mine),
+    all(i["assignee"] is None for i in mine),
+    all(i["dueOn"] is None for i in mine)))')
+chk "one work item per engagement"        "2/True/True" "$SPAWNED"
+UNROUTED=$(curl -s -b $J/partner.txt $WI | python3 -c '
+import sys, json
+items = [i for i in json.load(sys.stdin)["items"] if i["engagementId"] is not None]
+print("Dept" in (items[0]["assignmentNote"] or ""))')
+chk "…and each says WHY nobody has it"    "True" "$UNROUTED"
+
+# A SECOND sweep must add nothing. Every route into it is at-least-once, and a
+# second work item is a second task on a desk for work already being done.
+(cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
+AGAINWI=$(curl -s -b $J/partner.txt $WI | python3 -c '
+import sys, json
+print(len([i for i in json.load(sys.stdin)["items"] if i["engagementId"] is not None]))')
+chk "a second sweep creates no second task" 2 "$AGAINWI"
+
+# THE ACCEPTANCE LINE. Now do it properly: a Dept the firm actually has, a SPOC
+# on the client for it, and a service filed under that Dept with an SLA. The
+# filing then arrives pre-assigned, dated from the day the work begins.
+FRC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/tenancy/structure/axes -H "$H" -d '{"axis":"dept","code":"FRC","name":"Financial Reporting and Compliance"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+PARTNERID=$(cat $J/partner.id)
+chk "the client gets a SPOC for FRC"      201 "$(code -b $J/partner.txt -XPOST $API/api/v1/parties/$PID/assignments -H "$H" -d '{"role":"spoc","axisId":"'$FRC'","userId":"'$PARTNERID'","validFrom":"2020-01-01"}')"
+
+# `bookkeeping` is the service filed under FRC (section 5) — and section 5 also
+# revised it to a 90-day SLA and dropped the Dept, which makes it the perfect
+# service to prove the PINNED/LIVE split with. A third version puts the Dept
+# back on what is IN FORCE, and the letter line pins version ONE.
+#
+# So the work item that comes out should carry BOTH answers at once:
+#   · slaDaysSnapshot 30 — from the version the client actually SIGNED. A
+#     catalogue revision must not make finished work retroactively late.
+#   · Dept FRC — from what is published TODAY. A client agreed to the service,
+#     not to which of our departments delivers it.
+BKV3='{"body":{"name":"Monthly bookkeeping","billingBasis":"retainer","recurrence":"monthly","slaDays":90,"module":"FRC"}}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/config/service/bookkeeping/versions -H "$H" -d "$BKV3"
+chk "the firm files bookkeeping under FRC again" 200 "$(code -b $J/partner.txt -XPOST $API/api/v1/config/service/bookkeeping/versions/3/publish -H "$H")"
+BOOKV=$BKV1
+EL2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/lines -H "$H" -d '{"entityPartyId":"'$ENT1'","serviceVersionId":"'$BOOKV'","description":"Monthly bookkeeping","quantity":"12","unitAmount":"18000","discountPercent":"0"}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/send -H "$H"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-002"}'
+(cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
+
+ROUTED=$(curl -s -b $J/partner.txt $WI | python3 -c '
+import sys, json
+items = json.load(sys.stdin)["items"]
+b = [i for i in items if i["title"] == "Monthly bookkeeping"]
+if not b:
+    print("no bookkeeping work item"); raise SystemExit
+i = b[0]
+print("%s/%s/%s" % (
+    i["assignee"] is not None,
+    i["slaDaysSnapshot"],
+    i["deptName"]))')
+chk "A FILING ARRIVES PRE-ASSIGNED TO ITS DEPT SPOC" "True/30/Financial Reporting and Compliance" "$ROUTED"
+# Said twice on purpose. The 30 above came from the version the client signed
+# and the FRC came from the one in force now, and getting either from the other
+# would be a different product: a firm could not re-file a service without
+# re-dating every task, or could re-date finished work by editing a catalogue.
+DUE=$(curl -s -b $J/partner.txt $WI | python3 -c '
+import sys, json
+i = next(i for i in json.load(sys.stdin)["items"] if i["title"] == "Monthly bookkeeping")
+print(i["dueOn"] is not None and len(i["dueOn"]) == 10)')
+chk "…dated from the day the work begins, plus the SLA" "True" "$DUE"
+
+echo; echo "── 16b-3. The firm's own words for work, and the rules on them ─────"
+# The states and priorities are ROWS, seeded at createTenant. The whole point is
+# that a firm may rename any of them from a screen — so the FLAGS carry the
+# meaning and nothing in the product ever compares a name.
+VOCAB=$API/api/v1/work-vocabulary
+SEEDED=$(curl -s -b $J/partner.txt $VOCAB | python3 -c '
+import sys, json
+v = json.load(sys.stdin)
+print("%d/%d/%d/%d" % (
+    len(v["states"]), len(v["priorities"]),
+    sum(1 for s in v["states"] if s["isInitial"]),
+    sum(1 for p in v["priorities"] if p["isStatutoryDefault"])))')
+chk "a new firm starts with eight and four" "8/4/1/1" "$SEEDED"
+chk "an associate may READ the vocabulary"  200 "$(code -b $J/associate.txt $VOCAB)"
+chk "…but not change it"                    403 "$(code -b $J/associate.txt -XPOST $VOCAB/states -H "$H" -d '{"code":"x1","name":"X"}')"
+
+STARTID=$(curl -s -b $J/partner.txt $VOCAB | python3 -c '
+import sys, json
+print(next(s["id"] for s in json.load(sys.stdin)["states"] if s["isInitial"]))')
+# The floor a partial unique index cannot enforce: AT MOST one is a constraint,
+# at LEAST one is not, and a firm with none could not create a single task.
+chk "un-marking the only starting state is refused" 409 \
+  "$(code -b $J/partner.txt -XPATCH $VOCAB/states/$STARTID -H "$H" -d '{"isInitial":false}')"
+chk "…and so is retiring it"                        409 \
+  "$(code -b $J/partner.txt -XPATCH $VOCAB/states/$STARTID -H "$H" -d '{"isActive":false}')"
+chk "a state cannot be terminal AND blocked"        400 \
+  "$(code -b $J/partner.txt -XPOST $VOCAB/states -H "$H" -d '{"code":"odd","name":"Odd","isTerminal":true,"isBlocked":true}')"
+# THE RENAME, which is the whole promise. The behaviour has to survive it, and
+# the two checks in the next section are what prove it did.
+BLOCKID=$(curl -s -b $J/partner.txt $VOCAB | python3 -c '
+import sys, json
+print(next(s["id"] for s in json.load(sys.stdin)["states"] if s["isBlocked"]))')
+chk "the firm renames Blocked to Stuck"     200 "$(code -b $J/partner.txt -XPATCH $VOCAB/states/$BLOCKID -H "$H" -d '{"name":"Stuck"}')"
+
+echo; echo "── 16b-4. Raising work by hand, blocking it, getting it checked ────"
+ADHOC=$(curl -s -b $J/partner.txt -XPOST $WI -H "$H" -d '{"clientPartyId":"'$PID'","title":"Prepare the board minutes"}')
+ADHOCID=$(echo "$ADHOC" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "ad hoc work is real work"            "True" "$(echo "$ADHOC" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d["jobId"] is None and d["engagementId"] is None)')"
+# An associate CAN raise and move work — the role is "does the work", and
+# `work:write` is exactly the permission this table is for. The line that
+# separates them is the VOCABULARY, two checks above: an associate reads the
+# firm's states and cannot change what they MEAN.
+chk "an associate may raise work too"     201 "$(code -b $J/associate.txt -XPOST $WI -H "$H" -d '{"clientPartyId":"'$PID'","title":"Chase the bank confirmation"}')"
+chk "…and a client contact cannot see any" 403 "$(code -b $J/client.txt $WI)"
+
+# THE CAPTURE-OR-LOSE PAIR, against the RENAMED state. A rule keyed on the code
+# would have gone quiet on the rename two checks ago, silently.
+chk "moving to Stuck with no reason is refused" 400 \
+  "$(code -b $J/partner.txt -XPOST $WI/$ADHOCID/state -H "$H" -d '{"stateId":"'$BLOCKID'"}')"
+chk "…and accepted with one"                    200 \
+  "$(code -b $J/partner.txt -XPOST $WI/$ADHOCID/state -H "$H" -d '{"stateId":"'$BLOCKID'","blockedReason":"Ramesh has not sent the register"}')"
+# The reason stays on the row and NEVER enters the log, which cannot be erased.
+LEAKED=$(curl -s -b $J/partner.txt "$API/api/v1/events?limit=40" | python3 -c '
+import sys, json
+print("Ramesh" in json.dumps(json.load(sys.stdin)["events"]))')
+chk "…and the reason is not in the audit log" "False" "$LEAKED"
+
+# Maker != checker, over HTTP. The partner owns the task, so the partner cannot
+# be the one who says it is right.
+curl -s -o /dev/null -b $J/partner.txt -XPOST $WI/$ADHOCID/assignee -H "$H" -d '{"assigneeUserId":"'$PARTNERID'"}'
+REVIEW=$(curl -s -b $J/partner.txt -XPOST $WI/$ADHOCID/review -H "$H" -d '{}')
+REVIEWID=$(echo "$REVIEW" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+chk "the maker is DERIVED from the assignee" "True" \
+  "$(echo "$REVIEW" | python3 -c 'import sys,json;print(json.load(sys.stdin)["submittedBy"] == "'$PARTNERID'")')"
+chk "a second review cannot be opened"      409 "$(code -b $J/partner.txt -XPOST $WI/$ADHOCID/review -H "$H" -d '{}')"
+chk "THE MAKER CANNOT BE THE CHECKER"       403 \
+  "$(code -b $J/partner.txt -XPOST $API/api/v1/work-item-checks/$REVIEWID/decide -H "$H" -d '{"decision":"approved"}')"
+chk "a rejection with no note is refused"   400 \
+  "$(code -b $J/associate.txt -XPOST $API/api/v1/work-item-checks/$REVIEWID/decide -H "$H" -d '{"decision":"rejected"}')"
+
 echo; echo "── 16c. The prose a document carries — copied, never referenced ────"
 # G1.7. Three lists appear on every document besides its priced lines: the
 # EXCLUSIONS, the COMMERCIAL notes and the TEAM block. They are not clauses — a
@@ -1178,6 +1333,71 @@ rs = {r["balance"]["invoiceId"]: r for r in json.load(sys.stdin)["receivables"]}
 r = rs.get("'$INV1ID'")
 print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
 chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
+
+echo; echo "── 16f. The compliance calendar — generated, never typed ────────────"
+# T3.2. What this section can prove that a unit test cannot: the firm got its
+# rules AT PROVISIONING, the gates on them are the ones intended, and — the one
+# that matters most — an empty calendar EXPLAINS ITSELF.
+#
+# EIGHT REQUESTS, and that number was chosen rather than landed on. The walk was
+# already at ~288 of a 300/minute budget before this section, and the header
+# says the fix is to spend fewer requests here rather than raise the product's
+# default. So this covers the seeding, both gates and the coverage answer, and
+# nothing that a unit test already covers: the date arithmetic, the March TDS
+# exception and the re-run idempotency are all in tests/obligation/.
+#
+# THE BUDGET IS NOW SPENT: ~296 of 300. The next section genuinely does not fit,
+# and the known-open item about the limiter's key is no longer theoretical.
+RULES=$(curl -s -b $J/partner.txt $API/api/v1/obligation-rules)
+# A NEW FIRM IS NEVER LOOKING AT AN EMPTY RULES SCREEN. Fifty-seven rules from
+# the firm's own applicability sheet arrive with the tenant — ten that produce
+# dates, and forty-seven that say, by name, what they are still waiting for.
+COUNTS=$(python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["rules"]
+gen = [r for r in rs if r["coverage"] == "generating"]
+print("%d/%d" % (len(rs), len(gen)))' <<< "$RULES")
+chk "a new firm is seeded with the India pack" "57/10" "$COUNTS"
+# EVERY ONE OF THEM UNCONFIRMED, India included: the dates came from a previous
+# vendor's document, not from a partner ticking them against the statute.
+UNCONF=$(python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["rules"]
+print("yes" if all(r["status"] == "unconfirmed" for r in rs) else "no")' <<< "$RULES")
+chk "…and every date is marked unconfirmed"  yes "$UNCONF"
+# THE FORTY-SEVEN ARE NOT FAILURES. Each carries the firm's own words for what
+# is missing, and a rule with no formula and no reason would be indistinguishable
+# from an unfinished import.
+REASONED=$(python3 -c '
+import sys, json
+rs = [r for r in json.load(sys.stdin)["rules"] if r["dueRule"] is None]
+print("yes" if rs and all(r["unresolvedReason"] for r in rs) else "no")' <<< "$RULES")
+chk "…and every rule with no formula says why" yes "$REASONED"
+GSTR=$(python3 -c '
+import sys, json
+r = next(r for r in json.load(sys.stdin)["rules"] if r["name"] == "GSTR-3B")
+print("%s/%s/%s" % (r["recurrence"], r["dueRule"]["dueMonthOffset"], r["dueRule"]["dueDayOfMonth"]))' <<< "$RULES")
+chk "…GSTR-3B is the 20th of the month after" "monthly/1/20" "$GSTR"
+
+# THE ANSWER TO AN EMPTY CALENDAR, which is the whole reason this endpoint
+# exists. This firm has live engagements and no matching rules, so it MUST get a
+# reason rather than a blank screen — a firm that cannot tell "nothing is owed"
+# from "a rule is missing" cannot tell either from broken software.
+COVER=$(curl -s -b $J/partner.txt $API/api/v1/calendar/coverage | python3 -c '
+import sys, json
+gaps = json.load(sys.stdin)["gaps"]
+print("yes" if gaps and all(g["reason"] for g in gaps) else "no")')
+chk "an uncovered engagement says WHY"      yes "$COVER"
+
+# The gates. Reading the calendar is `party:read` — what a client owes is
+# delivery state and everybody on the team needs it. WRITING a rule is
+# `tenant:admin`, a deliberate step up from `work:write`: a wrong due date costs
+# the CLIENT a penalty, and confirming one is a partner taking responsibility.
+chk "an associate may read the calendar"    200 "$(code -b $J/associate.txt $API/api/v1/calendar)"
+chk "…but may not write a compliance rule"  403 "$(code -b $J/associate.txt -XPOST $API/api/v1/obligation-rules -H "$H" -d '{"jurisdiction":"IN","name":"Made up","recurrence":"annual","dueRule":null,"unresolvedReason":"x","rulePack":"x@1"}')"
+# And the audience gate, ahead of the role gate: a client contact reaches the
+# portal paths and nothing else, so the whole firm's calendar is not one of them.
+chk "…and a client contact reaches none of it" 403 "$(code -b $J/client.txt $API/api/v1/calendar)"
 
 echo; echo "── 17. Rate limiting ───────────────────────────────────────────────"
 last=""

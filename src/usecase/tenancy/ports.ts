@@ -126,6 +126,27 @@ export interface MembershipRepository {
     membershipId: string,
     gradeId: string | null,
   ): Promise<Membership>;
+  /**
+   * Set who somebody reports to, or clear it (`null`). The FOURTH axis (T2.9),
+   * and like the grade it grants nothing — it is read by one thing, a
+   * `reporting_line` verification policy deciding who may check this person's
+   * work.
+   */
+  updateReportsTo(
+    tenantId: string,
+    membershipId: string,
+    reportsToUserId: string | null,
+  ): Promise<Membership>;
+  /**
+   * The reporting line as a set of `(userId -> managerUserId)` pairs, for the
+   * whole firm.
+   *
+   * Read whole rather than one at a time, because the two callers both need it
+   * that way: the cycle check walks a chain, and the queue asks "who may check
+   * this" for a screenful of steps at once. A lookup per row is the mistake this
+   * codebase has now made and fixed five times.
+   */
+  reportingLines(tenantId: string): Promise<ReadonlyMap<string, string>>;
 }
 
 /**
@@ -155,6 +176,29 @@ export interface GradeDirectory {
 export interface GradeLadderSeeder {
   /** Returns the grade codes written, for the caller's audit trail. */
   seedDefaultGrades(tenantId: string, actor: Actor): Promise<readonly string[]>;
+}
+
+/**
+ * Giving a brand-new firm its own words for work (T3.1).
+ *
+ * The same shape and the same argument as the two seeders around it: work-item
+ * STATES and PRIORITIES are rows, so the firm can rename "Blocked" or decide
+ * that statutory work is Critical without a deploy — and a firm with none of
+ * them cannot create a single work item, because there is no state to create it
+ * in and no priority to give it.
+ *
+ * Ordered LAST of the three, deliberately. A firm that ends up with roles, a
+ * ladder and no work vocabulary can still be administered and can fix it from
+ * the screen; the reverse cannot be fixed from inside the product.
+ *
+ * Satisfied by `WorkVocabularyService.seedDefaultVocabulary` in the composition
+ * root, so neither module imports the other.
+ */
+export interface WorkVocabularySeeder {
+  /** Returns the state and priority codes written, for the caller's audit
+   *  trail. Empty when the firm already had them — the seeder is idempotent,
+   *  because `createTenant` and it share no unit of work. */
+  seedDefaultVocabulary(tenantId: string, actor: Actor): Promise<readonly string[]>;
 }
 
 /**
@@ -189,6 +233,34 @@ export interface RoleDirectory {
  * nobody can sign in to. Making it a port keeps that requirement visible here
  * instead of buried in provisioning scripts.
  */
+/**
+ * A new firm's obligation STATES — the `ObligationService.seedDefaultStates`
+ * seam, and it is here for `WorkVocabularySeeder`'s reason.
+ *
+ * A firm with no state marked as the starting one cannot have a single filing
+ * generated. Telling it to go and configure that before the compliance calendar
+ * will do anything would be a worse first day than the roles problem, and the
+ * firm has not been asked what to call these anyway.
+ */
+export interface ObligationVocabularySeeder {
+  seedDefaultStates(tenantId: string, actor: Actor): Promise<number>;
+}
+
+/**
+ * A new firm's compliance RULES — the shipped India pack.
+ *
+ * THE OTHER HALF OF THE SILENCE CURE. A firm with no rules has an empty
+ * calendar and nothing on any screen explaining why, which is indistinguishable
+ * from broken software. Fifty-seven rules arrive at creation: ten produce dates
+ * and the rest say, by name, what they are still waiting on from the firm.
+ *
+ * Idempotent on a rule's identity, so it never overwrites one a partner has
+ * since confirmed or given a lead time to.
+ */
+export interface ObligationRuleSeeder {
+  seedIndiaRulePack(tenantId: string, actor: Actor): Promise<number>;
+}
+
 export interface RoleRegistrySeeder {
   /** Returns the role keys written, for the caller's audit trail. */
   seedDefaultRoles(tenantId: string, actor: Actor): Promise<readonly string[]>;

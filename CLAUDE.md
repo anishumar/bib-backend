@@ -102,8 +102,8 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Three kinds ship today — `service`, `role` and
-`policy`; `workflow_template` and `rule_pack` join them when T2.7 and T4.3 actually read them.
+`config.version` is what it said at a point in time. Eight kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
+`confidence_tier` and `verification_policy`; `rule_pack` joins them when T4.3 actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
 
@@ -163,13 +163,16 @@ addresses, and a general staff directory is a wider decision than this screen.
 ## Seniority is a third axis, and it grants nothing (G3.3)
 
 `tenancy.staff_grade` is the firm's own ladder and `membership.grade_id` puts a person on a
-rung. Keep it clear of the other two axes: **role** says what somebody may REACH (permissions,
-gate 3), **commercial visibility** says whether they see money, and **grade** says how SENIOR
-they are. A grade carries no permission at all.
+rung. Keep it clear of the other axes: **role** says what somebody may REACH (permissions,
+gate 3), **commercial visibility** says whether they see money, **grade** says how SENIOR
+they are, and **`reports_to_user_id`** (T2.9) says who checks their work. A grade carries no
+permission at all, and neither does a reporting line.
 
 It exists for exactly one comparison — the firm's stated review rule is *"Manager or above is
 fine"* — so `rank` is a plain integer and there is no skill matrix and no tier-and-load
-routing. T2.9's verification queue and T3.1's review step are its consumers.
+routing. **T2.9 is now its consumer** and confirmed the shape: a `verification_policy` stores a
+`minGradeRank` and compares it, and nothing anywhere reads a skill or a load. T3.1's review step
+is the other.
 
 Four things about it are decisions, not details:
 
@@ -214,7 +217,7 @@ vocabulary, the same at every firm. The firm owns the ROWS.
 
 **It lives in `tenancy`, not the config registry**, for `staff_grade`'s reason: a Dept is the
 firm's own structure, `is_active` is a distinction the registry cannot express, and G3.2's
-`client_assignment.module_id` needs a real row to point at.
+`client_assignment.axis_id` needs a real row to point at.
 
 **A `service` body still stores the CODE, not a foreign key**, and that is not a shortcut. A
 published config version is FROZEN — the freeze is what lets a nine-month-old proposal still
@@ -763,6 +766,61 @@ reason T2.5 deferred `workflow_template`). It is T3.8, and the constraint that d
 engine is stated there: a document's content hash is evidence, so the renderer must be
 deterministic.
 
+## Who owns a client — the Key Manager and the SPOCs (G3.2)
+
+`crm.client_assignment` (migration 0049) is who at the firm looks after a client, effective-
+dated. **Key Manager** — one at a time, owns the relationship. **SPOC** — the day-to-day
+contact for one Dept or delivery team; the firm's own practice is one per Dept (*"each client
+will defacto have two SPOC, one from TRC and one from FRC"*), and a client buying RAA work has
+three, which is why it is a row per assignment and not two columns.
+
+It is in `crm` and not `tenancy` because it is the firm describing a RELATIONSHIP with a
+client, not describing itself the way `staff_grade` and `service_axis` do.
+
+**`axis_id`, not `module_id`**, and the widening is deliberate: 0043 made Depts and delivery
+teams one list precisely because neither layer is universal, so pinning a SPOC to `dept` leaves
+a firm with only teams nowhere to put one. It costs 10x Global nothing and it avoids settling
+the open Dept-vs-team question in DDL. What IS enforced is structural — a SPOC has an axis, a
+Key Manager never does.
+
+**A DEPT MAY HAVE MORE THAN ONE SPOC, and that is a decision.** Shrestha, 2026-08-30, against
+the board's own acceptance line: leave cover, a joint SPOC on a group, a fortnight's parallel
+handover. So there is no "one per axis" constraint, "who was the SPOC in March" may answer with
+a LIST, and every reader takes one. `ownership.integration.test.ts` tests the ABSENCE, so a
+later tidy-up cannot add it back without somebody deciding to — and note the asymmetry that
+chose the direction: dropping a constraint later is one line, adding one later fails against
+whatever overlap the firm has already recorded.
+
+**Two EXCLUSION constraints, not a partial unique index.** One Key Manager at a time per
+client, and no duplicate (same person, same role, same axis, overlapping). An index over OPEN
+rows constrains only today — two CLOSED rows overlapping in March would slip past it and leave
+"who was the Key Manager in March" answering with two names, which is the acceptance criterion
+failing behind a constraint that looked like it covered this. `btree_gist` +
+`daterange(valid_from, valid_to, '[)')`.
+
+**Half-open, `[valid_from, valid_to)`** — `valid_to` is the FIRST DAY NOT IN FORCE, like
+`party_relationship`, `party_identifier` and `isInForceOn`. The demo used an inclusive bound and
+copying it would have shown two SPOCs on every changeover day. **A handover closes the old row
+at D and opens the new one at D**, in ONE transaction, and is never an `UPDATE` of `user_id`:
+overwriting who the SPOC is destroys the only record of who it WAS.
+
+**"TODAY" IS THE CALLER'S FACT, NOT THE SERVER'S — this module is the first to take that
+seriously.** `clock.now().toISOString().slice(0, 10)` is a day out for a firm east of Greenwich
+every morning, and opening the screen at 04:11 in Delhi found both halves of it: the panel said
+"as of 29-08" on the thirtieth, and then a client assigned from that form was missing from its
+holder's own book because `CURRENT_DATE` on a UTC server had not reached it. So `GET
+/api/v1/my-clients` takes `asOf`, `listOpenForClient` takes the date, `CURRENT_DATE` appears
+nowhere in this module's SQL, and the browser sends its LOCAL calendar day. **The defaults still
+use the server's day**, which is the honest fallback for a caller that did not say — and the
+same one-liner is still the convention in `invoice`, `dunning` and `lead`, which have the same
+bug and their own task to fix it in.
+
+`party:read` to see an account team, `party:write` to change one — not `tenant:admin`. Naming a
+Key Manager grants nobody anything; it is a fact about a client, like its identifiers. Its
+honest limit is on the SCREEN: the assign form needs the roster and the Dept list, both
+`tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
+`/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
@@ -863,10 +921,33 @@ waiting on a person vanished from the work board AND from the sweep, so nothing 
 at it again. Only `done` and `cancelled` are excluded — those never move.
 
 **Step conditions test a CLOSED set of facts** (`recurrence`, `jurisdiction`), both of which
-already exist. A little expression language was refused: it is a vocabulary nobody chose, no
-partner can write and no test can cover. Which facts the firm actually branches on is an open
-question with the client; adding one is a member of `StepFact`, a case in the orchestrator's
+already exist, with a CLOSED set of operators (`equals`, `not_equals`, `in`, `not_in`). A
+little expression language was refused: it is a vocabulary nobody chose, no partner can write
+and no test can cover. Adding a fact is a member of `StepFact`, a case in the orchestrator's
 resolver, and a line of documentation.
+
+**THERE IS NO `gte` / `lte`, AND THAT IS THE SAME RULE AS EVERYTHING ELSE HERE.** The firm's
+own compliance list (given 2026-08-30) makes a THRESHOLD its single commonest driver —
+*"turnover > ₹1 Cr"*, *"AATO ≥ ₹5 Cr"*, *"net worth ≥ ₹500 Cr"* — but nothing in this schema
+stores a turnover, an employee count, a paid-up capital or a listed status. A numeric operator
+today would sit in a picker beside `jurisdiction`, compare a string, and do nothing: a control
+that looks live and is inert. It arrives with the first NUMERIC FACT, which arrives with the
+data, which is T3.2.
+
+**The SHAPE moved and the operators did not, and the asymmetry is deliberate.** Adding an
+operator later is backward compatible — a frozen body naming `equals` still reads. Changing
+`{ fact, equals }` into `{ fact, op, value }` later would not have been, because every body
+published in between would carry the old shape forever. So the shape changed the day the need
+was known and the operators wait for their data. **The legacy `{ fact, equals }` is not
+deprecated — it is frozen into every version published before operators existed, and
+`readStepCondition` normalises it to `op: "equals"` on the way out so the evaluator only ever
+sees one shape.**
+
+**AN UNRESOLVED FACT KEEPS THE STEP — under EVERY operator, and the negative ones are the
+subtle half.** "The jurisdiction is not IN" reads as true when the jurisdiction is unknown, and
+it is not true, it is unknown. Evaluating `not_equals` against a null would let a blank field
+SATISFY a condition, which is the same failure as skipping on one, reached from the opposite
+side. The null check is therefore before the operator is even looked at.
 
 **`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
 permission, because the row it gates is the record of who did the work.
@@ -916,12 +997,435 @@ cannot answer.
 is G2.4's stated design, and it means a firm that switches mid-year has two shapes of job on
 its board until the old ones finish.
 
+## The agent guardrail — built before there is an agent (T2.8)
+
+There are still no agents, and `NoAgentsBuiltYet` is still wired in `setup/`. This task built
+the RAILS: what a machine would be allowed to do with what it produced, before anything
+produces anything. That order is the board's (*guardrails first, then capabilities*) and it is
+the product's — get manual work into the product standardised, then replace some of it.
+
+**The guardrail is a CHECK in migration 0047, not a rule in the orchestrator.** `build2.md` in
+the firm's words: *a rule that lives in a form is a rule that a script, an import or an AI agent
+walks straight past* — and here the rule is ABOUT agents. A CHECK cannot read config, so
+**`delivery.agent_run` copies the thresholds that applied** onto every row, the same move
+`job.split_code` and `job_step.executor` make. It also makes "why was this allowed" survive the
+firm raising its bar next quarter.
+
+**A machine acts unattended only STRICTLY above the bar.** `>` and not `>=`, so **1.0 means
+never** — one edit stops every unattended commit with no deploy. Do not "tidy" that comparison.
+
+**Three answers, not two.** `committed` · `queued` (the machine answered, a person says whether
+it stands) · `escalated` (it was not sure enough to answer). The middle one is the point:
+"commit or don't" throws away a usable draft every time the machine is unsure, which is most of
+the time, and a firm redoing the work by hand has bought nothing.
+
+**`confidence_tier` is the registry's SEVENTH kind, not a table**, and the reason is the
+question it answers: *why did this commit on its own?* is asked a year later and the only true
+answer is "the bar was 0.95 that day". A run PINS the version it was judged under. `staff_grade`
+went the other way for the opposite reason — nobody asks what a rung meant last March.
+
+**NOTHING IS SEEDED, and shipping this changed no firm's behaviour.** No published tier means
+`ASK_A_PERSON` — `(autoCommitAt 1, reviewAt 0)`, so nothing commits and everything proposes,
+expressed in the same two numbers so no code has a special case. The discount policy's rule
+from the same direction: *no published policy means ZERO, not "no limit"*. `SUGGESTED_TIERS`
+(0.95 / 0.70) is a starting point a firm publishes deliberately — and those numbers are **not
+the client's**: the demo records them as inherited from another vendor and never agreed.
+
+**THE TEMPLATE OUTRANKS THE NUMBERS.** `agent_with_approval` never commits, whatever the
+confidence — the firm said a person signs this step off, and that is a decision by somebody who
+knows what the step does. `approval_required` is stored on the run so the CHECK can express it,
+and so "unsure" and "always checked" stay different facts. **This is why the thresholds are not
+the load-bearing product decision**, and why `runsAMachine` is a separate question from
+`waitsForAPerson` — conflating them was a real bug: `agent_with_approval` was blocked before
+`agents.run` was reached, so the machine produced nothing and the person had nothing to approve.
+
+**`proposed` and `applied` both survive forever** (`build2.md` §5.2). Keeping only the corrected
+value throws away the entire accuracy signal — the only evidence that could ever justify moving
+a threshold. Two CHECKs keep it honest: a `corrected` must ACTUALLY differ, an `accepted` must
+not. A rejection must say why, and does NOT finish the step: throwing away an answer is not
+doing the work.
+
+**Nothing about a run can be rewritten** — a trigger refuses edits to the proposal, the
+confidence, the thresholds, the decision or the provenance. A person's verdict is the one half
+that legitimately arrives later. `model` and `prompt_version` are NOT NULL from the start,
+because *"extraction got worse in March"* needs something to blame and something to revert, and
+adding them later means backfilling a fact nobody recorded.
+
+**Ticking Done behind a proposal is refused** (`PROPOSAL_UNDECIDED`): it would record that a
+person did the work and leave what the machine said undecided forever.
+
+## Who may check somebody else's work (T2.9)
+
+Two rules, and only one of them is the firm's.
+
+**MAKER != CHECKER is the product's, and it is not a setting.** `step_approval_maker_is_not_checker`
+in migration 0048, for `build2.md`'s stated reason — *a rule that lives in a form is a rule that
+a script, an import or an AI agent walks straight past*. `isEligible` applies it too, so a
+person is TOLD rather than shown a constraint violation, and the wall underneath still holds for
+everything that never reaches this code. `maker-checker.integration.test.ts` proves it as the
+OWNER role.
+
+**`submitted_by` IS DERIVED AND FROZEN, and that is what makes the CHECK worth anything.** It
+compares two columns; if a writer could set both, the way past it is to name somebody else as
+the maker and approve as yourself. A BEFORE INSERT trigger reads it from
+`job_step.performed_by` and a BEFORE UPDATE trigger refuses to let it move. The application
+cannot set it, the fakes model that, and the integration test attacks it specifically. **Do not
+add a `submittedBy` to any write path.**
+
+**WHO ELSE may check is the firm's, and it is a `verification_policy` — the registry's EIGHTH
+kind.** The client gave two answers on different days and they are different controls:
+*"Manager or above is fine"* (a rank threshold) and *"manager means engagement manager"* (a
+reporting line, which stalls the morning that person is on leave). The demo's own S3 says this
+is *"the maker-checker control and not a line to draw on the firm's behalf"*, so the firm draws
+it: `rank_threshold` · `reporting_line` · `reporting_line_or_rank`. **Nothing is seeded.**
+
+**It is a kind and not a column for `confidence_tier`'s reason**: *who was allowed to approve
+this filing in March?* is an audit question, a published version is frozen, and an approval PINS
+the version it opened under. `minGradeRank` stores the RANK, not the code — the opposite of what
+a `service` body does with an axis code, because a stored code would be re-resolved against
+today's ladder and answer March's question with April's row.
+
+**And a firm publishes SEVERAL, because a step names one.** SQC 1 — ICAI's own quality-control
+standard — wants an engagement quality control reviewer to be both *suitably qualified* (a rank
+test) and *independent of the engagement team*, which a reporting line is the opposite of. An
+ordinary manager review and an EQCR sign-off are two rules inside one process. `excludeEngagementTeam`
+is deliberately NOT built: "engagement team" is the Dept-vs-delivery-team axis the client has
+not settled (G2.4), and an independence rule written on a guessed axis would decide who may sign
+off an audit.
+
+**`membership.reports_to_user_id` is a FOURTH axis and grants nothing** — role says what you may
+reach, commercial visibility whether you see money, grade how senior you are, and this one who
+checks your work under a reporting-line rule. It exists because nothing else in this schema
+records a staff reporting relationship: `core.party_relationship` is between PARTIES and a
+member of staff is a `user_account` plus a membership, never a party. **Not effective-dated**,
+and that is stated rather than implied: nothing records when a reporting line STARTED, so the
+column answers "now" and the ledger answers "when did it change". Two refusals a database cannot
+make are the service's — a manager who is not an active STAFF member of this firm (the FK points
+at a GLOBAL table and would accept a stranger), and a loop, which a CHECK cannot see past one
+row and which would silently leave everybody in it with no eligible checker.
+
+**A checked step does NOT finish.** It stays `blocked` — a fourth cause of that state, and the
+work is DONE there — `performed_by` is recorded, and an approval opens. A review that does not
+hold up the work downstream is a review nobody has to do. Approving finishes the step and
+advances the job in the same call; **rejecting moves nothing**, keeps the reason, and the redo
+opens a SECOND row so "this took two goes" survives.
+
+**`work:write` is a FLOOR under the firm's rule, never the whole answer.** Approving somebody's
+filing writes to the record of whether the work stands, so it needs the permission that already
+gates saying it was done. Without that floor a read-only Management membership carrying a Senior
+Manager grade would pass a rank threshold — which is the demo's Q41, still unanswered. This does
+not invent a role rule; it applies one the firm controls on the roles screen.
+
+**T2.9 lives on `OrchestratorService`, not in a service of its own**, the same judgement T2.8
+made about `decideProposal`: a check is part of a STEP's lifecycle. Splitting it would mean a
+handler calling two use cases or two services holding each other, since opening a check happens
+when work finishes and finishing work happens when a check passes. The RULE is pure in
+`domain/verification`.
+
+**The queue is the WHOLE FIRM's, and every row carries the viewer's verdict.** Under a rank
+threshold there is no "mine", and a list filtered to what you can act on hides that six filings
+have waited a week because nobody senior enough looked. **Ordered oldest-first, with no due
+date anywhere**: the firm has not given its turnaround times (client ask 3.4) or its escalation
+matrix (3.3), and a deadline this product invented is a priority the firm never set. `slaDays`
+stays earmarked for T3.1.
+
+## Work items — the row on somebody's desk, and the firm's own words for it (T3.1)
+
+`delivery.work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`
+(0051), over `work_item_state` + `work_item_priority` (0050).
+
+**IT IS NOT `job_step`, and merging them would have cost both halves.** A JOB is HOW work
+gets done — which template, which steps, which agent — and its states are the ENGINE's,
+identical at every firm. A WORK ITEM is WHAT is owed and WHOSE it is, and its states are the
+FIRM's own words. Merge them and ad hoc work ("prepare the board minutes") has no home at
+all, and a firm ends up renaming the engine's mechanics to get its own board to read
+properly. `work_item.job_id` is nullable in both directions: many items may share one merged
+job, and an item may have no job.
+
+**MEANING IS A FLAG; NAMES ARE THE FIRM'S. Nothing in the product compares a state's or a
+priority's `code`.** Rows buy the firm its vocabulary and immediately take something away: a
+CHECK cannot say "a blocked item owes a reason", because it cannot see a word in another
+table. The naive fix is `code = 'blocked'` — which hardcodes the very name the firm was
+promised it could change, and the first rename switches the rule off *silently*. So
+`is_initial` / `is_terminal` / `is_blocked` and `is_default` / `is_statutory_default` / `rank`
+carry every rule, and `enforce_work_item_state_facts` (a trigger, because a CHECK cannot join)
+reads those flags. **The smoke walk renames "Blocked" to "Stuck" and then proves the reason is
+still demanded** — the only way to test a promise like this.
+
+**"At most one" is a partial unique index; "at least one" is the service.** A firm may never
+end up with no starting state, no default priority or no statutory default — each leaves it
+unable to create a single task — and Postgres cannot express a constraint over the ABSENCE of
+rows. So the floor lives in `WorkVocabularyService`, and marking another row moves the flag in
+the SAME statement rather than leaving a window with none.
+
+**`is_statutory_default` is the firm's own rule made mechanical** — *"due dates that are
+statutory should anyway be high priority"*. A flag rather than the constant `'high'`, so a
+firm that decides statutory work is Critical moves a tick. **Work spawned from an ENGAGEMENT
+is deliberately NOT statutory:** an engagement's SLA is the firm's own promise, and defaulting
+it true would put every piece of advisory work on the statutory priority and make the flag
+meaningless the day it matters. T3.2's obligations set it, from the law.
+
+**Routing refuses to guess, and the refusal is a SENTENCE.** One SPOC for the service's Dept →
+assigned. None, or more than one (G3.2 allows several) → UNASSIGNED with `assignment_note`
+saying which. Falling back to the Key Manager and taking the first SPOC are both rules the
+firm never gave, and **a wrong assignee is worse than none**: it sits on a desk whose owner
+believes it is not theirs, while unassigned work is visible in a queue that gets chased. The
+note is what makes that queue clearable rather than a pile.
+
+**`slaDays` is PINNED and the Dept is LIVE, on the same row.** A catalogue revision must not
+make finished work retroactively late (G2.3), so the SLA is snapshotted from the version the
+client SIGNED. A client agreed to the service and not to which of our departments delivers it,
+so the Dept comes from what is published NOW — the same rule `unspawnedActivations` applies to
+the grouping facts, and **the two must not drift**, or a job cut by one Dept would put its task
+on another's desk. The due date's base is `crm.engagement.effective_from`, a `date` column,
+never `signed_at`: turning an instant into a calendar day is a day out either side of midnight
+UTC.
+
+**A SECOND approval table, and the RULE is not duplicated.** `work_item_approval` exists
+because `step_approval` hangs off a `job_step`, so work with no template could never be
+reviewed — and *"every task is mostly reviewed"* is the client's words about the TASK. What is
+reused unchanged is T2.9's `isEligible`, `VerificationPolicy` and the grade/reporting-line
+comparison: one answer to "who checks whose work", two tables recording the answers.
+`submitted_by` is DERIVED from the item's assignee and FROZEN by trigger, exactly as T2.9's is.
+**Do not add a `submittedBy` to any write path.**
+
+**A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
+is finished" is what it says. Cancelling stays allowed: cancelling something that never
+started is a real act, and refusing it would trap the item. The cycle check walks the edge
+list in the domain, because reachability is not expressible in a CHECK — the database catches
+only the self-edge.
+
+**`escalated_level` / `escalated_at` are deliberately NOT built.** The demo has them; the
+escalation ladder is T3.3 and needs G3.4. A column with no writer is the feature that looks
+finished.
+
+### Three things this task found, and none was in T3.1
+
+**`sweepActivations` promised per-tenant isolation from T2.6 and did not do it.** Its own
+comment said *"one firm's failure must not stop the others"*; a throw in `spawnForTenant`
+propagated out of the loop and every firm after it was skipped, silently. One firm with no
+work vocabulary stopped the calendar for every client of every firm. Each firm is caught now
+and the failure is REPORTED — `SweepReport.failure`, printed by `worker:once` — because a
+silently skipped firm is worse than a stopped sweep, which at least gets noticed.
+
+**A work-item failure must never lose the JOB.** Two facts: a job is the record that work is
+OWED, a task is whose desk it lands on. `spawnForEngagements` is caught inside the sweep and
+counted as `tasksFailed`; the job stands.
+
+**PATCH WAS MISSING FROM THE CORS ALLOWLIST, since CORS was added.** T3.1 registered the first
+routes that use it. The browser answers the preflight 204, reads the header, sees its method
+is absent and DISCARDS the request — no server log, no status code, surfacing as "TypeError:
+Failed to fetch" and reading as a dead endpoint. **`npm run smoke` could never have caught it:
+curl does not preflight.** Found by clicking a checkbox on a screen.
+`tests/api/cors-methods.test.ts` reads every verb the handlers register and fails if the list
+falls behind.
+
+**And a comment in 0051 was wrong until the integration test ran.** A BEFORE INSERT trigger
+runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches a cross-tenant
+state BEFORE the composite foreign key does, and answers with a sentence naming the state and
+the firm. Both defences are real; the trigger is the outer one.
+
+## The compliance calendar — generated, never typed (T3.2)
+
+`delivery.obligation_template` + `_exception` + `obligation_state` (0052) and
+`delivery.obligation_instance` (0053).
+
+**AN OBLIGATION IS NOT A TASK, and everything here follows from that.** The obligation is what
+the LAW requires of the ENTITY — Kaveri Foods must file GSTR-3B for August by 20 September. The
+task (`delivery.work_item`) is what somebody at the firm must DO about it. Merge them and the
+calendar can never be GENERATED, only typed, which is the exact Excel this product replaces.
+Nobody adds a row: it falls out of which entities exist, what each bought, and what the law says
+about that combination. **There is no create endpoint for an instance and there must not be one**
+— if a human could add a calendar entry, the calendar could drift from the statute.
+
+**These are their own tables and NOT a config-registry kind — the deviation `CLAUDE.md` requires
+to be written down with its reasoning.** The registry is prescribed for a template or a rule
+pack, and it was weighed and set aside for three reasons: the generator reads EVERY rule in one
+set-based pass while the registry answers one key at a time; an exception needs a real foreign
+key to the rule it modifies, which inside a jsonb body is a string somebody has to keep true; and
+this shape is proven — it ran in the approved demo and produced a real calendar.
+
+**The cost is stated rather than discovered later, and paid.** The registry would have supplied
+versioning, publishing, freezing and pinning for free, so this table supplies them itself:
+`rule_pack` is part of the rule's IDENTITY (the unique key is `(tenant, jurisdiction, name,
+rule_pack)`), which makes a revision a NEW ROW and never an edit; `supersedes_id` is the chain;
+retiring is `is_active` and the old row stays readable forever; and an instance PINS its template.
+Without all four, *"why was this due then?"* — the one question an audit actually asks — is
+unanswerable. The same shape of deviation `staff_grade` makes, and recorded here for the same
+reason.
+
+**`due_rule` IS NULLABLE, and that is the most consequential decision in the module.** The firm's
+own applicability sheet holds 55 obligations; ten of them are formulas. The rest are not, and the
+vagueness is CORRECT: *"within a statutory period after the AGM"* depends on an AGM date,
+*"State-specific"* is a different day in Maharashtra and Karnataka, *"within 7 working days"*
+needs a holiday calendar nothing here holds. The demo converted what it could and handed the rest
+back BY NAME in a log. **A log is not an answer**, so all of them are ROWS: the computable ones
+carry a due rule and generate, the rest carry a mandatory `unresolved_reason` in the firm's own
+terms and say on the rules screen exactly what they still need.
+
+`domain/obligation/rulepack-in.ts` therefore follows one rule without exception: **a due date is
+encoded ONLY where the firm's own sheet states one.** Not where it is publicly known, not where
+you remember it. MSME-1 is genuinely due 31 October and 30 April and the pack does not say so.
+`tests/obligation/rulepack.test.ts` PINS the generating count at ten and names all ten, so
+"helpfully" dating an undated obligation is a red build rather than a wrong date reaching a
+client. A fake VALUE is survivable; a fake RULE is not.
+
+**The date arithmetic is pure and has no `Date` in it.** `domain/obligation/model.ts` works in
+`YYYY-MM-DD` strings: every date it produces is a statutory deadline somebody is held to, so it
+has to be exhaustively testable, and a function that reaches for `new Date()` cannot be. The
+fiscal year is on the RULE (4 for India), because an Indian quarter runs Apr–Jun and computing
+quarters on the calendar is the mistake that looks right three times out of four.
+
+**The exception is a ROW against the rule, keyed on the month the PERIOD ends in** — not the month
+it is due, because the due month is exactly what the exception changes. March's TDS is due 30
+April while the other eleven months are the 7th; a template holds one formula, and reading only
+the normal half gives a rule that is right eleven months a year and quietly wrong every April.
+That is the worst failure available: nobody re-reads a date that looks right, and the cost lands
+on the client as a penalty. Withdrawing an exception is `is_active = false`, never a DELETE —
+`bib_app` holds no DELETE grant on any of the four tables.
+
+**Two dates, and the difference is the point.** `statutory_due_on` is the law's and missing it is
+the client's money; `internal_target_on` is T–X, the firm's own, and it is the actionable one —
+finding out you are late on the day you are late is useless. Every screen orders by the internal
+target. **A new lead time RE-DATES what is already generated** (`redateUnstarted`), because the
+sweep materialises a year ahead and generation is idempotent: without it a partner sets T–X and
+watches nothing happen for twelve months. It moves only rows nobody has started, and never the
+statutory date.
+
+**States are ROWS and NOTHING compares a `code`** — 0050's argument, and the demo got this half
+wrong in a way worth naming: its sweep looked states up by the literal strings `'pending'` and
+`'in_progress'`, which hardcodes the very names the firm was promised it could change. Meaning
+lives in `is_initial` / `is_terminal` / `needs_decision`; "can this still be missed" is derived
+from the last two rather than stored as a third.
+
+### Closing a filing — and why "terminal" is the wrong rule on BOTH sides (0054)
+
+T3.2 shipped with `filed_on` READ in four places and WRITTEN in none, so every row said "Pending"
+forever and `obligation.filed` was a registered verb with no writer. The obvious close — *the work
+item reached a terminal state, so the obligation is filed* — is **ambiguous in both halves**, and
+each resolves the wrong way if left alone:
+
+- **0050 seeds TWO terminal work item states, `completed` AND `cancelled`.** Tasks are cancelled
+  for ordinary reasons: the client left, the entity was deregistered, it was raised twice. Reading
+  `is_terminal` alone records that a statutory return was FILED because somebody tidied their
+  board — not a missing feature but a FALSE STATEMENT about a filing, and worse than the "Pending
+  forever" it replaces.
+- **0052 seeds TWO terminal obligation states, `filed` AND `resolved`.** `resolved` is T3.3's —
+  the end of a deadline already missed, which a partner chose. A filing nobody had to decide
+  anything about does not belong in the decision queue.
+
+So each side carries ONE flag: **`work_item_state.is_success`** ("the work was DONE, not
+abandoned") and **`obligation_state.is_filed`** ("a finished filing lands here"). Flags rather than
+codes, for this module's own reason — a firm renaming Filed to "Submitted" must not switch the
+mechanism off. `filedState()` mirrors `initialState()`, a partial unique index caps `is_filed` at
+one per firm, and a CHECK refuses either flag on a state that is not terminal. **Both default to
+FALSE**, so a firm's own new terminal state leaves an obligation OPEN and visible rather than
+recording a filing that never happened — the safe direction, chosen.
+
+**`ObligationFiling.reconcileFiling` is the only writer, and it RECONCILES rather than transitions.**
+It takes the current answer to "is this discharged" — terminal AND successful — and makes the
+obligation agree, and `moveToState` calls it on every move. Idempotent by construction (the guard
+is the repository's `WHERE filed_on IS NULL`, so a double-click writes one event), reopening is the
+same call with a different answer rather than a second path, and there is no order to get wrong.
+**A reopened or cancelled task UN-FILES**, because `moveToState` already clears `completedAt` on the
+way back, and because filed is terminal — `canStillBeMissed` would be false forever and T3.3 could
+never flag it. Un-filing lets the missed sweep self-correct, and the withdrawal is its own verb
+(`obligation.filing_reversed`), never a quiet UPDATE.
+
+**The two use cases now name each other, and the cycle is broken in `setup/`.** The calendar raises
+a task (`WorkItemRaiser`); finishing that task files the obligation (`ObligationFiling`). Neither
+file imports the other — each declares the one method it needs and the composition root satisfies
+both with a closure, in the API and the worker alike. **Both processes must have it**, or a filing
+would close when a person ticked a task and not when the worker did.
+
+**`work_item.completed` fires only for a SUCCESSFUL terminal state.** It fired for any terminal one
+until 0054, so cancellations counted as work the firm finished — and the verb's own description is
+*"what did we finish last month"*. `work_item.state_changed` carries `isSuccess`, so "what did we
+abandon" stays answerable without a verb of its own.
+
+**`filed_on` is the UTC day, DECIDED rather than defaulted (Shrestha, 2026-08-30).** East of
+Greenwich a filing made after midnight local records the previous day, which is exactly the
+on-time/late boundary. It is survivable only because `work_item.completed_at` keeps the instant, so
+`filed_on` is a projection and the truth is not lost. The general fix is still open and still shared
+with `invoice`, `dunning` and `lead`.
+
+**A boolean query parameter is NEVER `z.coerce.boolean()`.** Coercion is `Boolean(value)`, a query
+string carries TEXT, and `Boolean("false")` is `true` — so `?includeSettled=false` meant "include
+them" and `/calendar`'s checkbox was inert whatever the screen said. Every layer behaved: it parsed,
+answered 200, and ran the wrong branch, which is indistinguishable from the right one until a row is
+actually terminal. Use `z.enum(["true","false"]).transform((v) => v === "true")`, which also puts
+the accepted values in the spec. `tests/api/query-booleans.test.ts` holds the build red on the whole
+class; JSON bodies are unaffected and `z.coerce.number()` is fine.
+
+**The obligation states still have NO screen** — unlike the work board's `/admin/work-vocabulary`,
+which gained the `is_success` tick. A firm cannot yet rename its compliance states or move these
+flags, which is the standing directive unmet for this one vocabulary; it belongs with T4.3's rules
+page. Until then, no error message may tell a partner to change them on a screen, because there
+isn't one.
+
+**Generation scope is DECIDED: only where an engagement exists.** `engagement_id` stays nullable
+so the compliance-engine reading (generate for every entity; every uncovered obligation is a sales
+lead) is a config change rather than a migration. The firm has not been asked which it wants, and
+this schema does not answer it for them. **The floor matters as much as the scope:** generation
+reaches ninety days back so a client who signed last month gets the period already under way, and
+`CalendarSubject.effectiveFrom` stops that same reach-back inventing missed deadlines — onboard
+four hundred clients without it and a partner's decision queue fills with thousands of deadlines
+nobody ever had.
+
+**THRESHOLDS ARE STILL NOT BUILT, AND THAT IS NOW A DECISION.** The firm's commonest applicability
+rule is a threshold, and `StepOperator` still has no `gte`/`lte` for the same reason it never did:
+nothing in this schema stores a turnover, an employee count or a paid-up capital. Under the decided
+scope it does not need to — *"does Tax Audit apply?"* is answered by the client having BOUGHT it.
+The threshold layer belongs with the compliance-engine reading, and every seeded rule carries the
+sheet's own threshold text in `applicabilityNote` so the specification is ready the day that
+question is answered.
+
+### The silent hole, and why the cure is a derivation rather than a setting
+
+A recurring engagement now gets one task PER PERIOD from the calendar, so `spawnForEngagements`
+must not also raise its own — that row is due `effective_from + slaDays`, can never be completed
+while the engagement runs a year, and is indistinguishable from a real task. Four hundred clients
+times three recurring services is twelve hundred of them.
+
+The obvious mechanism is a flag on the service. **A flag can be WRONG, and being wrong means
+SILENCE**: no engagement task and no calendar rows either. So the discriminator is DERIVED —
+`ObligationCoverage` asks the GENERATOR'S OWN PREDICATE (an active rule, with a formula, not
+event-driven, naming this engagement's service and the entity's country). **The failure then
+inverts: a firm with no rules is not covered, so it gets exactly the behaviour it had before this
+existed, and the board can never end up empty.**
+
+`GET /api/v1/calendar/coverage` is the other half: every live engagement the calendar produced
+nothing for, WITH A REASON, and **none of the five reasons is an error** — the commonest,
+`no_rule_names_this_service`, is the ordinary state of advisory work. The worker logs the count
+every sweep and `worker:once` prints it whether or not anything generated. An empty calendar with
+nothing said about it is indistinguishable from broken software, and that is the failure this
+whole mechanism exists to prevent.
+
+### What running it found, and what none of the tests did
+
+- **The batch insert never executed.** postgres.js infers a JSON type for a string parameter and
+  encodes it AGAIN, so `${json}::jsonb` produced a jsonb STRING and every sweep died with *"cannot
+  call jsonb_to_recordset on a non-array"*. `::text::jsonb` is the fix. Unit tests use a fake
+  repository and the integration test inserted rows by hand, so **neither ever ran the statement**.
+  If you add a repository method with non-trivial SQL, run it.
+- **The coverage reason was wrong on its commonest case** — it required a rule to name the
+  engagement's service, and every rule in the shipped pack names none (a pack cannot know a firm's
+  catalogue keys). Fixed to the generator's predicate, and `entity_not_registered` added, which was
+  the real answer.
+- **Two id-only foreign keys**, caught by `tenant-keys.integration.test.ts` and not by review.
+  `service_entry_id` and `supersedes_id` both carry the tenant now.
+
+`/calendar` and `/admin/obligation-rules` are the screens, and the whole chain was walked in the
+browser — load the pack, register a company, sweep, set a lead time, sweep, and find the GSTR-3B
+task on the board at High priority, from the law, with nobody setting it.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
-`scheduler`, the `orchestrator` and `invoicing` are built.
-Next: T2.8's agent runtime, T2.9's verification queue, T3.6's documents and T3.7's dashboards.
+`scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
+Next: T3.3's missed-deadline state (which the calendar's `needs_decision` flag is already waiting
+for, and which 0054's un-filing rule is what keeps honest) and T3.7's dashboards.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

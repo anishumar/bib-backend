@@ -78,6 +78,12 @@ const MembershipSchema = z
         "Null is ordinary: a portal contact has no grade, and neither does somebody whose " +
         "designation the firm has never ranked. The roster read returns the rung itself.",
     }),
+    reportsToUserId: z.string().uuid().nullable().openapi({
+      description:
+        "Who this person reports to (T2.9). Read by one thing — a `reporting_line` " +
+        "verification policy deciding who may check their work. Null for a partner, for " +
+        "every portal contact, and for everybody at a firm that has not filled it in.",
+    }),
     isActive: z.boolean(),
   })
   .openapi("Membership");
@@ -181,6 +187,21 @@ const ChangeMemberGradeRequest = z
     }),
   })
   .openapi("ChangeMemberGradeRequest");
+
+// Nullable rather than optional, for `ChangeMemberGradeRequest`'s reason: null
+// means "this person reports to nobody", which is a decision a partner's row
+// legitimately records. An omitted key would mean the same thing as that
+// decision, so a screen bug that dropped the field would silently flatten the
+// firm's reporting line.
+const SetReportsToRequest = z
+  .object({
+    reportsToUserId: z.string().uuid().nullable().openapi({
+      description:
+        "The user id of their manager, or null for nobody. Must be an active STAFF member " +
+        "of this firm — the foreign key cannot say so, because user accounts are global.",
+    }),
+  })
+  .openapi("SetReportsToRequest");
 
 const MemberParam = z.object({ membershipId: z.string().uuid() });
 
@@ -366,6 +387,36 @@ const changeMemberGradeRoute = createRoute({
   },
 });
 
+const setReportsToRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/members/{membershipId}/reports-to",
+  tags: ["tenancy"],
+  summary: "Say who a member reports to, or clear it",
+  description:
+    "The FOURTH axis, and it grants nothing. One thing reads it: a `reporting_line` " +
+    "verification policy deciding who may check this person's work. " +
+    "Two refusals no database can make are made here — a manager who is not an active " +
+    "member of this firm (user accounts are global, so the foreign key would accept a " +
+    "stranger), and a loop, which would leave everybody in it with no eligible checker and " +
+    "would fail silently. " +
+    "NOT effective-dated: nothing records when a reporting line started, so this answers " +
+    "'now' and the audit trail answers 'when did it change'.",
+  request: {
+    params: MemberParam,
+    body: { content: { "application/json": { schema: SetReportsToRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Set. Idempotent — naming the manager they already have records nothing.",
+      content: { "application/json": { schema: MembershipSchema } },
+    },
+    400: errorResponse("Not a colleague, or the reporting line would loop"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such membership at this firm"),
+  },
+});
+
 // ── Who binds the firm ──────────────────────────────────────────────────────
 //
 // One signatory for the whole firm, whichever of its entities issues the
@@ -525,6 +576,18 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     return c.json(membership, 200);
   });
 
+  app.openapi(setReportsToRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { membershipId } = c.req.valid("param");
+    const { reportsToUserId } = c.req.valid("json");
+    const membership = await deps.service.setReportsTo(
+      { tenantId: s.tenantId, membershipId, reportsToUserId },
+      s.actor,
+    );
+    return c.json(membership, 200);
+  });
+
   app.openapi(firmSignatoryRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -571,6 +634,7 @@ export const tenancyRoutes = {
   changeMemberRole: changeMemberRoleRoute,
   setMemberActive: setMemberActiveRoute,
   changeMemberGrade: changeMemberGradeRoute,
+  setReportsTo: setReportsToRoute,
   firmSignatory: firmSignatoryRoute,
   setFirmSignatory: setFirmSignatoryRoute,
 } as const;

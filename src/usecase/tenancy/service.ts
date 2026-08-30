@@ -35,9 +35,17 @@ import {
 // staff-grade domain owns what a rung is and what it means to have retired one,
 // so the vocabulary for refusing comes from there.
 import { GradeNotAssignable, GradeNotFound } from "../../domain/staffgrade/errors";
+// The reporting line exists for exactly one consumer — a `reporting_line`
+// verification policy — so its rule and its refusals are owned there. Reaching
+// ACROSS the domain is what the wall permits; reaching out of it is not.
+import { walkReportingLine } from "../../domain/verification/model";
+import { ReportsToCycle, ReportsToNotAColleague } from "../../domain/verification/errors";
 import type {
   GradeDirectory,
   GradeLadderSeeder,
+  WorkVocabularySeeder,
+  ObligationVocabularySeeder,
+  ObligationRuleSeeder,
   MemberGrade,
   IssuingEntitySeeder,
   MemberRecord,
@@ -62,6 +70,9 @@ export interface Deps {
   readonly roleDirectory: RoleDirectory;
   /** A new firm's seniority ladder, written as its own rows (G3.3). */
   readonly gradeSeeder: GradeLadderSeeder;
+  readonly workVocabularySeeder: WorkVocabularySeeder;
+  readonly obligationVocabularySeeder: ObligationVocabularySeeder;
+  readonly obligationRuleSeeder: ObligationRuleSeeder;
   /** What this firm's rungs ARE, for the two things a grade assignment must
    *  refuse: a grade this firm never defined, and one it has retired. */
   readonly gradeDirectory: GradeDirectory;
@@ -108,6 +119,14 @@ export interface ChangeMemberGradeInput {
   readonly membershipId: string;
   /** `null` takes them off the ladder — a real answer, not an omission. */
   readonly gradeId: string | null;
+}
+
+export interface SetReportsToInput {
+  readonly tenantId: string;
+  readonly membershipId: string;
+  /** `null` clears it — a partner reports to nobody, and so does everybody at a
+   *  firm that has not filled this in. */
+  readonly reportsToUserId: string | null;
 }
 
 export interface SetFirmSignatoryInput {
@@ -213,6 +232,25 @@ export class TenancyService {
     // the screen. The reverse — a ladder nobody can reach because gate 3
     // refuses every request — cannot be fixed from inside the product.
     await this.deps.gradeSeeder.seedDefaultGrades(tenant.id, actor);
+
+    // And its own words for work — the states a task moves through and the
+    // priorities it can carry (T3.1). Rows rather than an enum, because the
+    // vocabulary is the firm's: renaming "Waiting Internal" or deciding that
+    // statutory work is Critical must be an UPDATE on a screen, not a deploy.
+    // A firm with none of them cannot create a single work item, so it belongs
+    // at creation for the two seeders above's reason.
+    //
+    // Last of the three, and the ordering is the same argument again: a firm
+    // with roles, a ladder and no work vocabulary can be administered and can
+    // fix it from `/admin/work-vocabulary`. The reverse cannot be fixed from
+    // inside the product at all.
+    await this.deps.workVocabularySeeder.seedDefaultVocabulary(tenant.id, actor);
+
+    // The compliance calendar's two halves (T3.2), in this order: the states a
+    // filing can be in, then the rules that produce filings. A rule pack loaded
+    // before there is a state to generate into would be rules that cannot run.
+    await this.deps.obligationVocabularySeeder.seedDefaultStates(tenant.id, actor);
+    await this.deps.obligationRuleSeeder.seedIndiaRulePack(tenant.id, actor);
     // And its own entity, with the fallback rule naming it as the issuer of the
     // firm's documents — for the same reason, one step further on. Both
     // documents carry `issuing_entity_party_id NOT NULL` (0021), so a firm with
@@ -588,6 +626,74 @@ export class TenancyService {
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
+
+  /**
+   * Say who somebody reports to, or clear it (T2.9).
+   *
+   * A FOURTH axis, and like the grade it grants nothing — one thing reads it, a
+   * `reporting_line` verification policy deciding who may check this person's
+   * work. It runs no `requireAdministratorSurvives` for the same reason the
+   * grade does not: clearing a reporting line locks nobody out, it merely means
+   * a firm on that rule has one fewer eligible checker, which is a state it can
+   * see on the queue and fix.
+   *
+   * Two things ARE refused, and both are refusals a database cannot make:
+   *
+   *   A MANAGER WHO IS NOT A COLLEAGUE. The foreign key points at
+   *   `tenancy.user_account`, which is GLOBAL — identity is above tenant
+   *   (ADR-02) — so the database will happily accept a stranger's id. Checked
+   *   against this firm's own active staff instead.
+   *
+   *   A LOOP. `a -> b -> a` leaves nobody in it with a manager who could check
+   *   their work, and it is silent: the queue simply never offers anybody. The
+   *   database refuses only the one-person case (`membership_reports_to_is_not_self`),
+   *   because a CHECK sees one row.
+   *
+   * Idempotent: setting the manager somebody already has records nothing.
+   */
+  async setReportsTo(input: SetReportsToInput, actor: Actor): Promise<Membership> {
+    const membership = await this.memberOrThrow(input.tenantId, input.membershipId);
+    if (membership.reportsToUserId === input.reportsToUserId) return membership;
+
+    if (input.reportsToUserId !== null) {
+      const roster = await this.deps.memberships.listMembers(input.tenantId);
+      const manager = roster.find(
+        (m) =>
+          m.membership.userId === input.reportsToUserId &&
+          m.membership.audience === "STAFF" &&
+          m.membership.isActive,
+      );
+      // A client-portal contact is deliberately not a candidate. Putting one in
+      // the firm's reporting line would make a client eligible to check the
+      // firm's work under a `reporting_line` policy.
+      if (!manager) throw new ReportsToNotAColleague(input.reportsToUserId);
+
+      const lines = await this.deps.memberships.reportingLines(input.tenantId);
+      const cycle = walkReportingLine(lines, membership.userId, input.reportsToUserId);
+      if (cycle !== null) throw new ReportsToCycle(cycle);
+    }
+
+    const updated = await this.deps.memberships.updateReportsTo(
+      input.tenantId,
+      membership.id,
+      input.reportsToUserId,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "membership.reports_to_changed",
+      objectId: membership.id,
+      actor,
+      // Ids, never an email address — the address is personal data and this log
+      // cannot be erased. Both sides, because "when did Priya move under Anand"
+      // is the question this row is asked later.
+      payload: {
+        userId: membership.userId,
+        from: membership.reportsToUserId,
+        to: input.reportsToUserId,
+      },
+    });
+    return updated;
+  }
 
   private async memberOrThrow(tenantId: string, membershipId: string): Promise<Membership> {
     const membership = await this.deps.memberships.findById(tenantId, membershipId);

@@ -28,6 +28,21 @@ import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypt
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
+import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
+import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
+import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
+import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
+import {
+  PostgresObligationExceptionRepository,
+  PostgresObligationStateRepository,
+  PostgresObligationTemplateRepository,
+} from "../infrastructure/postgres/obligation-rule-repository";
+import {
+  PostgresCalendarSource,
+  PostgresObligationInstanceRepository,
+} from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
+import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import {
   PostgresServiceAxisRepository,
   PostgresWorkSplitSetting,
@@ -71,11 +86,16 @@ import { AuthzService } from "../usecase/authz/service";
 import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
+import { ClientAssignmentService } from "../usecase/clientassignment/service";
+import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
+import { ObligationService } from "../usecase/obligation/service";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
+import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
+import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
@@ -133,6 +153,115 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // ONE adapter over `tenancy.service_axis`, serving FOUR ports: the
+  // service-axis use case's own, the config registry's `AxisDirectory`, G3.2's
+  // `AssignableAxisDirectory` and T3.1's `WorkAxisDirectory`. One adapter
+  // because it is one table — two would eventually disagree about which Depts a
+  // firm has, and the registry would accept a code the picker never offered.
+  //
+  // Constructed HERE, above the scheduler, because the work-item service below
+  // needs it and the scheduler needs the work-item service.
+  const serviceAxisRepository = new PostgresServiceAxisRepository(pools.app);
+
+  // ONE adapter over `core.party`, serving the party use case, the
+  // client-assignment use case and now T3.1 — each holding it as its own narrow
+  // directory. It must refuse work raised against a party that is not there or
+  // that the firm has archived, and only this adapter can say.
+  const partyRepository = new PostgresPartyRepository(pools.app);
+
+  // THE FIRM'S OWN WORDS FOR WORK (T3.1), and the work itself.
+  //
+  // Two services over one adapter, because they have two audiences and two
+  // permissions: the vocabulary is an admin screen changed rarely, the board is
+  // everybody's screen all day. `workVocabularyRepository` is shared, so a board
+  // and its admin screen can never disagree about what a state means.
+  const workVocabularyRepository = new PostgresWorkVocabularyRepository(pools.app);
+  const workVocabulary = new WorkVocabularyService({
+    vocabulary: workVocabularyRepository,
+    ids: systemIds,
+    events: ledger,
+  });
+
+  // Seven seams, and six of them are adapters something else already holds —
+  // which is the point rather than a coincidence:
+  //
+  //   · `clients`     — the party adapter. One notion of what a party is and
+  //     whether it is archived; a second would eventually disagree about
+  //     whether work may be raised against an archived client.
+  //   · `staff`       — the SAME membership adapter the lead and
+  //     client-assignment use cases hold: `tenancy.user_account` is GLOBAL, so
+  //     nothing but the roster can say a person works HERE.
+  //   · `spocs`       — G3.2's own adapter, asked ONE question: who does this
+  //     client talk to about FRC work, on this day. Two adapters over
+  //     `crm.client_assignment` would eventually disagree about what "in force"
+  //     means, and a filing would land on somebody whose handover finished last
+  //     week.
+  //   · `axes`        — a FOURTH port on the service-axis adapter, and the one
+  //     that makes T3.1's acceptance line work: a pinned service body carries
+  //     `module: "FRC"` — the CODE — so the chain from a service to a SPOC has
+  //     to pass through a lookup by code.
+  //   · `policies` /
+  //     `reviewers` /
+  //     `permissions` — the SAME three T2.9 gave the orchestrator. One answer to
+  //     "who checks whose work" at this firm, whether the work is a process step
+  //     or a task; two would drift the first time a firm changed its policy.
+  const workItems: WorkItemService = new WorkItemService({
+    items: new PostgresWorkItemRepository(pools.app),
+    approvals: new PostgresWorkItemApprovalRepository(pools.app),
+    vocabulary: workVocabularyRepository,
+    clients: partyRepository,
+    staff: memberships,
+    spocs: new PostgresClientAssignmentRepository(pools.app),
+    axes: serviceAxisRepository,
+    policies: configRepository,
+    reviewers: memberships,
+    permissions: configRepository,
+    engagements: new PostgresEngagementWorkSource(pools.app),
+    // T3.2. Where a compliance rule already covers an engagement, the CALENDAR
+    // puts a task on somebody's desk once per period and this must not add a
+    // thirteenth that can never be completed. Derived rather than configured —
+    // see `ObligationCoverage` — so a firm with no rules keeps exactly the
+    // behaviour it had before the calendar existed.
+    obligations: new PostgresObligationCoverage(pools.app),
+    // THE RETURN LEG, AND THE ONE CYCLE IN THIS FILE — broken here, which is
+    // where a cycle belongs. The calendar raises a task (`workItems` below is
+    // passed to it as `WorkItemRaiser`); finishing that task files the
+    // obligation. Two use cases naming each other cannot both be constructed
+    // first, so this closure defers the lookup to CALL time — by which point
+    // `obligations` has long been assigned, since nothing calls it before a
+    // request. Neither use case imports the other; only this line knows both.
+    filings: {
+      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
+        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
+    },
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // THE COMPLIANCE CALENDAR (T3.2). The API holds it for its READS and its rule
+  // writes; the SWEEP that materialises the calendar runs in the worker, over
+  // the same service, so there is one definition of what a rule produces.
+  //
+  // `workItems` is passed as the `WorkItemRaiser` port rather than as the
+  // service itself: the boundary between "what the law asks of the entity" and
+  // "what a person must do about it" is the one idea this whole module rests
+  // on, and it is visible here in the type as well as in the comments.
+  const obligationTemplates = new PostgresObligationTemplateRepository(pools.app);
+  const obligations: ObligationService = new ObligationService({
+    templates: obligationTemplates,
+    exceptions: new PostgresObligationExceptionRepository(pools.app),
+    states: new PostgresObligationStateRepository(pools.app),
+    instances: new PostgresObligationInstanceRepository(pools.app),
+    calendarSource: new PostgresCalendarSource(pools.app),
+    services: configRepository,
+    workItems,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   // The API holds the scheduler READ-ONLY: the same service the worker runs, so
   // there is one definition of what "runnable" means, but this process never
   // sweeps and never advances a job. Writing is the worker's and the
@@ -148,16 +277,18 @@ export function wire(cfg: Config, log: Logger): Wired {
     // the write side of this setting; the scheduler reads it, and neither
     // imports the other.
     splitAxis: new PostgresWorkSplitSetting(pools.app),
+    // T3.1's seam. A spawned job puts TASKS on desks, and the scheduler does not
+    // know what an assignee or a due date is — it hands the engagements it just
+    // linked to the work-item service and moves on. Wired here even though this
+    // process never sweeps, because the API and the worker construct the same
+    // service and a scheduler that behaved differently in the two would be the
+    // worst kind of bug to find.
+    workItems,
     ids: systemIds,
     clock: systemClock,
     events: ledger,
   });
 
-  // ONE adapter over `tenancy.service_axis`, serving TWO ports: the service-axis
-  // use case's own, and the config registry's `AxisDirectory`. One adapter
-  // because it is one table — two would eventually disagree about which Depts a
-  // firm has, and the registry would accept a code the picker never offered.
-  const serviceAxisRepository = new PostgresServiceAxisRepository(pools.app);
   const serviceAxes = new ServiceAxisService({
     axes: serviceAxisRepository,
     split: new PostgresWorkSplitSetting(pools.app),
@@ -180,6 +311,21 @@ export function wire(cfg: Config, log: Logger): Wired {
     templates: configRepository,
     subjects: new PostgresJobSubjectRepository(pools.app),
     agents: new NoAgentsBuiltYet(),
+    // The guardrail's two seams (T2.8). Both are wired even though nothing runs
+    // through them yet, and that is the order the board asks for — the rails
+    // exist before anything is on them, so the first real agent is a change to
+    // ONE line above and not a conversation about what it may do while somebody
+    // waits for it to ship.
+    tiers: configRepository,
+    runs: new PostgresAgentRunRepository(pools.app),
+    // T2.9's three seams. `checkers` and `permissions` are the SAME two adapters
+    // the roster and the authz guard already use — one notion of who works here
+    // and one of what a role carries, because eligibility to check somebody's
+    // work must not be able to disagree with either.
+    checks: new PostgresStepApprovalRepository(pools.app),
+    policies: configRepository,
+    checkers: memberships,
+    permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
@@ -295,6 +441,23 @@ export function wire(cfg: Config, log: Logger): Wired {
       seedDefaultGrades: (tenantId, actor) => staffGrades.seedDefaultGrades(tenantId, actor),
     },
     gradeDirectory: staffGradeRepository,
+    // And the firm's own words for work (T3.1), for the same reason again: a
+    // firm with no work-item states cannot create a single task, and telling it
+    // to configure that before it can record any work would be a worse first
+    // day than the roles problem above.
+    workVocabularySeeder: workVocabulary,
+    // And the compliance calendar's two halves (T3.2), for the same reason a
+    // third time. A firm with no obligation STATES cannot have a filing
+    // generated at all; a firm with no RULES has an empty calendar and no
+    // explanation for it, which is the exact silence this module was built to
+    // prevent. Both are idempotent, and the rule pack never overwrites a rule a
+    // partner has since confirmed.
+    obligationVocabularySeeder: {
+      seedDefaultStates: (tenantId, actor) => obligations.seedDefaultStates(tenantId, actor),
+    },
+    obligationRuleSeeder: {
+      seedIndiaRulePack: (tenantId, actor) => obligations.seedIndiaRulePack(tenantId, actor),
+    },
     ids: systemIds,
     events: ledger,
   });
@@ -361,11 +524,39 @@ export function wire(cfg: Config, log: Logger): Wired {
 
   const tenancyDeps: TenancyDeps = { service: tenancy };
 
+  // Held in a variable rather than constructed inline, because the
+  // client-assignment use case needs the same adapter as its `ClientDirectory`
+  // — it must refuse an assignment to a party that is not there or that the
+  // firm has archived, and only this adapter can say.
   const party = new PartyService({
-    parties: new PostgresPartyRepository(pools.app),
+    parties: partyRepository,
     identifiers: new PostgresIdentifierRepository(pools.app),
     relationships: new PostgresRelationshipRepository(pools.app),
     ids: systemIds,
+    events: ledger,
+  });
+
+  // WHO OWNS A CLIENT (G3.2). Four ports, and three of them are adapters that
+  // already exist for somebody else — which is the point of stating ports in
+  // each use case's own vocabulary.
+  //
+  //   · `clients`  — the party adapter. One notion of what a party is and
+  //     whether it is archived; a second would eventually disagree about
+  //     whether an archived client may be given an owner.
+  //   · `staff`    — the SAME membership adapter the lead use case holds as its
+  //     own `StaffDirectory`, and for the same reason: `tenancy.user_account` is
+  //     GLOBAL, so nothing but the roster can say the person works HERE.
+  //   · `axes`     — a THIRD port on `PostgresServiceAxisRepository`, beside the
+  //     service-axis repository and the config registry's `AxisDirectory`. One
+  //     table, one adapter: two would let a SPOC be assigned to a Dept the
+  //     picker never offered.
+  const clientAssignments = new ClientAssignmentService({
+    assignments: new PostgresClientAssignmentRepository(pools.app),
+    clients: partyRepository,
+    staff: memberships,
+    axes: serviceAxisRepository,
+    ids: systemIds,
+    clock: systemClock,
     events: ledger,
   });
 
@@ -462,6 +653,9 @@ export function wire(cfg: Config, log: Logger): Wired {
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
+        clientAssignments: { service: clientAssignments },
+        workItems: { service: workItems, vocabulary: workVocabulary },
+        obligations: { service: obligations },
         orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },

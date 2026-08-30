@@ -1,4 +1,19 @@
-// The master configuration registry (P2) — nouns + pure rules, stdlib only.
+// The master configuration registry (P2) — nouns + pure rules.
+//
+// One internal import, and it is the same argument `domain/scheduler` makes for
+// reaching across to `domain/serviceaxis`: `ConfidenceTiers` and what counts as a
+// valid confidence are one concept that `domain/agent` already owns, and
+// restating the range check here would create two notions of "valid" free to
+// drift — with the drift landing on whether a machine may file unattended. The
+// wall forbids reaching OUT of domain, not across it.
+import type { ConfidenceTiers } from "../agent/model";
+import { isConfidence, tiersAreCoherent } from "../agent/model";
+// The same argument, one kind later: what a verification rule IS, and which of
+// them read a rank, is one concept `domain/verification` already owns. Restating
+// it here would create two notions of a valid rule free to drift — with the
+// drift landing on who may sign off a statutory filing.
+import type { VerificationPolicy } from "../verification/model";
+import { VERIFICATION_RULES, isVerificationRule, rulePer } from "../verification/model";
 //
 // One spine, several KINDS. The spine is the part that is hard to get right and
 // expensive to change later: how a configured thing is versioned, published,
@@ -40,7 +55,9 @@ export type ConfigKind =
   | "policy"
   | "clause"
   | "dunning"
-  | "workflow_template";
+  | "workflow_template"
+  | "confidence_tier"
+  | "verification_policy";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -49,6 +66,8 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "clause",
   "dunning",
   "workflow_template",
+  "confidence_tier",
+  "verification_policy",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -438,6 +457,17 @@ const POLICY_FIELDS = ["maxDiscountPercent"];
  *  the honest state rather than a promise. */
 export const DISCOUNT_POLICY_KEY = "discount";
 
+/**
+ * The one `confidence_tier` entry a firm publishes (T2.8).
+ *
+ * A fixed key because there is one answer per firm today, not one per agent —
+ * there are no agents, so there is no accuracy record any per-agent number could
+ * be set from, and a threshold chosen by guessing is worse than one that does
+ * not exist. When agents exist and differ, this becomes a key per agent and
+ * nothing above it changes.
+ */
+export const CONFIDENCE_TIER_KEY = "default";
+
 function validatePolicyBody(body: Record<string, unknown>): string | null {
   const unknown = unknownFields(body, POLICY_FIELDS);
   if (unknown) return unknown;
@@ -742,7 +772,175 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateDunningBody(body);
     case "workflow_template":
       return validateWorkflowTemplateBody(body);
+    case "confidence_tier":
+      return validateConfidenceTierBody(body);
+    case "verification_policy":
+      return validateVerificationPolicyBody(body);
   }
+}
+
+const TIER_FIELDS = ["autoCommitAt", "reviewAt"];
+
+/**
+ * How sure a machine has to be before it may act unattended (T2.8).
+ *
+ * **In the registry rather than in a table, and the reason is the question it
+ * has to answer.** "Why did this commit on its own?" is asked a year later, and
+ * the only true answer is "the bar was 0.95 that day". A published version is
+ * frozen and a run PINS the one it was judged under, so that answer survives the
+ * firm raising the bar afterwards. `staff_grade` went the other way for the
+ * opposite reason: nobody asks what a rung meant last March.
+ *
+ * Two numbers and no more. A per-agent threshold is a knob nobody can fill
+ * today — there are no agents, so there is no accuracy record to set it from —
+ * and a knob set by guessing is worse than one that does not exist.
+ */
+function validateConfidenceTierBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, TIER_FIELDS);
+  if (unknown) return unknown;
+
+  const autoCommitAt = body["autoCommitAt"];
+  if (typeof autoCommitAt !== "number" || !isConfidence(autoCommitAt)) {
+    return (
+      `"autoCommitAt" must be a number between 0 and 1, got ${describe(autoCommitAt)}. A ` +
+      `machine acts unattended only STRICTLY above it, which is what makes 1 mean "never" — ` +
+      `the one edit that stops every unattended commit without a deploy.`
+    );
+  }
+
+  const reviewAt = body["reviewAt"];
+  if (typeof reviewAt !== "number" || !isConfidence(reviewAt)) {
+    return `"reviewAt" must be a number between 0 and 1, got ${describe(reviewAt)}`;
+  }
+
+  if (!tiersAreCoherent({ autoCommitAt, reviewAt })) {
+    return (
+      `"reviewAt" (${String(reviewAt)}) is above "autoCommitAt" (${String(autoCommitAt)}), ` +
+      `which describes no possible routing. Equal is allowed and means the machine either ` +
+      `commits or escalates, with nothing merely proposed.`
+    );
+  }
+  return null;
+}
+
+/** Read a published `confidence_tier` body back. Null when the body does not
+ *  parse, which the caller reads as "the firm has published nothing usable" and
+ *  therefore falls back to asking a person — never to a threshold this code
+ *  invented. */
+export function readConfidenceTierBody(body: Record<string, unknown>): ConfidenceTiers | null {
+  if (validateConfidenceTierBody(body) !== null) return null;
+  const autoCommitAt = body["autoCommitAt"];
+  const reviewAt = body["reviewAt"];
+  if (typeof autoCommitAt !== "number" || typeof reviewAt !== "number") return null;
+  return { autoCommitAt, reviewAt };
+}
+
+const VERIFICATION_POLICY_FIELDS = ["label", "rule", "minGradeRank", "minGradeCode"];
+
+/**
+ * Who may check somebody else's work (T2.9) — the registry's eighth kind.
+ *
+ * **A kind rather than a column on the tenant, and the reason is the question
+ * it has to answer.** "Who was allowed to approve this filing in March?" is
+ * asked in an audit, and the only true answer is the rule that was in force
+ * that March. A published version is frozen and an approval PINS the version it
+ * was opened under, so raising the bar in April restates nothing.
+ *
+ * **Several per firm, not one.** SQC 1 requires an engagement quality control
+ * reviewer to be both suitably qualified AND independent of the engagement
+ * team, while an ordinary manager review is precisely the opposite — your own
+ * manager, who is on your engagement. Those are two rules inside one process,
+ * so a workflow STEP names the policy that governs it and a firm publishes as
+ * many as it has kinds of review. `confidence_tier` went the other way, with a
+ * fixed key, because there is genuinely one answer per firm there.
+ *
+ * `minGradeRank` is the RANK, resolved when the policy is written and stored as
+ * the number — the opposite of what a `service` body does with an axis code,
+ * for a reason that only applies here. A stored code would be re-resolved
+ * against today's ladder on every read, and would answer the March question
+ * with April's row, defeating the freeze this kind exists for. `minGradeCode`
+ * rides along for display and nothing compares it.
+ */
+function validateVerificationPolicyBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, VERIFICATION_POLICY_FIELDS);
+  if (unknown) return unknown;
+
+  const label = body["label"];
+  if (typeof label !== "string" || label.trim() === "") {
+    return `"label" must be a non-empty string — what a person reading the step sees, like "Manager review"`;
+  }
+
+  const rule = body["rule"];
+  if (typeof rule !== "string" || !isVerificationRule(rule)) {
+    return (
+      `"rule" must be one of ${VERIFICATION_RULES.join(", ")}. "rank_threshold" is the firm's ` +
+      `stated rule ("Manager or above is fine"); "reporting_line" is the tighter reading ` +
+      `("manager means engagement manager") and stalls when that person is away; ` +
+      `"reporting_line_or_rank" is both. Got ${describe(rule)}`
+    );
+  }
+
+  const { usesRank } = rulePer(rule);
+  const minGradeRank = body["minGradeRank"];
+  const minGradeCode = body["minGradeCode"];
+
+  if (usesRank) {
+    if (typeof minGradeRank !== "number" || !Number.isInteger(minGradeRank) || minGradeRank < 1) {
+      return (
+        `"minGradeRank" must be a whole number above zero — the rank of the lowest grade that ` +
+        `may check, taken from the firm's own ladder. Rule ${JSON.stringify(rule)} tests it. ` +
+        `Got ${describe(minGradeRank)}`
+      );
+    }
+    if (typeof minGradeCode !== "string" || minGradeCode.trim() === "") {
+      return (
+        `"minGradeCode" must name the grade "minGradeRank" came from, so a screen can say ` +
+        `"Manager" rather than "rank 7". It is never compared — the rank is`
+      );
+    }
+    return null;
+  }
+
+  // `reporting_line` tests no rank at all, so carrying one would be a knob that
+  // looks live and is not — the shape this codebase keeps catching.
+  if (minGradeRank !== null && minGradeRank !== undefined) {
+    return (
+      `rule "reporting_line" checks only who the maker reports to, so it must not carry a ` +
+      `"minGradeRank" — a threshold nothing reads is a setting that looks live. Use ` +
+      `"reporting_line_or_rank" to have both.`
+    );
+  }
+  if (minGradeCode !== null && minGradeCode !== undefined) {
+    return `rule "reporting_line" tests no grade, so "minGradeCode" must be null`;
+  }
+  return null;
+}
+
+/**
+ * Read a published `verification_policy` body back.
+ *
+ * Null when the body does not parse, and the caller reads that as "the firm has
+ * published no usable rule for this step" — which falls back to maker != checker
+ * alone, never to a threshold this code invented. Same contract as
+ * `readConfidenceTierBody`, and for the same reason.
+ */
+export function readVerificationPolicyBody(
+  body: Record<string, unknown>,
+): VerificationPolicy | null {
+  if (validateVerificationPolicyBody(body) !== null) return null;
+  const label = body["label"];
+  const rule = body["rule"];
+  if (typeof label !== "string" || typeof rule !== "string" || !isVerificationRule(rule)) {
+    return null;
+  }
+  const minGradeRank = body["minGradeRank"];
+  const minGradeCode = body["minGradeCode"];
+  return {
+    label,
+    rule,
+    minGradeRank: typeof minGradeRank === "number" ? minGradeRank : null,
+    minGradeCode: typeof minGradeCode === "string" ? minGradeCode : null,
+  };
 }
 
 const ROLE_FIELDS = ["label", "permissions"];
@@ -1383,19 +1581,72 @@ export function isStepFact(v: string): v is StepFact {
 }
 
 /**
- * When a step applies at all.
+ * How a condition compares its fact.
  *
- * Equality only, and a `null` condition means always. `equals` is compared
- * exactly against the resolved fact, which is why both facts are already
- * normalised where they are stored.
+ * A CLOSED SET, for `StepFact`'s reason: a little expression language is a
+ * vocabulary nobody chose, no partner can write and no test can cover.
  *
- * A fact the job cannot resolve does NOT silently skip the step — see
- * `usecase/orchestrator`. Skipping on an unknown is how a review step quietly
- * stops happening.
+ * **All four operate on a STRING fact, because both facts this engine can
+ * resolve are strings.** There is deliberately no `gte` / `lte` here yet, and
+ * that is not an oversight — it is the same rule this codebase keeps being
+ * caught by. The firm's own compliance list (2026-08-30) shows its single most
+ * common driver is a THRESHOLD — *"turnover > ₹1 Cr"*, *"AATO ≥ ₹5 Cr"* — but
+ * nothing in this schema stores a turnover, an employee count or a paid-up
+ * capital. A `gte` offered today would sit in a picker beside `jurisdiction`,
+ * compare a string, and be a control that looks live and is inert.
+ *
+ * They arrive with the first NUMERIC fact, which arrives with the data, which
+ * is T3.2's `obligation_template`. **Adding an operator later is backward
+ * compatible** — a frozen body naming `equals` still reads. Changing the SHAPE
+ * later would not have been, which is why the shape moved now and the operators
+ * did not.
+ */
+export type StepOperator = "equals" | "not_equals" | "in" | "not_in";
+
+export const STEP_OPERATORS: readonly StepOperator[] = [
+  "equals",
+  "not_equals",
+  "in",
+  "not_in",
+];
+
+export function isStepOperator(v: string): v is StepOperator {
+  return (STEP_OPERATORS as readonly string[]).includes(v);
+}
+
+/** Whether an operator compares against a LIST rather than a single value. The
+ *  one structural difference between them, and the validator and the screen
+ *  both ask it rather than restating the membership. */
+export function operatorTakesList(op: StepOperator): boolean {
+  return op === "in" || op === "not_in";
+}
+
+/**
+ * When a step applies at all. `null` means always.
+ *
+ * The value is compared exactly against the resolved fact, which is why both
+ * facts are already normalised where they are stored.
+ *
+ * **A fact the job cannot resolve does NOT skip the step, under ANY operator** —
+ * see `usecase/orchestrator`. That rule is easy to get subtly wrong on a
+ * negative operator, where "the fact is not X" reads as true when the fact is
+ * unknown; it is not true, it is unknown, and skipping on an unknown is how a
+ * review step quietly stops happening.
+ *
+ * ── THE LEGACY SHAPE ────────────────────────────────────────────────────────
+ *
+ * Bodies written before this operator existed carry `{ fact, equals }` and no
+ * `op`. They are read as `equals` forever, and never rewritten: a published
+ * config version is FROZEN, which is the whole point of the registry, so the
+ * old shape is not a migration to run but a shape to keep parsing. Both are
+ * accepted on the way in; only the new one is written.
  */
 export interface StepCondition {
   readonly fact: StepFact;
-  readonly equals: string;
+  readonly op: StepOperator;
+  /** A single value for `equals` / `not_equals`; a non-empty list for `in` /
+   *  `not_in`. `operatorTakesList` is the one place that mapping lives. */
+  readonly value: string | readonly string[];
 }
 
 export interface WorkflowStep {
@@ -1416,6 +1667,21 @@ export interface WorkflowStep {
   readonly dependsOn: readonly string[];
   /** When this step applies at all. Null means always. */
   readonly condition: StepCondition | null;
+  /**
+   * The `verification_policy` key that says WHO checks this step once it is
+   * done (T2.9). Null means nobody does — which is what every step did before
+   * this field, and is the right default: a firm that has written no review
+   * rule must not have one invented for it.
+   *
+   * The KEY and not a version id, and this is the one place in a workflow body
+   * that deliberately reads live. A job PINS its template so editing the
+   * process never rewrites work in flight; the review RULE is different, and
+   * the difference is what an audit asks about. `step_approval` pins the policy
+   * version at the moment a check is opened, which is when "who was allowed to
+   * approve this" is actually decided. Pinning it a second time on the template
+   * would freeze a firm's review rule to whenever it last edited its process.
+   */
+  readonly verificationPolicyKey: string | null;
 }
 
 export interface WorkflowTemplateBody {
@@ -1424,7 +1690,14 @@ export interface WorkflowTemplateBody {
 }
 
 const WORKFLOW_FIELDS = ["label", "steps"];
-const WORKFLOW_STEP_FIELDS = ["key", "label", "executor", "dependsOn", "condition"];
+const WORKFLOW_STEP_FIELDS = [
+  "key",
+  "label",
+  "executor",
+  "dependsOn",
+  "condition",
+  "verificationPolicyKey",
+];
 
 /** A step key is a lowercase handle, like a config key and for the same reason:
  *  it is compared, stored on every row, and read in an audit trail. */
@@ -1504,7 +1777,10 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
     if (condition !== null && condition !== undefined) {
       if (typeof condition !== "object") return `${at}.condition must be an object or null`;
       const c = condition as Record<string, unknown>;
-      const cUnknown = unknownFields(c, ["fact", "equals"]);
+      // BOTH SHAPES, and the legacy one is not deprecated — it is FROZEN into
+      // every version published before operators existed, and a published body
+      // can never be rewritten. `equals` alone means `op: "equals"` forever.
+      const cUnknown = unknownFields(c, ["fact", "op", "value", "equals"]);
       if (cUnknown) return `${at}.condition: ${cUnknown}`;
       const fact = c["fact"];
       if (typeof fact !== "string" || !isStepFact(fact)) {
@@ -1514,9 +1790,66 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
           `by adding a member here when the firm names a condition it actually uses.`
         );
       }
-      const equals = c["equals"];
-      if (typeof equals !== "string" || equals.trim() === "") {
-        return `${at}.condition.equals must be a non-empty string`;
+
+      const legacyEquals = c["equals"];
+      const hasLegacy = legacyEquals !== undefined;
+      const hasOp = c["op"] !== undefined || c["value"] !== undefined;
+      // Refused rather than silently preferring one. A body carrying both is
+      // somebody's half-finished edit, and guessing which half they meant is
+      // how a step quietly starts applying to the wrong clients.
+      if (hasLegacy && hasOp) {
+        return (
+          `${at}.condition carries both the old "equals" and the newer "op"/"value". Use one: ` +
+          `"equals" is the shape published before operators existed and still reads, and ` +
+          `{ "op": "equals", "value": … } is what to write now.`
+        );
+      }
+
+      if (hasLegacy) {
+        if (typeof legacyEquals !== "string" || legacyEquals.trim() === "") {
+          return `${at}.condition.equals must be a non-empty string`;
+        }
+      } else {
+        const op = c["op"];
+        if (typeof op !== "string" || !isStepOperator(op)) {
+          return (
+            `${at}.condition.op must be one of ${STEP_OPERATORS.join(", ")}. All four compare a ` +
+            `STRING, because both facts this engine can resolve are strings — a numeric ` +
+            `comparison arrives with the first numeric fact and not before.`
+          );
+        }
+        const value = c["value"];
+        if (operatorTakesList(op)) {
+          if (!Array.isArray(value) || value.length === 0) {
+            return (
+              `${at}.condition.value must be a non-empty array for "${op}" — ` +
+              `["IN", "AE", "SG"]. An empty list matches nothing, which is a step that never ` +
+              `runs rather than a condition somebody meant.`
+            );
+          }
+          for (const v of value) {
+            if (typeof v !== "string" || v.trim() === "") {
+              return `${at}.condition.value contains ${describe(v)}, not a non-empty string`;
+            }
+          }
+        } else if (typeof value !== "string" || value.trim() === "") {
+          return `${at}.condition.value must be a non-empty string for "${op}"`;
+        }
+      }
+    }
+
+    // Shape only. That the key names a policy this firm has actually PUBLISHED
+    // is checked at the write by the service, through a directory port — the
+    // same division `service` bodies make about an axis code, and for the same
+    // reason: this file may not reach a database, and a body frozen years ago
+    // must still parse after the policy it names has been retired.
+    const policyKey = step["verificationPolicyKey"];
+    if (policyKey !== undefined && policyKey !== null) {
+      if (typeof policyKey !== "string" || !isValidKey(policyKey)) {
+        return (
+          `${at}.verificationPolicyKey must be the key of a published verification_policy — ` +
+          `"manager_review", "eqcr" — or null for a step nobody checks. Got ${describe(policyKey)}`
+        );
       }
     }
   }
@@ -1585,6 +1918,30 @@ function findStepCycle(
 }
 
 /**
+ * One stored condition, in the shape the engine evaluates — the ONE place the
+ * legacy `{ fact, equals }` becomes `{ fact, op, value }`.
+ *
+ * Normalised HERE and nowhere else, so the orchestrator's evaluator never has
+ * to know two shapes existed. A published version is frozen, so the old shape
+ * is permanent rather than a migration waiting to happen, and every consumer
+ * reading it through this function sees one shape forever.
+ */
+function readStepCondition(raw: unknown): StepCondition | null {
+  if (raw === null || raw === undefined) return null;
+  const c = raw as Record<string, unknown>;
+  const fact = c["fact"] as StepFact;
+  const legacy = c["equals"];
+  if (typeof legacy === "string") return { fact, op: "equals", value: legacy };
+  const op = c["op"];
+  const value = c["value"];
+  if (typeof op !== "string" || !isStepOperator(op)) return null;
+  if (operatorTakesList(op)) {
+    return Array.isArray(value) ? { fact, op, value: [...(value as string[])] } : null;
+  }
+  return typeof value === "string" ? { fact, op, value } : null;
+}
+
+/**
  * A stored workflow body, read back — the ONE reader for `kind='workflow_template'`.
  *
  * Returns null rather than throwing when the body is not one, for the reason
@@ -1602,13 +1959,13 @@ export function readWorkflowTemplate(
       label: s["label"] as string,
       executor: s["executor"] as StepExecutor,
       dependsOn: [...((s["dependsOn"] as string[] | undefined) ?? [])],
-      condition:
-        s["condition"] === null || s["condition"] === undefined
-          ? null
-          : {
-              fact: (s["condition"] as Record<string, unknown>)["fact"] as StepFact,
-              equals: (s["condition"] as Record<string, unknown>)["equals"] as string,
-            },
+      condition: readStepCondition(s["condition"]),
+      // Absent reads as null, not as a parse failure. Every template published
+      // before T2.9 has no such field, and those are processes a firm is
+      // running today — a body that stopped parsing would take their jobs with
+      // it. "Nobody checks this step" is exactly what those templates meant.
+      verificationPolicyKey:
+        typeof s["verificationPolicyKey"] === "string" ? s["verificationPolicyKey"] : null,
     }),
   );
   return { label: body["label"] as string, steps };

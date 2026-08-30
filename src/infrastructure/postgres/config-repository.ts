@@ -17,9 +17,15 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
+  PublishedTiers,
   ResolvedTemplate,
   TemplateSource,
+  TierSource,
 } from "../../usecase/orchestrator/ports";
+import type {
+  ResolvedPolicy,
+  VerificationPolicySource,
+} from "../../usecase/verification/ports";
 import type { Permission } from "../../domain/authz/model";
 import type {
   ConfigEntry,
@@ -29,10 +35,13 @@ import type {
   VersionStatus,
 } from "../../domain/config/model";
 import {
+  CONFIDENCE_TIER_KEY,
   DISCOUNT_POLICY_KEY,
+  readConfidenceTierBody,
   readMaxDiscountPercent,
   readRolePermissions,
   readWorkflowTemplate,
+  readVerificationPolicyBody,
 } from "../../domain/config/model";
 import type { PermissionSource } from "../../usecase/authz/ports";
 import type { RoleDirectory } from "../../usecase/tenancy/ports";
@@ -44,6 +53,7 @@ import type {
   PublishOutcome,
   SeedRow,
 } from "../../usecase/config/ports";
+import type { ServiceDirectory as ObligationServiceDirectory } from "../../usecase/obligation/ports";
 import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
 import type { Amount } from "../../domain/money/model";
 
@@ -104,9 +114,29 @@ export class PostgresConfigRepository
     RoleDirectory,
     ServiceCatalogue,
     PolicyDirectory,
-    TemplateSource
+    TemplateSource,
+    TierSource,
+    VerificationPolicySource,
+    ObligationServiceDirectory
 {
   constructor(private readonly app: Db) {}
+
+  /**
+   * The `ServiceDirectory` port T3.2 declares — does this catalogue ENTRY exist?
+   *
+   * The entry and not a version, deliberately: a compliance rule is about what
+   * the firm SELLS, and a firm publishing v4 of 'gst-filing' has not stopped
+   * owing its clients GSTR-3B. Pinning a version on a rule would quietly stop
+   * it generating the day somebody edited the catalogue.
+   */
+  async serviceKey(tenantId: string, entryId: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ key: string }[]>`
+        SELECT key FROM config.entry WHERE id = ${entryId} AND kind = 'service'
+      `;
+      return row?.key ?? null;
+    });
+  }
 
   async define(entry: NewEntry, firstDraft: NewVersion): Promise<DefinedEntry> {
     return withTenant(this.app, entry.tenantId, async (db) => {
@@ -471,6 +501,77 @@ export class PostgresConfigRepository
     });
   }
 
+  /**
+   * The firm's confidence thresholds, as published (T2.8).
+   *
+   * One entry per firm under a fixed key, not one per agent. A per-agent
+   * threshold is a knob nobody can fill today — there are no agents, so there is
+   * no accuracy record to set one from — and a knob set by guessing is worse
+   * than one that does not exist. When agents exist and their accuracy differs,
+   * this becomes a key per agent and the port does not change.
+   *
+   * Null is the ordinary answer and NOT an error: the caller falls back to
+   * "never commit, always ask" rather than to numbers this code invented, which
+   * is why T2.8 changed no firm's behaviour on the day it shipped.
+   */
+  async publishedTiers(tenantId: string): Promise<PublishedTiers | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'confidence_tier' AND e.key = ${CONFIDENCE_TIER_KEY}
+      `;
+      if (!row) return null;
+      const tiers = readConfidenceTierBody(row.body);
+      // A published row that no longer parses reads as nothing published. The
+      // safe direction: a machine that cannot establish what it is allowed to do
+      // does not act unattended.
+      return tiers === null ? null : { tiers, versionId: row.id };
+    });
+  }
+
+  // ── VerificationPolicySource (T2.9's seam) ─────────────────────────────────
+  //
+  // The same two reads, for the same reason, one kind later. `publishedPolicy`
+  // is asked ONCE, when a check is opened; `pinnedPolicy` every time
+  // afterwards — so a firm raising its review bar this afternoon does not make
+  // this morning's open checks unapprovable by the people already looking at
+  // them, and an audit asking "who was allowed to approve this" gets the answer
+  // that was true then.
+
+  async publishedPolicy(tenantId: string, key: string): Promise<ResolvedPolicy | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ id: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'verification_policy' AND e.key = ${key}
+      `;
+      // No row is the ordinary answer for a firm that has written no review rule
+      // — or has withdrawn one a template still names. The caller opens the
+      // check anyway, under maker != checker alone: the firm said this step is
+      // reviewed, and unpublishing the rule about WHO does it is not the same as
+      // saying nobody does.
+      return row ? toResolvedPolicy(row.id, key, row.body) : null;
+    });
+  }
+
+  async pinnedPolicy(tenantId: string, versionId: string): Promise<ResolvedPolicy | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // By VERSION id with no status filter, exactly as `pinnedTemplate` does:
+      // the version a check pinned is `archived` the moment the firm publishes a
+      // newer rule, and reading it is the entire point.
+      const [row] = await db<{ id: string; key: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, e.key, v.body
+        FROM config.version v
+        JOIN config.entry e ON e.id = v.entry_id
+        WHERE v.id = ${versionId}
+      `;
+      return row ? toResolvedPolicy(row.id, row.key, row.body) : null;
+    });
+  }
+
   async pinnedTemplate(tenantId: string, versionId: string): Promise<ResolvedTemplate | null> {
     return withTenant(this.app, tenantId, async (db) => {
       // By VERSION id, with no status filter — the version a job pinned is
@@ -483,6 +584,18 @@ export class PostgresConfigRepository
       return row ? toResolvedTemplate(row.id, row.body) : null;
     });
   }
+}
+
+/** A stored body as the verification port states it. Null when the row does not
+ *  read as a policy — which for a PINNED version is a fact about the past, not
+ *  today's rule applied retroactively to a check somebody already opened. */
+function toResolvedPolicy(
+  versionId: string,
+  key: string,
+  body: Record<string, unknown>,
+): ResolvedPolicy | null {
+  const policy = readVerificationPolicyBody(body);
+  return policy === null ? null : { versionId, key, policy };
 }
 
 /** A stored body as the orchestrator's port states it. Null when the row does
@@ -503,6 +616,7 @@ function toResolvedTemplate(
       executor: s.executor,
       dependsOn: s.dependsOn,
       condition: s.condition,
+      verificationPolicyKey: s.verificationPolicyKey,
     })),
   };
 

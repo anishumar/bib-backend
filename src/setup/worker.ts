@@ -21,12 +21,34 @@ import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
 import { LedgerService } from "../usecase/ledger/service";
 import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
+import { WorkItemService } from "../usecase/workitem/service";
+import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
+import { PostgresServiceAxisRepository } from "../infrastructure/postgres/service-axis-repository";
+import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
+import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
+import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
+import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
+import {
+  PostgresObligationExceptionRepository,
+  PostgresObligationStateRepository,
+  PostgresObligationTemplateRepository,
+} from "../infrastructure/postgres/obligation-rule-repository";
+import {
+  PostgresCalendarSource,
+  PostgresObligationInstanceRepository,
+} from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
+import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
+import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
+import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
+import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
   PostgresDunningLadder,
@@ -47,6 +69,12 @@ export const DUNNING_QUEUE = "billing.dunning";
  *  again — this one is minutes rather than hours or days, because what it is
  *  waiting for is not a clock but a colleague finishing a step. */
 export const ORCHESTRATOR_QUEUE = "delivery.orchestrate";
+/** The compliance calendar (T3.2): generate a year ahead, then raise a task for
+ *  anything that has reached its internal target. Its own queue rather than a
+ *  step inside the spawn sweep, because it runs on a different cadence — once a
+ *  day rather than every few minutes — and because a firm's calendar failing
+ *  must not stop its engagements being spawned. */
+export const OBLIGATION_QUEUE = "delivery.obligations";
 
 export interface WiredWorker {
   readonly pools: Pools;
@@ -54,6 +82,7 @@ export interface WiredWorker {
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
   readonly orchestrator: OrchestratorService;
+  readonly obligations: ObligationService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -76,6 +105,77 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // they belong to the same RLS-aware adapter rather than to two.
   const jobs = new PostgresJobRepository(pools.app);
 
+  // Constructed above the scheduler, because the work-item service below needs
+  // it and the scheduler needs the work-item service. ONE adapter over the
+  // config tables in this process, exactly as in the API: the orchestrator's
+  // templates, its confidence tiers, its verification policies and the work
+  // item's review policies are all config reads, and two adapters would
+  // eventually disagree about what "published" means.
+  const configRepository = new PostgresConfigRepository(pools.app);
+  const memberships = new PostgresMembershipRepository(pools.app);
+
+  // T3.1 — THE TASKS a spawned job puts on people's desks.
+  //
+  // The worker constructs the same graph the API does, from the same adapters,
+  // because this is the process that actually calls it: the sweep spawns a job
+  // and hands the engagements it just linked to `spawnForEngagements`. A
+  // work-item service that differed between the two processes would put a
+  // filing on one desk when the cron ran it and another when a person did.
+  const workVocabularyRepository = new PostgresWorkVocabularyRepository(pools.app);
+  const workItems: WorkItemService = new WorkItemService({
+    items: new PostgresWorkItemRepository(pools.app),
+    approvals: new PostgresWorkItemApprovalRepository(pools.app),
+    vocabulary: workVocabularyRepository,
+    clients: new PostgresPartyRepository(pools.app),
+    staff: memberships,
+    // G3.2's adapter, asked the one question the acceptance line turns on: who
+    // does this client talk to about this Dept's work, on the day the work
+    // begins.
+    spocs: new PostgresClientAssignmentRepository(pools.app),
+    axes: new PostgresServiceAxisRepository(pools.app),
+    policies: configRepository,
+    reviewers: memberships,
+    permissions: configRepository,
+    engagements: new PostgresEngagementWorkSource(pools.app),
+    // T3.2, and it matters MORE here than in the API: this is the process that
+    // actually spawns engagement tasks, so a worker whose coverage check
+    // disagreed with the API's would put a duplicate on somebody's desk exactly
+    // when nobody was watching.
+    obligations: new PostgresObligationCoverage(pools.app),
+    // The return leg, wired exactly as the API wires it — see `setup/server.ts`
+    // for why the closure is what breaks the cycle. It must exist in BOTH
+    // processes for this file's own stated reason: a work-item service that
+    // behaved differently here would file an obligation when a person ticked a
+    // task and not when the worker did.
+    filings: {
+      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
+        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
+    },
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // THE COMPLIANCE CALENDAR (T3.2) — the sweep that materialises it, and the
+  // one that turns an obligation into a task at T-X.
+  //
+  // The same service the API holds, from the same adapters, for the reason
+  // stated above the work-item service: a calendar that generated differently
+  // in the worker than it reads in the browser is one nobody could debug.
+  const obligations: ObligationService = new ObligationService({
+    templates: new PostgresObligationTemplateRepository(pools.app),
+    exceptions: new PostgresObligationExceptionRepository(pools.app),
+    states: new PostgresObligationStateRepository(pools.app),
+    instances: new PostgresObligationInstanceRepository(pools.app),
+    calendarSource: new PostgresCalendarSource(pools.app),
+    services: configRepository,
+    workItems,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const scheduler = new SchedulerService({
     jobs,
     activations: jobs,
@@ -88,6 +188,11 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // the write side of this setting; the scheduler reads it, and neither
     // imports the other.
     splitAxis: new PostgresWorkSplitSetting(pools.app),
+    // T3.1. The tasks ride on the spawn because "work became owed" is ONE fact:
+    // a second sweep would leave a job showing no tasks for as long as it was
+    // behind, which is a board that says a client is being looked after when
+    // nobody has it.
+    workItems,
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -113,19 +218,39 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // purpose: the scheduler creates jobs and this one walks them, and two
   // adapters over `delivery.job` would eventually disagree about what "runnable"
   // means — which is the one thing both of them turn on.
+  // ONE config repository, in three roles: the template source, the tier source
+  // and the catalogue. Two instances would be two adapters over the same table
+  // free to disagree about what is published — and one of the two answers here
+  // decides whether a machine may act with nobody watching.
+
   const orchestrator = new OrchestratorService({
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
     // The config repository, in its `TemplateSource` role. The same class the
     // API reads roles and services through — one adapter over `config`, so what
     // is published is one answer rather than two that agree by luck.
-    templates: new PostgresConfigRepository(pools.app),
+    templates: configRepository,
     subjects: new PostgresJobSubjectRepository(pools.app),
     // There are no agents. Not a stub standing in for something missing — a
     // true statement about this product today, which is why it is not gated on
     // config the way the dev auth resolver is. Every step waits for a person,
     // and the firm's work runs. T2.8 replaces this line.
     agents: new NoAgentsBuiltYet(),
+    // The guardrail's two seams (T2.8). Both are wired even though nothing runs
+    // through them yet, and that is the order the board asks for — the rails
+    // exist before anything is on them, so the first real agent is a change to
+    // ONE line above and not a conversation about what it may do while somebody
+    // waits for it to ship.
+    tiers: configRepository,
+    runs: new PostgresAgentRunRepository(pools.app),
+    // T2.9's three seams. `checkers` and `permissions` are the SAME two adapters
+    // the roster and the authz guard already use — one notion of who works here
+    // and one of what a role carries, because eligibility to check somebody's
+    // work must not be able to disagree with either.
+    checks: new PostgresStepApprovalRepository(pools.app),
+    policies: configRepository,
+    checkers: memberships,
+    permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
@@ -140,6 +265,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     scheduler,
     dunning,
     orchestrator,
+    obligations,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -201,6 +327,37 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(ORCHESTRATOR_QUEUE, cfg.worker.orchestratorCron);
+
+      await queue.register(OBLIGATION_QUEUE, async () => {
+        const reports = await obligations.sweep();
+        for (const r of reports) {
+          if (r.failure !== undefined) {
+            // One firm's failure never stops the others — T3.1's lesson, and
+            // it is REPORTED rather than swallowed, because a firm silently
+            // skipped forever is worse than a sweep that stops.
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "obligation sweep failed");
+            continue;
+          }
+          if (r.created === 0 && r.raised === 0 && r.uncoveredEngagements === 0) continue;
+          // `uncoveredEngagements` is the number nobody would think to log and
+          // is the one that matters: engagements the firm is delivering that the
+          // calendar produced NOTHING for. Most are perfectly ordinary advisory
+          // work; some are a rule the firm has not finished writing, and the
+          // coverage screen says which is which. Logging it means the hole is
+          // visible from the worker as well as from the browser.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              created: r.created,
+              raised: r.raised,
+              uncoveredEngagements: r.uncoveredEngagements,
+              rulesWithNoSubjects: r.rulesWithNoSubjects.length,
+            },
+            "obligation sweep",
+          );
+        }
+      });
+      await queue.schedule(OBLIGATION_QUEUE, cfg.worker.obligationCron);
     },
   };
 }

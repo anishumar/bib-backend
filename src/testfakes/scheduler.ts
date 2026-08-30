@@ -18,6 +18,7 @@ import type {
   NewJob,
   QueueHandler,
   TenantDirectory,
+  WorkItemSpawner,
   WorkSplitSource,
 } from "../usecase/scheduler/ports";
 
@@ -269,3 +270,34 @@ export class FakeJobQueue implements JobQueue {
   }
 }
 
+/**
+ * The work-item seam (T3.1), recorded rather than performed.
+ *
+ * The scheduler's job here is to hand over the engagements it just linked; what
+ * the work-item service does with them is `tests/workitem/`'s business. So this
+ * records the calls and asserts nothing — but it records them PER JOB, because
+ * the thing worth testing on this side is that a second sweep hands over
+ * NOTHING, which is the same at-least-once property the job table has.
+ */
+export class FakeWorkItemSpawner implements WorkItemSpawner {
+  readonly calls: {
+    readonly tenantId: string;
+    readonly jobId: string;
+    readonly engagementIds: readonly string[];
+  }[] = [];
+
+  spawnForEngagements(
+    tenantId: string,
+    jobId: string,
+    engagementIds: readonly string[],
+  ): Promise<number> {
+    this.calls.push({ tenantId, jobId, engagementIds: [...engagementIds] });
+    return Promise.resolve(engagementIds.length);
+  }
+
+  /** Every engagement handed over across every call, flattened — what a test
+   *  asserts on when it wants "and nothing was handed over twice". */
+  get handedOver(): readonly string[] {
+    return this.calls.flatMap((c) => c.engagementIds);
+  }
+}

@@ -49,18 +49,28 @@ import {
 } from "../../src/testfakes/serviceaxis";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
 import {
+  FakeAgentRunRepo,
   FakeAgentRuntime,
+  FakeTierSource,
   FakeJobStepRepo,
   FakeJobSubjectSource,
   FakeTemplateSource,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
+import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
+import {
+  FakeAssignableAxes,
+  FakeAssignmentStaff,
+  FakeClientAssignmentRepo,
+  FakeClientDirectory,
+} from "../../src/testfakes/clientassignment";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -78,6 +88,12 @@ import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
+import {
+  FakeCheckerDirectory,
+  FakeStepApprovalRepo,
+  FakeVerificationPolicySource,
+  FakeWorkPermissions,
+} from "../../src/testfakes/verification";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import {
@@ -88,6 +104,33 @@ import {
   FakeSessionRepo,
   FakeTokenFactory,
 } from "../../src/testfakes/identity";
+import {
+  FakeEngagementWork,
+  FakeObligationCoverage,
+  FakeObligationFiling,
+  FakeReviewPermissions,
+  FakeReviewPolicies,
+  FakeReviewers,
+  FakeSpocDirectory,
+  FakeWorkAxes,
+  FakeWorkItemApprovalRepo,
+  FakeWorkItemClients,
+  FakeWorkItemRepo,
+  FakeWorkItemStaff,
+  FakeWorkVocabularyRepo,
+} from "../../src/testfakes/workitem";
+import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
+import { ObligationService } from "../../src/usecase/obligation/service";
+import {
+  FakeCalendarSource,
+  FakeObligationExceptionRepo,
+  FakeObligationInstanceRepo,
+  FakeObligationServices,
+  FakeObligationStateRepo,
+  FakeObligationTemplateRepo,
+  FakeObligationTenants,
+  FakeWorkItemRaiser,
+} from "../../src/testfakes/obligation";
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
 const INTERNAL_CLIENTS = [
@@ -119,7 +162,28 @@ const SESSION_TENANT = "00000000-0000-4000-8000-000000000007";
 
 function deps(): RouterDeps {
   const fakes = makeFakes();
+  const obligationTemplates = new FakeObligationTemplateRepo();
+  const obligationExceptions = new FakeObligationExceptionRepo();
+  obligationTemplates.exceptions = obligationExceptions;
   return {
+    // T3.2. These tests only ask what the ROUTER exposes and what an anonymous
+    // caller gets, so the service is real over empty stores — enough to answer,
+    // and nothing invented.
+    obligations: {
+      service: new ObligationService({
+        templates: obligationTemplates,
+        exceptions: obligationExceptions,
+        states: new FakeObligationStateRepo(),
+        instances: new FakeObligationInstanceRepo(),
+        calendarSource: new FakeCalendarSource(),
+        services: new FakeObligationServices(),
+        workItems: new FakeWorkItemRaiser(),
+        tenants: new FakeObligationTenants(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     tenancy: { service: new TenancyService(fakes) },
     scheduler: {
       service: new SchedulerService({
@@ -127,6 +191,7 @@ function deps(): RouterDeps {
         activations: new FakeActivationFeed(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         splitAxis: new FakeWorkSplit(),
+        workItems: new FakeWorkItemSpawner(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
         events: new RecordingEventSink(),
@@ -139,6 +204,12 @@ function deps(): RouterDeps {
         templates: new FakeTemplateSource(),
         subjects: new FakeJobSubjectSource(),
         agents: new FakeAgentRuntime(),
+        tiers: new FakeTierSource(),
+        runs: new FakeAgentRunRepo(),
+        checks: new FakeStepApprovalRepo(),
+        policies: new FakeVerificationPolicySource(),
+        checkers: new FakeCheckerDirectory(),
+        permissions: new FakeWorkPermissions(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-08-29T00:00:00.000Z")),
@@ -150,6 +221,53 @@ function deps(): RouterDeps {
         axes: new FakeServiceAxisRepo(),
         split: new FakeWorkSplitSetting(),
         ids: new FakeIds(),
+        events: new RecordingEventSink(),
+      }),
+    },
+    // T3.1. Every port is a fake, because these two tests are about the ROUTER —
+    // that every registered route is gated and that the spec renders — and not
+    // about what a work item does.
+    workItems: (() => {
+      const vocabulary = new FakeWorkVocabularyRepo();
+      const items = new FakeWorkItemRepo();
+      const approvals = new FakeWorkItemApprovalRepo();
+      items.vocabulary = vocabulary;
+      items.approvals = approvals;
+      approvals.items = items;
+      return {
+        service: new WorkItemService({
+          items,
+          approvals,
+          vocabulary,
+          clients: new FakeWorkItemClients(),
+          staff: new FakeWorkItemStaff(),
+          spocs: new FakeSpocDirectory(),
+          axes: new FakeWorkAxes(),
+          policies: new FakeReviewPolicies(),
+          reviewers: new FakeReviewers(),
+          permissions: new FakeReviewPermissions(),
+          engagements: new FakeEngagementWork(),
+          obligations: new FakeObligationCoverage(),
+          filings: new FakeObligationFiling(),
+          ids: new FakeIds(),
+          clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
+          events: new RecordingEventSink(),
+        }),
+        vocabulary: new WorkVocabularyService({
+          vocabulary,
+          ids: new FakeIds(),
+          events: new RecordingEventSink(),
+        }),
+      };
+    })(),
+    clientAssignments: {
+      service: new ClientAssignmentService({
+        assignments: new FakeClientAssignmentRepo(),
+        clients: new FakeClientDirectory(),
+        staff: new FakeAssignmentStaff(),
+        axes: new FakeAssignableAxes(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         events: new RecordingEventSink(),
       }),
     },

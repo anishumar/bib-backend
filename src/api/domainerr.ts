@@ -9,7 +9,10 @@ import { HTTPException } from "hono/http-exception";
 import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
+import { ClientAssignmentError } from "../domain/clientassignment/errors";
+import { WorkItemError } from "../domain/workitem/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
+import { VerificationError } from "../domain/verification/errors";
 import { SchedulerError } from "../domain/scheduler/errors";
 import { PartyError } from "../domain/party/errors";
 import { LedgerError } from "../domain/ledger/errors";
@@ -163,8 +166,59 @@ export function mapError(err: unknown): MappedError {
       // conflicts for the same reason: the request said something true a moment
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
-      case "STEP_NOT_A_PERSONS":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A machine has answered this step and nobody has said whether the answer
+      // stands. A conflict, not a 400: the request is well formed and what
+      // refuses it is the state of the step, fixed by deciding the proposal
+      // rather than by resending this.
+      case "PROPOSAL_UNDECIDED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Nothing produced an answer here, so there is nothing to accept. A 409
+      // rather than a 404: the step exists and is perfectly real, it is just
+      // finished a different way — with the Done button.
+      case "NOTHING_PROPOSED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A correction identical to the proposal. 409 rather than 400: the body is
+      // well formed and what refuses it is the state of the run it is about.
+      case "CORRECTION_CHANGED_NOTHING":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // The work is done and waiting for somebody ELSE to look at it (T2.9).
+      // 409 for STEP_NOT_WAITING's reason: the request was true a moment ago
+      // and the fix is to reload the job, not to resend.
+      case "AWAITING_CHECK":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  // T2.9. The 403 below is the one that matters, and it is why this family has
+  // a mapping the day it exists rather than the day somebody opens the page:
+  // NOT_ELIGIBLE_TO_CHECK reaching a browser as "internal error" is exactly the
+  // fifth bug T2.8 found, and this is the refusal a person meets most often.
+  if (err instanceof VerificationError) {
+    switch (err.code) {
+      case "APPROVAL_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // FORBIDDEN, not CONFLICT. The caller is authenticated and their request
+      // is well formed; what refuses it is who they are — they did the work, or
+      // they are not senior enough, or they are not the maker's manager. The
+      // message says which, because "you cannot check this" with no reason is
+      // how somebody concludes the button is broken.
+      case "NOT_ELIGIBLE_TO_CHECK":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // Somebody else answered first, or the step is not finished yet. Both are
+      // the state of the thing, not the shape of the request.
+      case "APPROVAL_ALREADY_DECIDED":
+      case "CHECK_ALREADY_OPEN":
+      case "STEP_NOT_CHECKABLE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // These two ARE the shape of the request: a rejection with no note, and a
+      // manager who is not a colleague. 400, and the message names what to send
+      // instead.
+      case "REJECTION_NEEDS_A_REASON":
+      case "REPORTS_TO_NOT_A_COLLEAGUE":
+      case "REPORTS_TO_CYCLE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -212,6 +266,96 @@ export function mapError(err: unknown): MappedError {
       // choosing another, not by resending this.
       case "AXIS_NOT_ASSIGNABLE":
       case "WORK_SPLIT_AXIS_EMPTY":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof ClientAssignmentError) {
+    switch (err.code) {
+      // Malformed in shape or incoherent on its face — the caller fixes the
+      // request. The two axis rules are here rather than with the conflicts
+      // because a SPOC with no Dept and a Key Manager with one are wrong
+      // whatever state the firm is in.
+      case "INVALID_ASSIGNMENT_ROLE":
+      case "INVALID_ASSIGNMENT_DATES":
+      case "AXIS_REQUIRED_FOR_SPOC":
+      case "AXIS_NOT_ALLOWED_FOR_KEY_MANAGER":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "ASSIGNMENT_CLIENT_NOT_FOUND":
+      case "ASSIGNMENT_AXIS_NOT_FOUND":
+      case "ASSIGNMENT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Conflicts, on `AXIS_NOT_ASSIGNABLE`'s reasoning: every one of these is
+      // a well-formed request refused by the state of the firm's own records —
+      // a client it has put away, a Dept it has retired, an assignment that
+      // already exists or already ended, a start date the incumbent's own
+      // period is in the way of. The caller fixes each on another screen or
+      // with another date, never by resending this.
+      case "ASSIGNMENT_CLIENT_ARCHIVED":
+      case "ASSIGNMENT_AXIS_RETIRED":
+      case "ASSIGNMENT_HOLDER_NOT_STAFF":
+      case "ASSIGNMENT_ALREADY_ENDED":
+      case "ASSIGNMENT_DUPLICATE":
+      case "ASSIGNMENT_PREDATES_INCUMBENT":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof WorkItemError) {
+    switch (err.code) {
+      // Malformed in shape or incoherent on its face — the caller fixes the
+      // request. The two flag rules are here rather than with the conflicts
+      // because a state that is both terminal and blocked is wrong whatever
+      // state the firm is in.
+      case "INVALID_VOCABULARY_CODE":
+      case "INVALID_RANK":
+      case "INVALID_SORT_ORDER":
+      case "INVALID_DUE_DATE":
+      case "WORK_ITEM_TITLE_REQUIRED":
+      case "CONFLICTING_STATE_FLAGS":
+      case "BLOCK_REASON_REQUIRED":
+      case "REVIEW_REJECTION_NEEDS_NOTE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "WORK_ITEM_NOT_FOUND":
+      case "WORK_ITEM_CLIENT_NOT_FOUND":
+      case "STATE_NOT_FOUND":
+      case "PRIORITY_NOT_FOUND":
+      case "CHECKLIST_ITEM_NOT_FOUND":
+      case "DEPENDENCY_NOT_FOUND":
+      case "REVIEW_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // 403, and these two are the only ones here. Both are a refusal about WHO
+      // the caller is rather than about the state of the firm's records — you
+      // may not check this work, and you may not check your own — so a caller
+      // that retried with a different body would be told the same thing. That
+      // is what separates them from the conflicts below.
+      case "REVIEW_SELF_APPROVAL":
+      case "REVIEWER_NOT_ELIGIBLE":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      // Conflicts, on `AssignmentDuplicate`'s reasoning: every one is a
+      // well-formed request refused by the state of the firm's own records — a
+      // client it has put away, a state it has retired, a review somebody else
+      // already decided, a dependency that would close a loop, a vocabulary row
+      // that is the last of its kind. The caller fixes each on another screen
+      // or with another value, never by resending this.
+      case "VOCABULARY_CODE_TAKEN":
+      case "STATE_RETIRED":
+      case "PRIORITY_RETIRED":
+      case "NO_INITIAL_STATE":
+      case "NO_DEFAULT_PRIORITY":
+      case "LAST_INITIAL_STATE":
+      case "LAST_DEFAULT_PRIORITY":
+      case "WORK_ITEM_CLIENT_ARCHIVED":
+      case "ASSIGNEE_NOT_STAFF":
+      case "WORK_ITEM_ALREADY_IN_STATE":
+      case "WORK_ITEM_BLOCKED_BY_DEPENDENCY":
+      case "CHECKLIST_ITEM_DONE":
+      case "DEPENDENCY_CYCLE":
+      case "DEPENDENCY_EXISTS":
+      case "REVIEW_ALREADY_OPEN":
+      case "REVIEW_ALREADY_DECIDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

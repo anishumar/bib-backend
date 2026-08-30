@@ -7,6 +7,8 @@
 //   /api/v1/tenancy/...                app-facing (user principal)
 //   /api/v1/config/...                 the firm's own services and roles (T2.5)
 //   /api/v1/leads/...                  the commercial pipeline (T2.1)
+//   /api/v1/work-items/...             the board — what is owed and whose (T3.1)
+//   /api/v1/work-vocabulary/...        the firm's own states and priorities (T3.1)
 //   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
 //   /api/v1/invoices/...               invoicing, and the one gapless series (T3.4)
 //   /api/v1/documents/...              the document store — bytes, versions, links (T3.6)
@@ -33,7 +35,13 @@ import type { TenancyDeps } from "./handler/tenancy";
 import { registerStaffGradeRoutes } from "./handler/staffgrade";
 import type { StaffGradeDeps } from "./handler/staffgrade";
 import { registerServiceAxisRoutes } from "./handler/serviceaxis";
+import { registerObligationRoutes } from "./handler/obligation";
+import type { ObligationDeps } from "./handler/obligation";
 import type { ServiceAxisDeps } from "./handler/serviceaxis";
+import { registerClientAssignmentRoutes } from "./handler/clientassignment";
+import type { ClientAssignmentDeps } from "./handler/clientassignment";
+import { registerWorkItemRoutes } from "./handler/workitem";
+import type { WorkItemDeps } from "./handler/workitem";
 import { registerOrchestratorRoutes } from "./handler/orchestrator";
 import type { OrchestratorDeps } from "./handler/orchestrator";
 import { registerSchedulerRoutes } from "./handler/scheduler";
@@ -81,6 +89,9 @@ export interface RouterDeps {
   readonly tenancy: TenancyDeps;
   readonly staffGrades: StaffGradeDeps;
   readonly serviceAxes: ServiceAxisDeps;
+  readonly obligations: ObligationDeps;
+  readonly clientAssignments: ClientAssignmentDeps;
+  readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
   readonly scheduler: SchedulerDeps;
   readonly party: PartyDeps;
@@ -141,7 +152,17 @@ export function buildRouter(
     cors({
       origin: [...opts.corsOrigins],
       credentials: true,
-      allowMethods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      // EVERY method any registered route actually uses. A method missing here
+      // is the worst kind of failure: the browser discards the response before
+      // either app sees it, with no server log and no error the API could have
+      // returned — so it looks like the endpoint is broken rather than like a
+      // header is short.
+      //
+      // PATCH was missing until T3.1 added the first routes that use it, and it
+      // was found by clicking a checkbox on a screen, not by any test.
+      // `tests/api/cors-methods.test.ts` now reads the registered routes and
+      // fails if this list falls behind them again.
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
       maxAge: 600,
     }),
@@ -175,6 +196,9 @@ export function buildRouter(
   registerTenancyRoutes(app, deps.tenancy);
   registerStaffGradeRoutes(app, deps.staffGrades);
   registerServiceAxisRoutes(app, deps.serviceAxes);
+  registerObligationRoutes(app, deps.obligations);
+  registerClientAssignmentRoutes(app, deps.clientAssignments);
+  registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);
   registerSchedulerRoutes(app, deps.scheduler);
   registerPartyRoutes(app, deps.party);

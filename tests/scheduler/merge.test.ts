@@ -19,6 +19,7 @@ import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
 import { SchedulerService, groupActivations } from "../../src/usecase/scheduler/service";
@@ -73,16 +74,21 @@ function engine() {
   activations.jobs = jobs; // the anti-join, as the real query does it
   const events = new RecordingEventSink();
   const split = new FakeWorkSplit();
+  const workItems = new FakeWorkItemSpawner();
   const service = new SchedulerService({
     jobs,
     activations,
     tenants: new FakeTenantDirectory([FIRM]),
     splitAxis: split,
+    // T3.1's seam. Recorded rather than performed: what the work-item service
+    // does with these engagements is `tests/workitem/`'s business, and what
+    // matters HERE is that a second sweep hands over nothing.
+    workItems,
     ids: new FakeIds(),
     clock: new FakeClock(new Date(NOW)),
     events,
   });
-  return { service, jobs, activations, events, split };
+  return { service, jobs, activations, events, split, workItems };
 }
 
 /** The firm's own three-service letter: GST and TDS delivered by FinCompliance,

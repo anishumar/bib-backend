@@ -15,6 +15,7 @@ import {
   FakeActivationFeed,
   FakeJobRepo,
   FakeTenantDirectory,
+  FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
 import type { Activation } from "../../src/usecase/scheduler/ports";
@@ -57,16 +58,21 @@ function engine(tenantIds: string[] = [FIRM_A]) {
   const events = new RecordingEventSink();
   const clock = new FakeClock(new Date(NOW));
   const split = new FakeWorkSplit();
+  const workItems = new FakeWorkItemSpawner();
   const service = new SchedulerService({
     jobs,
     activations,
     tenants: new FakeTenantDirectory(tenantIds),
     splitAxis: split,
+    // T3.1's seam. Recorded rather than performed: what the work-item service
+    // does with these engagements is `tests/workitem/`'s business, and what
+    // matters HERE is that a second sweep hands over nothing.
+    workItems,
     ids: new FakeIds(),
     clock,
     events,
   });
-  return { service, jobs, activations, events, clock, split };
+  return { service, jobs, activations, events, clock, split, workItems };
 }
 
 describe("a released contract becomes a job", () => {
@@ -316,5 +322,84 @@ describe("the actor on a spawned job", () => {
     await service.sweepActivations(SYSTEM_ACTOR);
     expect(events.recorded[0]?.actorType).toBe("system");
     expect(events.recorded[0]?.actorId).toBeNull();
+  });
+});
+
+describe("one firm's failure must not stop the others", () => {
+  // THE COMMENT SAID THIS FROM T2.6 AND THE CODE DID NOT DO IT. A throw in
+  // `spawnForTenant` propagated straight out of the loop, so every firm after
+  // it in the list was skipped, silently, until somebody read a worker log.
+  //
+  // T3.1 is what found it: one firm with no work-item states stopped the
+  // calendar for every client of every firm on the box. These two tests are
+  // what stop it coming back.
+
+  it("carries on to the next firm, and REPORTS the one it skipped", async () => {
+    const jobs = new FakeJobRepo();
+    const activations = new FakeActivationFeed();
+    activations.jobs = jobs;
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
+    activations.add(FIRM_B, activation(ENGAGEMENT_2, "2026-08-28T10:00:00.000Z"));
+
+    const service = new SchedulerService({
+      jobs,
+      // Firm A's read throws; firm B's is fine. A is first in the list, which
+      // is the ordering that used to lose B entirely.
+      activations: {
+        unspawnedActivations: (tenantId, limit) => {
+          if (tenantId === FIRM_A) throw new Error("this firm's feed is broken");
+          return activations.unspawnedActivations(tenantId, limit);
+        },
+      },
+      tenants: new FakeTenantDirectory([FIRM_A, FIRM_B]),
+      splitAxis: new FakeWorkSplit(),
+      workItems: new FakeWorkItemSpawner(),
+      ids: new FakeIds(),
+      clock: new FakeClock(new Date(NOW)),
+      events: new RecordingEventSink(),
+    });
+
+    const reports = await service.sweepActivations();
+
+    // Both firms are reported, and the broken one SAYS so. A silently skipped
+    // firm is a calendar that stops without anybody being told.
+    expect(reports).toHaveLength(2);
+    expect(reports[0]).toMatchObject({ tenantId: FIRM_A, spawned: 0 });
+    expect(reports[0]?.failure).toContain("broken");
+    expect(reports[1]).toMatchObject({ tenantId: FIRM_B, spawned: 1 });
+    // Asserted separately: `toMatchObject` treats an `undefined` value as a key
+    // that must be PRESENT, and the healthy report deliberately omits it.
+    expect(reports[1]?.failure).toBeUndefined();
+  });
+
+  it("keeps the JOB when the TASK cannot be created, and counts it", async () => {
+    // Two separate facts, and the second must never undo the first. A job is
+    // the record that work is OWED; a task is whose desk it lands on. Losing
+    // the job because a task could not be routed would lose the work entirely.
+    const jobs = new FakeJobRepo();
+    const activations = new FakeActivationFeed();
+    activations.jobs = jobs;
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
+
+    const service = new SchedulerService({
+      jobs,
+      activations,
+      tenants: new FakeTenantDirectory([FIRM_A]),
+      splitAxis: new FakeWorkSplit(),
+      workItems: {
+        spawnForEngagements: () => {
+          throw new Error("this firm has no starting state for work items");
+        },
+      },
+      ids: new FakeIds(),
+      clock: new FakeClock(new Date(NOW)),
+      events: new RecordingEventSink(),
+    });
+
+    const [report] = await service.sweepActivations();
+
+    expect(jobs.rows).toHaveLength(1);
+    expect(report).toMatchObject({ spawned: 1, tasksFailed: 1 });
+    expect(report?.failure).toBeUndefined();
   });
 });
