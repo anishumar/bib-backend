@@ -8,6 +8,13 @@
 // have to repair by hand.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+// THE BUG THIS FILE USED TO HAVE. Its own `toDay` read the LOCAL date fields
+// and carried a comment saying `toISOString()` "would be wrong east of UTC".
+// Both were backwards: postgres.js builds a `date` at UTC midnight, so the
+// local fields are the ones that move — a day BACK, west of Greenwich. It never
+// showed up because nothing here runs west of Greenwich. `day.ts` carries the
+// measurement.
+import { toDay } from "./day";
 import type {
   Engagement,
   EngagementLetter,
@@ -134,14 +141,7 @@ interface EngagementRow {
   ends_on: Date | null;
 }
 
-/** A date column, as a day. `toISOString().slice(0,10)` would be wrong east of
- *  UTC: node builds the Date at local midnight and converting can move it back. */
-function toDay(d: Date): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${String(year)}-${month}-${day}`;
-}
+
 
 function toLetter(r: LetterRow): EngagementLetter {
   return {

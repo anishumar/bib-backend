@@ -2916,6 +2916,24 @@ sandbox access + credentials. **Not on any demo's critical path.**
   > weaken a real control to make a test pass. Whoever picks it up should also decide whether
   > the suite should reset the limiter between sections; it is in-memory, so a restart clears it.
 
+- [x] **A `date` column was read by its LOCAL fields in two adapters, and the comment explaining
+  it had the fact backwards.** `postgres.js` returns a `date` at **UTC midnight** — measured
+  against the database, not assumed. `engagement-repository.ts` read `getFullYear()/getMonth()/
+  getDate()` and carried a comment saying the UTC read "would be wrong east of UTC";
+  `proposal-repository.ts` copied both. Both were backwards: the LOCAL fields are the ones that
+  move, a day BACK, west of Greenwich. Latent rather than live — nothing here runs west of
+  Greenwich — but it would have shown up as `engagement.effective_from` a day early on a laptop
+  in New York or in a pod in `us-east-1`, and that column is the base every SLA due date counts
+  from. **`invoice` and `dunning` were already correct**; the four now share
+  `infrastructure/postgres/day.ts`, which carries the measurement.
+  > **How it was found is the part worth keeping.** The bug was looked for in the wrong place
+  > first — on the belief that `toISOString().slice(0, 10)` was the fault, which is what the two
+  > private comments said. Probing the actual driver reversed the answer. A comment is not a
+  > measurement, and two files agreeing is not two measurements — it is one, copied.
+  > `tests/architecture/calendar-day.test.ts` bans the local getters in the adapters and shows
+  > the lost day through `Intl`, so it fails on a UTC runner as well; a behavioural test alone
+  > passes on every machine this is developed on.
+
 - [ ] **One office, one rate-limit bucket.** The edge limiter keys on client ADDRESS at
   300/min, which is comfortable for a handful of browsers and is not obviously comfortable for
   a firm of forty behind a single office NAT gateway — they share one bucket. Found by the

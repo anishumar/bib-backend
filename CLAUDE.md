@@ -329,6 +329,33 @@ lead capture in particular resolves by identifier without consulting `archived_a
 carrying an archived party's PAN attaches to it. Making that the stronger invariant is a decision
 nobody has taken; it is on the board as an open item, not an oversight.
 
+## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
+
+**Measured, not reasoned about:** `postgres.js` materialises a `date` column at **UTC midnight** —
+`'2026-08-20'::date` comes back as `2026-08-20T00:00:00.000Z` in every zone. So an adapter reads
+its **UTC fields** (`toDay` / `toDayOrNull` in `infrastructure/postgres/day.ts`) and never its
+local ones, which name the day that instant falls on where the process runs — the day BEFORE,
+west of Greenwich.
+
+**The trap is the one that looks safer.** `getFullYear()/getMonth()/getDate()` reads like the
+careful choice: no string slicing and no `UTC`, which in this codebase is usually what to be
+suspicious of. `engagement-repository.ts` used it and carried a comment asserting the opposite,
+`proposal-repository.ts` copied both, and nothing went red — the failure only appears west of
+Greenwich and nothing here runs there. It would have surfaced as an engagement's `effective_from`
+a day early on a laptop in New York, which is the base every SLA due date is counted from.
+
+`tests/architecture/calendar-day.test.ts` bans the local getters in `infrastructure/postgres/` and
+demonstrates the day being lost via `Intl`, so it fails on a UTC runner too — a behavioural test
+alone proves nothing here, because east of Greenwich both implementations pass.
+
+**Better still, where a query is being written anyway: `SELECT some_date::text`.** No `Date` is
+constructed and no zone is involved. The compliance calendar does exactly that; copy it.
+
+**This is a different question from "today".** `clock.now().toISOString().slice(0, 10)` is the
+SERVER's day and is the honest fallback for a caller that did not say which day it is on — see
+the client-assignment section. That one is answered by the caller sending `asOf`; this one is
+answered by reading the right fields.
+
 ## Migrations
 
 `migrations/NNNN_name.{up,down}.sql`, immutable once applied, fix forward with a new number.

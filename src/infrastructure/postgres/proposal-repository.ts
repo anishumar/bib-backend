@@ -11,6 +11,7 @@
 // together.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { toDay } from "./day";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
@@ -89,16 +90,6 @@ interface TotalsRow {
   net: string | null;
   line_count: string;
   unpriced_line_count: string;
-}
-
-/** A date column, as a day. `toISOString().slice(0,10)` would be wrong for a
- *  date east of UTC: node builds the Date at local midnight, and converting to
- *  UTC can move it back a day. */
-function toDay(d: Date): string {
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${String(year)}-${month}-${day}`;
 }
 
 function toProposal(r: ProposalRow): Proposal {

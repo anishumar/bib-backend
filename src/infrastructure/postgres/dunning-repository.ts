@@ -17,6 +17,7 @@
 //   `signAndFanOut` and `recordAdvance` use.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { toDayOrNull } from "./day";
 import type { DunningBody } from "../../domain/config/model";
 import { readDunningBody } from "../../domain/config/model";
 import type {
@@ -131,7 +132,10 @@ export class PostgresDunningRepository implements DunningRepository {
         // the case a partner rejects, and a stale figure would hide it.
         outstanding: r.outstanding,
         currency: r.currency,
-        dueOn: r.due_on === null ? null : r.due_on.toISOString().slice(0, 10),
+        // The shared helper rather than an inline slice — same result, but the
+        // reasoning lives in one place now. This is the date the ladder chases
+        // from, so a day out means chasing a client before the invoice is late.
+        dueOn: toDayOrNull(r.due_on),
       }));
     });
   }

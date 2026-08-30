@@ -37,6 +37,7 @@
 // by definition a total order.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { toDayOrNull } from "./day";
 import type {
   CreditNote,
   Invoice,
@@ -87,11 +88,17 @@ interface InvoiceRow {
   notes: string | null;
 }
 
-/** A date column as this product speaks about dates: an ISO DAY, never an
- *  instant. An invoice date is a calendar fact in a jurisdiction. */
-function day(d: Date | null): string | null {
-  return d === null ? null : d.toISOString().slice(0, 10);
-}
+/**
+ * A date column as this product speaks about dates: an ISO DAY, never an
+ * instant. An invoice date is a calendar fact in a jurisdiction.
+ *
+ * Was `toISOString().slice(0, 10)` inline, which was correct — postgres.js
+ * hands back a `date` at UTC midnight. It is the shared helper now so that
+ * "which fields do I read" has one answer with the measurement behind it;
+ * `engagement` and `proposal` reached the opposite conclusion in their own
+ * private copies and were wrong. See `day.ts`.
+ */
+const day = toDayOrNull;
 
 function toStatus(raw: string): InvoiceStatus {
   if (!isInvoiceStatus(raw)) {
