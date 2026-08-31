@@ -24,6 +24,7 @@ import { SchedulerService } from "../usecase/scheduler/service";
 import { WorkItemService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
+import { EscalationService } from "../usecase/escalation/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
@@ -55,6 +56,11 @@ import {
   PostgresDunningLadder,
   PostgresDunningRepository,
 } from "../infrastructure/postgres/dunning-repository";
+import {
+  PostgresEscalationLadder,
+  PostgresEscalationNoticeRepository,
+  PostgresEscalationSubjects,
+} from "../infrastructure/postgres/escalation-repository";
 import type { JobQueue } from "../usecase/scheduler/ports";
 
 /** The queue the spawn sweep runs on. A name, because pg-boss keys a schedule
@@ -76,6 +82,12 @@ export const ORCHESTRATOR_QUEUE = "delivery.orchestrate";
  *  day rather than every few minutes — and because a firm's calendar failing
  *  must not stop its engagements being spawned. */
 export const OBLIGATION_QUEUE = "delivery.obligations";
+/** The escalation ladder (T4.5). Its own queue and its own cadence again, and
+ *  the cadence is the argument: the rungs are counted in DAYS, so this runs
+ *  once a morning — early enough that somebody still has a working day to act
+ *  on what it says, and never so often that a partner is told the same thing
+ *  twice before lunch. */
+export const ESCALATION_QUEUE = "delivery.escalation";
 
 export interface WiredWorker {
   readonly pools: Pools;
@@ -84,6 +96,7 @@ export interface WiredWorker {
   readonly dunning: DunningService;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
+  readonly escalations: EscalationService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -264,6 +277,32 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // THE FIFTH SWEEP (T4.5) — the ladder that tells somebody the firm's OWN
+  // work has gone quiet.
+  //
+  // Deliberately NOT wired through `agents`, even though A9 sits under Phase 4
+  // with the agent capabilities. `AgentRuntime.run` is step-scoped
+  // (`{ tenantId, jobId, stepKey }`) and this has neither a job nor a step —
+  // "no human trigger" is its own line on the board — and it produces no
+  // proposal, so there is no confidence for a tier to govern. Forcing it
+  // through would mean a fake job and a confidence of 1.0 for arithmetic over
+  // two dates, and that number would then sit in the accuracy record making the
+  // real agents look better than they are. See `usecase/escalation/service.ts`.
+  //
+  // `memberships` a third time in this file, and that is the point of the port:
+  // one notion of who works here, so who may be ESCALATED to cannot disagree
+  // with who may CHECK work or who may be given it.
+  const escalations = new EscalationService({
+    ladders: new PostgresEscalationLadder(pools.app),
+    notices: new PostgresEscalationNoticeRepository(pools.app),
+    subjects: new PostgresEscalationSubjects(pools.app),
+    staff: memberships,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const queue = new BossJobQueue({ connectionString: cfg.db.appUrl, log });
 
   return {
@@ -273,6 +312,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     dunning,
     orchestrator,
     obligations,
+    escalations,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -365,6 +405,34 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(OBLIGATION_QUEUE, cfg.worker.obligationCron);
+
+      await queue.register(ESCALATION_QUEUE, async () => {
+        const reports = await escalations.sweep();
+        for (const r of reports) {
+          if (r.failure !== undefined) {
+            // One firm's org chart never stops the others. The obligation
+            // sweep's arrangement, and T3.1's lesson before it.
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "escalation sweep failed");
+            continue;
+          }
+          if (r.raised === 0 && r.alreadyRaised === 0) continue;
+          // `unresolved` is the number nobody would think to log and the one
+          // somebody has to act on: rungs that fired and reached NOBODY,
+          // because the firm has no reporting line above that person or nobody
+          // holds the grade the rung names. The notice is in the queue either
+          // way; this makes the hole visible from the worker too.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              raised: r.raised,
+              alreadyRaised: r.alreadyRaised,
+              unresolved: r.unresolved,
+            },
+            "escalation sweep",
+          );
+        }
+      });
+      await queue.schedule(ESCALATION_QUEUE, cfg.worker.escalationCron);
     },
   };
 }

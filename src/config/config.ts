@@ -84,6 +84,12 @@ const EnvSchema = z.object({
   // reject, to discover nothing. 02:15 is after midnight in every Indian time
   // zone offset, so "today" has actually rolled over.
   BIB_WORKER_OBLIGATION_CRON: z.string().min(1).default("15 2 * * *"),
+  // DAILY, and EARLY — 06:15, before the compliance sweep's own 02:15 has been
+  // acted on by anybody and while there is still a working day left to do
+  // something about what it says. The ladder counts in days like the dunning
+  // one, so sweeping more often re-reads the same answer; the one thing it
+  // could buy is a partner woken at 3am, which is not wanted.
+  BIB_WORKER_ESCALATION_CRON: z.string().min(1).default("15 6 * * *"),
   // How long a shutdown waits for a sweep already in flight. Long enough for the
   // slowest one, finite so a wedged handler cannot hold a deploy open forever.
   BIB_WORKER_SHUTDOWN_GRACE_MS: z.coerce.number().int().positive().default(45_000),
@@ -178,6 +184,9 @@ export interface WorkerConfig {
   readonly dunningCron: string;
   readonly orchestratorCron: string;
   readonly obligationCron: string;
+  /** When the escalation ladder is climbed (T4.5). Daily: the rungs are
+   *  counted in DAYS, so a finer cadence re-reads the same answer. */
+  readonly escalationCron: string;
   /** How long `stop()` waits for work in flight before the hard stop. */
   readonly shutdownGraceMs: number;
 }
@@ -256,6 +265,7 @@ export function load(): Config {
       dunningCron: env.BIB_WORKER_DUNNING_CRON,
       orchestratorCron: env.BIB_WORKER_ORCHESTRATOR_CRON,
       obligationCron: env.BIB_WORKER_OBLIGATION_CRON,
+      escalationCron: env.BIB_WORKER_ESCALATION_CRON,
       shutdownGraceMs: env.BIB_WORKER_SHUTDOWN_GRACE_MS,
     },
     db: {

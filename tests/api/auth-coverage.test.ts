@@ -138,6 +138,14 @@ import {
   FakeObligationTenants,
   FakeWorkItemRaiser,
 } from "../../src/testfakes/obligation";
+import { EscalationService } from "../../src/usecase/escalation/service";
+import {
+  FakeEscalationLadder,
+  FakeEscalationNotices,
+  FakeEscalationStaff,
+  FakeEscalationSubjects,
+  FakeEscalationTenants,
+} from "../../src/testfakes/escalation";
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";
 const INTERNAL_CLIENTS = [
@@ -176,6 +184,20 @@ function deps(): RouterDeps {
     // T3.2. These tests only ask what the ROUTER exposes and what an anonymous
     // caller gets, so the service is real over empty stores — enough to answer,
     // and nothing invented.
+    // T4.5. Same treatment as the calendar above: the real service over empty
+    // stores, which is enough to answer what the router exposes.
+    escalations: {
+      service: new EscalationService({
+        ladders: new FakeEscalationLadder(),
+        notices: new FakeEscalationNotices(),
+        subjects: new FakeEscalationSubjects(),
+        staff: new FakeEscalationStaff(),
+        tenants: new FakeEscalationTenants(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     obligations: {
       service: new ObligationService({
         templates: obligationTemplates,

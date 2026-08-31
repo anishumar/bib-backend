@@ -40,6 +40,7 @@ export const KIND_VALUES = [
   "confidence_tier",
   "verification_policy",
   "compliance_policy",
+  "escalation",
 ] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────

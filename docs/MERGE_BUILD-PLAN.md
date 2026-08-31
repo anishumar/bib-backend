@@ -2784,7 +2784,143 @@ P7 with confidence · can't approve own output.
 - [ ] `(B)` **T4.2** **A7 Reconciliation**: ledger↔books, payment↔invoice matching. *Acc: no force-match; unmatched ages into a queue.*
 - [ ] `(B)` **T4.3** **A3 Rule-Match**: facts → section/rate/form/due-date from **versioned** rule pack + confidence. *Acc: refuses to answer outside its pack version.*
 - [ ] `(B)` **T4.4** **A8 Chaser**: reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
-- [ ] `(B)` **T4.5** **A9 Monitor** (no human trigger): SLA timers, T–X countdowns, stale items, reassignment triggers. *Acc: alerts + spawns tasks only, never acts itself.*
+- [x] `(B)` **T4.5** **A9 Monitor** (no human trigger): SLA timers, T–X countdowns, stale items, reassignment triggers. *Acc: alerts + spawns tasks only, never acts itself.*
+  > **Done (2026-08-31). Migration 0058.** Gates on the merged tree: `check` **1391** ·
+  > `notice.integration` **6/6** · `worker:once` climbed **14 rungs at a seeded firm, 7 of them
+  > reaching NOBODY**, and the second run climbed none. Built out of order and the reason is
+  > below; T4.1–T4.4 are untouched and were not needed.
+  >
+  > ── 0052 SAID THIS OUT LOUD AND NOTHING EVER FIRED ───────────────────────────────
+  >
+  > `0052_obligation_rule.up.sql:204` — *"the escalation ladder fires on the internal target
+  > rather than the statutory"* — and `0053`'s header names the date it would watch. On the
+  > morning this was written the live database held **7 work items overdue, 5 of them on
+  > NOBODY's desk**, and **2 filings past `internal_target_on` with the statutory date still
+  > ahead**. Every one of those was a row this product already had and never looked at.
+  > `information_schema` held **zero** columns matching `%escalat%`.
+  >
+  > ── IT IS NOT AN AGENT, AND THAT IS WRITTEN DOWN RATHER THAN ASSUMED ─────────────
+  >
+  > A9 sits in Phase 4 with the agents and deliberately does NOT go through T2.8's runtime.
+  > `AgentRuntime.run` is `{ tenantId, jobId, stepKey }` — step-scoped — and this has neither
+  > a job nor a step: *"no human trigger"* is its own line above. It produces no proposal, so
+  > there is no confidence for a tier to govern and nothing for a person to accept or correct.
+  > Forcing it through would have meant a fake job and a confidence of **1.0 for arithmetic
+  > over two dates**, and that number would then sit in the accuracy record making the real
+  > agents look better than they are. The shape it matches is `usecase/dunning`: a clock, a
+  > firm's published ladder, an idempotent write. **No new date is invented anywhere** — all
+  > three watches are anchored to columns T3.1 and T3.2 already wrote.
+  >
+  > ── THE LADDER IS THE REGISTRY'S TENTH KIND, AND NOTHING IS SEEDED ───────────────
+  >
+  > `dunning` (0033) is the precedent followed exactly: one entry holds the whole ladder, a
+  > published version is frozen, and *"which ladder was in force when this fired"* stays
+  > answerable. **A firm with no published ladder escalates nobody** — and the wrong default
+  > here does not merely annoy, it teaches everybody to ignore the one queue whose entire
+  > value is being believed. `GET /api/v1/escalations` therefore returns `ladderPublished`,
+  > because an empty queue at a firm that never wrote a ladder and an empty queue at a firm
+  > where everything is on time are the same picture and only one means the product works.
+  >
+  > **Ascending is per WATCH, not across the array** — the one place this validator differs
+  > from dunning's. The three watches are three independent ladders sharing an entry, and one
+  > global order would force a firm to write a ladder it does not mean.
+  >
+  > ── WHO IT REACHES: THREE ANSWERS, AND THE THIRD IS A RANK ───────────────────────
+  >
+  > `assignee` · `manager` · `grade_at_least`. **The manager hop resolves TODAY, through
+  > `membership.reports_to_user_id`** — G3.4 is about linking a login to a PARTY, which is a
+  > different question, and the note under G3.4 already said so. `grade_at_least` is
+  > deliberately NOT resolved to a person: an escalation routed to one partner is one that
+  > dies while that partner is on leave, so `min_grade_rank` is stored and the reader's own
+  > rank is what matches. **All three can reach NOBODY** — nobody holds it, nobody is above
+  > them, nobody holds the rank — and the notice fires anyway with a sentence saying which.
+  > T3.1's `assignment_note` is the same decision: 7 of the 14 rungs the first real sweep
+  > climbed reached nobody, and those are the rows a partner actually has to act on.
+  >
+  > ── WHY THERE IS A TABLE AT ALL, AND WHY IT HAS NO `cleared_at` ──────────────────
+  >
+  > **THE SWEEP'S `WHERE` CLAUSE CANNOT READ THE LEDGER** — T3.3's `resolved_at` lesson, and
+  > worth repeating because it is not obvious. Without `delivery.escalation_notice` the same
+  > rung fires every morning for as long as the work stays open. `cleared_at` was considered
+  > and refused: an escalation about a task is live exactly while that task is not terminal,
+  > and one about unassigned work exactly while nobody holds it. A column restating a fact
+  > two tables away is one that can disagree with it. **Proven by running it**: cancelling a
+  > task dropped its three notices from the queue (14 → 11) and reopening it brought them
+  > back (→ 14) with nothing re-raised.
+  >
+  > ── THE BOUNDARY WITH T3.3, WHICH IS WHY THESE STAYED TWO SWEEPS ─────────────────
+  >
+  > `obligation_target` fires between the firm's own T–X and the statutory date, and **stops
+  > the moment the statutory date passes** — from there T3.3 owns the filing, it is in the
+  > partner's decision queue, and two systems shouting about one filing is how both get
+  > ignored. `obligation.escalated` is its own verb beside `obligation.missed` for the same
+  > reason: one is the warning, the other is the money already gone.
+  >
+  > ── A REAL BUG THE SWEEP FOUND IN ITS OWN READ MODEL ─────────────────────────────
+  >
+  > The first walk produced 14 notices, three addressed to a partner BY NAME — and the queue
+  > rendered a **blank space** beside "told". `tenancy.user_account.display_name` is nullable
+  > and is genuinely empty at seeded firms. `raisedToName: string | null` collapsed *"told
+  > somebody whose name we do not hold"* into *"told nobody"*, which is the exact shape the
+  > document panel already recorded (`createdByName`) — **the email is the discriminator, not
+  > the id**. Both people are now `{ userId, displayName, email }`, the shape `EventRecord.actor`
+  > has. A read model carrying a name and not an email is not a read model; that is six times.
+  >
+  > ── THE SCREENS ─────────────────────────────────────────────────────────────────
+  >
+  > `/work-items` gains a fourth tab, **Escalated**, with its own renderer — it is not the
+  > board sliced, it is the record that somebody was TOLD about work. **No dismiss, no snooze,
+  > no acknowledge**: a notice ends when the work moves, and a button that emptied the queue
+  > without anything happening would make it decoration. `/admin/escalation-ladder` is new —
+  > draft and publish, `tenant:admin`, a grade picker rather than a number, and the one
+  > impossible combination (watch unassigned work, notify its assignee) is moved off rather
+  > than left to 400.
+  >
+  > **No new permission.** Reading is `party:read`, exactly as T3.3's decision queue is, and
+  > for its stated reason: a queue narrowed to what you personally may act on hides that six
+  > tasks have been escalated for a week because nobody senior enough looked.
+  >
+  > ── WHAT THE BROWSER WALK FOUND, AND IT WAS TWO THINGS ──────────────────────────
+  >
+  > The chain was first exercised over HTTP with a real session — the empty queue with
+  > `ladderPublished:false`, three validator refusals each naming the rung and the fix,
+  > publish, sweep, the queue, `?mine=true` (7 of 14 for a rank-10 partner), the live-join
+  > proof above, and the ledger payloads. **The extension then connected and the screens were
+  > walked**, which found two faults typechecking was perfectly happy with:
+  >
+  > **THE `FOR` COLUMN READ AS WRONG.** A row titled *"TDS deposit — Lakeview LOGISTICS"* sat
+  > over a cell saying *"Lakeview Foods"* — correct data (one is billed, the other files) and
+  > indistinguishable from a bug. The board already solves this and this screen had not
+  > copied it: **G0.1, a group of four companies files four sets of returns**, so `entityName`
+  > now sits beneath the client exactly as `WorkRow` puts it there. `clientName` is null on a
+  > filing rather than being backfilled from the entity — an obligation has no client at all,
+  > and the queue shows an em dash and names the company underneath.
+  >
+  > **A HINT INSIDE A `<FieldRow>` COLUMN, FOR THE THIRD TIME IN THIS APP.** `.field-row` is
+  > `align-items: end`, so a field carrying a hint stands taller and its INPUT rides up above
+  > the ones beside it. The ladder form's two text boxes sat at two different heights and the
+  > Remove button floated between them. The frontend `CLAUDE.md` has recorded this twice
+  > already, T6.4 re-made it, and this is the third — hints go in a `<p className="field-hint">`
+  > UNDER the row, and a button gets its own line because `.field-row > *` is `flex: 1 1 160px`
+  > and turns one into a banner.
+  >
+  > **The form was then re-opened and re-checked, and found two more.** `"Everybody at a grade
+  > and above"` rendered as `"Everybody at a grade and abo"` — choosing that option ADDS a
+  > fourth column to the row and every select narrows, which no other state of the form shows.
+  > It reads `"A grade and above"` now. And the two hint halves were concatenated into one
+  > run-on paragraph: what a rung WATCHES and who it TELLS are separate answers and a reader
+  > checks one at a time, so they are two lines.
+  >
+  > **The synthetic-click wall is worth recording precisely, because a way through it exists.**
+  > The extension's clicks and keypresses stopped reaching React — the same wall at the top of
+  > T3.2 and T3.3 — including on a FRESH tab, so "it only happens after the first interaction"
+  > is not the rule. What works is `javascript_tool` calling `.click()` on the element: React's
+  > synthetic event system handles that, and the whole form was driven and eyeballed that way.
+  > Reach for it as soon as a second click does nothing rather than retrying the first.
+  >
+  > **Demo data was CHANGED and is not restored.** At `demo-1788079646`: the partner was put
+  > on the Partner rung, two reporting lines were recorded, and an escalation ladder was
+  > published. 14 notices and 14 ledger events followed; the events are append-only and stay.
 - [ ] `(B)` **T4.6** **A10 Rule-Pack Watcher**: reads CBDT/CBIC/MCA notices → drafts version diffs for approval. *Acc: never auto-activates a version.*
 - [ ] `(A)` **T4.7** **A1 Intake**: OCR, classify, extract, dedupe, attach. Extraction **port** with deterministic fake. *Acc: ambiguous doc routes to human, isn't discarded.*
 - [ ] `(A)` **T4.8** **A2 Enrichment**: MCA/GST/public lookups → fill record, flag conflicts. *Acc: never overwrites human-entered data.*

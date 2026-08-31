@@ -8,6 +8,7 @@
 //   /api/v1/config/...                 the firm's own services and roles (T2.5)
 //   /api/v1/leads/...                  the commercial pipeline (T2.1)
 //   /api/v1/work-items/...             the board — what is owed and whose (T3.1)
+//   /api/v1/escalations                what the firm's own ladder has escalated (T4.5)
 //   /api/v1/work-vocabulary/...        the firm's own states and priorities (T3.1)
 //   /api/v1/firm-entities/...          which of the firm's own entities issues (G1.2)
 //   /api/v1/invoices/...               invoicing, and the one gapless series (T3.4)
@@ -38,6 +39,8 @@ import type { StaffGradeDeps } from "./handler/staffgrade";
 import { registerServiceAxisRoutes } from "./handler/serviceaxis";
 import { registerObligationRoutes } from "./handler/obligation";
 import type { ObligationDeps } from "./handler/obligation";
+import { registerEscalationRoutes } from "./handler/escalation";
+import type { EscalationDeps } from "./handler/escalation";
 import type { ServiceAxisDeps } from "./handler/serviceaxis";
 import { registerClientAssignmentRoutes } from "./handler/clientassignment";
 import type { ClientAssignmentDeps } from "./handler/clientassignment";
@@ -93,6 +96,7 @@ export interface RouterDeps {
   readonly staffGrades: StaffGradeDeps;
   readonly serviceAxes: ServiceAxisDeps;
   readonly obligations: ObligationDeps;
+  readonly escalations: EscalationDeps;
   readonly clientAssignments: ClientAssignmentDeps;
   readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
@@ -201,6 +205,7 @@ export function buildRouter(
   registerStaffGradeRoutes(app, deps.staffGrades);
   registerServiceAxisRoutes(app, deps.serviceAxes);
   registerObligationRoutes(app, deps.obligations);
+  registerEscalationRoutes(app, deps.escalations);
   registerClientAssignmentRoutes(app, deps.clientAssignments);
   registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);

@@ -283,6 +283,15 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // work, not reading the board, and the record of who did it is worth only as
   // much as the gate in front of it. Deliberately not `party:write`: raising a
   // task for a client is not the same act as editing the client.
+  // THE ESCALATION QUEUE (T4.5). `party:read`, the same as the board it hangs
+  // off and the same as T3.3's decision queue — and for that queue's stated
+  // reason: everybody on the team should be able to see that six tasks have
+  // been escalated for a week, because a list narrowed to what you personally
+  // may act on hides exactly the failure the ladder exists to surface. There is
+  // no write here at all: a notice ends when the WORK ends, and nothing in this
+  // product can dismiss one by hand.
+  [routeKey("GET", "/api/v1/escalations"), "party:read" as const],
+
   [routeKey("GET", "/api/v1/work-items"), "party:read" as const],
   [routeKey("GET", "/api/v1/work-items/{workItemId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/work-items"), "work:write" as const],

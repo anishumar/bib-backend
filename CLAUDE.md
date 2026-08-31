@@ -102,8 +102,8 @@ like "there is no fee".
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
 configured (`tenant × kind × key` — "the GST filing service", "the partner role") and
-`config.version` is what it said at a point in time. Nine kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
-`confidence_tier`, `verification_policy` and `compliance_policy`; `rule_pack` joins them when T4.3
+`config.version` is what it said at a point in time. Ten kinds ship today — `service`, `role`, `policy`, `clause`, `dunning`, `workflow_template`,
+`confidence_tier`, `verification_policy`, `compliance_policy` and `escalation`; `rule_pack` joins them when T4.3
 actually reads it.
 Adding a kind is a code change, because each kind needs a body validator in
 `domain/config/model.ts` and a kind without one accepts anything.
@@ -1276,9 +1276,12 @@ started is a real act, and refusing it would trap the item. The cycle check walk
 list in the domain, because reachability is not expressible in a CHECK — the database catches
 only the self-edge.
 
-**`escalated_level` / `escalated_at` are deliberately NOT built.** The demo has them; the
-escalation ladder is T3.3 and needs G3.4. A column with no writer is the feature that looks
-finished.
+**`escalated_level` / `escalated_at` are still deliberately NOT built, and T4.5 did not add
+them.** The demo has them. The ladder keeps its own rows in `delivery.escalation_notice`
+instead, because a level on the item answers only *how far up* and loses when, which rung,
+whether anybody was actually reached, and what a second reason for escalating the same task
+was. A column with no writer is the feature that looks finished; two columns that lose the
+question is the feature that looks answered.
 
 ### Three things this task found, and none was in T3.1
 
@@ -1664,13 +1667,102 @@ whole mechanism exists to prevent.
 browser — load the pack, register a company, sweep, set a lead time, sweep, and find the GSTR-3B
 task on the board at High priority, from the law, with nobody setting it.
 
+## The escalation ladder — the sweep that tells somebody, and the one thing it may not do (T4.5)
+
+`delivery.escalation_notice` (migration 0058) plus `escalation`, the configuration registry's
+TENTH kind. It watches three dates the product already holds and raises a notice; it changes
+nothing else, ever.
+
+**0052 SAID THIS OUT LOUD AND NOTHING EVER FIRED.** Its own comment reads *"the escalation
+ladder fires on the internal target rather than the statutory"*, and until T4.5 nothing did.
+On the morning it was built the live database held **7 work items overdue, 5 of them on nobody's
+desk**, and **2 filings past `internal_target_on` with the statutory date still ahead** — all
+rows this product already had and never looked at. If you find another comment describing a
+mechanism, check whether the mechanism exists: this is the third one.
+
+**IT IS NOT AN AGENT, and the deviation is recorded rather than assumed.** A9 sits in Phase 4
+with the agent capabilities and deliberately does not run through T2.8's runtime.
+`AgentRuntime.run` is `{ tenantId, jobId, stepKey }` — step-scoped — and this has neither a job
+nor a step, because *"no human trigger"* is its own line on the board. It produces no proposal,
+so there is no confidence for a tier to govern and nothing for a person to accept or correct.
+Forcing it through would have meant inventing a fake job and a confidence of **1.0 for
+arithmetic over two dates**, and that number would then sit in the accuracy record making the
+first real agents look better than they are. The shape it matches is `usecase/dunning`.
+
+**IT NEVER ACTS, and that is structural rather than a rule to remember.** `EscalationService`
+holds five read ports and one write; there is no seam on it through which a task could be
+reassigned, a filing moved or a client contacted. `alerts + spawns tasks only, never acts
+itself` is enforced by what does not exist.
+
+**THREE WATCHES, AND NO NEW DATE IS INVENTED.** `work_item_due` reads the SLA T3.1 snapshotted
+at creation; `work_item_unassigned` counts from `created_at`, because an item the router refused
+to guess an owner for has no other clock; `obligation_target` reads T3.2's `internal_target_on`.
+An escalation counted from a deadline this software made up would be one nobody could argue
+with or check, and there must not be a fourth watch that needs one.
+
+**NOTHING IS SEEDED.** A firm with no published ladder escalates nobody — the same safe
+direction `dunning` and `confidence_tier` take, and here the failure mode is sharper than noise:
+a threshold this product invented teaches everybody to ignore the one queue whose whole value is
+being believed. `GET /api/v1/escalations` therefore returns **`ladderPublished`**, because an
+empty queue at a firm that never wrote a ladder and an empty queue at a firm where everything is
+on time are the same picture, and only one of them means the product is working.
+
+**Ascending is per WATCH, not across the array** — the one place this validator differs from
+dunning's. The three watches are three independent ladders sharing an entry, and a global order
+would force a firm to write a ladder it does not mean.
+
+**WHO IT REACHES: `assignee` · `manager` · `grade_at_least`, and all three can reach NOBODY.**
+The manager hop resolves TODAY through `membership.reports_to_user_id`; **G3.4 is not a blocker
+for it**, because that task links a login to a PARTY, which answers a different question.
+`grade_at_least` is deliberately NOT resolved to a person — an escalation routed to one partner
+is one that dies while that partner is on leave — so `min_grade_rank` is stored and the reader's
+own rank is what matches. When nobody can be named the notice still fires, carrying a sentence
+saying which of the three reasons: T3.1's `assignment_note` decision, and the first real sweep
+raised 14 rungs of which **7 reached nobody** — the rows a partner actually has to act on.
+
+**THE TABLE EXISTS BECAUSE THE SWEEP'S `WHERE` CLAUSE CANNOT READ THE LEDGER.** T3.3's
+`resolved_at` lesson, and it is worth repeating because it is not obvious: without a row, the
+same rung fires every morning for as long as the work stays open. Idempotence is the two partial
+unique indexes and `ON CONFLICT DO NOTHING`, and the event is written only when a row was
+actually created — `dunning`'s arrangement exactly.
+
+**AND THERE IS NO `cleared_at`.** An escalation about a task is live exactly while that task is
+not terminal, and one about unassigned work exactly while nobody holds it, so the queue reads a
+JOIN. A column restating a fact two tables away is one that can disagree with it. Proven by
+running it: cancelling a task dropped its three notices and reopening it brought them back, with
+nothing re-raised.
+
+**THE BOUNDARY WITH T3.3 IS WHY THESE ARE TWO SWEEPS.** `obligation_target` fires between the
+firm's own T–X and the statutory date and **stops the moment the statutory date passes** — from
+there the filing is in the partner's decision queue and two systems shouting about one filing is
+how both get ignored. `obligation.escalated` is its own verb beside `obligation.missed` for the
+same reason: one is the warning that exists so the other never happens.
+
+**Reading the queue is `party:read` and there is no write route at all.** No acknowledge, no
+dismiss, no snooze — a notice ends when the WORK ends, and a control that emptied the queue
+without anything happening would make it decoration. The unfiltered queue is the default, T3.3's
+decision for its stated reason; `?mine=true` is a convenience resolved from the caller's own
+membership and never from the wire.
+
+### What running it found — a read model with a name and no email
+
+The first real sweep produced 14 notices, three of them addressed to a partner BY NAME, and the
+queue rendered a **blank space** beside "told". `tenancy.user_account.display_name` is nullable
+and is genuinely empty at seeded firms, so `raisedToName: string | null` collapsed *"told
+somebody whose name we do not hold"* into *"told nobody"* — the exact shape `createdByName` had
+in T3.6, and the audit trail's rule stated once more: **the email is the discriminator, not the
+id.** Both people on the row are `{ userId, displayName, email }` now, the shape
+`EventRecord.actor` has. That is the sixth time a read model has been caught, and the first
+where the missing half was the email rather than the name.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
 T3.3's missed-deadline state and T3.7's dashboards are built. Next on `(B)`'s lane: the
-escalation ladder (G3.4, which needs `membership.party_id`) and T4.x's agents.
+T4.x's agents. The escalation ladder is BUILT (T4.5) and did not need G3.4 —
+its manager hop reads `membership.reports_to_user_id`, and G3.4 answers a different question.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

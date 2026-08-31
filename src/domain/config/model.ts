@@ -58,7 +58,8 @@ export type ConfigKind =
   | "workflow_template"
   | "confidence_tier"
   | "verification_policy"
-  | "compliance_policy";
+  | "compliance_policy"
+  | "escalation";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -70,6 +71,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "confidence_tier",
   "verification_policy",
   "compliance_policy",
+  "escalation",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -780,6 +782,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateVerificationPolicyBody(body);
     case "compliance_policy":
       return validateCompliancePolicyBody(body);
+    case "escalation":
+      return validateEscalationBody(body);
   }
 }
 
@@ -1592,6 +1596,278 @@ export function dueDunningSteps(
 ): readonly DunningStep[] {
   return ladder.steps.filter((s) => daysOverdue >= s.afterDays && !taken.has(s.key));
 }
+
+// ── The escalation ladder (T4.5) ───────────────────────────────────────────
+
+/**
+ * What the firm does, and when, about its OWN work going quiet.
+ *
+ * The sibling of `dunning` and deliberately not the same entry: that ladder
+ * chases a CLIENT about money, this one tells a COLLEAGUE about a deadline.
+ * They run on different dates, are read by different people, and a firm will
+ * want to change one without touching the other — which a shared entry, frozen
+ * and published as a whole, would not allow.
+ *
+ * A config kind for the reason `dunning` is one: "three days past the internal
+ * target and your manager hears about it" is the firm's number, it changes, and
+ * "which ladder was in force when this fired" is asked afterwards. NOTHING IS
+ * SEEDED — a firm with no published ladder escalates nobody, which is the safe
+ * direction. A number this product invented would train everybody to ignore the
+ * one screen whose entire value is being believed.
+ */
+export interface EscalationBody {
+  readonly rungs: readonly EscalationRung[];
+}
+
+/**
+ * The three things a rung can watch, each anchored to a date that already
+ * exists. No new date is invented here, and that is the constraint that keeps
+ * this honest: an escalation counted from a deadline this product made up would
+ * be an escalation nobody could argue with or check.
+ *
+ *   work_item_due         `work_item.due_on` — the SLA the client was promised,
+ *                         snapshotted at creation (G2.3, T3.1).
+ *   work_item_unassigned  days since the item was created while NOBODY holds
+ *                         it. It has no due date to be late against — T3.1
+ *                         leaves an item unassigned rather than guessing a
+ *                         wrong SPOC — so the only honest clock is its age.
+ *   obligation_target     `obligation_instance.internal_target_on` — the firm's
+ *                         own T-X. THE ONE THIS MODULE EXISTS FOR: 0052 says so
+ *                         in its own comment, and finding out you are late on
+ *                         the day you are late is useless.
+ */
+export type EscalationWatch = "work_item_due" | "work_item_unassigned" | "obligation_target";
+
+export const ESCALATION_WATCHES: readonly EscalationWatch[] = [
+  "work_item_due",
+  "work_item_unassigned",
+  "obligation_target",
+];
+
+export function isEscalationWatch(v: string): v is EscalationWatch {
+  return (ESCALATION_WATCHES as readonly string[]).includes(v);
+}
+
+/**
+ * Who a rung tells.
+ *
+ * `manager` resolves through `membership.reports_to_user_id` — the firm's own
+ * chart, which G3.3 built and `usecase/verification` already walks. It is NOT
+ * blocked on G3.4: that task links a login to a PARTY, which answers "which
+ * person is this", a different question from "who does this login report to".
+ *
+ * `grade_at_least` is not resolved to a person at all, and that is the whole
+ * point of it — see `min_grade_rank` in migration 0058. "Tell a partner" means
+ * every partner can see it, because an escalation routed to one desk is an
+ * escalation that dies while that desk is on leave.
+ */
+export type EscalationTarget = "assignee" | "manager" | "grade_at_least";
+
+export const ESCALATION_TARGETS: readonly EscalationTarget[] = [
+  "assignee",
+  "manager",
+  "grade_at_least",
+];
+
+export function isEscalationTarget(v: string): v is EscalationTarget {
+  return (ESCALATION_TARGETS as readonly string[]).includes(v);
+}
+
+export interface EscalationRung {
+  /** The rung's own key — `nudge`, `manager`, `partner`. Recorded on every
+   *  notice, so a row stays readable after the ladder moves under it. Never an
+   *  index, for `DunningStep.key`'s reason: an index shifts when a firm inserts
+   *  a rung and every notice already raised is silently renamed. */
+  readonly key: string;
+  readonly watch: EscalationWatch;
+  /** Days past the date this rung's watch names. 0 means the day itself. */
+  readonly afterDays: number;
+  readonly notify: EscalationTarget;
+  /** The rung a person must hold to see it, when `notify` is `grade_at_least`.
+   *  Null otherwise, and the validator refuses the two mismatches — a rank on a
+   *  rung that does not use it is a number nobody reads, and a missing one on a
+   *  rung that does would escalate to everybody. */
+  readonly minGradeRank: number | null;
+  readonly label: string;
+}
+
+const ESCALATION_FIELDS = ["rungs"];
+const RUNG_FIELDS = ["key", "watch", "afterDays", "notify", "minGradeRank", "label"];
+
+function validateEscalationBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, ESCALATION_FIELDS);
+  if (unknown) return unknown;
+
+  const rungs = body["rungs"];
+  if (!Array.isArray(rungs) || rungs.length === 0) {
+    return "rungs must be a non-empty array — a ladder with no rungs tells nobody anything";
+  }
+
+  const keys = new Set<string>();
+  // ASCENDING WITHIN EACH WATCH, not across the whole array — and this is the
+  // one place this validator deliberately differs from dunning's. The three
+  // watches are three independent ladders sharing an entry: "day 3 on an
+  // unassigned item" and "day 1 past a filing's internal target" are both
+  // sensible and neither is out of order. Requiring one global order would
+  // force a firm to write a ladder it does not mean.
+  const previousByWatch = new Map<string, number>();
+  for (const [index, raw] of rungs.entries()) {
+    if (typeof raw !== "object" || raw === null) return `rungs[${String(index)}] must be an object`;
+    const rung = raw as Record<string, unknown>;
+
+    const unknownRung = unknownFields(rung, RUNG_FIELDS);
+    if (unknownRung) return `rungs[${String(index)}]: ${unknownRung}`;
+
+    const key = rung["key"];
+    if (typeof key !== "string" || key.trim() === "") {
+      return `rungs[${String(index)}].key must be a non-empty string`;
+    }
+    // Duplicate keys collide on the notice table's unique index, and the second
+    // rung would silently never fire — a ladder that looks like it has four
+    // rungs and climbs three.
+    if (keys.has(key)) return `rungs[${String(index)}].key ${JSON.stringify(key)} appears twice`;
+    keys.add(key);
+
+    const watch = rung["watch"];
+    if (typeof watch !== "string" || !isEscalationWatch(watch)) {
+      return `rungs[${String(index)}].watch must be one of ${ESCALATION_WATCHES.join(", ")}`;
+    }
+
+    const afterDays = rung["afterDays"];
+    if (typeof afterDays !== "number" || !Number.isInteger(afterDays) || afterDays < 0) {
+      return `rungs[${String(index)}].afterDays must be a non-negative whole number of days`;
+    }
+    const previous = previousByWatch.get(watch) ?? -1;
+    // Refused rather than sorted, exactly as the dunning ladder refuses: a
+    // ladder given out of order is a firm that has made a mistake about its own
+    // escalation, and quietly reordering it hides that.
+    if (afterDays <= previous) {
+      return (
+        `rungs[${String(index)}].afterDays must be greater than the rung before it on the same ` +
+        `watch (${String(previous)})`
+      );
+    }
+    previousByWatch.set(watch, afterDays);
+
+    const notify = rung["notify"];
+    if (typeof notify !== "string" || !isEscalationTarget(notify)) {
+      return `rungs[${String(index)}].notify must be one of ${ESCALATION_TARGETS.join(", ")}`;
+    }
+
+    const rank = rung["minGradeRank"];
+    if (notify === "grade_at_least") {
+      if (typeof rank !== "number" || !Number.isInteger(rank)) {
+        return (
+          `rungs[${String(index)}].minGradeRank must be a whole number when notify is ` +
+          `"grade_at_least" — without it the rung would be visible to everybody. Got ` +
+          `${describe(rank)}`
+        );
+      }
+    } else if (rank !== undefined && rank !== null) {
+      return (
+        `rungs[${String(index)}].minGradeRank belongs only to a "grade_at_least" rung; this one ` +
+        `notifies ${JSON.stringify(notify)}, so the rank would be a number nobody reads`
+      );
+    }
+
+    // `work_item_unassigned` with `notify: assignee` is the one combination
+    // that can never do anything: the watch's whole definition is that nobody
+    // holds the item. Refused here rather than discovered as a rung that
+    // silently notifies nobody every night.
+    if (watch === "work_item_unassigned" && notify === "assignee") {
+      return (
+        `rungs[${String(index)}] watches unassigned work and notifies its assignee — there is ` +
+        `never one, which is what "unassigned" means. Notify a manager or a grade instead`
+      );
+    }
+
+    const label = rung["label"];
+    if (typeof label !== "string" || label.trim() === "") {
+      return `rungs[${String(index)}].label must be a non-empty string — somebody reads it`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A stored escalation body, read back.
+ *
+ * Falls back to an EMPTY ladder rather than throwing, for the reason every
+ * reader in this file does: a pinned version must always resolve. An empty
+ * ladder escalates nobody, which is the safe direction — the alternative is
+ * inventing rungs a firm never published and putting a partner's name on work
+ * they were never told about.
+ */
+export function readEscalationBody(body: Record<string, unknown>): EscalationBody {
+  const raw = body["rungs"];
+  if (!Array.isArray(raw)) return { rungs: [] };
+  const rungs: EscalationRung[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const rung = item as Record<string, unknown>;
+    const key = rung["key"];
+    const watch = rung["watch"];
+    const afterDays = rung["afterDays"];
+    const notify = rung["notify"];
+    const rank = rung["minGradeRank"];
+    const label = rung["label"];
+    if (
+      typeof key !== "string" ||
+      typeof watch !== "string" ||
+      !isEscalationWatch(watch) ||
+      typeof afterDays !== "number" ||
+      typeof notify !== "string" ||
+      !isEscalationTarget(notify)
+    ) {
+      continue;
+    }
+    // A `grade_at_least` rung with no usable rank is DROPPED rather than
+    // defaulted. Reading it as rank 0 would make it visible to the whole firm,
+    // which is the loudest possible misreading of a rung the firm wrote to
+    // reach its seniors.
+    if (notify === "grade_at_least" && (typeof rank !== "number" || !Number.isInteger(rank))) {
+      continue;
+    }
+    rungs.push({
+      key,
+      watch,
+      afterDays,
+      notify,
+      minGradeRank: notify === "grade_at_least" && typeof rank === "number" ? rank : null,
+      label: typeof label === "string" ? label : key,
+    });
+  }
+  return { rungs };
+}
+
+/**
+ * The rungs DUE on one piece of work: watching this date, past their day, and
+ * not already climbed on it.
+ *
+ * Pure, and it is the whole rule the sweep applies — `dueDunningSteps`'s shape,
+ * with the watch as the extra filter. `daysPast` is computed by the caller from
+ * ISO dates: no `Date` arithmetic here, because a due date is a calendar fact
+ * and a UTC instant moves it by a day for anyone east or west of Greenwich.
+ *
+ * Returns EVERY due rung rather than only the next. A firm whose worker was
+ * down for a week should not need seven sweeps to catch up, and each rung is
+ * idempotent by its own unique key, so replaying is safe.
+ */
+export function dueEscalationRungs(
+  ladder: EscalationBody,
+  watch: EscalationWatch,
+  daysPast: number,
+  climbed: ReadonlySet<string>,
+): readonly EscalationRung[] {
+  return ladder.rungs.filter(
+    (r) => r.watch === watch && daysPast >= r.afterDays && !climbed.has(r.key),
+  );
+}
+
+/** One entry per firm. There is one escalation ladder, the same way there is
+ *  one compliance go-live date — unlike `policy`, which is keyed by what it
+ *  governs because a firm has many unrelated limits. */
+export const ESCALATION_KEY = "default";
 
 // ── workflow_template: what a firm's process actually IS (T2.7) ──────────────
 //

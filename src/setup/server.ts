@@ -75,10 +75,16 @@ import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboar
 import { DashboardService } from "../usecase/dashboard/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
+import { EscalationService } from "../usecase/escalation/service";
 import {
   PostgresDunningLadder,
   PostgresDunningRepository,
 } from "../infrastructure/postgres/dunning-repository";
+import {
+  PostgresEscalationLadder,
+  PostgresEscalationNoticeRepository,
+  PostgresEscalationSubjects,
+} from "../infrastructure/postgres/escalation-repository";
 import {
   PostgresDocumentBlockRepository,
   PostgresStandardBlockRepository,
@@ -449,6 +455,26 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // THE ESCALATION QUEUE (T4.5) — the READ half only.
+  //
+  // The same split the dunning ladder has one block above: the worker climbs
+  // the ladder on a clock, and this process only ever shows somebody what it
+  // climbed. The sweep is wired in `setup/worker.ts` and is deliberately not
+  // reachable from a request — a monitor a person can trigger is a monitor that
+  // can be triggered a hundred times, and nothing here needs it.
+  const escalations = new EscalationService({
+    ladders: new PostgresEscalationLadder(pools.app),
+    notices: new PostgresEscalationNoticeRepository(pools.app),
+    subjects: new PostgresEscalationSubjects(pools.app),
+    // `memberships` again — one notion of who works here, so who may be
+    // escalated to cannot disagree with who may check work.
+    staff: memberships,
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   // Creating a firm now also gives it its own role definitions, in the same
   // call — gate 3 reads those rows and has no built-in table to fall back on,
   // so a tenant without them is a tenant nobody can sign in to. The seam is a
@@ -695,6 +721,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         clientAssignments: { service: clientAssignments },
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
+        escalations: { service: escalations },
         orchestrator: { service: orchestrator },
         scheduler: { service: scheduler },
         party: { service: party },

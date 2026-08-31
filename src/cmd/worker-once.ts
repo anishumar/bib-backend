@@ -8,9 +8,12 @@
 //
 //   npm run worker:once
 //
-// It runs ALL THREE sweeps — spawn, orchestrate and dunning — because all three
-// are what the worker does, and an entry point that mirrored part of the process
-// would be a worse lie than none at all.
+// It runs ALL FIVE sweeps — spawn, orchestrate, dunning, the compliance
+// calendar and the escalation ladder — because all five are what the worker
+// does, and an entry point that mirrored part of the process would be a worse
+// lie than none at all. It said THREE until T4.5, by which point it had run
+// four for two tasks: a count in a comment is a fact that rots, so the list is
+// spelt out.
 import pino from "pino";
 import { load } from "../config/config";
 import { wireWorker } from "../setup/worker";
@@ -61,9 +64,9 @@ async function main(): Promise<void> {
       console.log();
     }
 
-    // ALL THREE sweeps, because all three are what the worker does. Running
-    // only one here would make this entry point a partial mirror of the process
-    // it exists to stand in for — and the engine would be demonstrable only by
+    // EVERY sweep, because every sweep is what the worker does. Running only
+    // one here would make this entry point a partial mirror of the process it
+    // exists to stand in for — and the engine would be demonstrable only by
     // waiting for a cron.
     // ORCHESTRATE BEFORE CHASING, and in the same order the worker's crons put
     // them: a job spawned a moment ago should have its steps written on the same
@@ -138,6 +141,31 @@ async function main(): Promise<void> {
           `open /calendar/coverage to see why (most will be advisory work with no ` +
           `compliance rule, which is normal)`,
       );
+    }
+    console.log();
+
+    // THE ESCALATION LADDER (T4.5), last and after the calendar on purpose: a
+    // filing that reached its internal target on this very run should be able
+    // to escalate on the same one rather than "tomorrow".
+    const ladder = await wired.escalations.sweep();
+    for (const r of ladder.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: escalation sweep FAILED — ${r.failure ?? ""}`);
+    }
+    const climbed = ladder.reduce((n, r) => n + r.raised, 0);
+    const unresolved = ladder.reduce((n, r) => n + r.unresolved, 0);
+
+    if (climbed === 0) {
+      console.log("  nothing to escalate — no open work has reached a rung it has not had.");
+    } else {
+      console.log(`  climbed ${String(climbed)} escalation rung(s)`);
+      // The number somebody has to ACT on, and it is not a failure of the
+      // sweep: the rung fired and reached nobody, because the firm has no
+      // reporting line above that person or nobody holds the grade it names.
+      if (unresolved > 0) {
+        console.log(
+          `  ${String(unresolved)} of them reached NOBODY — the queue says why on each row`,
+        );
+      }
     }
     console.log();
   } finally {
