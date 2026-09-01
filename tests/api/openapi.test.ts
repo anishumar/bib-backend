@@ -45,6 +45,7 @@ import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import { PortalInviteService } from "../../src/usecase/portalinvite/service";
+import { PortalHomeService } from "../../src/usecase/portalhome/service";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -56,6 +57,7 @@ import {
   FakePortalClients,
   FakePortalMemberships,
 } from "../../src/testfakes/portalaccess";
+import { FakePortalHomeRepo, FakePortalScope } from "../../src/testfakes/portalhome";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
@@ -322,6 +324,13 @@ function deps(): RouterDeps {
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         events: new RecordingEventSink(),
+      }),
+    },
+    portalHome: {
+      service: new PortalHomeService({
+        scope: new FakePortalScope(),
+        rows: new FakePortalHomeRepo(),
+        clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
       }),
     },
     portalInvites: {

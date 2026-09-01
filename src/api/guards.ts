@@ -108,21 +108,24 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
  * The routes a CLIENT_PORTAL session may reach. Everything else on /api/v1 is
  * the STAFF workspace.
  *
- * Today that is only the routes a client needs to manage their own session,
- * because no client-facing feature exists yet (U1 is Phase 6). The list is
- * short for the right reason: a portal user should reach exactly what has been
- * built FOR them, and nothing has been.
- *
  * Denied by default, and that default is load-bearing. With the reverse — allow
  * unless denied — a client contact could list the firm's entire book of
  * clients, create parties in it, and read its audit trail, simply by signing in
  * through the front door. That was true of this codebase until this list
  * existed; it was not an attack, it was the normal login path.
  *
- * When U1 lands (T6.5–T6.7), its routes are added here AND get record-scope
- * (gate 4): a portal user sees only the parties they represent, which needs the
- * user-to-party link that does not exist yet. Audience is the coarse gate;
- * record-scope is the fine one, and a portal route needs both.
+ * Audience is the coarse gate; record-scope (gate 4) is the fine one, and a
+ * portal route needs BOTH — being listed here says only that a client may ask
+ * the question, never which rows come back.
+ *
+ * ── AN EXACT MATCH ON THE CONCRETE PATH, WHICH IS A REAL CONSTRAINT ───────
+ *
+ * Unlike gate 3, which compiles `{param}` templates and matches them, this is a
+ * plain `Set.has` over the path as it arrived. So a portal route carrying a path
+ * parameter is unreachable whatever is written here, and the first portal read
+ * is deliberately parameter-less because of it. T6.6's uploads and any
+ * per-record detail route need this matcher to learn templates FIRST — that is a
+ * change to the audience gate, and it does not get made in passing.
  */
 export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/me",
@@ -133,6 +136,20 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   // returns only the caller's own memberships, so a portal session sees exactly
   // what it already knows about itself.
   "/api/v1/tenancy/me/memberships",
+  // ── THE FIRST ROUTE HERE THAT RETURNS A BUSINESS RECORD (T6.5) ───────────
+  //
+  // Everything above manages a session. This is the client portal's status home
+  // — what the firm is doing for the companies this login was granted, what is
+  // held up, and what has been filed — and until it existed a client contact
+  // could sign in and land on a blank page, which is indistinguishable from
+  // broken software.
+  //
+  // What makes it safe is not this line: it is that every table it reads carries
+  // its own RESTRICTIVE policy written in terms of `crm.portal_sees()`
+  // (`delivery.work_item` in 0059, `delivery.obligation_instance` and the
+  // client-visible flag in 0062), and that the one adapter behind it uses
+  // `withPortal` rather than `withTenant`. This line only says a client may ASK.
+  "/api/v1/portal/home",
 ]);
 
 /**

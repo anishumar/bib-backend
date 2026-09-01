@@ -64,6 +64,7 @@ import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import { PortalInviteService } from "../../src/usecase/portalinvite/service";
+import { PortalHomeService } from "../../src/usecase/portalhome/service";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -75,6 +76,7 @@ import {
   FakePortalClients,
   FakePortalMemberships,
 } from "../../src/testfakes/portalaccess";
+import { FakePortalHomeRepo, FakePortalScope } from "../../src/testfakes/portalhome";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
@@ -342,6 +344,13 @@ function deps(): RouterDeps {
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
         events: new RecordingEventSink(),
+      }),
+    },
+    portalHome: {
+      service: new PortalHomeService({
+        scope: new FakePortalScope(),
+        rows: new FakePortalHomeRepo(),
+        clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
       }),
     },
     portalInvites: {
@@ -670,15 +679,27 @@ describe("gate 2 — audience", () => {
     expect(reachable).toEqual([]);
   });
 
-  it("lets a client-portal session manage its own session", async () => {
+  it("lets a client-portal session reach every route on its own list", async () => {
+    // THE METHOD COMES FROM THE ROUTER, not from the shape of the path. It used
+    // to be guessed — GET for anything ending `/me` or `/memberships`, POST
+    // otherwise — and the guess held only while every portal route happened to
+    // fit it. T6.5's `GET /api/v1/portal/home` does not, so the test asked for
+    // it with POST, gate 3 refused an unmapped method with a 403, and the
+    // failure read as "the audience gate refuses the portal's own home".
     for (const path of PORTAL_PATHS) {
-      const isGet = path.endsWith("/me") || path.endsWith("/memberships");
-      const res = await app(PORTAL_SESSION).request(path, {
-        method: isGet ? "GET" : "POST",
-        headers: { "content-type": "application/json" },
-        ...(isGet ? {} : { body: "{}" }),
-      });
-      expect(res.status, `${path} should not be 403 for a portal session`).not.toBe(403);
+      const methods = registeredRoutes()
+        .filter((r) => r.path === path)
+        .map((r) => r.method.toUpperCase());
+      expect(methods, `${path} is in PORTAL_PATHS but no route is registered at it`).not.toEqual(
+        [],
+      );
+      for (const method of methods) {
+        const res = await app(PORTAL_SESSION).request(path, bodylessOrJson(method));
+        expect(
+          res.status,
+          `${method} ${path} should not be 403 for a portal session`,
+        ).not.toBe(403);
+      }
     }
   });
 
@@ -695,14 +716,19 @@ describe("gate 2 — audience", () => {
     expect(res.status).toBe(200);
   });
 
-  it("keeps the portal list to session management only", () => {
-    // Nothing has been built FOR portal users yet (U1 is Phase 6), so they
-    // should reach nothing but their own session. A route added here needs
-    // record-scope (gate 4) as well — audience alone is the coarse gate.
+  it("pins the portal list, so a route joins it deliberately", () => {
+    // The point of pinning it is that adding a route here is a decision
+    // somebody makes rather than a line somebody slips in. A route on this list
+    // needs record-scope (gate 4) as well — audience alone is the coarse gate,
+    // and it says only that a client may ASK the question.
     expect([...PORTAL_PATHS].sort()).toEqual([
       "/api/v1/auth/logout",
       "/api/v1/auth/me",
       "/api/v1/auth/switch-tenant",
+      // T6.5's status home — the first route here that returns a business
+      // record. Every table behind it carries its own RESTRICTIVE policy
+      // (0059, 0062) and its one adapter uses `withPortal`, never `withTenant`.
+      "/api/v1/portal/home",
       // The org switcher's data — their own memberships and nothing else.
       "/api/v1/tenancy/me/memberships",
     ]);

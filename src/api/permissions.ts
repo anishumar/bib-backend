@@ -21,16 +21,34 @@ export function routeKey(method: string, path: string): RouteKey {
 /**
  * Routes that need a session but no particular permission.
  *
- * Only session management belongs here: a caller must be able to see who they
- * are, choose an org, and sign out regardless of what their role permits —
- * otherwise a misconfigured role would lock someone out of the very endpoints
- * they need to fix it.
+ * Session management belongs here: a caller must be able to see who they are,
+ * choose an org, and sign out regardless of what their role permits — otherwise
+ * a misconfigured role would lock someone out of the very endpoints they need to
+ * fix it.
+ *
+ * ── AND THE CLIENT PORTAL'S STATUS HOME, WHICH IS ARGUED (T6.5) ───────────
+ *
+ * It is not session management, so it needs its own reason. Being invited and
+ * being granted a company IS the authorisation to read that company's status:
+ * `crm.portal_access` is a row somebody wrote, with a granter, a date and a
+ * ledger event, and gate 4 enforces it in the database. A permission on top
+ * would be a second answer to a question already answered — and every portal
+ * login would hold it, which is the definition of a permission that decides
+ * nothing.
+ *
+ * What a contact may DO — upload a file, answer a question, approve something —
+ * is the question that genuinely needs a role, and it needs one that declares
+ * its AUDIENCE (a migration; see `AuthzService.permissionsOf` and
+ * `tests/api/portal-permissions.test.ts`). That lands with T6.6, where those
+ * verbs exist. Adding the permission first would register something no route
+ * checks, which this codebase has now paid for four times.
  */
 export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   routeKey("GET", "/api/v1/auth/me"),
   routeKey("POST", "/api/v1/auth/switch-tenant"),
   routeKey("POST", "/api/v1/auth/logout"),
   routeKey("GET", "/api/v1/tenancy/me/memberships"),
+  routeKey("GET", "/api/v1/portal/home"),
 ]);
 
 /** The permission each business route requires. */

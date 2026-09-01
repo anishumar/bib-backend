@@ -48,6 +48,8 @@ import { registerPortalAccessRoutes } from "./handler/portalaccess";
 import type { PortalAccessDeps } from "./handler/portalaccess";
 import { registerPortalInviteRoutes } from "./handler/portalinvite";
 import type { PortalInviteDeps } from "./handler/portalinvite";
+import { registerPortalHomeRoutes } from "./handler/portalhome";
+import type { PortalHomeDeps } from "./handler/portalhome";
 import { registerWorkItemRoutes } from "./handler/workitem";
 import type { WorkItemDeps } from "./handler/workitem";
 import { registerOrchestratorRoutes } from "./handler/orchestrator";
@@ -104,6 +106,7 @@ export interface RouterDeps {
   readonly clientAssignments: ClientAssignmentDeps;
   readonly portalAccess: PortalAccessDeps;
   readonly portalInvites: PortalInviteDeps;
+  readonly portalHome: PortalHomeDeps;
   readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
   readonly scheduler: SchedulerDeps;
@@ -215,6 +218,7 @@ export function buildRouter(
   registerClientAssignmentRoutes(app, deps.clientAssignments);
   registerPortalAccessRoutes(app, deps.portalAccess);
   registerPortalInviteRoutes(app, deps.portalInvites);
+  registerPortalHomeRoutes(app, deps.portalHome);
   registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);
   registerSchedulerRoutes(app, deps.scheduler);

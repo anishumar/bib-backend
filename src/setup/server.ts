@@ -30,6 +30,7 @@ import { PostgresConfigRepository } from "../infrastructure/postgres/config-repo
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
+import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-home-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
@@ -101,6 +102,7 @@ import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
+import { PortalHomeService } from "../usecase/portalhome/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -660,6 +662,27 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // THE PORTAL'S OWN READ (T6.5) — and this line is where the firm's write
+  // surface and the client's read surface meet, which is the only place they
+  // should.
+  //
+  // `PortalScopeSource` is declared by `usecase/portalhome` in its own words and
+  // satisfied here STRUCTURALLY by `PortalAccessService`, so neither use case
+  // imports the other: "who may be granted access" and "what does a client see"
+  // stay separate blast radii. This line is where a drift between them would
+  // fail — at compile time, in one place, which is what the port bought.
+  const portalHome = new PortalHomeService({
+    scope: {
+      scopedCompanies: (tenantId, userId, on) =>
+        portalAccess.scopedClientsForUser(tenantId, userId, on),
+    },
+    // The ONE adapter in this product that uses `withPortal`. Everything else
+    // reaches tenant data through `withTenant`, which sets the firm and nothing
+    // narrower — and would leave gate 4's restrictive policies disarmed.
+    rows: new PostgresPortalHomeRepository(pools.app),
+    clock: systemClock,
+  });
+
   // The pipeline sits ON TOP of the party module rather than beside it: a lead
   // is an opportunity about a party, so capture creates prospects through
   // PartyService — which owns display-name derivation, identifier normalisation
@@ -761,6 +784,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
         portalAccess: { service: portalAccess },
+        portalHome: { service: portalHome },
         portalInvites: {
           service: portalAccessForInvite(),
           identity,

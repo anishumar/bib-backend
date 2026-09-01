@@ -1869,7 +1869,7 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` 421 tests · `test:integration` 105 · `smoke` **125 passed, 0 failed**.
   >
   > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
-- [~] `(B)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
+- [x] `(B)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
   > **CORRECTED (2026-08-30), and the correction is that this task's ACCEPTANCE IS ALREADY MET
   > by somebody else's work.** The line above was written when the escalation ladder was the
   > reason to pull this forward from U1. **T2.9 built the org chart a different way and it
@@ -1882,11 +1882,12 @@ open and are recorded above; neither blocks Phase 2.
   > parking-lot question — *"pull `membership.party_id` forward from U1, or make `(B)`'s
   > escalation wait"* — is answered by events: neither. It was overtaken.
   >
-  > **What is genuinely left of this task is Gate 4 and only Gate 4**: which parties a CLIENT
-  > PORTAL session may see. That has no consumer until U1, and building it now would be a column
-  > with no writer — the exact thing `(B)` cited three days ago when he deliberately did NOT
-  > build `escalated_level`, and the thing T2.5 cited when it deferred `workflow_template`. So
-  > it stays open and moves to Phase 6, where its consumer is.
+  > **CLOSED 2026-09-01.** What was left of this task was Gate 4 and only Gate 4 — which parties
+  > a CLIENT PORTAL session may see — and it is now built, written and READ: migrations 0059
+  > (the wall), 0060 (the writer and `portal:grant`), 0061 (remove means now) and 0062 (the
+  > second and third policies, landing with the first portal read). Its consumer is T6.5's
+  > status home; **the full record is in the Phase 6 U1 block**, including the decision that a
+  > filing is scoped by its ENTITY because that is the column that table names.
   >
   > **The reporting line and this column are not redundant, and it is worth saying why**, so
   > nobody later "simplifies" one into the other. `reports_to_user_id` answers *who does this
@@ -3243,7 +3244,7 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
 portal session until the gate exists), then `T6.5` (who is looking), then `T6.6` and `T4.4`
 together (what is asked for, and who does the asking), then `T6.7`.
 
-- [~] `(B)` **G3.4** **Gate 4 — record-scope.** `membership.party_id`, and the rule that a portal session sees its OWN company's records and nothing else. *Acc: a portal login cannot read another client's anything, proven by a test that tries.* — full entry in Phase 3; **do this before any portal screen**, or every query gets written twice.
+- [x] `(B)` **G3.4** **Gate 4 — record-scope.** `membership.party_id`, and the rule that a portal session sees its OWN company's records and nothing else. *Acc: a portal login cannot read another client's anything, proven by a test that tries.* — full entry in Phase 3; **do this before any portal screen**, or every query gets written twice.
   > **THE WALL IS IN (2026-09-01, migration 0059). THE WRITE PATH IS NOT — and this box stays
   > `[~]` for exactly that reason.** What exists: `membership.party_id` (which PERSON a login
   > is), `crm.portal_access` (which COMPANIES it was granted, effective-dated, one row per
@@ -3290,10 +3291,21 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > Proven over HTTP: granted, scope 1; ended, `validFrom == validTo`; scope EMPTY on the
   > next call; the row still on the history.
   >
-  > **What is still left:** resolving a portal session's grants once per request into
-  > `withPortal`, and `/auth/me` saying which companies the session is scoped to. Both are the
-  > PORTAL's own surface rather than the firm's, they have no consumer until the first portal
-  > read exists, and they land with `T6.5`.
+  > **CLOSED 2026-09-01 with T6.5.** Both halves that were left have landed and have a consumer:
+  > `/auth/me` carries `portalScope`, and `usecase/portalhome` resolves a session's grants ONCE
+  > per request into `withPortal`. The acceptance line — *"a portal login cannot read another
+  > client's anything, proven by a test that tries"* — now holds over a real read as well as
+  > over a raw query: `tests/portal/portal-reads.integration.test.ts` asks for the other client's
+  > filing BY ID and gets nothing, and every one of its assertions was watched go RED with its
+  > policy dropped and green with it back.
+  >
+  > **Migration 0062 added the second and third policies**, one table at a time as the rule says:
+  > `delivery.obligation_instance` on **`entity_party_id`** (that table names the ENTITY, never
+  > the client — 0053), and `is_client_visible` on `delivery.work_item` as a SECOND restrictive
+  > policy. The entity-scoping is a decision, taken with Shrestha on 2026-09-01: a contact
+  > granted Cobalt Foods sees Foods' filings and NOT its subsidiary's, and reaching the
+  > subsidiary would mean joining `crm.engagement` — a NULLABLE join, and exactly the derivation
+  > 0059 refused. Two companies means two grants.
   >
   > **Decision recorded in the migration and in CLAUDE.md: access is GRANTED, never DERIVED.**
   > `core.party_relationship` could answer "this contact is in the Kaveri group" with one
@@ -3301,7 +3313,7 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > Cobalt contact the group's filings. No default and no widening: a contact who should see
   > four companies gets four rows. Whether a group's contact SHOULD see all four is a client
   > fact nobody has been asked (G0.1), and a join would have answered it for them.
-- [~] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
+- [x] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
   > **STARTED 2026-09-01 — the SESSION is scoped now, which is the block everything else sits
   > on.** `/auth/me` carries `portalScope` for a CLIENT_PORTAL session: the companies it may
   > read TODAY, **by name**, resolved once here rather than looked up per screen. NULL for a
@@ -3319,14 +3331,75 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > staff session → `null`, access removed → `[]` on the very next call, and `/work-items`
   > still **403** because gate 2 refuses the staff surface before any of this is consulted.
   >
-  > **Left, in the order it has to happen:** the portal's own read routes (`PORTAL_PATHS` +
-  > `withPortal`, one per screen, each with its own RESTRICTIVE policy on the table it
-  > reads) · the STATUS HOME those routes feed · **invite + password set**, which is the one
-  > that needs a decision rather than code: today a login can only be created through
-  > `/internal` with a platform key, so a firm cannot invite its own client's contact from
-  > the product at all · per-contact roles, which CLAUDE.md already records as needing a
-  > role that declares its audience, and a migration.
+  > **DONE 2026-09-01, and the acceptance line was walked in the browser** as
+  > `meera@cobaltfoods.in`: sign in at `/login` → routed to `/portal` by AUDIENCE → "Hello,
+  > Meera · What 10x Global is doing for Cobalt Foods Private Limited", with what is held up
+  > (and the reason, verbatim), 22 filings still owed, 18 pieces of work under way and one
+  > filing made. Lakeview's and Harbour's rows are nowhere on it, and `/work-items`,
+  > `/clients` and `/calendar` all still answer **403** because gate 2 refuses the staff
+  > surface before any of this is consulted.
+  >
+  > **What shipped:** migration 0062 (two more restrictive policies), `usecase/portalhome`,
+  > `GET /api/v1/portal/home` — the fifth `PORTAL_PATH` and the first that returns a business
+  > record — `PostgresPortalHomeRepository`, the ONE adapter in the product that uses
+  > `withPortal`, and on the frontend `/portal` with its own frame, `/portal/accept-invite`
+  > (the page the invite email had been pointing at since the invite flow shipped, and which
+  > did not exist), and audience routing on `/login`.
+  >
+  > **GATE 2 IS AN EXACT PATH MATCH AND THAT SHAPED THE API.** `PORTAL_PATHS.has(c.req.path)`
+  > compares the concrete path, unlike gate 3 which compiles templates — so a portal route with
+  > a path parameter is unreachable whatever is written in that set. The status home is
+  > therefore one parameter-less aggregate read. **T6.6 cannot add an upload route until that
+  > matcher learns templates**, and that is a change to the audience gate, not a line in a set.
+  >
+  > **PER-CONTACT ROLES MOVE TO T6.6, deliberately.** They need a role that declares its
+  > AUDIENCE and a migration, and their first real consumer is a verb — upload, answer, approve
+  > — which does not exist yet. The status home needs no permission: being invited and granted
+  > a company IS the authorisation, recorded as a row with a granter, a date and a ledger event.
+  > Shipping the permission first would register something no route checks, which this codebase
+  > has now paid for four times.
+  >
+  > **`is_client_visible` HAD A WRITER AND NO READER SINCE 0051** — the fourth of those. The
+  > portal is its reader now, enforced as a POLICY rather than a filter, and
+  > `/work-items/[workItemId]` grew the switch that sets it in the same commit: a flag the
+  > portal enforces and no screen can change is a wall built against a value nobody can move.
+  >
+  > **Three things only opening the page could find**, all fixed: a heading reading "Filings
+  > coming up" over five rows already past their date and marked Missed; the same filing listed
+  > TWICE, once as the law's row and once as the firm's task (the calendar raises one per
+  > obligation); and the demo showing *"Decide the credit hold on INV/2026-27/0003"* — an
+  > internal decision about the client's money — on the client's own page, because
+  > `is_client_visible` defaults true and nothing had ever set it false.
+  >
+  > **And one only running it could find:** postgres.js sends parameters untyped, so
+  > `${asOf}::date + ${90}` is *"operator is not unique: date + unknown"* and the first real
+  > request was a **500**. T3.2's `::text::jsonb` lesson, again.
+  >
+  > **The demo seed now grants Meera Cobalt Foods and files one obligation** (through the
+  > product's own path — a person ticks the task and `reconcileFiling` closes the filing), so
+  > all four sections of the portal have something in them. `demo:verify` stays **71/71**.
 - [ ] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
+  > **THREE THINGS T6.5 HANDED IT, stated so they are not rediscovered.**
+  >
+  > **1 · `PORTAL_PATHS` MUST LEARN TEMPLATES FIRST.** Gate 2 is an exact match on the concrete
+  > path, so every route this task wants — an upload against a document, an answer to one
+  > question, an approval of one thing — is unreachable until the audience gate matches
+  > `{param}` the way gate 3 already does. Do it as its own change, with its own test: it
+  > widens the gate that stops a client contact reading the firm's whole book.
+  >
+  > **2 · PER-CONTACT ROLES BELONG HERE, and this is where they finally have a consumer.**
+  > "This contact may upload, that one may only look" needs a role that declares its AUDIENCE
+  > (a migration — `DEFAULT_ROLES`, the seed-parity test, and `AuthzService.permissionsOf`,
+  > which returns `[]` for every portal session today). `tests/api/portal-permissions.test.ts`
+  > goes red the moment a portal route requires a permission, which is the reminder.
+  >
+  > **3 · THE CLIENT-DIRECTED ASK IS THIS TASK'S, and the portal is honest about not having it.**
+  > T6.5's "Held up" section shows `work_item.blocked_reason` verbatim, under a line saying
+  > whose words it is, because nothing in the schema records who a task is WAITING ON — the
+  > same sentence reads "the client has not sent the register" or "the GST portal is down". A
+  > row that says *we are waiting on YOU*, with somewhere to answer it, is what this builds.
+  > Documents and invoices are also still absent from the portal, and the page says so out loud
+  > rather than letting a client conclude the firm has not billed them.
 - [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
   > **Why it is in this phase.** It is the only thing on the board that reduces the firm's own
   > chasing hours, and it has no honest surface without the portal — a reminder that points at

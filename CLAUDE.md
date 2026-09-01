@@ -85,6 +85,11 @@ GLOBAL tables (marked so in the migration); everything else is tenant-scoped.
 [STAFF | CLIENT_PORTAL], (3) role, (4) record-scope [portal user sees only its own parties].
 Fee/commercial visibility is a **fifth, orthogonal** axis — a flag on membership, never a role.
 
+**AND SINCE T6.5 THERE IS SOMETHING BEHIND THEM** — `GET /api/v1/portal/home`, the first portal
+route that returns a business record, with its own section near the end of this file. Read it
+before adding a second one: a portal read is three things, and gate 2's exact-path match is a
+constraint on what a portal route may even look like.
+
 **ALL FOUR ARE BUILT SINCE 0059** — gate 4 was the last, and it went in BEFORE the portal
 screens rather than with them: a portal read written against no gate has to be written twice,
 and the second version is the one nobody reviews. It is `crm.portal_access` (which companies a
@@ -145,7 +150,9 @@ force on no day is a typo at the moment of granting, while ending one is a decis
 twenty seconds later. The database allows the shape; the service allows only the act.
 
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
-today because it is the one business table carrying `client_party_id` directly. The column that
+by 0059 because it is the one business table carrying `client_party_id` directly, and
+`delivery.obligation_instance` by 0062 — on `entity_party_id`, because that is the column THAT
+table names (see the portal section below for why no join reaches the client from there). The column that
 names the client differs per table and a guessed join is a wall with a hole in it; until each
 gets its line, those tables are unreachable through gate 2, which is a real defence and not a
 permanent one. `tests/portal/gate4.integration.test.ts` is the proof and it TRIES — it asks for
@@ -1821,14 +1828,117 @@ id.** Both people on the row are `{ userId, displayName, email }` now, the shape
 `EventRecord.actor` has. That is the sixth time a read model has been caught, and the first
 where the missing half was the email rather than the name.
 
+## The client portal — the first read written for somebody outside the firm (T6.5)
+
+`usecase/portalhome` + `GET /api/v1/portal/home` + migration 0062. Gate 4 shipped in 0059 and
+its writer in 0060; until this there was still **nothing for a client to look at** —
+`PORTAL_PATHS` held four routes and not one returned a business record, so an invited contact
+signed in and landed on a blank page, which is indistinguishable from broken software.
+
+**A PORTAL READ IS THREE THINGS AND MISSING ANY ONE IS A HOLE.** An entry in `PORTAL_PATHS`
+(gate 2 is denied by default), an entry in `NO_PERMISSION_REQUIRED` or `ROUTE_PERMISSIONS`
+(gate 3 is too), and the query through **`withPortal` — never `withTenant`** — with its own
+RESTRICTIVE policy on every table it reads. `PostgresPortalHomeRepository` is the only adapter
+in the product that uses `withPortal`, and it should stay countable on one hand.
+
+**GATE 2 IS AN EXACT PATH MATCH, WHICH IS A REAL CONSTRAINT.** `PORTAL_PATHS.has(c.req.path)`
+compares the CONCRETE path — unlike gate 3, which compiles `{param}` templates. So a portal
+route carrying a path parameter is unreachable whatever is written in that set, and the status
+home is one parameter-less aggregate read because of it. T6.6's uploads and any per-record
+detail route need that matcher to learn templates FIRST; that is a change to the audience gate
+and does not get made in passing.
+
+**THE QUERIES LOOK LIKE QUERIES THAT FORGOT TO FILTER, ON PURPOSE.** Neither statement names
+`client_party_id`, `entity_party_id` or `is_client_visible` in a WHERE clause: the wall is under
+the query, not in it. Repeating the filter would feel safer and would silently disarm the
+negative control — `tests/portal/portal-reads.integration.test.ts` drops a policy and expects
+these reads to start leaking, and each of its assertions was watched go red and back.
+
+**A GRANT NAMES A PARTY; EACH TABLE NAMES ITS OWN.** `delivery.work_item` carries
+`client_party_id` and `delivery.obligation_instance` carries `entity_party_id` ("the ENTITY,
+never the client" — 0053), so the two policies scope on different columns and a contact granted
+Cobalt Foods sees Cobalt Foods' filings and NOT its subsidiary's, while still seeing the
+subsidiary's TASK (that row names Foods as its client). Reaching the subsidiary's filings would
+mean joining `crm.engagement` — a **nullable** join, and the derivation 0059 refused. A contact
+who should see both gets two grants. Shrestha, 2026-09-01: strict, no join.
+
+**`is_client_visible` HAD A WRITER AND NO READER FROM 0051 UNTIL NOW** — the fourth registered
+thing this codebase has found with no reader. It is enforced as a SECOND restrictive policy
+(0062) rather than a filter in the query, for gate 4's own reason: a portal read that forgets it
+returns an internal note with a 200. `/work-items/[workItemId]` grew the switch that sets it in
+the same commit — a flag the portal enforces and no screen can change is a wall built against a
+value nobody can move.
+
+**NAME TABLES ARE NOT SCOPED BY WHAT THEY NAME.** The read joins `core.party`,
+`work_item_state`, `obligation_state` and `obligation_template` for NAMES and none of them gets a
+policy. `crm.portal_sees(id)` on `core.party` would blank the ENTITY on a row the reader is
+already allowed to see — T4.5's blank-space bug, on purpose. What contains them is gate 2, which
+0059 already accepted as a real defence; **a portal route whose SUBJECT is one of those tables
+needs its own line in a migration first.**
+
+**NO DUE DATE THIS PRODUCT INVENTED REACHES A CLIENT.** `statutoryDueOn` travels only where
+`is_statutory_due` is set; everything else answers with the day the work OPENED. The firm has
+never given its turnaround times (client ask 3.4), and this reader could quote the date back at
+it. `internal_target_on` is not on the response at all — T–X is the firm's own working margin and
+showing it turns it into the deadline.
+
+**"HELD UP" IS NOT "WAITING ON YOU", AND THE NAME IS HONEST ON PURPOSE.** Nothing in this schema
+records who a task waits on: `work_item_state.is_blocked` means the firm cannot proceed and
+`blocked_reason` reads *"the client has not sent the purchase register"* as readily as *"the GST
+portal is down"*. The section shows the reason **verbatim** — it is the only field that says what
+is wanted, and without it the section is titles with no ask — under a line saying whose words
+they are. A client-directed ask with its own answer is T6.6.
+
+**RECENTLY FILED IS KEYED ON `filed_on`, NEVER ON THE STATE BEING TERMINAL.** 0052 seeds two
+terminal states and `resolved` is T3.3's end of a deadline already MISSED. Calling that "filed"
+is a false statement about a statutory return — 0054's failure, reached from the reading side.
+
+**THE STATUS HOME NEEDS NO PERMISSION, AND PER-CONTACT ROLES WAIT FOR T6.6.** Being invited and
+granted a company IS the authorisation to read that company's status: `crm.portal_access` is a
+row somebody wrote, with a granter, a date and a ledger event, and gate 4 enforces it. A
+permission on top is a second answer to a settled question and every portal login would hold it.
+What a contact may DO — upload, answer, approve — is what genuinely needs a role that declares
+its AUDIENCE (a migration; `AuthzService.permissionsOf` and
+`tests/api/portal-permissions.test.ts` hold the build red the day a portal route wants one). It
+lands with T6.6, where those verbs exist, because a permission nothing checks is a lie on a
+screen.
+
+**A STAFF SESSION IS REFUSED RATHER THAN ANSWERED EMPTY.** Gate 2 admits a portal session to
+`PORTAL_PATHS` and says nothing about a staff one reaching it; a colleague would hold no grants
+and get an empty page reading as "this client has nothing going on". A wrong answer that looks
+right is worse than a refusal.
+
+### What running it found, and what none of the tests did
+
+- **`date + $n` IS AMBIGUOUS TO POSTGRES.** postgres.js sends every parameter untyped, so
+  `${asOf}::date + ${90}` died with *"operator is not unique: date + unknown"*. It typechecked,
+  it linted, the unit tests use a fake repository — and it surfaced as a **500 on the first real
+  request**. `::int` on the window is the fix, and it is T3.2's `::text::jsonb` lesson again: **if
+  you add SQL, run it.**
+- **THE PAGE SAID EVERYTHING TWICE.** The calendar raises a task per obligation, so the first
+  response carried "GSTR-3B — Cobalt Foods — Jul 2026" as a filing AND as a task. To the firm
+  those are two things; to a client they are one thing listed twice. The work query now excludes
+  a task whose obligation is on the same page — and the asymmetry falls out of RLS rather than
+  being coded: an obligation for a company that was NOT granted is invisible to the subquery, so
+  `NOT EXISTS` is true and its task stays, which is right, because that task is then the only
+  trace of the work the client can see.
+- **"FILINGS COMING UP" WAS A HEADING THAT LIED.** The top five rows were past their statutory
+  date and marked Missed. Only opening the page shows that; a heading wrong about the rows
+  beneath it would have had a client scrolling past the lines that matter.
+- **THE DEMO PUT AN INTERNAL DECISION ON THE CLIENT'S PAGE.** *"Decide the credit hold on
+  INV/2026-27/0003"* — because `is_client_visible` defaults TRUE and nothing had ever set it
+  false. The flag was working; the seed had never used it.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
 `engagement letters`, the `staff grade` ladder, the firm's `service axis` lists, the
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
-T3.3's missed-deadline state and T3.7's dashboards are built. Next on `(B)`'s lane: the
-T4.x's agents. The escalation ladder is BUILT (T4.5) and did not need G3.4 —
-its manager hop reads `membership.reports_to_user_id`, and G3.4 answers a different question.
+T3.3's missed-deadline state and T3.7's dashboards are built. The escalation ladder is BUILT
+(T4.5) and did not need G3.4 — its manager hop reads `membership.reports_to_user_id`, and G3.4
+answers a different question. **The CLIENT PORTAL is built as far as its status home (T6.5),
+and gate 4 is closed** — see the portal section above. **Next on `(B)`'s lane is T6.6**, the
+action centre, and Phase 6 runs BEFORE Phase 4's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

@@ -441,6 +441,20 @@ HARBOUR=$(org "Harbour Provisions Private Limited")
 ident "$HARBOUR" '{"type":"pan","value":"AAACH3344P","validFrom":"2023-01-09"}'
 warn "Harbour Provisions has no legal entity registered — its calendar will be empty, with a reason."
 
+# ── The client's own contact, let in (T6.5) ──────────────────────────────────
+#
+# Without this row Meera signs in and the portal correctly says "the firm has
+# not given you access to a company yet" — which is the right screen for that
+# state and the wrong first impression of a demo. ACCESS IS GRANTED, NEVER
+# DERIVED: this is one company, one row, one event, one answer to "who decided
+# this". Cobalt Logistics is deliberately NOT granted even though Cobalt Foods
+# is its parent — the relationship above says so and access does not read it, so
+# the portal shows Foods' filings and not the subsidiary's until somebody
+# decides otherwise. That is the wall being visible rather than a gap.
+M_MEERA=$(mship "meera@cobaltfoods.in")
+asp partner "$API/api/v1/portal-access/memberships/$M_MEERA"   -d "{\"clientPartyId\":\"$COBALT\",\"validFrom\":\"$LAST_MONTH\"}" | ok
+step "Meera Menon may read Cobalt Foods — and nothing else"
+
 DIRECTOR=$(asp partner "$API/api/v1/parties/persons" -d '{"fullName":"Priya Menon"}' | field partyId)
 asp partner "$API/api/v1/parties/relationships" \
   -d "{\"fromPartyId\":\"$DIRECTOR\",\"toPartyId\":\"$COBALT\",\"type\":\"director_of\",\"validFrom\":\"2019-06-11\"}" | ok
@@ -671,8 +685,15 @@ step "FY27 audit planning memo — with Ravi, in progress"
 # work: the things only a partner may sign.
 W_P1=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Sign off the FY27 audit engagement\",\"description\":\"Independence confirmation and the engagement quality review before fieldwork opens.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$DUE_SOON\"}")
 W_P2=$(task "{\"clientPartyId\":\"$LAKEVIEW\",\"entityPartyId\":\"$LAKEVIEW\",\"title\":\"Price the Lakeview audit before the proposal goes out\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$YESTERDAY\"}")
-W_P3=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Decide the credit hold on INV/2026-27/0003\",\"description\":\"75 days overdue. The ladder has climbed to the credit-hold rung and stopped - only a partner may apply it.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$TODAY\"}")
-step "three on Siddharth's own desk - one late, one due today"
+# NOT CLIENT-VISIBLE, and it is the row that shows why that flag exists (T6.5).
+# `is_client_visible` defaults TRUE — the client's own answer, "clients would be
+# able to see their tasks" — and the exceptions are MARKED rather than the rule
+# inverted. This is an exception: deciding whether to put a client on credit hold
+# is the firm talking to itself about that client's money, and the description
+# names the rung the ladder stopped on. Walking the portal is what found it
+# sitting on Meera's page.
+W_P3=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Decide the credit hold on INV/2026-27/0003\",\"description\":\"75 days overdue. The ladder has climbed to the credit-hold rung and stopped - only a partner may apply it.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$TODAY\",\"isClientVisible\":false}")
+step "three on Siddharth's own desk - one late, one due today, one the client cannot see"
 
 # UNASSIGNED, and OLD, so the unassigned rungs of the ladder have fired.
 W_HARBOUR=$(task "{\"clientPartyId\":\"$HARBOUR\",\"entityPartyId\":\"$HARBOUR\",\"title\":\"Onboarding - collect Harbour's incorporation papers\",\"description\":\"Nothing can be filed for this client until it is registered as a legal entity.\",\"dueOn\":\"$LAST_WEEK\"}")
@@ -680,6 +701,30 @@ step "Harbour onboarding - a week late, and nobody holds it"
 
 W_ORPHAN=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"FY27 statutory audit - open the file\",\"description\":\"Audit is filed under RAA and this client has no SPOC there.\",\"dueOn\":\"$DUE_SOON\"}")
 step "FY27 audit — nobody holds it"
+
+# ── One filing actually MADE ─────────────────────────────────────────────────
+#
+# Everything above leaves the calendar entirely unfiled, so every screen that
+# shows finished compliance work — the client portal's "recently filed" among
+# them — renders empty at a firm that has been running for a month. That is not
+# what the demo is showing.
+#
+# It goes through the PRODUCT's own path and not a psql UPDATE: a person ticks
+# the TASK, and `reconcileFiling` (0054) closes the obligation behind it. Filing
+# is not something anybody marks twice, and this is the demo of that.
+say "One filing actually made"
+# FROM THE CALENDAR, not from the board. The board's own statutory rows include
+# the hand-raised "GSTR-3B - Cobalt Foods - July" above, which carries the
+# statutory flag and NO obligation behind it — ticking that one moves a card and
+# files nothing, which is exactly what the first version of this step did.
+# `workItemId` on a calendar row is the link that makes the tick reach a filing.
+FILED_TASK=$(as partner "$API/api/v1/calendar" | pick "next((r['workItemId'] for r in d['rows'] if r['workItemId'] and r['entityName'].startswith('Cobalt Foods')), None)")
+if [ "$FILED_TASK" != "None" ]; then
+  asp partner "$API/api/v1/work-items/$FILED_TASK/state" -d "{\"stateId\":\"$S_DONE\"}" | ok
+  step "a statutory task ticked - and the calendar entry behind it now says Filed"
+else
+  warn "no statutory task to tick - the calendar raised none"
+fi
 
 say "Running the worker again, so the escalation ladder has climbed the new work"
 (cd "$(dirname "$0")/.." && npm run worker:once 2>&1 | sed 's/^/    /') || true
