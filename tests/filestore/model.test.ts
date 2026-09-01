@@ -1,6 +1,6 @@
 // The document store's pure rules, and the one thing they are written in two
 // places (T3.6).
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import {
   BRAND_ASSET_KINDS,
@@ -12,22 +12,45 @@ import {
   safeFilename,
 } from "../../src/domain/filestore/model";
 
-const MIGRATION = "migrations/0037_document_store.up.sql";
-
 /**
- * The CHECK constraint's members, read out of the migration.
+ * The CHECK constraint's members, read out of the NEWEST migration that states
+ * it — not out of 0037.
  *
  * The same instinct as tests/ledger/contract-parity.test.ts and
  * tests/config/seed-parity.test.ts: SQL cannot import TypeScript, so the
  * duplication is unavoidable — the DRIFT is not. A kind added to the union and
  * not to the CHECK is a value the service will happily accept and the database
- * will reject at 3am; the reverse is a value the database allows that nothing
- * in the product can produce or read.
+ * will reject at 3am; the reverse is a value the database allows that nothing in
+ * the product can produce or read.
+ *
+ * ── AND "NEWEST" IS T6.6's CORRECTION, NOT A TIDY-UP ─────────────────────
+ *
+ * This was pinned to `0037_document_store.up.sql`, and 0063 widened
+ * `subject_kind` by DROPPING that CHECK and adding a new one — which an applied
+ * migration must do, because it cannot be edited. So the test went on reading
+ * seven members out of a constraint the database no longer had, and would have
+ * stayed green while the union and the live CHECK disagreed. Exactly the drift
+ * it was written to catch, hidden by where it was looking.
+ *
+ * `seed-parity.test.ts` had already solved this and stated why: a test pinned to
+ * the first migration makes the CORRECT fix look like a regression, and the
+ * tempting way out of a red build is to edit an applied migration.
  */
 function checkMembers(constraint: string): string[] {
-  const sql = readFileSync(MIGRATION, "utf8");
-  const at = sql.indexOf(constraint);
-  if (at < 0) throw new Error(`${MIGRATION} no longer contains ${constraint}`);
+  const carriers = readdirSync("migrations")
+    .filter((f) => f.endsWith(".up.sql"))
+    .filter((f) => readFileSync(`migrations/${f}`, "utf8").includes(constraint))
+    .sort(); // NNNN_ prefixes are zero-padded, so lexicographic IS numeric
+
+  const file = carriers.at(-1);
+  if (file === undefined) {
+    throw new Error(`no migration in migrations/ states ${constraint} any more`);
+  }
+  const sql = readFileSync(`migrations/${file}`, "utf8");
+  const at = sql.lastIndexOf(constraint);
+  // From the needle, never from the file: a migration that states one CHECK
+  // usually states others, and searching from the top finds whichever came
+  // first rather than the one asked for.
   const open = sql.indexOf("(", sql.indexOf("CHECK", at));
   const close = sql.indexOf(")", open);
   return [...sql.slice(open, close).matchAll(/'([a-z_]+)'/g)].map((m) => m[1] as string).sort();
@@ -35,19 +58,33 @@ function checkMembers(constraint: string): string[] {
 
 describe("the closed sets agree with the database", () => {
   it("document kinds", () => {
-    expect(checkMembers("kind        text NOT NULL CHECK")).toEqual([...DOCUMENT_KINDS].sort());
+    expect(checkMembers("  kind        text NOT NULL CHECK")).toEqual(
+      [...DOCUMENT_KINDS].sort(),
+    );
   });
 
   it("document origins", () => {
-    expect(checkMembers("origin      text NOT NULL CHECK")).toEqual([...DOCUMENT_ORIGINS].sort());
+    expect(checkMembers("  origin      text NOT NULL CHECK")).toEqual(
+      [...DOCUMENT_ORIGINS].sort(),
+    );
   });
 
   it("subject kinds", () => {
-    expect(checkMembers("subject_kind  text NOT NULL CHECK")).toEqual([...SUBJECT_KINDS].sort());
+    // 0063 widened this one, so it is read out of THAT migration rather than
+    // 0037's — see `checkMembers`. The needle is the CHECK's own predicate
+    // because 0063 states it as an ALTER, where the column declaration the
+    // other three anchor on does not appear.
+    //
+    // The other three needles carry their LEADING INDENTATION deliberately:
+    // `kind        text NOT NULL CHECK` is a substring of 0063's
+    // `ask_kind        text NOT NULL CHECK`, so without the two spaces in front
+    // this test would compare the document kinds against the three kinds of ask
+    // and be perfectly confident about it.
+    expect(checkMembers("CHECK (subject_kind IN (")).toEqual([...SUBJECT_KINDS].sort());
   });
 
   it("brand asset kinds", () => {
-    expect(checkMembers("kind                text NOT NULL CHECK")).toEqual(
+    expect(checkMembers("  kind                text NOT NULL CHECK")).toEqual(
       [...BRAND_ASSET_KINDS].sort(),
     );
   });

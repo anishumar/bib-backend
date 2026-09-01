@@ -64,7 +64,13 @@ import {
   InvalidFilename,
   UnsupportedMediaType,
 } from "../../domain/filestore/errors";
-import { normaliseMediaType, safeFilename } from "../../domain/filestore/model";
+import type { DocumentKind } from "../../domain/filestore/model";
+import {
+  DOCUMENT_KINDS,
+  isDocumentKind,
+  normaliseMediaType,
+  safeFilename,
+} from "../../domain/filestore/model";
 import type { BlobStore, ContentDigest } from "../filestore/ports";
 import type {
   AskRepository,
@@ -186,6 +192,15 @@ export class ClientAskService {
     if (wantsDocument === (input.documentKind === null)) {
       throw new AskDocumentKindMismatch(input.askKind);
     }
+    // CHECKED HERE, so a kind outside the closed set is a 400 with a sentence
+    // rather than a 500 from 0063's CHECK. The route's zod enum already refuses
+    // one over HTTP; this is the same rule for every other caller, and it is
+    // what lets the port carry `DocumentKind` instead of `string` — one cast at
+    // the edge instead of one in each adapter.
+    if (input.documentKind !== null && !isDocumentKind(input.documentKind)) {
+      throw new InvalidAskKind(input.documentKind, DOCUMENT_KINDS);
+    }
+    const documentKind: DocumentKind | null = input.documentKind;
 
     const raisedBy = this.humanOrNull(input.actor);
     if (raisedBy === null) {
@@ -201,7 +216,7 @@ export class ClientAskService {
       workItemId: input.workItemId,
       askKind: input.askKind,
       prompt,
-      documentKind: input.documentKind,
+      documentKind,
       raisedBy,
     });
     if (record === null) throw new AskWorkItemNotFound(input.workItemId);

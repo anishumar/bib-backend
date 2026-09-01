@@ -17,6 +17,8 @@
 // be waiting on the client for one thing and moving on three others, and a firm
 // that wants the two coupled sets the state itself (migration 0063).
 
+import type { DocumentKind } from "../filestore/model";
+
 /**
  * What kind of answer an ask wants — and therefore what the action centre draws
  * under it.
@@ -95,9 +97,18 @@ export interface ClientAsk {
    *  actually wanted — without it the action centre is a list of blanks. Shown
    *  to the client verbatim, under a line saying whose words they are. */
   readonly prompt: string;
-  /** What an uploaded answer gets filed as. Present exactly when `askKind` is
-   *  `document` — a CHECK in 0063 holds the pair. */
-  readonly documentKind: string | null;
+  /**
+   * What an uploaded answer gets filed as. Present exactly when `askKind` is
+   * `document` — a CHECK in 0063 holds the pair.
+   *
+   * `DocumentKind` and not `string`, and it costs an import from
+   * `domain/filestore` that is worth making: the vocabulary is already written
+   * three times (here, 0037's CHECK and 0063's), and typing it as a string here
+   * would let a fourth spelling reach the API's response schema, where the
+   * generated client would carry it as `string` and the firm's screen would
+   * offer a kind the store cannot file.
+   */
+  readonly documentKind: DocumentKind | null;
   readonly status: AskStatus;
   readonly raisedBy: string;
   readonly raisedAt: string;
@@ -184,7 +195,7 @@ export interface PortalAskRow {
    * reading `"working_paper"` learns nothing they can act on. The handler maps
    * field by field, which is what keeps that true.
    */
-  readonly documentKind: string | null;
+  readonly documentKind: DocumentKind | null;
   /** Which of the client's companies this is about, when the work names one.
    *  Null is a real answer — relationship-level work has no entity (0051). */
   readonly companyName: string | null;

@@ -81,6 +81,22 @@ export interface PortalWorkRow {
    *  reason, so a held-up row with nothing to say cannot exist. */
   readonly heldUpSince: string | null;
   readonly heldUpReason: string | null;
+  /**
+   * Whether the firm has an OPEN ask on this task (T6.6).
+   *
+   * FOUND BY OPENING THE PAGE, and it is T6.5's own duplication bug in a new
+   * costume. The action centre now shows *"Please send the Maharashtra purchase
+   * register"* with a file picker under it; two sections lower, "Held up" showed
+   * the identical sentence out of `blocked_reason` with nothing to do about it.
+   * To the firm those are two rows — one is a note to itself, the other is a
+   * request it addressed to the client — and to the client they are the same
+   * sentence twice, which is the exact fault the filings/tasks dedupe fixed.
+   *
+   * The row is NOT removed. The task really is held up and belongs in that
+   * section; what changes is that the reason is not repeated under it, because
+   * the ask above already says it and has somewhere to answer it.
+   */
+  readonly hasOpenAsk: boolean;
 }
 
 /**

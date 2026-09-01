@@ -3378,7 +3378,7 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > **The demo seed now grants Meera Cobalt Foods and files one obligation** (through the
   > product's own path — a person ticks the task and `reconcileFiling` closes the filing), so
   > all four sections of the portal have something in them. `demo:verify` stays **71/71**.
-- [ ] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
+- [x] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
   > **THREE THINGS T6.5 HANDED IT, stated so they are not rediscovered.**
   >
   > **1 · `PORTAL_PATHS` MUST LEARN TEMPLATES FIRST.** Gate 2 is an exact match on the concrete
@@ -3400,6 +3400,104 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > row that says *we are waiting on YOU*, with somewhere to answer it, is what this builds.
   > Documents and invoices are also still absent from the portal, and the page says so out loud
   > rather than letting a client conclude the firm has not billed them.
+
+  > **DONE 2026-09-01, and the acceptance line was walked in the browser** as
+  > `meera@cobaltfoods.in`: a document ask, a question and an approval on the action centre;
+  > uploaded a file against the one the firm raised on the blocked task; approved the
+  > management pack with a reason; and the file arrived on the firm's own
+  > `/work-items/[workItemId]` marked *"Answered — needs a look"* with the two buttons that
+  > close it. **A second client's records stayed unreachable throughout** — an ask raised for
+  > Lakeview answered **404** by id, was absent from the list, and `/clients` and
+  > `/work-items` still answered **403**.
+  >
+  > **1 · THE GATE-2 MATCHER SHIPPED FIRST AND ALONE** (`19d5ae3`), before any route needed
+  > it. `PORTAL_PATHS` now carries `{param}` templates compiled the way gate 3 compiles them.
+  > What contains the widening is a test rather than care: `auth-coverage` asserts, over EVERY
+  > registered route, that `isPortalPath(concrete(path))` equals plain membership of that
+  > route's TEMPLATE. Watched go red with `/api/v1/work-items/{workItemId}` added to the list,
+  > and the matcher's own unit test watched go red with the `$` anchor removed. `asTemplate()`
+  > was the half that was not optional — Hono registers `:name` while both permission tables
+  > are keyed by `{name}`, so a templated portal route would have looked undeclared.
+  >
+  > **2 · THE ASK LIVES IN `delivery` AND HANGS OFF A WORK ITEM** (0063). Not `crm`: an ask
+  > exists because WORK cannot move. `work_item_id` is NOT NULL, and that is what lets its
+  > `client_party_id` — the column gate 4 filters on — be held to the work item's by a
+  > COMPOSITE foreign key. The wall column is denormalised and **cannot disagree**, rather
+  > than being trusted; nothing on either surface accepts a client party at all, it is read
+  > from the work item inside the INSERT. **No due date, and its absence is the API's own
+  > statement.** `answered` is not `closed` (Shrestha's call): a client who sent last
+  > quarter's register must not see the ask marked done. Responses are **append-only by
+  > GRANT** — a client's answer is evidence.
+  >
+  > **THE WALL, ON THE WRITE SIDE FOR THE FIRST TIME.** 0059 and 0062 wrote `WITH CHECK` while
+  > saying no portal write path existed, *"which is why it will not have to be built with the
+  > rule inside it"*. This is that path and the promise held: not one statement in
+  > `PostgresPortalAskRepository` — the product's SECOND `withPortal` adapter and the first
+  > that writes — names `client_party_id`. Five new policies: the ask, its responses, and
+  > `files.document`, `document_version` and `document_link`, which 0037 wrote `party_id` for
+  > and which have had no policy since. NULL there means the firm's own and denies correctly,
+  > which the migration states because it does not look deliberate in the SQL.
+  > `document_version` is guarded by an EXISTS on its parent, and that is what finally makes
+  > T3.6's *"no pre-signed URL, the key is unreachable"* claim TRUE.
+  >
+  > **PROVEN BY NEGATIVE CONTROL**, which is the only way it is worth anything:
+  > `tests/portal/client-ask.integration.test.ts` is 16 tests, and dropping the five policies
+  > turns 3, 1, 5, 2 and 1 of them red respectively — then green with each put back.
+  >
+  > **3 · PER-CONTACT ROLES LANDED HERE BECAUSE HERE IS WHERE THEY GET A CONSUMER** (0064).
+  > `portal:respond` is the tenth permission and the only one held by somebody outside the
+  > firm. `permissionsOf` returned `[]` for every portal session, which was ARITHMETIC and
+  > documented as such; `portal-permissions.test.ts` was written to go red the day it stopped
+  > being true, and it did. The fix is the one CLAUDE.md always named: **a role declares its
+  > AUDIENCE and a role written for the other one grants nothing** — BOTH ways, because
+  > `portal:respond` on `associate` is as wrong as `manager` on a portal login.
+  > `client_contact` may respond, `client_viewer` may only look, and **both see everything**,
+  > because reading is authorised by the grant and never by a permission. Walked: Meera as
+  > `client_viewer` saw all three asks, was offered no control, and the API answered 403 with
+  > *"role `client_viewer` does not carry `portal:respond`"*.
+  >
+  > **VIRUS-SCAN / OCR / AUTO-FILE: NONE, AND NO PORT EITHER.** There is no scanner and no
+  > agent runtime (`NoAgentsBuiltYet` is still what `setup/` wires), so all three would be
+  > contracts written against nothing — and T3.6 wrote a `DocumentRenderer` port and DELETED
+  > IT BEFORE COMMIT under exactly that rule. A `scan()` returning "clean" is a lie with a
+  > signature; one that threw would make uploads impossible. So it is SAID instead: the file
+  > is stored unscanned, the firm's screen says *"not scanned"* beside it, and
+  > `content-disposition: attachment` is the one protection that does exist. **Open for
+  > Shrestha to overrule** — a real scanner arrives with a consumer.
+  >
+  > **WHAT WALKING IT FOUND, AND WHAT NONE OF THE TESTS DID — four things.**
+  >
+  > · **THE PAGE SAID THE REQUEST TWICE.** The action centre showed *"Please send the
+  >   Maharashtra purchase register"* with a file picker under it, and "Held up" printed the
+  >   identical sentence out of `blocked_reason` with nothing to do about it. T6.5's own
+  >   duplication bug in a new costume. `hasOpenAsk` is on the row now and the held-up card
+  >   points at the ask instead of repeating it — and the asymmetry falls out of RLS again: an
+  >   ask the reader was not granted is invisible to the EXISTS, so the reason is shown, which
+  >   is right, because it is then the only thing saying what is wanted.
+  > · **THE FOOTER STARTED LYING.** *"sending files across is not here yet — email 10x Global
+  >   as you do now"*, one paragraph below a working file picker. Nothing in a typecheck, a
+  >   lint or a test can see a sentence go stale.
+  > · **A READ-ONLY CONTACT WAS PROMISED SOMETHING.** *"if you sent the wrong thing, you can
+  >   still send another"* — beside a card with no controls, and because all their asks were
+  >   answered it was the only sentence about them on the page.
+  > · **AND THE POINTER NAMED THE WRONG HEADING.** *"it is under Waiting on you"* on an ask
+  >   that had been answered and therefore sat under "Sent — with the firm". Found by reading
+  >   the page again after answering something on it.
+  >
+  > **AND ONE THE WALK FOUND IN A TEST RATHER THAN ON A SCREEN.**
+  > `tests/filestore/model.test.ts` was PINNED TO 0037, and 0063 widened `subject_kind` by
+  > dropping that CHECK and adding a new one — which an applied migration must do. So the test
+  > went on reading seven members out of a constraint the database no longer had, and would
+  > have stayed green while the union and the live CHECK disagreed: exactly the drift it
+  > exists to catch, hidden by where it was looking. It reads the NEWEST carrier now, the way
+  > `seed-parity` already did. `linksOf` gained its `work_item` case in the same pass — 0063's
+  > comment claimed both halves were present and only one was.
+  >
+  > **The demo seed now carries three asks, one per kind, with the question already
+  > ANSWERED** so "with the firm" is not an empty heading either. `demo:verify` stays
+  > **71/71** — its *"a portal session is told it may do nothing"* check is now *"told exactly
+  > what it may do"*, asserting the LIST rather than a count, because "one permission" would
+  > pass with the wrong one.
 - [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
   > **Why it is in this phase.** It is the only thing on the board that reduces the firm's own
   > chasing hours, and it has no honest surface without the portal — a reminder that points at

@@ -13,6 +13,7 @@
 // an approval", "an answered ask still accepts another answer", "closing a
 // closed ask is refused" are facts about an ask, not about who is looking at it,
 // and two services would state each of them twice and eventually differ.
+import type { DocumentKind } from "../../domain/filestore/model";
 import type {
   AskKind,
   AskRecord,
@@ -27,7 +28,7 @@ export interface NewAsk {
   readonly workItemId: string;
   readonly askKind: AskKind;
   readonly prompt: string;
-  readonly documentKind: string | null;
+  readonly documentKind: DocumentKind | null;
   readonly raisedBy: string;
 }
 
@@ -101,7 +102,7 @@ export interface UploadedBytes {
   readonly versionId: string;
   readonly linkId: string;
   readonly title: string;
-  readonly documentKind: string;
+  readonly documentKind: DocumentKind;
   readonly contentHash: string;
   readonly byteSize: number;
   readonly mediaType: string;

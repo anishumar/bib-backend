@@ -35,6 +35,7 @@ import type {
   AskStatus,
   ResponseKind,
 } from "../../domain/clientask/model";
+import type { DocumentKind } from "../../domain/filestore/model";
 import type { AskRepository, NewAsk } from "../../usecase/clientask/ports";
 
 interface AskRow {
@@ -255,7 +256,7 @@ function toRecord(r: AskRow): AskRecord {
       clientPartyId: r.client_party_id,
       askKind: r.ask_kind as AskKind,
       prompt: r.prompt,
-      documentKind: r.document_kind,
+      documentKind: r.document_kind as DocumentKind | null,
       status: r.status as AskStatus,
       raisedBy: r.raised_by,
       raisedAt: r.raised_at,

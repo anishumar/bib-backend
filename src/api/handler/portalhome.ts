@@ -99,6 +99,13 @@ const WorkSchema = z
         "What the firm recorded it is waiting for. Both this and `heldUpSince` are present " +
         "together or not at all — a trigger insists a held-up task carries a reason.",
     }),
+    hasOpenAsk: z.boolean().openapi({
+      description:
+        "TRUE when the firm has an open ask on this task (T6.6), which the action centre is " +
+        "already showing with somewhere to answer it. A screen must not ALSO print " +
+        "`heldUpReason` under such a row: the two routinely say the same sentence, and one " +
+        "of them has a button.",
+    }),
   })
   .openapi("PortalWorkRow");
 
@@ -238,6 +245,7 @@ function toWorkWire(r: {
   statutoryDueOn: string | null;
   heldUpSince: string | null;
   heldUpReason: string | null;
+  hasOpenAsk: boolean;
 }): z.infer<typeof WorkSchema> {
   return {
     workItemId: r.workItemId,
@@ -249,6 +257,7 @@ function toWorkWire(r: {
     statutoryDueOn: r.statutoryDueOn,
     heldUpSince: r.heldUpSince,
     heldUpReason: r.heldUpReason,
+    hasOpenAsk: r.hasOpenAsk,
   };
 }
 

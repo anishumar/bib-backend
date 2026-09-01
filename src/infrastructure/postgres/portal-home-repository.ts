@@ -63,6 +63,7 @@ interface WorkRow {
   statutory_due_on: string | null;
   held_up_since: string | null;
   held_up_reason: string | null;
+  has_open_ask: boolean;
 }
 
 interface FilingRow {
@@ -120,7 +121,22 @@ export class PostgresPortalHomeRepository implements PortalHomeRepository {
                (wi.created_at AT TIME ZONE 'UTC')::date::text AS opened_on,
                CASE WHEN wi.is_statutory_due THEN wi.due_on::text END AS statutory_due_on,
                (wi.blocked_at AT TIME ZONE 'UTC')::date::text AS held_up_since,
-               wi.blocked_reason AS held_up_reason
+               wi.blocked_reason AS held_up_reason,
+               -- Does an ask already say this, with somewhere to answer it?
+               --
+               -- Under gate 4 like everything else here, and the asymmetry that
+               -- buys is the same one the filings subquery relies on: an ask the
+               -- reader was not granted is invisible to this EXISTS, so it
+               -- answers false and the blocked reason is shown. Which is right —
+               -- if the client cannot see the ask, the reason is the only thing
+               -- on the page that says what is wanted.
+               EXISTS (
+                 SELECT 1
+                   FROM delivery.client_ask ca
+                  WHERE ca.work_item_id = wi.id
+                    AND ca.tenant_id = wi.tenant_id
+                    AND ca.status IN ('open', 'answered')
+               ) AS has_open_ask
           FROM delivery.work_item wi
           JOIN delivery.work_item_state ws
             ON ws.id = wi.state_id AND ws.tenant_id = wi.tenant_id
@@ -205,6 +221,7 @@ function toWorkRow(r: WorkRow): PortalWorkRow {
     statutoryDueOn: r.statutory_due_on,
     heldUpSince: r.held_up_since,
     heldUpReason: r.held_up_reason,
+    hasOpenAsk: r.has_open_ask,
   };
 }
 

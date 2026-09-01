@@ -43,6 +43,7 @@ function work(over: Partial<PortalWorkRow> = {}): PortalWorkRow {
     statutoryDueOn: null,
     heldUpSince: null,
     heldUpReason: null,
+    hasOpenAsk: false,
     ...over,
   };
 }

@@ -397,7 +397,8 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         SELECT l.id, l.tenant_id, l.document_id, l.subject_kind, l.subject_ref,
                l.role, l.created_by, l.created_at,
                COALESCE(p.display_name, ld.title, pr.ref, el.ref,
-                        eng_p.display_name, i.number, j.source_kind) AS subject_label
+                        eng_p.display_name, i.number, j.source_kind,
+                        wi.title) AS subject_label
         FROM files.document_link l
         LEFT JOIN core.party p
           ON l.subject_kind = 'party' AND p.id = l.subject_ref
@@ -415,6 +416,12 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
           ON l.subject_kind = 'invoice' AND i.id = l.subject_ref
         LEFT JOIN delivery.job j
           ON l.subject_kind = 'job' AND j.id = l.subject_ref
+        -- 0063's addition, and the half it promised beside the CHECK: *"a kind
+        -- nothing can resolve is a link nobody can follow"*. A client's uploaded
+        -- answer is linked to the WORK ITEM the ask was raised from, so without
+        -- this the file arrives on the firm's document list attached to a blank.
+        LEFT JOIN delivery.work_item wi
+          ON l.subject_kind = 'work_item' AND wi.id = l.subject_ref
         WHERE l.document_id = ${documentId}
         ORDER BY l.created_at
       `;

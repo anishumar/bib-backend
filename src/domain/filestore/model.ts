@@ -80,7 +80,12 @@ export type SubjectKind =
   | "engagement_letter"
   | "engagement"
   | "invoice"
-  | "job";
+  | "job"
+  /** The row on somebody's desk (0051), and NOT the same thing as `job`: a job
+   *  is the engine's run of a process, a work item is the task. Added by 0063
+   *  because a client's uploaded answer files itself against the task the ask
+   *  was raised from — which is where the person who asked for it is looking. */
+  | "work_item";
 
 export const SUBJECT_KINDS: readonly SubjectKind[] = [
   "party",
@@ -90,6 +95,7 @@ export const SUBJECT_KINDS: readonly SubjectKind[] = [
   "engagement",
   "invoice",
   "job",
+  "work_item",
 ];
 
 /** The firm's own marks, per issuing entity (G1.2 applied to paper). */

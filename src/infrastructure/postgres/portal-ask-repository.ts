@@ -45,6 +45,7 @@
 import type { Db } from "../../db/pool";
 import { withPortal } from "../../db/tenant";
 import type { AskKind, AskStatus, PortalAskRow } from "../../domain/clientask/model";
+import type { DocumentKind } from "../../domain/filestore/model";
 import type {
   NewResponse,
   PortalAskRepository,
@@ -296,7 +297,7 @@ function toPortalRow(r: Row): PortalAskRow {
     askId: r.id,
     askKind: r.ask_kind as AskKind,
     prompt: r.prompt,
-    documentKind: r.document_kind,
+    documentKind: r.document_kind as DocumentKind | null,
     status: r.status as AskStatus,
     companyName: r.company_name,
     workItemTitle: r.work_item_title,

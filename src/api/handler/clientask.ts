@@ -75,7 +75,14 @@ const AskSchema = z
     clientName: z.string(),
     askKind: z.enum(ASK_KINDS as unknown as [string, ...string[]]),
     prompt: z.string(),
-    documentKind: z.string().nullable(),
+    documentKind: z
+      .enum(DOCUMENT_KINDS as unknown as [string, ...string[]])
+      .nullable()
+      .openapi({
+        description:
+          "What an uploaded answer gets FILED as, chosen when the ask was raised. Present " +
+          "exactly when askKind is `document`. The CLIENT never sees or chooses it.",
+      }),
     status: z.enum(["open", "answered", "closed", "withdrawn"]).openapi({
       description:
         "`answered` IS NOT `closed`. The client responding turns an ask answered; the FIRM " +

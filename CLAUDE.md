@@ -1841,12 +1841,20 @@ signed in and landed on a blank page, which is indistinguishable from broken sof
 RESTRICTIVE policy on every table it reads. `PostgresPortalHomeRepository` is the only adapter
 in the product that uses `withPortal`, and it should stay countable on one hand.
 
-**GATE 2 IS AN EXACT PATH MATCH, WHICH IS A REAL CONSTRAINT.** `PORTAL_PATHS.has(c.req.path)`
-compares the CONCRETE path — unlike gate 3, which compiles `{param}` templates. So a portal
-route carrying a path parameter is unreachable whatever is written in that set, and the status
-home is one parameter-less aggregate read because of it. T6.6's uploads and any per-record
-detail route need that matcher to learn templates FIRST; that is a change to the audience gate
-and does not get made in passing.
+**GATE 2 MATCHES `{param}` TEMPLATES SINCE T6.6, AND THAT WAS ITS OWN COMMIT.** It was
+`PORTAL_PATHS.has(c.req.path)` — an exact match on the concrete path — until the action centre,
+so a portal route carrying a path parameter was unreachable whatever was written in that set,
+and the status home is one parameter-less aggregate read because of it. `compilePortalPaths`
+compiles the list the way `decideRoute` compiles `ROUTE_PERMISSIONS`.
+
+**What contains that widening is a test, not care.** A matcher is strictly more permissive than
+a set, and what it guards is the gate that stops a client contact reading the firm's whole book.
+So `auth-coverage.test.ts` asserts, over EVERY route the router has registered, that
+`isPortalPath(concrete(path))` equals plain membership of that route's TEMPLATE in the list — a
+pattern that swallowed a staff route turns it red and names the route. `asTemplate()` is the
+other half and was not optional: Hono registers a parameter as `:name` while both permission
+tables are keyed by `{name}`, so `PORTAL_PATHS.has("/x/:id")` is always false and a templated
+portal route would have looked undeclared to every sweep in that file.
 
 **THE QUERIES LOOK LIKE QUERIES THAT FORGOT TO FILTER, ON PURPOSE.** Neither statement names
 `client_party_id`, `entity_party_id` or `is_client_visible` in a WHERE clause: the wall is under
@@ -1882,12 +1890,12 @@ never given its turnaround times (client ask 3.4), and this reader could quote t
 it. `internal_target_on` is not on the response at all — T–X is the firm's own working margin and
 showing it turns it into the deadline.
 
-**"HELD UP" IS NOT "WAITING ON YOU", AND THE NAME IS HONEST ON PURPOSE.** Nothing in this schema
-records who a task waits on: `work_item_state.is_blocked` means the firm cannot proceed and
-`blocked_reason` reads *"the client has not sent the purchase register"* as readily as *"the GST
-portal is down"*. The section shows the reason **verbatim** — it is the only field that says what
-is wanted, and without it the section is titles with no ask — under a line saying whose words
-they are. A client-directed ask with its own answer is T6.6.
+**"HELD UP" IS NOT "WAITING ON YOU", AND THE NAME WAS HONEST ON PURPOSE.** Nothing in T6.5's
+schema recorded who a task waits on: `work_item_state.is_blocked` means the firm cannot proceed
+and `blocked_reason` reads *"the client has not sent the purchase register"* as readily as *"the
+GST portal is down"*. The section shows the reason **verbatim**, under a line saying whose words
+they are. T6.6 built the row that says it properly — see the section below — and this one stays,
+because the two are different facts and a firm may be waiting on more than one thing at once.
 
 **RECENTLY FILED IS KEYED ON `filed_on`, NEVER ON THE STATE BEING TERMINAL.** 0052 seeds two
 terminal states and `resolved` is T3.3's end of a deadline already MISSED. Calling that "filed"
@@ -1929,6 +1937,127 @@ right is worse than a refusal.
   INV/2026-27/0003"* — because `is_client_visible` defaults TRUE and nothing had ever set it
   false. The flag was working; the seed had never used it.
 
+## The client-directed ask — the first thing a client can DO (T6.6)
+
+`delivery.client_ask` + `client_ask_response` (migration 0063), `usecase/clientask`, and two
+adapters. T6.5's "Held up" section was honest and blunt: `blocked_reason` is a note the firm
+wrote to ITSELF, and a portal that put an answer box under it would be inviting a client to fix
+the GST portal. An ask is raised deliberately, addressed to one client, and carries somewhere to
+answer it.
+
+**IT LIVES IN `delivery` AND HANGS OFF A WORK ITEM, AND THE SECOND HALF IS WHAT MAKES THE WALL
+SOLID.** `crm` is the relationship; an ask exists because WORK cannot move. `work_item_id` is NOT
+NULL, so its `client_party_id` — the column gate 4 filters on — is held to the work item's by a
+COMPOSITE foreign key over `(work_item_id, client_party_id, tenant_id)`. **The denormalised wall
+column cannot disagree**, rather than being trusted; and nothing on either surface accepts a
+client party at all, because it is read from the work item inside the INSERT. A `(subject_kind,
+subject_ref)` pair would have been more flexible and could carry no foreign key, which is exactly
+the guarantee this needs.
+
+**`answered` IS NOT `closed`.** The client responding turns an ask answered; the FIRM decides
+whether what arrived was what it needed. A client who sent last quarter's register would otherwise
+see the ask marked done, and the firm would have to raise a second one that reads as a fresh
+request rather than "that was not it". `withdrawn` is kept apart from `closed` for the client's
+sake — "you sent it" and "never mind" are different answers to "did I have to?".
+
+**NO DUE DATE, ANYWHERE, AND ITS ABSENCE IS THE API's OWN STATEMENT.** The portal's rule
+unchanged. `raised_at` is on the row and elapsed time is a fact, which is also all T4.4's chaser
+needs. **Raising an ask does not block the task**, deliberately: coupling them would make that the
+product's opinion rather than the firm's.
+
+**RESPONSES ARE APPEND-ONLY BY GRANT**, the arrangement `files.document_version` and the `ledger`
+schema have. A client's answer is evidence, and "the wrong file, then the right one" is a history.
+`first_answered_at` is written `coalesce(first_answered_at, now())` so a later response never
+restates when they first replied — that number is what a firm reaches for when a filing goes late.
+
+**A CLIENT'S APPROVAL IS NOT `work_item_approval`.** That table and `step_approval` are the firm's
+maker-checker (T2.9) — a second qualified person has CHECKED the work, gated on `work:write`,
+refused when checker = maker. A client approving is an INSTRUCTION. Recording it there would make
+a client's "yes" count as a checker's sign-off.
+
+### The write side of gate 4, exercised for the first time
+
+`PostgresPortalAskRepository` is the SECOND adapter in this product to use `withPortal` and the
+FIRST to write through it. 0059 and 0062 both put `WITH CHECK` on their restrictive policies while
+saying no portal write path existed — *"which is why it will not have to be built with the rule
+inside it"* — and the promise held: **not one statement in that file names `client_party_id`.**
+`party_id` on an uploaded document and `client_party_id` on a response are both taken from the ask
+inside the INSERT, and the ask itself is read under the portal scope, so an unreachable ask writes
+nothing at all.
+
+0063 adds five policies: `delivery.client_ask`, `delivery.client_ask_response`, and the three
+document-store tables 0037 wrote `party_id` for and left unguarded. **NULL there means the firm's
+own and denies correctly by arithmetic** — `crm.portal_sees(NULL)` is `NULL = ANY(...)`, which is
+not true — and that is written into the migration precisely because it does not look deliberate:
+somebody "tidying" it to `OR party_id IS NULL` would hand every client the firm's stationery
+cupboard. `document_version` and `document_link` are guarded by an EXISTS on the PARENT, which
+inherits the parent's own RLS, so one edit decides both — and it is what finally makes T3.6's *"no
+pre-signed URL, the key is unreachable"* claim true rather than aspirational.
+
+`tests/portal/client-ask.integration.test.ts` proves all of it by negative control: 16 tests, and
+dropping the five policies turns 3, 1, 5, 2 and 1 of them red.
+
+### Per-contact roles, and the day `permissionsOf` stopped being arithmetic
+
+`AuthzService.permissionsOf` returned `[]` for every CLIENT_PORTAL session, and CLAUDE.md was
+careful to call that ARITHMETIC: gate 2 admitted a portal session only to `PORTAL_PATHS`, and none
+of those needed a permission. `tests/api/portal-permissions.test.ts` was written to go red the day
+the second line stopped being true. **`portal:respond` is that day**, and it did.
+
+The fix is the one this file always named: **a role declares its AUDIENCE, and a role written for
+the other one grants nothing** (`roleServes`). It runs BOTH ways, and the second direction is the
+one nobody expects — nothing refuses `manager` on a portal membership, and nothing refuses
+`portal:respond` on `associate` either, which would hand a colleague a permission that only means
+something outside the firm. `can()` now applies the same rule as `permissionsOf`; the two used to
+disagree deliberately, and that was safe only while gate 2 covered for gate 3.
+
+`audience` on `RoleBody` is **optional and absent means STAFF**, and that is forced rather than
+chosen: a published config version is FROZEN and `validateBody` rejects unknown keys, so every
+role row every firm already holds cannot grow the field. `roleBodyOf` writes it only when the role
+declares one, so a staff role's body stays byte-for-byte what it was — which is what the role
+upgrade migrations (0012, 0045, 0056, 0060, 0064) compare against to tell a firm that has never
+edited a role from one that has.
+
+**`client_contact` may respond; `client_viewer` may only look — and both see everything.** Reading
+is authorised by the grant (`crm.portal_access`), never by a permission, which is what makes a
+read-only contact coherent rather than crippled.
+
+### There is no virus scanner, no OCR and no auto-filing — and no PORT for one
+
+The board asked for all three. There is no scanner in this product and no agent runtime
+(`NoAgentsBuiltYet` is still what `setup/` wires), so each would be a contract written against
+nothing — and T3.6 wrote a `DocumentRenderer` port and **deleted it before commit** under exactly
+that rule. A `scan()` returning "clean" is a lie with a function signature; one that threw would
+make uploads impossible.
+
+So what is true is said instead: a client-supplied file is stored **unscanned**, the firm's screen
+says so beside it, and the download route's `content-disposition: attachment` — never `inline` —
+is the one protection that does exist, and has been there since T3.6 for this exact reason. When a
+scanner arrives it arrives with a consumer.
+
+### What running it found, and what none of the tests did
+
+- **THE PAGE SAID THE REQUEST TWICE.** The action centre showed *"Please send the Maharashtra
+  purchase register"* with a file picker under it; two sections lower "Held up" printed the
+  identical sentence with nothing to do about it. T6.5's own duplication bug in a new costume.
+  `PortalWorkRow.hasOpenAsk` now answers it, and the asymmetry falls out of RLS the way the
+  filings dedupe already did: an ask the reader was not granted is invisible to the EXISTS, so
+  the blocked reason is shown — which is right, because it is then the only thing on the page
+  that says what is wanted.
+- **THE FOOTER STARTED LYING.** *"sending files across is not here yet — email 10x Global as you
+  do now"*, one paragraph below a working file picker. Nothing in a typecheck, a lint or a test
+  can see a sentence go stale.
+- **A READ-ONLY CONTACT WAS PROMISED SOMETHING.** *"if you sent the wrong thing, you can still
+  send another"*, beside a card with no controls on it.
+- **AND A TEST WAS LOOKING IN THE WRONG PLACE.** `tests/filestore/model.test.ts` was pinned to
+  `0037_document_store.up.sql`, and 0063 widened `subject_kind` by dropping that CHECK and adding
+  a new one — which an applied migration must do. The test went on reading seven members out of a
+  constraint the database no longer had, and would have stayed green while the union and the live
+  CHECK disagreed: **exactly the drift it exists to catch, hidden by where it was looking.** It
+  reads the NEWEST carrier now, the way `seed-parity.test.ts` already did and said why.
+  `linksOf` gained its `work_item` case in the same pass — 0063's comment claimed both halves of
+  *"a kind nothing can resolve is a link nobody can follow"* were present, and only one was.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
@@ -1936,9 +2065,10 @@ right is worse than a refusal.
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
 T3.3's missed-deadline state and T3.7's dashboards are built. The escalation ladder is BUILT
 (T4.5) and did not need G3.4 — its manager hop reads `membership.reports_to_user_id`, and G3.4
-answers a different question. **The CLIENT PORTAL is built as far as its status home (T6.5),
-and gate 4 is closed** — see the portal section above. **Next on `(B)`'s lane is T6.6**, the
-action centre, and Phase 6 runs BEFORE Phase 4's agents.
+answers a different question. **The CLIENT PORTAL is built through its ACTION CENTRE (T6.5,
+T6.6), and gate 4 is closed** — see the two portal sections above. **Next on `(B)`'s lane is
+T4.4**, the chaser: T4.5's ladder shape aimed OUTWARD, never outside a channel the firm
+configured, and stopping on escalation freeze. Phase 6 runs BEFORE Phase 4's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`
