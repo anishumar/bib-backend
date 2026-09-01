@@ -51,10 +51,12 @@ import type { PortalInviteDeps } from "./handler/portalinvite";
 import { registerPortalHomeRoutes } from "./handler/portalhome";
 import { registerClientAskRoutes } from "./handler/clientask";
 import { registerPortalAskRoutes } from "./handler/portalask";
+import { registerPortalLibraryRoutes } from "./handler/portallibrary";
 import { registerChaserRoutes } from "./handler/chaser";
 import type { PortalHomeDeps } from "./handler/portalhome";
 import type { ClientAskDeps } from "./handler/clientask";
 import type { PortalAskDeps } from "./handler/portalask";
+import type { PortalLibraryDeps } from "./handler/portallibrary";
 import type { ChaserDeps } from "./handler/chaser";
 import { registerWorkItemRoutes } from "./handler/workitem";
 import type { WorkItemDeps } from "./handler/workitem";
@@ -118,6 +120,7 @@ export interface RouterDeps {
    *  looking, and only the scope the adapter opens differs. */
   readonly clientAsks: ClientAskDeps;
   readonly portalAsks: PortalAskDeps;
+  readonly portalLibrary: PortalLibraryDeps;
   /** Stopping the chaser on one client (T4.4). The SWEEP has no route — it is a
    *  cron in the worker, and a "chase now" button would make the ledger's
    *  SYSTEM actor a lie on some rows and not others. */
@@ -236,6 +239,7 @@ export function buildRouter(
   registerPortalHomeRoutes(app, deps.portalHome);
   registerClientAskRoutes(app, deps.clientAsks);
   registerPortalAskRoutes(app, deps.portalAsks);
+  registerPortalLibraryRoutes(app, deps.portalLibrary);
   registerChaserRoutes(app, deps.chaser);
   registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);

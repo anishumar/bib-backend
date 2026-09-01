@@ -3576,7 +3576,142 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > through the generic config API, and an `/admin/chaser-ladder` belongs with the first firm
   > that wants to edit one — the same position `/admin/structure` took about the confidence
   > tiers.
-- [ ] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest. *Acc: a client finds last year's challan without emailing anyone.*
+- [x] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest. *Acc: a client finds last year's challan without emailing anyone.*
+  > **DONE 2026-09-01 (migrations 0066 and 0067).** `usecase/portallibrary` + `usecase/nudge`,
+  > four portal routes, three portal screens, and the reader `client_ask_chase` had been
+  > waiting for since T4.4. **The acceptance line was walked in the browser** as
+  > `meera@cobaltfoods.in`: found the filed acknowledgement under *Documents*, downloaded it,
+  > read the invoices with what is still outstanding, and opened September month by month —
+  > **without asking anybody, and without an email**.
+  >
+  > **0 · THE HOLE T4.4 LEFT, CLOSED FIRST.** `delivery.client_ask_chase` had a writer, a
+  > portal policy and a ledger event and NOTHING rendered any of it — the sixth registered
+  > thing in this codebase found in that state. 0065's own comment claimed the client's action
+  > centre showed *"how many times it has been reminded and when"*; that was false the day it
+  > was written, and 0065 is applied and immutable, so the correction is here and in
+  > `CLAUDE.md`. **Both surfaces read it now and they read it DIFFERENTLY on purpose.** The
+  > FIRM gets every rung with its key, threshold and day — a colleague who cannot see three
+  > chases will send a fourth by hand, which is the work T4.4 exists to remove, and *"we asked
+  > you four times"* is where the append-only grant earns its keep. The CLIENT gets a DATE and
+  > no tally (Shrestha, 2026-09-01): a count on somebody's own page is an accusation, and on a
+  > daily rung it reads *"9 times"* within a fortnight. Proven by negative control — dropping
+  > `client_ask_chase_portal_scope` turns 2 of the new tests red.
+  >
+  > **1 · THE LIBRARY, AND THE HOLE 0063 LEFT THAT ONLY BECAME ONE TODAY.**
+  > `document_portal_scope` was `portal_sees(party_id)` alone, which was CORRECT while the only
+  > route reaching a document was a client reading back a filename. **This is the first route
+  > that LISTS documents**, and `party_id` alone hands the client every working paper the firm
+  > has ever filed against them. So `files.document.is_client_visible` (0066), which is
+  > `work_item.is_client_visible` for the second time — DB default FALSE so a forgetful writer
+  > publishes nothing, first value from the KIND in the service, enforced as a POLICY, and **a
+  > switch on the firm's screen in the same task**, because T6.5 already named *a wall built
+  > against a value nobody can move*.
+  >
+  > **AND THE OBVIOUS WAY TO WRITE THAT NARROWING BROKE THE FIRM'S OWN WORKSPACE.** A bare
+  > `AND is_client_visible` on a RESTRICTIVE policy applies to STAFF too — the firm lost sight
+  > of its own working papers, and the same edit on `crm.invoice` hid every DRAFT from the
+  > people writing them. 0062 had solved it already (`NOT crm.is_portal_session() OR …`) and
+  > 0066 copies that shape. **The integration suite said so within a minute of the first
+  > draft**, off its own first assertion: *"a STAFF session is untouched"*.
+  >
+  > **2 · INVOICES, which 0062 said out loud were not here.** `crm.invoice.party_id` — who is
+  > BILLED, never a join. A DRAFT is refused **inside the policy** for `is_client_visible`'s
+  > reason; a CANCELLED one is visible, because a client holding a copy of a withdrawn invoice
+  > must be able to see it was withdrawn. Lines, payments and credit notes get an EXISTS on the
+  > parent (0063's shape), and `crm.invoice_balance` follows for free because it is
+  > `security_invoker`. `crm.dunning_action` gets NO policy — 0065's answer about
+  > `client_freeze`, applied again.
+  >
+  > **BYTES LEAVE ON THE CLIENT'S SIDE FOR THE FIRST TIME, and T3.6's rule extends rather than
+  > bends:** one route, no pre-signed URL, `content-disposition: attachment`. The version row
+  > naming the storage key is read under `withPortal` and only then is the key given to the
+  > blob store, so the key is unreachable before it could be used. `PostgresPortalLibraryRepository`
+  > is the THIRD `withPortal` adapter — *"countable on one hand"* is half spent.
+  >
+  > **3 · THE NUDGE IS NOT THE CHASER WITH A MINUS SIGN** (0067). Its own config kind and its
+  > own table: a chase counts FORWARD from when the firm asked and wants something back, a
+  > nudge counts BACKWARD from a date the LAW set and wants nothing. The validator is the
+  > MIRROR of the chaser's — strictly DESCENDING `beforeDays` where that one demands ascending
+  > `afterDays`. Wall column `entity_party_id`, because 0053 says *the ENTITY, never the
+  > client*.
+  >
+  > **AND THE FREEZE DOES NOT STOP IT** — a decision whose two halves happen to agree. A
+  > statutory date is the LAW's and travels whether or not a fee is in dispute; going quiet
+  > about one during a dispute exposes the client to a penalty and the firm to a claim. And
+  > structurally it could not reach: a freeze is on `client_party_id`, an obligation on
+  > `entity_party_id`, and joining them is the nullable derivation this schema has refused
+  > three times. `tests/nudge/service.test.ts` asserts the ABSENCE of a freeze port as well as
+  > the absence of a mailer.
+  >
+  > **4 · THE DIGEST IS A SCREEN, SAID PLAINLY.** No transport (P10 is Phase 7), so no mailer
+  > is injected — the chaser's arrangement, for the chaser's reason. `/portal/month` says on
+  > the page that nothing is sent. It is not a second copy of the status home: that answers
+  > *what is outstanding today* over ninety rolling days, this is bounded by a calendar MONTH
+  > and reaches back as far as a client cares to look.
+  >
+  > **5 · THE FOOTER LIED AGAIN, AND THE FIX IS NOT A THIRD REWRITE.** It named absences —
+  > *"your invoices and the firm's own documents are not here yet"* — and T6.7 built both. A
+  > sentence that enumerates what is MISSING goes stale every time somebody removes one. It
+  > points at where things ARE now, and the portal grew a NAV, which is the actual fix: a
+  > library reachable only by scrolling past four sections of today's news is not self-serve.
+  >
+  > **6 · AND THE PORTAL'S FRAME WAS RE-SHAPED AFTER LOOKING AT IT.** T6.5 argued for no
+  > nav at all (one screen, no map); this task gave it four tabs; and then Shrestha opened
+  > it — *"everything looks messy"*. The strip ran the full window with four small labels at
+  > the far left, above a CENTRED column, so the nav and the thing it navigated did not line
+  > up and the page read as half-built. Every gate was green. It is now `.shell` +
+  > `.sidebar` + `.main`, reusing every class the staff workspace uses **with no new CSS** —
+  > four flat links with icons, and deliberately none of the staff shell's groups, search
+  > box or firm switcher. The rail's foot names the **company** where the staff one names a
+  > role: `client_viewer` is the firm's word for what somebody may do, and showing it to a
+  > client is a label about their own permissions that they cannot act on.
+  >
+  > The same pass turned `/portal/documents` from cards into a TABLE (cards are a two-minute
+  > scroll at thirty rows, and that list has no window), put its search behind a threshold
+  > of eight, and stopped a work item's title repeating the client's own company name —
+  > which was wide enough to give the table a horizontal scrollbar with ONE row in it.
+  > **None of that is visible in a page's TEXT**, which is what a walk usually reads: it
+  > needed a screenshot.
+  >
+  > **THREE MORE THINGS BUILDING IT FOUND, none visible to a typecheck.**
+  >
+  > · **A CLIENT'S OWN UPLOAD BECAME UNREADABLE TO THEM.** The portal's ask adapter inserts the
+  >   document and did not set the new flag, so it defaulted FALSE — which did not leak
+  >   anything, it made the INSERT fail the policy's own `WITH CHECK`, because a portal session
+  >   cannot write a row it could not then read. The wall telling the truth. The firm's
+  >   default-by-kind mapping deliberately does not apply there: the kind was the FIRM's
+  >   filing decision, and a client would lose sight of what they sent because of it.
+  > · **`subject_kind = 'work_item'` HAD NO FIRM-SIDE READER EITHER.** 0063 added it so a
+  >   client's upload lands where the person who asked is looking, and `/work-items/[id]` had
+  >   no `<Documents>` panel at all. It has one now, and it is where the visibility switch
+  >   lives.
+  > · **AND A DOWN MIGRATION FAILED HALFWAY, WHICH ONLY RUNNING IT SHOWED.** 0067's first
+  >   down dropped the table, dropped the composite key, and only then tried to narrow
+  >   `entry_kind_check` back — which a database with a published `nudge` entry refuses, as
+  >   its own comment predicted. What the comment did not predict is that the refusal lands
+  >   AFTER the drops, leaving the schema in a state neither migration describes and the
+  >   constraint gone entirely — the exact failure 0066's own down carries a paragraph about.
+  >   It ADDs the narrow constraint under a temporary name first now, so the refusal happens
+  >   with nothing destroyed, then swaps it in. `npm run migrate` wraps each file in a
+  >   transaction and would have rolled it back; a DOWN is run by hand, against a database
+  >   somebody is trying to rescue, and that is the case it has to be safe in. Both halves
+  >   proven: the refusal leaves table, constraint and temp name untouched, and the full
+  >   down/up round trip runs clean inside a rolled-back transaction with the entry removed.
+  > · **`worker:once` CLAIMED TO RUN EVERYTHING AND DID NOT.** T4.4 registered the chaser on
+  >   the worker's queue and never added it to that command, so it ran every sweep except the
+  >   one aimed at clients — under a header that said "ALL FIVE". The count has gone stale
+  >   twice; there is no count in it any more. Its "nothing to chase" line also asserted the
+  >   firm had published no ladder on a run where the demo had just published one.
+  >
+  > **The demo seed now publishes both outward ladders and stocks the library** — a filed
+  > acknowledgement the client CAN see and a working paper about the same client they CANNOT,
+  > both through the product's own upload route, so the kind mapping is what decides and
+  > nothing passes the flag. Nothing has been chased on a fresh demo, correctly: every ask is
+  > raised today and no rung is due. `check` **1510** · `test:integration` **524** ·
+  > `demo:verify` **71**.
+
+**Phase 6 is COMPLETE.** U1 (T6.5, T6.6, T6.7), the chaser (T4.4) and gate 4 (G3.4) have all
+landed. What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over
 the full backend, the client-facing loop closed (portal + chaser), integrations faked, **and
@@ -3606,6 +3741,17 @@ Not security, and not blocking — but it has to be true before anybody is onboa
 data, and each line is something a session did on purpose and wrote down rather than left for
 somebody to find.
 
+- **T6.7's walk ran the chaser sweep as of a FUTURE day (`2026-09-12`) to see the reader it
+  built**, which wrote 4 `client_ask_chase` rows, and flipped one document's client visibility
+  on and off. Both were undone by `npm run demo:fresh`, which re-verified **71/71** — the
+  recovery this list already names, used rather than described. The scratch script that ran
+  the sweep was deleted; `worker:once` has no `--as-of` and should not grow one for a walk.
+- **AND THE WALK FOUND ONE THING IN THE DEMO'S OWN DATA that is not T6.7's to fix.** The
+  75-days-overdue invoice now renders on a CLIENT's page as *"issued 01 Sep 2026, due by 18
+  Jun 2026"* — issued after it was due. The seed back-dates the series with `seriesDate` and
+  the API stamps `issued_on` at the moment of issue, which nothing could back-date until now
+  because no client ever saw both dates side by side. Harmless to the firm, incoherent to a
+  client, and it belongs with whoever owns the invoicing lane.
 - **T3.3's walk back-dated 7 obligations across both `demo-*` firms and recorded 3 decisions.**
   The state renamed to "Missed" was renamed back. The ledger events are append-only and stay.
 - **T6.4's walk answered `DPDP compliance`, which generated 4 filings, then added and withdrew a

@@ -13,6 +13,7 @@ import type {
 } from "../../domain/filestore/model";
 import {
   SUBJECT_KINDS,
+  clientVisibleByDefault,
   isSubjectKind,
   normaliseMediaType,
   safeFilename,
@@ -154,6 +155,15 @@ export class FileStoreService {
         origin: "uploaded",
         kind: input.kind,
         partyId: input.partyId,
+        // ── THE FIRST VALUE, FROM THE KIND (T6.7) ──────────────────────
+        //
+        // Not the column's DEFAULT, which is FALSE and stays FALSE — that one
+        // is for a writer who has never heard of this field, and it has to be
+        // the safe direction. This is the judgement: a challan or an invoice is
+        // a document the client is a party to, a working paper is the firm's
+        // own thinking. It is a starting position and never a wall — the wall
+        // is 0066's policy, and the firm's own screen can flip this either way.
+        isClientVisible: clientVisibleByDefault(input.kind),
         createdBy: input.actor.type === "human" ? input.actor.id : null,
       },
       {
@@ -304,6 +314,59 @@ export class FileStoreService {
     return record;
   }
 
+  /**
+   * Share this document with the client it belongs to, or stop sharing it.
+   *
+   * ── WHY THIS EXISTS AT ALL ────────────────────────────────────────────
+   *
+   * `clientVisibleByDefault(kind)` gives every new document a sensible first
+   * value and the policy in 0066 enforces it. Neither is a substitute for a
+   * person being able to change it: T6.5 named this exact failure on
+   * `delivery.work_item`'s copy of the same flag — *"a wall built against a
+   * value nobody can move"* — and the fix there was a switch on the screen in
+   * the same commit as the policy. This is that switch's endpoint.
+   *
+   * ── IT IS EVENTED, AND NOT AS A DOCUMENT EDIT ─────────────────────────
+   *
+   * `document.client_visibility_set` and never `document.attached`. Sharing a
+   * file with somebody outside the firm is a DISCLOSURE decision, and "when did
+   * this become visible to the client" is a question asked after something has
+   * reached somebody it should not have. The payload carries the flag and the
+   * party; never the title, which routinely names a client's own affairs.
+   */
+  async setClientVisible(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly visible: boolean;
+    readonly actor: Actor;
+  }): Promise<DocumentRecord> {
+    const record = await this.deps.documents.setClientVisible({
+      tenantId: input.tenantId,
+      documentId: input.documentId,
+      visible: input.visible,
+    });
+    // Null covers "no such document" AND "the firm's own document, which has no
+    // client to share it with". Both are `DocumentNotFound` on this surface:
+    // the second is a document that exists, so a distinct refusal would be
+    // useful — but `partyId` is already on every read this caller has, so a
+    // screen offering the control at all has the answer, and a second error
+    // code for a state the UI cannot reach is a code nobody handles.
+    if (!record) throw new DocumentNotFound(input.documentId);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "document.client_visibility_set",
+      objectId: record.document.id,
+      actor: input.actor,
+      payload: {
+        isClientVisible: record.document.isClientVisible,
+        partyId: record.document.partyId,
+        kind: record.document.kind,
+      },
+    });
+    return record;
+  }
+
   async list(input: {
     readonly tenantId: string;
     readonly partyId?: string | undefined;
@@ -433,6 +496,10 @@ export class FileStoreService {
         origin: "generated",
         kind: input.kind,
         partyId: input.partyId,
+        // Same rule for a rendered document. A generated engagement letter is
+        // the one the client signed; a generated proposal is a quote that may
+        // never be sent, which is why `proposal` is false in that mapping.
+        isClientVisible: clientVisibleByDefault(input.kind),
         createdBy: input.actor.type === "human" ? input.actor.id : null,
       },
       {

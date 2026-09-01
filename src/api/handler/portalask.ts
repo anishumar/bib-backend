@@ -103,6 +103,14 @@ const AskSchema = z
         "one: no deadline this product invented reaches a client, so how long it has been " +
         "outstanding is a fact and 'by Friday' would be a promise nobody made.",
     }),
+    lastRemindedAt: z.string().nullable().openapi({
+      description:
+        "When the firm last reminded you about this, or null if it never has. A DATE AND " +
+        "NOT A COUNT, deliberately: `you have been reminded 4 times` is a tally about you " +
+        "rather than something you can act on, and on a daily cadence it reads `9 times` " +
+        "within a fortnight. The firm keeps every rung on its own screen, where it is the " +
+        "evidence behind `we asked four times` when a filing goes late.",
+    }),
     responses: z.array(ResponseSchema),
   })
   .openapi("PortalAsk");
@@ -367,6 +375,7 @@ function toWire(r: PortalAskRow): z.infer<typeof AskSchema> {
     companyName: r.companyName,
     workItemTitle: r.workItemTitle,
     raisedAt: r.raisedAt,
+    lastRemindedAt: r.lastRemindedAt,
     responses: r.responses.map((x) => ({
       responseId: x.response.id,
       responseKind: x.response.responseKind,

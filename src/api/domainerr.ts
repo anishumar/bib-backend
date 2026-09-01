@@ -13,6 +13,7 @@ import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { PortalAccessError } from "../domain/portalaccess/errors";
 import { ClientAskError } from "../domain/clientask/errors";
 import { ChaserError } from "../domain/chaser/errors";
+import { PortalLibraryError } from "../domain/portallibrary/errors";
 import { WorkItemError } from "../domain/workitem/errors";
 import { ObligationError } from "../domain/obligation/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
@@ -374,6 +375,15 @@ export function mapError(err: unknown): MappedError {
       case "FREEZE_ALREADY_IN_FORCE":
       case "FREEZE_ALREADY_LIFTED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
+  if (err instanceof PortalLibraryError) {
+    switch (err.code) {
+      case "INVALID_MONTH":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

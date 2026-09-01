@@ -27,6 +27,7 @@
 //   `document_portal_scope`            (0063) — the file, and never the firm's own
 //   `document_version_portal_scope`    (0063) — its bytes and its filename
 //   `document_link_portal_scope`       (0063) — what it is attached to
+//   `client_ask_chase_portal_scope`    (0065) — and when they were last reminded
 //
 // Repeating any of those here would feel safer and would silently disarm the
 // negative control: `tests/portal/client-ask.integration.test.ts` drops a policy
@@ -63,6 +64,7 @@ interface Row {
   company_name: string | null;
   work_item_title: string;
   raised_at: string;
+  last_reminded_at: string | null;
   responses: RawResponse[] | null;
 }
 
@@ -121,13 +123,31 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
       // this session may not reach produces no row and the whole thing writes
       // nothing.
       const [doc] = await db<{ id: string }[]>`
-        INSERT INTO files.document (id, tenant_id, title, origin, kind, party_id, created_by)
+        INSERT INTO files.document
+          (id, tenant_id, title, origin, kind, party_id, is_client_visible, created_by)
         SELECT ${upload.documentId},
                ${tenantId},
                ${upload.title},
                'uploaded',
                ${upload.documentKind},
                a.client_party_id,
+               -- ── TRUE, AND IT IS THE ONE LITERAL IN THIS FILE THAT IS NOT
+               --    TAKEN FROM A ROW ─────────────────────────────────────
+               --
+               -- 0066 narrowed document_portal_scope to require this flag, and
+               -- the column defaults FALSE. Leaving it to the default here
+               -- would not have leaked anything — it would have made this
+               -- INSERT fail the policy's own WITH CHECK, because a portal
+               -- session cannot write a row it could not then read. Which is
+               -- the wall telling the truth: what a client sends, a client sees.
+               --
+               -- Hiding a client's own upload from them is not a defensible
+               -- state in either direction. The firm's default-by-kind mapping
+               -- does not apply, and must not: the kind here was chosen by the
+               -- FIRM when it raised the ask, and a client who sent a file
+               -- filed as working_paper would lose sight of the thing they
+               -- sent because of a filing decision they never saw.
+               true,
                ${response.respondedBy}
           FROM delivery.client_ask a
          WHERE a.id = ${response.askId}
@@ -242,6 +262,25 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
              ent.display_name AS company_name,
              wi.title         AS work_item_title,
              a.raised_at::text AS raised_at,
+             -- ── WHEN WE LAST REMINDED THEM, AND NOT HOW OFTEN ───────────
+             --
+             -- delivery.client_ask_chase (0065) carried a portal policy from
+             -- the day it was created and had no reader on either side. This is
+             -- the client's half of that reader, and it is a MAX rather than a
+             -- count on purpose (see PortalAskRow.lastRemindedAt): the tally
+             -- is an accusation printed on somebody's own page, the date is
+             -- something they can act on. The firm's own screen carries every
+             -- rung, which is where the evidence is actually needed.
+             --
+             -- No WHERE client_party_id = ... here either. The restrictive
+             -- policy is under this subquery exactly as it is under the outer
+             -- one, and repeating it would disarm the negative control.
+             (
+               SELECT max(c.chased_at)::text
+                 FROM delivery.client_ask_chase c
+                WHERE c.ask_id = a.id
+                  AND c.tenant_id = a.tenant_id
+             ) AS last_reminded_at,
              (
                SELECT coalesce(jsonb_agg(r ORDER BY r.responded_at), '[]'::jsonb)
                  FROM (
@@ -302,6 +341,7 @@ function toPortalRow(r: Row): PortalAskRow {
     companyName: r.company_name,
     workItemTitle: r.work_item_title,
     raisedAt: r.raised_at,
+    lastRemindedAt: r.last_reminded_at,
     responses: (r.responses ?? []).map((x) => toResponseRecord(x, r.id)),
   };
 }

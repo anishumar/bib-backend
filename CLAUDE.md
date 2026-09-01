@@ -2137,6 +2137,192 @@ have a different subject and a different cadence. There is no screen for the lad
 is reachable through the generic config API, and an editor belongs with the first firm that
 wants to change one.
 
+## The self-serve library — and the flag that decides what is in it (T6.7)
+
+`usecase/portallibrary` + migration 0066. The board's line is *"a client finds last year's
+challan without emailing anyone"*, and reading it word by word decides the whole design: LAST
+YEAR'S means no window, CHALLAN means the BYTES rather than a filename, and WITHOUT EMAILING
+ANYONE means the empty state has to say which kind of empty it is.
+
+**THE HOLE 0063 LEFT, AND IT ONLY BECAME ONE HERE.** `document_portal_scope` was
+`crm.portal_sees(party_id)` and nothing else, which was CORRECT while the only route reaching a
+document was a client reading back the filename of a file they had just sent. There was no route
+that LISTED documents, so the policy was never asked a broad question. The moment one exists,
+`party_id` alone hands the client every working paper the firm has ever filed against them — the
+audit team's notes, the queries they raised internally, the draft they rejected. Not a leak across
+the tenant wall; worse in the way that matters commercially, because every row of it is genuinely
+about that client and a partner would still never send it.
+
+**So `files.document.is_client_visible` is `delivery.work_item.is_client_visible` for the second
+time**, and the lesson is taken rather than re-learnt. THREE mechanisms, deliberately not one:
+
+- the **DATABASE DEFAULT IS FALSE**, so an import, an agent, or an INSERT that has never heard of
+  the column publishes NOTHING. False is the direction a forgetful writer lands on.
+- the **first sensible value comes from the KIND**, in `FileStoreService`. `clientVisibleByDefault`
+  says a challan, an invoice, a credit note and a signed engagement letter are documents the client
+  is a party to, and a working paper is the firm's own thinking. That is a judgement about a firm's
+  business, which is why it is not the default and not the policy.
+- and it is **enforced as a POLICY**, never as a `WHERE`. A portal read that forgets a filter
+  returns an internal working paper with a 200.
+
+**A SECOND POLICY, NOT AN EXTRA `AND` — AND WRITING IT THE OBVIOUS WAY BROKE THE FIRM'S OWN
+WORKSPACE.** The first draft was `ALTER POLICY document_portal_scope … USING
+(crm.portal_sees(party_id) AND is_client_visible)`. A RESTRICTIVE policy applies to EVERY session
+and `portal_sees` returns true for a staff one, so the second condition had nothing making it
+conditional: the firm lost sight of its own working papers, and the same edit on `crm.invoice` hid
+every DRAFT invoice from the people writing them. The integration suite said so within a minute.
+0062 had already solved this — `work_item_portal_visible` is `NOT crm.is_portal_session() OR
+is_client_visible` — and 0066 copies that shape exactly. **A narrowing written without the guard
+narrows the workspace.**
+
+**AND THE FLAG HAS A SWITCH, IN THE SAME TASK AS THE POLICY.** `PATCH
+/api/v1/documents/{documentId}/client-visibility`, its own ledger verb
+(`document.client_visibility_set` — a disclosure decision, not a document edit), and a column on
+the `<Documents>` panel. T6.5 named this exact failure on the work item's copy of the flag: *a flag
+the portal enforces and no screen can change is a wall built against a value nobody can move.*
+
+### The invoice, which 0062 said out loud was not here
+
+*"Documents and invoices are NOT here either. They are T6.6/T6.7's reads."* `crm.invoice.party_id`
+is who is BILLED — the column that table carries, and NOT the entity the work was delivered to
+(0027's own distinction, and G0.1's). **A DRAFT MAY NOT REACH A CLIENT and that is in the policy**,
+for `is_client_visible`'s reason: a draft is a demand nobody has made yet, and a client who saw one
+would either pay it or argue about it. `cancelled` IS visible — a client holding a copy of a
+withdrawn invoice must be able to see that it was withdrawn.
+
+Lines, payments and credit notes carry no party column and get an EXISTS on the parent, which is
+0063's `document_version` arrangement: one edit decides all four and a child cannot drift from its
+invoice. `crm.invoice_balance`, `invoice_totals` and `invoice_line_amount` are all
+`security_invoker = true`, so they follow with nothing written for them — which is what that flag
+is for, and why 0066 wrote four table policies and no view policy.
+
+`crm.dunning_action` gets NO policy, deliberately: whether a client may see their own dunning
+history is a question for a firm rather than a guess, the same answer 0065 gave about
+`crm.client_freeze`.
+
+### Bytes on the client's side — T3.6's rule extended, not bent
+
+`GET /api/v1/portal/documents/{documentId}/content` is the second route in this product that
+returns bytes and the first on the client's side. **One route, no pre-signed URL**: the VERSION row
+naming the storage key is read under `withPortal` and only then is the key handed to the blob
+store, so the key is unreachable before it could be used, and `PortalBlobStore` has no method that
+returns a URL. `content-disposition: attachment`, never `inline` — and here it is sharper than for
+staff, because this store holds files supplied by CLIENTS and rendering one inline would make an
+uploaded HTML file same-origin script in a portal another client is also signed into.
+
+`PostgresPortalLibraryRepository` is the THIRD adapter using `withPortal`, so this file's *"it
+should stay countable on one hand"* is now half spent. The next one needs an argument.
+
+### The monthly digest is a SCREEN, and that is stated rather than discovered
+
+The board asks for a digest. A digest is something that ARRIVES, and transport is P10 (Phase 7) —
+so this ships as the thing behind the email rather than as the email, and `/portal/month` says so
+on the page. `ChaserService`'s arrangement and its reason: an honest stub that logged "digest sent"
+would put a line in an operator's log saying a client was emailed, which is the same class of lie
+as a `scan()` returning clean.
+
+It is NOT a second copy of the status home. The home answers *what is outstanding today* over a
+rolling ninety days; this is bounded by a calendar MONTH and reaches back as far as a client cares
+to look. A month is refused rather than coerced — `2026-13` read as January 2027 answers a question
+nobody asked with data that looks entirely right.
+
+## The proactive nudge — the same ladder pointed the other way (T6.7)
+
+`usecase/nudge` + migration 0067. T4.4's board line was *"T–3 daily, D+3/7/15"* and only the D+
+half was built, with the reason written down: **a filing approaching its statutory date asks the
+client for NOTHING.**
+
+**IT IS NOT THE CHASER WITH A MINUS SIGN.** A chase is about an open `client_ask` — the firm wants
+something back, and the count of reminders is evidence when a filing goes late. A nudge is about an
+`obligation_instance`, wants nothing back, and names a date the LAW set. So the chase counts
+FORWARD from when the firm asked (`afterDays`, validated ASCENDING) and the nudge counts BACKWARD
+from a statutory date (`beforeDays`, validated strictly DESCENDING — 7, then 3, then 1). Its own
+config kind, because bending the chaser's would need a sign convention on a field called "after".
+
+**THE WALL COLUMN IS `entity_party_id`, WHICH IS NOT THE CLIENT.** 0053's rule — *"the ENTITY,
+never the client"* — so a contact granted Cobalt Foods is nudged about Cobalt Foods' filings and
+NOT its subsidiary's, even though the subsidiary's TASK is on their page. Reaching them would mean
+joining `crm.engagement`, the nullable derivation this schema has now refused three times. A
+contact who should see both gets two grants.
+
+**AND THE FREEZE DOES NOT STOP IT.** `crm.client_freeze` stops the CHASER only, and that is a
+decision with two halves that happen to agree. The date is the LAW's, not the firm's: everything
+else this portal refuses to show a client is a deadline somebody invented, and going quiet about a
+statutory one because a fee is in dispute exposes the client to a penalty and the firm to a claim
+for having known and said nothing. And structurally it could not reach anyway — a freeze is keyed
+on `client_party_id` and an obligation carries `entity_party_id`. If a firm ever wants one, it is
+its own effective-dated row on the ENTITY, with its own migration and its own argument.
+
+**NOTHING BY DEFAULT, at-least-once, append-only by grant, and no transport** — the chaser's four
+properties for the chaser's four reasons. `tests/nudge/service.test.ts` asserts the dependency list
+STRUCTURALLY, and it asserts the ABSENCE of a freeze port as well as the absence of a mailer: a
+port that took freezes and ignored them would be worse than none.
+
+**It never offers a filing already discharged or already PAST its date.** `filed_on IS NULL` and
+not a terminal-state test — 0052 seeds two terminal states and T3.3's `resolved` is the end of a
+deadline already MISSED, so calling that "coming up" would be 0054's false statement reached from
+the other side. And `days_until >= 0` is both a CHECK and the query's own predicate: *"due in −5
+days"* is not a sentence, and a filing past its date is a missed deadline with its own screen.
+
+## What the chaser's rows waited for, and what T6.7 decided about them
+
+`delivery.client_ask_chase` (0065) had a WRITER, a portal policy and a ledger event, and **nothing
+rendered any of it** — the sixth registered thing this codebase has found in that state, after
+`membership.revoked`, `obligation.filed`, the escalation ladder's comment, `is_client_visible` and
+`files.document.party_id`. 0065's own comment claimed the client's action centre showed *"how many
+times it has been reminded and when"*, and that was false on the day it was written. 0065 is
+applied and immutable, so this is the correction: only half of that sentence ships, and the half
+that does not is a decision.
+
+**Both surfaces read it now, and they read it DIFFERENTLY on purpose.**
+
+- The FIRM gets every rung — `AskRecord.chases`, with the key, the threshold that fired and the
+  day. That half was never a decision: a colleague who cannot see that the sweep has already
+  chased this client three times will chase it a fourth time by hand, which is the work T4.4
+  exists to remove. It is also where *"we asked you four times"* needs evidence behind it, which
+  is why the table is append-only by GRANT.
+- The CLIENT gets a DATE and no tally — `PortalAskRow.lastRemindedAt`, a `max()`. *"We have
+  reminded you 4 times"* is an accusation printed on somebody's own page, and on a daily rung it
+  reads "9 times" within a fortnight. What a client can act on is WHEN: *"you last heard from us
+  on the 12th"* tells them whether they missed a message. Shrestha, 2026-09-01.
+
+The nudge's reader lands in the same task that creates it, for the same reason:
+`PortalFilingRow.lastNudgedAt`, also a date and also not a count.
+
+### What building and walking T6.7 found, and what none of the tests did
+
+- **THE NARROWING HID THE FIRM'S OWN PAPERS FROM THE FIRM.** Above, at length. Caught by
+  `tests/portal/library.integration.test.ts`'s first assertion — *"a STAFF session is untouched"* —
+  which is the first thing to check whenever a restrictive policy lands, and the one that gets
+  blamed on everything else first.
+- **A CLIENT'S OWN UPLOAD BECAME UNREADABLE TO THEM.** `PostgresPortalAskRepository` inserts the
+  document and did not set the new flag, so it defaulted FALSE. It leaked nothing — it made the
+  INSERT fail the policy's own `WITH CHECK`, because a portal session cannot write a row it could
+  not then read. The wall telling the truth: what a client sends, a client sees. The firm's
+  default-by-kind mapping does not apply there and must not — the kind was chosen by the FIRM when
+  it raised the ask, and a client who sent a file filed as `working_paper` would lose sight of the
+  thing they sent because of a filing decision they never saw.
+- **`subject_kind = 'work_item'` HAD NO FIRM-SIDE READER EITHER.** 0063 added it so a client's
+  upload files itself against the job that asked for it, and `/work-items/[workItemId]` had no
+  `<Documents>` panel at all — the ask panel named each response's filename and nothing else on
+  that page listed a file. The panel is there now, and it is where the visibility switch lives.
+- **A DOWN MIGRATION FAILED HALFWAY, AND ONLY RUNNING IT SHOWED THAT.** 0067's first down
+  dropped its table and its composite key and only then tried to narrow `entry_kind_check`
+  back — which a database holding a published `nudge` entry refuses, as its own comment
+  predicted. What the comment missed is that the refusal lands AFTER the drops, leaving the
+  constraint gone entirely: the exact failure 0066's down carries a paragraph about. It ADDs
+  the narrow constraint under a temporary name FIRST now, so the refusal happens with nothing
+  destroyed, then swaps it in. `npm run migrate` wraps each file in a transaction and would
+  have rolled it back — **a down is run by hand, against a database somebody is trying to
+  rescue, and that is the case it has to be safe in.**
+- **`worker:once` CLAIMED TO RUN EVERYTHING AND DID NOT.** Its header said "ALL FIVE sweeps", and
+  T4.4 registered the chaser on the worker's queue without adding it here — so the command quietly
+  ran everything except the one sweep aimed at clients. The count in that comment has now gone
+  stale twice; there is no count in it any more, and the list is the list.
+- **AND THE SWEEP'S "NOTHING TO DO" LINE TOLD A PARTNER SOMETHING FALSE.** It read *"a firm that
+  has published no chaser ladder chases nobody"* on a run where the demo had just published one.
+  Two causes, and a line that picks one is worse than a line that names both.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
@@ -2144,9 +2330,11 @@ wants to change one.
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
 T3.3's missed-deadline state and T3.7's dashboards are built. The escalation ladder is BUILT
 (T4.5) and did not need G3.4 — its manager hop reads `membership.reports_to_user_id`, and G3.4
-answers a different question. **The CLIENT PORTAL is built through its ACTION CENTRE (T6.5,
-T6.6), and gate 4 is closed** — see the two portal sections above. **The CHASER is built too (T4.4)** — see the section
-above. **Next on `(B)`'s lane is T6.7**, the self-serve library. Phase 6 runs BEFORE Phase 4's agents.
+answers a different question. **The CLIENT PORTAL is COMPLETE through T6.7** — status home,
+action centre, self-serve library, invoices and a month view — **and gate 4 is closed**; see the
+four portal sections above. **The CHASER is built (T4.4) and so is the PROACTIVE NUDGE (T6.7)**,
+and both have readers on both sides. **Phase 6 is finished and milestone M5 is reached.** Phase 6
+ran BEFORE Phase 4's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

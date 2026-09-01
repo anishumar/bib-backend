@@ -62,6 +62,12 @@ import {
   FakePortalAskRepo,
 } from "../../src/testfakes/clientask";
 import {
+  FakeLibraryBlobs,
+  FakeLibraryScope,
+  FakePortalLibraryRepo,
+} from "../../src/testfakes/portallibrary";
+import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
+import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
@@ -366,6 +372,7 @@ function deps(): RouterDeps {
       }),
     },
     portalAsks: { service: askService() },
+    portalLibrary: { service: libraryService() },
     portalInvites: {
       service: new PortalInviteService({
         identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
@@ -473,6 +480,15 @@ function askService(): ClientAskService {
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
     maxUploadBytes: 10_000_000,
+  });
+}
+
+function libraryService(): PortalLibraryService {
+  return new PortalLibraryService({
+    scope: new FakeLibraryScope(),
+    library: new FakePortalLibraryRepo(),
+    blobs: new FakeLibraryBlobs(),
+    clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
   });
 }
 

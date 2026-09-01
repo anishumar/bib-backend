@@ -57,6 +57,7 @@ function filing(over: Partial<PortalFilingRow> = {}): PortalFilingRow {
     statutoryDueOn: "2026-09-20",
     stateName: "Pending",
     filedOn: null,
+    lastNudgedAt: null,
     ...over,
   };
 }

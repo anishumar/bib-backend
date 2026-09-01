@@ -28,6 +28,7 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
+  AskChaseRecord,
   AskDecision,
   AskKind,
   AskRecord,
@@ -56,6 +57,17 @@ interface AskRow {
   raised_by_name: string | null;
   closed_by_name: string | null;
   responses: RawResponse[] | null;
+  chases: RawChase[] | null;
+}
+
+/** One row of `delivery.client_ask_chase`, as the aggregate hands it back.
+ *  `after_days` and `days_open` are `integer`, so postgres.js gives numbers —
+ *  unlike `byte_size`, which is `bigint` and arrives as a string. */
+interface RawChase {
+  rung_key: string;
+  after_days: number;
+  days_open: number;
+  chased_at: string;
 }
 
 export interface RawResponse {
@@ -202,7 +214,34 @@ export class PostgresClientAskRepository implements AskRepository {
                     WHERE resp.ask_id = a.id
                       AND resp.tenant_id = a.tenant_id
                  ) r
-             ) AS responses
+             ) AS responses,
+             -- ── THE CHASER'S OWN ROWS, AND THE READER THEY WAITED FOR ───
+             --
+             -- delivery.client_ask_chase (0065) had a writer, a portal
+             -- policy and a ledger event, and NOTHING rendered it. A colleague
+             -- opening this task could not see that the sweep had already
+             -- reminded this client three times, so the next thing they would
+             -- do is chase it a fourth time by hand — which is the work T4.4
+             -- exists to remove.
+             --
+             -- Aggregated here rather than fetched per ask, for the reason the
+             -- responses are: the per-row lookup is the mistake this codebase
+             -- has been caught by six times. OLDEST FIRST, unlike the asks
+             -- themselves, because a ladder is read as a sequence — "first,
+             -- then second, then final" — and reversing it makes a cadence
+             -- look like it ran backwards.
+             (
+               SELECT coalesce(jsonb_agg(ch ORDER BY ch.chased_at), '[]'::jsonb)
+                 FROM (
+                   SELECT c.rung_key,
+                          c.after_days,
+                          c.days_open,
+                          c.chased_at::text AS chased_at
+                     FROM delivery.client_ask_chase c
+                    WHERE c.ask_id = a.id
+                      AND c.tenant_id = a.tenant_id
+                 ) ch
+             ) AS chases
         FROM delivery.client_ask a
         JOIN core.party cp
           ON cp.id = a.client_party_id AND cp.tenant_id = a.tenant_id
@@ -268,5 +307,18 @@ function toRecord(r: AskRow): AskRecord {
     raisedByName: r.raised_by_name,
     closedByName: r.closed_by_name,
     responses: (r.responses ?? []).map((x) => toResponseRecord(x, r.id)),
+    chases: (r.chases ?? []).map(toChaseRecord),
+  };
+}
+
+/** No `label`: the rung's label is in the firm's published `chaser` config and
+ *  a ladder edited in April must not restate what March's chase was called.
+ *  0065 put `rung_key` and `after_days` on the row for exactly that. */
+function toChaseRecord(c: RawChase): AskChaseRecord {
+  return {
+    rungKey: c.rung_key,
+    afterDays: Number(c.after_days),
+    daysOpen: Number(c.days_open),
+    chasedAt: c.chased_at,
   };
 }

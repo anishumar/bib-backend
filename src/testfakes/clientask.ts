@@ -18,6 +18,7 @@
 // with its policy dropped. A unit test that "proved" gate 4 with a filter in a
 // fake would be the most dangerous file in this repository.
 import type {
+  AskChaseRecord,
   AskDecision,
   AskRecord,
   AskResponse,
@@ -63,6 +64,12 @@ export class FakeAskStore {
    *  0062's policy on the JOIN; here it is a set, and the note at the top of the
    *  file applies. */
   readonly hiddenWorkItems = new Set<string>();
+  /** Reminders the chaser has recorded, by ask. `delivery.client_ask_chase`
+   *  (0065) — the table that shipped with a writer and no reader, which is what
+   *  T6.7 closed. Kept here so a unit test can assert the two surfaces read it
+   *  DIFFERENTLY on purpose: the firm gets every rung, the client gets the last
+   *  date and no tally. */
+  readonly chases = new Map<string, AskChaseRecord[]>();
   private tick = 0;
 
   now(): string {
@@ -72,6 +79,15 @@ export class FakeAskStore {
 
   workItem(id: string, clientPartyId: string, title = "GST monthly filing"): this {
     this.workItems.set(id, { clientPartyId, title });
+    return this;
+  }
+
+  /** Record that a rung fired on an ask. Append-only here as it is by GRANT in
+   *  0065 — there is deliberately no way to remove one. */
+  chase(askId: string, rungKey: string, afterDays: number, daysOpen: number): this {
+    const held = this.chases.get(askId) ?? [];
+    held.push({ rungKey, afterDays, daysOpen, chasedAt: this.now() });
+    this.chases.set(askId, held);
     return this;
   }
 
@@ -155,6 +171,10 @@ export class FakeAskRepo implements AskRepository {
       responses: this.store.responses
         .filter((r) => r.askId === ask.id)
         .map((r) => toResponse(r)),
+      // EVERY RUNG, oldest first. The firm's half of the chase reader.
+      chases: [...(this.store.chases.get(ask.id) ?? [])].sort((a, b) =>
+        a.chasedAt < b.chasedAt ? -1 : 1,
+      ),
     };
   }
 }
@@ -252,6 +272,14 @@ export class FakePortalAskRepo implements PortalAskRepository {
       companyName: "Cobalt Foods Private Limited",
       workItemTitle: this.store.workItems.get(ask.workItemId)?.title ?? "a task",
       raisedAt: ask.raisedAt,
+      // THE LAST DATE AND NO COUNT — the client's half, and the difference from
+      // `record()` above is the whole decision, not an oversight. `max()` in the
+      // real adapter, the same reduction here.
+      lastRemindedAt:
+        (this.store.chases.get(ask.id) ?? []).reduce<string | null>(
+          (latest, c) => (latest === null || c.chasedAt > latest ? c.chasedAt : latest),
+          null,
+        ),
       responses: this.store.responses
         .filter((r) => r.askId === ask.id)
         .map((r) => toResponse(r)),

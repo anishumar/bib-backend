@@ -37,6 +37,15 @@
 //   -- run this file: the version test fails
 //   ROLLBACK;
 //
+// ── AND 0066 NARROWED ONE OF THEM UNDER THIS FILE ────────────────────────
+//
+// `document_portal_scope` is `portal_sees(party_id) AND is_client_visible` since
+// T6.7, because that task added the first route that LISTS documents. Four tests
+// here went red the moment it landed, because their fixtures did not set the new
+// column — see the note on the `document()` helper. The narrowing's own negative
+// control lives with the read that needed it, in
+// `tests/portal/library.integration.test.ts`.
+//
 // A test that passes with the wall removed proves only that the rows exist.
 //
 // Run with:  npm run test:integration
@@ -133,10 +142,24 @@ beforeAll(async () => {
   theirAsk = await ask(theirItem, theirs, "Send the Q1 TDS challans");
   hiddenAsk = await ask(hiddenItem, mine, "Confirm the write-off");
 
+  // `is_client_visible` IS SET EXPLICITLY, AND IT HAS TO BE SINCE 0066.
+  //
+  // That migration NARROWED `document_portal_scope` to `portal_sees(party_id)
+  // AND is_client_visible`, and the column defaults FALSE — so a fixture that
+  // does not set it is a document no portal session can read, and four tests in
+  // this file went red saying exactly that when 0066 landed. Which is the wall
+  // telling the truth: it is what stops a library route handing a client every
+  // working paper the firm ever filed against them.
+  //
+  // These fixtures stand for documents a client HAS been given, so they are
+  // visible. The other half — a document that is the client's and is NOT shared
+  // — is `tests/portal/library.integration.test.ts`'s, where the read that
+  // depends on it lives.
   const document = async (party: string | null, title: string): Promise<[string, string]> => {
     const [doc] = await owner<{ id: string }[]>`
-      INSERT INTO files.document (tenant_id, title, origin, kind, party_id)
-      VALUES (${tenantId}, ${title}, 'uploaded', 'working_paper', ${party}) RETURNING id
+      INSERT INTO files.document
+        (tenant_id, title, origin, kind, party_id, is_client_visible)
+      VALUES (${tenantId}, ${title}, 'uploaded', 'working_paper', ${party}, true) RETURNING id
     `;
     if (!doc) throw new Error(`could not create ${title}`);
     const [version] = await owner<{ id: string }[]>`
@@ -150,6 +173,23 @@ beforeAll(async () => {
     if (!version) throw new Error(`could not version ${title}`);
     return [doc.id, version.id];
   };
+  // ── THE CHASER'S ROWS (0065), AND THE READER T6.7 GAVE THEM ────────────
+  //
+  // `delivery.client_ask_chase` shipped with a WRITER, a portal policy, a
+  // ledger event and nothing rendering any of it — the sixth registered thing
+  // this codebase has found in that state. Two rungs on my ask and one on
+  // another client's, so the policy has something to refuse.
+  const chase = async (askId: string, client: string, rung: string, days: number) => {
+    await owner`
+      INSERT INTO delivery.client_ask_chase
+        (tenant_id, ask_id, client_party_id, rung_key, after_days, days_open)
+      VALUES (${tenantId}, ${askId}, ${client}, ${rung}, ${days}, ${days + 1})
+    `;
+  };
+  await chase(myAsk, mine, "first", 3);
+  await chase(myAsk, mine, "second", 7);
+  await chase(theirAsk, theirs, "first", 3);
+
   [myDocument, myVersion] = await document(mine, "mine");
   [theirDocument, theirVersion] = await document(theirs, "theirs");
   // The firm's OWN document — `party_id` NULL. It is the case the policy decides
@@ -158,6 +198,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  await owner`DELETE FROM delivery.client_ask_chase WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM delivery.client_ask_response WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM delivery.client_ask WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM files.document_link WHERE tenant_id = ${tenantId}`;
@@ -385,5 +426,95 @@ describe("the document store, reached from the portal (0063's other three polici
       `;
     });
     expect(rows).toHaveLength(1);
+  });
+});
+
+describe("the chaser's rows, and the reader they waited for (T6.7)", () => {
+  // `client_ask_chase_portal_scope` (0065) was written on the day the table was
+  // created and had NO reader on either side until T6.7. Both surfaces read it
+  // now, and they read it DIFFERENTLY on purpose: the firm gets every rung
+  // (`AskRecord.chases`), the client gets `max(chased_at)` and no tally
+  // (`PortalAskRow.lastRemindedAt`).
+  //
+  // Negative control:
+  //   BEGIN; DROP POLICY client_ask_chase_portal_scope ON delivery.client_ask_chase;
+  //   -- run this file: "another client's chases" and "sees only its own" fail
+  //   ROLLBACK;
+
+  it("a STAFF session is untouched: all three chases are readable", async () => {
+    const rows = await withTenant(app, tenantId, async (db) => {
+      return db<{ id: string }[]>`
+        SELECT id FROM delivery.client_ask_chase WHERE tenant_id = ${tenantId}
+      `;
+    });
+    expect(rows).toHaveLength(3);
+  });
+
+  it("AND IT TRIES: another client's chases, asked for by their ASK id, come back empty", async () => {
+    const rows = await withPortal(app, tenantId, [mine], async (db) => {
+      return db<{ id: string }[]>`
+        SELECT id FROM delivery.client_ask_chase WHERE ask_id = ${theirAsk}
+      `;
+    });
+    expect(rows).toHaveLength(0);
+  });
+
+  it("sees only its own client's chases", async () => {
+    const rows = await withPortal(app, tenantId, [mine], async (db) => {
+      return db<{ rung_key: string }[]>`
+        SELECT rung_key FROM delivery.client_ask_chase
+         WHERE tenant_id = ${tenantId} ORDER BY after_days
+      `;
+    });
+    expect(rows.map((r) => r.rung_key)).toEqual(["first", "second"]);
+  });
+
+  it("the CLIENT's own read is a max() and not a count", async () => {
+    // The shape the action centre actually uses. A date is something a client
+    // can act on — "did I miss a message" — and a tally is a statement about
+    // them. The count stays on the firm's screen, where "we asked you four
+    // times" is the sentence that needs evidence behind it.
+    const rows = await withPortal(app, tenantId, [mine], async (db) => {
+      return db<{ last: string | null }[]>`
+        SELECT (
+          SELECT max(c.chased_at)::text
+            FROM delivery.client_ask_chase c
+           WHERE c.ask_id = a.id AND c.tenant_id = a.tenant_id
+        ) AS last
+        FROM delivery.client_ask a WHERE a.id = ${myAsk}
+      `;
+    });
+    expect(rows[0]?.last).not.toBeNull();
+  });
+
+  it("an ask nobody has chased answers NULL, which is an ordinary answer", async () => {
+    // A firm that has published no `chaser` ladder chases nobody, so this is the
+    // shipped state and the screen must not render it as a fault.
+    const rows = await withPortal(app, tenantId, [mine], async (db) => {
+      return db<{ last: string | null }[]>`
+        SELECT (
+          SELECT max(c.chased_at)::text
+            FROM delivery.client_ask_chase c
+           WHERE c.ask_id = a.id AND c.tenant_id = a.tenant_id
+        ) AS last
+        FROM delivery.client_ask a WHERE a.id = ${hiddenAsk}
+      `;
+    });
+    expect(rows[0]?.last).toBeNull();
+  });
+
+  it("APPEND-ONLY BY GRANT: a chase cannot be edited, so the count is evidence", async () => {
+    // 0065's own argument — "we reminded you four times" is what a firm says
+    // when a filing goes late, and a record it can edit is not evidence. The
+    // grant is what enforces it, not a trigger: an import or an agent walks past
+    // a trigger and not past a missing permission.
+    await expect(
+      withTenant(app, tenantId, async (db) => {
+        return db`
+          UPDATE delivery.client_ask_chase SET rung_key = 'tampered'
+           WHERE ask_id = ${myAsk} AND tenant_id = ${tenantId}
+        `;
+      }),
+    ).rejects.toThrow(/permission denied/i);
   });
 });

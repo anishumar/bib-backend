@@ -82,6 +82,14 @@ const DocumentSchema = z
         "Whether the product made this file or a person supplied it. An uploaded document is " +
         "the only copy in existence; a generated one could be produced again.",
     }),
+    isClientVisible: z.boolean().openapi({
+      description:
+        "Whether the client this belongs to can see it in their portal library (T6.7). Set " +
+        "from the document's KIND when it is stored — a challan yes, a working paper no — " +
+        "and changeable either way from this endpoint's sibling. Enforced by a policy in the " +
+        "database, never by a query: a portal read that forgot to filter would return your " +
+        "own working papers with a 200.",
+    }),
     kind: z.enum(DOCUMENT_KINDS as unknown as [string, ...string[]]).openapi({
       description:
         "What the document is. A CLOSED set — the product's own document types, mirrored by " +
@@ -174,6 +182,7 @@ function toWire(r: DocumentRecord): z.infer<typeof DocumentSchema> {
     kind: r.document.kind,
     partyId: r.document.partyId,
     partyName: r.partyName,
+    isClientVisible: r.document.isClientVisible,
     createdBy: r.createdBy,
     versionCount: r.versionCount,
     latestVersion: versionToWire(r.latestVersion),
@@ -359,6 +368,42 @@ const versionContentRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not read"),
     404: errorResponse("No such document, or no such version of it"),
     502: errorResponse("The storage backend has lost the bytes this version names"),
+  },
+});
+
+const clientVisibilityRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/documents/{documentId}/client-visibility",
+  tags: ["documents"],
+  summary: "Share this document with its client, or stop sharing it",
+  description:
+    "A DISCLOSURE decision, and it is recorded as one — its own audit verb rather than a " +
+    "document edit, because 'when did this become visible to the client' is asked after " +
+    "something has reached somebody it should not have. " +
+    "Every document gets a sensible first value from its KIND when it is stored: a challan, " +
+    "an invoice, a credit note and a signed engagement letter are things the client is a " +
+    "party to; a working paper is your own thinking. This is how you disagree with that in " +
+    "either direction. " +
+    "A document with no `partyId` is the firm's own and belongs to no client, so there is " +
+    "nobody to share it with — it answers 404.",
+  request: {
+    params: DocumentParam,
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ isClientVisible: z.boolean() })
+            .openapi("SetDocumentClientVisibility"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: DocumentSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org chosen, or the role may not write documents"),
+    404: errorResponse("No such document at this firm, or it belongs to no client"),
   },
 });
 
@@ -629,6 +674,20 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
       versionId,
     });
     return bytesResponse(bytes, version);
+  });
+
+  app.openapi(clientVisibilityRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { documentId } = c.req.valid("param");
+    const { isClientVisible } = c.req.valid("json");
+    const record = await deps.service.setClientVisible({
+      tenantId: s.tenantId,
+      documentId,
+      visible: isClientVisible,
+      actor: s.actor,
+    });
+    return c.json(toWire(record), 200);
   });
 
   app.openapi(versionsRoute, async (c) => {

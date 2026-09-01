@@ -60,7 +60,8 @@ export type ConfigKind =
   | "verification_policy"
   | "compliance_policy"
   | "escalation"
-  | "chaser";
+  | "chaser"
+  | "nudge";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -74,6 +75,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "compliance_policy",
   "escalation",
   "chaser",
+  "nudge",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -793,6 +795,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateEscalationBody(body);
     case "chaser":
       return validateChaserBody(body);
+    case "nudge":
+      return validateNudgeBody(body);
   }
 }
 
@@ -1884,6 +1888,152 @@ export function readChaserBody(body: Record<string, unknown>): ChaserBody {
   // taking rungs out of order would chase in the wrong sequence rather than
   // refusing to chase at all.
   return { rungs: [...rungs].sort((a, b) => a.afterDays - b.afterDays) };
+}
+
+/**
+ * A rung of the PROACTIVE ladder (T6.7) — when the firm tells a client a filing
+ * of theirs is coming up.
+ *
+ * ── ITS OWN KIND, AND IT IS NOT `chaser` WITH A MINUS SIGN ──────────────
+ *
+ * A `ChaserRung` counts FORWARD from the day the firm asked for something and
+ * wants an answer back. This counts BACKWARD from a date the LAW set and wants
+ * nothing back at all. Reusing `chaser` would need a sign convention on
+ * `afterDays`, which is a firm being asked to write `-3` into a field called
+ * "after" and hold two ideas in one number — and migration 0067 states the rest
+ * of the argument.
+ *
+ * ── AND IT HAS NO CHANNEL EITHER ────────────────────────────────────────
+ *
+ * Same reason `ChaserRung` has none: P10 transport is Phase 7, so a nudge is
+ * RAISED and the client's own filings list shows it. A `channel: "email"`
+ * written now would be a field nothing reads and a promise the product cannot
+ * keep.
+ */
+export interface NudgeRung {
+  /** The rung's own key — `week`, `three_days`, `eve`. Recorded on every nudge
+   *  so a row stays readable after the ladder moves under it. Never an index. */
+  readonly key: string;
+  /** Days BEFORE the statutory date. 0 means the day it is due — allowed, and a
+   *  firm that writes it means "tell them this morning", which on a same-day
+   *  deadline is the most useful rung on the ladder. */
+  readonly beforeDays: number;
+  /** What the firm calls this rung, for its own screens. */
+  readonly label: string;
+}
+
+export interface NudgeBody {
+  readonly rungs: readonly NudgeRung[];
+}
+
+const NUDGE_FIELDS = ["rungs"];
+const NUDGE_RUNG_FIELDS = ["key", "beforeDays", "label"];
+
+/**
+ * DESCENDING, STRICTLY — and that is the one line where this validator is the
+ * mirror of the chaser's rather than a copy of it.
+ *
+ * `validateChaserBody` demands ascending `afterDays` because its ladder runs
+ * away from a day in the past. This one runs TOWARDS a day in the future, so its
+ * sequence is 7, then 3, then 1: the same "one subject, one sequence" rule,
+ * pointing the other way. A firm that wrote 1 before 7 has made a mistake about
+ * its own cadence — refused rather than sorted, because quietly reordering hides
+ * it and this ladder's output lands on a client.
+ */
+function validateNudgeBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, NUDGE_FIELDS);
+  if (unknown) return unknown;
+
+  const rungs = body["rungs"];
+  if (!Array.isArray(rungs) || rungs.length === 0) {
+    return (
+      "rungs must be a non-empty array — a nudge ladder with no rungs tells nobody anything, " +
+      "and that is what publishing NO ladder already means. An empty one is a firm believing " +
+      "it has turned reminders on."
+    );
+  }
+
+  const keys = new Set<string>();
+  let previous = Number.POSITIVE_INFINITY;
+  for (const [index, raw] of rungs.entries()) {
+    if (typeof raw !== "object" || raw === null) return `rungs[${String(index)}] must be an object`;
+    const rung = raw as Record<string, unknown>;
+
+    const unknownRung = unknownFields(rung, NUDGE_RUNG_FIELDS);
+    if (unknownRung) return `rungs[${String(index)}]: ${unknownRung}`;
+
+    const key = rung["key"];
+    if (typeof key !== "string" || key.trim() === "") {
+      return `rungs[${String(index)}].key must be a non-empty string`;
+    }
+    // A duplicate key collides on `obligation_nudge_once` and the second rung
+    // would silently never fire — a ladder that looks like it has three rungs
+    // and climbs two.
+    if (keys.has(key)) return `rungs[${String(index)}].key ${JSON.stringify(key)} appears twice`;
+    keys.add(key);
+
+    const beforeDays = rung["beforeDays"];
+    if (typeof beforeDays !== "number" || !Number.isInteger(beforeDays) || beforeDays < 0) {
+      return (
+        `rungs[${String(index)}].beforeDays must be a non-negative whole number of days ` +
+        `before the statutory date`
+      );
+    }
+    if (beforeDays >= previous) {
+      return (
+        `rungs[${String(index)}].beforeDays must be SMALLER than the rung before it ` +
+        `(${String(previous)}) — a nudge ladder counts down to a deadline, so 7 comes ` +
+        `before 3 comes before 1`
+      );
+    }
+    previous = beforeDays;
+
+    const label = rung["label"];
+    if (typeof label !== "string" || label.trim() === "") {
+      return `rungs[${String(index)}].label must be a non-empty string`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A stored nudge ladder, read back — the ONE reader for `kind='nudge'`.
+ *
+ * A malformed rung is DROPPED rather than defaulted, the fail-closed reading
+ * `readChaserBody` and `readEscalationBody` both take. A rung with no usable
+ * `beforeDays` read as 0 would tell a client about a filing on the morning it is
+ * due and never before, which is the loudest possible misreading of a cadence
+ * somebody wrote down carefully.
+ */
+export function readNudgeBody(body: Record<string, unknown>): NudgeBody {
+  const raw = body["rungs"];
+  if (!Array.isArray(raw)) return { rungs: [] };
+  const rungs: NudgeRung[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const rung = item as Record<string, unknown>;
+    const key = rung["key"];
+    const beforeDays = rung["beforeDays"];
+    const label = rung["label"];
+    if (
+      typeof key !== "string" ||
+      typeof beforeDays !== "number" ||
+      !Number.isInteger(beforeDays) ||
+      beforeDays < 0
+    ) {
+      continue;
+    }
+    rungs.push({
+      key,
+      beforeDays,
+      label: typeof label === "string" && label.trim() !== "" ? label : key,
+    });
+  }
+  // Sorted on the way OUT, DESCENDING — furthest from the deadline first, which
+  // is the order the sweep climbs them in. Never on the way in: the validator
+  // refuses an out-of-order ladder so a firm learns about its own mistake, while
+  // this is a stored body that may predate a rule or have been hand-edited.
+  return { rungs: [...rungs].sort((a, b) => b.beforeDays - a.beforeDays) };
 }
 
 const ESCALATION_FIELDS = ["rungs"];

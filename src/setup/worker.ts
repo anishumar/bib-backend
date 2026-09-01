@@ -26,6 +26,7 @@ import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
+import { NudgeService } from "../usecase/nudge/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
@@ -69,6 +70,12 @@ import {
   PostgresChaserTenants,
   PostgresClientFreezeRepository,
 } from "../infrastructure/postgres/chaser-repository";
+import {
+  PostgresNudgeCandidates,
+  PostgresNudgeLadder,
+  PostgresNudgeRepository,
+  PostgresNudgeTenants,
+} from "../infrastructure/postgres/nudge-repository";
 import type { JobQueue } from "../usecase/scheduler/ports";
 
 /** The queue the spawn sweep runs on. A name, because pg-boss keys a schedule
@@ -103,6 +110,14 @@ export const ESCALATION_QUEUE = "delivery.escalation";
  *  failure silence the other. */
 export const CHASER_QUEUE = "delivery.chaser";
 
+/** The proactive nudge (T6.7). Its own queue, and the reason is the one that
+ *  keeps giving: a daily sweep over a firm's own rows whose failure must not
+ *  silence a different daily sweep. It shares the escalation CRON — three
+ *  once-a-morning sweeps do not need three knobs a firm has to think about
+ *  separately to get one answer — but not the queue, because a poisoned job in
+ *  one would stop the others. */
+export const NUDGE_QUEUE = "delivery.nudge";
+
 export interface WiredWorker {
   readonly pools: Pools;
   readonly queue: JobQueue;
@@ -112,6 +127,7 @@ export interface WiredWorker {
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
   readonly chaser: ChaserService;
+  readonly nudges: NudgeService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -320,6 +336,21 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // NO MAILER HERE EITHER, for the chaser's own reason: transport is P10, so a
+  // nudge raises the reminder and the client's filings list shows it. No
+  // `freezes` port either, and that is the decision rather than an omission —
+  // 0067 states both halves: a statutory date is the LAW's and travels whether
+  // or not a fee is in dispute, and a freeze is keyed on `client_party_id` while
+  // an obligation carries `entity_party_id`.
+  const nudges = new NudgeService({
+    tenants: new PostgresNudgeTenants(pools.app),
+    ladders: new PostgresNudgeLadder(pools.app),
+    candidates: new PostgresNudgeCandidates(pools.app),
+    nudges: new PostgresNudgeRepository(pools.app),
+    clock: systemClock,
+    events: ledger,
+  });
+
   const escalations = new EscalationService({
     ladders: new PostgresEscalationLadder(pools.app),
     notices: new PostgresEscalationNoticeRepository(pools.app),
@@ -342,6 +373,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     obligations,
     escalations,
     chaser,
+    nudges,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -491,6 +523,26 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(CHASER_QUEUE, cfg.worker.escalationCron);
+
+      // THE NUDGE, on the same cron and its own queue. See NUDGE_QUEUE.
+      await queue.register(NUDGE_QUEUE, async () => {
+        const reports = await nudges.sweep();
+        for (const r of reports) {
+          if (r.failure !== undefined) {
+            // One firm's bad calendar never stops the others — T3.1's lesson,
+            // where one firm with no work states stopped the calendar for every
+            // firm after it in the list.
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "nudge sweep failed");
+            continue;
+          }
+          if (r.sent === 0 && r.alreadySent === 0) continue;
+          log.info(
+            { tenantId: r.tenantId, sent: r.sent, alreadySent: r.alreadySent },
+            "nudge sweep",
+          );
+        }
+      });
+      await queue.schedule(NUDGE_QUEUE, cfg.worker.escalationCron);
     },
   };
 }

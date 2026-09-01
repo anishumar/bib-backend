@@ -31,6 +31,7 @@ import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-g
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
 import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-home-repository";
+import { PostgresPortalLibraryRepository } from "../infrastructure/postgres/portal-library-repository";
 import { PostgresClientAskRepository } from "../infrastructure/postgres/client-ask-repository";
 import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
 import {
@@ -112,6 +113,7 @@ import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { PortalHomeService } from "../usecase/portalhome/service";
+import { PortalLibraryService } from "../usecase/portallibrary/service";
 import { ClientAskService } from "../usecase/clientask/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
@@ -694,6 +696,28 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
   });
 
+  // THE SELF-SERVE LIBRARY (T6.7) — the THIRD `withPortal` adapter, and
+  // CLAUDE.md's "it should stay countable on one hand" is now half spent.
+  //
+  // `PortalScopeSource` again, satisfied structurally by the same
+  // `PortalAccessService` for the third time — three use cases each asking "what
+  // may this session read" in their own words, one implementation, no imports
+  // between them.
+  //
+  // `blobs` is the SAME object the firm's own `FileStoreService` holds, and that
+  // is the point rather than a convenience: two blob stores would mean a
+  // client's download and the firm's download reading different disks, and the
+  // symptom would be a file the firm can open and the client cannot.
+  const portalLibrary = new PortalLibraryService({
+    scope: {
+      scopedCompanies: (tenantId, userId, on) =>
+        portalAccess.scopedClientsForUser(tenantId, userId, on),
+    },
+    library: new PostgresPortalLibraryRepository(pools.app),
+    blobs,
+    clock: systemClock,
+  });
+
   // THE CLIENT-DIRECTED ASK (T6.6) — one service, two adapters, two scopes.
   //
   // `asks` is the FIRM's side under `withTenant`; `portal` is the client's under
@@ -856,6 +880,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         clientAsks: { service: clientAsks },
         chaser: { service: chaser },
         portalAsks: { service: clientAsks },
+        portalLibrary: { service: portalLibrary },
         portalInvites: {
           service: portalAccessForInvite(),
           identity,

@@ -183,6 +183,28 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/portal/asks/{askId}/answer",
   "/api/v1/portal/asks/{askId}/decision",
   "/api/v1/portal/asks/{askId}/documents",
+  // ── THE SELF-SERVE LIBRARY (T6.7), AND THE FIRST BYTES A CLIENT READS ───
+  //
+  // Four READS, so none of them is behind a permission — reading is authorised
+  // by the GRANT, which is what lets a `client_viewer` find last year's challan
+  // without asking anybody. What makes them safe is not these lines:
+  //
+  //   · `files.document`'s policy was NARROWED in 0066 rather than merely
+  //     relied on. This is the first route in the product that LISTS documents,
+  //     and `crm.portal_sees(party_id)` alone would have handed the client
+  //     every working paper the firm ever filed against them
+  //   · `crm.invoice` gained its first portal policy in 0066, on `party_id`
+  //     (who is BILLED) and never on a join, with a DRAFT excluded inside the
+  //     policy rather than in a query
+  //   · the adapter uses `withPortal`, never `withTenant`
+  //
+  // `/content` is the second route in this product that returns BYTES and the
+  // first on the client's side. T3.6's rule extends unchanged: one route, no
+  // pre-signed URL, `content-disposition: attachment`.
+  "/api/v1/portal/documents",
+  "/api/v1/portal/documents/{documentId}/content",
+  "/api/v1/portal/invoices",
+  "/api/v1/portal/digest",
 ]);
 
 /**

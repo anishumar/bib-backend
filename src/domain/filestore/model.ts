@@ -112,10 +112,73 @@ export interface StoredDocument {
   readonly kind: DocumentKind;
   /** The client this belongs to, or null for the firm's own. */
   readonly partyId: string | null;
+  /**
+   * Whether this appears in the client portal's LIBRARY (T6.7, migration 0066).
+   *
+   * `delivery.work_item.is_client_visible` for the second time, and the second
+   * time is the interesting one — the first sat unread from 0051 to 0062 and
+   * then T6.5's walk found the portal showing a client *"Decide the credit hold
+   * on INV/2026-27/0003"*, because that flag defaulted TRUE and nothing had ever
+   * set it false.
+   *
+   * So: the DATABASE default is FALSE, and the first sensible value comes from
+   * `clientVisibleByDefault(kind)` at the moment the service creates the row.
+   * Those are two different mechanisms on purpose. The default is what an
+   * import, an agent or a future INSERT that has never heard of this column
+   * lands on, and it must be the safe direction; the kind mapping is a judgement
+   * about a firm's business, which is why it lives where a firm's own screen can
+   * override it in both directions.
+   *
+   * IT IS ENFORCED AS A POLICY, NEVER AS A `WHERE`. A portal read that forgets a
+   * filter returns an internal working paper with a 200.
+   */
+  readonly isClientVisible: boolean;
   /** Null when the system generated it. */
   readonly createdBy: string | null;
   readonly createdAt: string;
   readonly updatedAt: string;
+}
+
+/**
+ * Whether a document of this KIND should start out visible to the client it
+ * belongs to.
+ *
+ * ── WHY A MAPPING AND NOT A DEFAULT EITHER WAY ──────────────────────────
+ *
+ * Defaulting everything FALSE makes the library empty until somebody ticks 168
+ * boxes, and a self-serve library nobody has stocked does not stop the email it
+ * exists to stop. Defaulting everything TRUE is T6.5's bug with the stakes
+ * raised from one task title to the firm's working papers.
+ *
+ * So the split is by what the document IS. A challan, an invoice, a credit note
+ * and a signed engagement letter are documents the client is a PARTY to — they
+ * either signed it, were billed by it, or it was filed on their behalf and their
+ * name is on it. A working paper is the firm's own thinking, and an
+ * `identity_proof` is something the client supplied, which they already hold.
+ *
+ * `correspondence` is FALSE and it is the line worth arguing about: some of it
+ * is a letter to the client and some of it is a note to a colleague about the
+ * client, and this vocabulary cannot tell those apart. False is the direction to
+ * be wrong in, and a firm that wants one shared flips it on the document.
+ *
+ * NONE OF THIS IS A WALL. It is a first value; the wall is the policy in 0066.
+ * A firm may set any of these either way and the product does not argue.
+ */
+export function clientVisibleByDefault(kind: DocumentKind): boolean {
+  switch (kind) {
+    case "statutory_filing":
+    case "invoice":
+    case "credit_note":
+    case "engagement_letter":
+      return true;
+    case "proposal":
+    case "identity_proof":
+    case "working_paper":
+    case "correspondence":
+    case "brand_asset":
+    case "other":
+      return false;
+  }
 }
 
 /** One immutable set of bytes. */

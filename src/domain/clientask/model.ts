@@ -134,6 +134,34 @@ export interface AskResponse {
 }
 
 /**
+ * One rung of the chaser climbed on one ask (T4.4, migration 0065) — and the
+ * READER that row waited for.
+ *
+ * ── IT SHIPPED WITH A WRITER AND NOBODY LOOKING AT IT ────────────────────
+ *
+ * `delivery.client_ask_chase` was written by the sweep, carried a portal policy,
+ * emitted `client_ask.chased`, and NOTHING rendered any of it. That is the sixth
+ * registered thing this codebase has found in that state, after
+ * `membership.revoked`, `obligation.filed`, the escalation ladder's comment,
+ * `is_client_visible` and `files.document.party_id`. A firm cannot say *"we
+ * reminded you three times"* off a row no screen reads.
+ *
+ * `label` is deliberately NOT here. The rung's label lives in the firm's
+ * published `chaser` config and a ladder edited in April must not restate what
+ * March's chase was called — `rungKey` and `afterDays` are on the row precisely
+ * so the row stays readable after the ladder moves under it (0065). The screen
+ * shows the key, which is what the firm itself wrote.
+ */
+export interface AskChaseRecord {
+  readonly rungKey: string;
+  /** The threshold that fired, copied from the rung at the moment it did. */
+  readonly afterDays: number;
+  /** How long the ask had actually been open when it fired. */
+  readonly daysOpen: number;
+  readonly chasedAt: string;
+}
+
+/**
  * An ask as the FIRM reads it, on the work item it was raised from.
  *
  * Names, never ids — the rule this codebase has now learnt six times. The
@@ -149,6 +177,16 @@ export interface AskRecord {
   readonly raisedByName: string | null;
   readonly closedByName: string | null;
   readonly responses: readonly AskResponseRecord[];
+  /**
+   * Every reminder the chaser has sent about this, oldest first.
+   *
+   * THE FIRM'S HALF IS NOT A DECISION, unlike the client's (see
+   * `PortalAskRow.lastRemindedAt`). A colleague opening this task has to be able
+   * to see that it has been chased three times and is still open — otherwise the
+   * next thing they do is chase it a fourth time by hand, which is the exact
+   * work T4.4 exists to remove.
+   */
+  readonly chases: readonly AskChaseRecord[];
 }
 
 /** A response with the file resolved to something a person can read. */
@@ -202,6 +240,29 @@ export interface PortalAskRow {
   /** What the firm is doing that this ask is part of. */
   readonly workItemTitle: string;
   readonly raisedAt: string;
+  /**
+   * When the firm last reminded them about this, or null if it never has.
+   *
+   * ── A DATE AND NOT A COUNT, AND THAT IS THE DECISION ────────────────────
+   *
+   * 0065's own comment said this surface would show *"how many times it has been
+   * reminded and when"*. Only half of that ships, and the half that does not is
+   * a deliberate choice rather than an omission (Shrestha, 2026-09-01).
+   *
+   * *"We have reminded you 4 times"* is an accusation printed on somebody's own
+   * page, and on a daily rung it reads *"9 times"* within a fortnight. What a
+   * client can act on is WHEN — "you last heard from us on the 12th" tells them
+   * whether they missed a message; the tally tells them only what the firm
+   * thinks of them, and the predictable response to it is an email, which is
+   * where all of this was before the portal.
+   *
+   * THE COUNT IS NOT LOST. `AskRecord.chases` carries every rung on the firm's
+   * own screen, which is where *"we asked you four times"* is a sentence
+   * somebody needs evidence for. The row is append-only by GRANT for exactly
+   * that reason — a record the firm can edit is not evidence — and none of that
+   * changes because the client's page is quieter about it.
+   */
+  readonly lastRemindedAt: string | null;
   readonly responses: readonly AskResponseRecord[];
 }
 

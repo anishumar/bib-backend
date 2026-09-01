@@ -102,6 +102,24 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     return Promise.resolve(doc ? this.recordOf(doc) : null);
   }
 
+  setClientVisible(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly visible: boolean;
+  }): Promise<DocumentRecord | null> {
+    const i = this.documents.findIndex(
+      (d) => d.tenantId === input.tenantId && d.id === input.documentId,
+    );
+    const doc = this.documents[i];
+    // `party_id IS NOT NULL` is in the real adapter's WHERE, so it is here: a
+    // fake that accepted a write the database refuses is a fixture that can
+    // describe an impossible state.
+    if (i === -1 || doc === undefined || doc.partyId === null) return Promise.resolve(null);
+    const next = { ...doc, isClientVisible: input.visible };
+    this.documents[i] = next;
+    return Promise.resolve(this.recordOf(next));
+  }
+
   list(input: {
     readonly tenantId: string;
     readonly partyId?: string | undefined;

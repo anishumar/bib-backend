@@ -42,6 +42,7 @@ export const KIND_VALUES = [
   "compliance_policy",
   "escalation",
   "chaser",
+  "nudge",
 ] as const satisfies readonly ConfigKind[];
 
 // ── Response schemas ────────────────────────────────────────────────────────

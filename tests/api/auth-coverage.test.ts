@@ -81,6 +81,12 @@ import {
   FakePortalAskRepo,
 } from "../../src/testfakes/clientask";
 import {
+  FakeLibraryBlobs,
+  FakeLibraryScope,
+  FakePortalLibraryRepo,
+} from "../../src/testfakes/portallibrary";
+import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
+import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
@@ -194,6 +200,15 @@ function askService(): ClientAskService {
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
     maxUploadBytes: 10_000_000,
+  });
+}
+
+function libraryService(): PortalLibraryService {
+  return new PortalLibraryService({
+    scope: new FakeLibraryScope(),
+    library: new FakePortalLibraryRepo(),
+    blobs: new FakeLibraryBlobs(),
+    clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
   });
 }
 
@@ -412,6 +427,7 @@ function deps(): RouterDeps {
       }),
     },
     portalAsks: { service: askService() },
+    portalLibrary: { service: libraryService() },
     portalInvites: {
       service: new PortalInviteService({
         identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
@@ -870,7 +886,21 @@ describe("gate 2 — audience", () => {
       "/api/v1/portal/asks/{askId}/answer",
       "/api/v1/portal/asks/{askId}/decision",
       "/api/v1/portal/asks/{askId}/documents",
+      // T6.7's self-serve library. Four READS, none behind a permission — which
+      // is what makes the acceptance line ("a client finds last year's challan
+      // without emailing anyone") true for a `client_viewer` as well. What
+      // guards them is 0066: `files.document`'s policy NARROWED by
+      // `is_client_visible`, and `crm.invoice`'s first portal policy, on
+      // `party_id` with a DRAFT excluded inside the policy itself.
+      //
+      // `/content` is the first route on the CLIENT's side that returns bytes.
+      // T3.6's rule extends rather than bends: one route, no pre-signed URL,
+      // `content-disposition: attachment`.
+      "/api/v1/portal/digest",
+      "/api/v1/portal/documents",
+      "/api/v1/portal/documents/{documentId}/content",
       "/api/v1/portal/home",
+      "/api/v1/portal/invoices",
       // The org switcher's data — their own memberships and nothing else.
       "/api/v1/tenancy/me/memberships",
     ]);

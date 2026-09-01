@@ -61,7 +61,7 @@ deliberately broken and worth showing.
 | **Ravi Iyer** — manager | `ravi@10xglobal.in` | Owns the UK desk, and checks Ananya's work. |
 | **Ananya Nair** — associate | `ananya@10xglobal.in` | **No fee visibility** — the money disappears for her. |
 | **Farhan Qureshi** — associate | `farhan@10xglobal.in` | **Reports to nobody** — his escalations reach nobody. |
-| **Meera Menon** — client contact | `meera@cobaltfoods.in` | A *client* login. Proves the wall. |
+| **Meera Menon** — client contact | `meera@cobaltfoods.in` | A *client* login. Signs in at `/portal` — her own app, four tabs, and nothing of the firm's. Proves the wall. |
 
 ### The problem corner — deliberate, and the sharpest part of the demo
 
@@ -297,10 +297,19 @@ Two things to close on:
 
 ## What is deliberately NOT built yet — say it before they ask
 
-- **The client portal** has no screens yet. The login and the wall exist (step 14);
-  the portal itself is the next phase.
-- **The delivery engine's screens** — work items, the verification queue, the
-  compliance calendar — are the other developer's lane and are in progress.
+- **NOTHING LEAVES THE BUILDING.** There is no email, no WhatsApp and no SMS in this
+  product (P10, Phase 7). So the chaser RAISES a reminder and the client's own action
+  centre shows it; the nudge raises one and their filings list shows it; the "monthly
+  digest" is a page they open rather than something that arrives, and `/portal/month`
+  says so on the page. Say this before somebody asks why their inbox is empty — every
+  one of those is a real record with a real reader, and none of them is a message.
+- **No virus scanner, no OCR, no auto-filing.** A client-supplied file is stored
+  exactly as it arrives, the firm's own screen says *"not scanned"* beside it, and
+  `content-disposition: attachment` is the one protection that does exist. There is no
+  scanner in this product and a `scan()` returning "clean" would be a lie with a
+  function signature.
+- **No way to PAY from the portal.** A client sees what they were billed and what is
+  still outstanding; payments are P11 and nothing in this product takes money.
 - **The AI agents** are designed and not built. The runtime seam they plug into
   exists, which is why they are a phase and not a rewrite.
 - **Real integrations** (GST portal, MCA, banking) are externally gated on

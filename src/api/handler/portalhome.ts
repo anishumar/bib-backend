@@ -123,6 +123,14 @@ const FilingSchema = z
     }),
     stateName: z.string(),
     filedOn: IsoDate.nullable(),
+    lastNudgedAt: z.string().nullable().openapi({
+      description:
+        "When the firm last told you this one was coming up, or null if it never has. A DATE " +
+        "AND NOT A COUNT, the same choice the action centre makes about reminders: what you " +
+        "can act on is whether you missed a message, and a tally would be the firm being " +
+        "defensive about a filing that is not late yet. NULL IS ORDINARY — a firm that has " +
+        "published no reminder ladder tells nobody, which is the shipped state.",
+    }),
   })
   .openapi("PortalFilingRow");
 
@@ -269,6 +277,7 @@ function toFilingWire(r: {
   statutoryDueOn: string;
   stateName: string;
   filedOn: string | null;
+  lastNudgedAt: string | null;
 }): z.infer<typeof FilingSchema> {
   return {
     obligationId: r.obligationId,
@@ -278,5 +287,6 @@ function toFilingWire(r: {
     statutoryDueOn: r.statutoryDueOn,
     stateName: r.stateName,
     filedOn: r.filedOn,
+    lastNudgedAt: r.lastNudgedAt,
   };
 }

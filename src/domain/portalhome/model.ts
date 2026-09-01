@@ -121,6 +121,23 @@ export interface PortalFilingRow {
   readonly stateName: string;
   /** YYYY-MM-DD once it is done, null while it is not. */
   readonly filedOn: string | null;
+  /**
+   * When the firm last told this client the filing was coming up, or null if it
+   * never has (T6.7, `delivery.obligation_nudge`).
+   *
+   * A DATE AND NOT A COUNT, the same decision `PortalAskRow.lastRemindedAt`
+   * makes and for the same reason — a tally on somebody's own page is about
+   * them rather than about the work. On this row it matters slightly
+   * differently: what a client does with it is decide whether they MISSED a
+   * message, and *"we told you three times"* about a filing that has not gone
+   * late yet is the firm being defensive before there is anything to be
+   * defensive about.
+   *
+   * NULL IS A REAL AND ORDINARY ANSWER and the screen must not treat it as a
+   * fault: a firm that has published no `nudge` ladder tells nobody, which is
+   * the shipped state.
+   */
+  readonly lastNudgedAt: string | null;
 }
 
 /** Everything the status home renders, in one response. */

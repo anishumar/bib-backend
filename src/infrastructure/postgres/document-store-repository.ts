@@ -40,6 +40,7 @@ interface DocumentRow {
   origin: string;
   kind: string;
   party_id: string | null;
+  is_client_visible: boolean;
   created_by: string | null;
   created_at: string;
   updated_at: string;
@@ -152,6 +153,7 @@ function toDocument(r: DocumentRow): StoredDocument {
     origin: r.origin as DocumentOrigin,
     kind: r.kind as DocumentKind,
     partyId: r.party_id,
+    isClientVisible: r.is_client_visible,
     createdBy: r.created_by,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
@@ -206,12 +208,40 @@ function toBrandAsset(r: BrandAssetRow): BrandAsset {
 export class PostgresDocumentStoreRepository implements DocumentStoreRepository {
   constructor(private readonly app: Db) {}
 
+  async setClientVisible(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly visible: boolean;
+  }): Promise<DocumentRecord | null> {
+    return withTenant(this.app, input.tenantId, async (db) => {
+      // `party_id IS NOT NULL` IS PART OF THE WRITE, not a check above it. A
+      // document with no party is the FIRM's own — the portal denies it by
+      // arithmetic whatever this flag says (0063) — so setting the flag on one
+      // would store a value that means nothing and read on a screen as "shared
+      // with a client" when it is shared with nobody.
+      const [row] = await db<{ id: string }[]>`
+        UPDATE files.document
+           SET is_client_visible = ${input.visible}
+         WHERE id = ${input.documentId}
+           AND tenant_id = ${input.tenantId}
+           AND party_id IS NOT NULL
+        RETURNING id
+      `;
+      if (!row) return null;
+      const [record] = await db<DocumentRow[]>`
+        ${this.recordSelect(db)} WHERE d.id = ${input.documentId}
+      `;
+      return record ? toRecord(record) : null;
+    });
+  }
+
   async create(doc: NewDocument, version: NewDocumentVersion): Promise<DocumentRecord> {
     return withTenant(this.app, doc.tenantId, async (db) => {
       await db`
-        INSERT INTO files.document (id, tenant_id, title, origin, kind, party_id, created_by)
+        INSERT INTO files.document
+          (id, tenant_id, title, origin, kind, party_id, is_client_visible, created_by)
         VALUES (${doc.id}, ${doc.tenantId}, ${doc.title}, ${doc.origin}, ${doc.kind},
-                ${doc.partyId}, ${doc.createdBy})
+                ${doc.partyId}, ${doc.isClientVisible}, ${doc.createdBy})
       `;
       await db`
         INSERT INTO files.document_version
@@ -497,6 +527,7 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
   private recordSelect(db: Db) {
     return db`
       SELECT d.id, d.tenant_id, d.title, d.origin, d.kind, d.party_id,
+             d.is_client_visible,
              d.created_by, d.created_at, d.updated_at,
              p.display_name AS party_name,
              u.display_name AS created_by_name,

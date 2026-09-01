@@ -55,6 +55,24 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   // simply cannot answer one — those three routes are in ROUTE_PERMISSIONS,
   // behind `portal:respond`.
   routeKey("GET", "/api/v1/portal/asks"),
+  // ── THE LIBRARY (T6.7) ────────────────────────────────────────────────
+  //
+  // Four reads, and the argument is the one the home and the ask list already
+  // made: being invited and granted a company IS the authorisation to read that
+  // company's records. `crm.portal_access` is a row somebody wrote, with a
+  // granter, a date and a ledger event, and gate 4 enforces it. A permission on
+  // top would be a second answer to a settled question, and every portal login
+  // would hold it.
+  //
+  // It also decides something concrete rather than being a formality: a
+  // `client_viewer` holds NO permission at all, and the acceptance line — a
+  // client finds last year's challan without emailing anyone — has to be true
+  // for them too. Putting the download behind `portal:respond` would make the
+  // read-only role unable to read.
+  routeKey("GET", "/api/v1/portal/documents"),
+  routeKey("GET", "/api/v1/portal/documents/{documentId}/content"),
+  routeKey("GET", "/api/v1/portal/invoices"),
+  routeKey("GET", "/api/v1/portal/digest"),
 ]);
 
 /** The permission each business route requires. */
@@ -598,6 +616,16 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/documents/render"), "party:write" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/content"), "party:read" as const],
+  // A DISCLOSURE decision, and it takes `party:write` rather than a permission
+  // of its own. Sharing a file with a client is the same kind of act as
+  // uploading one for them, and a tenth permission that only ever accompanies
+  // this one would be a row every firm has to think about once and never
+  // again. `portal:grant` was considered and is wrong: that one decides which
+  // COMPANIES a login may read at all, and this decides what is in one of them.
+  [
+    routeKey("PATCH", "/api/v1/documents/{documentId}/client-visibility"),
+    "party:write" as const,
+  ],
   [routeKey("GET", "/api/v1/documents/{documentId}/versions"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents/{documentId}/versions"), "party:write" as const],
   [

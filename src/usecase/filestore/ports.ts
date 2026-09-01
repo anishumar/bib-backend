@@ -19,6 +19,10 @@ export interface NewDocument {
   readonly origin: DocumentOrigin;
   readonly kind: DocumentKind;
   readonly partyId: string | null;
+  /** Set by the SERVICE from `clientVisibleByDefault(kind)`, never defaulted
+   *  here. Required rather than optional so a new caller has to decide — an
+   *  optional flag on a disclosure switch is a caller quietly choosing. */
+  readonly isClientVisible: boolean;
   readonly createdBy: string | null;
 }
 
@@ -115,6 +119,29 @@ export interface DocumentStoreRepository {
   addVersion(version: NewDocumentVersion): Promise<DocumentVersion>;
 
   findById(tenantId: string, documentId: string): Promise<DocumentRecord | null>;
+
+  /**
+   * Share this document with the client it belongs to, or stop sharing it.
+   *
+   * ── THE HALF THAT KEEPS THE FLAG FROM BEING A WALL NOBODY CAN MOVE ─────
+   *
+   * `is_client_visible` (0066) gets its first value from the document's KIND
+   * and is enforced by a policy. Without this method it would be exactly what
+   * T6.5 named on `delivery.work_item`'s copy of the same flag: *"a flag the
+   * portal enforces and no screen can change is a wall built against a value
+   * nobody can move"* — a firm that wanted to share one working paper, or to
+   * un-share a challan filed against the wrong client, would have no way to.
+   *
+   * The one UPDATE in this repository, and it touches nothing else — a document
+   * with no `party_id` is the firm's own and cannot be shared with anybody, so
+   * the statement refuses it rather than writing a flag that means nothing.
+   * Null is "no such document at this firm", and the use case owns the sentence.
+   */
+  setClientVisible(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly visible: boolean;
+  }): Promise<DocumentRecord | null>;
 
   /** Newest first. `kind` narrows; absent means every kind. */
   list(input: {

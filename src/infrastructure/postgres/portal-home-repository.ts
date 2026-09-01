@@ -74,6 +74,7 @@ interface FilingRow {
   statutory_due_on: string;
   state_name: string;
   filed_on: string | null;
+  last_nudged_at: string | null;
 }
 
 export class PostgresPortalHomeRepository implements PortalHomeRepository {
@@ -189,7 +190,30 @@ export class PostgresPortalHomeRepository implements PortalHomeRepository {
                oi.period_label,
                oi.statutory_due_on::text AS statutory_due_on,
                os.name          AS state_name,
-               oi.filed_on::text AS filed_on
+               oi.filed_on::text AS filed_on,
+               -- ── WHEN WE LAST TOLD THEM, AND NOT HOW OFTEN (T6.7) ────────
+               --
+               -- delivery.obligation_nudge (0067), and its reader lands in the
+               -- same task that creates it — which is the rule this codebase
+               -- has now learnt six times over, most recently from
+               -- client_ask_chase shipping with a writer and nobody looking.
+               --
+               -- A MAX and not a count, the same decision the action centre
+               -- makes about reminders: what a client does with this is work
+               -- out whether they missed a message. "We told you three times"
+               -- about a filing that is not late yet is the firm being
+               -- defensive before there is anything to be defensive about.
+               --
+               -- No client filter here. obligation_nudge_portal_scope is under
+               -- this subquery exactly as obligation_instance_portal_scope is
+               -- under the outer one, and repeating either would disarm the
+               -- negative control.
+               (
+                 SELECT max(n.nudged_at)::text
+                   FROM delivery.obligation_nudge n
+                  WHERE n.obligation_id = oi.id
+                    AND n.tenant_id = oi.tenant_id
+               ) AS last_nudged_at
           FROM delivery.obligation_instance oi
           JOIN delivery.obligation_template t
             ON t.id = oi.template_id AND t.tenant_id = oi.tenant_id
@@ -234,5 +258,6 @@ function toFilingRow(r: FilingRow): PortalFilingRow {
     statutoryDueOn: r.statutory_due_on,
     stateName: r.state_name,
     filedOn: r.filed_on,
+    lastNudgedAt: r.last_nudged_at,
   };
 }

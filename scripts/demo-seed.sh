@@ -371,6 +371,40 @@ asp partner "$API/api/v1/config/escalation" -d '{"key":"default","body":{"rungs"
 asp partner "$API/api/v1/config/escalation/default/versions/1/publish" | ok
 step "7 rungs across all three watches — unassigned, due, and the internal target"
 
+say "When the firm reminds a CLIENT"
+# THE OUTWARD LADDER (T4.4). Nothing is seeded by the product — a firm with no
+# published `chaser` entry chases NOBODY, and that rule is sharper than the
+# escalation one: an escalation nobody asked for lands on a colleague, a chase
+# lands on the client, who reads it as the firm's opinion of them. This is the
+# firm publishing one.
+#
+# D+3, D+7, D+15 — the board's own numbers. NOTHING HAS FIRED ON A FRESH DEMO
+# and that is correct rather than a gap: every ask below is raised today, so no
+# ask is three days old yet. The firm's ask panel and the client's action centre
+# both say nothing about reminders, which is the true state of a firm on its
+# first day and not an empty screen hiding a broken sweep.
+asp partner "$API/api/v1/config/chaser" -d '{"key":"default","body":{"rungs":[
+  {"key":"first","afterDays":3,"label":"A gentle reminder"},
+  {"key":"second","afterDays":7,"label":"A second reminder"},
+  {"key":"final","afterDays":15,"label":"A final reminder"}]}}' > /dev/null
+asp partner "$API/api/v1/config/chaser/default/versions/1/publish" | ok
+step "chasing an unanswered ask: D+3, D+7, D+15 — and a freeze stops it"
+
+say "When the firm tells a client a filing is coming up"
+# THE PROACTIVE LADDER (T6.7), and it counts the other way: 7, then 3, then 1
+# day BEFORE a statutory date. Its own config kind rather than a rung of the
+# chaser with a minus sign — a chase is about something the firm asked for and
+# has not had back, a nudge asks for nothing and names a date the LAW set.
+#
+# THIS ONE DOES FIRE on a fresh demo, because the calendar below materialises a
+# year of filings and some of them are inside a week.
+asp partner "$API/api/v1/config/nudge" -d '{"key":"default","body":{"rungs":[
+  {"key":"week","beforeDays":7,"label":"A week to go"},
+  {"key":"three_days","beforeDays":3,"label":"Three days to go"},
+  {"key":"eve","beforeDays":1,"label":"Due tomorrow"}]}}' > /dev/null
+asp partner "$API/api/v1/config/nudge/default/versions/1/publish" | ok
+step "telling a client about their own filing: T-7, T-3, T-1 — a freeze does NOT stop this"
+
 say "The clauses a letter is written from"
 clause() {
   asp partner "$API/api/v1/config/clause" -d "$1" | ok
@@ -751,7 +785,51 @@ else
   warn "no statutory task to tick - the calendar raised none"
 fi
 
-say "Running the worker again, so the escalation ladder has climbed the new work"
+# ── AND THE CHALLAN ITSELF, so the library has something in it (T6.7) ───────
+#
+# T6.7's acceptance line is *"a client finds last year's challan without emailing
+# anyone"*, and until this the demo had no documents AT ALL — the library would
+# have rendered empty and the walk would have proved nothing.
+#
+# It goes through the PRODUCT's own upload route, so `is_client_visible` is set
+# the way it is set for every other document: by `clientVisibleByDefault(kind)`,
+# which is TRUE for a `statutory_filing`. Nothing here passes that flag, and
+# nothing can — it is not on the form. A `working_paper` uploaded the same way
+# would land invisible, which is the other half of the same decision and is what
+# migration 0066 exists for.
+#
+# Attached to the WORK ITEM, which is how a filing's document reaches the client
+# with a label they recognise: the task's title carries the period.
+if [ "$FILED_TASK" != "None" ]; then
+  # THE TITLE NAMES NO PARTICULAR RETURN, and that is not laziness.
+  # `FILED_TASK` is whatever the calendar happened to raise and tick for
+  # Cobalt Foods — it was a TDS statement on this run and may be a GSTR-3B
+  # on the next. The first version of this file called it a GSTR-3B
+  # acknowledgement and the portal rendered it under "Quarterly TDS
+  # statements — Q1 FY2026-27", which is a document contradicting the job it
+  # is filed against on a CLIENT's own page. The link already carries the
+  # period; the title says what the thing IS.
+  CHALLAN_FILE="$J/filing-acknowledgement.txt"
+  printf 'Filing acknowledgement
+ARN AA2708260012345
+Cobalt Foods Private Limited
+' > "$CHALLAN_FILE"
+  curl -s -b "$J/partner.txt" -XPOST "$API/api/v1/documents"     -F "file=@$CHALLAN_FILE"     -F "title=Filing acknowledgement"     -F "kind=statutory_filing"     -F "partyId=$COBALT"     -F "subjectKind=work_item"     -F "subjectRef=$FILED_TASK"     -F "role=filed_copy" | ok
+  step "the filed challan, in the client's own library — visible because of what it IS"
+
+  # THE OTHER HALF, and it is what makes the first half mean anything. A working
+  # paper about the same client, uploaded the same way, lands INVISIBLE — so the
+  # walk can open the portal library and see that the firm's own thinking about
+  # this client is not in it.
+  WP_FILE="$J/open-queries.txt"
+  printf 'Open queries - Cobalt Foods FY26
+1. Nashik write-off: partner to confirm treatment
+' > "$WP_FILE"
+  curl -s -b "$J/partner.txt" -XPOST "$API/api/v1/documents"     -F "file=@$WP_FILE"     -F "title=Open queries - Cobalt FY26"     -F "kind=working_paper"     -F "partyId=$COBALT"     -F "subjectKind=work_item"     -F "subjectRef=$FILED_TASK" | ok
+  step "and a working paper about the same client, which the client cannot see"
+fi
+
+say "Running the worker again, so the ladders have climbed the new work"
 (cd "$(dirname "$0")/.." && npm run worker:once 2>&1 | sed 's/^/    /') || true
 
 # ── What is actually there ───────────────────────────────────────────────────

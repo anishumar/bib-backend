@@ -67,6 +67,26 @@ const ResponseSchema = z
   })
   .openapi("ClientAskResponse");
 
+const ChaseSchema = z
+  .object({
+    rungKey: z.string().openapi({
+      description:
+        "Your own name for the rung — `first`, `second`, `final`. The KEY and never an " +
+        "index: an index shifts when you insert a rung and every chase already sent is " +
+        "silently renamed.",
+    }),
+    afterDays: z.number().int().openapi({
+      description:
+        "The threshold that fired, copied from your ladder at the moment it did. A cadence " +
+        "changed in April does not restate what was sent in March.",
+    }),
+    daysOpen: z.number().int().openapi({
+      description: "How long the ask had actually been open when the rung fired.",
+    }),
+    chasedAt: z.string(),
+  })
+  .openapi("ClientAskChase");
+
 const AskSchema = z
   .object({
     askId: z.string().uuid(),
@@ -99,6 +119,14 @@ const AskSchema = z
     closedByName: z.string().nullable(),
     closedAt: z.string().nullable(),
     responses: z.array(ResponseSchema),
+    chases: z.array(ChaseSchema).openapi({
+      description:
+        "Every reminder the chaser has sent about this, oldest first. THE COUNT IS THE " +
+        "POINT: `we asked you four times` is what a firm says when a filing goes late, and " +
+        "`delivery.client_ask_chase` is append-only by GRANT so it is evidence rather than a " +
+        "note. The CLIENT's own surface shows only the last date and no tally — see " +
+        "`PortalAsk.lastRemindedAt` for why.",
+    }),
   })
   .openapi("ClientAsk");
 
@@ -267,6 +295,12 @@ export function toWire(r: AskRecord): z.infer<typeof AskSchema> {
       respondedByName: x.respondedByName,
       respondedAt: x.response.respondedAt,
       document: x.document,
+    })),
+    chases: r.chases.map((c) => ({
+      rungKey: c.rungKey,
+      afterDays: c.afterDays,
+      daysOpen: c.daysOpen,
+      chasedAt: c.chasedAt,
     })),
   };
 }

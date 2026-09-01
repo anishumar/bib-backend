@@ -8,12 +8,17 @@
 //
 //   npm run worker:once
 //
-// It runs ALL FIVE sweeps — spawn, orchestrate, dunning, the compliance
-// calendar and the escalation ladder — because all five are what the worker
-// does, and an entry point that mirrored part of the process would be a worse
-// lie than none at all. It said THREE until T4.5, by which point it had run
-// four for two tasks: a count in a comment is a fact that rots, so the list is
-// spelt out.
+// It runs EVERY sweep the worker does — spawn, orchestrate, dunning, the
+// compliance calendar, the escalation ladder, the chaser and the proactive
+// nudge — because that is what the worker does, and an entry point that
+// mirrored part of the process would be a worse lie than none at all.
+//
+// THE COUNT IN THIS COMMENT HAS NOW GONE STALE TWICE. It said THREE until T4.5
+// and FIVE until T6.7, and on the second occasion it was worse than stale: T4.4
+// registered the chaser on the worker's queue and never added it here, so this
+// command claimed to run everything and quietly ran everything but the one
+// sweep aimed at clients. There is no count in this sentence any more, and the
+// list is the list.
 import pino from "pino";
 import { load } from "../config/config";
 import { wireWorker } from "../setup/worker";
@@ -166,6 +171,59 @@ async function main(): Promise<void> {
           `  ${String(unresolved)} of them reached NOBODY — the queue says why on each row`,
         );
       }
+    }
+    console.log();
+
+    // THE CHASER (T4.4). After the ladder because both are daily sweeps and
+    // neither depends on the other, and because this is the order the worker
+    // registers them in — an entry point that ran them in a different order
+    // would be a second arrangement nobody chose.
+    //
+    // IT WAS MISSING FROM THIS FILE UNTIL T6.7, which is the whole reason the
+    // header above no longer counts anything.
+    const chases = await wired.chaser.sweep();
+    for (const r of chases.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: chaser sweep FAILED — ${r.failure ?? ""}`);
+    }
+    const chased = chases.reduce((n, r) => n + r.sent, 0);
+    const frozen = chases.reduce((n, r) => n + r.frozen, 0);
+    if (chased === 0) {
+      // TWO CAUSES, AND THE LINE MUST NOT PICK ONE. The first draft asserted
+      // the firm had published no ladder, and the demo publishes one — so the
+      // command was telling a partner something demonstrably false about their
+      // own configuration on the run that proved it. Both reasons are named.
+      console.log(
+        "  nothing to chase — either no open client ask has reached a rung it has not had, " +
+          "or this firm has published no chaser ladder, which means it chases nobody.",
+      );
+    } else {
+      console.log(`  raised ${String(chased)} client reminder(s)`);
+    }
+    // THE NUMBER THAT EXPLAINS A QUIET WEEK, and the one nobody would think to
+    // print: a sweep that sent nothing because every client is frozen and one
+    // that sent nothing because it is broken look identical from the outside.
+    if (frozen > 0) {
+      console.log(
+        `  ${String(frozen)} ask(s) skipped — their client is frozen (a dispute somebody is negotiating)`,
+      );
+    }
+    console.log();
+
+    // THE PROACTIVE NUDGE (T6.7). Last, and after the calendar for the same
+    // reason the escalation ladder is: a filing generated on this very run
+    // should be able to be nudged about on the same one rather than "tomorrow".
+    const nudged = await wired.nudges.sweep();
+    for (const r of nudged.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: nudge sweep FAILED — ${r.failure ?? ""}`);
+    }
+    const told = nudged.reduce((n, r) => n + r.sent, 0);
+    if (told === 0) {
+      console.log(
+        "  nothing to nudge about — either no unfiled obligation has reached a rung it has " +
+          "not had, or this firm has published no nudge ladder, which means it tells nobody.",
+      );
+    } else {
+      console.log(`  told clients about ${String(told)} upcoming filing(s)`);
     }
     console.log();
   } finally {
