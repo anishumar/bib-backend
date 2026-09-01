@@ -65,6 +65,14 @@ import { ClientAssignmentService } from "../../src/usecase/clientassignment/serv
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import { PortalInviteService } from "../../src/usecase/portalinvite/service";
 import { PortalHomeService } from "../../src/usecase/portalhome/service";
+import { ChaserService } from "../../src/usecase/chaser/service";
+import {
+  FakeChaseCandidates,
+  FakeChaseRepo,
+  FakeChaserLadder,
+  FakeChaserTenants,
+  FakeClientFreezeRepo,
+} from "../../src/testfakes/chaser";
 import { ClientAskService } from "../../src/usecase/clientask/service";
 import {
   FakeAskRepo,
@@ -389,6 +397,20 @@ function deps(): RouterDeps {
     // T6.6's ask, both surfaces over ONE service — the wiring `setup/` uses, so
     // this sweep exercises the same object graph the server does.
     clientAsks: { service: askService() },
+    // The FREEZE surface only. The sweep has no route — it is a cron in the
+    // worker, so this sweep asks who may reach the freeze and nothing else.
+    chaser: {
+      service: new ChaserService({
+        tenants: new FakeChaserTenants([]),
+        ladders: new FakeChaserLadder(),
+        candidates: new FakeChaseCandidates(),
+        chases: new FakeChaseRepo(),
+        freezes: new FakeClientFreezeRepo(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
+    },
     portalAsks: { service: askService() },
     portalInvites: {
       service: new PortalInviteService({

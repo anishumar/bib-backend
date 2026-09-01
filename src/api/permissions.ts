@@ -132,6 +132,27 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/asks/{askId}/close"), "work:write" as const],
   [routeKey("POST", "/api/v1/asks/{askId}/withdraw"), "work:write" as const],
 
+  // ── Stopping the chaser (T4.4) ─────────────────────────────────────────
+  //
+  // READING is `party:read` — a freeze is a fact about a client, like its
+  // identifiers and its account team, and anybody who can open the client page
+  // should be able to see why nothing is being sent.
+  //
+  // SETTING one is `tenant:admin`, and that is argued rather than assumed. It is
+  // not `party:write`, which G3.2 established covers facts ABOUT a client that
+  // grant nobody anything — this one switches off a piece of the firm's own
+  // machinery, silently, for as long as nobody notices. It is not `work:write`
+  // either: that is doing the job, and this is deciding the firm will stop
+  // asking. The board's own case for it is a partner negotiating a dispute.
+  //
+  // A `chaser:pause` of its own would be the tighter answer and is not free —
+  // a permission reaches existing firms as config rows, so it costs a migration
+  // to every tenant that has not customised its roles. `proposal:approve` and
+  // `obligation:resolve` both got one when a firm ASKED; revisit the same way.
+  [routeKey("GET", "/api/v1/clients/{partyId}/freezes"), "party:read" as const],
+  [routeKey("POST", "/api/v1/clients/{partyId}/freezes"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/freezes/{freezeId}/lift"), "tenant:admin" as const],
+
   // ── AND THE CLIENT'S SIDE — THE FIRST PORTAL ROUTES THAT NEED A PERMISSION ─
   //
   // `portal:respond` is the tenth permission and the only one in this product

@@ -3498,7 +3498,7 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > **71/71** — its *"a portal session is told it may do nothing"* check is now *"told exactly
   > what it may do"*, asserting the LIST rather than a count, because "one permission" would
   > pass with the wrong one.
-- [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
+- [x] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
   > **Why it is in this phase.** It is the only thing on the board that reduces the firm's own
   > chasing hours, and it has no honest surface without the portal — a reminder that points at
   > an email thread is the thing every firm already does badly. The ladder shape is already
@@ -3511,6 +3511,71 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > a channel the firm configured (P10 transport, Phase 7 — until then it raises the ask and
   > the portal shows it), and it **stops on escalation freeze** so a client already in a
   > dispute is not being auto-chased while a partner is negotiating.
+
+  > **DONE 2026-09-01 (migration 0065).** `usecase/chaser` + `crm.client_freeze` +
+  > `delivery.client_ask_chase` + a `chaser` config kind. The sweep is a cron on the
+  > escalation ladder's own cadence; the API surface is the FREEZE only.
+  >
+  > **ESCALATION FREEZE DID NOT EXIST — not a table, not a column, not a config kind.** The
+  > acceptance line named a concept this product had never built, so half of T4.4 was
+  > building it, and its shape was a client fact rather than a guess. Shrestha, 2026-09-01:
+  > **on the CLIENT, effective-dated** (the board's own case is a dispute, which is with a
+  > client and not with one task — a per-ask snooze would make a partner silence seven asks
+  > one at a time and go silent again on the eighth); **stopping the OUTWARD ladder only** (a
+  > dispute is the worst possible moment for a firm to go blind to its own late work); and a
+  > **reason is required**, because "why is this client not being chased" is asked months
+  > later by somebody who did not set it.
+  >
+  > **THE OTHER HARD LIMIT IS MET BY THERE BEING NOTHING TO SEND THROUGH.** No mailer is
+  > wired into `ChaserService` — a logging stub would put a line in an operator's log saying a
+  > client was emailed, which is the same class of lie as a `scan()` returning clean. A chase
+  > RAISES the reminder and the client's action centre shows it. `tests/chaser/service.test.ts`
+  > asserts the dependency list STRUCTURALLY, so a transport appearing in `Deps` turns the
+  > build red and somebody has to justify it on the board first.
+  >
+  > **NOTHING IS SET BY DEFAULT**, and it is sharper here than on T4.5: an escalation nobody
+  > asked for lands on a colleague, a chase nobody asked for lands on the CLIENT. A firm that
+  > has published no `chaser` entry chases nobody, and the sweep returns before it even reads
+  > that firm's open asks. Its own config kind rather than the `escalation` kind reused — that
+  > rung carries `watch`, `notify` and `minGradeRank`, and a chase has one subject and one
+  > recipient, so reusing it would mean three fields nobody reads and a validator that could
+  > no longer refuse a rung that made no sense.
+  >
+  > **It chases OPEN asks only.** An answered ask is back with the firm, and reminding somebody
+  > about something they have already sent is the single most annoying thing a chaser can do —
+  > and exactly what a spreadsheet-driven human chaser gets wrong every week. It also skips an
+  > ask whose task the firm marked invisible: chasing about something that is not on the
+  > client's page would be the product contradicting itself.
+  >
+  > **At-least-once, evidence-grade.** `client_ask_chase_once` makes a redelivery unwritable
+  > and the ledger event is emitted only for rows actually created, so *"we reminded you four
+  > times"* is a sentence the count supports. The table is APPEND-ONLY BY GRANT for the same
+  > reason: a record the firm can edit is not evidence. The actor is the SYSTEM, honestly —
+  > nobody decided to send this one, a cron did — which is also why there is no "chase now"
+  > button.
+  >
+  > **AND BUILDING IT FOUND A CONSTRAINT THAT WAS WRONG.** `client_freeze` first carried
+  > `client_ask`'s both-or-neither pairing on `(valid_to, lifted_by)`, and the integration test
+  > refused a freeze that ENDS on a known day — *"frozen until the 30th, while we are in
+  > mediation"* — which is the shape a partner is most likely to want. The true invariant is
+  > one-directional: a LIFTER with no end date is impossible, because lifting IS setting the
+  > end date. 0065 was uncommitted and applied only locally, so it was corrected in place and
+  > the file was proven by a full down/up round trip.
+  >
+  > 13 integration tests over real Postgres, including the exclusion constraint refusing an
+  > overlap AS RANGES, the empty range (0061's shape) not blocking a re-freeze after an
+  > immediate lift, and `${asOf}::date - a.raised_at::date` returning the right number of
+  > days — arithmetic no fake exercises and the thing that cost T6.5 a 500 on its first real
+  > request. `check` **1481** · `test:integration` **487** · `demo:verify` **71**.
+  >
+  > **WHAT IS NOT BUILT, stated rather than left to be discovered:** the *T–3 daily* half of
+  > this line. A filing approaching its statutory date asks the client for nothing until the
+  > firm raises an ask about it — *"your GSTR-3B is due in 3 days"* is a NUDGE, not a request,
+  > and it is `T6.7`'s "proactive nudges" with a different subject and a different cadence.
+  > Shrestha's call, 2026-09-01. And there is no SCREEN for the ladder yet: it is reachable
+  > through the generic config API, and an `/admin/chaser-ladder` belongs with the first firm
+  > that wants to edit one — the same position `/admin/structure` took about the confidence
+  > tiers.
 - [ ] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest. *Acc: a client finds last year's challan without emailing anyone.*
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over

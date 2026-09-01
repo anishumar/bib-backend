@@ -25,6 +25,7 @@ import { WorkItemService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
+import { ChaserService } from "../usecase/chaser/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
@@ -61,6 +62,13 @@ import {
   PostgresEscalationNoticeRepository,
   PostgresEscalationSubjects,
 } from "../infrastructure/postgres/escalation-repository";
+import {
+  PostgresChaseCandidates,
+  PostgresChaseRepository,
+  PostgresChaserLadder,
+  PostgresChaserTenants,
+  PostgresClientFreezeRepository,
+} from "../infrastructure/postgres/chaser-repository";
 import type { JobQueue } from "../usecase/scheduler/ports";
 
 /** The queue the spawn sweep runs on. A name, because pg-boss keys a schedule
@@ -89,6 +97,12 @@ export const OBLIGATION_QUEUE = "delivery.obligations";
  *  twice before lunch. */
 export const ESCALATION_QUEUE = "delivery.escalation";
 
+/** The chaser (T4.4). Its own queue, on the escalation ladder's own cadence and
+ *  for the same reason: it is a daily sweep over a firm's own rows, not a
+ *  reaction to anything, and putting it on another queue would make one job's
+ *  failure silence the other. */
+export const CHASER_QUEUE = "delivery.chaser";
+
 export interface WiredWorker {
   readonly pools: Pools;
   readonly queue: JobQueue;
@@ -97,6 +111,7 @@ export interface WiredWorker {
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
+  readonly chaser: ChaserService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -292,6 +307,19 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // `memberships` a third time in this file, and that is the point of the port:
   // one notion of who works here, so who may be ESCALATED to cannot disagree
   // with who may CHECK work or who may be given it.
+  // See the note in `setup/server.ts`: no mailer, deliberately. Until P10 there
+  // is no channel, so a chase raises the reminder and the portal shows it.
+  const chaser = new ChaserService({
+    tenants: new PostgresChaserTenants(pools.app),
+    ladders: new PostgresChaserLadder(pools.app),
+    candidates: new PostgresChaseCandidates(pools.app),
+    chases: new PostgresChaseRepository(pools.app),
+    freezes: new PostgresClientFreezeRepository(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const escalations = new EscalationService({
     ladders: new PostgresEscalationLadder(pools.app),
     notices: new PostgresEscalationNoticeRepository(pools.app),
@@ -313,6 +341,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     orchestrator,
     obligations,
     escalations,
+    chaser,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -433,6 +462,35 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(ESCALATION_QUEUE, cfg.worker.escalationCron);
+
+      // THE CHASER, on the escalation ladder's own cron. Both are daily sweeps
+      // over a firm's own rows and neither reacts to anything, so a second knob
+      // would be a setting a firm has to think about twice to get one answer.
+      await queue.register(CHASER_QUEUE, async () => {
+        const reports = await chaser.sweep();
+        for (const r of reports) {
+          if (r.failure !== undefined) {
+            // One firm's bad data never stops the others — T3.1's lesson again.
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "chaser sweep failed");
+            continue;
+          }
+          if (r.sent === 0 && r.alreadySent === 0 && r.frozen === 0) continue;
+          // `frozen` is the number nobody would think to log and the one that
+          // explains a quiet week: a sweep that sent nothing because every
+          // client is frozen and one that sent nothing because it is broken
+          // look identical from the outside.
+          log.info(
+            {
+              tenantId: r.tenantId,
+              sent: r.sent,
+              alreadySent: r.alreadySent,
+              frozen: r.frozen,
+            },
+            "chaser sweep",
+          );
+        }
+      });
+      await queue.schedule(CHASER_QUEUE, cfg.worker.escalationCron);
     },
   };
 }

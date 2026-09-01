@@ -2058,6 +2058,85 @@ scanner arrives it arrives with a consumer.
   `linksOf` gained its `work_item` case in the same pass — 0063's comment claimed both halves of
   *"a kind nothing can resolve is a link nobody can follow"* were present, and only one was.
 
+## The chaser — the same ladder aimed OUTWARD (T4.4)
+
+`usecase/chaser` + migration 0065. T6.6 built the row that says WE ARE WAITING ON YOU and
+nothing sent a second one; at a real firm that gap is the job, and it is the only task on the
+board that reduces the firm's own chasing hours.
+
+**IT IS T4.5's MECHANISM AND DELIBERATELY NOT T4.5's TABLE.** Rungs keyed by name, a threshold
+in days, the threshold copied onto the row when it fires, at-least-once, nothing set by
+default. But `escalation_notice` records that a COLLEAGUE was told, and this records that a
+CLIENT was reminded: different reader, different target, different stop. Sharing the table
+would put "and not the outward ones" in every escalation query forever.
+
+**ITS OWN CONFIG KIND, for the same reason.** An `EscalationRung` carries `watch`, `notify` and
+`minGradeRank`; a chase has one subject (an open `client_ask`) and one recipient (the client
+that ask names). Reusing the kind would mean three fields every chaser rung sets to a value
+nobody reads, and a validator that could no longer refuse a rung that made no sense.
+
+**IT SENDS NOTHING, AND THAT IS THE BOARD'S HARD LIMIT MET STRUCTURALLY.** Transport is P10
+(Phase 7), so a chase RAISES a reminder and the client's own action centre shows it. No mailer
+is injected: an honest logging stub would put a line in an operator's log saying a client was
+emailed, which is the same class of lie as a `scan()` returning clean. `ChaserService`'s
+dependency list is asserted in a test, so a transport appearing in it goes red first.
+
+**IT CHASES OPEN ASKS ONLY.** An answered ask is back with the firm, and reminding somebody
+about something they have already sent is the most annoying thing a chaser can do — and what a
+spreadsheet-driven human chaser gets wrong every week. It also skips an ask whose task the firm
+marked invisible to the client.
+
+**AT-LEAST-ONCE, AND EVIDENCE-GRADE.** `client_ask_chase_once` makes a redelivery unwritable,
+the ledger event is emitted only for rows actually created, and the table is APPEND-ONLY BY
+GRANT: *"we reminded you four times"* is what a firm says when a filing goes late, and a record
+it can edit is not evidence. The actor is the SYSTEM, honestly — which is also why there is no
+"chase now" route: a person pressing it would make that actor a lie on some rows and not
+others.
+
+### Escalation freeze — the acceptance line named a thing that did not exist
+
+*"stops on escalation freeze"*, and this product had no freeze: not a table, not a column, not
+a config kind. So half of T4.4 was building one, and its shape was a CLIENT FACT rather than a
+guess (Shrestha, 2026-09-01):
+
+- **On the CLIENT, effective-dated.** The board's own case is a dispute, and a dispute is with
+  a client rather than with one task. A per-ask snooze would make a partner silence seven asks
+  one at a time and go silent again the moment an eighth was raised.
+- **It stops the OUTWARD ladder only.** T4.5 goes on telling the firm its own work is late,
+  because a dispute is the worst possible moment to go blind to that.
+- **A reason is required.** "Why is this client not being chased" is asked months later by
+  somebody who did not set it, and a freeze with no reason cannot be told apart from one
+  nobody remembered to lift. It is on the ROW and never in the ledger — a partner's words about
+  a client, in a log that cannot be erased (§3.4, the split `obligation.resolved` makes).
+
+Half-open `[valid_from, valid_to)`, like every other effective-dated row here. Lifting defaults
+to TODAY — 0061's decision applied a second time, so pressing resume means the next sweep
+chases rather than midnight. Setting a freeze in force on no day is still refused by the
+service, while lifting one produces exactly that shape twenty seconds later: the database
+allows the shape, the service allows only the act.
+
+**No portal policy on `crm.client_freeze`, deliberately.** Gate 2 contains it — no portal route
+reads that table — and whether a client may see they have been frozen is a question for a firm,
+not a guess. A portal route whose subject is that table needs its own line in a migration
+first.
+
+### What building it found
+
+**A CONSTRAINT THAT WAS WRONG, and only the integration test could say so.**
+`crm.client_freeze` first carried `client_ask`'s both-or-neither pairing on `(valid_to,
+lifted_by)` — which refuses a freeze that ENDS on a known day, *"frozen until the 30th, while
+we are in mediation"*, the shape a partner is most likely to want. The true invariant runs one
+way only: a LIFTER with no end date is impossible, because lifting IS setting the end date.
+0065 was uncommitted and applied only locally, so it was corrected in place and proven by a
+full down/up round trip rather than papered over with an 0066.
+
+**AND THE T–3 HALF OF THE BOARD'S LINE IS NOT BUILT, on purpose.** A filing approaching its
+statutory date asks the client for nothing until the firm raises an ask about it: *"your GSTR-3B
+is due in 3 days"* is a NUDGE, not a request, and it belongs with T6.7's proactive nudges, which
+have a different subject and a different cadence. There is no screen for the ladder either — it
+is reachable through the generic config API, and an editor belongs with the first firm that
+wants to change one.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
@@ -2066,9 +2145,8 @@ scanner arrives it arrives with a consumer.
 T3.3's missed-deadline state and T3.7's dashboards are built. The escalation ladder is BUILT
 (T4.5) and did not need G3.4 — its manager hop reads `membership.reports_to_user_id`, and G3.4
 answers a different question. **The CLIENT PORTAL is built through its ACTION CENTRE (T6.5,
-T6.6), and gate 4 is closed** — see the two portal sections above. **Next on `(B)`'s lane is
-T4.4**, the chaser: T4.5's ladder shape aimed OUTWARD, never outside a channel the firm
-configured, and stopping on escalation freeze. Phase 6 runs BEFORE Phase 4's agents.
+T6.6), and gate 4 is closed** — see the two portal sections above. **The CHASER is built too (T4.4)** — see the section
+above. **Next on `(B)`'s lane is T6.7**, the self-serve library. Phase 6 runs BEFORE Phase 4's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.
 
 **Assignment is territory first, rotation second (T2.1b).** `FirstMatchAssignment` in `setup/`

@@ -59,7 +59,8 @@ export type ConfigKind =
   | "confidence_tier"
   | "verification_policy"
   | "compliance_policy"
-  | "escalation";
+  | "escalation"
+  | "chaser";
 
 export const CONFIG_KINDS: readonly ConfigKind[] = [
   "service",
@@ -72,6 +73,7 @@ export const CONFIG_KINDS: readonly ConfigKind[] = [
   "verification_policy",
   "compliance_policy",
   "escalation",
+  "chaser",
 ];
 
 export function isConfigKind(v: string): v is ConfigKind {
@@ -789,6 +791,8 @@ export function validateBody(kind: ConfigKind, body: Record<string, unknown>): s
       return validateCompliancePolicyBody(body);
     case "escalation":
       return validateEscalationBody(body);
+    case "chaser":
+      return validateChaserBody(body);
   }
 }
 
@@ -1736,6 +1740,150 @@ export interface EscalationRung {
    *  rung that does would escalate to everybody. */
   readonly minGradeRank: number | null;
   readonly label: string;
+}
+
+/**
+ * A rung of the OUTWARD ladder (T4.4) — when the firm sends a client a reminder
+ * about something it asked for and has not had back.
+ *
+ * ── ITS OWN KIND, AND NOT THE `escalation` KIND WITH FIELDS UNUSED ───────
+ *
+ * `EscalationRung` carries `watch`, `notify` and `minGradeRank`, and a chase has
+ * none of the three: there is ONE thing chased — an open `client_ask` — and it
+ * always goes to the client that ask names. Reusing that shape would mean three
+ * fields every chaser rung sets to a value nobody reads, and a validator that
+ * could no longer refuse a rung that made no sense.
+ *
+ * ── AND IT HAS NO TARGET AND NO CHANNEL ─────────────────────────────────
+ *
+ * No channel is on the rung because there is nowhere to send one yet: P10
+ * transport is Phase 7, so a chase RAISES the reminder and the client's own
+ * action centre shows it. A `channel: "email"` written now would be a field
+ * nothing reads and a promise the product cannot keep — the trap this codebase
+ * calls a control that looks live and is inert.
+ */
+export interface ChaserRung {
+  /** The rung's own key — `first`, `second`, `final`. Recorded on every chase,
+   *  so a row stays readable after the ladder moves under it. Never an index:
+   *  an index shifts when a firm inserts a rung and every chase already sent is
+   *  silently renamed. `DunningStep.key` and `EscalationRung.key` before it. */
+  readonly key: string;
+  /** Days since the ask was RAISED. 0 means the day it was raised — allowed,
+   *  and a firm that writes it means "remind them the same day", which is a
+   *  cadence somebody may genuinely want on a same-day filing. */
+  readonly afterDays: number;
+  /** What the firm calls this rung. Shown to nobody outside the firm yet; it is
+   *  what a colleague reads on the ask's history. */
+  readonly label: string;
+}
+
+export interface ChaserBody {
+  readonly rungs: readonly ChaserRung[];
+}
+
+const CHASER_FIELDS = ["rungs"];
+const CHASER_RUNG_FIELDS = ["key", "afterDays", "label"];
+
+/**
+ * ASCENDING, STRICTLY, across the whole array — and this is where a chaser
+ * differs from an escalation and matches DUNNING.
+ *
+ * `validateEscalationBody` allows each `watch` its own order because its three
+ * watches are three independent ladders sharing an entry. A chaser has ONE
+ * subject, so its rungs are one sequence and a firm that wrote D+7 before D+3
+ * has made a mistake about its own chasing. Refused rather than sorted: quietly
+ * reordering hides the mistake, and this ladder's output lands on a client.
+ */
+function validateChaserBody(body: Record<string, unknown>): string | null {
+  const unknown = unknownFields(body, CHASER_FIELDS);
+  if (unknown) return unknown;
+
+  const rungs = body["rungs"];
+  if (!Array.isArray(rungs) || rungs.length === 0) {
+    return (
+      "rungs must be a non-empty array — a chaser ladder with no rungs reminds nobody, and " +
+      "that is what publishing NO ladder already means. An empty one is a firm believing it " +
+      "has turned chasing on."
+    );
+  }
+
+  const keys = new Set<string>();
+  let previous = -1;
+  for (const [index, raw] of rungs.entries()) {
+    if (typeof raw !== "object" || raw === null) return `rungs[${String(index)}] must be an object`;
+    const rung = raw as Record<string, unknown>;
+
+    const unknownRung = unknownFields(rung, CHASER_RUNG_FIELDS);
+    if (unknownRung) return `rungs[${String(index)}]: ${unknownRung}`;
+
+    const key = rung["key"];
+    if (typeof key !== "string" || key.trim() === "") {
+      return `rungs[${String(index)}].key must be a non-empty string`;
+    }
+    // A duplicate key collides on `client_ask_chase_once` and the second rung
+    // would silently never fire — a ladder that looks like it has three rungs
+    // and climbs two.
+    if (keys.has(key)) return `rungs[${String(index)}].key ${JSON.stringify(key)} appears twice`;
+    keys.add(key);
+
+    const afterDays = rung["afterDays"];
+    if (typeof afterDays !== "number" || !Number.isInteger(afterDays) || afterDays < 0) {
+      return `rungs[${String(index)}].afterDays must be a non-negative whole number of days`;
+    }
+    if (afterDays <= previous) {
+      return (
+        `rungs[${String(index)}].afterDays must be greater than the rung before it ` +
+        `(${String(previous)}) — a chaser has one subject, so its rungs are one sequence`
+      );
+    }
+    previous = afterDays;
+
+    const label = rung["label"];
+    if (typeof label !== "string" || label.trim() === "") {
+      return `rungs[${String(index)}].label must be a non-empty string`;
+    }
+  }
+  return null;
+}
+
+/**
+ * A stored chaser ladder, read back — the ONE reader for `kind='chaser'`.
+ *
+ * A malformed rung is DROPPED rather than defaulted, the same fail-closed
+ * reading `readEscalationBody` takes: a rung with no usable `afterDays` read as
+ * 0 would remind a client the moment the firm asked, which is the loudest
+ * possible misreading of a cadence somebody wrote down carefully.
+ */
+export function readChaserBody(body: Record<string, unknown>): ChaserBody {
+  const raw = body["rungs"];
+  if (!Array.isArray(raw)) return { rungs: [] };
+  const rungs: ChaserRung[] = [];
+  for (const item of raw) {
+    if (typeof item !== "object" || item === null) continue;
+    const rung = item as Record<string, unknown>;
+    const key = rung["key"];
+    const afterDays = rung["afterDays"];
+    const label = rung["label"];
+    if (
+      typeof key !== "string" ||
+      typeof afterDays !== "number" ||
+      !Number.isInteger(afterDays) ||
+      afterDays < 0
+    ) {
+      continue;
+    }
+    rungs.push({
+      key,
+      afterDays,
+      label: typeof label === "string" && label.trim() !== "" ? label : key,
+    });
+  }
+  // Sorted on the way OUT, never on the way in. The validator refuses an
+  // out-of-order ladder so a firm learns about its own mistake; this is a
+  // stored body that may predate a rule or have been hand-edited, and a sweep
+  // taking rungs out of order would chase in the wrong sequence rather than
+  // refusing to chase at all.
+  return { rungs: [...rungs].sort((a, b) => a.afterDays - b.afterDays) };
 }
 
 const ESCALATION_FIELDS = ["rungs"];

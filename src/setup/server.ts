@@ -33,6 +33,13 @@ import { PostgresPortalAccessRepository } from "../infrastructure/postgres/porta
 import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-home-repository";
 import { PostgresClientAskRepository } from "../infrastructure/postgres/client-ask-repository";
 import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
+import {
+  PostgresChaseCandidates,
+  PostgresChaseRepository,
+  PostgresChaserLadder,
+  PostgresChaserTenants,
+  PostgresClientFreezeRepository,
+} from "../infrastructure/postgres/chaser-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
@@ -106,6 +113,7 @@ import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { PortalHomeService } from "../usecase/portalhome/service";
 import { ClientAskService } from "../usecase/clientask/service";
+import { ChaserService } from "../usecase/chaser/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -720,6 +728,29 @@ export function wire(cfg: Config, log: Logger): Wired {
     maxUploadBytes: cfg.storage.maxUploadBytes,
   });
 
+  // THE CHASER (T4.4) — the ask ladder aimed OUTWARD, and the freeze that stops
+  // it. The API surface here is the FREEZE only: the sweep is a cron in the
+  // worker (`setup/worker.ts`), because a "chase now" button would be a person
+  // telling the product to remind a client and would make the ledger's SYSTEM
+  // actor a lie on some rows and not others.
+  //
+  // No mailer is wired in on purpose. Transport is P10 (Phase 7), and an honest
+  // logging stub here would put a line in an operator's log saying a client was
+  // emailed — the same class of lie as a `scan()` that returns clean. Until a
+  // channel exists, a chase raises the reminder and the client's own action
+  // centre shows it, which is the board's hard limit met by there being nothing
+  // to send through rather than by a check somebody could delete.
+  const chaser = new ChaserService({
+    tenants: new PostgresChaserTenants(pools.app),
+    ladders: new PostgresChaserLadder(pools.app),
+    candidates: new PostgresChaseCandidates(pools.app),
+    chases: new PostgresChaseRepository(pools.app),
+    freezes: new PostgresClientFreezeRepository(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   // The pipeline sits ON TOP of the party module rather than beside it: a lead
   // is an opportunity about a party, so capture creates prospects through
   // PartyService — which owns display-name derivation, identifier normalisation
@@ -823,6 +854,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
         clientAsks: { service: clientAsks },
+        chaser: { service: chaser },
         portalAsks: { service: clientAsks },
         portalInvites: {
           service: portalAccessForInvite(),
