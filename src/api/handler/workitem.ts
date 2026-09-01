@@ -8,6 +8,7 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type {
+  WorkItemCheckOnDesk,
   WorkItemService,
   WorkVocabularyService,
 } from "../../usecase/workitem/service";
@@ -246,8 +247,34 @@ const VocabularyResponse = z
   })
   .openapi("WorkVocabularyResponse");
 
+/**
+ * A queue row: the review, plus the VIEWER's own verdict on it.
+ *
+ * The verdict rides on the row rather than filtering the list, because a queue
+ * narrowed to what you may act on hides that six tasks have waited a week
+ * because nobody senior enough has looked. `StepCheck` carries the same field
+ * for the same reason — this is the task half of the same desk.
+ *
+ * A separate schema rather than a field on `WorkItemReview`, because that one
+ * is also an item's own history, where "may the viewer check this" is a
+ * question about a decision already made.
+ */
+const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
+  viewer: z
+    .object({
+      eligible: z.boolean(),
+      reason: z.string().nullable().openapi({
+        description:
+          "What to SAY when they may not — the SENTENCE, not a code, and the same prose the " +
+          "checkers endpoint returns, so one refusal is never phrased two ways. Null when " +
+          "they may check it.",
+      }),
+    })
+    .openapi("WorkItemCheckViewer"),
+}).openapi("WorkItemCheckRow");
+
 const ChecksResponse = z
-  .object({ checks: z.array(WorkItemReviewSchema) })
+  .object({ checks: z.array(WorkItemCheckRowSchema) })
   .openapi("WorkItemChecksResponse");
 
 const CheckersResponse = z
@@ -500,6 +527,10 @@ function toReviewWire(c: WorkItemCheck): z.infer<typeof WorkItemReviewSchema> {
     decidedBy: c.approval.decidedBy,
     decidedAt: c.approval.decidedAt,
   };
+}
+
+function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRowSchema> {
+  return { ...toReviewWire(c), viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason } };
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────
@@ -810,7 +841,11 @@ const pendingChecksRoute = createRoute({
   description:
     "The WHOLE firm's, oldest first — not filtered to what the viewer can act on. Under a " +
     "rank threshold there is no 'mine', and a filtered list hides that six tasks have waited " +
-    "a week because nobody senior enough has looked.",
+    "a week because nobody senior enough has looked. Every row carries the VIEWER's own " +
+    "verdict instead, with the sentence to say when they may not check it. " +
+    "Ordered by when the work was submitted and by nothing else: the firm has not given its " +
+    "internal turnaround times, and a deadline this product invented is a priority the firm " +
+    "never set.",
   responses: {
     200: { description: "The queue", content: { "application/json": { schema: ChecksResponse } } },
     401: errorResponse("No authenticated session"),
@@ -1167,8 +1202,8 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
   app.openapi(pendingChecksRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const checks = await deps.service.pendingChecks(s.tenantId);
-    return c.json({ checks: checks.map(toReviewWire) }, 200);
+    const checks = await deps.service.pendingChecks(s.tenantId, s.userId);
+    return c.json({ checks: checks.map(toCheckRowWire) }, 200);
   });
 
   app.openapi(vocabularyRoute, async (c) => {

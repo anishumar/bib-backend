@@ -616,6 +616,24 @@ export interface CheckerOption {
   readonly reason: string | null;
 }
 
+/**
+ * One row of the firm's check queue, with the viewer's own verdict on it.
+ *
+ * The verdict is on the ROW rather than deciding whether the row is there:
+ * a queue that hides what you cannot take also hides that nobody senior enough
+ * has looked at it. `/work`'s step queue carries the same field for the same
+ * reason — this is the task half of the same desk.
+ */
+export interface WorkItemCheckOnDesk extends WorkItemCheck {
+  readonly viewer: {
+    readonly eligible: boolean;
+    /** The SENTENCE, not the code — the same prose `eligibleCheckers` returns,
+     *  so the queue and the "who may check this?" list never phrase one
+     *  refusal two ways. Null when they may check it. */
+    readonly reason: string | null;
+  };
+}
+
 /** One work item and everything its own screen shows. */
 export interface WorkItemDetail {
   readonly record: WorkItemRecord;
@@ -661,9 +679,62 @@ export class WorkItemService {
     };
   }
 
-  /** Everything waiting to be checked at this firm, oldest first. */
-  async pendingChecks(tenantId: string): Promise<readonly WorkItemCheck[]> {
-    return this.deps.approvals.listPending(tenantId);
+  /**
+   * Everything waiting to be checked at this firm, oldest first — with the
+   * VIEWER's own verdict on every row.
+   *
+   * THE WHOLE FIRM'S, and the verdict rides on the row rather than filtering
+   * the list. Under a rank threshold there is no "mine" — any Manager may take
+   * any of it — and a queue narrowed to what you personally may act on hides
+   * the one fact it exists to show: that six tasks have waited a week because
+   * nobody senior enough has looked.
+   *
+   * The verdict is here rather than left to the screen for the reason every
+   * other read model in this file is: a queue of thirty rows asking
+   * `/checkers` thirty times is the per-row join this codebase has been caught
+   * by five times, and it would also ask a question the screen does not need —
+   * `/checkers` answers it for the whole roster, and a row needs one person.
+   *
+   * The REASON is the sentence, not the code, because that is what this
+   * module's `/checkers` already returns and the two must not say the same
+   * refusal in two different sets of words.
+   */
+  async pendingChecks(
+    tenantId: string,
+    viewer: string | null,
+  ): Promise<readonly WorkItemCheckOnDesk[]> {
+    const pending = await this.deps.approvals.listPending(tenantId);
+    if (pending.length === 0) return [];
+
+    // The roster and every role's permissions resolve ONCE for the whole
+    // queue. The policy still resolves per row, because each row pins its own
+    // version and two rows can honestly have been opened under different ones
+    // — which is exactly what a firm that revised its rule this week produces.
+    const staff = await this.deps.reviewers.activeStaff(tenantId);
+    const me =
+      viewer === null
+        ? undefined
+        : (await this.candidates(tenantId, staff)).find((c) => c.userId === viewer);
+
+    const out: WorkItemCheckOnDesk[] = [];
+    for (const row of pending) {
+      const policy = await this.pinnedPolicyOf(tenantId, row.approval);
+      // Not on the active roster at all. Their session resolved, so they hold
+      // a membership; this is the deactivated-between-requests case, and the
+      // honest answer is the same one `decideReview` gives them.
+      const verdict =
+        me === undefined
+          ? { eligible: false, reason: "NO_WORK_PERMISSION" as const }
+          : isEligible(me, this.makerOf(row.approval, staff), policy);
+      out.push({
+        ...row,
+        viewer: {
+          eligible: verdict.eligible,
+          reason: verdict.reason === null ? null : INELIGIBILITY_MESSAGES[verdict.reason],
+        },
+      });
+    }
+    return out;
   }
 
   // ── creating ─────────────────────────────────────────────────────────────

@@ -774,6 +774,42 @@ describe("review — and the rule no firm may configure away", () => {
     expect(byId.get("00000000-0000-4000-8000-0000000000d4")?.reason).toMatch(/grade above yours/i);
   });
 
+  it("puts the WHOLE firm's queue on every desk, with the viewer's own verdict on each row", async () => {
+    // Not filtered to what the viewer may take. Under a rank threshold there is
+    // no "mine" — any Manager may take any of it — and a list narrowed to what
+    // one person can act on hides the queue's most useful fact: that work has
+    // waited a week because nobody senior enough has looked. So the verdict
+    // rides on the ROW, and the refusal is the sentence a screen prints
+    // verbatim rather than a code it has to translate a second time.
+    const { h, item } = await readyForReview();
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const asPriya = await h.service.pendingChecks(FIRM, PRIYA);
+    expect(asPriya).toHaveLength(1);
+    expect(asPriya[0]?.viewer.eligible).toBe(false);
+    expect(asPriya[0]?.viewer.reason).toMatch(/did this work/i);
+
+    const asAnand = await h.service.pendingChecks(FIRM, ANAND);
+    expect(asAnand).toHaveLength(1);
+    expect(asAnand[0]?.viewer).toEqual({ eligible: true, reason: null });
+
+    // Ravi is a Director and may not, because checking somebody's work writes
+    // to the record of who did it. He still SEES the row — that is the point.
+    const asRavi = await h.service.pendingChecks(FIRM, RAVI);
+    expect(asRavi).toHaveLength(1);
+    expect(asRavi[0]?.viewer.reason).toMatch(/permission/i);
+  });
+
+  it("empties the queue once the work has been checked", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+    expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
+  });
+
   it("refuses a policy key the firm has not published, rather than falling through", async () => {
     // The caller asked for a particular bar; quietly opening the check without
     // it would be this product lowering it.
