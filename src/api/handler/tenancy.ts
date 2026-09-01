@@ -88,8 +88,28 @@ const MembershipSchema = z
   })
   .openapi("Membership");
 
+/**
+ * A membership as the ORG SWITCHER needs it — the row, plus what the firm on
+ * the other end of `tenantId` is actually called.
+ *
+ * Its own schema rather than a `tenantName` added to `MembershipSchema`, and
+ * the reason is which question each read answers. Every other route returning a
+ * membership has already established the firm: an administrator changing
+ * somebody's role is inside one firm and reading its name back off each row is
+ * noise. THIS read is the only one that crosses firms — it is the list a person
+ * who works at three of them picks from — and there the name is the entire
+ * point, because "partner · b35c4196" is not a choice anybody can make.
+ *
+ * Nullable, because a name is being LOOKED UP rather than joined: a membership
+ * whose tenant row has gone is a broken state, and saying so with a null is
+ * better than refusing the whole switcher over one bad row.
+ */
+const MyMembershipSchema = MembershipSchema.extend({
+  tenantName: z.string().nullable(),
+}).openapi("MyMembership");
+
 const MembershipsResponse = z
-  .object({ memberships: z.array(MembershipSchema) })
+  .object({ memberships: z.array(MyMembershipSchema) })
   .openapi("MembershipsResponse");
 
 /** One row of the roster: the membership plus who it belongs to, so a screen
@@ -142,7 +162,25 @@ const CreateTenantRequest = z
   .openapi("CreateTenantRequest");
 
 const RegisterUserRequest = z
-  .object({ email: z.string().email() })
+  .object({
+    email: z.string().email(),
+    /**
+     * What a colleague calls them.
+     *
+     * ADDED BECAUSE ITS ABSENCE WAS UNRECOVERABLE. `POST /api/v1/tenancy/members`
+     * has taken a display name since firm administration existed, so everybody a
+     * firm invites gets one — but the FIRST login at a firm is created through
+     * this route, before anybody exists to do the inviting, and there is no
+     * route anywhere that names an account afterwards. So every firm's founding
+     * partner rendered as `siddharth@10xglobal.in` on the roster, on the work
+     * board, in the escalation queue and on every audit row, permanently.
+     *
+     * Optional, and applied only when the account is NEW — `ensureUser` is
+     * idempotent by email (ADR-02) and a second provisioning call must not
+     * rename somebody.
+     */
+    displayName: z.string().min(1).optional(),
+  })
   .openapi("RegisterUserRequest");
 
 // The administration DTOs. `audience` and `role` stay free strings on the wire
@@ -510,7 +548,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
 
   app.openapi(registerUserRoute, async (c) => {
     const input = c.req.valid("json");
-    const user = await deps.service.ensureUser(input.email);
+    const user = await deps.service.ensureUser(input.email, input.displayName);
     return c.json(user, 201);
   });
 
@@ -618,7 +656,17 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       );
     }
     const memberships = await deps.service.resolveAccess(principal.userId);
-    return c.json({ memberships: [...memberships] }, 200);
+    // ONE lookup for the whole list rather than one per row.
+    const names = await deps.service.tenantNames(memberships.map((m) => m.tenantId));
+    return c.json(
+      {
+        memberships: memberships.map((m) => ({
+          ...m,
+          tenantName: names.get(m.tenantId) ?? null,
+        })),
+      },
+      200,
+    );
   });
 }
 

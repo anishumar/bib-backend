@@ -16,6 +16,7 @@ import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 import { SESSION_TTL_DAYS } from "../../domain/identity/model";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
+import type { TenancyService } from "../../usecase/tenancy/service";
 import { tokenFrom } from "../principal";
 
 export interface AuthDeps {
@@ -23,6 +24,16 @@ export interface AuthDeps {
   /** So the caller can be told what it may DO, not only who it is. A screen
    *  that cannot ask has to offer everything and let the API refuse. */
   readonly authz: AuthzService;
+  /**
+   * So the caller can be told what its firm is CALLED.
+   *
+   * The principal carries a tenant uuid, which names the firm to the database
+   * and to nobody else: every screen that showed whose session this is had to
+   * print `b35c4196-b81c-…` at a person who has never seen a uuid. One lookup
+   * here turns that into "Kaveri & Co" everywhere at once, because every screen
+   * reads its identity from this one response.
+   */
+  readonly tenancy: TenancyService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
 }
@@ -44,8 +55,26 @@ export interface AuthDeps {
 const PrincipalSchema = z
   .object({
     userId: z.string().uuid(),
+    /**
+     * What a colleague calls the person signed in, and the address that
+     * identifies them when nobody has said.
+     *
+     * BOTH, because `display_name` is nullable and genuinely empty at real
+     * firms. Without them the shell had only `role` to put under the avatar, so
+     * every sidebar in the product read "partner · Signed in" — the product
+     * telling somebody what they ARE rather than who they are, and identical
+     * for every partner at the firm.
+     */
+    displayName: z.string().nullable(),
+    email: z.string().nullable(),
     sessionId: z.string().uuid(),
     tenantId: z.string().uuid().nullable(),
+    /** What that firm is CALLED. Null when no firm is selected, and null again
+     *  in the state that cannot normally happen — a session pointed at a tenant
+     *  row that is gone. A screen prints the id in that case rather than an
+     *  empty space, because a blank name is indistinguishable from a firm
+     *  called nothing. */
+    tenantName: z.string().nullable(),
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]).nullable(),
     /** Null until an org is chosen — a session can belong to several firms. */
     role: z.string().nullable(),
@@ -61,6 +90,10 @@ const MembershipSummarySchema = z
   .object({
     id: z.string().uuid(),
     tenantId: z.string().uuid(),
+    /** The firm's own name. This list is a CHOICE offered to somebody who
+     *  belongs to more than one firm, and "partner · b35c4196" is not a choice
+     *  anybody can make. */
+    tenantName: z.string().nullable(),
     audience: z.enum(["STAFF", "CLIENT_PORTAL"]),
     role: z.string(),
   })
@@ -224,25 +257,46 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
    */
   const principalBody = async (
     principal: Principal,
-  ): Promise<z.infer<typeof PrincipalSchema>> => ({
-    userId: principal.userId,
-    sessionId: principal.sessionId,
-    tenantId: principal.tenantId,
-    audience: principal.audience,
-    role: principal.role,
-    commercialVisibility: principal.commercialVisibility,
-    permissions: [...(await deps.authz.permissionsOf(principal))],
-  });
+  ): Promise<z.infer<typeof PrincipalSchema>> => {
+    // Only when there IS a firm. A session that has not chosen one has nothing
+    // to look up, and asking anyway would be a query per call on every screen
+    // of the one flow where the answer is known to be null.
+    const [names, account] = await Promise.all([
+      principal.tenantId === null
+        ? Promise.resolve(null)
+        : deps.tenancy.tenantNames([principal.tenantId]),
+      deps.tenancy.account(principal.userId),
+    ]);
+    return {
+      userId: principal.userId,
+      displayName: account?.displayName ?? null,
+      email: account?.email ?? null,
+      sessionId: principal.sessionId,
+      tenantId: principal.tenantId,
+      tenantName:
+        principal.tenantId === null ? null : (names?.get(principal.tenantId) ?? null),
+      audience: principal.audience,
+      role: principal.role,
+      commercialVisibility: principal.commercialVisibility,
+      permissions: [...(await deps.authz.permissionsOf(principal))],
+    };
+  };
 
-  const signInBody = async (result: SignInResult): Promise<z.infer<typeof SignInSchema>> => ({
-    principal: await principalBody(result.principal),
-    memberships: result.memberships.map((m) => ({
-      id: m.id,
-      tenantId: m.tenantId,
-      audience: m.audience,
-      role: m.role,
-    })),
-  });
+  const signInBody = async (result: SignInResult): Promise<z.infer<typeof SignInSchema>> => {
+    // ONE lookup for the whole list, not one per row: this is the response that
+    // fans out to three firms for somebody who works at three.
+    const names = await deps.tenancy.tenantNames(result.memberships.map((m) => m.tenantId));
+    return {
+      principal: await principalBody(result.principal),
+      memberships: result.memberships.map((m) => ({
+        id: m.id,
+        tenantId: m.tenantId,
+        tenantName: names.get(m.tenantId) ?? null,
+        audience: m.audience,
+        role: m.role,
+      })),
+    };
+  };
 
   app.openapi(loginRoute, async (c) => {
     const { email, password } = c.req.valid("json");

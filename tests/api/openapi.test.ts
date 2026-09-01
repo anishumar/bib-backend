@@ -359,6 +359,8 @@ function deps(): RouterDeps {
     auth: {
       service: identityService(),
       authz: new AuthzService({ permissions }),
+      // /auth/me names the caller's FIRM, not only its uuid.
+      tenancy: new TenancyService(makeFakes()),
       cookieName: "bib_session",
       cookieSecure: false,
     },

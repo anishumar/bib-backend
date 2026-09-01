@@ -246,6 +246,37 @@ describe("resolveAccess (org-switcher)", () => {
     expect(access).toHaveLength(2);
     expect(access.map((m) => m.tenantId).sort()).toEqual([a.id, b.id].sort());
   });
+
+  // A switcher offering "partner · b35c4196" against "manager · 7f0a21c4" is not
+  // a choice anybody can make, and that is exactly the screen this feeds. The
+  // uuid names the firm to the database and to nobody else.
+  it("resolves those tenants to the names a person would recognise", async () => {
+    const { service } = svc();
+    const a = await service.createTenant({ name: "Kaveri & Co", slug: "kaveri", reportingCurrency: "INR" });
+    const b = await service.createTenant({ name: "Lakeview Advisors", slug: "lakeview", reportingCurrency: "INR" });
+
+    const names = await service.tenantNames([a.id, b.id]);
+    expect(names.get(a.id)).toBe("Kaveri & Co");
+    expect(names.get(b.id)).toBe("Lakeview Advisors");
+  });
+
+  // ABSENT, never blank. A firm whose row has gone is a broken state, and the
+  // caller renders that as the id it still holds — a bar that silently drops
+  // the firm is worse than one showing a uuid.
+  it("leaves an unknown id out rather than inventing a name for it", async () => {
+    const { service } = svc();
+    const names = await service.tenantNames(["1e2d5c94-4c1a-4d5a-9d5f-2b7c0a1e9f00"]);
+    expect(names.size).toBe(0);
+  });
+
+  it("asks once for an id repeated across memberships", async () => {
+    const { service } = svc();
+    const a = await service.createTenant({ name: "Kaveri & Co", slug: "kaveri", reportingCurrency: "INR" });
+
+    const names = await service.tenantNames([a.id, a.id, a.id]);
+    expect(names.size).toBe(1);
+    expect(names.get(a.id)).toBe("Kaveri & Co");
+  });
 });
 
 describe("the audit trail", () => {

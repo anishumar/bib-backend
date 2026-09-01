@@ -712,6 +712,9 @@ export function wire(cfg: Config, log: Logger): Wired {
         auth: {
           service: identity,
           authz,
+          // So /auth/me can say what the firm is CALLED, not only which uuid it
+          // is. Every screen reads its identity from that one response.
+          tenancy,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
         },

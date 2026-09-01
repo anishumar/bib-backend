@@ -373,6 +373,8 @@ function deps(): RouterDeps {
         attempts: new InMemoryRateLimiter(systemClock),
         magicLinkBaseUrl: "http://localhost:3000",
       }),
+      // /auth/me names the caller's FIRM, not only its uuid.
+      tenancy: new TenancyService(fakes),
       cookieName: "bib_session",
       cookieSecure: false,
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),

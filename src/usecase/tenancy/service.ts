@@ -356,6 +356,50 @@ export class TenancyService {
     return activeMemberships(all);
   }
 
+  /**
+   * The account behind a user id — what a colleague calls them, and the address
+   * that identifies them when nobody has said.
+   *
+   * BOTH HALVES, ALWAYS. `display_name` is nullable and is genuinely empty at
+   * real firms, so a caller given only the name cannot tell "we hold no name for
+   * this person" from "there is no person" — which is the exact collapse
+   * `createdByName` and `raisedToName` were each caught making. The email is the
+   * discriminator.
+   */
+  async account(userId: string): Promise<UserAccount | null> {
+    return this.deps.users.findById(userId);
+  }
+
+  /**
+   * What the firms behind these ids are CALLED.
+   *
+   * Every screen that names the caller's firm had only its uuid to name it
+   * with — the topbar read "BiB · b35c4196", the org switcher offered "partner ·
+   * b35c4196", and the session card printed two full uuids at somebody who has
+   * never seen one. A uuid identifies a firm to the database; it identifies
+   * nothing to the person using the product. This is what lets those screens
+   * say "Kaveri & Co" instead.
+   *
+   * A MAP rather than a list, so a caller with three memberships resolves them
+   * in one call and reads each back by id. An id with no row is simply absent —
+   * the caller decides what an unnamed firm looks like, because "missing" and
+   * "blank" are different answers and this is not the layer that renders them.
+   *
+   * `tenancy.tenant` is a GLOBAL table with no RLS on it, so this needs no
+   * tenant context and works on the session that has not chosen a firm yet —
+   * which is exactly the session that has to be shown a list of firm names to
+   * choose from.
+   */
+  async tenantNames(ids: readonly string[]): Promise<ReadonlyMap<string, string>> {
+    const wanted = [...new Set(ids)];
+    const found = await Promise.all(wanted.map(async (id) => this.deps.tenants.findById(id)));
+    const names = new Map<string, string>();
+    for (const tenant of found) {
+      if (tenant !== null) names.set(tenant.id, tenant.name);
+    }
+    return names;
+  }
+
   // ── Firm administration ─────────────────────────────────────────────────────
   //
   // Everything above is PROVISIONING: the platform creating firms and granting
