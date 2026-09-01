@@ -20,6 +20,9 @@
     "test:watch": "vitest",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "smoke": "bash scripts/smoke.sh",
+    "demo": "bash scripts/demo-seed.sh",
+    "demo:fresh": "bash scripts/demo-fresh.sh",
+    "demo:verify": "bash scripts/demo-verify.sh",
     "migrate": "tsx src/cmd/migrate.ts",
     "check": "npm run typecheck && npm run lint && npm run arch && npm run test",
     "prepare": "husky || true"
