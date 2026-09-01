@@ -20,4 +20,19 @@ export class LoggingMailer implements Mailer {
     );
     return Promise.resolve();
   }
+
+  sendPortalInvite(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.log.warn(
+      { to, url, expiresAt, firmName },
+      "portal invite NOT emailed — the logging mailer is registered. Open the url above to " +
+        "set the password. NOTE: the person on the other end of `to` is a CLIENT, not a " +
+        "colleague, so this one silently not arriving is a client who cannot get in.",
+    );
+    return Promise.resolve();
+  }
 }

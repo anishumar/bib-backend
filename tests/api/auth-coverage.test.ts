@@ -63,6 +63,7 @@ import {
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
+import { PortalInviteService } from "../../src/usecase/portalinvite/service";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -186,6 +187,25 @@ function deps(): RouterDeps {
   const obligationTemplates = new FakeObligationTemplateRepo();
   const obligationExceptions = new FakeObligationExceptionRepo();
   obligationTemplates.exceptions = obligationExceptions;
+  // Hoisted so the portal-invite route can be given the SAME identity service the
+  // auth routes use — accepting an invitation opens a session, and two services
+  // over two session stores would make that test prove nothing.
+  const identity = new IdentityService({
+        users: fakes.users,
+        memberships: fakes.memberships,
+        credentials: new FakeCredentialRepo(),
+        sessions: new FakeSessionRepo(),
+        magicLinks: new FakeMagicLinkRepo(),
+        passwords: new FakePasswordHasher(),
+        tokens: new FakeTokenFactory(),
+        mailer: new FakeMailer(),
+        ids: fakes.ids,
+        clock: new FakeClock(),
+        events: fakes.events,
+        attempts: new InMemoryRateLimiter(systemClock),
+        magicLinkBaseUrl: "http://localhost:3000",
+      });
+
   return {
     // T3.2. These tests only ask what the ROUTER exposes and what an anonymous
     // caller gets, so the service is real over empty stores — enough to answer,
@@ -324,6 +344,17 @@ function deps(): RouterDeps {
         events: new RecordingEventSink(),
       }),
     },
+    portalInvites: {
+      service: new PortalInviteService({
+        identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
+        memberships: { inviteMember: () => Promise.resolve({ id: "m", userId: "u" }) },
+        access: { grant: () => Promise.resolve({ id: "g" }) },
+        firms: { tenantNames: () => Promise.resolve(new Map()) },
+      }),
+      identity,
+      cookieName: "bib_session",
+      cookieSecure: false,
+    },
     staffGrades: {
       service: new StaffGradeService({
         grades: fakes.grades,
@@ -374,21 +405,7 @@ function deps(): RouterDeps {
       }),
     },
     auth: {
-      service: new IdentityService({
-        users: fakes.users,
-        memberships: fakes.memberships,
-        credentials: new FakeCredentialRepo(),
-        sessions: new FakeSessionRepo(),
-        magicLinks: new FakeMagicLinkRepo(),
-        passwords: new FakePasswordHasher(),
-        tokens: new FakeTokenFactory(),
-        mailer: new FakeMailer(),
-        ids: fakes.ids,
-        clock: new FakeClock(),
-        events: fakes.events,
-        attempts: new InMemoryRateLimiter(systemClock),
-        magicLinkBaseUrl: "http://localhost:3000",
-      }),
+      service: identity,
       // /auth/me names the caller's FIRM, not only its uuid.
       tenancy: new TenancyService(fakes),
       portalAccess: new PortalAccessService({
@@ -535,10 +552,24 @@ describe("every route is accounted for", () => {
     // tenant inside it so the read is still tenant-scoped, in the BODY rather
     // than the path, read-only, and one answer for malformed / unknown /
     // withdrawn. A fifth entry needs its own paragraph like that one.
+    //
+    // THE FIFTH IS THE PORTAL INVITATION (T6.5), and it was added with that
+    // paragraph — read it on PUBLIC_PATHS. In short: a client's contact holding
+    // an emailed invitation has no session and this is where they get their
+    // first, so it cannot require one. It is single-use, expiring, hashed at
+    // rest, carried in the BODY, bound to a PURPOSE so a sign-in link cannot be
+    // spent here, and identical in its answers for unknown / expired / used /
+    // wrong-purpose, so it discovers nothing about which addresses have
+    // accounts.
+    //
+    // It is also the FIRST public path that WRITES — it sets a password — which
+    // is exactly the act holding the link is meant to authorise, and exactly why
+    // it needed the argument. A sixth needs one at least as good.
     expect([...PUBLIC_PATHS].sort()).toEqual([
       "/api/v1/auth/login",
       "/api/v1/auth/magic-link",
       "/api/v1/auth/magic-link/redeem",
+      "/api/v1/portal-invites/accept",
       "/api/v1/proposals/shared",
     ]);
   });

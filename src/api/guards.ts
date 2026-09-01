@@ -79,6 +79,29 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/magic-link",
   "/api/v1/auth/magic-link/redeem",
   "/api/v1/proposals/shared",
+  // ── THE FIFTH, and it earns its place the way the fourth did ─────────────
+  //
+  // Everything else on this list exists to OBTAIN a session, and so does this:
+  // a client's contact holding an emailed invitation has no login yet, and this
+  // is the route on which they get their first. It cannot require a session
+  // because the session is what it produces.
+  //
+  // What makes it safe is the same set of properties the share link has. The
+  // token is single-use and expiring, only its SHA-256 digest is stored, and it
+  // arrives in the BODY — a path lands in access logs and Referer headers, and
+  // this one is a credential until it is spent. It is bound to a PURPOSE, so a
+  // sign-in link cannot be spent here and an invitation cannot be spent at the
+  // sign-in route. And unknown, expired, already-used and wrong-purpose all
+  // answer identically, so it cannot be used to discover whether an address has
+  // an account.
+  //
+  // What it does that the others do not is WRITE — it sets a password. That is
+  // the act being authorised by holding the link, and it is why the link is
+  // worth this paragraph: whoever holds it becomes that person. Adding a sixth
+  // entry needs an argument at least this good, and
+  // `tests/api/auth-coverage.test.ts` holds the build red until somebody writes
+  // one.
+  "/api/v1/portal-invites/accept",
 ]);
 
 /**

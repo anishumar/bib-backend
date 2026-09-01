@@ -100,6 +100,7 @@ import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
+import { PortalInviteService } from "../usecase/portalinvite/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -637,6 +638,19 @@ export function wire(cfg: Config, log: Logger): Wired {
   // directory. Two adapters over one table eventually disagree, and here that
   // would mean granting a client to a login the roster says was revoked.
   const portalAccessRepository = new PostgresPortalAccessRepository(pools.app);
+  // T6.5. Three existing services made into ONE act, because "let this client's
+  // CFO in" is one decision a partner takes and every halfway state of it is
+  // silent: a membership with no grant is a portal that shows nothing, and a
+  // grant with no membership is unreachable. Each port is satisfied
+  // structurally, so no use case imports another.
+  const portalAccessForInvite = (): PortalInviteService =>
+    new PortalInviteService({
+      identity,
+      memberships: tenancy,
+      access: portalAccess,
+      firms: tenancy,
+    });
+
   const portalAccess = new PortalAccessService({
     grants: portalAccessRepository,
     memberships: portalAccessRepository,
@@ -747,6 +761,12 @@ export function wire(cfg: Config, log: Logger): Wired {
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
         portalAccess: { service: portalAccess },
+        portalInvites: {
+          service: portalAccessForInvite(),
+          identity,
+          cookieName: cfg.auth.sessionCookieName,
+          cookieSecure: cfg.auth.sessionCookieSecure,
+        },
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
         escalations: { service: escalations },

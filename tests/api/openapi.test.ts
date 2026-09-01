@@ -44,6 +44,7 @@ import {
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
+import { PortalInviteService } from "../../src/usecase/portalinvite/service";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -192,6 +193,11 @@ function deps(): RouterDeps {
   const obligationTemplates = new FakeObligationTemplateRepo();
   const obligationExceptions = new FakeObligationExceptionRepo();
   obligationTemplates.exceptions = obligationExceptions;
+  // ONE identity service for both the auth routes and the portal-invite accept
+  // route: accepting an invitation opens a session, and two services over two
+  // session stores would make that prove nothing.
+  const sharedIdentity = identityService();
+
   return {
     // T3.2. This test only asks what the SPEC documents, so the service is real
     // over empty stores — enough to answer, and nothing invented.
@@ -318,6 +324,17 @@ function deps(): RouterDeps {
         events: new RecordingEventSink(),
       }),
     },
+    portalInvites: {
+      service: new PortalInviteService({
+        identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
+        memberships: { inviteMember: () => Promise.resolve({ id: "m", userId: "u" }) },
+        access: { grant: () => Promise.resolve({ id: "g" }) },
+        firms: { tenantNames: () => Promise.resolve(new Map()) },
+      }),
+      identity: sharedIdentity,
+      cookieName: "bib_session",
+      cookieSecure: false,
+    },
     scheduler: {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),
@@ -373,7 +390,7 @@ function deps(): RouterDeps {
       }),
     },
     auth: {
-      service: identityService(),
+      service: sharedIdentity,
       authz: new AuthzService({ permissions }),
       // /auth/me names the caller's FIRM, not only its uuid.
       tenancy: new TenancyService(makeFakes()),

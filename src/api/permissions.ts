@@ -91,6 +91,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/portal-access/clients/{partyId}"), "portal:grant" as const],
   [routeKey("POST", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
   [routeKey("POST", "/api/v1/portal-access/grants/{grantId}/end"), "portal:grant" as const],
+
+  // Inviting a client's contact IS granting them access — it creates the login
+  // and the grant in one act — so it carries the same permission rather than a
+  // second one that would have to be kept in step with it.
+  [routeKey("POST", "/api/v1/portal-invites"), "portal:grant" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],

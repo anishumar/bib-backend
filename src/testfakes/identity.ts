@@ -163,8 +163,22 @@ export class FakeMagicLinkRepo implements MagicLinkRepository {
 /** Captures what would have been emailed, so a test can read the link. */
 export class FakeMailer implements Mailer {
   readonly sent: { to: string; url: string; expiresAt: string }[] = [];
+  /** Kept apart from `sent` on purpose: a test asserting that an INVITE went out
+   *  must not pass because a sign-in link did. */
+  readonly invites: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
+
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
     this.sent.push({ to, url, expiresAt });
+    return Promise.resolve();
+  }
+
+  sendPortalInvite(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.invites.push({ to, url, expiresAt, firmName });
     return Promise.resolve();
   }
 }

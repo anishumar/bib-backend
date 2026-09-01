@@ -69,9 +69,32 @@ export function isUsableSession(session: Session, now: Date): boolean {
 }
 
 /** A magic link is usable exactly once, and only before it expires. */
-export function isUsableMagicLink(link: MagicLink, now: Date): boolean {
+/**
+ * Is this link still good FOR THIS PURPOSE?
+ *
+ * `purpose` has been a CHECKed column since 0004 (`login` | `invite`) and
+ * nothing read it until the portal invite existed — the "registered thing with
+ * no reader" shape this codebase keeps finding, and here it had teeth: an
+ * INVITE link redeemed at the sign-in route would have opened a session without
+ * the password ever being set, which is the one step an invite exists to make
+ * happen. The caller now says which kind it is holding and a link of the other
+ * kind is simply not usable.
+ */
+export function isUsableMagicLink(link: MagicLink, now: Date, purpose: MagicLinkPurpose): boolean {
+  if (link.purpose !== purpose) return false;
   if (link.consumedAt !== null) return false;
   return Date.parse(link.expiresAt) > now.getTime();
+}
+
+/** How long a portal invite stands. Days rather than the sign-in link's
+ *  minutes: a client contact reads their email when they read it, and an invite
+ *  that expired before they opened it sends them back to the firm — which is
+ *  the friction this whole flow exists to remove. Still single-use, still
+ *  hashed at rest, and a fresh invite invalidates nothing but itself. */
+export const PORTAL_INVITE_TTL_DAYS = 7;
+
+export function portalInviteExpiryFrom(now: Date, ttlDays = PORTAL_INVITE_TTL_DAYS): string {
+  return new Date(now.getTime() + ttlDays * 24 * 60 * 60 * 1000).toISOString();
 }
 
 export function sessionExpiryFrom(now: Date, ttlDays = SESSION_TTL_DAYS): string {

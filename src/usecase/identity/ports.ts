@@ -109,4 +109,20 @@ export interface Mailer {
   /** Sends the sign-in link. The use case decides WHAT is sent and to whom; the
    *  adapter decides how it looks and which vendor carries it. */
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void>;
+
+  /**
+   * Sends a client contact their invitation to the portal.
+   *
+   * A SEPARATE method rather than a flag on the one above, because the two
+   * letters say different things to different people: one is "here is the link
+   * you just asked for", the other arrives unasked, from a firm the reader may
+   * not be expecting mail from, and has to name that firm or it reads as
+   * phishing. `firmName` exists for exactly that sentence.
+   */
+  sendPortalInvite(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void>;
 }

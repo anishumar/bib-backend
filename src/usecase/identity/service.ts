@@ -26,6 +26,7 @@ import {
   isUsableMagicLink,
   isUsableSession,
   magicLinkExpiryFrom,
+  portalInviteExpiryFrom,
   sessionExpiryFrom,
 } from "../../domain/identity/model";
 import {
@@ -192,11 +193,84 @@ export class IdentityService {
     );
   }
 
+  /**
+   * Invite somebody to set a password — the portal contact's way in.
+   *
+   * The SAME single-use, hashed, expiring link the sign-in flow uses, with a
+   * different purpose and a longer life, pointed at the page where a password
+   * is chosen. It is deliberately not a sign-in link: redeeming this one
+   * without setting a password is refused, because a contact who never sets one
+   * has no way back in after it is consumed.
+   *
+   * Unlike `requestMagicLink` this DOES tell the caller what happened — a
+   * member of the firm is inviting a person they already named, so there is no
+   * account to confirm the existence of and nothing to be quiet about.
+   */
+  async invitePortalContact(userId: string, firmName: string | null): Promise<string> {
+    const user = await this.deps.users.findById(userId);
+    // The caller has just created or found this account, so a miss here is a
+    // race or a deactivated login rather than a typo — and the invite must not
+    // be mailed either way. `InvalidMagicLink` is the family's word for "this
+    // link cannot come to exist"; there is no `UserNotFound` and inventing one
+    // would need a case in `domainerr.ts` to avoid answering 500.
+    if (!user || user.status !== "active") throw new InvalidMagicLink();
+
+    const token = this.deps.tokens.newToken();
+    const expiresAt = portalInviteExpiryFrom(this.deps.clock.now());
+    await this.deps.magicLinks.create({
+      id: this.deps.ids.newId(),
+      userId: user.id,
+      tokenHash: this.deps.tokens.hash(token),
+      purpose: "invite",
+      expiresAt,
+    });
+    await this.deps.mailer.sendPortalInvite(
+      user.email,
+      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      expiresAt,
+      firmName,
+    );
+    return expiresAt;
+  }
+
+  /**
+   * Accept an invitation: set the password, and sign in.
+   *
+   * ONE call, because the two halves must not be separable. A route that only
+   * set the password would leave the contact holding a consumed token and a
+   * login screen; a route that only signed them in is the magic link again and
+   * leaves them with no password at all. The link is consumed FIRST, so a
+   * refused password does not spend it twice — and a weak one is refused by
+   * `setPassword` before anything is written.
+   */
+  async acceptPortalInvite(token: string, password: string): Promise<SignInResult> {
+    const link = await this.deps.magicLinks.findByTokenHash(this.deps.tokens.hash(token));
+    if (!link || !isUsableMagicLink(link, this.deps.clock.now(), "invite")) {
+      throw new InvalidMagicLink();
+    }
+    const user = await this.deps.users.findById(link.userId);
+    if (!user || user.status !== "active") throw new InvalidMagicLink();
+
+    // Strength is checked BEFORE the link is spent: a contact who typed
+    // something too short must be able to try again with the same email.
+    if (!isAcceptablePassword(password)) {
+      throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);
+    }
+    const won = await this.deps.magicLinks.consume(link.id, this.deps.clock.now().toISOString());
+    if (!won) throw new InvalidMagicLink();
+
+    await this.setPassword(user.id, password);
+    return this.openSession(user);
+  }
+
   /** Redeem a magic link for a session. Single use, enforced by the repository's
-   *  conditional update — two simultaneous clicks cannot both open a session. */
+   *  conditional update — two simultaneous clicks cannot both open a session.
+   *  A `login` link only: an invite is redeemed by setting a password. */
   async redeemMagicLink(token: string): Promise<SignInResult> {
     const link = await this.deps.magicLinks.findByTokenHash(this.deps.tokens.hash(token));
-    if (!link || !isUsableMagicLink(link, this.deps.clock.now())) throw new InvalidMagicLink();
+    if (!link || !isUsableMagicLink(link, this.deps.clock.now(), "login")) {
+      throw new InvalidMagicLink();
+    }
 
     const won = await this.deps.magicLinks.consume(link.id, this.deps.clock.now().toISOString());
     if (!won) throw new InvalidMagicLink();
