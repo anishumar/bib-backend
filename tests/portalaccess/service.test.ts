@@ -175,7 +175,7 @@ describe("granting a client to a portal login", () => {
         },
         SYSTEM_ACTOR,
       ),
-    ).rejects.toThrow(/FIRST DAY NOT IN FORCE/);
+    ).rejects.toThrow(/LATER than validFrom/);
   });
 
   it("refuses an overlapping duplicate IN WORDS, before the constraint says 500", async () => {
@@ -248,14 +248,49 @@ describe("ending a grant", () => {
     );
   }
 
-  it("defaults to TOMORROW, so access lasts out the day it was taken away", async () => {
-    // validTo is the FIRST DAY NOT IN FORCE. Ending on today's date would take
-    // access away retroactively for the whole of today, and somebody who read a
-    // document this morning would show as never having been allowed to.
+  it("REMOVE MEANS NOW: it ends today, and the scope is empty on the next read", async () => {
+    // This defaulted to tomorrow until 0061, and walking it over HTTP settled
+    // the argument: the firm pressed remove, asked what the session could see,
+    // and the client was still there until midnight. The row understates that
+    // person by part of a day; `portal_access.ended` still carries the instant.
     const grant = await granted();
     const ended = await w.service.end({ tenantId: FIRM, grantId: grant.id }, SYSTEM_ACTOR);
-    expect(ended.validTo).toBe("2026-09-02");
+    expect(ended.validTo).toBe("2026-09-01");
     expect(w.events.verbs()).toContain("portal_access.ended");
+    // The half that matters, and the reason the date alone is not the test.
+    expect((await w.service.scopeFor(FIRM, PORTAL_LOGIN)).clientPartyIds).toEqual([]);
+  });
+
+  it("takes back a grant made the same morning — an EMPTY range, in force on no day", async () => {
+    // Granted at 10:00, withdrawn at 10:01. Unrepresentable before 0061: the
+    // firm's only options were to leave it standing until tomorrow or to have
+    // never made the mistake.
+    const grant = await granted();
+    const ended = await w.service.end(
+      { tenantId: FIRM, grantId: grant.id, validTo: "2026-09-01" },
+      SYSTEM_ACTOR,
+    );
+    expect(ended.validFrom).toBe("2026-09-01");
+    expect(ended.validTo).toBe("2026-09-01");
+    expect((await w.service.scopeFor(FIRM, PORTAL_LOGIN, "2026-09-01")).clientPartyIds).toEqual([]);
+  });
+
+  it("still refuses to GRANT one in force on no day — that is a typo, not a decision", async () => {
+    // The asymmetry, deliberately: the database allows the shape and the
+    // service allows only the act that legitimately produces it.
+    await expect(
+      w.service.grant(
+        {
+          tenantId: FIRM,
+          membershipId: PORTAL_LOGIN,
+          clientPartyId: KAVERI,
+          validFrom: "2026-09-01",
+          validTo: "2026-09-01",
+          grantedBy: PARTNER,
+        },
+        SYSTEM_ACTOR,
+      ),
+    ).rejects.toThrow(/LATER than validFrom/);
   });
 
   it("keeps the row — the grant is closed, never deleted", async () => {
@@ -277,7 +312,7 @@ describe("ending a grant", () => {
     const grant = await granted();
     await expect(
       w.service.end({ tenantId: FIRM, grantId: grant.id, validTo: "2026-08-01" }, SYSTEM_ACTOR),
-    ).rejects.toThrow(/FIRST DAY NOT IN FORCE/);
+    ).rejects.toThrow(/do not/);
   });
 
   it("refuses a grant this firm does not have", async () => {

@@ -3272,16 +3272,23 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > login, 409 for a duplicate, 403 for a manager, 200 to end, 409 to end twice, and the
   > ended row still on the history). `demo:verify` 71/71 after the walk's row was removed.
   >
-  > **OPEN DECISION, found by running it: what does "remove access" mean?** `validTo` is the
-  > FIRST DAY NOT IN FORCE, so ending defaults to TOMORROW and access lasts out the day —
-  > which is what stops somebody who read a document this morning showing as never having
-  > been allowed to. The cost is that a firm clicks "remove access" and the client is still
-  > in the session's scope until midnight, which reads as a bug and is a real one if the
-  > contact is being removed for cause. The other default revokes immediately and understates
-  > the row by up to a day; the ledger event still carries the instant, so nothing is
-  > actually lost. **Same-day grant-and-revoke is unrepresentable either way** — a date-grained
-  > row cannot hold it, and allowing an empty range would need another migration. One line to
-  > change once somebody decides.
+  > **ANSWERED (2026-09-01, migration 0061): REMOVE MEANS NOW.** Shrestha's call. `end`
+  > defaults to TODAY, so access is gone on the next request rather than at midnight — the
+  > walk is what settled it: press remove, ask for the scope, and the client was still there.
+  > The row now understates that person by part of a day and nothing is lost, because
+  > `portal_access.ended` carries the INSTANT: the row is date-grained, the ledger is not.
+  >
+  > 0061 relaxed the CHECK to `valid_to >= valid_from`, which is what makes **granted at
+  > 10:00, revoked at 10:01** representable at all — an EMPTY range, in force on no day.
+  > `daterange(d, d, '[)')` is empty and `&&` never matches it, so the exclusion constraint
+  > keeps working and an empty grant cannot block the re-grant after it. **Creating one that
+  > way is still refused by the service**: a grant in force on no day is a typo at the moment
+  > of granting, while ending one is a decision taken twenty seconds later. The database
+  > allows the shape; the service allows only the act. Its `down` deliberately FAILS against
+  > any empty row a firm has since recorded, rather than re-dating an access record.
+  >
+  > Proven over HTTP: granted, scope 1; ended, `validFrom == validTo`; scope EMPTY on the
+  > next call; the row still on the history.
   >
   > **What is still left:** resolving a portal session's grants once per request into
   > `withPortal`, and `/auth/me` saying which companies the session is scoped to. Both are the

@@ -35,10 +35,11 @@ export class InvalidPortalDates extends PortalAccessError {
   constructor(validFrom: string, validTo: string | null) {
     super(
       "INVALID_PORTAL_DATES",
-      `a grant must be in force on at least one day: validFrom ${JSON.stringify(validFrom)} ` +
-        `and validTo ${JSON.stringify(validTo)} describe an empty range. validTo is the FIRST ` +
-        `DAY NOT IN FORCE, so it must be later than validFrom — to end a grant today, pass ` +
-        `tomorrow.`,
+      `validFrom ${JSON.stringify(validFrom)} and validTo ${JSON.stringify(validTo)} do not ` +
+        `describe a grant. validTo is the FIRST DAY NOT IN FORCE: granting needs it LATER ` +
+        `than validFrom, because a grant in force on no day reads as "granted" and lets ` +
+        `nobody in. Ending is different — the same day is allowed there, and is how access ` +
+        `is removed the moment somebody decides to remove it.`,
     );
   }
 }

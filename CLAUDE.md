@@ -128,13 +128,21 @@ CLIENT_PORTAL one that still works, or that the party is not a client the firm h
 exclusion constraint still refuses an overlapping duplicate under concurrency — the service is
 what a person is TOLD before they meet it.
 
-**ENDING IS A DATE AND THE DEFAULT IS AN OPEN DECISION.** `validTo` is the FIRST DAY NOT IN
-FORCE, so ending "today" is recorded as tomorrow and access lasts out the day — which is what
-stops somebody who read a document this morning showing as never having been allowed to. The
-cost, found by running it: a firm that clicks "remove access" sees the client still in the
-session's scope until midnight. The other default revokes immediately and understates the row by
-up to a day (the ledger event still carries the instant). Nobody has chosen; the board carries
-it as an open question rather than a preference buried in a service.
+**REMOVE MEANS NOW (decided 2026-09-01, migration 0061).** `validTo` is the FIRST DAY NOT IN
+FORCE and `end` defaults to TODAY, so the access is gone on the next request. It defaulted to
+tomorrow for one commit, on the reasoning that keeping the day whole stops somebody who read a
+document this morning showing as never having been allowed to — and **walking it over HTTP
+settled it the other way**: the firm presses remove, asks what the session can see, and the
+client is still there. That reads as a bug and is one when somebody is removed for cause. The
+row now understates that person by part of a day and nothing is lost, because
+`portal_access.ended` carries the INSTANT — the row is date-grained, the ledger is not.
+
+0061 relaxed the CHECK to `valid_to >= valid_from` so that **granted at 10:00, revoked at 10:01**
+is representable at all: an EMPTY range, in force on no day. `daterange(d, d, '[)')` is empty and
+`&&` never matches it, so the exclusion constraint keeps working and an empty grant cannot block
+the re-grant after it. **CREATING one that way is still refused, by the service** — a grant in
+force on no day is a typo at the moment of granting, while ending one is a decision somebody took
+twenty seconds later. The database allows the shape; the service allows only the act.
 
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
 today because it is the one business table carrying `client_party_id` directly. The column that

@@ -42,7 +42,8 @@ const PortalAccessSchema = z
     validTo: IsoDate.nullable().openapi({
       description:
         "HALF-OPEN: the FIRST DAY NOT IN FORCE, never the last day of access. Null while the " +
-        "grant stands. To end access at the close of today, this is tomorrow.",
+        "grant stands. Equal to `validFrom` when a grant was withdrawn on the day it was " +
+        "made — in force on no day at all, which is a real record and not a broken row.",
     }),
     grantedByEmail: z.string().nullable().openapi({
       description:
@@ -99,10 +100,11 @@ const EndPortalAccessRequest = z
   .object({
     validTo: IsoDate.optional().openapi({
       description:
-        "The FIRST DAY NOT IN FORCE. Absent means tomorrow, so access lasts out today — " +
-        "ending it on today's date would take it away retroactively for the whole of today, " +
-        "and somebody who read a document this morning would show as never having been " +
-        "allowed to.",
+        "The FIRST DAY NOT IN FORCE. Absent means TODAY: remove means remove, and the access " +
+        "is gone on the next request rather than at midnight. Ending on the day the grant " +
+        "began is allowed and records an empty range — granted and withdrawn before it was " +
+        "ever in force. The row is then a day coarser than the truth; the " +
+        "`portal_access.ended` event carries the instant.",
     }),
   })
   .openapi("EndPortalAccessRequest");
@@ -230,7 +232,7 @@ const endGrantRoute = createRoute({
   },
   responses: {
     200: { description: "Ended", content: { "application/json": { schema: PortalAccessSchema } } },
-    400: errorResponse("An end date that is not after the day it started"),
+    400: errorResponse("An end date BEFORE the day it started"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not grant access"),
     404: errorResponse("No such grant at this firm"),

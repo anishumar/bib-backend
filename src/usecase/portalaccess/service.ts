@@ -194,13 +194,27 @@ export class PortalAccessService {
   }
 
   /**
-   * Stop a login seeing a client.
+   * Stop a login seeing a client — NOW, not at midnight.
    *
-   * `validTo` is the FIRST DAY NOT IN FORCE, so ending it "today" means passing
-   * TOMORROW — which is why the default is tomorrow rather than today. Ending
-   * on today's date would take the access away retroactively for the whole of
-   * today, and somebody who read a document this morning would show as never
-   * having been allowed to.
+   * `validTo` is the FIRST DAY NOT IN FORCE, so the default is TODAY and the
+   * access is gone on the next request. It defaulted to tomorrow until 0061,
+   * on the reasoning that keeping the day intact stops somebody who read a
+   * document this morning showing as never having been allowed to — and
+   * walking it over HTTP settled the argument the other way: the firm presses
+   * remove, asks what the session can see, and the client is still there. That
+   * reads as a bug and IS one when somebody is being removed for cause.
+   *
+   * The row now understates that person by part of a day. Nothing is actually
+   * lost: `portal_access.ended` carries the INSTANT, so "when was it taken
+   * away" is answerable to the second — the row is date-grained and the ledger
+   * is not.
+   *
+   * Ending on the day it began is therefore allowed and produces an EMPTY
+   * range: granted at 10:00, withdrawn at 10:01, in force on no day. 0061
+   * relaxed the CHECK for exactly that case. CREATING one that way is still
+   * refused below — a grant in force on no day is a typo at the moment of
+   * granting, while ending one is a decision somebody took twenty seconds
+   * later.
    */
   async end(
     input: { readonly tenantId: string; readonly grantId: string; readonly validTo?: string | undefined },
@@ -210,8 +224,10 @@ export class PortalAccessService {
     if (!grant) throw new PortalGrantNotFound(input.grantId);
     if (grant.validTo !== null) throw new PortalGrantAlreadyEnded(grant.id, grant.validTo);
 
-    const validTo = input.validTo ?? this.tomorrow();
-    if (validTo <= grant.validFrom) throw new InvalidPortalDates(grant.validFrom, validTo);
+    const validTo = input.validTo ?? this.today();
+    // `<` and not `<=`: equal dates are the immediate-revocation case. Earlier
+    // than the day it started is not a short grant, it is a wrong one.
+    if (validTo < grant.validFrom) throw new InvalidPortalDates(grant.validFrom, validTo);
 
     const ended = await this.deps.grants.end(input.tenantId, grant.id, validTo);
     await this.deps.events.recordEvent({
@@ -242,10 +258,6 @@ export class PortalAccessService {
     return this.deps.clock.now().toISOString().slice(0, 10);
   }
 
-  private tomorrow(): string {
-    const now = this.deps.clock.now();
-    return new Date(now.getTime() + 86_400_000).toISOString().slice(0, 10);
-  }
 }
 
 /** Do two half-open day ranges share a day? The same comparison the exclusion
