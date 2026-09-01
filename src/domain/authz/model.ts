@@ -29,6 +29,7 @@ export type Permission =
   | "proposal:approve"
   | "work:write"
   | "obligation:resolve"
+  | "portal:grant"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -39,6 +40,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "proposal:approve",
   "work:write",
   "obligation:resolve",
+  "portal:grant",
   "tenant:admin",
 ];
 
@@ -73,6 +75,11 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "accept the penalty, or record that it never applied. Separate from doing the work, " +
     "because this commits the CLIENT'S money and is the one delivery decision a client may " +
     "later dispute.",
+  "portal:grant":
+    "Let one of a client's own people sign in and read that client's records — and take it " +
+    "away again. Its own permission because it hands somebody OUTSIDE the firm a view of the " +
+    "firm's work: it is not administering the firm, and it is not the ordinary act of doing " +
+    "the work. One client at a time, always, so who decided each is answerable.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -124,6 +131,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "proposal:approve",
       "work:write",
       "obligation:resolve",
+      "portal:grant",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.

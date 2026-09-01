@@ -29,6 +29,7 @@ import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
+import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
@@ -98,6 +99,7 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
+import { PortalAccessService } from "../usecase/portalaccess/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -625,6 +627,25 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // GATE 4's writer (G3.4). 0059 built the wall — `crm.portal_access`,
+  // `crm.portal_sees()` and the restrictive policies — and shipped with nothing
+  // that could write a grant, so the gate could only deny. This is that half.
+  //
+  // ONE adapter satisfies all three seams, the arrangement `PostgresConfigRepository`
+  // already has: the repository, the membership directory (audience and
+  // is_active, which the composite foreign key cannot check) and the client
+  // directory. Two adapters over one table eventually disagree, and here that
+  // would mean granting a client to a login the roster says was revoked.
+  const portalAccessRepository = new PostgresPortalAccessRepository(pools.app);
+  const portalAccess = new PortalAccessService({
+    grants: portalAccessRepository,
+    memberships: portalAccessRepository,
+    clients: portalAccessRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   // The pipeline sits ON TOP of the party module rather than beside it: a lead
   // is an opportunity about a party, so capture creates prospects through
   // PartyService — which owns display-name derivation, identifier normalisation
@@ -722,6 +743,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
+        portalAccess: { service: portalAccess },
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
         escalations: { service: escalations },

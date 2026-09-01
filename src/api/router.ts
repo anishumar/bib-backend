@@ -44,6 +44,8 @@ import type { EscalationDeps } from "./handler/escalation";
 import type { ServiceAxisDeps } from "./handler/serviceaxis";
 import { registerClientAssignmentRoutes } from "./handler/clientassignment";
 import type { ClientAssignmentDeps } from "./handler/clientassignment";
+import { registerPortalAccessRoutes } from "./handler/portalaccess";
+import type { PortalAccessDeps } from "./handler/portalaccess";
 import { registerWorkItemRoutes } from "./handler/workitem";
 import type { WorkItemDeps } from "./handler/workitem";
 import { registerOrchestratorRoutes } from "./handler/orchestrator";
@@ -98,6 +100,7 @@ export interface RouterDeps {
   readonly obligations: ObligationDeps;
   readonly escalations: EscalationDeps;
   readonly clientAssignments: ClientAssignmentDeps;
+  readonly portalAccess: PortalAccessDeps;
   readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
   readonly scheduler: SchedulerDeps;
@@ -207,6 +210,7 @@ export function buildRouter(
   registerObligationRoutes(app, deps.obligations);
   registerEscalationRoutes(app, deps.escalations);
   registerClientAssignmentRoutes(app, deps.clientAssignments);
+  registerPortalAccessRoutes(app, deps.portalAccess);
   registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);
   registerSchedulerRoutes(app, deps.scheduler);

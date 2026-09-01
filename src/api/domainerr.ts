@@ -10,6 +10,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
+import { PortalAccessError } from "../domain/portalaccess/errors";
 import { WorkItemError } from "../domain/workitem/errors";
 import { ObligationError } from "../domain/obligation/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
@@ -360,6 +361,31 @@ export function mapError(err: unknown): MappedError {
         return unmapped(err.code);
     }
   }
+  if (err instanceof PortalAccessError) {
+    switch (err.code) {
+      // Incoherent on its face — a range in force on no day at all. The caller
+      // fixes the request, whatever state the firm is in.
+      case "INVALID_PORTAL_DATES":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "PORTAL_MEMBERSHIP_NOT_FOUND":
+      case "PORTAL_CLIENT_NOT_FOUND":
+      case "PORTAL_GRANT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // The request is well formed and the STATE refuses it: a staff login, a
+      // revoked one, an archived client, a grant already closed, a duplicate.
+      // 409 rather than 400 because nothing about the body is wrong — the
+      // caller changes the world, not the request.
+      case "PORTAL_MEMBERSHIP_NOT_A_CLIENT_LOGIN":
+      case "PORTAL_MEMBERSHIP_INACTIVE":
+      case "PORTAL_CLIENT_ARCHIVED":
+      case "PORTAL_GRANT_ALREADY_ENDED":
+      case "PORTAL_GRANT_DUPLICATE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
   if (err instanceof ClientAssignmentError) {
     switch (err.code) {
       // Malformed in shape or incoherent on its face — the caller fixes the

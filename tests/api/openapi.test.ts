@@ -43,12 +43,18 @@ import {
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
+import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
   FakeClientDirectory,
 } from "../../src/testfakes/clientassignment";
+import {
+  FakePortalAccessRepo,
+  FakePortalClients,
+  FakePortalMemberships,
+} from "../../src/testfakes/portalaccess";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
@@ -300,6 +306,16 @@ function deps(): RouterDeps {
         ids: makeFakes().ids,
         clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         events: makeFakes().events,
+      }),
+    },
+    portalAccess: {
+      service: new PortalAccessService({
+        grants: new FakePortalAccessRepo(),
+        memberships: new FakePortalMemberships(),
+        clients: new FakePortalClients(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+        events: new RecordingEventSink(),
       }),
     },
     scheduler: {

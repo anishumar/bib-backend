@@ -110,6 +110,32 @@ session looking like STAFF — the one mistake here that is silent, because ever
 succeed. `withPortal` has no variant that takes no parties, on purpose: "I did not ask the grant
 table" is not a scope.
 
+**THE GRANT PATH IS `usecase/portalaccess`, and `portal:grant` is the NINTH permission
+(0060).** Not `tenant:admin` — a firm that wants the partner who owns a client relationship to
+invite that client's CFO, without also handing them the roster and the roles, could not express
+it. Not `party:write` either, which G3.2 gave client OWNERSHIP on the stated ground that naming
+a Key Manager grants nobody anything: this is the opposite kind of act, and the only permission
+in the product that hands somebody OUTSIDE the firm a view of the firm's work. The READS carry
+it too, because the list names a client's own people and what each may see.
+
+**ONE CLIENT PER GRANT, always.** A contact who should see four of a group's companies is
+granted four times — four rows, four events, four answers to "who decided this". The service has
+no method that takes a list and none that walks a relationship.
+
+**Every refusal in that service is one the DATABASE cannot make.** The composite foreign keys
+prove the membership and the party are this firm's; nothing in SQL says the login is a
+CLIENT_PORTAL one that still works, or that the party is not a client the firm has archived. The
+exclusion constraint still refuses an overlapping duplicate under concurrency — the service is
+what a person is TOLD before they meet it.
+
+**ENDING IS A DATE AND THE DEFAULT IS AN OPEN DECISION.** `validTo` is the FIRST DAY NOT IN
+FORCE, so ending "today" is recorded as tomorrow and access lasts out the day — which is what
+stops somebody who read a document this morning showing as never having been allowed to. The
+cost, found by running it: a firm that clicks "remove access" sees the client still in the
+session's scope until midnight. The other default revokes immediately and understates the row by
+up to a day (the ledger event still carries the instant). Nobody has chosen; the board carries
+it as an open question rather than a preference buried in a service.
+
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
 today because it is the one business table carrying `client_party_id` directly. The column that
 names the client differs per table and a guessed join is a wall with a hole in it; until each

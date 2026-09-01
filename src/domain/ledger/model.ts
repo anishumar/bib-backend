@@ -112,6 +112,14 @@ export const EVENT_VERBS = {
   "client_assignment.created":   { objectType: "client_assignment",   lane: "platform",   description: "Somebody at the firm was put in charge of a client — the Key Manager, or a SPOC for one Dept or delivery team. A key-manager handover carries `handedOverFrom`, naming the assignment it closed in the same transaction." },
   "client_assignment.ended":     { objectType: "client_assignment",   lane: "platform",   description: "An assignment was closed — somebody stopped holding a client, with nobody named in their place. NOT a delete: the row stays and is what answers who held it before. The payload carries the date it stopped being in force, which is the FIRST DAY NOT IN FORCE." },
 
+  // GATE 4 (G3.4). The table is effective-dated and already answers "who could
+  // see this client in March"; these answer what it cannot — WHO DECIDED to let
+  // them in, and who took it away. NO NAMES in either payload: the client's name
+  // and the contact's email are personal data about people outside the firm, and
+  // this log cannot be erased.
+  "portal_access.granted":       { objectType: "portal_access",       lane: "platform",   description: "A client-portal login was allowed to read one client's records. ONE CLIENT PER EVENT, deliberately: a contact who may see four companies has four grants and four of these, so who decided each one is answerable. Access is never derived from a group relationship." },
+  "portal_access.ended":         { objectType: "portal_access",       lane: "platform",   description: "A portal login stopped being able to read a client's records. NOT a delete: the row stays, which is what makes \"could this person see this on 14 March\" answerable a year later. The payload carries the FIRST DAY NOT IN FORCE." },
+
   // ── platform · the configuration registry (P2 / T2.5) ─────────────────────
   // Configuration decides what everyone else may do, so who changed it, when,
   // and to which version is exactly what gets asked about later. Only versions

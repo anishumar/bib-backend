@@ -21,11 +21,30 @@ cd bib-backend && nvm use && npm run dev          # :8080
 cd bib-frontend && nvm use && npm run dev         # :3000
 
 # 3 — a fresh firm, with a worked example already in it
-cd bib-backend && ./scripts/demo-seed.sh
+cd bib-backend && npm run demo:fresh
+
+# 4 — and check it actually came out right
+cd bib-backend && npm run demo:verify
 ```
 
-The seed prints four logins. **Run it again any time** — each run builds a brand
-new firm, so if the demo goes sideways you are one command from clean.
+`demo:fresh` DESTROYS the local database volume and rebuilds it: it drops the
+Postgres volume, re-migrates, and seeds 10x Global from nothing. That is what
+lets the logins be FIXED addresses — `siddharth@10xglobal.in`, not
+`siddharth-1788079646@10xglobal.example`, which is not something anybody wants
+to read off a terminal while a client watches. `npm run demo` on its own seeds
+without wiping, and REFUSES if the firm is already there rather than quietly
+making a second one: two firms holding those addresses turns every sign-in into
+"Choose a firm".
+
+`demo:verify` reads the firm back and asserts 71 facts about it — the account
+teams, the calendar, the ladder, every refusal, and every one of the deliberate
+problems. **A write being accepted is not the same as the firm coming out
+right**, which is why it is a second command: a rule can be valid and generate
+nothing, a ladder can be published and fire on nobody. It leaves the firm
+exactly as it found it, so run it as often as you like.
+
+The seed prints five logins and, at the end, the list of things that are
+deliberately broken and worth showing.
 
 > **Node 22 is required.** `nvm use` reads `.nvmrc`. On Node 20 the queue library
 > installs as an empty folder and the API will not start.
@@ -34,14 +53,29 @@ new firm, so if the demo goes sideways you are one command from clean.
 > rate-limit budget (300 requests a minute from one address) and the seed spends
 > about 120. If you do, the seed stops and tells you to wait 60 seconds.
 
-**Logins** (password is the same for all four — the seed prints it):
+**Logins** — fixed addresses, one password for all five, printed by the seed:
 
-| Who | Why they are in the demo |
+| Who | Address | Why they are in the demo |
+|---|---|---|
+| **Siddharth Rao** — partner | `siddharth@10xglobal.in` | Does everything. Start here. |
+| **Ravi Iyer** — manager | `ravi@10xglobal.in` | Owns the UK desk, and checks Ananya's work. |
+| **Ananya Nair** — associate | `ananya@10xglobal.in` | **No fee visibility** — the money disappears for her. |
+| **Farhan Qureshi** — associate | `farhan@10xglobal.in` | **Reports to nobody** — his escalations reach nobody. |
+| **Meera Menon** — client contact | `meera@cobaltfoods.in` | A *client* login. Proves the wall. |
+
+### The problem corner — deliberate, and the sharpest part of the demo
+
+Everything else in the firm is healthy. These five are not, and each is a state
+this product exists to make visible rather than hide:
+
+| What | What it shows |
 |---|---|
-| **Siddharth** — partner | Does everything. Start here. |
-| **Ravi** — manager | Owns the UK desk, for the territory step. |
-| **Ananya** — associate | **No fee visibility** — the money disappears for her. |
-| **Cobalt finance** — client contact | A *client* login. Proves the wall. |
+| Harbour Provisions has no SPOC on any Dept | Work lands **unassigned with the reason**, never on a guessed desk |
+| Lakeview has **two** SPOCs on TRC | The router refuses to choose, and says so |
+| Farhan reports to nobody | An escalation that **reached nobody** — the row a partner has to act on |
+| Harbour is not registered as a legal entity | Its calendar is empty, and `/calendar` → *Not covered* says why |
+| 53 of the 57 shipped rules have no formula | The partner's real job: answering them. Four are answered already. |
+| One invoice is 75 days overdue | A **credit hold waiting on a partner** — the rung a machine may reach and may not apply |
 
 > One caution: sign-ins are rate limited. If you log in and out repeatedly and
 > get refused, wait a minute — that is the product defending itself, and it is

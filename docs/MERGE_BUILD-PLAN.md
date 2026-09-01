@@ -3256,14 +3256,37 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > is refused, the scope does not survive the transaction, and a STAFF session is untouched.
   > Dropping the policy turns five of those six red; putting it back turns them green.
   >
-  > **What is left, named rather than implied:** `crm.portal_access` HAS NO WRITER. No
-  > service, no route, no event — a firm cannot yet grant anybody anything, so today the gate
-  > can only ever deny. That is the safe direction and it is still the "feature that looks
-  > finished" shape this repo keeps being caught by, so it is written here rather than
-  > discovered. The rest of the task is: the grant/revoke use case with its ledger verbs, the
-  > `tenant:admin` routes for it, resolving a portal session's grants once per request into
-  > `withPortal`, and `/auth/me` saying which companies the session is scoped to. `T6.5`
-  > cannot start until that half exists.
+  > **THE WRITE PATH IS IN TOO (2026-09-01, migration 0060).** `usecase/portalaccess` —
+  > grant, end, and the scope one session resolves to — with `portal_access.granted` /
+  > `portal_access.ended` in the ledger, five staff-only routes, and **`portal:grant`, the
+  > ninth permission**, partner-only by default. Not `tenant:admin` (a firm may want the
+  > partner who owns the relationship to invite that client's CFO without also handing them
+  > the roster) and not `party:write` (G3.2 gave client OWNERSHIP that permission on the
+  > ground that naming a Key Manager grants nobody anything — this is the opposite kind of
+  > act, and the only permission in the product that hands somebody OUTSIDE the firm a view
+  > of the firm's work). The READS carry it too: the list names a client's own people.
+  >
+  > Every refusal in the service is one the database cannot make — a staff login, a revoked
+  > one, an archived client — while the exclusion constraint still holds the duplicate under
+  > concurrency. 21 unit tests; walked over HTTP against the seeded firm (409 for a staff
+  > login, 409 for a duplicate, 403 for a manager, 200 to end, 409 to end twice, and the
+  > ended row still on the history). `demo:verify` 71/71 after the walk's row was removed.
+  >
+  > **OPEN DECISION, found by running it: what does "remove access" mean?** `validTo` is the
+  > FIRST DAY NOT IN FORCE, so ending defaults to TOMORROW and access lasts out the day —
+  > which is what stops somebody who read a document this morning showing as never having
+  > been allowed to. The cost is that a firm clicks "remove access" and the client is still
+  > in the session's scope until midnight, which reads as a bug and is a real one if the
+  > contact is being removed for cause. The other default revokes immediately and understates
+  > the row by up to a day; the ledger event still carries the instant, so nothing is
+  > actually lost. **Same-day grant-and-revoke is unrepresentable either way** — a date-grained
+  > row cannot hold it, and allowing an empty range would need another migration. One line to
+  > change once somebody decides.
+  >
+  > **What is still left:** resolving a portal session's grants once per request into
+  > `withPortal`, and `/auth/me` saying which companies the session is scoped to. Both are the
+  > PORTAL's own surface rather than the firm's, they have no consumer until the first portal
+  > read exists, and they land with `T6.5`.
   >
   > **Decision recorded in the migration and in CLAUDE.md: access is GRANTED, never DERIVED.**
   > `core.party_relationship` could answer "this contact is in the Kaveri group" with one

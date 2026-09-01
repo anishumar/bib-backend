@@ -80,6 +80,17 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // that permission governs. It is not `NO_PERMISSION_REQUIRED` just because
   // the rows happen to be the caller's.
   [routeKey("GET", "/api/v1/my-clients"), "party:read" as const],
+
+  // Gate 4's grants (G3.4). The READS carry the same permission as the writes,
+  // deliberately: this list names a client's own people and what each of them
+  // may see, which is not a fact the whole firm needs and is exactly what
+  // somebody probing would want. `party:read` would have handed it to every
+  // associate.
+  [routeKey("GET", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
+  [routeKey("GET", "/api/v1/portal-access/memberships/{membershipId}/scope"), "portal:grant" as const],
+  [routeKey("GET", "/api/v1/portal-access/clients/{partyId}"), "portal:grant" as const],
+  [routeKey("POST", "/api/v1/portal-access/memberships/{membershipId}"), "portal:grant" as const],
+  [routeKey("POST", "/api/v1/portal-access/grants/{grantId}/end"), "portal:grant" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],
