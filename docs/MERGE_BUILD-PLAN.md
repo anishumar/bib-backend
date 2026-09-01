@@ -41,7 +41,7 @@ Two senior devs, full-time, Claude-assisted, **full-stack incl. both UIs**. Rang
 | Milestone | What it includes | Estimate |
 |---|---|---|
 | **Demoable core** | Spine + engine end-to-end + 1 service pack + workspace UI; agents stubbed (humans in loop) | **10–14 weeks** |
-| **Sellable V1** | + billing, obligations, 2–3 service packs, core agents, both UIs at MVP, integrations as fakes | **5–7 months** |
+| **Sellable V1** | + billing, obligations, 2–3 service packs, **client portal + the Chaser**, both UIs at MVP, integrations as fakes — **agents still stubbed** (reordered 2026-09-01) | **5–7 months** |
 | **Full BiB** | All 11 flows, all 11 agents, all 6 service packs, both UIs polished, real integrations | **9–13 months** |
 
 **The wildcard is P11 (real integrations).** MCA / GST / GSP / TRACES / banking are
@@ -66,6 +66,13 @@ two interfaces first (T1.1, T2.5), then the lanes run parallel with minimal coll
   frontend app is scaffolded in Phase 1 (T1.8) and the staff workspace (U2) grows
   vertically alongside each module from ~week 4. Phase 6 is the **client portal + polish**,
   not the start of UI.
+- **THE CLIENT SIDE IS `(B)`'s, WHOLE (2026-09-01).** The portal is not a screen bolted onto
+  somebody else's module — it is a second AUDIENCE over the same records, with its own access
+  gate (Gate 4), its own identity model, and its own chasing loop. Splitting it across two
+  lanes would split that gate across two heads, which is the one place in this product where
+  that is unaffordable. So `T6.5`, `T6.6`, `T6.7`, the Gate 4 half of `G3.4`, and `T4.4` (the
+  Chaser that gives the portal something to ask for) are all `(B)`. `(A)` continues on the
+  commercial lane and the two U2 screens still open there (`T6.2`, `T6.3`).
 
 ## Dependency spine
 
@@ -79,14 +86,33 @@ Phase 2  Commercial (A): leads→proposals→EL→spawn   ∥   Engine (B): conf
    ↓                                    ┌─────────────────────────────────────────────┐
 Phase 3  Close loop: work+obligations (B) · billing+docs+dashboards (A)               │
    ↓                                    │  U2 (staff workspace) grows vertically here  │
-Phase 4  Agents A1–A11 (split A/B) — layered on the runtime, guardrails first         │  — each module ships its screen when its  │
+Phase 6  CLIENT PORTAL (U1) + the Chaser (T4.4) — (B) owns the whole client side      │  — each module ships its screen when its  │
    ↓                                    │  API stabilizes (~week 4 onward)             │
-Phase 5  Service packs S1–S6 (config + connectors, parallelized)                      └─────────────────────────────────────────────┘
+Phase 4  Agents A1–A11 (split A/B) — layered on the runtime, guardrails first         └─────────────────────────────────────────────┘
    ↓
-Phase 6  Client portal (U1) + cross-app polish — NOT the start of UI
+Phase 5  Service packs S1–S6 (config + connectors, parallelized)
    ↓
 Phase 7  Real integrations P11 — external-gated, its own track
 ```
+
+> **THE ORDER CHANGED (2026-09-01): PHASE 6 RUNS BEFORE PHASE 4.** Decision by Shrestha, and
+> the reason is what the firm is actually paying people to do today. Everything Phase 3 built
+> makes the FIRM's own work visible; not one line of it reduces the hours the firm spends
+> **chasing its clients** for documents, answers and approvals — which at a CA firm is where
+> the manual time goes, and is what every competitor in this market leads with. The portal
+> plus `T4.4` (the Chaser) closes that loop. Agents are the bigger technical bet and they get
+> better inputs after a portal exists: a client who uploads through a portal produces the
+> clean, attributed documents that A1 Intake and A6 Validation want, and a firm with no
+> portal feeds those agents mailbox attachments.
+>
+> **`T4.4` moves INTO Phase 6 and keeps its id** — ids on this board are stable and a task
+> that changes number is a task nobody can find in a commit message. Its line now sits in the
+> Phase 6 block; Phase 4 keeps a pointer where it used to be.
+>
+> Milestones move with the phases: **M5 (Sellable V1) is now reached at the end of Phase 6
+> with agents still stubbed**, and **M4 (the autonomy loop) after Phase 4**. That is the
+> honest order — a sellable V1 that chases clients and has humans in the loop is a product;
+> a set of agents with no client-facing surface is not.
 
 ---
 
@@ -1843,7 +1869,7 @@ open and are recorded above; neither blocks Phase 2.
   > Gate: `npm run check` 421 tests · `test:integration` 105 · `smoke` **125 passed, 0 failed**.
   >
   > **CORRECTION, and it matters because the first version of this note sent somebody to the wrong place.** This entry originally recorded 38 failing smoke checks in sections 7–9 (leads, proposals, engagement letters) as pre-existing breakage in `(A)`'s lane. **That was wrong. Nothing was broken in either lane.** The smoke script fed `python3` a `mktemp -d` path, and on Windows the `python3` on PATH is native Windows Python, which cannot resolve `/tmp/tmp.XXXX` and raises FileNotFoundError. `$LID` came back empty, every later URL became `/api/v1/leads//stage`, no route matched, and thirty-eight checks reported **403** — which reads exactly like a missing permission and sent the investigation into the authorization code twice. Fixed by passing JSON to python on stdin or as argv, never as a filename; the reasoning sits beside `J=$(mktemp -d)` so the next person does not rediscover it. **`(A)` should not spend any time on those 38.**
-- [ ] `(A)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
+- [ ] `(B)` **G3.4** **`membership.party_id` — the login-to-person link.** ~~*Acc: "escalate to this assignee's manager" resolves through the org chart.*~~ **→ Gate 4 (record-scope), and it moves to Phase 6 with U1.** — **§4.3.** On `membership` and not `user_account`, because `party` is tenant-scoped and `user_account` deliberately is not: the same human may hold logins at two firms and is a different party in each. Nullable both ways — a portal user is not staff, and most of a firm has a place in the chart and no login.
   > **CORRECTED (2026-08-30), and the correction is that this task's ACCEPTANCE IS ALREADY MET
   > by somebody else's work.** The line above was written when the escalation ladder was the
   > reason to pull this forward from U1. **T2.9 built the org chart a different way and it
@@ -1868,6 +1894,15 @@ open and are recorded above; neither blocks Phase 2.
   > login* — which is what lets a portal contact be scoped to their own company's records, and
   > what would let the firm's org chart include the majority of a firm who have a place in it
   > and no login at all. Different questions.
+  >
+  > **REASSIGNED TO `(B)` (2026-09-01), with the phase order change.** The gap-ownership rule
+  > on this board says a gap belongs to whoever built the module — and what is left of this
+  > task is not the `membership` column, it is **Gate 4**, whose only consumer is the portal
+  > `(B)` now owns end to end. The gate and the screens it protects belong in one head. It is
+  > also `(B)`'s territory by history: `membership` has taken its last three columns from that
+  > lane (grade in G3.3, `reports_to_user_id` in T2.9, the fee flag in T1.6). **It is the
+  > FIRST thing in Phase 6** — every portal read is refused or allowed by it, and building the
+  > screens first would mean writing every query twice.
 
 - [x] `(B)` **T3.1** **Work items**: `work_item` + `checklist_item` + `work_item_dependency` + `work_item_approval`; states/priorities as **rows not enums**. *Acc: a filing arrives pre-assigned to the client's Dept SPOC.*
   > **Done (2026-08-30). Migrations 0050 (the vocabulary) and 0051 (the work).** Both blockers
@@ -1978,6 +2013,31 @@ open and are recorded above; neither blocks Phase 2.
   > **Two things the screen found that the types were happy with:** the Owner fact printed the
   > assignment note AND the callout below repeated it verbatim, and a two-word state name
   > wrapped inside its pill and rendered as a broken circle. Both fixed.
+  >
+  > ── **THE REVIEW QUEUE HAD NO SCREEN** (found 2026-08-31, by using it) ──
+  >
+  > `GET /api/v1/work-item-checks` shipped with this task and had ONE caller for five months: a
+  > banner on `/work-items` linking to `checks[0]`. With two tasks pending there was no way to
+  > reach the second — a partner submitted a task and, signed in as somebody else, no screen
+  > listed it. This is the "write with no read" shape CLAUDE.md warns about, one step along:
+  > the read existed and nothing rendered it.
+  >
+  > **`/work-items` has a fifth tab, "To check"** — the Escalated tab's precedent, because a
+  > check is a different KIND of row from a task, so it gets its own renderer and the
+  > Board/List toggle is hidden while it is open. The WHOLE firm's queue, oldest first, no due
+  > date anywhere. Approve and Send back are on the ROW (the note field opens inline, because
+  > the API refuses a rejection without one), and the maker gets the SENTENCE instead of the
+  > buttons. The banner now opens the tab and says how many of the queue are the reader's own.
+  >
+  > **The API gained the verdict rather than the screen joining per row.** `viewer: { eligible,
+  > reason }` on every queue row, roster resolved once — the arrangement T2.9's `/api/v1/checks`
+  > already had, and the alternative was `/checkers` per row, which is the per-row join this
+  > codebase has been caught by five times and answers for the whole roster when a row needs one
+  > person. `reason` is the SENTENCE and not a code, because this module's `/checkers` already
+  > returns prose and one refusal must not be worded two ways.
+  >
+  > Gate: `npm run check` **1394 tests** (2 new over the queue's verdict) · `demo:verify`
+  > **71/71** · walked as maker and checker.
   >
   > Gate: `npm run check` **1172 tests** · `test:integration` **382** (27 new, real Postgres) ·
   > `npm run smoke` **253/253** · every screen opened in the browser.
@@ -2776,6 +2836,10 @@ open and are recorded above; neither blocks Phase 2.
 
 ## Phase 4 · Agents A1–A11  (~5–7 weeks) — guardrails first, then capabilities
 
+> **THIS PHASE NOW RUNS AFTER PHASE 6** (decided 2026-09-01 — see the dependency spine for
+> the reasoning). **`T4.4` (A8 Chaser) has moved into Phase 6** and keeps its id; its line
+> lives in the U1 block. Nothing else here moved.
+
 Runtime guardrails (from T2.8) must hold for **all**: never commit above tier · never
 contact a regulator autonomously · never invent data (flag, don't fill) · every action →
 P7 with confidence · can't approve own output.
@@ -2783,7 +2847,7 @@ P7 with confidence · can't approve own output.
 - [ ] `(B)` **T4.1** **A4 Computation** (deterministic, code not LLM): GST/TDS/payroll/challans, reproducible. *Acc: recompute delta = 0.*
 - [ ] `(B)` **T4.2** **A7 Reconciliation**: ledger↔books, payment↔invoice matching. *Acc: no force-match; unmatched ages into a queue.*
 - [ ] `(B)` **T4.3** **A3 Rule-Match**: facts → section/rate/form/due-date from **versioned** rule pack + confidence. *Acc: refuses to answer outside its pack version.*
-- [ ] `(B)` **T4.4** **A8 Chaser**: reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
+- → `(B)` **T4.4** **A8 Chaser** — **MOVED TO PHASE 6**, where the portal it asks through is built. Same id, same acceptance; the line is in the U1 block.
 - [x] `(B)` **T4.5** **A9 Monitor** (no human trigger): SLA timers, T–X countdowns, stale items, reassignment triggers. *Acc: alerts + spawns tasks only, never acts itself.*
   > **Done (2026-08-31). Migration 0058.** Gates on the merged tree: `check` **1391** ·
   > `notice.integration` **6/6** · `worker:once` climbed **14 rungs at a seeded firm, 7 of them
@@ -2928,7 +2992,7 @@ P7 with confidence · can't approve own output.
 - [ ] `(A)` **T4.10** **A6 Validation**: completeness, cross-checks vs books/prior periods, anomaly scan. *Acc: flags only, never fixes.*
 - [ ] `(A)` **T4.11** **A11 Context Writer** (pgvector RAG): approved positions/outcomes → per-client context, **hard tenancy wall**. *Acc: cross-client retrieval is impossible (RLS-filtered vector search).*
 
-**Milestone M4:** the confidence-routed autonomy loop works — agents draft, machines check, humans approve, everything scored and logged.
+**Milestone M4 (now AFTER M5, with the phase reorder):** the confidence-routed autonomy loop works — agents draft, machines check, humans approve, everything scored and logged.
 
 ---
 
@@ -2946,7 +3010,16 @@ They parallelize heavily because the engine already exists.
 
 ---
 
-## Phase 6 · Client portal (U1) + polish  (~4–6 weeks)
+## Phase 6 · Client portal (U1) + the Chaser  (~4–6 weeks) — **THIS IS NEXT, BEFORE PHASE 4**
+
+> **Reordered 2026-09-01, and `(B)` owns the whole of it.** Phase 3 made the FIRM's work
+> visible; it did nothing about the hours the firm spends chasing its own clients, which is
+> where the manual time at a CA firm actually goes. This phase closes that loop, and `T4.4`
+> (the Chaser) comes with it — a portal with nothing asking through it is a filing cabinet,
+> and a chaser with no portal is email. Reasoning in full on the dependency spine.
+>
+> **`M5 (Sellable V1)` is reached at the END of this phase**, with agents still stubbed and
+> humans in the loop. `M4` moves to the end of Phase 4.
 
 **UI does NOT start here.** The staff workspace (U2) is built **vertically from ~week 4** —
 each dev skins their own modules as the API stabilizes (the T6.1–T6.4 tasks below land during
@@ -3164,12 +3237,36 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   > **The screen was walked too** — see T6.1's note, which records the whole pass and the five
   > faults it found.
 
-### U1 · Client portal (client) — the real Phase 6 work
-- [ ] `(A)` **T6.5** Invite + secure login, per-contact roles, status home.
-- [ ] `(A)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals.
-- [ ] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest.
+### U1 · Client portal (client) — the real Phase 6 work, and **all of it is `(B)`'s**
 
-**Milestone M5 (Sellable V1):** both UIs at MVP over the full backend, 2–3 service packs live, core agents on, integrations faked.
+**Order matters here and it is not the numbering.** `G3.4` first (nothing may be read by a
+portal session until the gate exists), then `T6.5` (who is looking), then `T6.6` and `T4.4`
+together (what is asked for, and who does the asking), then `T6.7`.
+
+- [ ] `(B)` **G3.4** **Gate 4 — record-scope.** `membership.party_id`, and the rule that a portal session sees its OWN company's records and nothing else. *Acc: a portal login cannot read another client's anything, proven by a test that tries.* — full entry in Phase 3; **do this before any portal screen**, or every query gets written twice.
+- [ ] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
+- [ ] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
+- [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
+  > **Why it is in this phase.** It is the only thing on the board that reduces the firm's own
+  > chasing hours, and it has no honest surface without the portal — a reminder that points at
+  > an email thread is the thing every firm already does badly. The ladder shape is already
+  > proven: `T4.5`'s escalation ladder (0058) is the same mechanism aimed INWARD (the firm
+  > hears that its own work went quiet), and this is it aimed OUTWARD at a client. Reuse it —
+  > rungs, thresholds copied onto the row, and **nothing set by default**, because a chasing
+  > cadence this product invented is one the firm never agreed to and the client feels.
+  >
+  > **Two hard limits, stated now rather than discovered:** it never contacts anybody outside
+  > a channel the firm configured (P10 transport, Phase 7 — until then it raises the ask and
+  > the portal shows it), and it **stops on escalation freeze** so a client already in a
+  > dispute is not being auto-chased while a partner is negotiating.
+- [ ] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest. *Acc: a client finds last year's challan without emailing anyone.*
+
+**Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over
+the full backend, the client-facing loop closed (portal + chaser), integrations faked, **and
+agents still stubbed with humans in the loop**. Stated that way deliberately: the earlier
+wording said "core agents on", which was true when this phase ran after Phase 4 and is not
+true now. A V1 that chases clients and keeps a human on every decision is sellable; the
+agents raise the margin on it, they do not create it.
 
 ---
 
