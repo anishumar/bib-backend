@@ -154,6 +154,32 @@ export class PostgresPortalAccessRepository
     return rows.map(toAccess);
   }
 
+  /** The session's own read. Keyed on the PERSON and the audience, because that
+   *  is what a portal request carries — see the port for why the membership id
+   *  is not on the principal. */
+  async listForPortalUser(
+    tenantId: string,
+    userId: string,
+  ): Promise<readonly PortalAccessRecord[]> {
+    return this.records(
+      tenantId,
+      async (db) => db<AccessRecordRow[]>`
+        SELECT pa.id, pa.tenant_id, pa.membership_id, pa.client_party_id,
+               pa.valid_from::text AS valid_from, pa.valid_to::text AS valid_to, pa.granted_by,
+               p.display_name AS client_name,
+               contact.email AS contact_email, contact.display_name AS contact_display_name,
+               granter.email AS granted_by_email, granter.display_name AS granted_by_display_name
+          FROM crm.portal_access pa
+          JOIN tenancy.membership m  ON m.id = pa.membership_id   AND m.tenant_id = pa.tenant_id
+          JOIN core.party p          ON p.id = pa.client_party_id AND p.tenant_id = pa.tenant_id
+          JOIN tenancy.user_account contact ON contact.id = m.user_id
+          LEFT JOIN tenancy.user_account granter ON granter.id = pa.granted_by
+         WHERE m.user_id = ${userId} AND m.audience = 'CLIENT_PORTAL' AND m.is_active
+         ORDER BY p.display_name ASC
+      `,
+    );
+  }
+
   async findById(tenantId: string, grantId: string): Promise<PortalAccess | null> {
     const rows = await withTenant(
       this.app,

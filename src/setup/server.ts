@@ -736,6 +736,9 @@ export function wire(cfg: Config, log: Logger): Wired {
           // So /auth/me can say what the firm is CALLED, not only which uuid it
           // is. Every screen reads its identity from that one response.
           tenancy,
+          // And so a CLIENT PORTAL session is told which companies it may read
+          // (gate 4). Staff sessions never reach that branch.
+          portalAccess,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
         },

@@ -48,6 +48,24 @@ export interface PortalAccessRepository {
    */
   listGrants(tenantId: string, membershipId: string): Promise<readonly PortalAccess[]>;
 
+  /**
+   * The grants behind a SESSION, found by the person rather than the membership.
+   *
+   * A portal request carries a `Principal`, which names the user and the
+   * audience and NOT the membership row — and adding `membershipId` to the
+   * principal would ripple through identity, the resolver and every test that
+   * builds one, to buy an id this join already has. The join states the rule
+   * instead: `user_id = ? AND audience = 'CLIENT_PORTAL'`, which is exactly the
+   * membership a portal session is acting under. Somebody who is both a
+   * colleague and a contact of their own company has two memberships at this
+   * firm, and only one of them is this.
+   *
+   * Records rather than rows, because the one caller — `/auth/me` — has to be
+   * able to say WHICH companies, by name, and a second lookup per id is the
+   * per-row join this codebase keeps being caught by.
+   */
+  listForPortalUser(tenantId: string, userId: string): Promise<readonly PortalAccessRecord[]>;
+
   findById(tenantId: string, grantId: string): Promise<PortalAccess | null>;
 
   create(row: NewPortalAccess): Promise<PortalAccess>;

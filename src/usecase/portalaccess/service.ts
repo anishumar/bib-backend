@@ -119,6 +119,33 @@ export class PortalAccessService {
     return scopeOn(membershipId, grants, day);
   }
 
+  /**
+   * The companies a PORTAL SESSION may read today, by name.
+   *
+   * `/auth/me`'s read, and the reason it returns names rather than the ids
+   * `scopeFor` gives: the portal's own screens have to be able to say "you are
+   * looking at Cobalt Foods", and a session that resolved four ids would then
+   * look each one up — the per-row join this codebase has been caught by
+   * repeatedly.
+   *
+   * Empty is a real answer, and the portal must render it as one: a contact who
+   * has been invited and granted nothing sees a screen that says so, never a
+   * blank one and never everything.
+   */
+  async scopedClientsForUser(
+    tenantId: string,
+    userId: string,
+    on?: string,
+  ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]> {
+    const day = on ?? this.today();
+    const held = await this.deps.grants.listForPortalUser(tenantId, userId);
+    const seen = new Map<string, string>();
+    for (const row of held) {
+      if (isInForceOn(row.access, day)) seen.set(row.access.clientPartyId, row.clientName);
+    }
+    return [...seen].map(([clientPartyId, clientName]) => ({ clientPartyId, clientName }));
+  }
+
   // ── writing ──────────────────────────────────────────────────────────────
 
   /**

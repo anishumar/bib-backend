@@ -67,6 +67,20 @@ export class FakePortalAccessRepo implements PortalAccessRepository {
     );
   }
 
+  /** membershipId → the userId behind it, so the session read can be modelled
+   *  the way the join actually behaves. */
+  readonly membershipUsers = new Map<string, string>();
+
+  listForPortalUser(tenantId: string, userId: string): Promise<readonly PortalAccessRecord[]> {
+    return Promise.resolve(
+      this.rows
+        .filter(
+          (r) => r.tenantId === tenantId && this.membershipUsers.get(r.membershipId) === userId,
+        )
+        .map((r) => this.record(r)),
+    );
+  }
+
   findById(tenantId: string, grantId: string): Promise<PortalAccess | null> {
     return Promise.resolve(
       this.rows.find((r) => r.tenantId === tenantId && r.id === grantId) ?? null,

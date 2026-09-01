@@ -17,6 +17,7 @@ import type { Principal } from "../../platform/callctx";
 import { SESSION_TTL_DAYS } from "../../domain/identity/model";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
 import type { TenancyService } from "../../usecase/tenancy/service";
+import type { PortalAccessService } from "../../usecase/portalaccess/service";
 import { tokenFrom } from "../principal";
 
 export interface AuthDeps {
@@ -34,6 +35,16 @@ export interface AuthDeps {
    * reads its identity from this one response.
    */
   readonly tenancy: TenancyService;
+  /**
+   * So a CLIENT PORTAL session can be told WHICH companies it is looking at.
+   *
+   * Gate 4 decides what a portal session may read; this is the session being
+   * told the answer, which is a different thing and is needed for the portal to
+   * render at all — a screen that cannot name the company it is showing is one
+   * where a contact for two group companies cannot tell which set of filings is
+   * on the page. Staff sessions never touch it.
+   */
+  readonly portalAccess: PortalAccessService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
 }
@@ -79,6 +90,18 @@ const PrincipalSchema = z
     /** Null until an org is chosen — a session can belong to several firms. */
     role: z.string().nullable(),
     commercialVisibility: z.boolean().nullable(),
+    portalScope: z
+      .array(z.object({ clientPartyId: z.string().uuid(), clientName: z.string() }))
+      .nullable()
+      .openapi({
+        description:
+          "For a CLIENT_PORTAL session: the companies this login may read TODAY, by name — " +
+          "gate 4's answer, resolved once here rather than looked up per screen. NULL for a " +
+          "staff session, which is not scoped this way at all, and an EMPTY ARRAY for a " +
+          "portal contact who has been invited and granted nothing. Those two are different " +
+          "facts and the portal must not render them the same way: null is 'this question " +
+          "does not apply', empty is 'nothing yet, ask the firm'.",
+      }),
     /** What this caller may do, so a screen can offer only what will work.
      *  What it HOLDS, never the vocabulary it does not — the full set is
      *  GET /api/v1/config/permissions, behind config:read. */
@@ -261,11 +284,18 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     // Only when there IS a firm. A session that has not chosen one has nothing
     // to look up, and asking anyway would be a query per call on every screen
     // of the one flow where the answer is known to be null.
-    const [names, account] = await Promise.all([
+    // The portal scope is asked for ONLY on a portal session with a firm chosen.
+    // A staff session is not scoped this way at all, and paying a query per
+    // screen load for a null would be the per-request cost this response is
+    // careful about everywhere else.
+    const [names, account, portalScope] = await Promise.all([
       principal.tenantId === null
         ? Promise.resolve(null)
         : deps.tenancy.tenantNames([principal.tenantId]),
       deps.tenancy.account(principal.userId),
+      principal.tenantId !== null && principal.audience === "CLIENT_PORTAL"
+        ? deps.portalAccess.scopedClientsForUser(principal.tenantId, principal.userId)
+        : Promise.resolve(null),
     ]);
     return {
       userId: principal.userId,
@@ -279,6 +309,9 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       role: principal.role,
       commercialVisibility: principal.commercialVisibility,
       permissions: [...(await deps.authz.permissionsOf(principal))],
+      // Null and [] mean different things — see the schema. Spread because the
+      // service returns a readonly list and the wire type is mutable.
+      portalScope: portalScope === null ? null : [...portalScope],
     };
   };
 

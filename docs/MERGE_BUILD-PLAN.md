@@ -3301,7 +3301,31 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > Cobalt contact the group's filings. No default and no widening: a contact who should see
   > four companies gets four rows. Whether a group's contact SHOULD see all four is a client
   > fact nobody has been asked (G0.1), and a join would have answered it for them.
-- [ ] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
+- [~] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
+  > **STARTED 2026-09-01 — the SESSION is scoped now, which is the block everything else sits
+  > on.** `/auth/me` carries `portalScope` for a CLIENT_PORTAL session: the companies it may
+  > read TODAY, **by name**, resolved once here rather than looked up per screen. NULL for a
+  > staff session and an EMPTY ARRAY for a contact who has been invited and granted nothing —
+  > two different facts, and the portal must not draw them the same way ("does not apply"
+  > versus "nothing yet, ask the firm").
+  >
+  > It resolves by USER and audience rather than by membership id, because a portal request
+  > carries a principal that names neither the membership row nor anything but the audience —
+  > and putting `membershipId` on the principal would ripple through identity, the resolver
+  > and every test that builds one, to buy an id the join already has.
+  >
+  > Walked end to end against the seeded firm as the real portal contact
+  > (`meera@cobaltfoods.in`): no grant → `[]`, granted → `["Cobalt Foods Private Limited"]`,
+  > staff session → `null`, access removed → `[]` on the very next call, and `/work-items`
+  > still **403** because gate 2 refuses the staff surface before any of this is consulted.
+  >
+  > **Left, in the order it has to happen:** the portal's own read routes (`PORTAL_PATHS` +
+  > `withPortal`, one per screen, each with its own RESTRICTIVE policy on the table it
+  > reads) · the STATUS HOME those routes feed · **invite + password set**, which is the one
+  > that needs a decision rather than code: today a login can only be created through
+  > `/internal` with a platform key, so a firm cannot invite its own client's contact from
+  > the product at all · per-contact roles, which CLAUDE.md already records as needing a
+  > role that declares its audience, and a migration.
 - [ ] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
 - [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
   > **Why it is in this phase.** It is the only thing on the board that reduces the firm's own

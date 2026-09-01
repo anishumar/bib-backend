@@ -391,6 +391,14 @@ function deps(): RouterDeps {
       }),
       // /auth/me names the caller's FIRM, not only its uuid.
       tenancy: new TenancyService(fakes),
+      portalAccess: new PortalAccessService({
+        grants: new FakePortalAccessRepo(),
+        memberships: new FakePortalMemberships(),
+        clients: new FakePortalClients(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+        events: new RecordingEventSink(),
+      }),
       cookieName: "bib_session",
       cookieSecure: false,
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
