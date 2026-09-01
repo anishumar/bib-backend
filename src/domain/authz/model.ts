@@ -30,6 +30,7 @@ export type Permission =
   | "work:write"
   | "obligation:resolve"
   | "portal:grant"
+  | "portal:respond"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -41,6 +42,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "work:write",
   "obligation:resolve",
   "portal:grant",
+  "portal:respond",
   "tenant:admin",
 ];
 
@@ -80,6 +82,14 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "away again. Its own permission because it hands somebody OUTSIDE the firm a view of the " +
     "firm's work: it is not administering the firm, and it is not the ordinary act of doing " +
     "the work. One client at a time, always, so who decided each is answerable.",
+  "portal:respond":
+    "Answer the firm on a client's behalf — upload a file it asked for, reply to a question, " +
+    "approve or decline something. THE ONLY PERMISSION IN THIS PRODUCT HELD BY SOMEBODY " +
+    "OUTSIDE THE FIRM, which is why it is the first one whose role declares an audience: it " +
+    "is meaningless on a colleague and it must not be grantable to one by putting it on a " +
+    "staff role. A contact WITHOUT it still sees everything their company's portal shows — " +
+    "reading is authorised by the grant itself (crm.portal_access), not by a permission — " +
+    "and simply cannot act. That is the difference between the two portal roles.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -99,7 +109,45 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
 export const ADMIN_PERMISSION: Permission = "tenant:admin";
 
 /**
- * The four roles a firm STARTS with — seed data, not the runtime answer.
+ * WHICH SURFACE A ROLE IS WRITTEN FOR (T6.6).
+ *
+ * The same two words as `tenancy.membership.audience`, and the same meaning:
+ * STAFF is the firm's workspace, CLIENT_PORTAL is the client's.
+ *
+ * ── WHY A ROLE HAS TO DECLARE ONE, AND WHY ONLY NOW ─────────────────────
+ *
+ * Until T6.6 no portal route needed a permission, so `AuthzService.permissionsOf`
+ * could return `[]` for every portal session and be exactly right — gate 2
+ * admits a portal session only to `PORTAL_PATHS`, and none of those needed one.
+ * That was arithmetic, not policy, and it was documented as arithmetic:
+ * `tests/api/portal-permissions.test.ts` was written to go red the day it
+ * stopped being true.
+ *
+ * `portal:respond` is that day. It is the first permission a portal session can
+ * actually USE, and the blanket empty would now be a lie in the other direction:
+ * a portal screen would be told it may do nothing and would offer nothing that
+ * works. But simply removing the blanket is worse, because nothing refuses a
+ * STAFF role on a portal membership — `manager` on a CLIENT_PORTAL login is
+ * accepted today — and the reverse is just as true: a firm could put
+ * `portal:respond` on `associate` and hand a colleague a permission that only
+ * means anything outside the firm.
+ *
+ * So a role says which audience it is for, and a role written for the other one
+ * grants NOTHING. That is the honest fix CLAUDE.md has been pointing at since
+ * the gate was built, and it makes the two questions independent: `audience` on
+ * the MEMBERSHIP is which app you are in, `audience` on the ROLE is which app
+ * this list of permissions was written for, and they have to agree.
+ */
+export type RoleAudience = "STAFF" | "CLIENT_PORTAL";
+
+export const ROLE_AUDIENCES: readonly RoleAudience[] = ["STAFF", "CLIENT_PORTAL"];
+
+export function isRoleAudience(v: string): v is RoleAudience {
+  return (ROLE_AUDIENCES as readonly string[]).includes(v);
+}
+
+/**
+ * The FIVE roles a firm STARTS with — seed data, not the runtime answer.
  *
  * Since T2.5 the live role matrix is config rows (kind `role`) that the firm
  * owns and can edit, read through the `PermissionSource` port. This table is
@@ -109,12 +157,24 @@ export const ADMIN_PERMISSION: Permission = "tenant:admin";
  * lock out every role it had not yet redefined. See the note in
  * migrations/0005_config.up.sql for both failure modes.
  *
- * migrations/0005 seeds the same four for the firms that existed before it, and
- * tests/config/seed-parity.test.ts fails if the two ever drift.
+ * migrations/0005 seeded the first four for the firms that existed before it,
+ * 0064 carries this version to them, and tests/config/seed-parity.test.ts fails
+ * if the newest seed and this table ever drift.
  */
 export interface RoleDefinition {
   /** What a person sees in the org chart. The firm may rename it. */
   readonly label: string;
+  /**
+   * Which surface this role is for. OPTIONAL, and absent means STAFF.
+   *
+   * Optional because a published config version is FROZEN: every role row every
+   * firm already holds was written before this field existed, and `unknownFields`
+   * rejects a body's unknown keys at the WRITE, so those rows cannot be amended
+   * in place. Reading an absent `audience` as STAFF is right for all four of
+   * them — including `client_contact`, whose permission list was empty, so it
+   * granted nothing either way.
+   */
+  readonly audience?: RoleAudience;
   readonly permissions: readonly Permission[];
 }
 
@@ -145,15 +205,63 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
     label: "Associate",
     permissions: ["party:read", "party:write", "config:read", "work:write"],
   },
-  // A client's own contact. Holds nothing on the staff surface — the audience
-  // gate already refuses them, and this is the second, independent answer.
-  client_contact: { label: "Client contact", permissions: [] },
+  // ── THE TWO PORTAL ROLES (T6.6) ───────────────────────────────────────
+  //
+  // The board's line — "this contact may upload, that one may only look" — and
+  // the whole reason a role now declares an audience. Both hold NOTHING on the
+  // staff surface, and that is now two independent answers rather than one:
+  // gate 2 refuses every staff route to a portal session, and a CLIENT_PORTAL
+  // role carries no staff permission for it to refuse.
+  //
+  // READING IS NOT A PERMISSION EITHER WAY. Being invited and being granted a
+  // company IS the authorisation to read that company's status — a row somebody
+  // wrote, with a granter, a date and a ledger event (`crm.portal_access`), and
+  // gate 4 enforces it. So `client_viewer` with no permissions at all is a
+  // contact who sees the whole portal and cannot act, which is exactly what a
+  // read-only contact should be.
+
+  // The default a portal invite assigns, and it stays the default: every
+  // contact invited before T6.6 holds this role, and giving it nothing would
+  // take away an ability they were about to be given rather than granting one.
+  client_contact: {
+    label: "Client contact",
+    audience: "CLIENT_PORTAL",
+    permissions: ["portal:respond"],
+  },
+  // For a contact the firm wants to keep informed and not to hear from — an
+  // investor, a bank, a director who is not the one who sends the registers.
+  client_viewer: {
+    label: "Client contact (read only)",
+    audience: "CLIENT_PORTAL",
+    permissions: [],
+  },
 };
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
 
 export function grants(held: readonly Permission[], needed: Permission): boolean {
   return held.includes(needed);
+}
+
+/**
+ * Whether a role written for one audience may be used by a session in another.
+ *
+ * It may not, in either direction, and the symmetry is deliberate. A STAFF role
+ * on a portal membership granting nothing is the obvious half. The other half
+ * matters more: `portal:respond` on `associate` would be a firm handing a
+ * colleague a permission that only means something outside the firm, and the
+ * portal handlers refuse a staff session anyway — so it would show up on
+ * `/auth/me` and work nowhere, which is the exact 403-by-surprise
+ * `permissionsOf` exists to prevent.
+ *
+ * An absent role audience reads as STAFF — see `RoleDefinition.audience` for why
+ * it has to be optional.
+ */
+export function roleServes(
+  roleAudience: RoleAudience | undefined,
+  sessionAudience: string | null,
+): boolean {
+  return (roleAudience ?? "STAFF") === (sessionAudience ?? "STAFF");
 }
 
 /**

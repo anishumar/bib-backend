@@ -28,7 +28,7 @@ import type {
 } from "../usecase/verification/ports";
 import type { FakeJobStepRepo } from "./orchestrator";
 import type { Permission } from "../domain/authz/model";
-import type { PermissionSource } from "../usecase/authz/ports";
+import type { PermissionSource, StoredRole } from "../usecase/authz/ports";
 
 export class FakeStepApprovalRepo implements StepApprovalRepository {
   readonly rows: StepApproval[] = [];
@@ -209,6 +209,17 @@ export class FakeWorkPermissions implements PermissionSource {
 
   permissionsFor(_tenantId: string, role: string): Promise<readonly Permission[]> {
     return Promise.resolve(this.denied.has(role) ? ["party:read"] : ["party:read", "work:write"]);
+  }
+
+  /** Every role this fake knows about is a STAFF role: it exists to answer "may
+   *  this colleague check somebody's work", which is a question about the firm's
+   *  own people. A portal audience here would be a fixture describing a
+   *  situation that cannot arise. */
+  roleFor(tenantId: string, role: string): Promise<StoredRole | null> {
+    return this.permissionsFor(tenantId, role).then((permissions) => ({
+      audience: "STAFF" as const,
+      permissions,
+    }));
   }
 
   knownRoles(_tenantId: string): Promise<readonly string[]> {

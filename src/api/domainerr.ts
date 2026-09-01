@@ -11,6 +11,7 @@ import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { PortalAccessError } from "../domain/portalaccess/errors";
+import { ClientAskError } from "../domain/clientask/errors";
 import { WorkItemError } from "../domain/workitem/errors";
 import { ObligationError } from "../domain/obligation/errors";
 import { OrchestratorError } from "../domain/orchestrator/errors";
@@ -361,6 +362,28 @@ export function mapError(err: unknown): MappedError {
         return unmapped(err.code);
     }
   }
+  if (err instanceof ClientAskError) {
+    switch (err.code) {
+      case "INVALID_ASK_PROMPT":
+      case "INVALID_ASK_KIND":
+      case "ASK_DOCUMENT_KIND_MISMATCH":
+      case "ASK_DECISION_NOT_WANTED":
+      case "ASK_ANSWER_EMPTY":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 404 AND NOT 403 FOR AN ASK THIS SESSION MAY NOT REACH. The row was
+      // filtered by gate 4 in the database, so the service genuinely cannot tell
+      // "no such ask" from "another client's ask" — and a 403 would confirm one
+      // exists, which is the enumeration the policy was written to prevent.
+      case "ASK_NOT_FOUND":
+      case "ASK_WORK_ITEM_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "ASK_ALREADY_SETTLED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
   if (err instanceof PortalAccessError) {
     switch (err.code) {
       // Incoherent on its face — a range in force on no day at all. The caller

@@ -46,6 +46,13 @@ import { ClientAssignmentService } from "../../src/usecase/clientassignment/serv
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import { PortalInviteService } from "../../src/usecase/portalinvite/service";
 import { PortalHomeService } from "../../src/usecase/portalhome/service";
+import { ClientAskService } from "../../src/usecase/clientask/service";
+import {
+  FakeAskRepo,
+  FakeAskScope,
+  FakeAskStore,
+  FakePortalAskRepo,
+} from "../../src/testfakes/clientask";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -333,6 +340,10 @@ function deps(): RouterDeps {
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
       }),
     },
+    // T6.6's ask, both surfaces over ONE service — the wiring `setup/` uses, so
+    // this sweep exercises the same object graph the server does.
+    clientAsks: { service: askService() },
+    portalAsks: { service: askService() },
     portalInvites: {
       service: new PortalInviteService({
         identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
@@ -415,6 +426,32 @@ function deps(): RouterDeps {
       cookieSecure: false,
     },
   };
+}
+
+
+/**
+ * The client-directed ask, wired the way `setup/` wires it: one service, the
+ * firm's repository and the client's over ONE store.
+ *
+ * The fakes filter the portal scope in TypeScript, which the real adapter never
+ * does — it hands the parties to `withPortal` and lets 0063's policies filter.
+ * That is fine HERE, because this file asks who may REACH a route, not which
+ * rows come back; gate 4 is proven against real Postgres in
+ * `tests/portal/client-ask.integration.test.ts`.
+ */
+function askService(): ClientAskService {
+  const store = new FakeAskStore();
+  return new ClientAskService({
+    asks: new FakeAskRepo(store),
+    portal: new FakePortalAskRepo(store),
+    scope: new FakeAskScope(),
+    blobs: new FakeBlobStore(),
+    digest: new FakeContentDigest(),
+    ids: new FakeIds(),
+    events: new RecordingEventSink(),
+    clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+    maxUploadBytes: 10_000_000,
+  });
 }
 
 const INTERNAL_KEY = "test-internal-key-at-least-32-characters-long";

@@ -16,8 +16,8 @@ import type {
   ConfigVersion,
   PublishedEntry,
 } from "../domain/config/model";
-import { readRolePermissions, roleBodyOf } from "../domain/config/model";
-import type { PermissionSource } from "../usecase/authz/ports";
+import { readRoleAudience, readRolePermissions, roleBodyOf } from "../domain/config/model";
+import type { PermissionSource, StoredRole } from "../usecase/authz/ports";
 import type { RoleDirectory } from "../usecase/tenancy/ports";
 import type {
   ConfigRepository,
@@ -187,15 +187,26 @@ export class FakeConfigRepo implements ConfigRepository, PermissionSource, RoleD
 
   // ── PermissionSource ───────────────────────────────────────────────────────
 
-  permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]> {
+  roleFor(tenantId: string, role: string): Promise<StoredRole | null> {
     const entry = this.entries.find(
       (e) => e.tenantId === tenantId && e.kind === "role" && e.key === role,
     );
-    if (!entry) return Promise.resolve([]);
+    if (!entry) return Promise.resolve(null);
     const published = this.versions.find(
       (v) => v.entryId === entry.id && v.status === "published",
     );
-    return Promise.resolve(published ? readRolePermissions(published.body) : []);
+    if (!published) return Promise.resolve(null);
+    // Through the same two readers the Postgres adapter uses, so a role stored
+    // without an `audience` reads as STAFF here exactly as it does there — which
+    // is the behaviour every role row published before T6.6 depends on.
+    return Promise.resolve({
+      audience: readRoleAudience(published.body),
+      permissions: readRolePermissions(published.body),
+    });
+  }
+
+  async permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]> {
+    return (await this.roleFor(tenantId, role))?.permissions ?? [];
   }
 
   /** RoleDirectory's other half: which roles here carry a permission. Reads the

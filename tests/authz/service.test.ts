@@ -43,10 +43,42 @@ describe("the roles a firm starts with", () => {
     expect(DEFAULT_ROLES["associate"]?.permissions).toContain("config:read");
   });
 
-  it("gives a client contact nothing on the staff surface", () => {
+  it("gives the portal roles nothing on the staff surface", () => {
     // The audience gate already refuses them; this is the second, independent
-    // answer, so neither gate is load-bearing alone.
-    expect(DEFAULT_ROLES["client_contact"]?.permissions).toEqual([]);
+    // answer, so neither gate is load-bearing alone. Since T6.6 the second
+    // answer is stronger than "an empty list": these roles DECLARE their
+    // audience, so a staff permission on one of them would grant nothing even
+    // if a firm added it.
+    for (const key of ["client_contact", "client_viewer"]) {
+      const role = DEFAULT_ROLES[key];
+      expect(role?.audience, `${key} must be written for the portal`).toBe("CLIENT_PORTAL");
+      for (const permission of role?.permissions ?? []) {
+        expect(permission, `${key} must hold nothing that works inside the firm`).toBe(
+          "portal:respond",
+        );
+      }
+    }
+  });
+
+  it("separates the contact who may act from the one who may only look", () => {
+    // The board's own line for T6.6, asserted rather than left to a comment.
+    // `client_viewer` holding NOTHING is not an oversight: reading is authorised
+    // by the grant (`crm.portal_access`), never by a permission, so a contact
+    // with no permissions still sees their company's whole portal and simply
+    // cannot answer anything on it.
+    expect(DEFAULT_ROLES["client_contact"]?.permissions).toEqual(["portal:respond"]);
+    expect(DEFAULT_ROLES["client_viewer"]?.permissions).toEqual([]);
+  });
+
+  it("gives every staff role no portal permission, and declares no audience", () => {
+    // The other direction, which is the one that is easy to forget: an audience
+    // is absent on a staff role rather than written as "STAFF", so a firm's
+    // existing role bodies — frozen, published before T6.6 — stay byte-for-byte
+    // what they were and the upgrade migrations can still recognise them.
+    for (const key of ["partner", "manager", "associate"]) {
+      expect(DEFAULT_ROLES[key]?.audience, `${key} declares no audience`).toBeUndefined();
+      expect(DEFAULT_ROLES[key]?.permissions).not.toContain("portal:respond");
+    }
   });
 
   it("keeps the right to CHANGE configuration to the administrator", () => {

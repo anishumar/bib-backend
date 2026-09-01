@@ -31,6 +31,8 @@ import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-g
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
 import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-home-repository";
+import { PostgresClientAskRepository } from "../infrastructure/postgres/client-ask-repository";
+import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
 import { PostgresWorkItemRepository } from "../infrastructure/postgres/work-item-repository";
 import { PostgresWorkItemApprovalRepository } from "../infrastructure/postgres/work-item-approval-repository";
@@ -103,6 +105,7 @@ import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { PortalHomeService } from "../usecase/portalhome/service";
+import { ClientAskService } from "../usecase/clientask/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -683,6 +686,40 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
   });
 
+  // THE CLIENT-DIRECTED ASK (T6.6) — one service, two adapters, two scopes.
+  //
+  // `asks` is the FIRM's side under `withTenant`; `portal` is the client's under
+  // `withPortal`, and it is the SECOND adapter in this product to use it and the
+  // FIRST to write through it. The rules about an ask — a decision only answers
+  // an approval, an answered ask still accepts another answer, a closed one
+  // accepts nothing — are the same whoever is looking, so they live in one
+  // service and only the transaction the adapter opens differs.
+  //
+  // `scope` is satisfied by `PortalAccessService` again, structurally, exactly
+  // as the status home's is: the grant table is the firm's write surface and
+  // this is a client's read surface, and neither use case imports the other.
+  //
+  // `blobs` and `digest` are the SAME two objects the staff document store
+  // holds, reused rather than re-declared — they are the only ports in
+  // `usecase/filestore` that carry no tenant scoping, which is what makes them
+  // safe to share across a wall. `FileStoreService` itself is deliberately NOT
+  // wired in here: its repository writes through `withTenant`, so a portal
+  // upload routed through it would put the row naming the client outside gate 4.
+  const clientAsks = new ClientAskService({
+    asks: new PostgresClientAskRepository(pools.app),
+    portal: new PostgresPortalAskRepository(pools.app),
+    scope: {
+      scopedCompanies: (tenantId, userId, on) =>
+        portalAccess.scopedClientsForUser(tenantId, userId, on),
+    },
+    blobs,
+    digest: new Sha256ByteDigest(),
+    ids: systemIds,
+    events: ledger,
+    clock: systemClock,
+    maxUploadBytes: cfg.storage.maxUploadBytes,
+  });
+
   // The pipeline sits ON TOP of the party module rather than beside it: a lead
   // is an opportunity about a party, so capture creates prospects through
   // PartyService — which owns display-name derivation, identifier normalisation
@@ -785,6 +822,8 @@ export function wire(cfg: Config, log: Logger): Wired {
         clientAssignments: { service: clientAssignments },
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
+        clientAsks: { service: clientAsks },
+        portalAsks: { service: clientAsks },
         portalInvites: {
           service: portalAccessForInvite(),
           identity,

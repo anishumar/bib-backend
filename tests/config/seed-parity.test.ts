@@ -18,6 +18,7 @@ const MARKER = "@default-roles-seed";
 interface SeededRole {
   label: string;
   permissions: string[];
+  audience?: string;
 }
 
 /**
@@ -88,6 +89,18 @@ describe("the newest role-seed migration matches the roles the code defines", ()
   it("gives each role the same label", () => {
     for (const [key, definition] of Object.entries(DEFAULT_ROLES)) {
       expect(seeded[key]?.label, `label for ${key} in ${file}`).toBe(definition.label);
+    }
+  });
+
+  it("gives each role the same AUDIENCE, absence included", () => {
+    // T6.6's field, and the ABSENCE is asserted as hard as the value. A staff
+    // role's body has no `audience` key at all — `readRoleAudience` reads that as
+    // STAFF — and writing one in would change the body of every staff role, which
+    // is exactly what the role-upgrade migrations compare against to tell a firm
+    // that has never edited a role from one that has. Seeding `"audience":
+    // "STAFF"` would make every firm on earth look like it had made a decision.
+    for (const [key, definition] of Object.entries(DEFAULT_ROLES)) {
+      expect(seeded[key]?.audience, `audience for ${key} in ${file}`).toBe(definition.audience);
     }
   });
 

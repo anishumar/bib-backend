@@ -107,9 +107,20 @@ is "the partner's session names its FIRM, not a uuid" "10x Global" "$(pick "d['t
 is "...and its role"                                  "partner"    "$(pick "d['role']" <<< "$ME")"
 is "...and it can see fees"                           "True"       "$(pick "d['commercialVisibility']" <<< "$ME")"
 is "an associate cannot see fees"                     "False"      "$(as ananya "$API/api/v1/auth/me" | pick "d['commercialVisibility']")"
-# A portal session holds a role and reaches none of the staff surface, so what
-# it is TOLD it may do has to be empty — a screen offers only what will work.
-is "a portal session is told it may do nothing"       "0"          "$(as portal "$API/api/v1/auth/me" | pick "len(d['permissions'])")"
+# WHAT A PORTAL SESSION IS TOLD IT MAY DO — and this line changed with T6.6,
+# which is the whole point of asserting it.
+#
+# It used to be ZERO, and that was arithmetic rather than policy: gate 2 admitted
+# a portal session only to PORTAL_PATHS and none of those needed a permission, so
+# reporting anything would have been reporting something unreachable. The action
+# centre ended that — `portal:respond` is the first permission a portal session
+# can actually use — and a role now declares its AUDIENCE, so what comes back is
+# exactly what a client contact can do and nothing a colleague's role carries.
+#
+# Asserted as the exact list rather than a count: "one permission" would still
+# pass if it were the wrong one, and the wrong one here is a staff permission on
+# a client's login.
+is "a portal session is told exactly what it may do" "portal:respond" "$(as portal "$API/api/v1/auth/me" | pick "','.join(d['permissions'])")"
 
 say "The gates"
 status "anonymous is refused the board"        401 "$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/work-items")"

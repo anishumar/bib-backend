@@ -35,8 +35,8 @@ import { VERIFICATION_RULES, isVerificationRule, rulePer } from "../verification
 // Adding a kind is a code change, not a config change, because each kind needs a
 // body validator and a kind without one would accept anything. The database
 // CHECK on config.entry.kind is the other half of that agreement.
-import type { Permission } from "../authz/model";
-import { PERMISSIONS, isPermission } from "../authz/model";
+import type { Permission, RoleAudience } from "../authz/model";
+import { PERMISSIONS, ROLE_AUDIENCES, isPermission, isRoleAudience } from "../authz/model";
 import type { Amount, Money } from "../money/model";
 import { MAX_AMOUNT_SCALE, isAmount, isCurrencyCode, normalizeCurrency } from "../money/model";
 
@@ -148,9 +148,14 @@ export function isValidKey(key: string): boolean {
 // ── Body shapes, one per kind ────────────────────────────────────────────────
 
 /** A role, as a firm defines it. The permission SET is the product's; which of
- *  them this role holds is the firm's. */
+ *  them this role holds is the firm's, and which SURFACE it is for is the
+ *  product's again — a firm renames a role and picks its permissions, it does
+ *  not decide that "Client contact" is a staff role. */
 export interface RoleBody {
   readonly label: string;
+  /** STAFF | CLIENT_PORTAL. Optional and absent means STAFF — see
+   *  `RoleDefinition.audience` for why an applied version cannot grow one. */
+  readonly audience?: RoleAudience;
   readonly permissions: readonly Permission[];
 }
 
@@ -1046,7 +1051,9 @@ export function readMissedFromOn(body: Record<string, unknown>): string | null {
   return typeof from === "string" && isCalendarDay(from) ? from : null;
 }
 
-const ROLE_FIELDS = ["label", "permissions"];
+// `audience` is last because it arrived last (T6.6) and because the "Valid: ..."
+// message reads best as what-it-is, what-it-may-do, where-it-applies.
+const ROLE_FIELDS = ["label", "permissions", "audience"];
 
 function validateRoleBody(body: Record<string, unknown>): string | null {
   const unknown = unknownFields(body, ROLE_FIELDS);
@@ -1068,6 +1075,20 @@ function validateRoleBody(body: Record<string, unknown>): string | null {
         `Valid: ${PERMISSIONS.join(", ")}`
       );
     }
+  }
+
+  // OPTIONAL, and its absence is a real value rather than a gap: every role row
+  // published before T6.6 has no `audience`, a published version is frozen, and
+  // `readRoleAudience` reads the absence as STAFF — which is right for all four
+  // of the roles that existed then.
+  const audience = body["audience"];
+  if (audience !== undefined && (typeof audience !== "string" || !isRoleAudience(audience))) {
+    return (
+      `"audience" is which surface this role is written for, and ${describe(audience)} is not ` +
+      `one. Valid: ${ROLE_AUDIENCES.join(", ")}. A role written for one audience grants ` +
+      `NOTHING to a session in the other — a staff role on a client-portal login, and equally ` +
+      `a portal permission on a colleague's role.`
+    );
   }
   return null;
 }
@@ -1334,6 +1355,22 @@ export function readRolePermissions(body: Record<string, unknown>): readonly Per
   return raw.filter((p): p is Permission => typeof p === "string" && isPermission(p));
 }
 
+/**
+ * Which surface a stored role is written for.
+ *
+ * ABSENT MEANS STAFF, and that reading is the whole reason `audience` could be
+ * added at all. A published config version is FROZEN, so the role rows every
+ * existing firm holds cannot grow a field; they were all written for the staff
+ * workspace, and the one that was not — `client_contact` — carried no
+ * permissions, so it granted nothing under either reading. Anything unrecognised
+ * reads as STAFF too, which is the fail-closed direction: an unknown value must
+ * not turn a role into one a client contact can use.
+ */
+export function readRoleAudience(body: Record<string, unknown>): RoleAudience {
+  const audience = body["audience"];
+  return typeof audience === "string" && isRoleAudience(audience) ? audience : "STAFF";
+}
+
 /** The role's display name, falling back to its key when a stored body somehow
  *  has none — a role with no label is still a role that works. */
 export function readRoleLabel(body: Record<string, unknown>, key: string): string {
@@ -1345,7 +1382,17 @@ export function readRoleLabel(body: Record<string, unknown>, key: string): strin
  *  stated, so tenancy provisioning and the migration agree on more than the
  *  permission list. */
 export function roleBodyOf(definition: RoleBody): Record<string, unknown> {
-  return { label: definition.label, permissions: [...definition.permissions] };
+  return {
+    label: definition.label,
+    permissions: [...definition.permissions],
+    // Written only when the role declares one, so a staff role's body is
+    // byte-for-byte what it has always been. That matters beyond tidiness: the
+    // role-upgrade migrations (0012, 0045, 0056, 0060, 0064) find a firm that
+    // has never edited a role by comparing its body to the old default with
+    // jsonb equality, and an added key would make every one of those firms look
+    // like a firm that had made a decision.
+    ...(definition.audience === undefined ? {} : { audience: definition.audience }),
+  };
 }
 
 /**

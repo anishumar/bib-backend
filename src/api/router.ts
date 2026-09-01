@@ -49,7 +49,11 @@ import type { PortalAccessDeps } from "./handler/portalaccess";
 import { registerPortalInviteRoutes } from "./handler/portalinvite";
 import type { PortalInviteDeps } from "./handler/portalinvite";
 import { registerPortalHomeRoutes } from "./handler/portalhome";
+import { registerClientAskRoutes } from "./handler/clientask";
+import { registerPortalAskRoutes } from "./handler/portalask";
 import type { PortalHomeDeps } from "./handler/portalhome";
+import type { ClientAskDeps } from "./handler/clientask";
+import type { PortalAskDeps } from "./handler/portalask";
 import { registerWorkItemRoutes } from "./handler/workitem";
 import type { WorkItemDeps } from "./handler/workitem";
 import { registerOrchestratorRoutes } from "./handler/orchestrator";
@@ -107,6 +111,11 @@ export interface RouterDeps {
   readonly portalAccess: PortalAccessDeps;
   readonly portalInvites: PortalInviteDeps;
   readonly portalHome: PortalHomeDeps;
+  /** The firm's side of a client-directed ask, and the client's. Two handler
+   *  sets over ONE service — the rules about an ask are the same whoever is
+   *  looking, and only the scope the adapter opens differs. */
+  readonly clientAsks: ClientAskDeps;
+  readonly portalAsks: PortalAskDeps;
   readonly workItems: WorkItemDeps;
   readonly orchestrator: OrchestratorDeps;
   readonly scheduler: SchedulerDeps;
@@ -219,6 +228,8 @@ export function buildRouter(
   registerPortalAccessRoutes(app, deps.portalAccess);
   registerPortalInviteRoutes(app, deps.portalInvites);
   registerPortalHomeRoutes(app, deps.portalHome);
+  registerClientAskRoutes(app, deps.clientAsks);
+  registerPortalAskRoutes(app, deps.portalAsks);
   registerWorkItemRoutes(app, deps.workItems);
   registerOrchestratorRoutes(app, deps.orchestrator);
   registerSchedulerRoutes(app, deps.scheduler);

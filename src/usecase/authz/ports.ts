@@ -4,7 +4,23 @@
 // it comes from the tenant's own `role` config rows, read by a Postgres adapter
 // that implements this same interface. No route, no guard and no handler
 // changed — none of them ever knew where the answer came from.
-import type { Permission } from "../../domain/authz/model";
+import type { Permission, RoleAudience } from "../../domain/authz/model";
+
+/**
+ * A role as the firm has published it — what it may do, and which surface it was
+ * written for.
+ *
+ * `roleFor` and not a second `audienceFor` beside `permissionsFor`, because gate
+ * 3 runs on EVERY request and the two answers come off the same row. Two methods
+ * would be two round trips per request to read one config body, and a cache is
+ * the thing this port's own comment refuses ("a revoked permission stays live
+ * for its TTL, and a firm that takes an access away expects it gone this
+ * afternoon").
+ */
+export interface StoredRole {
+  readonly audience: RoleAudience;
+  readonly permissions: readonly Permission[];
+}
 
 export interface PermissionSource {
   /**
@@ -16,6 +32,22 @@ export interface PermissionSource {
    * nothing above it.
    */
   permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]>;
+
+  /**
+   * The same row, with the role's AUDIENCE as well (T6.6).
+   *
+   * Null when the firm does not define that role — the same "no row" answer
+   * `permissionsFor` turns into an empty list, kept distinguishable here because
+   * a role that does not exist and a role that grants nothing are different
+   * facts, and `AuthzService` says different things about them.
+   *
+   * `permissionsFor` stays because two other use cases depend on it structurally
+   * — `usecase/orchestrator` and `ReviewPermissionSource` in `usecase/workitem`,
+   * neither of which has an audience to compare against: they ask "does this
+   * ROLE carry work:write" about a colleague named on a job step, not about a
+   * session.
+   */
+  roleFor(tenantId: string, role: string): Promise<StoredRole | null>;
 
   /**
    * Every role this firm defines.

@@ -163,6 +163,26 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   // client-visible flag in 0062), and that the one adapter behind it uses
   // `withPortal` rather than `withTenant`. This line only says a client may ASK.
   "/api/v1/portal/home",
+  // ── THE ACTION CENTRE (T6.6), AND THE FIRST TEMPLATES ON THIS LIST ──────
+  //
+  // The routes this gate was taught templates for. What makes them safe is not
+  // these lines:
+  //
+  //   · every table behind them carries a RESTRICTIVE policy in terms of
+  //     `crm.portal_sees()` — `delivery.client_ask` and
+  //     `delivery.client_ask_response` in 0063, the work item they hang off in
+  //     0059/0062, and the document store in 0063
+  //   · the adapter uses `withPortal`, never `withTenant`, on the WRITES as well
+  //   · the three that ACT need `portal:respond` (gate 3), which only a role
+  //     declaring the CLIENT_PORTAL audience can carry
+  //
+  // The list needs no permission, because being granted a company IS the
+  // authorisation to read it — which is what makes a read-only contact possible
+  // at all.
+  "/api/v1/portal/asks",
+  "/api/v1/portal/asks/{askId}/answer",
+  "/api/v1/portal/asks/{askId}/decision",
+  "/api/v1/portal/asks/{askId}/documents",
 ]);
 
 /**

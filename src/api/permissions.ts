@@ -49,6 +49,12 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   routeKey("POST", "/api/v1/auth/logout"),
   routeKey("GET", "/api/v1/tenancy/me/memberships"),
   routeKey("GET", "/api/v1/portal/home"),
+  // The action centre's LIST, for the same reason as the home above it, and it
+  // is what makes T6.6's read-only portal role coherent: `client_viewer` holds
+  // no permission at all and still sees every ask its company has been sent. It
+  // simply cannot answer one — those three routes are in ROUTE_PERMISSIONS,
+  // behind `portal:respond`.
+  routeKey("GET", "/api/v1/portal/asks"),
 ]);
 
 /** The permission each business route requires. */
@@ -114,6 +120,33 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // and the grant in one act — so it carries the same permission rather than a
   // second one that would have to be kept in step with it.
   [routeKey("POST", "/api/v1/portal-invites"), "portal:grant" as const],
+
+  // ── The client-directed ask (T6.6) ─────────────────────────────────────
+  //
+  // The FIRM's side is ordinary delivery work: reading what has been asked of a
+  // client is `party:read`, and asking, closing or withdrawing is `work:write`.
+  // Not `portal:grant` — that permission decides who may SEE the firm's work,
+  // and this is the ordinary act of doing it.
+  [routeKey("GET", "/api/v1/work-items/{workItemId}/asks"), "party:read" as const],
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/asks"), "work:write" as const],
+  [routeKey("POST", "/api/v1/asks/{askId}/close"), "work:write" as const],
+  [routeKey("POST", "/api/v1/asks/{askId}/withdraw"), "work:write" as const],
+
+  // ── AND THE CLIENT'S SIDE — THE FIRST PORTAL ROUTES THAT NEED A PERMISSION ─
+  //
+  // `portal:respond` is the tenth permission and the only one in this product
+  // held by somebody OUTSIDE the firm. It is what makes the board's line — "this
+  // contact may upload, that one may only look" — a role a firm can assign:
+  // `client_contact` carries it, `client_viewer` does not, and both see
+  // everything the portal shows because reading is authorised by the grant.
+  //
+  // It is not reachable by a colleague. A role declares its AUDIENCE since 0064,
+  // and `roleServes` refuses a CLIENT_PORTAL role's permissions to a STAFF
+  // session — so a firm that put this on `associate` would find it grants
+  // nothing, which is right, because the handlers refuse a staff session anyway.
+  [routeKey("POST", "/api/v1/portal/asks/{askId}/answer"), "portal:respond" as const],
+  [routeKey("POST", "/api/v1/portal/asks/{askId}/decision"), "portal:respond" as const],
+  [routeKey("POST", "/api/v1/portal/asks/{askId}/documents"), "portal:respond" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],

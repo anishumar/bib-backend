@@ -91,7 +91,10 @@ describe("createTenant", () => {
 
     expect(await f.config.knownRoles(t.id)).toEqual([
       "associate",
+      // Both portal roles from the moment the firm exists (T6.6): a firm cannot
+      // invite a read-only contact if the role only arrives with a migration.
       "client_contact",
+      "client_viewer",
       "manager",
       "partner",
     ]);

@@ -41,11 +41,12 @@ import {
   readConfidenceTierBody,
   readMaxDiscountPercent,
   readMissedFromOn,
+  readRoleAudience,
   readRolePermissions,
   readWorkflowTemplate,
   readVerificationPolicyBody,
 } from "../../domain/config/model";
-import type { PermissionSource } from "../../usecase/authz/ports";
+import type { PermissionSource, StoredRole } from "../../usecase/authz/ports";
 import type { RoleDirectory } from "../../usecase/tenancy/ports";
 import type {
   ConfigRepository,
@@ -363,7 +364,15 @@ export class PostgresConfigRepository
   // cache with explicit invalidation on publish is the fix when the traffic
   // justifies it, and it goes behind this same port.
 
-  async permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]> {
+  /**
+   * Gate 3's read, and the one place this body is turned into a role.
+   *
+   * `permissionsFor` is implemented in terms of it rather than beside it: two
+   * statements reading the same published body is how the audience and the
+   * permissions come to be read under different conditions, and this is a
+   * middleware that runs on every request.
+   */
+  async roleFor(tenantId: string, role: string): Promise<StoredRole | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ body: Record<string, unknown> }[]>`
         SELECT v.body
@@ -371,11 +380,19 @@ export class PostgresConfigRepository
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'role' AND e.key = ${role}
       `;
-      // No row is the ordinary answer for a role this firm does not define, and
-      // it carries nothing. AuthzService asks knownRoles() to tell that apart
-      // from a role that exists and simply lacks the permission.
-      return row ? readRolePermissions(row.body) : [];
+      // No row is the ordinary answer for a role this firm does not define.
+      // AuthzService asks knownRoles() to tell that apart from a role that
+      // exists and simply lacks the permission.
+      if (!row) return null;
+      return {
+        audience: readRoleAudience(row.body),
+        permissions: readRolePermissions(row.body),
+      };
     });
+  }
+
+  async permissionsFor(tenantId: string, role: string): Promise<readonly Permission[]> {
+    return (await this.roleFor(tenantId, role))?.permissions ?? [];
   }
 
   async knownRoles(tenantId: string): Promise<readonly string[]> {

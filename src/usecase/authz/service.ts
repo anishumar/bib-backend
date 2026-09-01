@@ -7,7 +7,7 @@
 // which hat they are wearing right now.
 import type { Principal } from "../../platform/callctx";
 import type { Permission } from "../../domain/authz/model";
-import { grants, redactCommercials, seesCommercials } from "../../domain/authz/model";
+import { grants, redactCommercials, roleServes, seesCommercials } from "../../domain/authz/model";
 import { NotPermitted, UnknownRole } from "../../domain/authz/errors";
 import type { PermissionSource } from "./ports";
 
@@ -53,39 +53,47 @@ export class AuthzService {
    * Empty for a session that has not chosen an org: without a tenant there is no
    * membership, so there is no role and nothing is carried.
    *
-   * **Empty for a CLIENT_PORTAL session too, whatever role it holds.** Nothing
-   * about that is a policy decision made here — it is the arithmetic of the two
-   * gates. Gate 2 runs BEFORE gate 3 and admits a portal session only to
-   * `PORTAL_PATHS`; every one of those routes requires no permission at all. So
-   * the set of permissions a portal session can actually USE is empty, and
-   * saying otherwise breaks this method's own contract: a screen is supposed to
-   * be able to offer only what will work.
+   * **A ROLE WRITTEN FOR THE OTHER AUDIENCE CARRIES NOTHING (T6.6).** This used
+   * to be a blanket `[]` for every CLIENT_PORTAL session, and that was exactly
+   * right for the reason it stated: gate 2 admits a portal session only to
+   * `PORTAL_PATHS`, and none of those routes needed a permission, so the set a
+   * portal session could actually USE was empty. It was arithmetic, not policy.
    *
-   * It matters because nothing stops a firm assigning a staff role to a portal
-   * membership — `manager` on a `CLIENT_PORTAL` login is accepted today. That
-   * leaks nothing (gate 2 refuses every staff route), but it used to make
-   * `/auth/me` report four permissions of which none was reachable, which is
-   * exactly the 403-by-surprise this field exists to prevent.
+   * `portal:respond` ended that arithmetic — it is the first permission a portal
+   * session can use — and the blanket became a lie in the other direction: a
+   * portal screen told it may do nothing offers nothing that works, which is the
+   * 403-by-surprise this method exists to prevent.
    *
-   * **U1 must revisit this.** When the client portal ships, `PORTAL_PATHS` grows
-   * and some of those routes will want a permission — at which point this
-   * blanket empty becomes wrong. It cannot be forgotten: the honest fix is a
-   * role that declares which audience it is for, and
-   * `tests/api/portal-permissions.test.ts` holds the build red the moment a
-   * portal route starts requiring one.
+   * So the rule is now the honest one CLAUDE.md always pointed at, and it runs
+   * BOTH ways. Nothing refuses `manager` on a CLIENT_PORTAL membership, and
+   * nothing stops a firm putting `portal:respond` on `associate`; in both cases
+   * the role was written for the other surface and grants nothing here. What
+   * makes that expressible is that a role declares its own audience — see
+   * `roleServes`.
    */
   async permissionsOf(principal: Principal): Promise<readonly Permission[]> {
     if (principal.tenantId === null || principal.role === null) return [];
-    if (principal.audience === "CLIENT_PORTAL") return [];
-    return this.deps.permissions.permissionsFor(principal.tenantId, principal.role);
+    const role = await this.deps.permissions.roleFor(principal.tenantId, principal.role);
+    if (role === null) return [];
+    if (!roleServes(role.audience, principal.audience)) return [];
+    return role.permissions;
   }
 
-  /** The same question without the throw, for a handler deciding what to show
-   *  rather than whether to serve. */
+  /**
+   * The same question without the throw, for a handler deciding what to show
+   * rather than whether to serve.
+   *
+   * It applies the audience rule too, and it must: `permissionsOf` promises a
+   * screen that what it offers will work, and if the two disagreed the promise
+   * would be broken in whichever direction they differed. This one is the half
+   * that actually refuses a request.
+   */
   async can(principal: Principal, permission: Permission): Promise<boolean> {
     if (principal.tenantId === null || principal.role === null) return false;
-    const held = await this.deps.permissions.permissionsFor(principal.tenantId, principal.role);
-    return grants(held, permission);
+    const role = await this.deps.permissions.roleFor(principal.tenantId, principal.role);
+    if (role === null) return false;
+    if (!roleServes(role.audience, principal.audience)) return false;
+    return grants(role.permissions, permission);
   }
 
   private async knownRoles(principal: Principal): Promise<readonly string[]> {

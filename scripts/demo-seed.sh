@@ -695,6 +695,31 @@ W_P2=$(task "{\"clientPartyId\":\"$LAKEVIEW\",\"entityPartyId\":\"$LAKEVIEW\",\"
 W_P3=$(task "{\"clientPartyId\":\"$COBALT\",\"entityPartyId\":\"$COBALT\",\"title\":\"Decide the credit hold on INV/2026-27/0003\",\"description\":\"75 days overdue. The ladder has climbed to the credit-hold rung and stopped - only a partner may apply it.\",\"priorityId\":\"$P_HIGH\",\"assigneeUserId\":\"$PARTNER_ID\",\"dueOn\":\"$TODAY\",\"isClientVisible\":false}")
 step "three on Siddharth's own desk - one late, one due today, one the client cannot see"
 
+# ── WHAT THE FIRM IS WAITING ON THE CLIENT FOR (T6.6) ──────────────────────
+#
+# Three asks on Meera's action centre, one per kind, so the portal's three
+# controls all have something to draw — and one of them ALREADY ANSWERED, so
+# "with the firm" is not an empty heading either.
+#
+# THE FIRST ONE IS THE POINT OF THE WHOLE TASK. `W_BLOCKED` above carries the
+# blocked reason *"The client has not shared the Maharashtra purchase register"*,
+# and until now that sentence was the only thing on the client's page saying what
+# was wanted — under a heading that read HELD UP, because nothing in the schema
+# recorded who a task was waiting on. Now the same task carries a row that says
+# it, addressed to Meera, with somewhere to answer it. The blocked reason stays:
+# the two are different facts and the firm may be waiting on more than one thing.
+ask() { asp partner "$API/api/v1/work-items/$1/asks" -d "$2" | pick "d['askId']"; }
+
+A_REGISTER=$(ask "$W_BLOCKED" '{"askKind":"document","documentKind":"working_paper","prompt":"Please send the Maharashtra purchase register for July - a PDF or an Excel export is fine."}')
+A_QUESTION=$(ask "$W_LATE" '{"askKind":"question","prompt":"Two invoices from Nashik Traders are not in your 2B. Were they cancelled, or is the supplier late in filing?"}')
+A_APPROVE=$(ask "$W_REVIEW" '{"askKind":"approval","prompt":"May we file the June management pack as it stands? It shows the Nashik write-off as an exceptional item."}')
+
+# ANSWERED, NOT CLOSED — the distinction the status column exists for. Meera
+# replied; the firm has not said it was what it needed, so the ask sits under
+# "with the firm" on her page and stays open on the task.
+asp client "$API/api/v1/portal/asks/$A_QUESTION/answer"   -d '{"answerText":"Both were cancelled in July. Nashik Traders has issued credit notes - I will send them if you need them."}' | ok
+step "three asks on Meera's action centre, one of them already answered"
+
 # UNASSIGNED, and OLD, so the unassigned rungs of the ladder have fired.
 W_HARBOUR=$(task "{\"clientPartyId\":\"$HARBOUR\",\"entityPartyId\":\"$HARBOUR\",\"title\":\"Onboarding - collect Harbour's incorporation papers\",\"description\":\"Nothing can be filed for this client until it is registered as a legal entity.\",\"dueOn\":\"$LAST_WEEK\"}")
 step "Harbour onboarding - a week late, and nobody holds it"
