@@ -85,7 +85,40 @@ GLOBAL tables (marked so in the migration); everything else is tenant-scoped.
 [STAFF | CLIENT_PORTAL], (3) role, (4) record-scope [portal user sees only its own parties].
 Fee/commercial visibility is a **fifth, orthogonal** axis — a flag on membership, never a role.
 
-Gates 1–3 are built. Gate 1 is RLS; gates 2 and 3 are prefix middleware (`api/guards.ts`),
+**ALL FOUR ARE BUILT SINCE 0059** — gate 4 was the last, and it went in BEFORE the portal
+screens rather than with them: a portal read written against no gate has to be written twice,
+and the second version is the one nobody reviews. It is `crm.portal_access` (which companies a
+portal LOGIN was granted, effective-dated, one row per company), `tenancy.membership.party_id`
+(which PERSON a login is — a different question, and the half that also lets the org chart hold
+the majority of a firm who have no login), `withPortal` in `src/db/tenant.ts`, and RESTRICTIVE
+policies written in terms of `crm.portal_sees()`.
+
+**ACCESS IS GRANTED, NEVER DERIVED, and that is the decision in it.** `core.party_relationship`
+already knows a company is in a group, and reading portal access out of that graph is one join
+and is wrong: the screen that writes relationships is the CRM screen, so recording "Cobalt is
+part of the Kaveri group" would silently hand a Cobalt contact the group's filings, reviewed by
+nobody, because a CRM edit is not reviewed as an access-control change. There is deliberately no
+default and no widening — a group's contact who should see four companies gets four rows —
+because whether one contact sees a whole group is a fact about the ENGAGEMENT and the firm has
+never been asked (G0.1: four companies file four sets of returns).
+
+**"Unset" and "empty" are different values, and that distinction IS the safety.** `app.portal`
+is `'on'` only inside `withPortal`, so every staff request takes the first branch of
+`portal_sees()` and the restrictive policies cost it nothing. A portal session with no grants
+sets an EMPTY list and sees nothing. Skipping the call because the list is empty would leave the
+session looking like STAFF — the one mistake here that is silent, because every read would
+succeed. `withPortal` has no variant that takes no parties, on purpose: "I did not ask the grant
+table" is not a scope.
+
+**A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
+today because it is the one business table carrying `client_party_id` directly. The column that
+names the client differs per table and a guessed join is a wall with a hole in it; until each
+gets its line, those tables are unreachable through gate 2, which is a real defence and not a
+permanent one. `tests/portal/gate4.integration.test.ts` is the proof and it TRIES — it asks for
+the other client's row by id, and it was checked by dropping the policy and watching five of its
+six tests go red.
+
+Gate 1 is RLS; gates 2 and 3 are prefix middleware (`api/guards.ts`),
 both **denied by default** — a `CLIENT_PORTAL` session reaches only `PORTAL_PATHS`, and a
 route absent from `ROUTE_PERMISSIONS` is refused for everyone. **Roles are config rows the
 firm owns** (T2.5), read through the `PermissionSource` port; the swap changed no call site,
@@ -93,8 +126,7 @@ which is what the port was there for. `DEFAULT_ROLES` in `domain/authz/model.ts`
 the SEED a new tenant's rows are written from — nothing consults it at request time, and
 there is deliberately no fallback to it (see the configuration registry below). A role the
 firm does not define carries nothing and says so (`UNKNOWN_ROLE`), because a firm locked out
-by a typo must not look like policy working as intended. Gate 4 needs the user-to-party link
-and lands with U1. The fee axis is `AuthzService.seesFees()` / `withFeeVisibility()` — it
+by a typo must not look like policy working as intended. The fee axis is `AuthzService.seesFees()` / `withFeeVisibility()` — it
 **redacts** money rather than omitting the record, so "you may not see this" never looks
 like "there is no fee".
 

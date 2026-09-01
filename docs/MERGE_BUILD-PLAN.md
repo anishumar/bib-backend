@@ -3243,7 +3243,34 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
 portal session until the gate exists), then `T6.5` (who is looking), then `T6.6` and `T4.4`
 together (what is asked for, and who does the asking), then `T6.7`.
 
-- [ ] `(B)` **G3.4** **Gate 4 — record-scope.** `membership.party_id`, and the rule that a portal session sees its OWN company's records and nothing else. *Acc: a portal login cannot read another client's anything, proven by a test that tries.* — full entry in Phase 3; **do this before any portal screen**, or every query gets written twice.
+- [~] `(B)` **G3.4** **Gate 4 — record-scope.** `membership.party_id`, and the rule that a portal session sees its OWN company's records and nothing else. *Acc: a portal login cannot read another client's anything, proven by a test that tries.* — full entry in Phase 3; **do this before any portal screen**, or every query gets written twice.
+  > **THE WALL IS IN (2026-09-01, migration 0059). THE WRITE PATH IS NOT — and this box stays
+  > `[~]` for exactly that reason.** What exists: `membership.party_id` (which PERSON a login
+  > is), `crm.portal_access` (which COMPANIES it was granted, effective-dated, one row per
+  > company), `withPortal` in `src/db/tenant.ts`, `crm.portal_sees()` and a RESTRICTIVE policy
+  > on `delivery.work_item`.
+  >
+  > **The acceptance line is met and was proven by NEGATIVE CONTROL**, which is the only way
+  > it is worth anything: `tests/portal/gate4.integration.test.ts` asks for the other client's
+  > row BY ID and gets nothing, a portal session with no grants sees nothing at all, a write
+  > is refused, the scope does not survive the transaction, and a STAFF session is untouched.
+  > Dropping the policy turns five of those six red; putting it back turns them green.
+  >
+  > **What is left, named rather than implied:** `crm.portal_access` HAS NO WRITER. No
+  > service, no route, no event — a firm cannot yet grant anybody anything, so today the gate
+  > can only ever deny. That is the safe direction and it is still the "feature that looks
+  > finished" shape this repo keeps being caught by, so it is written here rather than
+  > discovered. The rest of the task is: the grant/revoke use case with its ledger verbs, the
+  > `tenant:admin` routes for it, resolving a portal session's grants once per request into
+  > `withPortal`, and `/auth/me` saying which companies the session is scoped to. `T6.5`
+  > cannot start until that half exists.
+  >
+  > **Decision recorded in the migration and in CLAUDE.md: access is GRANTED, never DERIVED.**
+  > `core.party_relationship` could answer "this contact is in the Kaveri group" with one
+  > join, and then a CRM edit — reviewed by nobody as an access change — would silently hand a
+  > Cobalt contact the group's filings. No default and no widening: a contact who should see
+  > four companies gets four rows. Whether a group's contact SHOULD see all four is a client
+  > fact nobody has been asked (G0.1), and a join would have answered it for them.
 - [ ] `(B)` **T6.5** Invite + secure login, per-contact roles, status home. *Acc: a client contact signs in and sees only their own company.*
 - [ ] `(B)` **T6.6** Action centre: uploads (virus-scan/OCR/auto-file), questions, one-tap approvals. *Acc: a client upload files itself against the job that asked for it.*
 - [ ] `(B)` **T4.4** **A8 Chaser** (moved here from Phase 4, id unchanged): reminder ladders (T–3 daily, D+3/7/15), portal asks, escalation. *Acc: respects ladder config; stops on escalation freeze.*
