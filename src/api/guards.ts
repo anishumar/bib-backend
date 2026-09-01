@@ -118,14 +118,27 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
  * portal route needs BOTH — being listed here says only that a client may ask
  * the question, never which rows come back.
  *
- * ── AN EXACT MATCH ON THE CONCRETE PATH, WHICH IS A REAL CONSTRAINT ───────
+ * ── TEMPLATES, MATCHED THE WAY GATE 3 MATCHES THEM (T6.6) ────────────────
  *
- * Unlike gate 3, which compiles `{param}` templates and matches them, this is a
- * plain `Set.has` over the path as it arrived. So a portal route carrying a path
- * parameter is unreachable whatever is written here, and the first portal read
- * is deliberately parameter-less because of it. T6.6's uploads and any
- * per-record detail route need this matcher to learn templates FIRST — that is a
- * change to the audience gate, and it does not get made in passing.
+ * This list is written in the same vocabulary as `ROUTE_PERMISSIONS` — the
+ * OpenAPI path, `{param}` included — and `isPortalPath` below compiles it once
+ * and matches the concrete path against it.
+ *
+ * It was a plain `Set.has` over the path as it arrived until T6.6, and that was
+ * a real constraint rather than an oversight: a portal route carrying a path
+ * parameter was unreachable whatever was written here, so T6.5's status home is
+ * one parameter-less aggregate read. Every verb T6.6 wants — upload against a
+ * document, answer one question, approve one thing — names the record it acts
+ * on in its path, so none of them was reachable at all.
+ *
+ * WIDENING THIS GATE IS ITS OWN CHANGE, and it was made as one, before any
+ * route needed it. What it widens is the gate that stops a client contact
+ * reading the firm's whole book of clients, and a template that matched more
+ * than it named would do exactly that silently. So the containment is a test
+ * rather than care: `tests/api/auth-coverage.test.ts` asserts, over EVERY route
+ * the router has registered, that `isPortalPath(concrete(path))` agrees exactly
+ * with `PORTAL_PATHS.has(template)`. A template that swallows a staff route
+ * turns that red, naming the route it swallowed.
  */
 export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/me",
@@ -151,6 +164,45 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   // `withPortal` rather than `withTenant`. This line only says a client may ASK.
   "/api/v1/portal/home",
 ]);
+
+/**
+ * Compile a set of route templates into the gate's matcher.
+ *
+ * The same compilation `decideRoute` does, and deliberately not shared with it:
+ * that one keys on `METHOD /path` and answers with a permission, this one keys
+ * on the path alone and answers yes or no. A helper serving both would have to
+ * take a method that this gate does not have an opinion about.
+ *
+ * PATH ONLY, AND THAT IS UNCHANGED. Gate 2 has never asked which METHOD a
+ * portal session used, because it is the coarse gate: it says a client may ASK
+ * at this address, and gate 3 — which is keyed on the method — says what may be
+ * done there. A method this route does not register is `unmapped` at gate 3 and
+ * refused, so nothing is opened by leaving the method out here.
+ *
+ * Exported so a test can compile a list of its own and prove the template
+ * behaviour without a route having to exist for it — which is what let this
+ * change ship before the routes that need it.
+ */
+export function compilePortalPaths(paths: Iterable<string>): (path: string) => boolean {
+  const patterns = [...paths].map((template) => {
+    const source = template
+      .split("/")
+      .map((segment) =>
+        segment.startsWith("{") && segment.endsWith("}")
+          ? // A single segment, never a slash: `[^/]+` is what stops
+            // `/api/v1/portal/asks/{askId}` from also matching
+            // `/api/v1/portal/asks/<id>/anything-else`.
+            "[^/]+"
+          : segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+      )
+      .join("/");
+    return new RegExp(`^${source}$`);
+  });
+  return (path: string) => patterns.some((pattern) => pattern.test(path));
+}
+
+/** Whether a CLIENT_PORTAL session may ask at this concrete path. */
+export const isPortalPath = compilePortalPaths(PORTAL_PATHS);
 
 /**
  * The /internal guard: a bearer secret from config, compared in constant time.
@@ -249,7 +301,7 @@ export function sessionGuard(principalOf: PrincipalResolver): MiddlewareHandler<
 
     // GATE 2 — audience. A client-portal session is authenticated and belongs
     // to the tenant; neither fact entitles it to the firm's staff workspace.
-    if (principal.audience === "CLIENT_PORTAL" && !PORTAL_PATHS.has(c.req.path)) {
+    if (principal.audience === "CLIENT_PORTAL" && !isPortalPath(c.req.path)) {
       return c.json(
         toEnvelope({
           status: 403,

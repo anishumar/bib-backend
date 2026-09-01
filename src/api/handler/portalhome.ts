@@ -13,16 +13,18 @@
 //     table it reads (0059 for work items, 0062 for the visibility flag and for
 //     filings)
 //
-// ── WHY IT IS PARAMETER-LESS, AND WHAT THAT COSTS ─────────────────────────
+// ── WHY IT IS PARAMETER-LESS, AND WHY IT STAYS THAT WAY ──────────────────
 //
-// Gate 2 is `PORTAL_PATHS.has(c.req.path)` — an exact match on the CONCRETE
-// path, unlike gate 3, which compiles templates. So a portal route with a path
-// parameter is unreachable no matter what is written in that set, and the whole
-// status home is therefore one aggregate read. That is fine here — it is one
-// screen and one round trip — and it is a real constraint on T6.6: an upload or
-// a per-filing detail route needs `PORTAL_PATHS` to learn templates FIRST, and
-// that change is a change to the audience gate, which is not a change to make
-// in passing.
+// Gate 2 was `PORTAL_PATHS.has(c.req.path)` when this was written — an exact
+// match on the CONCRETE path — so a portal route with a path parameter was
+// unreachable no matter what was in that set, and the whole status home is one
+// aggregate read because of it. T6.6 taught that gate templates, as its own
+// change with its own test, which is what let the action centre's verbs name
+// the record they act on.
+//
+// This route is still parameter-less and should stay so. It is one screen and
+// one round trip, and splitting it now would buy nothing and cost a second
+// scope resolution.
 //
 // ── IT NEEDS NO PERMISSION, AND THAT IS ARGUED RATHER THAN CONVENIENT ──────
 //

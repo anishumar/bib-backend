@@ -43,7 +43,7 @@ import {
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
-import { PORTAL_PATHS, PUBLIC_PATHS } from "../../src/api/guards";
+import { PORTAL_PATHS, PUBLIC_PATHS, compilePortalPaths, isPortalPath } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -492,6 +492,22 @@ function bodylessOrJson(method: string): RequestInit {
   return { method: verb, headers: { "content-type": "application/json" }, body: "{}" };
 }
 
+/**
+ * A router path in the form the two permission tables are written in.
+ *
+ * Hono registers a parameter as `:name`; `ROUTE_PERMISSIONS` and — since T6.6 —
+ * `PORTAL_PATHS` are keyed by the OpenAPI template `{name}`, because that is
+ * what the spec and the handlers say. Asking whether a REGISTERED route is
+ * declared therefore means translating one into the other, and doing it in a
+ * named function rather than inline is the difference between a comparison that
+ * is false and a comparison that is meaningless: `PORTAL_PATHS.has("/x/:id")`
+ * is always false, so a templated portal route would have looked undeclared and
+ * the sweep below would have reported it as a hole in the gate.
+ */
+function asTemplate(path: string): string {
+  return path.replace(/:([^/]+)/g, "{$1}");
+}
+
 /** A concrete request for a templated path. Hono registers params as :name and
  *  the OpenAPI spec renders them as {name}; both appear in this file. The
  *  guards run before validation, so the values need only exist. */
@@ -665,7 +681,7 @@ describe("gate 2 — audience", () => {
 
     for (const { method, path } of registeredRoutes()) {
       if (!path.startsWith("/api/v1/")) continue;
-      if (PUBLIC_PATHS.has(path) || PORTAL_PATHS.has(path)) continue;
+      if (PUBLIC_PATHS.has(path) || PORTAL_PATHS.has(asTemplate(path))) continue;
       const init = bodylessOrJson(method);
       const res = await app(PORTAL_SESSION).request(concrete(path), init);
       if (res.status !== 403) {
@@ -688,13 +704,17 @@ describe("gate 2 — audience", () => {
     // failure read as "the audience gate refuses the portal's own home".
     for (const path of PORTAL_PATHS) {
       const methods = registeredRoutes()
-        .filter((r) => r.path === path)
+        .filter((r) => asTemplate(r.path) === path)
         .map((r) => r.method.toUpperCase());
       expect(methods, `${path} is in PORTAL_PATHS but no route is registered at it`).not.toEqual(
         [],
       );
       for (const method of methods) {
-        const res = await app(PORTAL_SESSION).request(path, bodylessOrJson(method));
+        // `concrete()`, because this list carries TEMPLATES since T6.6 and the
+        // router matches concrete paths. Asking for the template itself would
+        // 404, and a 404 is not a 403, so the assertion below would have passed
+        // while proving nothing.
+        const res = await app(PORTAL_SESSION).request(concrete(path), bodylessOrJson(method));
         expect(
           res.status,
           `${method} ${path} should not be 403 for a portal session`,
@@ -714,6 +734,60 @@ describe("gate 2 — audience", () => {
   it("still lets staff through", async () => {
     const res = await app(STAFF_SESSION).request("/api/v1/parties");
     expect(res.status).toBe(200);
+  });
+
+  it("a template admits exactly the routes it names, and nothing else", () => {
+    // THE CONTAINMENT ON T6.6's CHANGE TO THIS GATE, and the reason widening it
+    // was safe to do before any route needed it.
+    //
+    // Gate 2 was an exact `Set.has` until T6.6; it now compiles `{param}` the
+    // way gate 3 does, because every verb the action centre wants names the
+    // record it acts on in its path. A matcher is strictly more permissive than
+    // a set, and what it guards is the gate that stops a client contact reading
+    // the firm's whole book — so the question is not whether the compilation is
+    // careful but whether it can be checked.
+    //
+    // It can, over the router itself: for every registered route, the matcher's
+    // answer must equal plain membership of its TEMPLATE in the list. A pattern
+    // that swallowed a staff route — `/api/v1/{anything}`, or a segment whose
+    // regex metacharacters were not escaped — makes this red and names the route
+    // it swallowed.
+    const swallowed: string[] = [];
+    for (const { path } of registeredRoutes()) {
+      const declared = PORTAL_PATHS.has(asTemplate(path));
+      if (isPortalPath(concrete(path)) !== declared) {
+        swallowed.push(`${path} (declared: ${String(declared)})`);
+      }
+    }
+    expect(swallowed).toEqual([]);
+  });
+
+  it("matches a path parameter, and only within one segment", () => {
+    // The matcher's own behaviour, compiled over a list of this test's own so
+    // it can be proven WITHOUT a route existing for it. That is what let the
+    // gate change ship as its own commit, ahead of the routes it was widened
+    // for: the alternative is registering an unreachable route to test the gate
+    // that would reach it.
+    const matches = compilePortalPaths([
+      "/api/v1/portal/home",
+      "/api/v1/portal/asks/{askId}/answer",
+    ]);
+
+    expect(matches("/api/v1/portal/home")).toBe(true);
+    expect(matches("/api/v1/portal/asks/9f8b7c6d-0000-4000-8000-000000000001/answer")).toBe(true);
+
+    // A parameter is ONE segment. Without `[^/]+` the pattern would reach past
+    // the address it names, which on this gate is a client contact reaching a
+    // route nobody listed.
+    expect(matches("/api/v1/portal/asks/a/b/answer")).toBe(false);
+    // Not a prefix match in either direction, which is the failure `PUBLIC_PATHS`
+    // states in its own comment: `/api/v1/auth/` as a prefix would have exempted
+    // every future auth route.
+    expect(matches("/api/v1/portal/home/secret")).toBe(false);
+    expect(matches("/api/v1/portal")).toBe(false);
+    expect(matches("/api/v1/portal/asks/x/answer/again")).toBe(false);
+    // A literal that is not on the list stays off it.
+    expect(matches("/api/v1/work-items")).toBe(false);
   });
 
   it("pins the portal list, so a route joins it deliberately", () => {
