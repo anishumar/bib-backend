@@ -2323,6 +2323,114 @@ The nudge's reader lands in the same task that creates it, for the same reason:
   has published no chaser ladder chases nobody"* on a run where the demo had just published one.
   Two causes, and a line that picks one is worse than a line that names both.
 
+## The client's own request — the first row a CLIENT creates (T6.8)
+
+`delivery.client_request` + `client_request_reply` (migration 0068), `portal:request` (0069),
+`usecase/clientrequest`, and two adapters. After T6.5, T6.6 and T6.7 a client could read their
+status, answer what the firm asked, find last year's challan and see what they owed — and every
+one of those is a REPLY. This is the first row in the schema a client CREATES.
+
+**IT IS NOT `client_ask` REVERSED, AND THAT IS STRUCTURAL.** 0063's `work_item_id` is NOT NULL
+with its whole argument written out: the composite FK over `(work_item_id, client_party_id,
+tenant_id)` is what makes the wall column a GUARANTEE rather than a convention. A client's own
+request has no work item and may never get one — *"please call me about the notice"* is not work
+anybody raises a task for — so widening that column to NULL would take 0063's guarantee away
+from every row in that table to make room for rows of a different shape. Its own table, and it
+pays for the wall differently.
+
+**THE WALL COLUMN IS SUPPLIED BY THE CALLER, UNIQUELY IN THIS PRODUCT, AND `WITH CHECK` IS WHAT
+HOLDS.** Every one before it was READ from a parent inside the write, so no caller could name a
+party at all. There is no parent here: a contact granted three of the firm's companies has to
+SAY which one they are writing about, so the value arrives from the browser and
+`WITH CHECK (crm.portal_sees(client_party_id))` refuses any other. 0059 and 0062 each wrote that
+arm while noting no portal write path existed *"which is why it will not have to be built with
+the rule inside it"* — this is the case that collects on it.
+
+**The service ALSO refuses a party outside the session's scope, and that is a SENTENCE rather
+than the wall.** What the policy refuses with is a Postgres RLS violation, which reaches a client
+as a 500 and tells them nothing. Delete the service check and the write is still refused; delete
+the POLICY and it is not. `tests/portal/client-request.integration.test.ts` demonstrates the
+difference by going straight to `withPortal`, past the service, the way an edited adapter would.
+
+**`author_side` IS STORED, AND THE POLICY IS WHY THAT IS SAFE.** The reply table's WITH CHECK
+carries a second clause — `NOT crm.is_portal_session() OR author_side = 'client'` — so a portal
+session physically cannot write a reply signed as the firm. Deriving it instead ("is the author a
+staff account?") is a join that decides ATTRIBUTION, and a contact who was once staff, or an
+account whose membership was revoked, would silently change sides in an old conversation.
+
+**AND THAT GUARD IS 0062's SHAPE FOR THE HARD REASON, NOT THE TIDY ONE.** A bare `author_side =
+'client'` on a RESTRICTIVE policy applies to STAFF too. Dropping the guard as a negative control
+turns **two** tests red and both are the FIRM locked out of its own table — it can no longer reply
+to a client, nor send one a document. T6.7's hour-long trap, reproduced exactly, which is why the
+first test in that file is *"a STAFF session is untouched"*.
+
+**FOUR STATES, AND THE TWO ENDINGS BELONG TO DIFFERENT PEOPLE** (Shrestha, 2026-09-02).
+`open` → `answered` (the firm came back at least once, which is the same fact as
+`first_replied_at IS NOT NULL` and is tied to it by a CHECK) → `closed` (**the FIRM**) or
+`withdrawn` (**the CLIENT**). The queue is the firm's and a client who got what they wanted will
+never come back to tick a box, so the firm closes; and the firm can never write `withdrawn`,
+because *"we decided you did not need this"* is a refusal, which is a close with a reply saying
+so. **Which ending a session may write falls out of WHICH REPOSITORY it goes through** — the
+firm's runs `withTenant` and hard-codes `closed`, the client's runs `withPortal` and hard-codes
+`withdrawn` — never from a status argument anybody could pass. The columns are
+`settled_by`/`settled_at` rather than 0063's `closed_by`, because that name holding a client
+contact on half its rows would read as the firm having closed it.
+
+**A CLIENT'S FOLLOW-UP DOES NOT MOVE THE STATUS.** Sending `answered` back to `open` would break
+the CHECK above or force it to be loosened, and a loosened one is how a list filtered on `status`
+and a report joined on `settled_at` come to disagree about the same week. Who is holding the
+conversation is `lastWordWith`, computed off the thread, and the firm's inbox shows both.
+
+**NO ROUTING, AND IT IS OPEN RATHER THAN DECIDED.** One firm-wide list, no assignee column, no
+`?clientPartyId=` filter. The firm has never said whether an inbound request belongs to the
+client's partner, to a Dept, or to whoever is free — and this codebase already carries one
+arbitrary answer to a question of that shape. When the rule arrives it is a column and an index,
+not a rewrite. **NO KIND either**: 0063 carries `ask_kind` because the action centre renders a
+different control per value, and nothing branches on the kind of a request. **AND NO DUE DATE**,
+which is not open — the firm has never given its turnaround times.
+
+**A FIRM REPLY MAY ATTACH A DOCUMENT ALREADY FILED AGAINST THAT CLIENT, AND SENDING IT IS WHAT
+SHARES IT.** The adapter flips `files.document.is_client_visible` (0066) in the SAME transaction,
+because attaching a document to a message addressed to a client IS the decision to show it to
+them — a reply naming a file the client cannot open would be that default quietly swallowing the
+answer. It is deliberately not an upload: a client's own files go through T6.6's route, where
+they land in the job's file, and a second thread-shaped path would put them where nobody working
+the job is looking. The composite FK is 0063's, and both halves earn their place again — another
+client's document is refused, and so is one of the firm's OWN, whose `party_id` is NULL and
+matches no NOT NULL value.
+
+**`portal:request` IS THE ELEVENTH PERMISSION AND THE SECOND HELD OUTSIDE THE FIRM (0069).** Not
+a widening of `portal:respond`: everything that one covers is a REPLY to something the firm
+raised, and this lets somebody START work the firm is then expected to do. A firm may well want
+the clerk who sends the registers every month to go on sending them and not to open requests, and
+folding the two together would take that choice away with no way to give it back short of
+splitting the permission later. `client_contact` carries both; `client_viewer` carries neither
+and still sees the whole portal, because reading is authorised by the GRANT.
+
+**NO TRANSPORT, AND THE ABSENCE IS ASSERTED STRUCTURALLY.** `ClientRequestService`'s dependency
+list is pinned in `tests/clientrequest/service.test.ts` the way `ChaserService`'s and
+`NudgeService`'s are, so a mailer appearing in `Deps` turns the build red and the argument goes on
+the board first. Said honestly: a client raises a request and **the firm finds out when somebody
+opens the inbox**. P10 is what fixes that, in both directions.
+
+**AND THE FIRM'S READER SHIPPED IN THE SAME TASK.** `/client-requests`, `party:read` to read and
+`work:write` to act — this file's own rule after seven things shipped with a writer and nobody
+looking.
+
+### What walking it found
+
+- **`className="row gap"` HAS NEVER DONE WHAT IT LOOKS LIKE.** `.row` is `justify-content:
+  space-between` and **`.gap` is defined nowhere in the design system**, so a row of buttons is
+  flung to opposite edges. Measured on the live page: the client's **Approve and Decline buttons
+  were 941px apart** on one card. `.cluster` is the class for that; ten occurrences across five
+  files now use it. It was in committed T6.6/T6.7 code and only a screenshot could see it.
+- **A TIMESTAMP IS NOT A `date` COLUMN, AND THE RULE POINTS THE OTHER WAY.** This file's
+  calendar-day rule is about `YYYY-MM-DD`, where reading the UTC fields is the fix. For an
+  INSTANT it is the bug: a request raised at 00:20 in Delhi rendered as the day before, because
+  00:20 IST is 18:50 UTC. **The field's TYPE decides which rule applies.**
+- **THE FIRM'S SCREEN SAID ONE THING TWICE** — a "Waiting on us" chip beside a raw `open` chip.
+  This codebase's duplication bug for the fourth time.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,
@@ -2330,9 +2438,10 @@ The nudge's reader lands in the same task that creates it, for the same reason:
 `scheduler`, the `orchestrator`, `invoicing`, `work items` and the `compliance calendar` are built.
 T3.3's missed-deadline state and T3.7's dashboards are built. The escalation ladder is BUILT
 (T4.5) and did not need G3.4 — its manager hop reads `membership.reports_to_user_id`, and G3.4
-answers a different question. **The CLIENT PORTAL is COMPLETE through T6.7** — status home,
-action centre, self-serve library, invoices and a month view — **and gate 4 is closed**; see the
-four portal sections above. **The CHASER is built (T4.4) and so is the PROACTIVE NUDGE (T6.7)**,
+answers a different question. **The CLIENT PORTAL is COMPLETE through T6.8** — status home,
+action centre, self-serve library, invoices, a month view, and the client's own request —
+**and gate 4 is closed**; see the five portal sections above. **T6.8 is what made it two-way**:
+everything before it was a reply. **The CHASER is built (T4.4) and so is the PROACTIVE NUDGE (T6.7)**,
 and both have readers on both sides. **Phase 6 is finished and milestone M5 is reached.** Phase 6
 ran BEFORE Phase 4's agents.
 Reuse the platform's auth, notifications and config; do not rebuild them.

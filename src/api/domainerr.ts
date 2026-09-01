@@ -12,6 +12,7 @@ import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { PortalAccessError } from "../domain/portalaccess/errors";
 import { ClientAskError } from "../domain/clientask/errors";
+import { ClientRequestError } from "../domain/clientrequest/errors";
 import { ChaserError } from "../domain/chaser/errors";
 import { PortalLibraryError } from "../domain/portallibrary/errors";
 import { WorkItemError } from "../domain/workitem/errors";
@@ -405,6 +406,37 @@ export function mapError(err: unknown): MappedError {
       case "ASK_WORK_ITEM_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "ASK_ALREADY_SETTLED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
+  if (err instanceof ClientRequestError) {
+    switch (err.code) {
+      case "REQUEST_SUBJECT_EMPTY":
+      case "REQUEST_BODY_EMPTY":
+      case "REQUEST_REPLY_EMPTY":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 404 AND NOT 403, twice over and for two different reasons.
+      //
+      // REQUEST_NOT_FOUND is gate 4 in the database: the service genuinely
+      // cannot tell "no such request" from "another client's request", and a
+      // 403 would confirm one exists.
+      //
+      // REQUEST_COMPANY_NOT_YOURS is the same answer for the WRITE that names a
+      // company. A 403 there would let a contact enumerate the firm's client
+      // list by posting uuids and reading which refusal came back.
+      //
+      // REQUEST_DOCUMENT_NOT_FOUND is a staff-side refusal and 404 for the
+      // ordinary reason: from the firm's side there is no such document filed
+      // against this client, and whether it exists elsewhere is not what was
+      // asked.
+      case "REQUEST_NOT_FOUND":
+      case "REQUEST_COMPANY_NOT_YOURS":
+      case "REQUEST_DOCUMENT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "REQUEST_ALREADY_SETTLED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

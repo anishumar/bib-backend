@@ -55,6 +55,7 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   // simply cannot answer one — those three routes are in ROUTE_PERMISSIONS,
   // behind `portal:respond`.
   routeKey("GET", "/api/v1/portal/asks"),
+  routeKey("GET", "/api/v1/portal/requests"),
   // ── THE LIBRARY (T6.7) ────────────────────────────────────────────────
   //
   // Four reads, and the argument is the one the home and the ask list already
@@ -150,6 +151,21 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/asks/{askId}/close"), "work:write" as const],
   [routeKey("POST", "/api/v1/asks/{askId}/withdraw"), "work:write" as const],
 
+  // ── WHAT CLIENTS HAVE ASKED THE FIRM FOR (T6.8) ───────────────────────
+  //
+  // `party:read` on the inbox and `work:write` on the acts, exactly as the
+  // firm's side of an ask is split. Reading it names every client that has
+  // written in, which is the thing `party:read` gates; replying and closing are
+  // the firm saying what it is doing about a client's work.
+  //
+  // There is NO route here requiring a routing permission, because there is no
+  // routing (0068): the inbox is firm-wide, so anyone who may read clients may
+  // read all of it.
+  [routeKey("GET", "/api/v1/client-requests"), "party:read" as const],
+  [routeKey("GET", "/api/v1/client-requests/{requestId}"), "party:read" as const],
+  [routeKey("POST", "/api/v1/client-requests/{requestId}/replies"), "work:write" as const],
+  [routeKey("POST", "/api/v1/client-requests/{requestId}/close"), "work:write" as const],
+
   // ── Stopping the chaser (T4.4) ─────────────────────────────────────────
   //
   // READING is `party:read` — a freeze is a fact about a client, like its
@@ -186,6 +202,25 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/portal/asks/{askId}/answer"), "portal:respond" as const],
   [routeKey("POST", "/api/v1/portal/asks/{askId}/decision"), "portal:respond" as const],
   [routeKey("POST", "/api/v1/portal/asks/{askId}/documents"), "portal:respond" as const],
+  // ── AND THE ELEVENTH PERMISSION, THE SECOND HELD OUTSIDE THE FIRM ──────
+  //
+  // `portal:request` is not a widening of the one above it. Everything
+  // `portal:respond` covers is a REPLY to something the firm raised; these
+  // three let a contact START something the firm is then expected to act on,
+  // and a firm may well want the clerk who sends the registers every month to
+  // go on sending them and not to open requests. Folding the two together would
+  // take that choice away with no way to give it back short of splitting the
+  // permission later, which is a migration and a role edit at every firm.
+  //
+  // `client_contact` carries it from 0069; `client_viewer` does not, and still
+  // sees the whole portal — reading is authorised by the grant, never by a
+  // permission. A firm that wants its read-only contact able to ask adds this
+  // one permission to that role on the admin screen.
+  //
+  // The LIST is not here, for the same reason the ask list is not.
+  [routeKey("POST", "/api/v1/portal/requests"), "portal:request" as const],
+  [routeKey("POST", "/api/v1/portal/requests/{requestId}/replies"), "portal:request" as const],
+  [routeKey("POST", "/api/v1/portal/requests/{requestId}/withdraw"), "portal:request" as const],
   // The firm's whole audit trail is a partner-and-manager read: it names every
   // client the firm has, which is more than an associate needs to do their work.
   [routeKey("GET", "/api/v1/events"), "ledger:read" as const],

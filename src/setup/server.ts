@@ -34,6 +34,8 @@ import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-
 import { PostgresPortalLibraryRepository } from "../infrastructure/postgres/portal-library-repository";
 import { PostgresClientAskRepository } from "../infrastructure/postgres/client-ask-repository";
 import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
+import { PostgresClientRequestRepository } from "../infrastructure/postgres/client-request-repository";
+import { PostgresPortalRequestRepository } from "../infrastructure/postgres/portal-request-repository";
 import {
   PostgresChaseCandidates,
   PostgresChaseRepository,
@@ -114,6 +116,7 @@ import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { PortalHomeService } from "../usecase/portalhome/service";
 import { PortalLibraryService } from "../usecase/portallibrary/service";
+import { ClientRequestService } from "../usecase/clientrequest/service";
 import { ClientAskService } from "../usecase/clientask/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
@@ -752,6 +755,33 @@ export function wire(cfg: Config, log: Logger): Wired {
     maxUploadBytes: cfg.storage.maxUploadBytes,
   });
 
+  // THE CLIENT'S OWN REQUEST (T6.8) — the other direction, and the first thing
+  // on this portal a client can START.
+  //
+  // NO MAILER, and the absence is asserted structurally in
+  // `tests/clientrequest/service.test.ts` the way the chaser's and the nudge's
+  // are: transport is P10 (Phase 7), so a client raising a request raises a row
+  // and the firm sees it when it opens the inbox. A logging stub saying the
+  // firm was notified would be the same class of lie as a scan() that returns
+  // clean, and a transport appearing in this Deps turns the build red on
+  // purpose so the decision is taken on the board.
+  //
+  // The same `scopedCompanies` closure the ask service holds, satisfying a port
+  // this use case declares for itself — TypeScript is structural, and one
+  // implementation serves all three portal use cases without any of them
+  // importing another's ports.
+  const clientRequests = new ClientRequestService({
+    requests: new PostgresClientRequestRepository(pools.app),
+    portal: new PostgresPortalRequestRepository(pools.app),
+    scope: {
+      scopedCompanies: (tenantId, userId, on) =>
+        portalAccess.scopedClientsForUser(tenantId, userId, on),
+    },
+    ids: systemIds,
+    events: ledger,
+    clock: systemClock,
+  });
+
   // THE CHASER (T4.4) — the ask ladder aimed OUTWARD, and the freeze that stops
   // it. The API surface here is the FREEZE only: the sweep is a cron in the
   // worker (`setup/worker.ts`), because a "chase now" button would be a person
@@ -878,9 +908,11 @@ export function wire(cfg: Config, log: Logger): Wired {
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
         clientAsks: { service: clientAsks },
+        clientRequests: { service: clientRequests },
         chaser: { service: chaser },
         portalAsks: { service: clientAsks },
         portalLibrary: { service: portalLibrary },
+        portalRequests: { service: clientRequests },
         portalInvites: {
           service: portalAccessForInvite(),
           identity,

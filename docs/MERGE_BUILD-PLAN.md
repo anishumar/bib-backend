@@ -3710,8 +3710,132 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > raised today and no rung is due. `check` **1510** · `test:integration` **524** ·
   > `demo:verify` **71**.
 
-**Phase 6 is COMPLETE.** U1 (T6.5, T6.6, T6.7), the chaser (T4.4) and gate 4 (G3.4) have all
-landed. What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
+- [x] `(B)` **T6.8** The client's own request — a client asks the FIRM for something, unprompted. *Acc: "send me last year's balance sheet" stops being a phone call.*
+  > **DONE 2026-09-02 (migrations 0068 and 0069).** `usecase/clientrequest`, two adapters, seven
+  > routes, an "Ask the firm" section on `/portal` and `/client-requests` on the firm's side.
+  > **Walked in the browser end to end**: Meera raised a request at Cobalt Foods, Siddharth
+  > answered it from the workspace attaching a document, and it appeared in her library — the
+  > acceptance line, in one loop, with no email.
+  >
+  > **ADDED TO THE BOARD RATHER THAN FOUND ON IT.** Phase 6 was complete against U1 as written
+  > and the portal was still a one-way street: a client could answer, upload, download and read,
+  > and could not START a sentence. T6.7's library covers the half where the firm has already
+  > filed the document AND marked it visible; it cannot cover *"we never had that from you"*.
+  >
+  > **1 · IT IS NOT `client_ask` REVERSED, AND THAT IS STRUCTURAL.** 0063's `work_item_id` is
+  > NOT NULL with its whole argument written out — the composite FK over `(work_item_id,
+  > client_party_id, tenant_id)` is what makes the wall column a GUARANTEE. A client's own
+  > request has no work item and may never get one, so widening that column would take 0063's
+  > guarantee away from every row in that table to make room for rows of a different shape.
+  >
+  > **2 · THE FIRST WALL COLUMN A CALLER SUPPLIES, AND THE FIRST WRITE WHERE `WITH CHECK` IS
+  > THE ONLY THING HOLDING.** Every one before it was read from a parent inside the INSERT.
+  > There is no parent here — a contact granted three companies must SAY which — so
+  > `crm.portal_sees(client_party_id)` on the WITH CHECK arm is what refuses another client's
+  > company. 0059 and 0062 both wrote that arm while saying no portal write path existed *"which
+  > is why it will not have to be built with the rule inside it"*; this is the case that
+  > collects on it. The service checks the scope first so the refusal is a SENTENCE and not an
+  > RLS violation, and `tests/portal/client-request.integration.test.ts` demonstrates which of
+  > the two is the wall by going straight to `withPortal`, past the service.
+  >
+  > **3 · `author_side` IS ENFORCED BY THE POLICY, WHICH IS WHY IT IS SAFE TO STORE.** The reply
+  > table's WITH CHECK carries `NOT crm.is_portal_session() OR author_side = 'client'`, so a
+  > contact posting `authorSide: "firm"` is refused by the DATABASE — not by a handler and not
+  > by a zod schema, both of which are also true today and either of which somebody could later
+  > simplify. Deriving it instead ("is the author a staff account?") is a join that decides
+  > ATTRIBUTION, and an account whose membership changed would switch sides in an old
+  > conversation.
+  >
+  > **AND THE GUARD IS 0062's SHAPE FOR THE HARD REASON.** A bare `author_side = 'client'` on a
+  > RESTRICTIVE policy applies to STAFF too. Removing the guard as a negative control turned
+  > **2** tests red and BOTH were the firm locked out of its own table — it could no longer
+  > reply to a client, nor send one a document. That is T6.7's hour-long trap reproduced
+  > exactly, and it is why the FIRST test in that file is *"a STAFF session is untouched"*.
+  >
+  > **4 · FOUR DECISIONS THAT ARE SHRESTHA'S, taken 2026-09-02 and not guessed:**
+  >   · **The FIRM closes; the CLIENT withdraws.** Against the symmetric reading where the
+  >     raiser closes: the queue is the firm's, and a client who got what they wanted will never
+  >     come back to tick a box, so those rows would sit open for ever and the inbox would stop
+  >     being read. The firm can never write `withdrawn` — *"we decided you did not need this"*
+  >     is a refusal, which is a close with a reply saying so — and which ending a session may
+  >     write falls out of WHICH REPOSITORY it goes through, not from a column anybody passes.
+  >     0068 names the columns `settled_by`/`settled_at` rather than borrowing 0063's
+  >     `closed_by`, because that name holding a client contact on half its rows would read as
+  >     the firm having closed it.
+  >   · **`portal:request` is the ELEVENTH permission and the SECOND held outside the firm** —
+  >     not a widening of `portal:respond`. Everything that one covers is a REPLY to something
+  >     the firm raised; this lets somebody START work the firm is expected to do, and a firm
+  >     may well want the clerk who sends the registers every month to go on sending them and
+  >     not to open requests. `client_viewer` holds neither and still sees everything, because
+  >     reading is authorised by the GRANT.
+  >   · **NO ROUTING.** One firm-wide list. The firm has never said whether an inbound request
+  >     belongs to the client's partner, to a Dept, or to whoever is free — and this codebase
+  >     already carries one arbitrary answer to a question of that shape (a service-less shipped
+  >     rule inheriting some engagement's Dept), which is on this board as open. A second guess
+  >     is the same mistake with a different table. **It is open, and it is the one thing on
+  >     this task somebody will want to change first.**
+  >   · **NO TOPIC OR KIND.** 0063 carries `ask_kind` because the action centre RENDERS a
+  >     different control per value. Nothing branches on the kind of a request, and a vocabulary
+  >     nobody reads stops being filled in accurately and then starts being trusted.
+  >
+  > **5 · THE ANSWER TO "SEND ME LAST YEAR'S BALANCE SHEET" IS 0066's SWITCH.** A firm reply may
+  > attach a document ALREADY FILED against that client, and the adapter flips
+  > `files.document.is_client_visible` in the same transaction — because attaching a document to
+  > a message addressed to a client IS the decision to show it to them. No second upload path:
+  > a client's own files go through T6.6's route, where they land in the job's file. The
+  > composite FK is 0063's and both halves earn their place again — another client's document is
+  > refused, and so is one of the firm's OWN (`party_id` NULL matches no NOT NULL value).
+  >
+  > **6 · NO TRANSPORT, AND THE ABSENCE IS ASSERTED STRUCTURALLY.** `ClientRequestService`'s
+  > dependency list is pinned in a test the way `ChaserService`'s and `NudgeService`'s are, so a
+  > mailer appearing in `Deps` turns the build red and the argument goes on this board first.
+  > What this means honestly: a client raises a request and **the firm finds out when somebody
+  > opens the inbox**. That is the same PULL the rest of the portal is, and P10 is what fixes
+  > it — for this in both directions.
+  >
+  > **AND THE FIRM'S READER SHIPPED IN THE SAME TASK**, which is this board's own rule after
+  > seven things shipped with a writer and nobody looking. `/client-requests`, a link in the
+  > Delivery group, `party:read` to read and `work:write` to act.
+  >
+  > **WHAT WALKING IT FOUND, and none of it visible to a typecheck, a lint or a test:**
+  >   · **`className="row gap"` HAS NEVER DONE WHAT IT LOOKS LIKE, AND IT IS IN COMMITTED
+  >     T6.6/T6.7 CODE.** `.row` is `justify-content: space-between` and **`.gap` is not defined
+  >     anywhere in the design system**. Measured on the live page: the client's **Approve and
+  >     Decline buttons were 941px apart**, at opposite edges of one card, with the destructive
+  >     one where the eye lands last. `.cluster` is the class meant for a row of buttons; ten
+  >     occurrences across five files now use it, and the spread is 8px. A screenshot found
+  >     this; the page's TEXT reads identically either way.
+  >   · **A TIMESTAMP IS NOT A DATE COLUMN, AND THE RULE POINTS THE OTHER WAY.** The first draft
+  >     rendered `raisedAt` by reading its UTC fields — which is the correct answer for a
+  >     `YYYY-MM-DD` DATE and the wrong one for an INSTANT. A request raised at 00:20 in Delhi
+  >     displayed **"01 Sep"**, the day before the client made it. It uses the reader's own zone
+  >     now, which is what the action centre already did.
+  >   · **THE FIRM'S SCREEN SAID ONE THING TWICE** — a "Waiting on us" chip beside a raw `open`
+  >     chip, which is this codebase's duplication bug for the fourth time, and put a machine
+  >     word on a partner's page. What replaced it says the three states a reader acts on, and
+  >     the middle one — **the client came BACK** — is the one neither chip could express alone.
+  >   · **THE DOCUMENT PICKER LOADED ON ITS OWN FOCUS AND WAS ALWAYS EMPTY.** A native `<select>`
+  >     opens the instant it is clicked, so the options arrived after the reader was already
+  >     looking at "Nothing attached". It loads when the REPLY BOX is touched now — typing a
+  >     sentence is far longer than the round trip.
+  >   · **AND THE FIRM'S SCREEN NEEDED A FIELD THE API DID NOT SEND.** `clientPartyId` is on the
+  >     firm's wire now and deliberately not on the portal's: the inbox needs it to list that
+  >     client's documents for the attachment picker, and a client reading their own page has no
+  >     use for their own party id. The rule this board already has — when a screen wants
+  >     something the API does not return, fix the API.
+  >
+  > **ONE THING LEFT OPEN AND NOT THIS TASK'S:** every portal timestamp crosses the wire as
+  > Postgres `::text` (`2026-09-01 19:54:05.712839+00`, a SPACE rather than a `T`), which is not
+  > ISO 8601. Chrome and Firefox parse it; Safari historically does not, and would render every
+  > date on this surface as a raw string. It is the convention T6.5, T6.6 and T6.7 all set and
+  > changing it is five adapters, so it is written down here rather than half-done.
+  >
+  > `check` **1529** · `test:integration` **543** · `demo:verify` **71** on a database rebuilt
+  > from nothing.
+
+**Phase 6 is COMPLETE, and T6.8 was added to it after the fact** — U1 as written (T6.5, T6.6,
+T6.7), the chaser (T4.4), gate 4 (G3.4), and then the request that made the portal two-way.
+What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over
 the full backend, the client-facing loop closed (portal + chaser), integrations faked, **and
@@ -3741,6 +3865,11 @@ Not security, and not blocking — but it has to be true before anybody is onboa
 data, and each line is something a session did on purpose and wrote down rather than left for
 somebody to find.
 
+- **T6.8's walk raised a real request at Cobalt Foods, answered it as Siddharth, and flipped a
+  working paper's client visibility on** to prove the attachment path end to end. All of it was
+  undone by `npm run demo:fresh`, which re-verified **71/71** and re-ran `test:integration` at
+  **543** on a database built from nothing — a stronger check on 0068 and 0069 than applying
+  them as an increment.
 - **T6.7's walk ran the chaser sweep as of a FUTURE day (`2026-09-12`) to see the reader it
   built**, which wrote 4 `client_ask_chase` rows, and flipped one document's client visibility
   on and off. Both were undone by `npm run demo:fresh`, which re-verified **71/71** — the

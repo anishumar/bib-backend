@@ -53,9 +53,13 @@ describe("the roles a firm starts with", () => {
       const role = DEFAULT_ROLES[key];
       expect(role?.audience, `${key} must be written for the portal`).toBe("CLIENT_PORTAL");
       for (const permission of role?.permissions ?? []) {
-        expect(permission, `${key} must hold nothing that works inside the firm`).toBe(
-          "portal:respond",
-        );
+        // The two portal permissions, and nothing else may join them without
+        // somebody deciding to: everything a portal role carries has to be
+        // meaningless inside the firm, or `roleServes` is doing the work alone.
+        expect(
+          ["portal:respond", "portal:request"],
+          `${key} must hold nothing that works inside the firm`,
+        ).toContain(permission);
       }
     }
   });
@@ -66,7 +70,15 @@ describe("the roles a firm starts with", () => {
     // by the grant (`crm.portal_access`), never by a permission, so a contact
     // with no permissions still sees their company's whole portal and simply
     // cannot answer anything on it.
-    expect(DEFAULT_ROLES["client_contact"]?.permissions).toEqual(["portal:respond"]);
+    // T6.8 added the second one, and it is a SEPARATE authority rather than a
+    // widening: `portal:respond` answers what the firm asked, `portal:request`
+    // starts something the firm must act on. A firm may give the first and
+    // withhold the second — the registers clerk who sends files and does not
+    // open requests — which is the whole reason there are two.
+    expect(DEFAULT_ROLES["client_contact"]?.permissions).toEqual([
+      "portal:respond",
+      "portal:request",
+    ]);
     expect(DEFAULT_ROLES["client_viewer"]?.permissions).toEqual([]);
   });
 

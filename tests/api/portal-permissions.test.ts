@@ -131,10 +131,18 @@ describe("a role grants nothing to a session in the other audience", () => {
   it("reports what a portal contact really holds", async () => {
     // And this is the half that used to be a lie in the other direction: before
     // T6.6 this answered `[]`, so the action centre would have offered nothing.
+    //
+    // TWO permissions since T6.8, and the ORDER is the order `DEFAULT_ROLES`
+    // and the 0069 seed both write — a role body is compared byte-for-byte by
+    // the upgrade migrations, so the array is not a set.
     expect(await authz.permissionsOf(principal("CLIENT_PORTAL", "client_contact"))).toEqual([
       "portal:respond",
+      "portal:request",
     ]);
     expect(await authz.can(principal("CLIENT_PORTAL", "client_contact"), "portal:respond")).toBe(
+      true,
+    );
+    expect(await authz.can(principal("CLIENT_PORTAL", "client_contact"), "portal:request")).toBe(
       true,
     );
   });

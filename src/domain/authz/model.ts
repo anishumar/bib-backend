@@ -31,6 +31,7 @@ export type Permission =
   | "obligation:resolve"
   | "portal:grant"
   | "portal:respond"
+  | "portal:request"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -43,6 +44,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "obligation:resolve",
   "portal:grant",
   "portal:respond",
+  "portal:request",
   "tenant:admin",
 ];
 
@@ -90,6 +92,15 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "staff role. A contact WITHOUT it still sees everything their company's portal shows — " +
     "reading is authorised by the grant itself (crm.portal_access), not by a permission — " +
     "and simply cannot act. That is the difference between the two portal roles.",
+  "portal:request":
+    "Ask the firm for something on a client's behalf — a document, a copy, a correction, a " +
+    "call. The SECOND permission held by somebody outside the firm, and the first that lets " +
+    "them start a sentence rather than answer one: everything portal:respond covers is a " +
+    "reply to something the firm raised. It is separate from that one because a firm may " +
+    "well want the clerk who sends the registers every month to keep sending them and NOT to " +
+    "open requests the firm is then expected to act on. client_viewer holds neither, so a " +
+    "read-only contact still sees everything and starts nothing — and a firm that wants that " +
+    "person able to ask adds this one permission to the role.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every configuration " +
     "setting — including this one.",
@@ -226,7 +237,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
   client_contact: {
     label: "Client contact",
     audience: "CLIENT_PORTAL",
-    permissions: ["portal:respond"],
+    permissions: ["portal:respond", "portal:request"],
   },
   // For a contact the firm wants to keep informed and not to hear from — an
   // investor, a bank, a director who is not the one who sends the registers.

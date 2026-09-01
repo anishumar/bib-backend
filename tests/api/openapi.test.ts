@@ -67,6 +67,13 @@ import {
   FakePortalLibraryRepo,
 } from "../../src/testfakes/portallibrary";
 import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
+import { ClientRequestService } from "../../src/usecase/clientrequest/service";
+import {
+  FakePortalRequestRepo,
+  FakeRequestRepo,
+  FakeRequestScope,
+  FakeRequestStore,
+} from "../../src/testfakes/clientrequest";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -357,6 +364,7 @@ function deps(): RouterDeps {
     // T6.6's ask, both surfaces over ONE service — the wiring `setup/` uses, so
     // this sweep exercises the same object graph the server does.
     clientAsks: { service: askService() },
+    clientRequests: { service: requestService() },
     // The FREEZE surface only. The sweep has no route — it is a cron in the
     // worker, so this sweep asks who may reach the freeze and nothing else.
     chaser: {
@@ -373,6 +381,7 @@ function deps(): RouterDeps {
     },
     portalAsks: { service: askService() },
     portalLibrary: { service: libraryService() },
+    portalRequests: { service: requestService() },
     portalInvites: {
       service: new PortalInviteService({
         identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
@@ -480,6 +489,21 @@ function askService(): ClientAskService {
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
     maxUploadBytes: 10_000_000,
+  });
+}
+
+/** T6.8's two ports over one in-memory store. Gate 4 is NOT reproduced here —
+ *  it is proven against real Postgres in
+ *  `tests/portal/client-request.integration.test.ts`. */
+function requestService(): ClientRequestService {
+  const store = new FakeRequestStore();
+  return new ClientRequestService({
+    requests: new FakeRequestRepo(store),
+    portal: new FakePortalRequestRepo(store),
+    scope: new FakeRequestScope(),
+    ids: new FakeIds(),
+    events: new RecordingEventSink(),
+    clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
   });
 }
 

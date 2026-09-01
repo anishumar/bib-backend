@@ -205,6 +205,17 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/portal/documents/{documentId}/content",
   "/api/v1/portal/invoices",
   "/api/v1/portal/digest",
+  // ── AND THE FIRST PORTAL ROUTES THAT CREATE SOMETHING (T6.8) ────────────
+  //
+  // The list is a READ and needs no permission, like every other read here.
+  // The three acts sit behind `portal:request` in ROUTE_PERMISSIONS — the
+  // second permission a portal session can hold, and deliberately not
+  // `portal:respond`: everything that one covers is a REPLY to something the
+  // firm raised, and a firm may well want a contact who sends registers and
+  // does not open requests (0069).
+  "/api/v1/portal/requests",
+  "/api/v1/portal/requests/{requestId}/replies",
+  "/api/v1/portal/requests/{requestId}/withdraw",
 ]);
 
 /**

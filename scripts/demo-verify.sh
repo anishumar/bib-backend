@@ -117,10 +117,18 @@ is "an associate cannot see fees"                     "False"      "$(as ananya 
 # can actually use — and a role now declares its AUDIENCE, so what comes back is
 # exactly what a client contact can do and nothing a colleague's role carries.
 #
-# Asserted as the exact list rather than a count: "one permission" would still
-# pass if it were the wrong one, and the wrong one here is a staff permission on
-# a client's login.
-is "a portal session is told exactly what it may do" "portal:respond" "$(as portal "$API/api/v1/auth/me" | pick "','.join(d['permissions'])")"
+# T6.8 added the SECOND one. `portal:request` lets a contact START something —
+# ask the firm for a document, a copy, a correction — where everything
+# `portal:respond` covers is a reply to something the firm raised. Separate
+# permissions because a firm may want the registers clerk sending files and not
+# opening requests.
+#
+# Asserted as the exact list rather than a count: "two permissions" would still
+# pass if one were the wrong one, and the wrong one here is a staff permission
+# on a client's login. The ORDER is the order `DEFAULT_ROLES` and the 0069 seed
+# both write — a role body is compared byte-for-byte by the upgrade migrations,
+# so this is not a set.
+is "a portal session is told exactly what it may do" "portal:respond,portal:request" "$(as portal "$API/api/v1/auth/me" | pick "','.join(d['permissions'])")"
 
 say "The gates"
 status "anonymous is refused the board"        401 "$(curl -s -o /dev/null -w '%{http_code}' "$API/api/v1/work-items")"

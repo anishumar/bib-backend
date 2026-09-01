@@ -86,6 +86,13 @@ import {
   FakePortalLibraryRepo,
 } from "../../src/testfakes/portallibrary";
 import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
+import { ClientRequestService } from "../../src/usecase/clientrequest/service";
+import {
+  FakePortalRequestRepo,
+  FakeRequestRepo,
+  FakeRequestScope,
+  FakeRequestStore,
+} from "../../src/testfakes/clientrequest";
 import {
   FakeAssignableAxes,
   FakeAssignmentStaff,
@@ -200,6 +207,21 @@ function askService(): ClientAskService {
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
     maxUploadBytes: 10_000_000,
+  });
+}
+
+/** T6.8's two ports over one in-memory store. Gate 4 is NOT reproduced here —
+ *  it is proven against real Postgres in
+ *  `tests/portal/client-request.integration.test.ts`. */
+function requestService(): ClientRequestService {
+  const store = new FakeRequestStore();
+  return new ClientRequestService({
+    requests: new FakeRequestRepo(store),
+    portal: new FakePortalRequestRepo(store),
+    scope: new FakeRequestScope(),
+    ids: new FakeIds(),
+    events: new RecordingEventSink(),
+    clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
   });
 }
 
@@ -412,6 +434,7 @@ function deps(): RouterDeps {
     // T6.6's ask, both surfaces over ONE service — the wiring `setup/` uses, so
     // this sweep exercises the same object graph the server does.
     clientAsks: { service: askService() },
+    clientRequests: { service: requestService() },
     // The FREEZE surface only. The sweep has no route — it is a cron in the
     // worker, so this sweep asks who may reach the freeze and nothing else.
     chaser: {
@@ -428,6 +451,7 @@ function deps(): RouterDeps {
     },
     portalAsks: { service: askService() },
     portalLibrary: { service: libraryService() },
+    portalRequests: { service: requestService() },
     portalInvites: {
       service: new PortalInviteService({
         identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
@@ -901,6 +925,20 @@ describe("gate 2 — audience", () => {
       "/api/v1/portal/documents/{documentId}/content",
       "/api/v1/portal/home",
       "/api/v1/portal/invoices",
+      // T6.8's own requests — the first routes on this list that CREATE
+      // something. The list is a read like every other one here; the three acts
+      // are behind `portal:request`, which is a SECOND portal permission and
+      // deliberately not a widening of `portal:respond`: everything that one
+      // covers is a reply to something the firm raised, and a firm may want a
+      // contact who sends registers and does not open requests (0069).
+      //
+      // What guards them is 0068, and on `POST /portal/requests` the WITH CHECK
+      // arm is doing something it has never had to do before — the client NAMES
+      // the company, so it is the only thing between a request parameter and
+      // the row.
+      "/api/v1/portal/requests",
+      "/api/v1/portal/requests/{requestId}/replies",
+      "/api/v1/portal/requests/{requestId}/withdraw",
       // The org switcher's data — their own memberships and nothing else.
       "/api/v1/tenancy/me/memberships",
     ]);
