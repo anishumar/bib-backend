@@ -28,7 +28,11 @@ import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { ClientRequestService } from "../../usecase/clientrequest/service";
 import type { ClientRequestRecord } from "../../domain/clientrequest/model";
-import { awaitsFirm, REQUEST_STATUSES } from "../../domain/clientrequest/model";
+import {
+  awaitsFirm,
+  REQUEST_ROUTINGS,
+  REQUEST_STATUSES,
+} from "../../domain/clientrequest/model";
 
 export interface ClientRequestDeps {
   readonly service: ClientRequestService;
@@ -106,6 +110,29 @@ const RequestSchema = z
         "things is two conversations.",
     }),
     raisedAt: z.string(),
+    assignee: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string(),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "WHOSE DESK it is on. Null is ORDINARY: the firm may route nothing (the default), or " +
+          "the rule may have run and found nobody — `assignmentNote` is what tells those two " +
+          "apart, and is null in the first case because nothing failed. " +
+          "ALL THREE FIELDS, which is the shape the escalation queue and the ledger's actor " +
+          "both use: `display_name` is nullable on an account and genuinely empty at seeded " +
+          "firms, so a screen given only the name renders a blank space and turns 'somebody we " +
+          "hold no name for' into 'nobody'. The EMAIL is the discriminator, and the userId is " +
+          "what a screen compares against the reader to answer 'is this mine'.",
+      }),
+    assignmentNote: z.string().nullable().openapi({
+      description:
+        "Why NOBODY, when the rule ran and could not name somebody — and it names the FIX, " +
+        "not the failure. Never set beside an assignee: the database refuses the pair.",
+    }),
     settledByName: z.string().nullable(),
     settledAt: z.string().nullable(),
     replies: z.array(ReplySchema),
@@ -135,6 +162,8 @@ const ReplyRequest = z
   })
   .openapi("ReplyToClientRequestRequest");
 
+const Routing = z.enum(REQUEST_ROUTINGS as unknown as [string, ...string[]]);
+
 const listRoute = createRoute({
   method: "get",
   path: "/api/v1/client-requests",
@@ -142,12 +171,25 @@ const listRoute = createRoute({
   summary: "What clients have asked YOU for",
   description:
     "The firm-wide inbox of requests clients raised themselves — everything not finished, " +
-    "newest first. There is no routing: nobody is assigned one, because the firm has not said " +
-    "who should be. `awaitingFirm` is the flag to work from.",
+    "newest first. `awaitingFirm` is the flag to work from, and `routing` says whether this " +
+    "firm places them on anybody's desk automatically.",
   responses: {
     200: {
-      description: "The live requests, each with its whole thread",
-      content: { "application/json": { schema: z.array(RequestSchema) } },
+      description: "The live requests with their threads, and the firm's routing setting",
+      content: {
+        "application/json": {
+          schema: z.object({
+            requests: z.array(RequestSchema),
+            routing: Routing.openapi({
+              description:
+                "WHAT THIS FIRM DOES WITH AN ARRIVING REQUEST. It travels with the list for " +
+                "T4.5's `ladderPublished` reason: an inbox where nothing is assigned because " +
+                "the firm routes nothing, and one where the rule ran and placed nothing, are " +
+                "the same picture — and only one of them is somebody's to fix.",
+            }),
+          }),
+        },
+      },
     },
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not read clients"),
@@ -210,6 +252,78 @@ const closeRoute = createRoute({
   },
 });
 
+const AssignRequest = z
+  .object({
+    assigneeUserId: z
+      .string()
+      .uuid()
+      .nullable()
+      .openapi({
+        description:
+          "Whose desk it goes on. NULL takes it off one — there is no separate unassign route, " +
+          "because assigning and unassigning are one act with two ends and the name and the " +
+          "note have to move together.",
+      }),
+  })
+  .openapi("AssignClientRequestRequest");
+
+const assignRoute = createRoute({
+  method: "put",
+  path: "/api/v1/client-requests/{requestId}/assignee",
+  tags: ["client-requests"],
+  summary: "Put it on somebody's desk, or take it off one",
+  description:
+    "ALWAYS AVAILABLE, whatever the firm's routing setting says. A firm that routes nothing " +
+    "still needs to say whose a request is, and a firm that routes to the Key Manager still " +
+    "needs somebody to take one that landed on the wrong desk — the rule is a default, not a " +
+    "wall. Taking a request off a desk clears the routing note with it: a person unassigning " +
+    "has explained it by doing it, and the rule's old sentence would then be saying the " +
+    "request is unplaced for a reason that is no longer why.",
+  request: {
+    params: RequestParam,
+    body: { content: { "application/json": { schema: AssignRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Assigned", content: { "application/json": { schema: RequestSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org chosen, or the role may not write work"),
+    404: errorResponse("No such request at this firm"),
+    409: errorResponse("Already closed or withdrawn, or that person does not work here"),
+  },
+});
+
+const setRoutingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/client-request-routing",
+  tags: ["client-requests"],
+  summary: "How an arriving client request is routed",
+  description:
+    "`none` routes nothing and is the DEFAULT — a real answer, not 'unconfigured', and " +
+    "exactly the behaviour this product had before the setting existed. `key_manager` places " +
+    "a new request on the desk of that client's Key Manager, and leaves it UNASSIGNED with a " +
+    "sentence when the client has none.\n\n" +
+    "A SPOC is not an option and cannot become one: a SPOC covers a Dept or a delivery team, " +
+    "a request names no service, and picking an axis for it would be this product deciding " +
+    "something the firm never said.\n\n" +
+    "CHANGING IT RESTATES NOTHING. Requests already on a desk keep their assignee; the next " +
+    "one is routed the new way.",
+  request: {
+    body: {
+      content: { "application/json": { schema: z.object({ routing: Routing }) } },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "The setting now in force",
+      content: { "application/json": { schema: z.object({ routing: Routing }) } },
+    },
+    400: errorResponse("Not one of none / key_manager"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org chosen, or the role may not administer the firm"),
+  },
+});
+
 export function registerClientRequestRoutes(
   app: OpenAPIHono<AppEnv>,
   deps: ClientRequestDeps,
@@ -217,8 +331,8 @@ export function registerClientRequestRoutes(
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const records = await deps.service.inbox(s.tenantId);
-    return c.json(records.map(toWire), 200);
+    const inbox = await deps.service.inbox(s.tenantId);
+    return c.json({ requests: inbox.requests.map(toWire), routing: inbox.routing }, 200);
   });
 
   app.openapi(readRoute, async (c) => {
@@ -241,6 +355,27 @@ export function registerClientRequestRoutes(
       actor: s.actor,
     });
     return c.json(toWire(record), 201);
+  });
+
+  app.openapi(assignRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { requestId } = c.req.valid("param");
+    const { assigneeUserId } = c.req.valid("json");
+    const record = await deps.service.assign({
+      tenantId: s.tenantId,
+      requestId,
+      assigneeUserId,
+      actor: s.actor,
+    });
+    return c.json(toWire(record), 200);
+  });
+
+  app.openapi(setRoutingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { routing } = c.req.valid("json");
+    return c.json({ routing: await deps.service.setRouting(s.tenantId, routing, s.actor) }, 200);
   });
 
   app.openapi(closeRoute, async (c) => {
@@ -279,6 +414,15 @@ function toWire(record: ClientRequestRecord) {
     awaitingFirm: awaitsFirm(record),
     raisedByName: record.raisedByName,
     raisedAt: record.request.raisedAt,
+    assignee:
+      record.request.assigneeUserId === null
+        ? null
+        : {
+            userId: record.request.assigneeUserId,
+            displayName: record.assigneeName,
+            email: record.assigneeEmail ?? "",
+          },
+    assignmentNote: record.request.assignmentNote,
     settledByName: record.settledByName,
     settledAt: record.request.settledAt,
     replies: record.replies.map((r) => ({

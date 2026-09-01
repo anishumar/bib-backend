@@ -25,7 +25,9 @@ export type ClientRequestErrorCode =
   | "REQUEST_BODY_EMPTY"
   | "REQUEST_ALREADY_SETTLED"
   | "REQUEST_REPLY_EMPTY"
-  | "REQUEST_DOCUMENT_NOT_FOUND";
+  | "REQUEST_DOCUMENT_NOT_FOUND"
+  | "REQUEST_ASSIGNEE_NOT_STAFF"
+  | "REQUEST_ROUTING_UNKNOWN";
 
 export class RequestNotFound extends ClientRequestError {
   constructor(requestId: string) {
@@ -106,6 +108,29 @@ export class RequestDocumentNotFound extends ClientRequestError {
         `client's, and never one of the firm's own working papers, whose party is null. File ` +
         `it against the client first; that is the ordinary act, and it is what makes the ` +
         `document theirs to be sent.`,
+    );
+  }
+}
+
+export class RequestAssigneeNotStaff extends ClientRequestError {
+  constructor(userId: string) {
+    super(
+      "REQUEST_ASSIGNEE_NOT_STAFF",
+      `${JSON.stringify(userId)} is not an active member of this firm, so a request cannot be ` +
+        `put on their desk. A foreign key cannot refuse this — tenancy.user_account is a ` +
+        `GLOBAL table, and nothing in SQL can say "still works here" — which is why it is ` +
+        `checked here, exactly as it is for a client assignment and a work item.`,
+    );
+  }
+}
+
+export class RequestRoutingUnknown extends ClientRequestError {
+  constructor(routing: string, valid: readonly string[]) {
+    super(
+      "REQUEST_ROUTING_UNKNOWN",
+      `${JSON.stringify(routing)} is not a way this product can route a client's request. ` +
+        `Valid: ${valid.join(", ")}. A SPOC is deliberately absent and cannot be added ` +
+        `without an axis: a request names no service, so there is nothing to pick a Dept by.`,
     );
   }
 }

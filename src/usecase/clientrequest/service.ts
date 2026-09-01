@@ -38,28 +38,47 @@ import type { EventSink } from "../ledger/ports";
 import type {
   ClientRequestRecord,
   PortalRequestRow,
+  RequestRouting,
   RequestStatus,
 } from "../../domain/clientrequest/model";
-import { acceptsReply, splitByReplied } from "../../domain/clientrequest/model";
+import {
+  acceptsReply,
+  isRequestRouting,
+  REQUEST_ROUTINGS,
+  routeRequest,
+  splitByReplied,
+} from "../../domain/clientrequest/model";
 import {
   RequestAlreadySettled,
+  RequestAssigneeNotStaff,
   RequestBodyEmpty,
   RequestCompanyNotYours,
   RequestDocumentNotFound,
   RequestNotFound,
   RequestReplyEmpty,
+  RequestRoutingUnknown,
   RequestSubjectEmpty,
 } from "../../domain/clientrequest/errors";
 import type {
+  AssignableStaffDirectory,
+  KeyManagerDirectory,
   PortalRequestRepository,
   PortalScopeSource,
   RequestRepository,
+  RequestRoutingSource,
 } from "./ports";
 
 export interface Deps {
   readonly requests: RequestRepository;
   readonly portal: PortalRequestRepository;
   readonly scope: PortalScopeSource;
+  /** How this firm routes an arriving request, and the switch that sets it. */
+  readonly routing: RequestRoutingSource;
+  /** Who owns the relationship with a client — a STAFF read, deliberately not
+   *  reached from inside the portal transaction. See `NewRequest`. */
+  readonly keyManagers: KeyManagerDirectory;
+  /** A refusal no foreign key can make: `tenancy.user_account` is GLOBAL. */
+  readonly staff: AssignableStaffDirectory;
   readonly ids: IdGen;
   readonly events: EventSink;
   readonly clock: Clock;
@@ -121,6 +140,21 @@ export interface CloseRequestInput {
   readonly actor: Actor;
 }
 
+export interface AssignRequestInput {
+  readonly tenantId: string;
+  readonly requestId: string;
+  /** Null takes it OFF a desk. There is no separate `unassign` — see the port. */
+  readonly assigneeUserId: string | null;
+  readonly actor: Actor;
+}
+
+export interface RequestInbox {
+  readonly requests: readonly ClientRequestRecord[];
+  /** What the firm has switched on. The screen needs it to say whether an empty
+   *  Assigned column is a rule that found nobody or no rule at all. */
+  readonly routing: RequestRouting;
+}
+
 export interface PortalRequestList {
   readonly awaitingFirm: readonly PortalRequestRow[];
   readonly replied: readonly PortalRequestRow[];
@@ -142,8 +176,103 @@ export class ClientRequestService {
    * screen shows which company each is from and who spoke last, which is what
    * makes an unrouted list workable while it is short.
    */
-  inbox(tenantId: string): Promise<readonly ClientRequestRecord[]> {
-    return this.deps.requests.listLive(tenantId);
+  async inbox(tenantId: string): Promise<RequestInbox> {
+    // THE SETTING TRAVELS WITH THE LIST, and that is T4.5's `ladderPublished`
+    // decision applied again. An inbox where nothing is assigned because the
+    // firm routes nothing, and one where the rule ran and could not place
+    // anything, are the same picture — and only one of them is somebody's to
+    // fix. A screen cannot tell them apart without this.
+    const [requests, routing] = await Promise.all([
+      this.deps.requests.listLive(tenantId),
+      this.deps.routing.routingFor(tenantId),
+    ]);
+    return { requests, routing };
+  }
+
+  /** Read the switch on its own, for the screen that sets it. */
+  routing(tenantId: string): Promise<RequestRouting> {
+    return this.deps.routing.routingFor(tenantId);
+  }
+
+  /**
+   * Change how arriving requests are routed.
+   *
+   * IT RESTATES NOTHING — `work_split_axis`'s behaviour and its reason (0043):
+   * requests already on a desk keep their assignee, the next one is routed the
+   * new way. A firm switching this on does not want yesterday's inbox
+   * redistributed underneath whoever is working it, and a firm switching it off
+   * is not asking for every request to be taken off its owner.
+   */
+  async setRouting(
+    tenantId: string,
+    routing: string,
+    actor: Actor,
+  ): Promise<RequestRouting> {
+    if (!isRequestRouting(routing)) throw new RequestRoutingUnknown(routing, REQUEST_ROUTINGS);
+    const chosen = await this.deps.routing.setRouting(tenantId, routing);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "client_request.routing_set",
+      // The FIRM is the object, because this is a fact about the firm rather
+      // than about any one request — `tenancy.tenant`'s own id, the shape
+      // `work_split_axis`'s own event takes.
+      objectId: tenantId,
+      actor,
+      payload: { routing: chosen },
+    });
+    return chosen;
+  }
+
+  /**
+   * Put a request on somebody's desk, or take it off one.
+   *
+   * THIS IS ALWAYS AVAILABLE, whatever the switch says. A firm that routes
+   * nothing still needs to be able to say whose this is, and a firm that routes
+   * to the Key Manager still needs somebody to be able to take one that landed
+   * on the wrong desk — the rule is a default, not a wall.
+   */
+  async assign(input: AssignRequestInput): Promise<ClientRequestRecord> {
+    const current = await this.find(input.tenantId, input.requestId);
+
+    if (input.assigneeUserId !== null) {
+      // A refusal the database cannot make: the foreign key points at a GLOBAL
+      // table and would accept a stranger, and no constraint can express
+      // "still works here". `client_assignment` and `work_item` both check this
+      // in the service for the same reason.
+      const ok = await this.deps.staff.isActiveStaff(input.tenantId, input.assigneeUserId);
+      if (!ok) throw new RequestAssigneeNotStaff(input.assigneeUserId);
+    }
+
+    const record = await this.deps.requests.assign({
+      tenantId: input.tenantId,
+      requestId: input.requestId,
+      assigneeUserId: input.assigneeUserId,
+      // TAKING IT OFF A DESK IS NOT A ROUTING FAILURE, so it writes no note.
+      // The note exists to explain what the RULE could not do; a person
+      // deliberately unassigning has explained it by doing it, and leaving the
+      // rule's old sentence there would have the screen saying the request is
+      // unplaced for a reason that is no longer why.
+      note: null,
+    });
+    if (record === null) {
+      throw new RequestAlreadySettled(input.requestId, current.request.status);
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "client_request.assigned",
+      objectId: input.requestId,
+      actor: input.actor,
+      payload: {
+        clientPartyId: record.request.clientPartyId,
+        // WHO it went to, and whether a person or the rule decided. The second
+        // half is the only way to answer "is this rule actually working" later,
+        // and it is a fact about the firm rather than about a client.
+        assigneeUserId: input.assigneeUserId,
+        by: "person",
+      },
+    });
+    return record;
   }
 
   async find(tenantId: string, requestId: string): Promise<ClientRequestRecord> {
@@ -290,6 +419,22 @@ export class ClientRequestService {
       throw new RequestCompanyNotYours(input.clientPartyId);
     }
 
+    // ── WHOSE DESK, DECIDED BEFORE THE WRITE ────────────────────────────
+    //
+    // Both reads are STAFF reads and neither happens inside the portal
+    // transaction: `tenancy.tenant` and `crm.client_assignment` name the firm's
+    // own settings and its own people, and a portal session has no business
+    // asking either. The server resolves the answer on the client's behalf and
+    // the answer never comes back to them — `PortalRequestRow` carries no
+    // assignee at all, deliberately (T6.5's rule: whose desk it is on is the
+    // firm's business).
+    const routing = await this.deps.routing.routingFor(input.tenantId);
+    const keyManager =
+      routing === "none"
+        ? null
+        : await this.deps.keyManagers.keyManagerFor(input.tenantId, input.clientPartyId, day);
+    const routed = routeRequest(routing, keyManager);
+
     const row = await this.deps.portal.raise(input.tenantId, parties, {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -297,6 +442,8 @@ export class ClientRequestService {
       subject,
       body,
       raisedBy: this.requireHuman(input.actor),
+      assigneeUserId: routed.assigneeUserId,
+      assignmentNote: routed.note,
     });
     if (row === null) throw new RequestCompanyNotYours(input.clientPartyId);
 
@@ -315,6 +462,30 @@ export class ClientRequestService {
       // and this log cannot be erased.
       payload: { clientPartyId: input.clientPartyId },
     });
+
+    // A SECOND EVENT, and only when the RULE actually placed it. Written per
+    // placement rather than per raise, so "how often does this rule find
+    // somebody" is a count over rows rather than an estimate — the arrangement
+    // `client_ask.chased` and `obligation.nudged` both take. `by: "rule"` is
+    // what tells it apart from somebody assigning by hand, which is the whole
+    // question anybody asks about a routing rule six months later.
+    if (routed.assigneeUserId !== null) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "client_request.assigned",
+        objectId: row.requestId,
+        // THE ACTOR IS THE CLIENT CONTACT, honestly: their request is what
+        // caused this. Naming the assignee would credit them with a decision
+        // they did not take, and naming the SYSTEM would hide that a person
+        // outside the firm set it off.
+        actor: input.actor,
+        payload: {
+          clientPartyId: input.clientPartyId,
+          assigneeUserId: routed.assigneeUserId,
+          by: "rule",
+        },
+      });
+    }
     return row;
   }
 
@@ -456,4 +627,4 @@ export class ClientRequestService {
   }
 }
 
-export type { ClientRequestRecord, PortalRequestRow, RequestStatus };
+export type { ClientRequestRecord, PortalRequestRow, RequestRouting, RequestStatus };

@@ -109,11 +109,19 @@ export class PostgresPortalRequestRepository implements PortalRequestRepository 
     request: NewRequest,
   ): Promise<PortalRequestRow | null> {
     return withPortal(this.app, tenantId, clientPartyIds, async (db) => {
+      // `assignee_user_id` AND `assignment_note` ARE WRITTEN HERE AND CHOSEN
+      // NOWHERE NEAR HERE. The service resolved them under `withTenant` before
+      // this transaction opened — see `NewRequest` — because reading the firm's
+      // routing setting and its key managers are STAFF reads and a portal
+      // session has no business making either. Nothing on either surface
+      // accepts an assignee, so this is a column no caller could supply.
       await db`
         INSERT INTO delivery.client_request
-          (id, tenant_id, client_party_id, subject, body, raised_by)
+          (id, tenant_id, client_party_id, subject, body, raised_by,
+           assignee_user_id, assignment_note)
         VALUES (${request.id}, ${tenantId}, ${request.clientPartyId},
-                ${request.subject}, ${request.body}, ${request.raisedBy})
+                ${request.subject}, ${request.body}, ${request.raisedBy},
+                ${request.assigneeUserId}::uuid, ${request.assignmentNote}::text)
       `;
       const rows = await this.select(db, tenantId, request.id);
       const row = rows[0];

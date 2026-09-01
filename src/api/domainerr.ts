@@ -438,6 +438,16 @@ export function mapError(err: unknown): MappedError {
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "REQUEST_ALREADY_SETTLED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 409 AND NOT 404, matching `ASSIGNMENT_HOLDER_NOT_STAFF` and
+      // `ASSIGNEE_NOT_STAFF` — the same refusal, twice already in this codebase,
+      // answered the same way. The person EXISTS; saying "no such user" would
+      // send somebody hunting a typo in an id that is perfectly good. What is
+      // wrong is that they do not work here, which is the firm's roster and is
+      // where the fix is.
+      case "REQUEST_ASSIGNEE_NOT_STAFF":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      case "REQUEST_ROUTING_UNKNOWN":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

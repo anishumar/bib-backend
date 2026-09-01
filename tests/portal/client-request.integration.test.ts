@@ -55,6 +55,12 @@
 //   -- one a document. A narrowing written without the guard narrows the
 //   -- workspace.
 //
+//   DROP TRIGGER trg_client_request_portal_assignee ON delivery.client_request;
+//   -- 0070's guard, and it is LOAD-BEARING: 2 fail, and both are a portal
+//   -- session successfully forging the assignee on its own request. The policy
+//   -- cannot cover this — a WITH CHECK sees only the NEW row, and the question
+//   -- is whether a column CHANGED — which is why this one thing is a trigger.
+//
 // Restore each before moving on. These are DDL on a shared database and do not
 // roll back with a transaction the test's own connection cannot see.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -403,5 +409,105 @@ describe("what the schema refuses whoever is asking", () => {
         VALUES (${tenantId}, ${stranger.id}, 'cross-firm', 'body', ${contactUser})
       `),
     ).rejects.toThrow(/foreign key|violates/i);
+  });
+});
+
+describe("whose desk it is on (migration 0070)", () => {
+  it("defaults every firm to routing NOTHING", async () => {
+    // `none` reproduces exactly what T6.8 shipped, so 0070 changed no firm's
+    // behaviour on the day it was applied. A default that routed would have
+    // re-cut every existing inbox underneath whoever was working it.
+    const [row] = await owner<{ client_request_routing: string }[]>`
+      SELECT client_request_routing FROM tenancy.tenant WHERE id = ${tenantId}
+    `;
+    expect(row?.client_request_routing).toBe("none");
+  });
+
+  it("refuses a routing this product cannot do", async () => {
+    // A SPOC is the one somebody will reach for, and it cannot be added without
+    // choosing an axis on the firm's behalf. The CHECK is what stops it being
+    // added by an UPDATE that skips every service in this codebase.
+    await expect(
+      owner`UPDATE tenancy.tenant SET client_request_routing = 'spoc' WHERE id = ${tenantId}`,
+    ).rejects.toThrow(/tenant_client_request_routing_chk/);
+  });
+
+  it("refuses a note beside a NAME", async () => {
+    // The pair has to move together, and this is the database saying so: a note
+    // sitting next to a person is a stale sentence contradicting the name it is
+    // printed beside.
+    await expect(
+      withTenant(app, tenantId, (db) => db`
+        UPDATE delivery.client_request
+           SET assignee_user_id = ${staffUser}, assignment_note = 'the rule found nobody'
+         WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+      `),
+    ).rejects.toThrow(/client_request_note_only_when_unassigned/);
+  });
+
+  it("refuses a note that is only whitespace", async () => {
+    await expect(
+      withTenant(app, tenantId, (db) => db`
+        UPDATE delivery.client_request SET assignment_note = '   '
+         WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+      `),
+    ).rejects.toThrow(/client_request_note_not_blank/);
+  });
+
+  it("lets the FIRM put a request on a desk and take it off again", async () => {
+    await withTenant(app, tenantId, (db) => db`
+      UPDATE delivery.client_request SET assignee_user_id = ${staffUser}, assignment_note = null
+       WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+    `);
+    const [held] = await withTenant(app, tenantId, (db) => db<{ assignee_user_id: string }[]>`
+      SELECT assignee_user_id FROM delivery.client_request WHERE id = ${myRequest}
+    `);
+    expect(held?.assignee_user_id).toBe(staffUser);
+
+    await withTenant(app, tenantId, (db) => db`
+      UPDATE delivery.client_request SET assignee_user_id = null
+       WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+    `);
+  });
+
+  it("REFUSES A PORTAL SESSION MOVING ITS OWN REQUEST ONTO A DESK", async () => {
+    // The hole this trigger exists for. `bib_app` holds UPDATE on this table
+    // (withdrawing is an UPDATE) and the portal policy's WITH CHECK only ever
+    // looks at `client_party_id` — so without the trigger a client could put
+    // their own request on a chosen partner's desk, or take it off the one the
+    // firm's rule chose.
+    //
+    // A WITH CHECK cannot express it: it sees only the NEW row, and this is a
+    // question about whether a column CHANGED.
+    await expect(
+      asClient((db) => db`
+        UPDATE delivery.client_request SET assignee_user_id = ${staffUser}
+         WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+      `),
+    ).rejects.toThrow(/may not change who a request is assigned to/);
+  });
+
+  it("refuses a portal session writing an assignment NOTE either", async () => {
+    // The other half of the same forgery: a sentence on the firm's own screen
+    // saying why nobody holds this, written by the client.
+    await expect(
+      asClient((db) => db`
+        UPDATE delivery.client_request SET assignment_note = 'nobody at the firm cares'
+         WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+      `),
+    ).rejects.toThrow(/may not change who a request is assigned to/);
+  });
+
+  it("still lets a portal session WITHDRAW, which is the update it is meant to make", async () => {
+    // The guard has to be narrow, or it takes the client's own ending with it.
+    // Written last on purpose: it settles the fixture's request.
+    await expect(
+      asClient((db) => db`
+        UPDATE delivery.client_request
+           SET status = 'withdrawn', settled_by = ${contactUser}, settled_at = now()
+         WHERE id = ${myRequest} AND tenant_id = ${tenantId}
+           AND status IN ('open', 'answered')
+      `),
+    ).resolves.toBeDefined();
   });
 });

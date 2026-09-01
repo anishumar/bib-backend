@@ -41,9 +41,13 @@ interface RequestRow {
   first_replied_at: string | null;
   settled_by: string | null;
   settled_at: string | null;
+  assignee_user_id: string | null;
+  assignment_note: string | null;
   client_name: string;
   raised_by_name: string | null;
   settled_by_name: string | null;
+  assignee_name: string | null;
+  assignee_email: string | null;
   replies: RawReply[] | null;
 }
 
@@ -204,6 +208,36 @@ export class PostgresClientRequestRepository implements RequestRepository {
     });
   }
 
+  async assign(input: {
+    readonly tenantId: string;
+    readonly requestId: string;
+    readonly assigneeUserId: string | null;
+    readonly note: string | null;
+  }): Promise<ClientRequestRecord | null> {
+    return withTenant(this.app, input.tenantId, async (db) => {
+      // THE NAME AND THE NOTE MOVE TOGETHER, because 0070's CHECK refuses a
+      // note beside a name. An UPDATE that set one of the two would be refused
+      // by the database — which is the database saying the same thing this
+      // method's single signature says.
+      //
+      // `::uuid` on the assignee: postgres.js sends every parameter untyped, and
+      // a NULL with no type is `unknown`, which an UPDATE cannot assign to a
+      // uuid column. It typechecks, it lints, and it fails on the first real
+      // unassign — T6.5's `date + $n` lesson on a different operator.
+      const [row] = await db<{ id: string }[]>`
+        UPDATE delivery.client_request
+           SET assignee_user_id = ${input.assigneeUserId}::uuid,
+               assignment_note  = ${input.note}::text
+         WHERE id = ${input.requestId}
+           AND tenant_id = ${input.tenantId}
+           AND status IN ('open', 'answered')
+        RETURNING id
+      `;
+      if (!row) return null;
+      return this.read(db, input.tenantId, input.requestId);
+    });
+  }
+
   private async read(
     db: Db,
     tenantId: string,
@@ -237,12 +271,22 @@ export class PostgresClientRequestRepository implements RequestRepository {
              r.first_replied_at::text AS first_replied_at,
              r.settled_by,
              r.settled_at::text      AS settled_at,
+             r.assignee_user_id,
+             r.assignment_note,
              cp.display_name         AS client_name,
              -- LEFT joins, and null is a real answer: an erased account stops
              -- resolving and the request survives, exactly as the ledger's
              -- actor join does.
              raiser.display_name  AS raised_by_name,
              settler.display_name AS settled_by_name,
+             -- BOTH HALVES OF THE ASSIGNEE, because display_name is nullable
+             -- on an account and is genuinely empty at seeded firms. T4.5's
+             -- escalation queue rendered a blank space where a name belonged
+             -- and collapsed "told somebody we hold no name for" into "told
+             -- nobody" — the audit trail's rule, and the EMAIL is the
+             -- discriminator.
+             holder.display_name  AS assignee_name,
+             holder.email         AS assignee_email,
              (
                SELECT coalesce(jsonb_agg(x ORDER BY x.written_at), '[]'::jsonb)
                  FROM (
@@ -287,6 +331,7 @@ export class PostgresClientRequestRepository implements RequestRepository {
           ON cp.id = r.client_party_id AND cp.tenant_id = r.tenant_id
         LEFT JOIN tenancy.user_account raiser  ON raiser.id = r.raised_by
         LEFT JOIN tenancy.user_account settler ON settler.id = r.settled_by
+        LEFT JOIN tenancy.user_account holder  ON holder.id = r.assignee_user_id
        WHERE r.tenant_id = ${tenantId}
          AND (${requestId}::uuid IS NULL OR r.id = ${requestId}::uuid)
          AND (NOT ${liveOnly}::boolean OR r.status IN ('open', 'answered'))
@@ -338,10 +383,14 @@ function toRecord(row: RequestRow): ClientRequestRecord {
       firstRepliedAt: row.first_replied_at,
       settledBy: row.settled_by,
       settledAt: row.settled_at,
+      assigneeUserId: row.assignee_user_id,
+      assignmentNote: row.assignment_note,
     },
     clientName: row.client_name,
     raisedByName: row.raised_by_name,
     settledByName: row.settled_by_name,
+    assigneeName: row.assignee_name,
+    assigneeEmail: row.assignee_email,
     replies: (row.replies ?? []).map(toReplyRecord),
   };
 }

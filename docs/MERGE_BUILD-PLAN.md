@@ -3833,8 +3833,79 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > `check` **1529** · `test:integration` **543** · `demo:verify` **71** on a database rebuilt
   > from nothing.
 
+- [x] `(B)` **T6.9** Routing for the client-request inbox — a switch the FIRM sets, never a rule this product invented. *Acc: a firm can have arriving requests land on the client's Key Manager, or on nobody, and say which.*
+  > **DONE 2026-09-02 (migration 0070).** `assignee_user_id` + `assignment_note` on
+  > `delivery.client_request`, `client_request_routing` on `tenancy.tenant`, Mine / Unassigned /
+  > Everything on `/client-requests`, and the switch on `/admin/structure`. **Walked**: raised
+  > one with routing OFF (nobody, no note), switched it on, raised another (landed on
+  > Siddharth Rao, Cobalt's Key Manager) — and the first one was **untouched**.
+  >
+  > **THE FIRM STILL HAS NOT STATED A RULE, so this does not encode one.** T6.8 left routing
+  > open because nobody had said who an inbound request belongs to, and that is still true. What
+  > changed is that the firm now has a LEVER: `none` is the default, reproduces T6.8's behaviour
+  > exactly, and means applying 0070 changed no firm's behaviour at all. Nothing is seeded — the
+  > position `dunning`, `confidence_tier` and the escalation ladder all take.
+  >
+  > **A SPOC IS NOT AN OPTION, AND THAT IS STRUCTURAL RATHER THAN A CHOICE.**
+  > `client_assignment_axis_matches_role` (0049) makes `axis_id` NOT NULL for a SPOC, because a
+  > SPOC covers a Dept or a delivery team. **A client's request names no service**, so there is
+  > no axis to look one up by — picking one would be exactly the arbitrary answer 0068 refused
+  > to give, and which a service-less shipped rule already gives elsewhere in this schema. The
+  > Key Manager needs no axis, is one person per client (an exclusion constraint says so), and
+  > is the only answer to *"whose is this request"* this database can derive without inventing
+  > anything. The admin screen SAYS a SPOC is impossible, because a partner reading a list of
+  > two would otherwise assume the third is missing rather than unavailable.
+  >
+  > **A WRONG ASSIGNEE IS WORSE THAN NONE** — 0051's rule, applied again. There is no fallback
+  > to the partner, to whoever is free, or to the last person who replied: the rule names the
+  > right person or NOBODY, and when it names nobody it writes a note that names the FIX
+  > (*"name one on the client's page, or take this request yourself"*). **Under `none` there is
+  > NO note**, which is the subtle half: a firm that routes nothing has not FAILED to route
+  > anything, and a sentence on every row of a uniformly unassigned inbox is noise saying what
+  > the empty column beside it already says.
+  >
+  > **AND THE SWITCH RESTATES NOTHING** — `work_split_axis`'s behaviour and its reason, which is
+  > also why the setting is a COLUMN on the tenant rather than a config kind: it is freely
+  > changeable, and nobody will ever ask what it said last March. Proven in the walk rather than
+  > asserted.
+  >
+  > **THE KEY MANAGER IS READ UNDER `withTenant`, BEFORE THE PORTAL TRANSACTION OPENS.**
+  > `crm.client_assignment` names the firm's own people, has no portal policy and must not grow
+  > one for this — so the server resolves the answer on the client's behalf and hands it to the
+  > portal insert. The answer never comes back to the client either: `PortalRequestRow` carries
+  > no assignee at all. A unit test asserts the lookup does not happen AT ALL under `none`.
+  >
+  > **AND A HOLE FROM T6.8 WAS FOUND AND CLOSED WHILE BUILDING THIS.** `bib_app` holds UPDATE on
+  > `client_request` (withdrawing is an UPDATE) and the portal policy's WITH CHECK only ever
+  > looks at `client_party_id` — so a portal session could have UPDATEd its OWN request and set
+  > `assignee_user_id` to any account it liked. Not a leak; a client silently putting their
+  > request on a chosen partner's desk. No route did it, but 0068 made `author_side` unforgeable
+  > in the DATABASE on the stated ground that an adapter is code somebody can edit, and leaving
+  > the neighbouring column forgeable would be that argument abandoned one migration later.
+  > **It is a TRIGGER and not a policy, and that is forced**: a WITH CHECK sees only the NEW row,
+  > and this is a question about whether a column CHANGED. Negative control run — dropping it
+  > turns **2** tests red, and both are a portal session successfully forging the assignee.
+  >
+  > **WHAT THE SCREEN DOES:** three tabs, and **Unassigned is the one that would not exist on a
+  > naive list** — work the rule could not place, or nobody has taken (0051's argument again:
+  > unassigned work is only chased if somebody can list it). **"Take it" needs no roster**, so
+  > it is the control everybody with `work:write` gets, and the full picker is the extra offered
+  > only where `/tenancy/members` is readable — the same honest gap `/work-items/[id]`, the
+  > pipeline's owner dropdown and the account team form all have.
+  >
+  > **`routing` travels with the LIST** (T4.5's `ladderPublished` decision): an inbox where
+  > nothing is assigned because the firm routes nothing, and one where the rule ran and placed
+  > nothing, are the same picture, and only one is somebody's to fix.
+  >
+  > `check` **1544** · `test:integration` **551** · `demo:verify` **71** on a rebuilt database.
+  > Two rendering faults found by looking at the page: the assignee picker was a full-width
+  > dropdown with no label sitting under two ghost buttons, and 0070 was corrected IN PLACE
+  > (uncommitted and local, 0065's precedent) to add the trigger, proven by a full down/up round
+  > trip.
+
 **Phase 6 is COMPLETE, and T6.8 was added to it after the fact** — U1 as written (T6.5, T6.6,
-T6.7), the chaser (T4.4), gate 4 (G3.4), and then the request that made the portal two-way.
+T6.7), the chaser (T4.4), gate 4 (G3.4), the request that made the portal two-way, and T6.9's
+routing for it.
 What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over
@@ -3865,6 +3936,9 @@ Not security, and not blocking — but it has to be true before anybody is onboa
 data, and each line is something a session did on purpose and wrote down rather than left for
 somebody to find.
 
+- **T6.9's walk raised two requests at Cobalt Foods and switched the firm's routing on**, to
+  prove that the setting restates nothing. Undone by `npm run demo:fresh`, which re-verified
+  **71/71**; the routing column is back at its `none` default.
 - **T6.8's walk raised a real request at Cobalt Foods, answered it as Siddharth, and flipped a
   working paper's client visibility on** to prove the attachment path end to end. All of it was
   undone by `npm run demo:fresh`, which re-verified **71/71** and re-ran `test:integration` at

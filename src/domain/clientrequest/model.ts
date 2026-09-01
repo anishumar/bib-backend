@@ -41,6 +41,24 @@ export const REQUEST_STATUSES: readonly RequestStatus[] = [
  */
 export type AuthorSide = "firm" | "client";
 
+/**
+ * How a firm routes a request that has just arrived (migration 0070).
+ *
+ * `none` is the DEFAULT and a real answer, not "unconfigured" — it reproduces
+ * exactly what T6.8 shipped, so the setting changed no firm's behaviour on the
+ * day it existed. A SPOC is deliberately not a member of this union and cannot
+ * become one without an axis: a request names no service, so there is nothing
+ * to pick a Dept by, and choosing one would be the arbitrary answer 0068 spent
+ * a header refusing to give.
+ */
+export type RequestRouting = "none" | "key_manager";
+
+export const REQUEST_ROUTINGS: readonly RequestRouting[] = ["none", "key_manager"];
+
+export function isRequestRouting(v: string): v is RequestRouting {
+  return (REQUEST_ROUTINGS as readonly string[]).includes(v);
+}
+
 /** A request, as the row holds it. Names are resolved by the records below. */
 export interface ClientRequest {
   readonly id: string;
@@ -54,6 +72,12 @@ export interface ClientRequest {
   readonly firstRepliedAt: string | null;
   readonly settledBy: string | null;
   readonly settledAt: string | null;
+  /** Whose desk it is on. NULL IS ORDINARY — see `routeRequest`. */
+  readonly assigneeUserId: string | null;
+  /** Why nobody, when the rule ran and could not name somebody. Null whenever
+   *  there IS an assignee (0070 refuses the pair) and also whenever the firm
+   *  routes nothing at all. */
+  readonly assignmentNote: string | null;
 }
 
 /** One message in the thread. */
@@ -109,6 +133,11 @@ export interface ClientRequestRecord {
    *  half of the thread the client's own screen does not need. */
   readonly raisedByName: string | null;
   readonly settledByName: string | null;
+  /** WHO AT THE FIRM holds it, resolved. Deliberately absent from
+   *  `PortalRequestRow`: whose desk the work is on is the firm's business
+   *  (T6.5), and a name there invites a client to chase a junior directly. */
+  readonly assigneeName: string | null;
+  readonly assigneeEmail: string | null;
   readonly replies: readonly RequestReplyRecord[];
 }
 
@@ -192,6 +221,60 @@ export function acceptsWithdrawal(status: RequestStatus): boolean {
  */
 export function isLive(status: RequestStatus): boolean {
   return status === "open" || status === "answered";
+}
+
+/**
+ * What the routing rule decides for a request that has just arrived.
+ *
+ * `assigneeUserId` null with a `note` means the rule RAN and could not name
+ * somebody; null with NO note means the firm routes nothing. 0070's CHECK
+ * refuses a note beside a name, so the third combination cannot be written.
+ */
+export interface RoutingOutcome {
+  readonly assigneeUserId: string | null;
+  readonly note: string | null;
+}
+
+/**
+ * Whose desk a new request lands on.
+ *
+ * ── A WRONG ASSIGNEE IS WORSE THAN NONE ─────────────────────────────────
+ *
+ * 0051's rule, and the reason this function never falls back to anybody: work
+ * on the wrong desk sits there while its owner believes it is not theirs, and
+ * unassigned work is visible in a queue that gets chased. So the only two
+ * answers are the right person and NOBODY — there is no "and otherwise the
+ * partner", and adding one would be this product deciding what the firm never
+ * said.
+ *
+ * ── AND `none` PRODUCES NO NOTE, WHICH IS THE SUBTLE HALF ───────────────
+ *
+ * A firm that routes nothing has not failed to route anything. Writing "the
+ * firm routes nothing" onto every row would put a permanent sentence on an
+ * inbox where every row is equally unassigned — noise that says the same thing
+ * as the empty Assigned column beside it, on every row, for ever. The note
+ * exists to separate *"nobody has got to it"* from *"the rule ran and could not
+ * decide"*, and under `none` there is no second case.
+ *
+ * Pure, so both the raise path and any later re-route give the same answer, and
+ * so the sentence a firm reads can be tested without a database.
+ */
+export function routeRequest(
+  routing: RequestRouting,
+  keyManagerUserId: string | null,
+): RoutingOutcome {
+  if (routing === "none") return { assigneeUserId: null, note: null };
+  if (keyManagerUserId !== null) return { assigneeUserId: keyManagerUserId, note: null };
+  return {
+    assigneeUserId: null,
+    // NAMES THE FIX, not the failure. T3.1's `assignment_note` is what makes an
+    // unassigned queue clearable rather than a pile, and it manages that only
+    // when the sentence says what somebody has to go and do.
+    note:
+      "This firm routes a client's request to that client's Key Manager, and this client " +
+      "has none on the day it arrived. Name one on the client's page, or take this request " +
+      "yourself.",
+  };
 }
 
 /**

@@ -36,6 +36,7 @@ import { PostgresClientAskRepository } from "../infrastructure/postgres/client-a
 import { PostgresPortalAskRepository } from "../infrastructure/postgres/portal-ask-repository";
 import { PostgresClientRequestRepository } from "../infrastructure/postgres/client-request-repository";
 import { PostgresPortalRequestRepository } from "../infrastructure/postgres/portal-request-repository";
+import { PostgresRequestRoutingRepository } from "../infrastructure/postgres/request-routing-repository";
 import {
   PostgresChaseCandidates,
   PostgresChaseRepository,
@@ -636,8 +637,14 @@ export function wire(cfg: Config, log: Logger): Wired {
   //     service-axis repository and the config registry's `AxisDirectory`. One
   //     table, one adapter: two would let a SPOC be assigned to a Dept the
   //     picker never offered.
+  // Hoisted, because T6.8's routing reads the SAME rows through the same
+  // adapter: the Key Manager it places a request on is `crm.client_assignment`,
+  // and a second instance over the same pool would be a second answer waiting
+  // to drift from this one.
+  const clientAssignmentRepository = new PostgresClientAssignmentRepository(pools.app);
+
   const clientAssignments = new ClientAssignmentService({
-    assignments: new PostgresClientAssignmentRepository(pools.app),
+    assignments: clientAssignmentRepository,
     clients: partyRepository,
     staff: memberships,
     axes: serviceAxisRepository,
@@ -776,6 +783,36 @@ export function wire(cfg: Config, log: Logger): Wired {
     scope: {
       scopedCompanies: (tenantId, userId, on) =>
         portalAccess.scopedClientsForUser(tenantId, userId, on),
+    },
+    routing: new PostgresRequestRoutingRepository(pools.app),
+    // ── THE KEY MANAGER, THROUGH THE SERVICE THAT OWNS THAT TABLE ────────
+    //
+    // `crm.client_assignment` has a use case already and this one does not
+    // reach past it into a second adapter over the same rows — the composition
+    // root is where concrete meets interface, so the closure lives here.
+    //
+    // `listOpenForClient` returns a LIST because G3.2 allows several SPOCs per
+    // axis. A key_manager cannot be several: an exclusion constraint refuses
+    // overlapping periods, and the port narrows to at most one BECAUSE of that
+    // rather than by taking the first of an arbitrary set. `open[0]` is the
+    // incumbent, which is that method's own documented contract.
+    keyManagers: {
+      keyManagerFor: async (tenantId, clientPartyId, on) => {
+        const open = await clientAssignmentRepository.listOpenForClient(
+          tenantId,
+          clientPartyId,
+          "key_manager",
+          on,
+        );
+        // `open[0]` is the incumbent — that method returns newest first and
+        // says so. A key_manager cannot be several: an exclusion constraint
+        // refuses overlapping periods, so taking the first is reading a
+        // guarantee rather than picking from a set.
+        return open[0]?.userId ?? null;
+      },
+    },
+    staff: {
+      isActiveStaff: (tenantId, userId) => memberships.isActiveStaff(tenantId, userId),
     },
     ids: systemIds,
     events: ledger,

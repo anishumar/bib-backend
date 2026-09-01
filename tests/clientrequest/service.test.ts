@@ -9,16 +9,21 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ClientRequestService } from "../../src/usecase/clientrequest/service";
 import {
+  FakeAssignableStaff,
+  FakeKeyManagers,
   FakePortalRequestRepo,
   FakeRequestRepo,
+  FakeRequestRouting,
   FakeRequestScope,
   FakeRequestStore,
 } from "../../src/testfakes/clientrequest";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { routeRequest } from "../../src/domain/clientrequest/model";
 import {
   RequestAlreadySettled,
+  RequestAssigneeNotStaff,
   RequestBodyEmpty,
   RequestCompanyNotYours,
   RequestDocumentNotFound,
@@ -36,6 +41,8 @@ const PARTNER = "55555555-5555-5555-5555-555555555555";
 /** Lakeview's own contact. A real uuid, because the ledger refuses a human
  *  actor without one — `isIdentifiedActor`. */
 const RAVI = "66666666-6666-6666-6666-666666666666";
+/** Whoever the routing rule would place a request on. */
+const KEY_MANAGER = PARTNER;
 
 const meera: Actor = { type: "human", id: MEERA };
 const partner: Actor = { type: "human", id: PARTNER };
@@ -44,15 +51,21 @@ function build() {
   const store = new FakeRequestStore();
   const events = new RecordingEventSink();
   const scope = new FakeRequestScope();
+  const routing = new FakeRequestRouting();
+  const keyManagers = new FakeKeyManagers();
+  const staff = new FakeAssignableStaff();
   const service = new ClientRequestService({
     requests: new FakeRequestRepo(store),
     portal: new FakePortalRequestRepo(store),
     scope,
+    routing,
+    keyManagers,
+    staff,
     ids: new FakeIds(),
     events,
     clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
   });
-  return { service, store, events, scope };
+  return { service, store, events, scope, routing, keyManagers, staff };
 }
 
 /** Meera at Cobalt Foods, granted her own company and nothing else. */
@@ -422,11 +435,15 @@ describe("the firm's inbox", () => {
     });
 
     const inbox = await ctx.service.inbox(TENANT);
-    // Nobody is assigned one. The firm has not said who an inbound request
-    // belongs to, and this codebase already carries one arbitrary answer to a
-    // question of that shape.
-    expect(inbox.map((r) => r.clientName).sort()).toEqual(["Cobalt Foods", "Lakeview Retail"]);
-    expect(inbox.every((r) => r.clientName.length > 0)).toBe(true);
+    expect(inbox.requests.map((r) => r.clientName).sort()).toEqual([
+      "Cobalt Foods",
+      "Lakeview Retail",
+    ]);
+    expect(inbox.requests.every((r) => r.clientName.length > 0)).toBe(true);
+    // AND THE SETTING TRAVELS WITH IT. `none` is the shipped default, so an
+    // inbox with nothing assigned is explained rather than ambiguous — T4.5's
+    // `ladderPublished` decision, applied again.
+    expect(inbox.routing).toBe("none");
   });
 
   it("drops a request once it is settled, from either side", async () => {
@@ -441,8 +458,236 @@ describe("the firm's inbox", () => {
       actor: meera,
     });
 
-    // A firm-wide inbox with no routing is only usable while it is short.
-    expect(await ctx.service.inbox(TENANT)).toEqual([]);
+    // A firm-wide inbox is only usable while it is short.
+    expect((await ctx.service.inbox(TENANT)).requests).toEqual([]);
+  });
+});
+
+
+describe("whose desk it lands on", () => {
+  describe("the rule itself, with nothing around it", () => {
+    it("routes nothing under `none`, and writes NO note for it", () => {
+      // The subtle half. A firm that routes nothing has not FAILED to route
+      // anything, and a note would put a permanent sentence on every row of an
+      // inbox where every row is equally unassigned — noise saying the same
+      // thing as the empty column beside it.
+      expect(routeRequest("none", KEY_MANAGER)).toEqual({ assigneeUserId: null, note: null });
+      expect(routeRequest("none", null)).toEqual({ assigneeUserId: null, note: null });
+    });
+
+    it("names the Key Manager when there is one", () => {
+      expect(routeRequest("key_manager", KEY_MANAGER)).toEqual({
+        assigneeUserId: KEY_MANAGER,
+        note: null,
+      });
+    });
+
+    it("names NOBODY when there is none, and says what to do about it", () => {
+      const out = routeRequest("key_manager", null);
+      expect(out.assigneeUserId).toBeNull();
+      // A wrong assignee is worse than none (0051): there is no fallback to a
+      // partner, to whoever is free, or to the last person who replied. The
+      // note is what makes the unassigned queue clearable rather than a pile,
+      // and it manages that only by naming the FIX.
+      expect(out.note).toMatch(/Key Manager/);
+      expect(out.note).toMatch(/Name one on the client's page|take this request yourself/);
+    });
+  });
+
+  it("places a request on the Key Manager's desk when the firm has switched it on", async () => {
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    ctx.keyManagers.set(COBALT, PARTNER);
+
+    const row = await raised(ctx);
+    const record = await ctx.service.find(TENANT, row.requestId);
+    expect(record.request.assigneeUserId).toBe(PARTNER);
+    expect(record.request.assignmentNote).toBeNull();
+  });
+
+  it("leaves it with NOBODY and a sentence when the client has no Key Manager", async () => {
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    // No `keyManagers.set` — the client has nobody, which is an ordinary state
+    // and the one the rule must refuse to guess around.
+
+    const row = await raised(ctx);
+    const record = await ctx.service.find(TENANT, row.requestId);
+    expect(record.request.assigneeUserId).toBeNull();
+    expect(record.request.assignmentNote).toMatch(/Key Manager/);
+  });
+
+  it("does not look up a Key Manager at all when the firm routes nothing", async () => {
+    // Not a performance point. `crm.client_assignment` names the firm's own
+    // people, and a read on a client's behalf that the firm has not asked for
+    // is a read that should not happen.
+    const ctx = withMeera();
+    let asked = 0;
+    const counting = {
+      keyManagerFor: async (t: string, c: string, on: string) => {
+        asked += 1;
+        return ctx.keyManagers.keyManagerFor(t, c, on);
+      },
+    };
+    const service = new ClientRequestService({
+      requests: new FakeRequestRepo(ctx.store),
+      portal: new FakePortalRequestRepo(ctx.store),
+      scope: ctx.scope,
+      routing: ctx.routing,
+      keyManagers: counting,
+      staff: ctx.staff,
+      ids: new FakeIds(),
+      events: ctx.events,
+      clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
+    });
+    await service.raise({
+      tenantId: TENANT,
+      userId: MEERA,
+      clientPartyId: COBALT,
+      subject: "anything",
+      body: "anything",
+      actor: meera,
+    });
+    expect(asked).toBe(0);
+  });
+
+  it("records the RULE placing it, apart from a person doing so", async () => {
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    ctx.keyManagers.set(COBALT, PARTNER);
+    await raised(ctx);
+
+    const placed = ctx.events.recorded.filter((e) => e.verb === "client_request.assigned");
+    expect(placed).toHaveLength(1);
+    expect(placed[0]?.payload).toEqual({
+      clientPartyId: COBALT,
+      assigneeUserId: PARTNER,
+      by: "rule",
+    });
+    // THE ACTOR IS THE CLIENT CONTACT, honestly — their request is what caused
+    // it. Naming the assignee would credit them with a decision they did not
+    // take; naming the SYSTEM would hide that somebody outside the firm set it
+    // off.
+    expect(placed[0]?.actorId).toBe(MEERA);
+  });
+
+  it("writes NO placement event when the rule found nobody", async () => {
+    // Per PLACEMENT, not per raise — so "how often does this rule find
+    // somebody" is a count over rows rather than an estimate.
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    await raised(ctx);
+    expect(ctx.events.recorded.filter((e) => e.verb === "client_request.assigned")).toEqual([]);
+  });
+
+  it("lets a person take one whatever the setting says, and clears the note", async () => {
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    const row = await raised(ctx); // no Key Manager -> unassigned, with a note
+
+    const taken = await ctx.service.assign({
+      tenantId: TENANT,
+      requestId: row.requestId,
+      assigneeUserId: PARTNER,
+      actor: partner,
+    });
+    expect(taken.request.assigneeUserId).toBe(PARTNER);
+    // 0070 refuses a note beside a name, so the pair has to move together.
+    expect(taken.request.assignmentNote).toBeNull();
+
+    const person = ctx.events.recorded.filter((e) => e.verb === "client_request.assigned");
+    expect(person[0]?.payload).toMatchObject({ by: "person" });
+  });
+
+  it("takes one OFF a desk with no note, because that is not a routing failure", async () => {
+    const ctx = withMeera();
+    const row = await raised(ctx);
+    await ctx.service.assign({
+      tenantId: TENANT,
+      requestId: row.requestId,
+      assigneeUserId: PARTNER,
+      actor: partner,
+    });
+
+    const off = await ctx.service.assign({
+      tenantId: TENANT,
+      requestId: row.requestId,
+      assigneeUserId: null,
+      actor: partner,
+    });
+    expect(off.request.assigneeUserId).toBeNull();
+    // A person deliberately unassigning has explained it by doing it. Leaving
+    // the rule's old sentence would have the screen saying the request is
+    // unplaced for a reason that is no longer why.
+    expect(off.request.assignmentNote).toBeNull();
+  });
+
+  it("refuses somebody who does not work here — a refusal no foreign key can make", async () => {
+    const ctx = withMeera();
+    const row = await raised(ctx);
+    ctx.staff.hasLeft(PARTNER);
+
+    await expect(
+      ctx.service.assign({
+        tenantId: TENANT,
+        requestId: row.requestId,
+        assigneeUserId: PARTNER,
+        actor: partner,
+      }),
+    ).rejects.toThrow(RequestAssigneeNotStaff);
+  });
+
+  it("refuses to assign a settled request", async () => {
+    const ctx = withMeera();
+    const row = await raised(ctx);
+    await ctx.service.close({ tenantId: TENANT, requestId: row.requestId, actor: partner });
+    await expect(
+      ctx.service.assign({
+        tenantId: TENANT,
+        requestId: row.requestId,
+        assigneeUserId: PARTNER,
+        actor: partner,
+      }),
+    ).rejects.toThrow(RequestAlreadySettled);
+  });
+
+  it("RESTATES NOTHING when the setting changes", async () => {
+    // `work_split_axis`'s behaviour and its reason: a firm switching this on
+    // does not want yesterday's inbox redistributed underneath whoever is
+    // working it, and one switching it off is not asking for every request to
+    // be taken off its owner.
+    const ctx = withMeera();
+    ctx.keyManagers.set(COBALT, PARTNER);
+    const before = await raised(ctx, "Raised while routing was off");
+
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    const after = await raised(ctx, "Raised after it was switched on");
+
+    const inbox = await ctx.service.inbox(TENANT);
+    const older = inbox.requests.find((r) => r.request.id === before.requestId);
+    const newer = inbox.requests.find((r) => r.request.id === after.requestId);
+    expect(older?.request.assigneeUserId).toBeNull();
+    expect(newer?.request.assigneeUserId).toBe(PARTNER);
+    expect(inbox.routing).toBe("key_manager");
+  });
+
+  it("records the switch against the FIRM, not against a request", async () => {
+    const ctx = withMeera();
+    await ctx.service.setRouting(TENANT, "key_manager", partner);
+    const event = ctx.events.recorded.find((e) => e.verb === "client_request.routing_set");
+    expect(event?.objectId).toBe(TENANT);
+    expect(event?.objectType).toBe("tenant");
+    expect(event?.payload).toEqual({ routing: "key_manager" });
+  });
+
+  it("refuses a routing this product cannot do, and says what it can", async () => {
+    const ctx = withMeera();
+    await expect(ctx.service.setRouting(TENANT, "spoc", partner)).rejects.toThrow(
+      /not a way this product can route/,
+    );
+    // A SPOC is the one somebody will reach for, and it cannot be added without
+    // choosing an axis on the firm's behalf.
+    await expect(ctx.service.setRouting(TENANT, "spoc", partner)).rejects.toThrow(/axis/);
   });
 });
 
@@ -456,7 +701,17 @@ describe("what this service may not do", () => {
     // Asserted structurally, the way `ChaserService`'s and `NudgeService`'s
     // are: a mailer, a notifier or a transport appearing in Deps turns this red
     // and the argument for it goes on the board first.
-    const wired = ["requests", "portal", "scope", "ids", "events", "clock"];
+    const wired = [
+      "requests",
+      "portal",
+      "scope",
+      "routing",
+      "keyManagers",
+      "staff",
+      "ids",
+      "events",
+      "clock",
+    ];
     const { service } = build();
     const actual = Object.keys(
       (service as unknown as { deps: Record<string, unknown> }).deps,

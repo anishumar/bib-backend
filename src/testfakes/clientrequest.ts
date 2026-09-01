@@ -28,16 +28,20 @@ import type {
   ClientRequestRecord,
   PortalRequestRow,
   RequestReplyRecord,
+  RequestRouting,
   RequestStatus,
 } from "../domain/clientrequest/model";
 import type {
+  AssignableStaffDirectory,
   FirmReplyOutcome,
+  KeyManagerDirectory,
   NewFirmReply,
   NewReply,
   NewRequest,
   PortalRequestRepository,
   PortalScopeSource,
   RequestRepository,
+  RequestRoutingSource,
 } from "../usecase/clientrequest/ports";
 
 interface StoredRequest {
@@ -53,6 +57,8 @@ interface StoredRequest {
   firstRepliedAt: string | null;
   settledBy: string | null;
   settledAt: string | null;
+  assigneeUserId: string | null;
+  assignmentNote: string | null;
 }
 
 interface StoredReply {
@@ -143,10 +149,14 @@ export class FakeRequestStore {
         firstRepliedAt: row.firstRepliedAt,
         settledBy: row.settledBy,
         settledAt: row.settledAt,
+        assigneeUserId: row.assigneeUserId,
+        assignmentNote: row.assignmentNote,
       },
       clientName: row.clientName,
       raisedByName: `user-${row.raisedBy}`,
       settledByName: row.settledBy === null ? null : `user-${row.settledBy}`,
+      assigneeName: row.assigneeUserId === null ? null : `user-${row.assigneeUserId}`,
+      assigneeEmail: row.assigneeUserId === null ? null : `${row.assigneeUserId}@firm.test`,
       replies: this.repliesOf(row.tenantId, row.id),
     };
   }
@@ -215,6 +225,22 @@ export class FakeRequestRepo implements RequestRepository {
     return Promise.resolve({ ok: true, record: this.store.toRecord(row) });
   }
 
+  assign(input: {
+    readonly tenantId: string;
+    readonly requestId: string;
+    readonly assigneeUserId: string | null;
+    readonly note: string | null;
+  }): Promise<ClientRequestRecord | null> {
+    const row = this.store.find(input.tenantId, input.requestId);
+    if (!row || !LIVE.includes(row.status)) return Promise.resolve(null);
+    // The pair moves together, which is 0070's CHECK expressed as an
+    // assignment rather than as a constraint — the fake cannot refuse, so it
+    // has to be incapable of writing the refused shape.
+    row.assigneeUserId = input.assigneeUserId;
+    row.assignmentNote = input.assigneeUserId === null ? input.note : null;
+    return Promise.resolve(this.store.toRecord(row));
+  }
+
   close(input: {
     readonly tenantId: string;
     readonly requestId: string;
@@ -275,6 +301,10 @@ export class FakePortalRequestRepo implements PortalRequestRepository {
       firstRepliedAt: null,
       settledBy: null,
       settledAt: null,
+      // Resolved by the SERVICE before this call, never here — the whole point
+      // of `NewRequest` carrying them.
+      assigneeUserId: request.assigneeUserId,
+      assignmentNote: request.assignmentNote,
     };
     this.store.requests.push(row);
     return Promise.resolve(this.store.toPortalRow(row));
@@ -337,5 +367,57 @@ export class FakeRequestScope implements PortalScopeSource {
     _on: string,
   ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]> {
     return Promise.resolve(this.byUser.get(userId) ?? []);
+  }
+}
+
+/**
+ * How a firm routes. Starts at `none`, because that is what every firm is on
+ * until it decides otherwise and a fake that started anywhere else would make
+ * the shipped default the one shape nothing is tested against.
+ */
+export class FakeRequestRouting implements RequestRoutingSource {
+  private readonly byTenant = new Map<string, RequestRouting>();
+
+  routingFor(tenantId: string): Promise<RequestRouting> {
+    return Promise.resolve(this.byTenant.get(tenantId) ?? "none");
+  }
+
+  setRouting(tenantId: string, routing: RequestRouting): Promise<RequestRouting> {
+    this.byTenant.set(tenantId, routing);
+    return Promise.resolve(routing);
+  }
+}
+
+/** Who owns which client. Empty means NO Key Manager, which is a real state and
+ *  the one the routing rule has to refuse to guess around. */
+export class FakeKeyManagers implements KeyManagerDirectory {
+  private readonly byClient = new Map<string, string>();
+
+  set(clientPartyId: string, userId: string): this {
+    this.byClient.set(clientPartyId, userId);
+    return this;
+  }
+
+  keyManagerFor(
+    _tenantId: string,
+    clientPartyId: string,
+    _on: string,
+  ): Promise<string | null> {
+    return Promise.resolve(this.byClient.get(clientPartyId) ?? null);
+  }
+}
+
+/** Everybody is staff unless a test says otherwise — the refusal is the
+ *  interesting case, so it is the one a test has to opt into. */
+export class FakeAssignableStaff implements AssignableStaffDirectory {
+  private readonly gone = new Set<string>();
+
+  hasLeft(userId: string): this {
+    this.gone.add(userId);
+    return this;
+  }
+
+  isActiveStaff(_tenantId: string, userId: string): Promise<boolean> {
+    return Promise.resolve(!this.gone.has(userId));
   }
 }

@@ -16,6 +16,7 @@
 import type {
   ClientRequestRecord,
   PortalRequestRow,
+  RequestRouting,
 } from "../../domain/clientrequest/model";
 
 /** What raising one writes. */
@@ -43,6 +44,20 @@ export interface NewRequest {
   readonly subject: string;
   readonly body: string;
   readonly raisedBy: string;
+  /**
+   * Whose desk it lands on, and why nobody when nobody (migration 0070).
+   *
+   * RESOLVED BEFORE THE WRITE, and that is not a convenience — it is what keeps
+   * `crm.client_assignment` out of the portal transaction. Reading the Key
+   * Manager is a STAFF read: that table names the firm's own people, it has no
+   * portal policy and must not grow one for this, and a portal session has no
+   * business asking it anything. So the server resolves it under `withTenant`,
+   * through `KeyManagerDirectory`, and hands the ANSWER to the portal insert —
+   * which then writes a column no caller could have supplied, because nothing
+   * on either surface accepts one.
+   */
+  readonly assigneeUserId: string | null;
+  readonly assignmentNote: string | null;
 }
 
 /** What one message writes. The client party is NOT here: it is read from the
@@ -111,6 +126,76 @@ export interface RequestRepository {
     readonly requestId: string;
     readonly settledBy: string;
   }): Promise<ClientRequestRecord | null>;
+
+  /**
+   * Put it on somebody's desk, or take it off one.
+   *
+   * ONE method for both, because they are one act with two ends and the pair
+   * has to move together: 0070 refuses a note beside a name, so assigning
+   * CLEARS the note in the same UPDATE and unassigning is `null` with an
+   * optional new one. Two methods would be two places to remember that.
+   *
+   * Null when the request is gone or already settled — a finished request is
+   * nobody's work, whoever it was assigned to.
+   */
+  assign(input: {
+    readonly tenantId: string;
+    readonly requestId: string;
+    readonly assigneeUserId: string | null;
+    readonly note: string | null;
+  }): Promise<ClientRequestRecord | null>;
+}
+
+/**
+ * How this firm routes a request that has just arrived.
+ *
+ * A COLUMN ON THE TENANT, never a config-registry kind — `work_split_axis`'s
+ * argument (0043) and it applies unchanged: it is freely changeable, changing
+ * it RESTATES NOTHING, and nobody will ever ask what it said last March, which
+ * is what the registry's versioning and pinning exist to answer.
+ */
+export interface RequestRoutingSource {
+  routingFor(tenantId: string): Promise<RequestRouting>;
+  setRouting(tenantId: string, routing: RequestRouting): Promise<RequestRouting>;
+}
+
+/**
+ * Who owns the relationship with a client, on a day.
+ *
+ * `crm.client_assignment`'s key_manager, and nothing else on that table is
+ * reachable from here BY CONSTRUCTION: a SPOC carries a NOT NULL `axis_id`, a
+ * request names no service, and picking an axis for it would be the arbitrary
+ * answer 0068 refused to give.
+ *
+ * ONE METHOD, returning at most one id. `listOpenForClient` returns a LIST
+ * because G3.2 allows several SPOCs per axis; the key_manager has an exclusion
+ * constraint making it one at a time, so a port that returned a list here would
+ * hand every caller a choice the database has already made.
+ *
+ * Declared here rather than imported from `usecase/clientassignment`, for the
+ * reason `PortalScopeSource` is: a use case reaching into another's ports for a
+ * shape is how two modules end up in one blast radius. TypeScript is
+ * structural, and `setup/` satisfies this with that service's own read.
+ */
+export interface KeyManagerDirectory {
+  keyManagerFor(
+    tenantId: string,
+    clientPartyId: string,
+    on: string,
+  ): Promise<string | null>;
+}
+
+/**
+ * Whether somebody is an ACTIVE member of this firm.
+ *
+ * A foreign key cannot express it — `tenancy.user_account` is GLOBAL (identity
+ * is above tenant, ADR-02) and a membership goes inactive long after a row was
+ * written. `client_assignment` and `work_item` both check it in the service for
+ * exactly this reason, and assigning a request to somebody who has left is the
+ * same failure: work sitting on a desk nobody is at.
+ */
+export interface AssignableStaffDirectory {
+  isActiveStaff(tenantId: string, userId: string): Promise<boolean>;
 }
 
 /**

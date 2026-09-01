@@ -69,8 +69,11 @@ import {
 import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
 import { ClientRequestService } from "../../src/usecase/clientrequest/service";
 import {
+  FakeAssignableStaff,
+  FakeKeyManagers,
   FakePortalRequestRepo,
   FakeRequestRepo,
+  FakeRequestRouting,
   FakeRequestScope,
   FakeRequestStore,
 } from "../../src/testfakes/clientrequest";
@@ -501,6 +504,9 @@ function requestService(): ClientRequestService {
     requests: new FakeRequestRepo(store),
     portal: new FakePortalRequestRepo(store),
     scope: new FakeRequestScope(),
+    routing: new FakeRequestRouting(),
+    keyManagers: new FakeKeyManagers(),
+    staff: new FakeAssignableStaff(),
     ids: new FakeIds(),
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),

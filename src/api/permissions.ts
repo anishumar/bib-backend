@@ -165,6 +165,17 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/client-requests/{requestId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/client-requests/{requestId}/replies"), "work:write" as const],
   [routeKey("POST", "/api/v1/client-requests/{requestId}/close"), "work:write" as const],
+  // Putting a request on somebody's desk is `work:write` — the same permission
+  // that says a piece of work was done, because this is the record of WHOSE the
+  // work is. Not `tenant:admin`: assigning is the ordinary act of running the
+  // day, and a firm whose managers cannot say who is handling a client's
+  // request would have the whole inbox routed by whoever holds the roster.
+  [routeKey("PUT", "/api/v1/client-requests/{requestId}/assignee"), "work:write" as const],
+  // But the RULE is `tenant:admin`, because it decides that for everybody at
+  // once and for every request from now on — the same distinction
+  // `/tenancy/structure/work-split` draws between running the firm and doing
+  // the work.
+  [routeKey("PUT", "/api/v1/tenancy/client-request-routing"), "tenant:admin" as const],
 
   // ── Stopping the chaser (T4.4) ─────────────────────────────────────────
   //

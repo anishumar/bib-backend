@@ -2417,6 +2417,40 @@ opens the inbox**. P10 is what fixes that, in both directions.
 `work:write` to act — this file's own rule after seven things shipped with a writer and nobody
 looking.
 
+### Whose desk it lands on (T6.9, migration 0070)
+
+T6.8 shipped with no routing and promised that when the rule arrived it would be *"a column and
+an index, not a rewrite"*. **The firm still has not stated a rule**, so 0070 does not encode one:
+it gives the firm a SWITCH that is OFF and gives everybody a way to assign by hand whatever it
+says. `tenancy.tenant.client_request_routing` is `none` | `key_manager`, `none` is the DEFAULT
+and reproduces T6.8's behaviour exactly — so applying it changed no firm's behaviour.
+
+**A COLUMN ON THE TENANT, never a registry kind** — `work_split_axis`'s argument (0043): freely
+changeable, restates nothing, and nobody will ever ask what it said last March.
+
+**A SPOC IS NOT AN OPTION AND CANNOT BECOME ONE.** `client_assignment_axis_matches_role` (0049)
+makes `axis_id` NOT NULL for a SPOC, because a SPOC covers a Dept or a delivery team. A client's
+request names no service, so there is no axis to look one up by. The Key Manager needs no axis,
+is one per client (an exclusion constraint), and is the only target this database can derive
+without inventing something.
+
+**A WRONG ASSIGNEE IS WORSE THAN NONE** (0051, again): the rule names the right person or NOBODY,
+with `assignment_note` naming the FIX. **Under `none` there is NO note** — a firm that routes
+nothing has not failed to route anything, and a sentence on every row of a uniformly unassigned
+inbox says what the empty column beside it already says.
+
+**THE KEY MANAGER IS READ UNDER `withTenant`, BEFORE THE PORTAL TRANSACTION OPENS.**
+`crm.client_assignment` names the firm's own people and has no portal policy — and must not grow
+one for this. The service resolves the answer and hands it to the portal insert, so a portal
+session never asks that table anything, and the answer never travels back: `PortalRequestRow`
+carries no assignee at all.
+
+**AND A PORTAL SESSION CANNOT FORGE ONE.** `bib_app` holds UPDATE on `client_request` and the
+portal policy's WITH CHECK only looks at `client_party_id`, so without a guard a client could
+UPDATE their own request onto a chosen partner's desk. **A trigger, not a policy, and that is
+forced**: a WITH CHECK sees only the NEW row and this is a question about whether a column
+CHANGED. Dropping it turns 2 integration tests red.
+
 ### What walking it found
 
 - **`className="row gap"` HAS NEVER DONE WHAT IT LOOKS LIKE.** `.row` is `justify-content:
