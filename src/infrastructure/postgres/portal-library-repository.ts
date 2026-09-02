@@ -48,6 +48,7 @@ import type {
   PortalInvoiceRow,
 } from "../../domain/portallibrary/model";
 import type { PortalLibraryRepository } from "../../usecase/portallibrary/ports";
+import { isoInstant } from "./instant";
 
 interface DocRow {
   id: string;
@@ -115,7 +116,7 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
                v.byte_size,
                v.media_type,
                v.content_hash,
-               d.created_at::text AS added_on,
+               ${db.unsafe(isoInstant("d.created_at", "added_on"))},
                -- ── WHAT IT IS ABOUT, IN WORDS ────────────────────────────
                --
                -- One link, resolved to a sentence a person recognises. A
@@ -199,7 +200,7 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
       const [row] = await db<VersionRow[]>`
         SELECT v.id, v.tenant_id, v.document_id, v.version_no, v.content_hash,
                v.byte_size, v.media_type, v.filename, v.storage_key,
-               v.created_by, v.created_at::text AS created_at
+               v.created_by, ${db.unsafe(isoInstant("v.created_at", "created_at"))}
           FROM files.document_version v
           -- The join to the parent is NOT decoration and not for a column: it is
           -- what makes document_portal_scope apply. The version's own policy

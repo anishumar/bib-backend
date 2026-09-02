@@ -52,6 +52,7 @@ import type {
 } from "../../usecase/clientrequest/ports";
 import type { RawReply } from "./client-request-repository";
 import { toReplyRecord } from "./client-request-repository";
+import { isoInstant } from "./instant";
 
 interface Row {
   id: string;
@@ -209,13 +210,13 @@ export class PostgresPortalRequestRepository implements PortalRequestRepository 
              r.body,
              r.status,
              cp.display_name   AS company_name,
-             r.raised_at::text AS raised_at,
+             ${db.unsafe(isoInstant("r.raised_at", "raised_at"))},
              -- When the firm last came back. A convenience for the one line the
              -- list shows; the whole thread is below it either way, so this is
              -- not the "date, never a count" decision the chaser's reader had
              -- to take — neither side is being counted here.
              (
-               SELECT max(f.written_at)::text
+               SELECT ${db.unsafe(isoInstant("max(f.written_at)"))}
                  FROM delivery.client_request_reply f
                 WHERE f.request_id = r.id
                   AND f.tenant_id = r.tenant_id
@@ -228,7 +229,7 @@ export class PostgresPortalRequestRepository implements PortalRequestRepository 
                           rep.request_id,
                           rep.author_side,
                           rep.body,
-                          rep.written_at::text AS written_at,
+                          ${db.unsafe(isoInstant("rep.written_at", "written_at"))},
                           author.display_name  AS author_name,
                           rep.document_id,
                           d.title              AS document_title,

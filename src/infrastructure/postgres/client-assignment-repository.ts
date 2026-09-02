@@ -23,6 +23,7 @@ import type {
 } from "../../usecase/clientassignment/ports";
 import type { SpocDirectory } from "../../usecase/workitem/ports";
 import type { SpocCandidate } from "../../domain/workitem/model";
+import { isoInstant } from "./instant";
 
 interface AssignmentRow {
   id: string;
@@ -271,7 +272,7 @@ export class PostgresClientAssignmentRepository
       >`
         SELECT a.client_party_id,
                p.display_name,
-               p.archived_at::text AS archived_at,
+               ${db.unsafe(isoInstant("p.archived_at", "archived_at"))},
                array_agg(DISTINCT a.role) AS roles
         FROM crm.client_assignment a
         JOIN core.party p ON p.id = a.client_party_id AND p.tenant_id = a.tenant_id

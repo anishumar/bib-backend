@@ -23,6 +23,7 @@ import type {
   PortalMembershipDirectory,
   PortalMembershipRow,
 } from "../../usecase/portalaccess/ports";
+import { isoInstant } from "./instant";
 
 interface AccessRow {
   id: string;
@@ -269,7 +270,7 @@ export class PostgresPortalAccessRepository
       this.app,
       tenantId,
       async (db) => db<{ id: string; display_name: string; archived_at: string | null }[]>`
-        SELECT id, display_name, archived_at::text AS archived_at
+        SELECT id, display_name, ${db.unsafe(isoInstant("archived_at", "archived_at"))}
           FROM core.party WHERE id = ${partyId}
       `,
     );

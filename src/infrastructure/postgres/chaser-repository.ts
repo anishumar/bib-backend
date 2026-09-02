@@ -33,6 +33,7 @@ import type {
   IsoDate,
   NewFreeze,
 } from "../../usecase/chaser/ports";
+import { isoInstant } from "./instant";
 
 /** The one entry key a firm's chaser ladder lives under. One entry holds the
  *  whole ladder rather than one per rung — the rungs are read together and
@@ -280,7 +281,7 @@ export class PostgresClientFreezeRepository implements ClientFreezeRepository {
              -- join does.
              setter.display_name AS set_by_name,
              lifter.display_name AS lifted_by_name,
-             f.created_at::text AS created_at
+             ${db.unsafe(isoInstant("f.created_at", "created_at"))}
         FROM crm.client_freeze f
         JOIN core.party p ON p.id = f.client_party_id AND p.tenant_id = f.tenant_id
         LEFT JOIN tenancy.user_account setter ON setter.id = f.set_by

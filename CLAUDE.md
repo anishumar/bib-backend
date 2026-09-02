@@ -429,6 +429,56 @@ SERVER's day and is the honest fallback for a caller that did not say which day 
 the client-assignment section. That one is answered by the caller sending `asOf`; this one is
 answered by reading the right fields.
 
+## A `timestamptz` is an INSTANT, and `::text` is not a format any browser must accept (T6.10)
+
+The section above is about a `date`. This is its OPPOSITE and the two are constantly confused:
+a DAY must never be parsed, an INSTANT must be — because the day a moment falls on is the
+READER's question and only their browser can answer it. **The field's TYPE decides which rule
+applies**, and getting it backwards is silent east and west of Greenwich.
+
+**`SELECT now()::text` gives `2026-09-01 19:54:05.712839+00`.** ECMAScript pins the one string
+`Date` is REQUIRED to accept — `YYYY-MM-DDTHH:mm:ss.sssZ`, a literal `T` and EXACTLY three
+fractional digits — and leaves everything else to each engine. **V8 takes the Postgres form**
+(measured, in `tests/architecture/instant-format.test.ts`), which is why every gate here was
+green with it: node, curl, `smoke` and every browser walk on this machine parsed it and landed
+on the right instant. JavaScriptCore historically does not, and every portal screen guards with
+`Number.isNaN(at.getTime()) ? iso : …` — so the failure was never a crash, it was a client on an
+iPhone reading `2026-09-01 19:54:05.712839+00` where the firm meant "1 Sep 2026".
+
+**AND THE SECOND BUG IN THE SAME CAST IS THE WORSE ONE.** `timestamptz::text` renders in the
+SESSION's `TimeZone`, not in UTC. `src/db/pool.ts` sets none, so it is the SERVER's — UTC in the
+compose container, which is the only reason every string anyone here has looked at ended `+00`.
+`render-source.ts` took an invoice's printed date from `created_at.slice(0, 10)` when
+`issued_on` was null, so **the date on a numbered tax document an auditor reads depended on
+`postgresql.conf`**: the same row slices to the 1st under UTC and the 2nd under `Asia/Kolkata`,
+measured in `instant-format.integration.test.ts`. It is `day.ts`'s bug in different clothes — a
+DAY derived from an INSTANT by a zone nobody chose.
+
+**So `infrastructure/postgres/instant.ts` holds two helpers and both pin the zone.**
+`isoInstant(expr, alias?)` writes `to_char(x AT TIME ZONE 'UTC',
+'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')` — byte for byte what JS `toISOString()` produces — and
+`utcDayOf(expr, alias)` writes `(x AT TIME ZONE 'UTC')::date::text` for the cases that wanted a
+day all along. `.MS` is three digits deliberately: `.US` is six, closer to what Postgres stores,
+and back outside the spec, which is back to each engine deciding. NULL in, NULL out, so an
+unanswered ask keeps its honest `null`. No `Date` is constructed at any point — `day.ts`'s
+reason: a value that is never parsed cannot be parsed wrong.
+
+**The guard is a GREP as well as an assertion**, for `calendar-day.test.ts`'s reason: a
+behavioural test proves nothing when both formats pass everywhere this is developed, and the
+failure is in a browser nobody here runs. `instant-format.test.ts` bans `_at::text` across
+`infrastructure/postgres/` — `_at::date::text` deliberately NOT matched, because asking SQL for
+the day is the right answer — and bans the format literal outside `instant.ts`, so there is
+exactly ONE expression for the integration test to measure against a real server.
+
+**When you want a day out of an instant, do not slice it.** `utcDayOf`, or the same expression
+written out, the way `portal-home-repository.ts` and `escalation-repository.ts` already do. A
+slice hides which zone answered.
+
+**And postgres.js rounds a timestamp-shaped PARAMETER to milliseconds** — it turns it into a JS
+`Date` on the way out. Found by measuring: the integration test's subject came back with three
+fractional digits where the server stores six, until it was written as a SQL literal. Nothing
+stores through that path today, but a test that means to observe precision cannot bind it.
+
 ## Migrations
 
 `migrations/NNNN_name.{up,down}.sql`, immutable once applied, fix forward with a new number.

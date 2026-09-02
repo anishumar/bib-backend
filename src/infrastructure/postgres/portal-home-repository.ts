@@ -52,6 +52,7 @@ import {
   PORTAL_HORIZON_DAYS,
 } from "../../domain/portalhome/model";
 import type { PortalHomeRepository, PortalHomeRows } from "../../usecase/portalhome/ports";
+import { isoInstant } from "./instant";
 
 interface WorkRow {
   id: string;
@@ -209,7 +210,7 @@ export class PostgresPortalHomeRepository implements PortalHomeRepository {
                -- under the outer one, and repeating either would disarm the
                -- negative control.
                (
-                 SELECT max(n.nudged_at)::text
+                 SELECT ${db.unsafe(isoInstant("max(n.nudged_at)"))}
                    FROM delivery.obligation_nudge n
                   WHERE n.obligation_id = oi.id
                     AND n.tenant_id = oi.tenant_id

@@ -31,6 +31,7 @@ import type {
   SpawnedInstance,
   UnstartedInstance,
 } from "../../usecase/obligation/ports";
+import { isoInstant } from "./instant";
 
 /**
  * Only `active` engagements generate.
@@ -66,7 +67,7 @@ const INSTANCE_COLUMNS =
   "id, tenant_id, template_id, entity_party_id, engagement_id, period_start::text, " +
   "period_end::text, period_label, statutory_due_on::text, internal_target_on::text, " +
   "state_id, work_item_id, filed_on::text, resolution_option_id, resolution_reason, " +
-  "resolved_at::text";
+  isoInstant("resolved_at", "resolved_at");
 
 function toInstance(r: InstanceRow): ObligationInstance {
   return {
@@ -179,7 +180,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
                s.is_terminal, s.needs_decision,
                oi.work_item_id, oi.filed_on::text,
                oi.resolution_option_id, ro.name AS resolution_name,
-               oi.resolution_reason, oi.resolved_at::text,
+               oi.resolution_reason, ${db.unsafe(isoInstant("oi.resolved_at", "resolved_at"))},
                t.status AS rule_status, t.rule_pack
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t

@@ -3903,9 +3903,84 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > (uncommitted and local, 0065's precedent) to add the trigger, proven by a full down/up round
   > trip.
 
+- [x] `(B)` **T6.10** Every instant on the wire is ISO 8601 — the format Safari is REQUIRED to parse. *Acc: no adapter renders a `timestamptz` with `::text`, the format is written in one place, and what Postgres emits for it is measured against a real server rather than reasoned about.*
+  > **DONE 2026-09-02. No migration** — this is the SELECT list, not the schema, so 0071 is still
+  > free. `check` **1550** · `test:integration` **556** · `demo:verify` **71** · frontend
+  > `check` clean and `api:generate` **byte-identical** (the type was and stays `z.string()`;
+  > what changed is the value inside it, which is why no frontend file was touched).
+  >
+  > **T6.9 LEFT THIS OPEN AND UNDERSTATED IT AT "five adapters".** It is **24 select sites
+  > across 10 adapters**, and only ELEVEN of them are the portal's — `client_ask`,
+  > `client_assignment`, `obligation_instance`, `chaser` and `render-source` carry the same cast
+  > on the FIRM's side. The rule shipped is therefore about the CLASS, not the surface: a
+  > `timestamptz` leaves an adapter as ISO 8601 or it does not leave.
+  >
+  > **WHAT `::text` ACTUALLY GIVES: `2026-09-01 19:54:05.712839+00`.** ECMAScript pins the string
+  > `Date` must accept — `YYYY-MM-DDTHH:mm:ss.sssZ`, a literal `T` and EXACTLY three fractional
+  > digits — and everything else is each engine's choice. **V8 takes it**, which is measured in
+  > the test and is why every gate in this repo was green: node, curl, smoke and every browser
+  > walk on this machine parsed it and landed on the right instant. JavaScriptCore historically
+  > does not, and every portal screen guards with `Number.isNaN(at.getTime()) ? iso : …` — so the
+  > failure was never a crash. It was a client on an iPhone reading
+  > `2026-09-01 19:54:05.712839+00` where the firm meant "1 Sep 2026".
+  >
+  > **AND THE SECOND BUG IN THE SAME CAST IS THE WORSE ONE, AND NOBODY HAD NAMED IT.**
+  > `timestamptz::text` renders in the **SESSION's TimeZone**, not in UTC. `src/db/pool.ts` sets
+  > none, so it is the SERVER's — UTC in the compose container, which is the only reason every
+  > string anyone here has ever looked at ended `+00`. **`render-source.ts` sliced its invoice
+  > date off that string** (`row.created_at.slice(0, 10)`, the fallback when `issued_on` is
+  > null), so the date printed on a numbered tax document an auditor reads depended on a setting
+  > in `postgresql.conf`. Measured, not argued: the same row under `TimeZone = Asia/Kolkata`
+  > slices to **2026-09-02** and under UTC to **2026-09-01**. It is `day.ts`'s bug in different
+  > clothes — a DAY derived from an INSTANT by a zone nobody chose.
+  >
+  > **THE FIX IS TWO HELPERS IN `infrastructure/postgres/instant.ts`, and both pin the zone.**
+  > `isoInstant(expr, alias?)` →
+  > `to_char(x AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`, byte for byte what JS
+  > `toISOString()` produces. `utcDayOf(expr, alias)` → `(x AT TIME ZONE 'UTC')::date::text`, for
+  > the render source, which wanted a day all along. `.MS` is three digits **deliberately**:
+  > `.US` is six, more faithful to what Postgres stores, and back outside the spec — which is
+  > back to each engine deciding. NULL in, NULL out, so an unanswered ask keeps its honest
+  > `null`.
+  >
+  > **THE GUARD IS A GREP, for `calendar-day.test.ts`'s reason** — a behavioural test proves
+  > nothing when both formats pass everywhere this is developed, and the failure is in a browser
+  > nobody here runs. `tests/architecture/instant-format.test.ts` bans `_at::text` across every
+  > adapter (`_at::date::text` deliberately NOT matched — asking SQL for a day is the right
+  > answer) and bans the format literal outside `instant.ts`, so there is exactly one thing for
+  > the integration test to measure. **Negative control run:** one site reverted, the grep goes
+  > red and names the file; restored, green.
+  >
+  > **AND WHAT POSTGRES EMITS IS MEASURED, in two server timezones.**
+  > `instant-format.integration.test.ts` reads the same instant under `UTC`, `Asia/Kolkata` and
+  > `America/New_York`: the helper does not move, the old `::text` does, and the day it slices to
+  > changes. **The measurement corrected the test itself** — the subject was a bound parameter
+  > first and came back `…05.712+00`, three digits where the server stores six, because
+  > postgres.js turns a timestamp-shaped parameter into a JS `Date` on the way OUT and a `Date`
+  > holds milliseconds. The driver had quietly rounded the precision the test existed to observe.
+  > It is a SQL literal now.
+  >
+  > **WALKED END TO END ON BOTH SURFACES, over HTTP against the demo firm** — signed in as
+  > `meera@cobaltfoods.in` and as `siddharth@10xglobal.in` and classified every date-shaped
+  > string in every response: **11 instants, all ISO 8601; 167 `YYYY-MM-DD` days, correctly
+  > untouched; ZERO non-ISO.** No screenshot: not one frontend file changed and `schema.d.ts` is
+  > byte-identical, so there is no layout for one to catch — the risk here is the STRING, and the
+  > string was read off the wire.
+  >
+  > **ONE THING LEFT OPEN, AND DELIBERATELY NOT HALF-DONE.** Three sites cast a `timestamptz`
+  > with `::date` or compare it to a `date` — `portal-library-repository.ts`'s month digest
+  > (twice) and `chaser-repository.ts`'s `(${asOf}::date - a.raised_at::date)` day arithmetic.
+  > Those are session-zone dependent in exactly the same way, and today they behave as UTC
+  > because the server does. **Pinning them to UTC would be deterministic and probably WRONG**:
+  > for an Indian firm a document added at 02:00 IST on 1 October belongs in October's digest,
+  > not September's, and a chase rung counted in UTC fires a day early east of Greenwich. The
+  > question is *whose zone is a client's month*, which is the firm's to answer and is next to
+  > the turnaround times nobody has given. It is a date-arithmetic decision, not a wire format,
+  > so it stays a written-down question rather than a silent UTC pin.
+
 **Phase 6 is COMPLETE, and T6.8 was added to it after the fact** — U1 as written (T6.5, T6.6,
 T6.7), the chaser (T4.4), gate 4 (G3.4), the request that made the portal two-way, and T6.9's
-routing for it.
+routing for it, and T6.10's wire format under all of them.
 What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over

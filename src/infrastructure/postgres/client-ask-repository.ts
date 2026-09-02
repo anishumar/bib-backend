@@ -38,6 +38,7 @@ import type {
 } from "../../domain/clientask/model";
 import type { DocumentKind } from "../../domain/filestore/model";
 import type { AskRepository, NewAsk } from "../../usecase/clientask/ports";
+import { isoInstant } from "./instant";
 
 interface AskRow {
   id: string;
@@ -174,10 +175,10 @@ export class PostgresClientAskRepository implements AskRepository {
              a.document_kind,
              a.status,
              a.raised_by,
-             a.raised_at::text  AS raised_at,
-             a.first_answered_at::text AS first_answered_at,
+             ${db.unsafe(isoInstant("a.raised_at", "raised_at"))},
+             ${db.unsafe(isoInstant("a.first_answered_at", "first_answered_at"))},
              a.closed_by,
-             a.closed_at::text  AS closed_at,
+             ${db.unsafe(isoInstant("a.closed_at", "closed_at"))},
              cp.display_name    AS client_name,
              -- LEFT joins, and null is a real answer: an erased account stops
              -- resolving and the ask survives, exactly as the ledger's actor
@@ -195,7 +196,7 @@ export class PostgresClientAskRepository implements AskRepository {
                           resp.answer_text,
                           resp.document_id,
                           resp.decision,
-                          resp.responded_at::text AS responded_at,
+                          ${db.unsafe(isoInstant("resp.responded_at", "responded_at"))},
                           responder.display_name  AS responded_by_name,
                           dv.filename,
                           dv.byte_size,
@@ -236,7 +237,7 @@ export class PostgresClientAskRepository implements AskRepository {
                    SELECT c.rung_key,
                           c.after_days,
                           c.days_open,
-                          c.chased_at::text AS chased_at
+                          ${db.unsafe(isoInstant("c.chased_at", "chased_at"))}
                      FROM delivery.client_ask_chase c
                     WHERE c.ask_id = a.id
                       AND c.tenant_id = a.tenant_id

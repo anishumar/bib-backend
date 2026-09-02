@@ -25,6 +25,7 @@ import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
 import type { RenderableDocument, Section } from "../../domain/render/model";
 import type { RenderSource } from "../../usecase/render/ports";
+import { isoInstant, utcDayOf } from "./instant";
 
 /** What this source can describe. Anything else is refused BY NAME rather than
  *  producing an empty document. */
@@ -42,7 +43,7 @@ interface LetterRow {
   signed_by_name: string | null;
   signed_by_title: string | null;
   firm_signatory_title: string | null;
-  created_at: string;
+  created_on: string;
   client_name: string;
   entity_name: string;
   entity_jurisdiction: string | null;
@@ -69,7 +70,7 @@ interface InvoiceRow {
   currency: string;
   issued_on: string | null;
   due_on: string | null;
-  created_at: string;
+  created_on: string;
   irn: string | null;
   client_name: string;
   entity_name: string;
@@ -165,9 +166,10 @@ export class PostgresRenderSource implements RenderSource {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
         SELECT el.ref, el.title, el.jurisdiction, el.currency, el.background,
-               el.issued_on::text, el.effective_from::text, el.signed_at::text,
+               el.issued_on::text, el.effective_from::text,
+               ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
-               el.created_at::text,
+               ${db.unsafe(utcDayOf("el.created_at", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                le.jurisdiction     AS entity_jurisdiction
@@ -237,7 +239,7 @@ export class PostgresRenderSource implements RenderSource {
         recipient: { name: row.client_name, lines: [] },
         recipientLabel: "To",
         meta: [
-          { label: "Dated", value: longDate(row.issued_on ?? row.created_at.slice(0, 10)) },
+          { label: "Dated", value: longDate(row.issued_on ?? row.created_on) },
           { label: "Effective from", value: longDate(row.effective_from) },
           { label: "Governing law", value: row.jurisdiction },
         ],
@@ -271,7 +273,7 @@ export class PostgresRenderSource implements RenderSource {
           ? row.entity_name
           : `${row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
         logo: await this.logo(db, tenantId, letterId, "engagement_letter"),
-        issuedOn: (row.issued_on ?? row.created_at).slice(0, 10),
+        issuedOn: row.issued_on ?? row.created_on,
       };
     });
   }
@@ -280,7 +282,7 @@ export class PostgresRenderSource implements RenderSource {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
         SELECT i.number, i.currency, i.issued_on::text, i.due_on::text,
-               i.created_at::text, i.irn,
+               ${db.unsafe(utcDayOf("i.created_at", "created_on"))}, i.irn,
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                t.gross::text, t.discount::text, t.net::text, t.tax::text, t.total::text
@@ -303,7 +305,7 @@ export class PostgresRenderSource implements RenderSource {
       `;
 
       const meta = [
-        { label: "Invoice date", value: longDate(row.issued_on ?? row.created_at.slice(0, 10)) },
+        { label: "Invoice date", value: longDate(row.issued_on ?? row.created_on) },
         { label: "Due", value: longDate(row.due_on) },
       ];
       // The government registry's identifier, when the firm has recorded one.
@@ -344,7 +346,7 @@ export class PostgresRenderSource implements RenderSource {
         ],
         footer: row.entity_name,
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
-        issuedOn: (row.issued_on ?? row.created_at).slice(0, 10),
+        issuedOn: row.issued_on ?? row.created_on,
       };
     });
   }

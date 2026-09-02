@@ -54,6 +54,7 @@ import type {
 } from "../../usecase/clientask/ports";
 import type { RawResponse } from "./client-ask-repository";
 import { toResponseRecord } from "./client-ask-repository";
+import { isoInstant } from "./instant";
 
 interface Row {
   id: string;
@@ -261,7 +262,7 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
              a.status,
              ent.display_name AS company_name,
              wi.title         AS work_item_title,
-             a.raised_at::text AS raised_at,
+             ${db.unsafe(isoInstant("a.raised_at", "raised_at"))},
              -- ── WHEN WE LAST REMINDED THEM, AND NOT HOW OFTEN ───────────
              --
              -- delivery.client_ask_chase (0065) carried a portal policy from
@@ -276,7 +277,7 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
              -- policy is under this subquery exactly as it is under the outer
              -- one, and repeating it would disarm the negative control.
              (
-               SELECT max(c.chased_at)::text
+               SELECT ${db.unsafe(isoInstant("max(c.chased_at)"))}
                  FROM delivery.client_ask_chase c
                 WHERE c.ask_id = a.id
                   AND c.tenant_id = a.tenant_id
@@ -289,7 +290,7 @@ export class PostgresPortalAskRepository implements PortalAskRepository {
                           resp.answer_text,
                           resp.document_id,
                           resp.decision,
-                          resp.responded_at::text AS responded_at,
+                          ${db.unsafe(isoInstant("resp.responded_at", "responded_at"))},
                           -- The client's OWN people, by name. This is their own
                           -- company's side of the conversation, and a household
                           -- with two directors needs to know which of them

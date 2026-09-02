@@ -28,6 +28,7 @@ import type {
   NewFirmReply,
   RequestRepository,
 } from "../../usecase/clientrequest/ports";
+import { isoInstant } from "./instant";
 
 interface RequestRow {
   id: string;
@@ -267,10 +268,10 @@ export class PostgresClientRequestRepository implements RequestRepository {
              r.body,
              r.status,
              r.raised_by,
-             r.raised_at::text       AS raised_at,
-             r.first_replied_at::text AS first_replied_at,
+             ${db.unsafe(isoInstant("r.raised_at", "raised_at"))},
+             ${db.unsafe(isoInstant("r.first_replied_at", "first_replied_at"))},
              r.settled_by,
-             r.settled_at::text      AS settled_at,
+             ${db.unsafe(isoInstant("r.settled_at", "settled_at"))},
              r.assignee_user_id,
              r.assignment_note,
              cp.display_name         AS client_name,
@@ -294,7 +295,7 @@ export class PostgresClientRequestRepository implements RequestRepository {
                           rep.request_id,
                           rep.author_side,
                           rep.body,
-                          rep.written_at::text AS written_at,
+                          ${db.unsafe(isoInstant("rep.written_at", "written_at"))},
                           author.display_name  AS author_name,
                           rep.document_id,
                           d.title              AS document_title,
