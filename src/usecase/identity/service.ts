@@ -186,11 +186,36 @@ export class IdentityService {
       purpose: "login",
       expiresAt,
     });
-    await this.deps.mailer.sendMagicLink(
-      user.email,
-      `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
-      expiresAt,
-    );
+    // ── THE SEND MUST NOT CHANGE THE ANSWER ─────────────────────────────────
+    //
+    // Everything above this line is careful to tell the caller nothing: an
+    // unknown or deactivated account returns early and the route answers 202
+    // either way, so submitting an address here reveals nothing about whether
+    // it has a login. A THROWN send undoes all of it — the route would answer
+    // 202 for an address with no account and 500 for one with an account whose
+    // letter would not go, which is an enumeration oracle built out of an error
+    // path. It was invisible while `LoggingMailer` was the only mailer,
+    // because writing to a log cannot fail; a real relay rejects a recipient,
+    // times out, or runs out of quota.
+    //
+    // So it is swallowed HERE and shouted about in the ADAPTER, which is the
+    // only layer that knows a send failed and the only one that may hold a
+    // logger. The user is told to check their email and no email arrives — which
+    // is bad, and is strictly better than the alternative, and is a fault an
+    // operator can see in the log within seconds.
+    //
+    // `invitePortalContact` below does the OPPOSITE, deliberately: there a
+    // member of the firm is watching a screen, there is no account to be quiet
+    // about, and a silent failure would be a client who never gets in.
+    try {
+      await this.deps.mailer.sendMagicLink(
+        user.email,
+        `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
+        expiresAt,
+      );
+    } catch {
+      // Deliberately empty. See above: the adapter has already logged it.
+    }
   }
 
   /**

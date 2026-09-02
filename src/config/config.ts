@@ -37,10 +37,32 @@ const EnvSchema = z.object({
   // The honest registry, as a switch. When on, the dev x-user-id header is
   // accepted as a principal. validate.ts refuses it in production-like.
   BIB_DEV_AUTH_ENABLED: z.enum(["true", "false"]).optional(),
-  // Only 'log' is implemented — it writes the magic link to the log instead of
-  // sending it. The enum grows when a real transport lands; production-like
-  // refuses to boot on 'log'.
-  BIB_MAIL_TRANSPORT: z.enum(["log"]).default("log"),
+  // Which mailer is registered. 'log' writes the magic link to the log instead
+  // of sending it and production-like refuses to boot on it; 'smtp' is the real
+  // one and carries whatever provider the firm already has — Google Workspace,
+  // Microsoft 365, SES or Postmark all speak it, which is why ONE adapter is
+  // enough and no vendor is named here.
+  BIB_MAIL_TRANSPORT: z.enum(["log", "smtp"]).default("log"),
+  // ── What the letters come FROM, and how they reach the server ────────────
+  //
+  // Optional in the SCHEMA and required by `validate.ts` when the transport is
+  // 'smtp', because "which transport" and "is that transport configured" are
+  // different failures and only the second can name the missing variable.
+  //
+  // The From address is not cosmetic: a portal invite arrives unasked, from a
+  // firm the reader may not be expecting mail from, so it has to be an address
+  // at a domain the client recognises or the letter reads as phishing.
+  BIB_MAIL_FROM: z.string().email().optional(),
+  BIB_MAIL_FROM_NAME: z.string().min(1).optional(),
+  BIB_SMTP_HOST: z.string().min(1).optional(),
+  // 587 is submission-with-STARTTLS, which is what every provider above wants.
+  // 465 is implicit TLS and is the one case `secure` defaults to true for.
+  BIB_SMTP_PORT: z.coerce.number().int().positive().max(65535).default(587),
+  BIB_SMTP_USER: z.string().min(1).optional(),
+  BIB_SMTP_PASSWORD: z.string().min(1).optional(),
+  // NEVER `z.coerce.boolean()` — `Boolean("false")` is true, and this one
+  // decides whether the connection is encrypted from the first byte.
+  BIB_SMTP_SECURE: z.enum(["true", "false"]).optional(),
   // How an engagement letter gets signed. Only `attested` exists — a person at
   // the firm records that the client signed, on paper or in a provider the firm
   // already uses. It records an assertion, not a signature, so a production-like
@@ -133,10 +155,34 @@ export interface AuthConfig {
   readonly appBaseUrl: string;
   /** Whether the dev x-user-id principal resolver is registered. */
   readonly devAuthEnabled: boolean;
-  readonly mailTransport: "log";
+  readonly mailTransport: "log" | "smtp";
   readonly esignProvider: "attested";
   /** The provisioning callers. Each key carries only its own capabilities. */
   readonly internalClients: readonly InternalClient[];
+}
+
+/** How the server reaches an SMTP relay. Null when no host is configured. */
+export interface SmtpConfig {
+  readonly host: string;
+  readonly port: number;
+  /** Implicit TLS from the first byte (465). False means STARTTLS on 587/25 —
+   *  which nodemailer still upgrades; it is not "unencrypted". */
+  readonly secure: boolean;
+  /** Null is a real answer: a relay on a private network may take no login. */
+  readonly user: string | null;
+  readonly password: string | null;
+}
+
+export interface MailConfig {
+  /** The envelope and header From. Null until somebody sets it — `validate.ts`
+   *  refuses a real transport without one, because a letter from a stranger's
+   *  domain is one a client is right to distrust. */
+  readonly from: string | null;
+  /** The display name beside it — the FIRM's name is not usable here: one
+   *  server serves every tenant, and the letter names the firm in its own
+   *  text instead. */
+  readonly fromName: string | null;
+  readonly smtp: SmtpConfig | null;
 }
 
 export interface CorsConfig {
@@ -174,6 +220,7 @@ export interface Config {
   readonly cors: CorsConfig;
   readonly worker: WorkerConfig;
   readonly storage: StorageConfig;
+  readonly mail: MailConfig;
 }
 
 export interface WorkerConfig {
@@ -254,6 +301,25 @@ export function load(): Config {
       trustProxy: env.BIB_TRUST_PROXY === "true",
       authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
       generalPerMinute: env.BIB_RATELIMIT_GENERAL_PER_MINUTE,
+    },
+    mail: {
+      from: env.BIB_MAIL_FROM ?? null,
+      fromName: env.BIB_MAIL_FROM_NAME ?? null,
+      // No host means no relay, whatever the other variables say. That keeps
+      // "is it configured" a single question for validate.ts to ask.
+      smtp:
+        env.BIB_SMTP_HOST === undefined
+          ? null
+          : {
+              host: env.BIB_SMTP_HOST,
+              port: env.BIB_SMTP_PORT,
+              secure:
+                env.BIB_SMTP_SECURE !== undefined
+                  ? env.BIB_SMTP_SECURE === "true"
+                  : env.BIB_SMTP_PORT === 465,
+              user: env.BIB_SMTP_USER ?? null,
+              password: env.BIB_SMTP_PASSWORD ?? null,
+            },
     },
     storage: {
       backend: env.BIB_STORAGE_BACKEND,

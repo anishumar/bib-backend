@@ -24,6 +24,7 @@ import type { Config } from "../../src/config/config";
 function productionLike(
   overrides: Partial<Config["auth"]> = {},
   storage: Partial<Config["storage"]> = {},
+  mail: Partial<Config["mail"]> = {},
 ): Config {
   return {
     environment: "production",
@@ -49,6 +50,21 @@ function productionLike(
         { name: "onboarding", key: "a-real-and-long-provisioning-key", capabilities: ["tenant.provision"] },
       ],
       ...overrides,
+    },
+    // A CONFIGURED transport, so that "which transport" and "is it configured"
+    // stay separable — the control below asserts a fully wired firm boots, and
+    // the two gates after it each remove exactly one of these.
+    mail: {
+      from: "no-reply@example.com",
+      fromName: "10x Global",
+      smtp: {
+        host: "smtp.example.com",
+        port: 587,
+        secure: false,
+        user: "no-reply@example.com",
+        password: "secret",
+      },
+      ...mail,
     },
     cors: { origins: ["https://app.example.com"] },
     rateLimit: { trustProxy: true, authPerMinute: 10, generalPerMinute: 300 },
@@ -80,6 +96,28 @@ describe("a production-like environment refuses every stub", () => {
     expect(() => {
       validateServer(productionLike({ mailTransport: "log" }));
     }).toThrow(/BIB_MAIL_TRANSPORT/);
+  });
+
+  // ── AND THE MAIL GATE HAS A SECOND HALF THAT IS NOT ABOUT THE ENVIRONMENT ──
+  //
+  // Every other check in this file asks "is this stub acceptable HERE". These
+  // two ask whether the transport somebody CHOSE can work at all, which has the
+  // same answer in every environment — so they are asserted outside the
+  // production-like harness as well, further down.
+  //
+  // The failure they prevent is the worst-shaped one available: it appears at
+  // the first send, which is the moment a real client is being invited, and
+  // the person who typed the config is not in the room.
+  it("refuses smtp with no relay to hand the letter to", () => {
+    expect(() => {
+      validateServer(productionLike({ mailTransport: "smtp" }, {}, { smtp: null }));
+    }).toThrow(/BIB_SMTP_HOST/);
+  });
+
+  it("refuses smtp with no From address — an unrecognised sender reads as phishing", () => {
+    expect(() => {
+      validateServer(productionLike({ mailTransport: "smtp" }, {}, { from: null }));
+    }).toThrow(/BIB_MAIL_FROM/);
   });
 
   it("refuses the filesystem blob store — replicas do not share a disk", () => {

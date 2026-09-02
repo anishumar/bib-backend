@@ -182,3 +182,34 @@ export class FakeMailer implements Mailer {
     return Promise.resolve();
   }
 }
+
+/**
+ * A mailer whose relay is down — every send rejects.
+ *
+ * It exists for ONE property, and it is a security property rather than an
+ * error-handling one: `requestMagicLink` must answer identically whether or not
+ * an account exists, and a thrown send would make the ERROR PATH the thing that
+ * tells them apart (202 for an unknown address, 500 for a real one). That was
+ * unreachable while `LoggingMailer` was the only mailer, because writing to a
+ * log cannot fail. A real relay rejects a recipient, times out, or runs out of
+ * quota, so it is reachable now and it is tested.
+ *
+ * `invitePortalContact` must do the OPPOSITE and let the failure out — there is
+ * no account to be quiet about and somebody at the firm is watching a screen.
+ */
+export class UnreachableMailer implements Mailer {
+  /** What was ATTEMPTED. A test that asserts a failure must still be able to
+   *  prove the letter was tried, or it cannot tell "the relay refused" from
+   *  "the code never called the mailer". */
+  readonly attempted: { to: string; kind: "magic-link" | "invite" }[] = [];
+
+  sendMagicLink(to: string): Promise<void> {
+    this.attempted.push({ to, kind: "magic-link" });
+    return Promise.reject(new Error("smtp: connection refused"));
+  }
+
+  sendPortalInvite(to: string): Promise<void> {
+    this.attempted.push({ to, kind: "invite" });
+    return Promise.reject(new Error("smtp: connection refused"));
+  }
+}

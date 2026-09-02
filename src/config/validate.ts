@@ -100,8 +100,9 @@ export function validateServer(cfg: Config): void {
     if (cfg.auth.mailTransport === "log") {
       throw new Error(
         `BIB_MAIL_TRANSPORT=log while BIB_ENVIRONMENT=${cfg.environment} (production-like). ` +
-          `The logging mailer does not send email — it prints the sign-in link. Register a real ` +
-          `transport (infrastructure/mail) and set BIB_MAIL_TRANSPORT to it before deploying.`,
+          `The logging mailer does not send email — it prints the sign-in link. Set ` +
+          `BIB_MAIL_TRANSPORT=smtp and configure BIB_SMTP_HOST and BIB_MAIL_FROM before ` +
+          `deploying.`,
       );
     }
 
@@ -139,6 +140,34 @@ export function validateServer(cfg: Config): void {
           `not share it, so an upload through one pod is a 500 through the others, and a ` +
           `restart loses the bytes while the metadata survives. Register an object-store ` +
           `adapter (infrastructure/storage) and set BIB_STORAGE_BACKEND to it before deploying.`,
+      );
+    }
+  }
+
+  // ── AND THIS ONE IS NOT GATED ON THE ENVIRONMENT ──────────────────────────
+  //
+  // Every check above asks "is this stub acceptable HERE". This one asks
+  // whether the transport somebody chose can work at all, which has the same
+  // answer everywhere: `smtp` with no relay and no From address is a typo, and
+  // the cost of finding it at boot rather than at the first send is the
+  // difference between a crash-loop and a client who never got their invite.
+  //
+  // Two variables, named separately, because they fail for different reasons —
+  // a missing host is "nothing was configured" and a missing From is "it was
+  // configured half way".
+  if (cfg.auth.mailTransport === "smtp") {
+    if (cfg.mail.smtp === null) {
+      throw new Error(
+        `BIB_MAIL_TRANSPORT=smtp but BIB_SMTP_HOST is not set. The SMTP mailer has no relay ` +
+          `to hand a letter to. Set BIB_SMTP_HOST (with BIB_SMTP_PORT, BIB_SMTP_USER and ` +
+          `BIB_SMTP_PASSWORD as your provider requires), or set BIB_MAIL_TRANSPORT=log.`,
+      );
+    }
+    if (cfg.mail.from === null) {
+      throw new Error(
+        `BIB_MAIL_TRANSPORT=smtp but BIB_MAIL_FROM is not set. Every letter needs a sender, ` +
+          `and a portal invite arrives unasked at a client who has to recognise the domain ` +
+          `or read it as phishing. Set BIB_MAIL_FROM to an address at the firm's own domain.`,
       );
     }
   }

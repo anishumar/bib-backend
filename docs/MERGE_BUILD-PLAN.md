@@ -3997,11 +3997,83 @@ agents raise the margin on it, they do not create it.
 Built as ports (fakes already exist). Each real adapter starts when the client grants
 sandbox access + credentials. **Not on any demo's critical path.**
 
+**EXCEPT ONE, AND IT WAS FILED HERE BY ASSOCIATION RATHER THAN BY ARGUMENT.** Transactional
+email needed no sandbox, no client negotiation and no new port — and it was the only thing
+standing between this product and a production boot. T7.0 below carves it out; the rest of the
+phase is unchanged and still externally gated.
+
+- [x] `(B)` **T7.0** One real Mailer, so a client can be invited and the product can boot. *Acc: `BIB_MAIL_TRANSPORT=smtp` sends a real invite through a real relay, and boot refuses a half-configured one.*
+  > **DONE 2026-09-02. No migration** — 0071 is still free. `check` **1567** ·
+  > `test:integration` **559** · `demo:verify` **71**. The frontend is untouched.
+  >
+  > **A LANE NOTE FIRST, because this is `(A)`'s square on paper.** T7.5 reads *"E-sign, email
+  > (Gmail/M365), WhatsApp"*. What is taken here is ONLY the two transactional letters behind
+  > `usecase/identity`'s existing `Mailer` port — the sign-in link and the portal invite — because
+  > they are the ones blocking `(B)`'s portal and the boot gate. **E-sign, WhatsApp, and the
+  > NOTIFICATION side of email (chaser, nudge, digest, the request inbox) are untouched and stay
+  > `(A)`'s in T7.5.** Nothing here went near `ChaserService`, `NudgeService` or
+  > `ClientRequestService`, whose dependency lists are pinned structurally precisely so that a
+  > transport arriving there is a decision somebody argues for first.
+  >
+  > **WHAT WAS ACTUALLY TRUE BEFORE THIS, and had never been written down as a fact:**
+  >   · **A CLIENT COULD NOT BE INVITED TO THE PORTAL AT ALL.** `logging-mailer.ts` said it in
+  >     its own comment — *"the person on the other end of `to` is a CLIENT, not a colleague, so
+  >     this one silently not arriving is a client who cannot get in"* — and inviting therefore
+  >     meant somebody at the firm copying a URL out of a server log into their own email. T6.5
+  >     through T6.9 shipped five screens **no outside reader could reach**.
+  >   · **AND THE PRODUCT COULD NOT BOOT IN PRODUCTION.** `validateServer` refuses `log` there,
+  >     so this was not "reminders are quiet" — the process stops. It blocked deploying anything.
+  >
+  > **PLAIN SMTP, NOT A VENDOR SDK.** Google Workspace, Microsoft 365, SES and Postmark all speak
+  > it; a firm in this market already has one, and changing provider becomes `.env` rather than a
+  > rewrite. `nodemailer-transport.ts` is the only file that imports the driver and
+  > `smtp-mailer.ts` holds the letters — which is what lets `letters.test.ts` read exactly what a
+  > client receives without a socket.
+  >
+  > **THE INVITE IS, FEATURE FOR FEATURE, A PHISHING EMAIL** — unasked, unfamiliar sender, click
+  > a link, set a password — so the letter works at not being one: the firm in the SUBJECT, why
+  > they are receiving it, what they will be able to do, and *check with your contact rather than
+  > replying*. A firm's name is DATA on both routes it takes: a newline in it would end a Subject
+  > header and let it append a `Bcc:`, and `Shah & Shah <Chartered Accountants>` would become
+  > markup. Both stripped and escaped at the door, both tested.
+  >
+  > **AND THE CHANGE OPENED A SECURITY HOLE, WHICH IS WHY IT IS CLOSED IN THE SAME COMMIT.**
+  > `requestMagicLink` answers 202 for an unknown address and returns early — deliberately quiet
+  > about whether an account exists. A THROWN send would have made it 202 for no account and
+  > **500 for a real one whose letter would not go**: an enumeration oracle assembled entirely
+  > out of an error path, with no code admitting to it. Unreachable while a log was the only
+  > mailer, because writing to a log cannot fail; reachable the moment a relay can reject a
+  > recipient or time out. It is swallowed there and thrown on the INVITE path, where the firm is
+  > watching a screen and a silent failure is a client who never gets in — and shouted about in
+  > the ADAPTER, the only layer that knows a send failed and the only one that may hold a logger.
+  > **Negative control run:** the swallow removed, that one test goes red; restored, green.
+  >
+  > **SENT THROUGH A REAL RELAY, because a transport nobody has sent through is `::text::jsonb`
+  > again** — that statement typechecked, linted, passed every unit test against a fake and died
+  > on the first real call. `smtp.integration.test.ts` speaks about forty lines of SMTP on
+  > 127.0.0.1 and asserts what arrives: `From: 10x Global <no-reply@10xglobal.in>`, the subject
+  > naming the firm, `multipart/alternative` with both bodies. Nothing leaves the machine — a
+  > hosted catcher would have made the suite depend on somebody's uptime to prove a local fact.
+  >
+  > **TWO BOOT GATES, and they are NOT gated on the environment** like every other one in that
+  > file. `smtp` with no `BIB_SMTP_HOST` and `smtp` with no `BIB_MAIL_FROM` are refused
+  > everywhere, because the question is not "is this stub acceptable here" but "can the transport
+  > somebody chose work at all" — and the alternative is finding out at the first send, which is
+  > the moment a real client is being invited.
+  >
+  > **WHAT THIS EXPOSES AND DOES NOT CLOSE: there is no RESEND, and it is now operationally
+  > real.** `PortalInviteService` refuses a second invite to somebody who already has a
+  > membership and its own comment defers the route. That cost nothing while a send could not
+  > fail. With a relay it can — a bounce, a typo, a quota — and the contact is then created,
+  > granted, and permanently uninvitable. The question behind it is unanswered (*did they lose
+  > the link, or has somebody taken over that mailbox?*), so it is written down rather than
+  > guessed at. **It should be the next thing built on this.**
+
 - [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
 - [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).
 - [ ] `(A)` **T7.4** Banking feed (payment reconciliation), payments (Razorpay/Stripe).
-- [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), email (Gmail/M365), WhatsApp (P10 transport).
+- [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), WhatsApp, and the NOTIFICATION side of email — the chaser, the nudge, the monthly digest and the request inbox. *The two TRANSACTIONAL letters (sign-in link, portal invite) are done: T7.0.*
 
 ---
 

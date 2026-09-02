@@ -14,7 +14,9 @@ import {
   FakePasswordHasher,
   FakeSessionRepo,
   FakeTokenFactory,
+  UnreachableMailer,
 } from "../../src/testfakes/identity";
+import type { Mailer } from "../../src/usecase/identity/ports";
 import {
   InvalidCredentials,
   InvalidMagicLink,
@@ -48,7 +50,7 @@ interface Harness {
   events: RecordingEventSink;
 }
 
-function harness(): Harness {
+function harness(mailerOverride?: Mailer): Harness {
   const fakes = makeFakes();
   const credentials = new FakeCredentialRepo();
   const sessions = new FakeSessionRepo();
@@ -63,7 +65,7 @@ function harness(): Harness {
     magicLinks,
     passwords: new FakePasswordHasher(),
     tokens: new FakeTokenFactory(),
-    mailer,
+    mailer: mailerOverride ?? mailer,
     ids: fakes.ids,
     clock,
     events: fakes.events,
@@ -496,5 +498,51 @@ describe("per-account throttling", () => {
     for (let i = 0; i < MAGIC_LINKS_PER_WINDOW + 1; i += 1) {
       await expect(h.service.requestMagicLink("priya@harbourpoint.in")).resolves.toBeUndefined();
     }
+  });
+});
+
+// ── WHEN THE RELAY IS DOWN, AND WHY THE TWO PATHS ANSWER DIFFERENTLY ─────────
+//
+// This whole block was unreachable until a real mailer existed. `LoggingMailer`
+// writes to a log and a log cannot refuse; an SMTP relay rejects a recipient,
+// times out, or runs out of quota, so "the send threw" became a state the
+// product can actually be in the day the transport landed.
+//
+// The two paths must not behave the same, and getting it backwards is a bug in
+// each direction: swallow the invite and a client silently never gets in;
+// surface the sign-in link and the error path becomes an account oracle.
+describe("a send that fails", () => {
+  it("does NOT change the answer on the sign-in path — that would enumerate accounts", async () => {
+    // Everything about requestMagicLink is built to say nothing: an unknown or
+    // deactivated address returns early and the route answers 202 either way.
+    // A thrown send would answer 202 for an address with no account and 500 for
+    // one with an account whose letter would not go — an enumeration oracle
+    // assembled out of an error path, with no code anywhere admitting to it.
+    const relay = new UnreachableMailer();
+    const h = harness(relay);
+    await seedUser(h, "priya@harbourpoint.in");
+
+    await expect(h.service.requestMagicLink("priya@harbourpoint.in")).resolves.toBeUndefined();
+    // And the two cases are INDISTINGUISHABLE, which is the actual property —
+    // asserting only that the first one resolves would pass on a version that
+    // threw for both.
+    await expect(h.service.requestMagicLink("nobody@nowhere.example")).resolves.toBeUndefined();
+
+    // The letter was genuinely attempted for the real account and not for the
+    // unknown one; otherwise this test would also pass if the mailer were never
+    // called at all.
+    expect(relay.attempted).toEqual([{ to: "priya@harbourpoint.in", kind: "magic-link" }]);
+  });
+
+  it("DOES surface on the invite path — a firm is watching a screen", async () => {
+    // The opposite decision, for the opposite reason. There is no account to be
+    // quiet about: a member of the firm has just named this person, and a
+    // silent failure is a client who never gets in and nobody knowing.
+    const relay = new UnreachableMailer();
+    const h = harness(relay);
+    const userId = await seedUser(h, "meera@cobaltfoods.in");
+
+    await expect(h.service.invitePortalContact(userId, "10x Global")).rejects.toThrow();
+    expect(relay.attempted).toEqual([{ to: "meera@cobaltfoods.in", kind: "invite" }]);
   });
 });

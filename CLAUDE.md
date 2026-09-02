@@ -598,11 +598,76 @@ digest at rest and only ever leaves in an httpOnly cookie — never in a respons
 a user with several memberships must call `POST /api/v1/auth/switch-tenant`. Anything that
 needs a tenant checks for it; nothing guesses.
 
-HONEST REGISTRY: the dev `x-user-id` resolver, the logging mailer and the **attested e-sign
-signer** are the only stubs, all three gated on config, and `validateServer` refuses to boot a
-production-like environment with any of them. `tests/config/boot-gates.test.ts` proves each
-refusal — a gate that stops refusing breaks nothing and is therefore silent. Do not add a
-fourth without the same treatment.
+HONEST REGISTRY: the dev `x-user-id` resolver, the logging mailer, the **attested e-sign
+signer** and the filesystem blob store are the stubs, all gated on config, and `validateServer`
+refuses to boot a production-like environment with any of them. `tests/config/boot-gates.test.ts`
+proves each refusal — a gate that stops refusing breaks nothing and is therefore silent. Do not
+add another without the same treatment.
+
+**The mailer is the first of them to have a real counterpart** — see the section below. The stub
+stays, and so does its gate: `log` is still what a developer wants locally, and is still refused
+in public. What changed is that `smtp` is now a thing to point the switch at.
+
+## Mail — the transport that had to exist before anything could be deployed (T7.0)
+
+`Mailer` (`usecase/identity/ports.ts`) has two methods and both are load-bearing outside this
+system: `sendMagicLink` and `sendPortalInvite`. Until T7.0 the only implementation wrote them to
+a log, which had two consequences nobody had stated as facts:
+
+- **A CLIENT COULD NOT BE INVITED TO THE PORTAL AT ALL.** `logging-mailer.ts` said so in its own
+  comment — *"the person on the other end of `to` is a CLIENT, not a colleague, so this one
+  silently not arriving is a client who cannot get in"* — and an invite therefore meant somebody
+  at the firm copying a URL out of a server log. Five portal tasks shipped screens no outside
+  reader could reach.
+- **AND THE PRODUCT COULD NOT BOOT IN PRODUCTION**, because `validateServer` refuses `log` there.
+  Not "would behave oddly": the process stops. So this blocked deploying anything at all, not
+  only the portal.
+
+**It is plain SMTP and not a vendor SDK.** Google Workspace, Microsoft 365, Amazon SES and
+Postmark all speak it, a firm in this market already has one of them, and switching provider is
+then `.env` rather than a rewrite. `nodemailer-transport.ts` is the ONLY file in the product that
+imports the driver; `smtp-mailer.ts` holds the letters and knows nothing about how they travel.
+That split is what makes the letters testable without a socket, and the letters are the half with
+judgement in them.
+
+**THE INVITE HAS TO WORK AT NOT BEING PHISHING.** It arrives unasked, at somebody who never
+signed up, from an address they have no reason to recognise, and asks them to open a link and set
+a password — feature for feature, a phishing email. So it names the firm in the SUBJECT, says why
+they are receiving it, says what they will be able to do, and tells them to check with their own
+contact rather than replying. `firmName` exists on the port for exactly that sentence, and
+`tests/identity/letters.test.ts` asserts each one rather than trusting this paragraph.
+
+**A FIRM'S NAME IS DATA.** It reaches a Subject header, where a newline would let it append
+headers of its own, and it reaches HTML, where a real company name carrying `&` or `<` would
+become markup. Both are handled at the door and both are tested; blank-after-stripping is treated
+as absent.
+
+**THE EXPIRY NAMES ITS ZONE.** An email has no browser to ask, so the choice is between a zone
+nobody chose and a zone said out loud — the same answer `instant.ts` (T6.10) gives for every date
+this product renders. *"4 September 2026, 14:05 UTC"*.
+
+### A failed send answers differently on the two paths, and that is a security decision
+
+**`requestMagicLink` SWALLOWS it.** Everything in that method is built to tell the caller nothing
+— an unknown or deactivated address returns early and the route answers 202 either way — and a
+thrown send would undo all of it: 202 for an address with no account, 500 for one with an account
+whose letter would not go. That is an **enumeration oracle assembled out of an error path**, and
+it was unreachable while a log was the only mailer, because writing to a log cannot fail.
+
+**`invitePortalContact` LETS IT OUT.** There is no account to be quiet about, a member of the firm
+is watching a screen, and a silent failure is a client who never gets in.
+
+**The failure is shouted about in the ADAPTER**, which is the only layer that knows a send failed
+and the only one that may hold a logger — no use case in this product takes one. Without that line
+the swallow above would make a broken relay completely silent.
+
+**WHAT IS STILL MISSING, and it is now operationally real: there is no RESEND.**
+`PortalInviteService` refuses a second invite to somebody who already has a membership, and its
+own comment says re-inviting *"belongs on its own route when a screen needs it"*. With a log-only
+mailer that never mattered because a send could not fail. With a relay it can — a bounce, a typo
+in an address, a quota — and the contact is then created, granted, and permanently uninvitable.
+It needs the question behind it answered first (*did they lose the link, or has somebody else
+taken over that mailbox?*), so it is written down rather than guessed at.
 
 ## CORS — the frontend is a separate origin
 
