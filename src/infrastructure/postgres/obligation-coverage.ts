@@ -27,15 +27,36 @@ export class PostgresObligationCoverage implements ObligationCoverage {
       const rows = await db<{ engagement_id: string }[]>`
         SELECT DISTINCT e.id AS engagement_id
         FROM crm.engagement e
-        JOIN crm.engagement_letter_line ln
+        -- LEFT from here down, exactly as subjectsFor has it: a rule that
+        -- names NO service reaches every live engagement, INCLUDING one whose
+        -- catalogue version has since been unpublished. An inner join here
+        -- would drop those and report them uncovered — losing an obligation
+        -- because we could not resolve what the client bought is the worst
+        -- failure available in this module.
+        LEFT JOIN crm.engagement_letter_line ln
           ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
-        JOIN config.version pinned
+        LEFT JOIN config.version pinned
           ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
         JOIN core.legal_entity le
           ON le.party_id = e.entity_party_id AND le.tenant_id = e.tenant_id
         JOIN delivery.obligation_template t
           ON t.tenant_id = e.tenant_id
-         AND t.service_entry_id = pinned.entry_id
+         -- A NULL service_entry_id MEANS "every service" — the screen writes
+         -- it as *"Owed by clients who bought: Any service"* and it is the
+         -- DEFAULT, so this is the ordinary case rather than an edge one.
+         --
+         -- This file's own header promised to be the generator's predicate and
+         -- not an approximation of it, and then drifted from it anyway: a bare
+         -- equality is never true against NULL, so every rule in the shipped
+         -- India pack — all 57, none of which names a service, because a pack
+         -- cannot know a firm's catalogue keys — reported every engagement
+         -- UNCOVERED while the calendar generated for it. spawnForEngagements
+         -- then raised its own engagement task ON TOP of the per-period ones:
+         -- **two tasks for one filing**, which is the exact failure the header
+         -- names. subjectsFor and gaps both read it correctly and only this
+         -- one did not, which is why the integration test below now runs all
+         -- three against one database rather than trusting three comments.
+         AND (t.service_entry_id IS NULL OR t.service_entry_id = pinned.entry_id)
          AND t.jurisdiction = le.jurisdiction
          AND (t.entity_type IS NULL OR t.entity_type = le.entity_type)
          AND t.is_active
