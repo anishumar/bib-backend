@@ -6,6 +6,7 @@
 // What is here is the arithmetic and the refusals: which rungs are due, what a
 // freeze stops, and what the sweep is NOT allowed to do.
 import { describe, expect, it } from "vitest";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { ChaserService } from "../../src/usecase/chaser/service";
 import {
   FakeChaseCandidates,
@@ -58,6 +59,7 @@ function svc(opts: { ladder?: readonly { key: string; afterDays: number; label: 
   const freezes = new FakeClientFreezeRepo().client(COBALT).client(LAKEVIEW);
   const events = new RecordingEventSink();
   const service = new ChaserService({
+      timeZones: new FakeFirmTimeZone(),
     tenants: new FakeChaserTenants([TENANT, OTHER]),
     ladders,
     candidates,
@@ -175,6 +177,13 @@ describe("what the sweep may not do", () => {
       "candidates",
       "chases",
       "freezes",
+      // ADDED DELIBERATELY (0071). A `FirmTimeZone` is read-only and answers
+      // ONE question — which calendar the sweep counts days on — so it is not a
+      // channel and holds no seam that could send anything. It is listed here
+      // because this test exists to make every addition to `Deps` a decision
+      // somebody wrote down, and that includes the harmless ones: a list that
+      // only ever grew by exception would stop being read.
+      "timeZones",
       "ids",
       "clock",
       "events",

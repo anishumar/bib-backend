@@ -27,6 +27,7 @@ import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
 import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
 import { SmtpMailer } from "../infrastructure/mail/smtp-mailer";
+import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
 import type { Mailer } from "../usecase/identity/ports";
 import { NodemailerTransport } from "../infrastructure/mail/nodemailer-transport";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
@@ -346,6 +347,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   const serviceAxes = new ServiceAxisService({
     axes: serviceAxisRepository,
     split: new PostgresWorkSplitSetting(pools.app),
+    timeZone: new PostgresFirmTimeZone(pools.app),
     ids: systemIds,
     events: ledger,
   });
@@ -728,6 +730,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       scopedCompanies: (tenantId, userId, on) =>
         portalAccess.scopedClientsForUser(tenantId, userId, on),
     },
+    timeZones: new PostgresFirmTimeZone(pools.app),
     library: new PostgresPortalLibraryRepository(pools.app),
     blobs,
     clock: systemClock,
@@ -838,6 +841,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // to send through rather than by a check somebody could delete.
   const chaser = new ChaserService({
     tenants: new PostgresChaserTenants(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ladders: new PostgresChaserLadder(pools.app),
     candidates: new PostgresChaseCandidates(pools.app),
     chases: new PostgresChaseRepository(pools.app),

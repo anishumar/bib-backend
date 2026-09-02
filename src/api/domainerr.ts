@@ -361,6 +361,11 @@ export function mapError(err: unknown): MappedError {
       case "AXIS_NOT_ASSIGNABLE":
       case "WORK_SPLIT_AXIS_EMPTY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A VALIDATION failure and not a conflict: nothing about the firm's
+      // state refuses this, the value is simply not a zone. Resending a
+      // corrected one is the whole fix.
+      case "INVALID_TIME_ZONE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

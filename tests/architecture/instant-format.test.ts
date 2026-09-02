@@ -73,6 +73,34 @@ describe("a timestamptz crosses the wire as ISO 8601", () => {
     ).toEqual([]);
   });
 
+  it("no adapter turns a timestamptz into a DAY without naming the zone", () => {
+    // ── THE SAME RULE AS ABOVE, ON THE OTHER CAST (0071) ──────────────────
+    //
+    // `x_at::text` gives a string in the session's zone; `x_at::date` gives a
+    // DAY in it, which is the same dependency with a worse failure — a day is
+    // what a month is made of, so an unqualified cast put a document filed at
+    // 02:00 IST on 1 October into SEPTEMBER's digest on a client's own page.
+    //
+    // The zone must be said out loud, either as UTC (`utcDayOf`) or as the
+    // firm's own (a parameter, which is what the digest and the chaser take).
+    // Both spell `AT TIME ZONE`, which is exactly what this grep looks for.
+    const offenders = adapters().filter((f) => {
+      const lines = code(`${ADAPTERS}/${f}`).split(/[\r\n]+/);
+      return lines.some(
+        (line) => /[a-z_]+_at\s*::\s*date/.test(line) && !line.includes("AT TIME ZONE"),
+      );
+    });
+
+    expect(
+      offenders,
+      `${offenders.join(", ")} cast a \`timestamptz\` to a \`date\` without saying in which ` +
+        `zone. That is the SESSION's, which is the database server's, which nobody chose — and ` +
+        `it decides which MONTH a client sees a document in and which DAY the chaser counts ` +
+        `from. Convert explicitly: \`(x AT TIME ZONE 'UTC')::date\` via utcDayOf, or ` +
+        `\`(x AT TIME ZONE \${timeZone}::text)::date\` for the firm's own calendar (0071).`,
+    ).toEqual([]);
+  });
+
   it("the format string lives in exactly one place", () => {
     // One helper, one format, one thing for the integration test to measure.
     // A second copy is a second thing that can drift.

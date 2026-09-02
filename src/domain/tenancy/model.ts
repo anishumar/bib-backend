@@ -162,3 +162,65 @@ export function rosterAfter<T extends { readonly id: string }>(
 ): readonly T[] {
   return members.map((m) => (m.id === membershipId ? change(m) : m));
 }
+
+// ── THE FIRM'S OWN TIMEZONE (0071) ──────────────────────────────────────────
+//
+// It answers ONE question and it is worth stating narrowly, because the wrong
+// reading of it undoes T6.9: *which calendar DAY or MONTH does this instant
+// belong to, for this firm?* The monthly digest asks it, and so does the
+// chaser's day arithmetic.
+//
+// It is NOT how an instant is rendered. A moment shown to a person is shown in
+// the READER's own zone — "2 September 2026" is the day it happened where they
+// are — and that is settled and unaffected. A PERIOD is the opposite: a digest
+// is a statement by the firm about a month, so it needs ONE boundary or the
+// partner and the client open the same September and see different documents.
+
+/** The zone every firm has until it chooses — and exactly what the product did
+ *  before 0071, since every environment it has run in is UTC. */
+export const DEFAULT_TIME_ZONE = "UTC";
+
+/**
+ * Is this a zone this runtime knows, and a NAME rather than an offset?
+ *
+ * The FRIENDLY half of the check. `tenancy.assert_known_time_zone` (0071) is
+ * the real one — a trigger, so an import or a psql session meets it too — and
+ * it asks `pg_timezone_names`, the list `AT TIME ZONE` will actually accept.
+ * This exists so a person setting the value gets a sentence instead of a
+ * database exception.
+ *
+ * ── THE TWO LISTS DIFFER, AND THE OBVIOUS API IS THE WRONG ONE ────────────
+ *
+ * `Intl.supportedValuesOf("timeZone")` looks like the right source and is not.
+ * Measured against this database rather than assumed:
+ *
+ *   · it omits `UTC` and `Asia/Kolkata`, both of which Postgres accepts — so
+ *     validating against it would refuse this product's own DEFAULT and the
+ *     one zone its first customer actually uses;
+ *   · it canonicalises `Asia/Kolkata` to `Asia/Calcutta`, which Postgres does
+ *     NOT know — so it would also recommend a value the write then rejects.
+ *
+ * Constructing a formatter is the check that matches: everything Postgres
+ * accepts, it accepts.
+ *
+ * ── AND AN OFFSET IS REFUSED ON PURPOSE, NOT AS AN ACCIDENT ───────────────
+ *
+ * `Intl` takes `+05:30`; `pg_timezone_names` does not. Rather than let that
+ * one class through to a database exception, it is refused here WITH a reason
+ * that is also the product's: an offset cannot express daylight saving, so a
+ * firm on `+01:00` would cut its months an hour wrong for half the year. A
+ * zone is a place, and a place is what knows its own rules.
+ */
+export function isTimeZone(value: string): boolean {
+  const name = value.trim();
+  if (name === "") return false;
+  // `+05:30`, `-08:00`, `GMT+5` — an offset wearing a zone's clothes.
+  if (/^[+-]/.test(name) || /^(?:GMT|UTC)[+-]/i.test(name)) return false;
+  try {
+    // An unknown zone throws RangeError; that is the whole check.
+    new Intl.DateTimeFormat("en-GB", { timeZone: name });
+    return true;
+  } catch {
+    return false;
+  }
+}

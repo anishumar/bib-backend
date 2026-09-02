@@ -4,6 +4,7 @@
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { describe, expect, it } from "vitest";
 import { buildRouter } from "../../src/api/router";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
@@ -30,6 +31,7 @@ import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import {
   FakeServiceAxisRepo,
+  FakeTimeZoneSetting,
   FakeWorkSplitSetting,
 } from "../../src/testfakes/serviceaxis";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
@@ -296,6 +298,7 @@ function deps(): RouterDeps {
       service: new ServiceAxisService({
         axes: new FakeServiceAxisRepo(),
         split: new FakeWorkSplitSetting(),
+    timeZone: new FakeTimeZoneSetting(),
         ids: makeFakes().ids,
         events: makeFakes().events,
       }),
@@ -372,6 +375,7 @@ function deps(): RouterDeps {
     // worker, so this sweep asks who may reach the freeze and nothing else.
     chaser: {
       service: new ChaserService({
+      timeZones: new FakeFirmTimeZone(),
         tenants: new FakeChaserTenants([]),
         ladders: new FakeChaserLadder(),
         candidates: new FakeChaseCandidates(),
@@ -515,6 +519,7 @@ function requestService(): ClientRequestService {
 
 function libraryService(): PortalLibraryService {
   return new PortalLibraryService({
+      timeZones: new FakeFirmTimeZone(),
     scope: new FakeLibraryScope(),
     library: new FakePortalLibraryRepo(),
     blobs: new FakeLibraryBlobs(),

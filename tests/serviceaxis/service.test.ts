@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import {
   FakeServiceAxisRepo,
+  FakeTimeZoneSetting,
   FakeWorkSplitSetting,
 } from "../../src/testfakes/serviceaxis";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -35,15 +36,18 @@ function svc(): {
   service: ServiceAxisService;
   axes: FakeServiceAxisRepo;
   split: FakeWorkSplitSetting;
+  timeZone: FakeTimeZoneSetting;
   events: RecordingEventSink;
 } {
   const axes = new FakeServiceAxisRepo();
   const split = new FakeWorkSplitSetting();
+  const timeZone = new FakeTimeZoneSetting();
   const events = new RecordingEventSink();
   return {
-    service: new ServiceAxisService({ axes, split, ids: new FakeIds(), events }),
+    service: new ServiceAxisService({ axes, split, timeZone, ids: new FakeIds(), events }),
     axes,
     split,
+    timeZone,
     events,
   };
 }
@@ -312,5 +316,48 @@ describe("how the firm splits work", () => {
       ACTOR,
     );
     expect(retired.isActive).toBe(false);
+  });
+});
+
+describe("which calendar the firm's months are cut on (0071)", () => {
+  it("is UTC until somebody chooses, which is what every firm had before", async () => {
+    // The default that made applying 0071 a no-op. Every environment this has
+    // run in is UTC, so the column reproduces exactly what the unqualified cast
+    // was already doing.
+    const { service } = svc();
+    expect(await service.getTimeZone(TENANT)).toBe("UTC");
+  });
+
+  it("takes an IANA zone and records BOTH sides", async () => {
+    // "Why did that filing move into October" is asked afterwards, and the old
+    // value is the entire answer — `work_split_axis.changed`'s reasoning.
+    const { service, events } = svc();
+    expect(await service.setTimeZone({ tenantId: TENANT, timeZone: "Asia/Kolkata" }, ACTOR)).toBe(
+      "Asia/Kolkata",
+    );
+    const event = events.recorded.find((e) => e.verb === "tenant.time_zone_changed");
+    expect(event?.payload).toEqual({ from: "UTC", to: "Asia/Kolkata" });
+  });
+
+  it("refuses something that is not a zone, with a sentence", async () => {
+    // The friendly half. `tenancy.assert_known_time_zone` is the real guard and
+    // an import meets that one; this exists so a person on a screen is told
+    // what to type instead of meeting a database exception.
+    const { service } = svc();
+    await expect(
+      service.setTimeZone({ tenantId: TENANT, timeZone: "Asia/Bengaluru" }, ACTOR),
+    ).rejects.toThrow(/not a time zone/);
+    await expect(
+      service.setTimeZone({ tenantId: TENANT, timeZone: "+05:30" }, ACTOR),
+    ).rejects.toThrow(/not a time zone/);
+    expect(await service.getTimeZone(TENANT)).toBe("UTC");
+  });
+
+  it("records nothing when the zone is unchanged", async () => {
+    // A no-op write is not a decision, and a ledger full of them makes the real
+    // change harder to find.
+    const { service, events } = svc();
+    await service.setTimeZone({ tenantId: TENANT, timeZone: "UTC" }, ACTOR);
+    expect(events.recorded.filter((e) => e.verb === "tenant.time_zone_changed")).toEqual([]);
   });
 });

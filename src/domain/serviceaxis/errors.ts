@@ -21,6 +21,7 @@ export class ServiceAxisError extends Error {
 
 export type ServiceAxisErrorCode =
   | "INVALID_AXIS_KIND"
+  | "INVALID_TIME_ZONE"
   | "INVALID_AXIS_CODE"
   | "INVALID_AXIS_NAME"
   | "AXIS_CODE_TAKEN"
@@ -137,6 +138,24 @@ export class WorkSplitAxisEmpty extends ServiceAxisError {
         `it has no active ${axis === "dept" ? "Depts" : "delivery teams"} defined. Every job ` +
         `would land in the same unfiled group, which is what "none" already does. Define the ` +
         `list first, then choose it here.`,
+    );
+  }
+}
+
+export class InvalidTimeZone extends ServiceAxisError {
+  constructor(value: string) {
+    // The FRIENDLY refusal. `tenancy.assert_known_time_zone` (0071) is the real
+    // one and asks Postgres's own `pg_timezone_names`, so an import or a psql
+    // session meets it too. This one exists so a person setting the value on a
+    // screen gets a sentence rather than a database exception, and so the two
+    // lists differing by a tzdata release fails in the safe direction: anything
+    // this accepts and Postgres does not is still refused at the write.
+    super(
+      "INVALID_TIME_ZONE",
+      `${JSON.stringify(value)} is not a time zone this system knows. Use an IANA name — ` +
+        `"Asia/Kolkata", "Europe/London", "America/New_York", or "UTC". This decides which ` +
+        `calendar MONTH a document falls into on a client's month view, and which calendar ` +
+        `DAY the chaser counts from; it does not change how any date is displayed.`,
     );
   }
 }

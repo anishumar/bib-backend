@@ -26,6 +26,7 @@ import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
+import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
 import { NudgeService } from "../usecase/nudge/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
@@ -327,6 +328,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // is no channel, so a chase raises the reminder and the portal shows it.
   const chaser = new ChaserService({
     tenants: new PostgresChaserTenants(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ladders: new PostgresChaserLadder(pools.app),
     candidates: new PostgresChaseCandidates(pools.app),
     chases: new PostgresChaseRepository(pools.app),

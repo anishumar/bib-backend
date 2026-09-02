@@ -3978,9 +3978,72 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > the turnaround times nobody has given. It is a date-arithmetic decision, not a wire format,
   > so it stays a written-down question rather than a silent UTC pin.
 
+- [x] `(B)` **T6.11** Whose calendar a client's MONTH is cut on — the firm's, not the database server's. *Acc: a firm sets its own zone, the month view and the chaser use it, and applying the migration changes no firm's behaviour.*
+  > **DONE 2026-09-02 (migration 0071).** `check` **1572** · `test:integration` **565** ·
+  > `demo:verify` **71** · frontend `check` clean. Walked in the browser: the control set the
+  > zone, an OFFSET was refused **400** rather than 500, and it was set back to UTC.
+  >
+  > **T6.10 LEFT THIS OPEN AS A QUESTION AND IT TURNED OUT TO BE A LIVE BUG, not a latent one.**
+  > `x_at::date` uses the SESSION's TimeZone, which `src/db/pool.ts` does not set — so
+  > `/portal/month` answered *"what did you do for me in September"* on the database SERVER's
+  > calendar. For an Indian firm that is wrong five and a half hours every night: a document
+  > filed at **02:00 IST on 1 October** is 20:30 UTC on 30 September and landed in **September's
+  > digest, on a client's own page**. The chaser had it worse — `(asOf::date - raised_at::date)`
+  > decides which rung has been reached, so a request raised after 18:30 UTC counted a day older
+  > and a **D+3 reminder went out on day 2**.
+  >
+  > **THE FIRM'S ZONE, NOT THE READER'S**, and that is the decision. A digest is a STATEMENT BY
+  > THE FIRM about a period, so it needs ONE boundary — otherwise the partner in Delhi and the
+  > client's CFO in Dubai open the same September and see different documents in it, and the one
+  > missing a row cannot tell whether it was filed late or whether their screen drew the line
+  > somewhere else. T6.9's rule is untouched and points the other way: a MOMENT is shown in the
+  > reader's own zone. **The field's type still decides**; this adds a third question to that
+  > family and CLAUDE.md now carries the three-row table.
+  >
+  > **DEFAULT `'UTC'`, so applying it changed no firm's behaviour** — `work_split_axis` (0043)
+  > and `client_request_routing` (0070), third time. A COLUMN and not a registry kind: nobody
+  > will ask what a firm's timezone said last March, and a frozen historical value would be
+  > actively wrong, because moving offices means every FUTURE digest uses the new zone.
+  >
+  > **VALIDATED BY A TRIGGER, which a CHECK could not do** — the only ways to ask Postgres
+  > whether a zone exists are `pg_timezone_names` (a subquery) and `AT TIME ZONE` (STABLE), and
+  > neither is allowed in a CHECK. 0070's precedent. Proven both ways by hand and by a full
+  > **down/up round trip**.
+  >
+  > **AND THE OBVIOUS JS API IS THE WRONG ONE — measured against this database, not assumed.**
+  > `Intl.supportedValuesOf("timeZone")` **omits `UTC` and `Asia/Kolkata`** — this product's
+  > default and its first customer's zone — and canonicalises Kolkata to `Asia/Calcutta`,
+  > **which Postgres does not know**. Validating against it would have refused both correct
+  > values and recommended a broken one. `isTimeZone` constructs a formatter instead, and
+  > separately refuses an OFFSET (`+05:30`), which `Intl` takes and `pg_timezone_names` does not
+  > — with the better reason being the product one: an offset cannot express daylight saving, so
+  > a firm on `+01:00` would cut its months an hour wrong for half the year. The measurement is
+  > PINNED in a test, so a tzdata upgrade surfaces there rather than on a settings screen.
+  >
+  > **THE PROOF IS AN INTEGRATION TEST, because no fake can hold it.** The library fake stores
+  > days as `YYYY-MM-DD`, so it has no instant for a zone to convert and ignores the argument —
+  > correctly. The whole effect is in SQL. The fixture sits on a boundary where the two zones
+  > DISAGREE, which is the only kind that can fail; a document at midday would pass under the
+  > broken implementation too. **Negative controls run twice:** the SQL reverted turns the
+  > digest test red, and the `AT TIME ZONE` removed turns the new grep in
+  > `instant-format.test.ts` red, which now bans a bare `_at::date` beside the `_at::text` ban
+  > it already carried — same family, same reason, **name the zone**.
+  >
+  > **AND IT SHIPPED WITH THE SCREEN**, this board's own rule: a labelled select on
+  > `/admin/structure`, beside the routing and work-split switches, with the firm's current value
+  > always in the list so opening the page can never silently offer to change a deliberate
+  > setting. `tenant.time_zone_changed` carries BOTH sides — *"why did that filing move month"*
+  > is asked afterwards and the old value is the answer — and `contract-parity.test.ts` caught
+  > the missing row in `EVENT-CONTRACT.md` before the commit did.
+  >
+  > **ONE THING FIXED IN PASSING, found by the console and nothing else:** a `<div>` inside a
+  > `<p>` in `work-items/[workItemId]/client-asks.tsx` — invalid HTML, so the browser closed the
+  > paragraph early, it LOOKED right, and React reported a hydration mismatch on every render of
+  > that panel. Committed T6.6 code, invisible to typecheck, lint and every test.
+
 **Phase 6 is COMPLETE, and T6.8 was added to it after the fact** — U1 as written (T6.5, T6.6,
 T6.7), the chaser (T4.4), gate 4 (G3.4), the request that made the portal two-way, and T6.9's
-routing for it, and T6.10's wire format under all of them.
+routing for it, T6.10's wire format under all of them, and T6.11's calendar under the month view.
 What is open on this board is `(A)`'s commercial lane — `T6.2` and `T6.3` — and Phase 7.
 
 **Milestone M5 (Sellable V1) — now reached HERE, at the end of Phase 6:** both UIs at MVP over

@@ -65,3 +65,16 @@ export interface WorkSplitSetting {
   read(tenantId: string): Promise<WorkSplitAxis>;
   write(tenantId: string, axis: WorkSplitAxis): Promise<void>;
 }
+
+/**
+ * Which calendar this firm's months and days are cut on (0071).
+ *
+ * A column on `tenancy.tenant`, like `WorkSplitSetting` next to it and for the
+ * same reason: freely changeable, and nobody will ever ask what it said last
+ * March. The value is validated by a TRIGGER as well as by the service, so an
+ * import cannot write a zone the digest would then throw on.
+ */
+export interface TimeZoneSetting {
+  read(tenantId: string): Promise<string>;
+  write(tenantId: string, timeZone: string): Promise<string>;
+}

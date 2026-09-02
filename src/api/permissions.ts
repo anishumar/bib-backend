@@ -282,6 +282,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}/active"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/work-split"), "tenant:admin" as const],
+  // Same shelf, same permission: which calendar the firm's months are cut on
+  // moves what a CLIENT sees on their month view, so it is running the firm.
+  [routeKey("PUT", "/api/v1/tenancy/structure/time-zone"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/grade"), "tenant:admin" as const],
   // WHO SOMEBODY REPORTS TO (T2.9) — `tenant:admin`, like the grade beside it
   // and for the same reason. Under a `reporting_line` policy this column decides

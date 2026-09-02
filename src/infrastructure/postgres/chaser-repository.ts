@@ -12,7 +12,8 @@
 //
 // ── AND THE DAY ARITHMETIC IS THE DATABASE'S ─────────────────────────────
 //
-// `${asOf}::date - a.raised_at::date` is computed in Postgres on the caller's
+// `${asOf}::date - (a.raised_at AT TIME ZONE tz)::date` is computed in Postgres
+// on the FIRM's calendar (0071) and on the caller's
 // own day, and NO `Date` is constructed in this file. A `date` column comes back
 // from postgres.js as a UTC instant and reading its local fields names the day
 // before west of Greenwich — which on a three-day rung is a whole rung early.
@@ -75,6 +76,7 @@ export class PostgresChaseCandidates implements ChaseCandidateSource {
   async openAsks(
     tenantId: string,
     asOf: IsoDate,
+    timeZone: string,
   ): Promise<{
     readonly candidates: readonly ChaseCandidate[];
     readonly frozenClients: readonly string[];
@@ -97,7 +99,8 @@ export class PostgresChaseCandidates implements ChaseCandidateSource {
         SELECT a.id           AS ask_id,
                a.client_party_id,
                a.work_item_id,
-               (${asOf}::date - a.raised_at::date)::int AS days_open,
+               (${asOf}::date - (a.raised_at AT TIME ZONE ${timeZone}::text)::date)::int
+                 AS days_open,
                coalesce(
                  (SELECT array_agg(c.rung_key)
                     FROM delivery.client_ask_chase c

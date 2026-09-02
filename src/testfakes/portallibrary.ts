@@ -167,6 +167,10 @@ export class FakePortalLibraryRepo implements PortalLibraryRepository {
     _tenantId: string,
     clientPartyIds: readonly string[],
     range: { readonly from: string; readonly to: string },
+    // Ignored, deliberately: this fake stores days as `YYYY-MM-DD` already, so
+    // there is no instant for a zone to convert. The zone's whole effect is on
+    // SQL, and it is proven against a real database.
+    _timeZone?: string,
   ): Promise<Omit<PortalDigest, "month">> {
     const granted = new Set(clientPartyIds);
     const inRange = (day: string) => day >= range.from && day < range.to;

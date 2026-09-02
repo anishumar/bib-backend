@@ -24,14 +24,24 @@ import {
   AxisNotFound,
   InvalidAxisCode,
   InvalidAxisName,
+  InvalidTimeZone,
   InvalidWorkSplitAxis,
   WorkSplitAxisEmpty,
 } from "../../domain/serviceaxis/errors";
-import type { NewServiceAxis, ServiceAxisRepository, WorkSplitSetting } from "./ports";
+import { isTimeZone } from "../../domain/tenancy/model";
+import type {
+  NewServiceAxis,
+  ServiceAxisRepository,
+  TimeZoneSetting,
+  WorkSplitSetting,
+} from "./ports";
 
 export interface Deps {
   readonly axes: ServiceAxisRepository;
   readonly split: WorkSplitSetting;
+  /** The firm's calendar. Beside `split` because both are firm-wide settings
+   *  this screen owns, and neither is a registry kind — see 0043 and 0071. */
+  readonly timeZone: TimeZoneSetting;
   readonly ids: IdGen;
   readonly events: EventSink;
 }
@@ -63,6 +73,11 @@ export interface SetWorkSplitInput {
   readonly axis: string;
 }
 
+export interface SetTimeZoneInput {
+  readonly tenantId: string;
+  readonly timeZone: string;
+}
+
 export class ServiceAxisService {
   constructor(private readonly deps: Deps) {}
 
@@ -86,6 +101,39 @@ export class ServiceAxisService {
   /** How this firm cuts a client's work up. `none` until it says otherwise. */
   async getWorkSplit(tenantId: string): Promise<WorkSplitAxis> {
     return this.deps.split.read(tenantId);
+  }
+
+  async getTimeZone(tenantId: string): Promise<string> {
+    return this.deps.timeZone.read(tenantId);
+  }
+
+  /**
+   * Choose the calendar this firm's months and days are cut on.
+   *
+   * Restates nothing STORED, and does restate what a past digest DISPLAYS —
+   * the digest is computed on read, so a change re-cuts historical months at
+   * their boundaries. That is deliberate and is what every accounting product
+   * does: the alternative, pinning a zone onto each month as it passes, would
+   * mean a firm that corrected a wrong setting could never fix the months it
+   * got wrong.
+   *
+   * The event carries BOTH sides. *"Why did that filing move into October"* is
+   * asked afterwards, and the old value is the entire answer.
+   */
+  async setTimeZone(input: SetTimeZoneInput, actor: Actor): Promise<string> {
+    if (!isTimeZone(input.timeZone)) throw new InvalidTimeZone(input.timeZone);
+    const before = await this.deps.timeZone.read(input.tenantId);
+    if (before === input.timeZone) return before;
+
+    const after = await this.deps.timeZone.write(input.tenantId, input.timeZone);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "tenant.time_zone_changed",
+      objectId: input.tenantId,
+      actor,
+      payload: { from: before, to: after },
+    });
+    return after;
   }
 
   /**

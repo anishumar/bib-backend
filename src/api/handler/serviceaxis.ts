@@ -60,6 +60,9 @@ const FirmStructureResponse = z
   .object({
     axes: z.array(ServiceAxisSchema),
     workSplitAxis: WorkSplit,
+    /** The IANA zone this firm's months and days are cut on. 'UTC' until
+     *  somebody chooses, which is what every firm had before 0071. */
+    timeZone: z.string(),
   })
   .openapi("FirmStructureResponse");
 
@@ -202,6 +205,34 @@ const setAxisActiveRoute = createRoute({
   },
 });
 
+const SetTimeZoneRequest = z
+  .object({ timeZone: z.string().min(1) })
+  .openapi("SetTimeZoneRequest");
+
+const setTimeZoneRoute = createRoute({
+  method: "put",
+  path: "/api/v1/tenancy/structure/time-zone",
+  tags: ["tenancy"],
+  summary: "Choose which calendar this firm's months and days are cut on",
+  description:
+    "An IANA zone. It decides which calendar MONTH a document falls into on a client's month " +
+    "view, and which calendar DAY the chaser counts from — NOT how any date is displayed, " +
+    "which is always the reader's own zone. Changing it restates nothing stored, and does " +
+    "re-cut what a past month view SHOWS, because that page is computed on read.",
+  request: {
+    body: { content: { "application/json": { schema: SetTimeZoneRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "The zone now in force",
+      content: { "application/json": { schema: z.object({ timeZone: z.string() }) } },
+    },
+    400: errorResponse("Not a time zone this system knows"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+  },
+});
+
 const setWorkSplitRoute = createRoute({
   method: "put",
   path: "/api/v1/tenancy/structure/work-split",
@@ -235,11 +266,12 @@ export function registerServiceAxisRoutes(
   app.openapi(getStructureRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const [axes, workSplitAxis] = await Promise.all([
+    const [axes, workSplitAxis, timeZone] = await Promise.all([
       deps.service.listAll(s.tenantId),
       deps.service.getWorkSplit(s.tenantId),
+      deps.service.getTimeZone(s.tenantId),
     ]);
-    return c.json({ axes: axes.map(toWire), workSplitAxis }, 200);
+    return c.json({ axes: axes.map(toWire), workSplitAxis, timeZone }, 200);
   });
 
   app.openapi(createAxisRoute, async (c) => {
@@ -283,6 +315,14 @@ export function registerServiceAxisRoutes(
       s.actor,
     );
     return c.json({ workSplitAxis: chosen }, 200);
+  });
+
+  app.openapi(setTimeZoneRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { timeZone } = c.req.valid("json");
+    const chosen = await deps.service.setTimeZone({ tenantId: s.tenantId, timeZone }, s.actor);
+    return c.json({ timeZone: chosen }, 200);
   });
 }
 

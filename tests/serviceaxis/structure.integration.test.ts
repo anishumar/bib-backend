@@ -32,6 +32,7 @@ import {
   PostgresServiceAxisRepository,
   PostgresWorkSplitSetting,
 } from "../../src/infrastructure/postgres/service-axis-repository";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { ServiceAxisError } from "../../src/domain/serviceaxis/errors";
 
 const cfg = load();
@@ -43,6 +44,7 @@ const axisRepository = new PostgresServiceAxisRepository(app);
 const axes = new ServiceAxisService({
   axes: axisRepository,
   split: new PostgresWorkSplitSetting(app),
+  timeZone: new PostgresFirmTimeZone(app),
   ids: systemIds,
   events: ledger,
 });

@@ -30,6 +30,7 @@ import { isMonth, monthRange } from "../../domain/portallibrary/model";
 import { BytesMissing, DocumentNotFound } from "../../domain/filestore/errors";
 import { InvalidMonth } from "../../domain/portallibrary/errors";
 import type {
+  FirmTimeZone,
   PortalBlobStore,
   PortalLibraryRepository,
   PortalScopeSource,
@@ -38,6 +39,10 @@ import type {
 export interface Deps {
   readonly scope: PortalScopeSource;
   readonly library: PortalLibraryRepository;
+  /** WHICH CALENDAR a month is cut on. The firm own zone, resolved OUTSIDE
+   *  the portal transaction, because tenancy.tenant has no portal policy
+   *  and must not grow one. */
+  readonly timeZones: FirmTimeZone;
   readonly blobs: PortalBlobStore;
   readonly clock: Clock;
 }
@@ -94,7 +99,18 @@ export class PortalLibraryService {
   ): Promise<PortalDigest> {
     if (!isMonth(month)) throw new InvalidMonth(month);
     const parties = await this.partiesFor(tenantId, userId, asOf);
-    const rows = await this.deps.library.digest(tenantId, parties, monthRange(month));
+    // The FIRM's zone, not the reader's and not the server's — a digest is a
+    // statement by the firm about a month, so the boundary has to be one
+    // boundary. Resolved BEFORE the portal transaction opens, because
+    // `tenancy.tenant` has no portal policy and must not grow one (T6.9's rule
+    // about the Key Manager, applied again).
+    const timeZone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const rows = await this.deps.library.digest(
+      tenantId,
+      parties,
+      monthRange(month),
+      timeZone,
+    );
     return { month, ...rows };
   }
 

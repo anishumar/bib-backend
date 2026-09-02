@@ -139,7 +139,7 @@ describe("which asks the sweep can even see", () => {
     // parameter untyped — and a `date` read back as a UTC instant would name the
     // day before west of Greenwich, which on a three-day rung is a whole rung.
     const today = new Date().toISOString().slice(0, 10);
-    const { candidates: rows } = await candidates.openAsks(tenantId, today);
+    const { candidates: rows } = await candidates.openAsks(tenantId, today, "UTC");
     const row = rows.find((r) => r.askId === openAsk);
     expect(row?.daysOpen).toBe(10);
   });
@@ -149,7 +149,7 @@ describe("which asks the sweep can even see", () => {
     // most annoying thing a chaser can do, and it is exactly what a
     // spreadsheet-driven human chaser gets wrong every week.
     const today = new Date().toISOString().slice(0, 10);
-    const { candidates: rows } = await candidates.openAsks(tenantId, today);
+    const { candidates: rows } = await candidates.openAsks(tenantId, today, "UTC");
     expect(rows.map((r) => r.askId)).toContain(openAsk);
     expect(rows.map((r) => r.askId)).not.toContain(answeredAsk);
   });
@@ -159,7 +159,7 @@ describe("which asks the sweep can even see", () => {
     // product contradicting itself. `is_client_visible` is the same flag the
     // portal's own read joins through.
     const today = new Date().toISOString().slice(0, 10);
-    const { candidates: rows } = await candidates.openAsks(tenantId, today);
+    const { candidates: rows } = await candidates.openAsks(tenantId, today, "UTC");
     expect(rows.map((r) => r.askId)).not.toContain(hiddenAsk);
   });
 });
@@ -181,7 +181,7 @@ describe("the freeze, and the constraint under it", () => {
     // FORCE. Getting this wrong is a client chased on the day a partner froze
     // them, or one silent for a day after it was lifted.
     const on = async (day: string) =>
-      (await candidates.openAsks(tenantId, day)).frozenClients;
+      (await candidates.openAsks(tenantId, day, "UTC")).frozenClients;
     expect(await on("2026-01-01")).toContain(client);
     expect(await on("2026-01-09")).toContain(client);
     expect(await on("2026-01-10")).not.toContain(client);

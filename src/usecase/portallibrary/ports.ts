@@ -84,8 +84,27 @@ export interface PortalLibraryRepository {
     tenantId: string,
     clientPartyIds: readonly string[],
     range: { readonly from: string; readonly to: string },
+    /** The firm's zone. `range` is a pair of calendar days and this is what
+     *  turns them into the instants that bound the month. */
+    timeZone: string,
   ): Promise<Omit<PortalDigest, "month">>;
 }
+
+/**
+ * The firm's own timezone — which calendar DAY or MONTH an instant belongs to.
+ *
+ * Declared here as well as in `usecase/chaser/ports.ts`, because ports
+ * live beside the use case that needs them; ONE adapter satisfies both, which
+ * is what stops the chaser counting days in one zone while the digest cuts
+ * months in another.
+ *
+ * NOT how an instant is rendered — that is the reader's own zone (T6.9), and
+ * the two rules point in opposite directions.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 
 /**
  * The bytes, by storage key.

@@ -20,6 +20,7 @@
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { describe, expect, it } from "vitest";
 import type { Principal } from "../../src/platform/callctx";
 import { buildRouter } from "../../src/api/router";
@@ -49,6 +50,7 @@ import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import {
   FakeServiceAxisRepo,
+  FakeTimeZoneSetting,
   FakeWorkSplitSetting,
 } from "../../src/testfakes/serviceaxis";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
@@ -233,6 +235,7 @@ function requestService(): ClientRequestService {
 
 function libraryService(): PortalLibraryService {
   return new PortalLibraryService({
+      timeZones: new FakeFirmTimeZone(),
     scope: new FakeLibraryScope(),
     library: new FakePortalLibraryRepo(),
     blobs: new FakeLibraryBlobs(),
@@ -369,6 +372,7 @@ function deps(): RouterDeps {
       service: new ServiceAxisService({
         axes: new FakeServiceAxisRepo(),
         split: new FakeWorkSplitSetting(),
+    timeZone: new FakeTimeZoneSetting(),
         ids: new FakeIds(),
         events: new RecordingEventSink(),
       }),
@@ -445,6 +449,7 @@ function deps(): RouterDeps {
     // worker, so this sweep asks who may reach the freeze and nothing else.
     chaser: {
       service: new ChaserService({
+      timeZones: new FakeFirmTimeZone(),
         tenants: new FakeChaserTenants([]),
         ladders: new FakeChaserLadder(),
         candidates: new FakeChaseCandidates(),

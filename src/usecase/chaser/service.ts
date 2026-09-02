@@ -48,6 +48,7 @@ import type {
   ChaserTenantDirectory,
   ClientFreezeRecord,
   ClientFreezeRepository,
+  FirmTimeZone,
   IsoDate,
 } from "./ports";
 
@@ -57,6 +58,11 @@ export interface Deps {
   readonly candidates: ChaseCandidateSource;
   readonly chases: ChaseRepository;
   readonly freezes: ClientFreezeRepository;
+  /** WHICH CALENDAR the days are counted on. Not a channel and not a seam that
+   *  could send anything — it is read-only and answers one question — but it is
+   *  a new name in this list, so `tests/chaser/service.test.ts` had to be
+   *  changed deliberately, which is what that test is for. */
+  readonly timeZones: FirmTimeZone;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -122,7 +128,16 @@ export class ChaserService {
       return { tenantId, sent: 0, alreadySent: 0, frozen: 0 };
     }
 
-    const { candidates, frozenClients } = await this.deps.candidates.openAsks(tenantId, day);
+    // The firm's own calendar, resolved once for the sweep. `(asOf - raised_at)`
+    // counted in the SERVER's zone fires a D+3 reminder on day 2 for a firm east
+    // of Greenwich, because a request raised after 18:30 UTC has already "aged"
+    // by the time the row is read.
+    const timeZone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const { candidates, frozenClients } = await this.deps.candidates.openAsks(
+      tenantId,
+      day,
+      timeZone,
+    );
     const frozen = new Set(frozenClients);
 
     const wanted = [];

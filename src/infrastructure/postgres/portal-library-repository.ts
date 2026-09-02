@@ -260,6 +260,7 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
     tenantId: string,
     clientPartyIds: readonly string[],
     range: { readonly from: string; readonly to: string },
+    timeZone: string,
   ): Promise<Omit<PortalDigest, "month">> {
     return withPortal(this.app, tenantId, clientPartyIds, async (db) => {
       // HALF-OPEN, `[from, to)`, in four places. `>= from AND < to` and never
@@ -287,12 +288,15 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
       const documentsAdded = await db<DigestRow[]>`
         SELECT d.title AS label,
                p.display_name AS company_name,
-               d.created_at::date::text AS on_day
+               -- The firm's day, not the server's. Written inline rather than
+               -- through instant.ts helpers because the zone is a PARAMETER
+               -- here, and those build static SQL.
+               (d.created_at AT TIME ZONE ${timeZone}::text)::date::text AS on_day
           FROM files.document d
           JOIN core.party p ON p.id = d.party_id AND p.tenant_id = d.tenant_id
          WHERE d.tenant_id = ${tenantId}
-           AND d.created_at >= ${range.from}::date
-           AND d.created_at <  ${range.to}::date
+           AND d.created_at >= ${range.from}::date::timestamp AT TIME ZONE ${timeZone}::text
+           AND d.created_at <  ${range.to}::date::timestamp AT TIME ZONE ${timeZone}::text
          ORDER BY d.created_at ASC
       `;
 
@@ -317,7 +321,7 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
       const asksAnswered = await db<DigestRow[]>`
         SELECT a.prompt AS label,
                ent.display_name AS company_name,
-               a.first_answered_at::date::text AS on_day
+               (a.first_answered_at AT TIME ZONE ${timeZone}::text)::date::text AS on_day
           FROM delivery.client_ask a
           JOIN delivery.work_item wi
             ON wi.id = a.work_item_id AND wi.tenant_id = a.tenant_id
@@ -325,8 +329,8 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
             ON ent.id = wi.entity_party_id AND ent.tenant_id = wi.tenant_id
          WHERE a.tenant_id = ${tenantId}
            AND a.first_answered_at IS NOT NULL
-           AND a.first_answered_at >= ${range.from}::date
-           AND a.first_answered_at <  ${range.to}::date
+           AND a.first_answered_at >= ${range.from}::date::timestamp AT TIME ZONE ${timeZone}::text
+           AND a.first_answered_at <  ${range.to}::date::timestamp AT TIME ZONE ${timeZone}::text
          ORDER BY a.first_answered_at ASC
       `;
 

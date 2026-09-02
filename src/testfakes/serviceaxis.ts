@@ -7,6 +7,7 @@ import type {
   ServiceAxisPatch,
   ServiceAxisRepository,
   WorkSplitSetting,
+  TimeZoneSetting,
 } from "../usecase/serviceaxis/ports";
 import type { AxisDirectory, KnownAxis } from "../usecase/config/ports";
 
@@ -128,5 +129,21 @@ export class FakeWorkSplitSetting implements WorkSplitSetting {
 export class NoAxesDefined implements AxisDirectory {
   knownAxes(): Promise<readonly KnownAxis[]> {
     return Promise.resolve([]);
+  }
+}
+
+/** The firm's calendar, as a fake. UTC until set — which is what every firm
+ *  gets before it chooses, so a test that does not care behaves as it did
+ *  before 0071. */
+export class FakeTimeZoneSetting implements TimeZoneSetting {
+  private readonly chosen = new Map<string, string>();
+
+  read(tenantId: string): Promise<string> {
+    return Promise.resolve(this.chosen.get(tenantId) ?? "UTC");
+  }
+
+  write(tenantId: string, timeZone: string): Promise<string> {
+    this.chosen.set(tenantId, timeZone);
+    return Promise.resolve(timeZone);
   }
 }

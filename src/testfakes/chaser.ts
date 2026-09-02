@@ -61,6 +61,11 @@ export class FakeChaseCandidates implements ChaseCandidateSource {
   openAsks(
     _tenantId: string,
     _asOf: IsoDate,
+    // Ignored: this fake holds candidates directly rather than deriving
+    // `daysOpen` from a clock, so there is no calendar for a zone to move.
+    // `tests/portallibrary/digest.integration.test.ts` is where the zone has to
+    // be real, because only a database can apply one.
+    _timeZone?: string,
   ): Promise<{
     readonly candidates: readonly ChaseCandidate[];
     readonly frozenClients: readonly string[];

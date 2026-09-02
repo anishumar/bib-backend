@@ -343,3 +343,27 @@ export class FakeIssuingEntitySeeder implements IssuingEntitySeeder {
     return Promise.resolve(partyId);
   }
 }
+
+/**
+ * The firm's timezone, as a fake.
+ *
+ * Satisfies both `usecase/chaser`'s `FirmTimeZone` and
+ * `usecase/portallibrary`'s — one fake for one answer, mirroring
+ * `PostgresFirmTimeZone`, which implements both for the reason written there:
+ * two answers to "which day is this instant on for this firm" would let the
+ * chaser and the digest disagree.
+ *
+ * Defaults to UTC, which is what every firm gets before it chooses, so a test
+ * that does not care about zones behaves exactly as it did before 0071.
+ */
+export class FakeFirmTimeZone {
+  constructor(private zone = "UTC") {}
+
+  set(zone: string): void {
+    this.zone = zone;
+  }
+
+  timeZoneFor(): Promise<string> {
+    return Promise.resolve(this.zone);
+  }
+}

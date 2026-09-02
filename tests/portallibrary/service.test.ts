@@ -13,6 +13,7 @@
 // empty scope, that a month is refused rather than coerced, and that bytes are
 // only ever fetched for a row that came back.
 import { describe, expect, it } from "vitest";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { PortalLibraryService } from "../../src/usecase/portallibrary/service";
 import {
   FakeLibraryBlobs,
@@ -56,6 +57,7 @@ function svc(opts: { granted?: boolean } = {}) {
   return {
     blobs,
     service: new PortalLibraryService({
+      timeZones: new FakeFirmTimeZone(),
       scope,
       library: new FakePortalLibraryRepo(store),
       blobs,
@@ -135,6 +137,7 @@ describe("the bytes, and the order they are fetched in", () => {
       storageKey: "k/gone",
     });
     const orphaned = new PortalLibraryService({
+      timeZones: new FakeFirmTimeZone(),
       scope: new FakeLibraryScope().grant(MEERA, COBALT),
       library: new FakePortalLibraryRepo(store),
       blobs: new FakeLibraryBlobs(),

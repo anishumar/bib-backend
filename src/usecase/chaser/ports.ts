@@ -45,6 +45,9 @@ export interface ChaseCandidateSource {
   openAsks(
     tenantId: string,
     asOf: IsoDate,
+    /** The firm's zone, so "how many days has this been open" is counted on the
+     *  firm's own calendar rather than the database server's. */
+    timeZone: string,
   ): Promise<{
     readonly candidates: readonly ChaseCandidate[];
     readonly frozenClients: readonly string[];
@@ -114,4 +117,19 @@ export interface ClientFreezeRepository {
     readonly on: IsoDate;
     readonly liftedBy: string;
   }): Promise<ClientFreezeRecord | null>;
+}
+
+/**
+ * The firm's own timezone — which calendar DAY or MONTH an instant belongs to.
+ *
+ * Declared here as well as in `usecase/portallibrary/ports.ts`, because ports
+ * live beside the use case that needs them; ONE adapter satisfies both, which
+ * is what stops the chaser counting days in one zone while the digest cuts
+ * months in another.
+ *
+ * NOT how an instant is rendered — that is the reader's own zone (T6.9), and
+ * the two rules point in opposite directions.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }

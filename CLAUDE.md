@@ -479,6 +479,65 @@ slice hides which zone answered.
 fractional digits where the server stores six, until it was written as a SQL literal. Nothing
 stores through that path today, but a test that means to observe precision cannot bind it.
 
+## The firm's own timezone — which calendar a MONTH is cut on (T6.11, 0071)
+
+The third rule in this family, and the one that decides a PERIOD. Keep all three apart:
+
+| Question | Answer | Where |
+|---|---|---|
+| What DAY is this `date` column? | Read its UTC fields — postgres.js built it at UTC midnight | `day.ts` |
+| When did this `timestamptz` happen, for a reader? | The READER's own zone, client-side | T6.9 |
+| Which MONTH or DAY does this instant belong to, for the FIRM? | **`tenancy.tenant.time_zone`** | 0071 |
+
+**IT WAS THE SERVER'S, AND NOBODY CHOSE THAT.** `x_at::date` uses the session's `TimeZone`,
+which `src/db/pool.ts` does not set. So `/portal/month` answered *"what did you do for me in
+September"* on the database server's calendar: for an Indian firm a document filed at 02:00 IST
+on 1 October is 20:30 UTC on 30 September and landed in SEPTEMBER, **on a client's own page**.
+The chaser had the same bug with a sharper edge — `(asOf::date - raised_at::date)` decides which
+rung has been reached, so a request raised after 18:30 UTC counted a day older and a D+3
+reminder went out on day 2.
+
+**THE FIRM'S ZONE, NOT THE READER'S, AND THAT IS THE DESIGN.** A digest is a STATEMENT BY THE
+FIRM about a period, so it needs ONE boundary — otherwise the partner in Delhi and the client's
+CFO in Dubai open the same September and see different documents in it, and the one missing a
+row cannot tell whether it was filed late or whether their screen drew the line elsewhere. An
+invoice's date is one date for the same reason. T6.9's rule is untouched and points the other
+way: a MOMENT shown to a person is shown where they are.
+
+**DEFAULT `'UTC'`, so applying 0071 changed no firm's behaviour** — `work_split_axis` and
+`client_request_routing`'s position, third time. **A column, not a registry kind**: nobody will
+ask what a firm's timezone said last March, and a frozen historical value would be actively
+wrong, because moving offices means every future digest uses the new zone.
+
+**It DOES restate what a past digest DISPLAYS**, deliberately: the page is computed on read, so
+changing the zone re-cuts historical months at their edges. Every accounting product behaves
+this way, and pinning a zone onto each month as it passed would mean a firm that corrected a
+wrong setting could never fix the months it got wrong.
+
+**VALIDATED BY A TRIGGER, because a CHECK cannot.** The only ways to ask Postgres whether a zone
+exists are `pg_timezone_names` (a subquery) and `AT TIME ZONE` (STABLE) — neither is allowed in
+a CHECK. 0070 put its own rule in a trigger for the same reason.
+
+**AND `Intl.supportedValuesOf("timeZone")` IS THE WRONG LIST — measured, not assumed.** It omits
+`UTC` and `Asia/Kolkata`, which are this product's default and its first customer's zone, and it
+canonicalises Kolkata to `Asia/Calcutta`, **which this database does not know**. Validating
+against it would refuse both correct values and recommend a broken one. `isTimeZone` constructs
+an `Intl.DateTimeFormat` instead, and separately refuses an OFFSET (`+05:30`), which `Intl` takes
+and `pg_timezone_names` does not — with a product reason that is better than the technical one:
+an offset cannot express daylight saving, so a firm on `+01:00` would cut its months an hour
+wrong for half the year. `tests/portallibrary/digest-timezone.integration.test.ts` pins the
+measurement so a tzdata upgrade surfaces there rather than on a firm's settings screen.
+
+**One adapter, three ports.** `PostgresFirmTimeZone` satisfies `usecase/chaser`'s `FirmTimeZone`,
+`usecase/portallibrary`'s, and `usecase/serviceaxis`'s `TimeZoneSetting`. Two implementations
+would be two answers to the same question, and a chaser counting days in one zone while the
+digest cuts months in another is a disagreement nobody would look for. The PORTAL resolves it
+BEFORE `withPortal` opens — `tenancy.tenant` has no portal policy and must not grow one (T6.9's
+rule about the Key Manager).
+
+`tests/architecture/instant-format.test.ts` bans a bare `_at::date` across the adapters, beside
+the `_at::text` ban it already carried. Same family, same reason: **name the zone**.
+
 ## Migrations
 
 `migrations/NNNN_name.{up,down}.sql`, immutable once applied, fix forward with a new number.
