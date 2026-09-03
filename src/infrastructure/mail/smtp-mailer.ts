@@ -144,6 +144,82 @@ export class SmtpMailer implements Mailer {
       ]),
     });
   }
+
+  /**
+   * The letter a new colleague gets.
+   *
+   * ── IT IS THE PORTAL INVITE'S PROBLEM, NOT THE SIGN-IN LINK'S ────────────
+   *
+   * Unasked-for, from an address the reader has no reason to recognise, with a
+   * link in it that logs somebody in. So it does the same work of not being a
+   * phishing email: the firm is named in the subject and the first line, the
+   * reason it arrived is stated, and there is a sentence about what to do if it
+   * was not expected. The one thing it must NOT copy from the invite is the
+   * password step — staff have no password to set, and telling them to choose
+   * one would send them looking for a screen that does not exist.
+   *
+   * The line that matters most is the last one. A colleague who lets this
+   * expire is not stuck, and saying so here is what makes the seventy-two hour
+   * life affordable — otherwise the letter would have to be a week long like
+   * the client's, for a person who has a login page.
+   */
+  sendStaffWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    const firm = headerSafe(firmName);
+    const who = firm ?? "The firm you work at";
+    const subject =
+      firm === null ? `You have been given access to ${PRODUCT}` : `${firm} has added you to ${PRODUCT}`;
+    const when = readableInstant(expiresAt);
+
+    const text = [
+      `${who} runs its practice on ${PRODUCT}, and somebody there has given you`,
+      `access with this email address.`,
+      ``,
+      `Open this link to sign in:`,
+      url,
+      ``,
+      `Inside you will find the work that is yours, what is due and when, and the`,
+      `clients you look after.`,
+      ``,
+      `The link works ONCE and stops working at ${when}. If it has expired by the`,
+      `time you read this, nothing is lost — go to the sign-in page and ask for a`,
+      `new link with this same address.`,
+      ``,
+      `If you were not expecting this, please check with your contact at`,
+      `${who} rather than replying to this message.`,
+    ].join("\n");
+
+    return this.transport.send({
+      to,
+      subject,
+      text,
+      html: page([
+        paragraph(
+          `<strong>${esc(who)}</strong> runs its practice on ${esc(PRODUCT)}, and somebody ` +
+            `there has given you access with this email address.`,
+        ),
+        button(url, "Sign in"),
+        paragraph(
+          `Inside you will find the work that is yours, what is due and when, and the clients ` +
+            `you look after.`,
+        ),
+        paragraph(
+          `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
+            `expired by the time you read this, nothing is lost — go to the sign-in page and ` +
+            `ask for a new link with this same address.`,
+        ),
+        paragraph(
+          `If you were not expecting this, please check with your contact at ` +
+            `${esc(who)} rather than replying to this message.`,
+        ),
+        fallback(url),
+      ]),
+    });
+  }
 }
 
 /**

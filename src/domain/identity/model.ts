@@ -17,7 +17,15 @@ export interface Session {
   readonly revokedAt: string | null;
 }
 
-export type MagicLinkPurpose = "login" | "invite";
+/**
+ * Which door a link opens, and it is READ — see `isUsableMagicLink`.
+ *
+ *   `login`   pulled by the account holder, lives minutes, opens a session.
+ *   `welcome` pushed to a new colleague, lives days, opens a session (0072).
+ *   `invite`  the client portal's; redeems ONLY by setting a password, and
+ *             never opens a session on its own.
+ */
+export type MagicLinkPurpose = "login" | "invite" | "welcome";
 
 export interface MagicLink {
   readonly id: string;
@@ -86,6 +94,23 @@ export function isUsableMagicLink(link: MagicLink, now: Date, purpose: MagicLink
   return Date.parse(link.expiresAt) > now.getTime();
 }
 
+/**
+ * The purposes that redeem straight into a session.
+ *
+ * Named as a set rather than left as an `||` at the call site, because the
+ * question "which links can open a session without a password?" is the security
+ * property of this whole module and it should be answerable by reading one
+ * line. `invite` is deliberately absent: redeeming it without setting a password
+ * would leave a portal contact with no way back in once it was spent, which is
+ * the bug the `purpose` column was first read to prevent.
+ */
+export const SESSION_OPENING_PURPOSES: readonly MagicLinkPurpose[] = ["login", "welcome"];
+
+/** Is this link still good for opening a session? */
+export function isUsableForSession(link: MagicLink, now: Date): boolean {
+  return SESSION_OPENING_PURPOSES.some((purpose) => isUsableMagicLink(link, now, purpose));
+}
+
 /** How long a portal invite stands. Days rather than the sign-in link's
  *  minutes: a client contact reads their email when they read it, and an invite
  *  that expired before they opened it sends them back to the firm — which is
@@ -103,4 +128,34 @@ export function sessionExpiryFrom(now: Date, ttlDays = SESSION_TTL_DAYS): string
 
 export function magicLinkExpiryFrom(now: Date, ttlMinutes = MAGIC_LINK_TTL_MINUTES): string {
   return new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
+}
+
+/**
+ * How long a colleague's welcome link stands.
+ *
+ * Hours rather than the sign-in link's minutes, and hours rather than the
+ * portal invite's week, because the three links are handed over in three
+ * different situations:
+ *
+ *   a sign-in link is PULLED — somebody pressed a button ten seconds ago and is
+ *   watching their inbox, so fifteen minutes is generous.
+ *
+ *   a welcome letter is PUSHED at somebody who did not ask, and who may be
+ *   added on a Friday evening and read it on Monday morning. Seventy-two hours
+ *   covers that and not much more.
+ *
+ *   a portal invite gets a full week because a CLIENT whose link expired has to
+ *   go back to the firm and ask a human — the friction that flow exists to
+ *   remove.
+ *
+ * Staff are the case that can afford to be strict, and it is worth saying why:
+ * an expired welcome link is NOT a dead end for them. The login page issues a
+ * fresh one to any active account on demand, so the worst outcome is one extra
+ * step, taken by somebody who already knows the product exists — which is
+ * exactly what the welcome letter told them.
+ */
+export const STAFF_WELCOME_TTL_HOURS = 72;
+
+export function staffWelcomeExpiryFrom(now: Date, ttlHours = STAFF_WELCOME_TTL_HOURS): string {
+  return new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
 }

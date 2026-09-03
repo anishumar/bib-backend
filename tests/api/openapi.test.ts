@@ -29,6 +29,7 @@ import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
 import type { PrincipalResolver } from "../../src/api/principal";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { StaffInviteService } from "../../src/usecase/staffinvite/service";
 import {
   FakeServiceAxisRepo,
   FakeTimeZoneSetting,
@@ -273,7 +274,16 @@ function deps(): RouterDeps {
         events: new RecordingEventSink(),
       }),
     },
-    tenancy: { service: new TenancyService(makeFakes()) },
+    tenancy: {
+      service: new TenancyService(makeFakes()),
+      // Route-shape tests only: the letter is asserted where letters are
+      // asserted (tests/identity, tests/staffinvite), not here.
+      staffInvite: new StaffInviteService({
+        identity: { welcomeStaff: () => Promise.resolve({ expiresAt: null, sent: false }) },
+        memberships: new TenancyService(makeFakes()),
+        firms: new TenancyService(makeFakes()),
+      }),
+    },
     staffGrades: { service: new StaffGradeService(makeFakes()) },
     orchestrator: {
       service: new OrchestratorService({

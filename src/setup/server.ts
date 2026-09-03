@@ -119,6 +119,7 @@ import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
+import { StaffInviteService } from "../usecase/staffinvite/service";
 import { PortalHomeService } from "../usecase/portalhome/service";
 import { PortalLibraryService } from "../usecase/portallibrary/service";
 import { ClientRequestService } from "../usecase/clientrequest/service";
@@ -616,7 +617,19 @@ export function wire(cfg: Config, log: Logger): Wired {
     );
   }
 
-  const tenancyDeps: TenancyDeps = { service: tenancy };
+  // T7.2. The same arrangement as `portalAccessForInvite` below and for the same
+  // reason: adding a colleague is the membership write plus a LETTER, and the
+  // letter is the half that differs by WHY the membership is being made. Putting
+  // it inside `TenancyService.inviteMember` would mail every client contact
+  // twice, because `PortalInviteService` calls that method too. Both ports are
+  // satisfied structurally, so neither use case imports the other.
+  const staffInvite = new StaffInviteService({
+    identity,
+    memberships: tenancy,
+    firms: tenancy,
+  });
+
+  const tenancyDeps: TenancyDeps = { service: tenancy, staffInvite };
 
   // Held in a variable rather than constructed inline, because the
   // client-assignment use case needs the same adapter as its `ClientDirectory`

@@ -136,7 +136,11 @@ const identity = new IdentityService({
   magicLinks: new PostgresMagicLinkRepository(app),
   passwords: new ScryptPasswordHasher(),
   tokens: new RandomTokenFactory(),
-  mailer: { sendMagicLink: () => Promise.resolve(), sendPortalInvite: () => Promise.resolve() },
+  mailer: {
+    sendMagicLink: () => Promise.resolve(),
+    sendPortalInvite: () => Promise.resolve(),
+    sendStaffWelcome: () => Promise.resolve(),
+  },
   ids: systemIds,
   clock: systemClock,
   events: ledger,

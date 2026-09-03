@@ -118,6 +118,84 @@ describe("the portal invite — the letter that must not read as phishing", () =
   });
 });
 
+describe("the staff welcome — unasked-for too, and it must not sell a password", () => {
+  const WELCOME = "https://app.example.com/auth/magic-link?token=abc123";
+
+  it("names the firm in the SUBJECT, for the same reason the invite does", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
+    const letter = only(t);
+
+    expect(letter.subject).toContain("10x Global");
+    expect(letter.text).toContain("10x Global");
+    expect(letter.html).toContain("10x Global");
+  });
+
+  it("does NOT tell a colleague to choose a password — there is no such screen", () => {
+    // The one thing it must not copy from the portal invite. Staff sign in with
+    // the link; no product route sets a staff password, so an instruction to
+    // pick one would send somebody looking for a page that does not exist.
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
+    const letter = only(t);
+
+    expect(letter.text).not.toMatch(/password/i);
+    expect(letter.html).not.toMatch(/password/i);
+    expect(letter.text).toContain(WELCOME);
+    expect(letter.html).toContain(WELCOME);
+  });
+
+  it("says the expiry is SURVIVABLE, which is what buys the 72-hour life", () => {
+    // The client's invite gets a week because a client whose link died has to
+    // go back and ask a human. A colleague does not — the sign-in page issues
+    // another one — and the letter has to SAY so, or the reader who opens it
+    // late believes they are locked out and asks somebody instead.
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
+    const letter = only(t);
+
+    expect(letter.text).toMatch(/works ONCE/);
+    expect(letter.text).toMatch(/expired/);
+    expect(letter.text).toMatch(/ask for a\s+new link/);
+  });
+
+  it("says what to do if it was NOT expected — and not 'reply to this'", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
+    const letter = only(t);
+
+    expect(letter.text).toMatch(/not expecting this/);
+    expect(letter.text).toMatch(/rather than replying/);
+  });
+
+  it("STILL SENDS when the firm's name does not resolve, and says less", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, null);
+    const letter = only(t);
+
+    expect(letter.subject).toBe("You have been given access to BiB");
+    expect(letter.text).toContain("The firm you work at");
+    expect(letter.text).not.toContain("null");
+  });
+
+  it("is a DIFFERENT letter from the invite, which is why it is a third method", () => {
+    // Both are pushed at somebody who did not ask, and that is where the
+    // similarity ends. A test that only checked "an email went" would pass on
+    // an implementation that mailed a colleague the client's portal invite.
+    const t = new Captured();
+    const mailer = new SmtpMailer(t);
+    void mailer.sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
+    void mailer.sendPortalInvite("meera@cobaltfoods.in", URL, EXPIRES, "10x Global");
+    const [welcome, invite] = t.sent;
+    if (welcome === undefined || invite === undefined) throw new Error("expected two letters");
+
+    expect(welcome.subject).not.toBe(invite.subject);
+    expect(welcome.text).not.toBe(invite.text);
+    expect(invite.text).toMatch(/client portal/);
+    expect(welcome.text).not.toMatch(/client portal/);
+  });
+});
+
 describe("a firm's name is data, and reaches a header and a document", () => {
   it("cannot inject a header — a newline in the name would end the Subject", () => {
     // A header ends at a newline, so a name carrying one could append headers

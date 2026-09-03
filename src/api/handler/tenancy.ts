@@ -9,6 +9,7 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { TenancyService } from "../../usecase/tenancy/service";
+import type { StaffInviteService } from "../../usecase/staffinvite/service";
 import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
 
@@ -18,6 +19,9 @@ import { scopeOf } from "../scope";
  *  cookie, a bearer token, or an SSO round-trip. */
 export interface TenancyDeps {
   readonly service: TenancyService;
+  /** Adding a colleague AND writing to them — one act, and deliberately not a
+   *  method on `service`, which the portal invite also calls. */
+  readonly staffInvite: StaffInviteService;
 }
 
 // ── Response schemas (describe the shapes the service returns) ──────────────
@@ -104,6 +108,35 @@ const MembershipSchema = z
  * whose tenant row has gone is a broken state, and saying so with a null is
  * better than refusing the whole switcher over one bad row.
  */
+/**
+ * What `POST /tenancy/members` answers with (T7.2).
+ *
+ * The membership, plus whether the WELCOME LETTER actually went. Two fields
+ * rather than one because they are two questions: `invitationSent` decides what
+ * the admin's screen says now, and `invitationExpiresAt` is when the link in
+ * that letter stops working, which only means anything if one was sent.
+ *
+ * `false` is not an error — the membership is written either way, and a
+ * colleague can always ask the sign-in page for a fresh link. Saying so on the
+ * screen is the whole point: an administrator who is not told will believe an
+ * email arrived.
+ */
+const InviteMemberResponse = MembershipSchema.extend({
+  invitationSent: z.boolean().openapi({
+    description:
+      "Whether a welcome letter went out. False when the relay refused it, and false by " +
+      "design for a CLIENT_PORTAL membership made on this route — that one carries no " +
+      "portal grant, so it opens onto nothing and there is nothing worth announcing. Use " +
+      "the portal invite route for a client.",
+  }),
+  invitationExpiresAt: z.string().datetime().nullable().openapi({
+    description:
+      "When the sign-in link in that letter stops working. Null when no letter was sent. " +
+      "Hours rather than the portal invite's days: a colleague whose link expires can ask " +
+      "the sign-in page for another one.",
+  }),
+}).openapi("InviteMemberResponse");
+
 const MyMembershipSchema = MembershipSchema.extend({
   tenantName: z.string().nullable(),
 }).openapi("MyMembership");
@@ -342,12 +375,20 @@ const inviteMemberRoute = createRoute({
   summary: "Give somebody access to this firm, by email",
   description:
     "Idempotent on identity (ADR-02): an email that already has an account links to that " +
-    "person rather than creating a second one. No email is sent — they sign in with a magic link.",
+    "person rather than creating a second one. A STAFF member is then WRITTEN TO: a welcome " +
+    "letter naming the firm, carrying a single-use sign-in link that lives 72 hours. The " +
+    "response says whether it went — a refused relay does not fail the add, because the " +
+    "membership stands and they can ask the sign-in page for a fresh link. A CLIENT_PORTAL " +
+    "membership made here gets no letter: it carries no portal grant, so it opens onto " +
+    "nothing. Invite a client through the portal invite route instead.",
   request: {
     body: { content: { "application/json": { schema: InviteMemberRequest } }, required: true },
   },
   responses: {
-    201: { description: "Access granted", content: { "application/json": { schema: MembershipSchema } } },
+    201: {
+      description: "Access granted, and — for a STAFF member — written to",
+      content: { "application/json": { schema: InviteMemberResponse } },
+    },
     400: errorResponse("Request failed validation, or unknown audience"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
@@ -574,8 +615,18 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
-    const membership = await deps.service.inviteMember({ tenantId: s.tenantId, ...body }, s.actor);
-    return c.json(membership, 201);
+    // `staffInvite` and not `service` — the membership write is shared with the
+    // portal invite, and the LETTER is the half that differs by why the
+    // membership is being made. See `usecase/staffinvite/service.ts`.
+    const added = await deps.staffInvite.add({ tenantId: s.tenantId, ...body }, s.actor);
+    return c.json(
+      {
+        ...added.membership,
+        invitationSent: added.invitationSent,
+        invitationExpiresAt: added.invitationExpiresAt,
+      },
+      201,
+    );
   });
 
   app.openapi(changeMemberRoleRoute, async (c) => {

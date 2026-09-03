@@ -166,6 +166,9 @@ export class FakeMailer implements Mailer {
   /** Kept apart from `sent` on purpose: a test asserting that an INVITE went out
    *  must not pass because a sign-in link did. */
   readonly invites: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
+  /** And a third, for the same reason: a test asserting a colleague was
+   *  WELCOMED must not pass on a portal invite that happens to have gone out. */
+  readonly welcomes: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
     this.sent.push({ to, url, expiresAt });
@@ -179,6 +182,16 @@ export class FakeMailer implements Mailer {
     firmName: string | null,
   ): Promise<void> {
     this.invites.push({ to, url, expiresAt, firmName });
+    return Promise.resolve();
+  }
+
+  sendStaffWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.welcomes.push({ to, url, expiresAt, firmName });
     return Promise.resolve();
   }
 }
@@ -201,7 +214,7 @@ export class UnreachableMailer implements Mailer {
   /** What was ATTEMPTED. A test that asserts a failure must still be able to
    *  prove the letter was tried, or it cannot tell "the relay refused" from
    *  "the code never called the mailer". */
-  readonly attempted: { to: string; kind: "magic-link" | "invite" }[] = [];
+  readonly attempted: { to: string; kind: "magic-link" | "invite" | "welcome" }[] = [];
 
   sendMagicLink(to: string): Promise<void> {
     this.attempted.push({ to, kind: "magic-link" });
@@ -210,6 +223,13 @@ export class UnreachableMailer implements Mailer {
 
   sendPortalInvite(to: string): Promise<void> {
     this.attempted.push({ to, kind: "invite" });
+    return Promise.reject(new Error("smtp: connection refused"));
+  }
+
+  /** `welcomeStaff` does a THIRD thing with a failure — neither swallow nor
+   *  throw, but report it — and this is what proves the difference. */
+  sendStaffWelcome(to: string): Promise<void> {
+    this.attempted.push({ to, kind: "welcome" });
     return Promise.reject(new Error("smtp: connection refused"));
   }
 }

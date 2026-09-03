@@ -48,6 +48,7 @@ import { PORTAL_PATHS, PUBLIC_PATHS, compilePortalPaths, isPortalPath } from "..
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
+import { StaffInviteService } from "../../src/usecase/staffinvite/service";
 import {
   FakeServiceAxisRepo,
   FakeTimeZoneSetting,
@@ -336,7 +337,16 @@ function deps(): RouterDeps {
         events: new RecordingEventSink(),
       }),
     },
-    tenancy: { service: new TenancyService(fakes) },
+    tenancy: {
+      service: new TenancyService(fakes),
+      // Route-shape tests only: the letter is asserted where letters are
+      // asserted (tests/identity, tests/staffinvite), not here.
+      staffInvite: new StaffInviteService({
+        identity: { welcomeStaff: () => Promise.resolve({ expiresAt: null, sent: false }) },
+        memberships: new TenancyService(fakes),
+        firms: new TenancyService(fakes),
+      }),
+    },
     scheduler: {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),

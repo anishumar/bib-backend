@@ -125,4 +125,23 @@ export interface Mailer {
     expiresAt: string,
     firmName: string | null,
   ): Promise<void>;
+
+  /**
+   * Sends a new colleague the letter that tells them the account exists.
+   *
+   * A THIRD letter, for the same reason the second one is not a flag on the
+   * first: this one is pushed at somebody who did not ask, like the portal
+   * invite, and so it has to name the firm or it reads as phishing — but it
+   * goes to a COLLEAGUE, not a client, and what it hands over is a session
+   * rather than a password form. Neither of the other two says the right thing.
+   *
+   * `firmName` is nullable for the same reason as above: a tenant row that does
+   * not resolve degrades the wording rather than trapping somebody outside.
+   */
+  sendStaffWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void>;
 }

@@ -26,7 +26,11 @@ import {
   UserDisabled,
   WeakPassword,
 } from "../../src/domain/identity/errors";
-import { SESSION_TTL_DAYS, MAGIC_LINK_TTL_MINUTES } from "../../src/domain/identity/model";
+import {
+  SESSION_TTL_DAYS,
+  MAGIC_LINK_TTL_MINUTES,
+  STAFF_WELCOME_TTL_HOURS,
+} from "../../src/domain/identity/model";
 import {
   LOGIN_ATTEMPTS_PER_WINDOW,
   LOGIN_WINDOW_SECONDS,
@@ -409,6 +413,121 @@ describe("magic links", () => {
   });
 });
 
+
+describe("the welcome link — pushed, not pulled (0072)", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** The token as the colleague receives it, out of the WELCOME letter. The
+   *  fake keeps welcomes apart from sign-in links on purpose: a test asserting
+   *  a colleague was written to must not pass on a magic link. */
+  function tokenFromWelcome(h2: Harness): string {
+    const last = h2.mailer.welcomes.at(-1);
+    if (!last) throw new Error("no welcome was sent");
+    const token = new URL(last.url).searchParams.get("token");
+    if (token === null) throw new Error(`no token in ${last.url}`);
+    return token;
+  }
+
+  it("writes to the colleague and redeems for a session", async () => {
+    const userId = await seedUser(h);
+    const outcome = await h.service.welcomeStaff(userId, "10x Global");
+
+    expect(outcome.sent).toBe(true);
+    expect(h.mailer.welcomes).toHaveLength(1);
+    // The letter names the firm, and it is the FIRM's name that got here —
+    // the mailer cannot invent one.
+    expect(h.mailer.welcomes[0]?.firmName).toBe("10x Global");
+    // And it is not the sign-in letter wearing a different subject.
+    expect(h.mailer.sent).toHaveLength(0);
+
+    const result = await h.service.redeemMagicLink(tokenFromWelcome(h));
+    expect(result.principal.tenantId).toBe(TENANT_A);
+    expect(await h.service.resolveSession(result.token)).not.toBeNull();
+  });
+
+  it("points at the SIGN-IN page, not at a password form", async () => {
+    // Staff have no password to set — no product route sets one — so a link to
+    // `/portal/accept-invite` would land a colleague on a page whose only
+    // action is impossible for them.
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "10x Global");
+    expect(h.mailer.welcomes[0]?.url).toContain("/auth/magic-link?token=");
+  });
+
+  it("lives HOURS, not the sign-in link's minutes", async () => {
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "10x Global");
+    const token = tokenFromWelcome(h);
+
+    // Long past a sign-in link's life, and still good — which is the entire
+    // reason this is a separate purpose rather than a longer `login`.
+    h.clock.advanceMinutes(MAGIC_LINK_TTL_MINUTES + 1);
+    h.clock.advanceMinutes(24 * 60);
+    await expect(h.service.redeemMagicLink(token)).resolves.toBeTruthy();
+  });
+
+  it("expires at 72 hours", async () => {
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "10x Global");
+    const token = tokenFromWelcome(h);
+    h.clock.advanceMinutes(STAFF_WELCOME_TTL_HOURS * 60 + 1);
+    await expect(h.service.redeemMagicLink(token)).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("is single use", async () => {
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "10x Global");
+    const token = tokenFromWelcome(h);
+    await h.service.redeemMagicLink(token);
+    await expect(h.service.redeemMagicLink(token)).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("CANNOT be spent as a portal invite — it sets no password", async () => {
+    // The negative control for the purpose column. Accepting it here would let
+    // somebody set a password on a staff account through a route no staff
+    // member is supposed to reach, using a link mailed to them unasked.
+    const userId = await seedUser(h);
+    await h.service.welcomeStaff(userId, "10x Global");
+    await expect(
+      h.service.acceptPortalInvite(tokenFromWelcome(h), PASSWORD),
+    ).rejects.toBeInstanceOf(InvalidMagicLink);
+  });
+
+  it("does not write to a deactivated account, and says so rather than throwing", async () => {
+    const userId = await seedUser(h);
+    const i = h.users.rows.findIndex((r) => r.id === userId);
+    const row = h.users.rows[i];
+    if (row === undefined) throw new Error("the seeded user vanished");
+    h.users.rows[i] = { ...row, status: "disabled" };
+
+    const outcome = await h.service.welcomeStaff(userId, "10x Global");
+
+    expect(outcome.sent).toBe(false);
+    expect(outcome.expiresAt).toBeNull();
+    expect(h.mailer.welcomes).toHaveLength(0);
+  });
+
+  it("REPORTS a refused relay — neither swallowed nor thrown", async () => {
+    // The third answer, and the one this method exists to give. The two
+    // neighbours in the service do the other two, for reasons that do not apply
+    // here: there is no account to be quiet about (an admin named the address)
+    // and no trap (the sign-in page issues another link).
+    const relay = new UnreachableMailer();
+    const broken = harness(relay);
+    const userId = await seedUser(broken);
+
+    const outcome = await broken.service.welcomeStaff(userId, "10x Global");
+    expect(outcome.sent).toBe(false);
+    // It was ATTEMPTED — otherwise this passes on code that never called the
+    // mailer at all.
+    expect(relay.attempted).toEqual([{ to: "priya@harbourpoint.in", kind: "welcome" }]);
+    // And the expiry is still reported, because a link WAS written.
+    expect(outcome.expiresAt).not.toBeNull();
+  });
+});
 
 describe("per-account throttling", () => {
   let h: Harness;

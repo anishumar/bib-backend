@@ -4132,11 +4132,52 @@ phase is unchanged and still externally gated.
   > the link, or has somebody taken over that mailbox?*), so it is written down rather than
   > guessed at. **It should be the next thing built on this.**
 
+- [x] `(B)` **T7.0a** The THIRD transactional letter: a colleague is told their account exists. *Acc: adding a STAFF member emails a 72-hour sign-in link naming the firm; a CLIENT_PORTAL membership made on that route still sends nothing; a refused relay does not undo the membership.*
+  > **DONE 2026-09-03. Migration 0072** (`magic_link.purpose` widened to `login | invite |
+  > welcome`). `check` **1592** · `test:integration` **570** · `demo:verify` **71** ·
+  > frontend `check` clean. Frontend: `admin/people` + `api:generate`.
+  >
+  > **THE GAP WAS NAMED IN THE PRODUCT'S OWN WORDS AND NOBODY READ IT AS A BUG.** The invite
+  > route's description said *"No email is sent — they sign in with a magic link"*, and the
+  > People screen repeated it under the button. True, and only if somebody remembers to send a
+  > separate message by hand. A firm that adds five people on a Monday has five colleagues who
+  > do not know they have an account.
+  >
+  > **A THIRD PURPOSE RATHER THAN A LONGER `login`.** A sign-in link is PULLED — somebody
+  > pressed a button ten seconds ago — and lives fifteen minutes. This one is PUSHED at a person
+  > who may open it on Monday, so it lives seventy-two hours. Widening `login` to days to buy
+  > that would have lengthened every sign-in link in the product. `invite` was not available
+  > either: it redeems ONLY by setting a password, and no product route sets a staff password.
+  >
+  > **AND IT IS A SECOND USE CASE, NOT A LINE INSIDE `inviteMember`.** `PortalInviteService`
+  > calls that same method with `audience: "CLIENT_PORTAL"` and then sends its own letter. A
+  > welcome buried in the shared write would mail every client contact TWICE — once welcoming
+  > them to a staff product they cannot use. `usecase/staffinvite` mirrors its neighbour
+  > exactly, and the negative test is the first one in the file.
+  >
+  > **THE THIRD ANSWER TO A FAILED SEND.** `requestMagicLink` swallows (a throw would build an
+  > enumeration oracle out of an error path); `invitePortalContact` throws (a client has no
+  > other door). This one REPORTS: `invitationSent` on the response, and the screen says
+  > *"added, but the letter did not go out"*. Throwing would be worse than useless — the
+  > membership is already written, so a 500 leaves a member created, an admin believing the add
+  > failed, and a retry refused as a duplicate. Staff are the case that can afford this: the
+  > login page issues a fresh link to any active account, which is exactly what they had before.
+  >
+  > **VERIFIED OVER HTTP, not from a unit test.** A real add through a signed-in session
+  > returned `invitationSent: true` with a 72-hour expiry; the link redeemed into a STAFF
+  > session and the second redemption answered 401; a `CLIENT_PORTAL` add on the same route
+  > wrote no letter at all. The down migration was run against a live `welcome` row inside a
+  > transaction, to prove the delete-before-narrow order — 0067's mistake — actually holds.
+  >
+  > **WHAT IT DOES NOT CLOSE.** Still no RESEND, and this widens the surface: a colleague whose
+  > welcome bounced is now in the same position as T7.0's client, minus the trap, because they
+  > can self-serve from the login page. The resend route is still the next thing to build here.
+
 - [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
 - [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).
 - [ ] `(A)` **T7.4** Banking feed (payment reconciliation), payments (Razorpay/Stripe).
-- [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), WhatsApp, and the NOTIFICATION side of email — the chaser, the nudge, the monthly digest and the request inbox. *The two TRANSACTIONAL letters (sign-in link, portal invite) are done: T7.0.*
+- [ ] `(A)` **T7.5** E-sign (DocuSign/Zoho Sign), WhatsApp, and the NOTIFICATION side of email — the chaser, the nudge, the monthly digest and the request inbox. *The THREE transactional letters (sign-in link, portal invite, staff welcome) are done: T7.0 and T7.0a.*
 
 ---
 

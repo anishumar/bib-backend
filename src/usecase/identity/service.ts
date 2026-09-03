@@ -23,11 +23,13 @@ import {
   MAX_PASSWORD_LENGTH,
   MIN_PASSWORD_LENGTH,
   isAcceptablePassword,
+  isUsableForSession,
   isUsableMagicLink,
   isUsableSession,
   magicLinkExpiryFrom,
   portalInviteExpiryFrom,
   sessionExpiryFrom,
+  staffWelcomeExpiryFrom,
 } from "../../domain/identity/model";
 import {
   InvalidCredentials,
@@ -89,6 +91,21 @@ export interface SignInResult {
   /** The org switcher's data: if this holds more than one entry, the session
    *  has no active tenant yet and the client must call switchTenant. */
   readonly memberships: readonly Membership[];
+}
+
+/**
+ * What came of writing to a new colleague.
+ *
+ * `sent: false` is a real, ordinary outcome and not an error — see
+ * `welcomeStaff` for why this is returned rather than thrown. The two fields
+ * are separate because they answer different questions: `sent` decides what the
+ * admin's screen says NOW, and `expiresAt` is when the link in the letter stops
+ * working, which is only meaningful if one went. It is null when no link was
+ * written at all.
+ */
+export interface StaffWelcome {
+  readonly expiresAt: string | null;
+  readonly sent: boolean;
 }
 
 export class IdentityService {
@@ -259,6 +276,75 @@ export class IdentityService {
   }
 
   /**
+   * Tell a new colleague their account exists, and hand them the way in.
+   *
+   * ── WHY THIS IS NOT `requestMagicLink` WITH A DIFFERENT SUBJECT ──────────
+   *
+   * Everything about the two differs except the mechanism. A sign-in link is
+   * PULLED by somebody at their keyboard and lives fifteen minutes; this one is
+   * PUSHED at somebody who has not heard of the product and may read it on
+   * Monday, so it lives seventy-two hours and carries its own purpose (0072) so
+   * that widening one does not widen the other. And the letter has to name the
+   * firm, because an unasked-for email with a sign-in link in it is, feature for
+   * feature, a phishing message.
+   *
+   * ── AND WHY A FAILED SEND IS REPORTED RATHER THAN THROWN ─────────────────
+   *
+   * The two neighbours in this file do the two opposite things, and this one is
+   * a third case that deserves its own answer rather than either of theirs.
+   *
+   *   `requestMagicLink` SWALLOWS, because throwing would build an account
+   *   enumeration oracle out of an error path.
+   *
+   *   `invitePortalContact` THROWS, because a client whose invite silently
+   *   failed has no other door and nobody watching for them.
+   *
+   * A colleague has a door. The login page issues a fresh link to any active
+   * account, which is exactly what the firm did before this existed. So a
+   * failed send here is neither a secret nor a trap — it is a fact the admin
+   * standing at the screen should be told, so it is RETURNED. Throwing would be
+   * actively worse: the membership is already written by the time this runs, so
+   * a 500 would leave a member created, an admin believing the add failed, and
+   * a retry refused as a duplicate.
+   *
+   * The adapter has already shouted about the underlying failure; this decides
+   * only what the screen says.
+   */
+  async welcomeStaff(userId: string, firmName: string | null): Promise<StaffWelcome> {
+    const user = await this.deps.users.findById(userId);
+    // The caller has just created or found this account, so a miss is a race or
+    // a deactivated login rather than a typo — and either way there is nobody to
+    // write to. Not an error: the membership stands, and the admin is told the
+    // letter did not go.
+    if (!user || user.status !== "active") return { expiresAt: null, sent: false };
+
+    const token = this.deps.tokens.newToken();
+    const expiresAt = staffWelcomeExpiryFrom(this.deps.clock.now());
+    await this.deps.magicLinks.create({
+      id: this.deps.ids.newId(),
+      userId: user.id,
+      tokenHash: this.deps.tokens.hash(token),
+      purpose: "welcome",
+      expiresAt,
+    });
+    try {
+      await this.deps.mailer.sendStaffWelcome(
+        user.email,
+        `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
+        expiresAt,
+        firmName,
+      );
+    } catch {
+      // Deliberately empty, and REPORTED rather than hidden — see above. The
+      // link row stays: it is unreachable, single-use and expiring, and
+      // deleting it would be a second write that can itself fail on a path
+      // whose whole point is that it does not throw.
+      return { expiresAt, sent: false };
+    }
+    return { expiresAt, sent: true };
+  }
+
+  /**
    * Accept an invitation: set the password, and sign in.
    *
    * ONE call, because the two halves must not be separable. A route that only
@@ -290,10 +376,13 @@ export class IdentityService {
 
   /** Redeem a magic link for a session. Single use, enforced by the repository's
    *  conditional update — two simultaneous clicks cannot both open a session.
-   *  A `login` link only: an invite is redeemed by setting a password. */
+   *  A session-opening link only — `login` or a colleague's `welcome` (0072).
+   *  An INVITE is redeemed by setting a password and is refused here, because
+   *  spending one without setting a password leaves a portal contact with no
+   *  way back in. That is the whole reason `purpose` is read at all. */
   async redeemMagicLink(token: string): Promise<SignInResult> {
     const link = await this.deps.magicLinks.findByTokenHash(this.deps.tokens.hash(token));
-    if (!link || !isUsableMagicLink(link, this.deps.clock.now(), "login")) {
+    if (!link || !isUsableForSession(link, this.deps.clock.now())) {
       throw new InvalidMagicLink();
     }
 

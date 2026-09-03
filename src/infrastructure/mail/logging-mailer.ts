@@ -35,4 +35,20 @@ export class LoggingMailer implements Mailer {
     );
     return Promise.resolve();
   }
+
+  sendStaffWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.log.warn(
+      { to, url, expiresAt, firmName },
+      "staff welcome NOT emailed — the logging mailer is registered. Open the url above to " +
+        "sign in as them. This is the LEAST damaging of the three to lose: a colleague can " +
+        "still get a fresh link from the login page, which is what they had to do before this " +
+        "letter existed.",
+    );
+    return Promise.resolve();
+  }
 }
