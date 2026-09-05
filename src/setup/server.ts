@@ -694,6 +694,10 @@ export function wire(cfg: Config, log: Logger): Wired {
       memberships: tenancy,
       access: portalAccess,
       firms: tenancy,
+      // `invite` records nothing itself — its three writes each emit their own
+      // event. `resend` writes no row at all, so this is the only record that a
+      // credential was mailed outside the firm and who said so.
+      events: ledger,
     });
 
   const portalAccess = new PortalAccessService({

@@ -39,6 +39,7 @@ interface AccessRecordRow extends AccessRow {
   client_name: string;
   contact_email: string;
   contact_display_name: string | null;
+  contact_accepted: boolean;
   granted_by_email: string | null;
   granted_by_display_name: string | null;
 }
@@ -61,6 +62,7 @@ function toRecord(r: AccessRecordRow): PortalAccessRecord {
     clientName: r.client_name,
     contactDisplayName: r.contact_display_name,
     contactEmail: r.contact_email,
+    contactAccepted: r.contact_accepted,
     grantedByDisplayName: r.granted_by_display_name,
     grantedByEmail: r.granted_by_email,
   };
@@ -103,6 +105,14 @@ export class PostgresPortalAccessRepository
                pa.valid_from::text AS valid_from, pa.valid_to::text AS valid_to, pa.granted_by,
                p.display_name AS client_name,
                contact.email AS contact_email, contact.display_name AS contact_display_name,
+               -- HAVE THEY EVER SET A PASSWORD. tenancy.credential holds one row
+               -- per account and none for somebody who was invited and never
+               -- accepted -- 0004 says so in as many words -- so this is the
+               -- whole test. EXISTS rather than a join, because nothing reads a
+               -- column off it and this runs on every portal request.
+               EXISTS (
+                 SELECT 1 FROM tenancy.credential cr WHERE cr.user_id = m.user_id
+               ) AS contact_accepted,
                granter.email AS granted_by_email, granter.display_name AS granted_by_display_name
           FROM crm.portal_access pa
           JOIN core.party p          ON p.id = pa.client_party_id AND p.tenant_id = pa.tenant_id
@@ -126,6 +136,14 @@ export class PostgresPortalAccessRepository
                pa.valid_from::text AS valid_from, pa.valid_to::text AS valid_to, pa.granted_by,
                p.display_name AS client_name,
                contact.email AS contact_email, contact.display_name AS contact_display_name,
+               -- HAVE THEY EVER SET A PASSWORD. tenancy.credential holds one row
+               -- per account and none for somebody who was invited and never
+               -- accepted -- 0004 says so in as many words -- so this is the
+               -- whole test. EXISTS rather than a join, because nothing reads a
+               -- column off it and this runs on every portal request.
+               EXISTS (
+                 SELECT 1 FROM tenancy.credential cr WHERE cr.user_id = m.user_id
+               ) AS contact_accepted,
                granter.email AS granted_by_email, granter.display_name AS granted_by_display_name
           FROM crm.portal_access pa
           JOIN core.party p          ON p.id = pa.client_party_id AND p.tenant_id = pa.tenant_id
@@ -169,6 +187,14 @@ export class PostgresPortalAccessRepository
                pa.valid_from::text AS valid_from, pa.valid_to::text AS valid_to, pa.granted_by,
                p.display_name AS client_name,
                contact.email AS contact_email, contact.display_name AS contact_display_name,
+               -- HAVE THEY EVER SET A PASSWORD. tenancy.credential holds one row
+               -- per account and none for somebody who was invited and never
+               -- accepted -- 0004 says so in as many words -- so this is the
+               -- whole test. EXISTS rather than a join, because nothing reads a
+               -- column off it and this runs on every portal request.
+               EXISTS (
+                 SELECT 1 FROM tenancy.credential cr WHERE cr.user_id = m.user_id
+               ) AS contact_accepted,
                granter.email AS granted_by_email, granter.display_name AS granted_by_display_name
           FROM crm.portal_access pa
           JOIN tenancy.membership m  ON m.id = pa.membership_id   AND m.tenant_id = pa.tenant_id

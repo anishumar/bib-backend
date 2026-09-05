@@ -140,6 +140,13 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // second one that would have to be kept in step with it.
   [routeKey("POST", "/api/v1/portal-invites"), "portal:grant" as const],
 
+  // Re-sending it carries the SAME permission and not a weaker one, because it
+  // is the same power: whoever may press this mails a credential to somebody
+  // outside the firm. It looks smaller than inviting — nothing new is created —
+  // and it is not, which is exactly the reasoning that would put it behind
+  // `party:read` and hand it to every associate.
+  [routeKey("POST", "/api/v1/portal-invites/{membershipId}/resend"), "portal:grant" as const],
+
   // ── The client-directed ask (T6.6) ─────────────────────────────────────
   //
   // The FIRM's side is ordinary delivery work: reading what has been asked of a

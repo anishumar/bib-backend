@@ -4173,6 +4173,83 @@ phase is unchanged and still externally gated.
   > welcome bounced is now in the same position as T7.0's client, minus the trap, because they
   > can self-serve from the login page. The resend route is still the next thing to build here.
 
+- [x] `(B)` **T7.0b** The RESEND, and the screen that had never existed to put it on. *Acc: a client contact whose invitation bounced can be sent it again, to the SAME address and no other; issuing a new one spends every live one; a contact who has set a password is refused; and a firm can do all of it from a screen rather than curl.*
+  > **DONE 2026-09-07. No migration** — the state it needed was already in `tenancy.credential`,
+  > which 0004 describes in as many words: *"a user with no row here (invited, never set a
+  > password) is a normal state"*. `check` **1610** · frontend `check` clean ·
+  > `demo:verify` **71**. Frontend: the panel below, plus `api:generate`.
+  >
+  > **THE DECISION T7.0 WROTE DOWN AND REFUSED TO GUESS, ANSWERED.** *"Did they lose the link,
+  > or has somebody else taken over the account?"* — **only the first.** The route takes a
+  > MEMBERSHIP id and nothing else that could reach the letter; the address comes off the
+  > account and there is no parameter that could change it. Allowing an address change would
+  > mean anybody holding a firm login could move a client's portal access to a mailbox of their
+  > choosing. That is a new door — it wants its own event and probably an approval — and it is
+  > deliberately NOT built rather than arriving as a side effect of a button called "Send it
+  > again". Shrestha's instruction was to take the safest production-standard call; this is it.
+  >
+  > **AND IT IS THE CLIENT'S ROUTE, NOT A GENERAL ONE.** `StaffInviteService` has the identical
+  > hole and does not get a route, for the reason T7.0a already wrote down: the sign-in page
+  > issues any active account a fresh link, so a colleague whose welcome bounced has a door. A
+  > client contact who has never set a password has none at all.
+  >
+  > **A NEW ISSUE SPENDS THE OLD ONES, and that is not tidiness.** An `invite` link is redeemed
+  > by SETTING A PASSWORD, so one still live after the contact has set theirs is a password
+  > reset sitting in an inbox for a week. Before this route there was exactly one by
+  > construction; a resend that issued a second without spending the first would turn that into
+  > a growing pile. `consumeUnusedFor(userId, purpose, at)` is a new port with the expiry in the
+  > predicate, so the count it returns — carried on the ledger event as `supersededLinks` — is
+  > LIVE links replaced and not rows touched. Zero is the ordinary answer and is what a walk
+  > actually produced when the first link had run out.
+  >
+  > **REFUSED ONCE THEY HAVE ACCEPTED, and this is the security call inside the security call.**
+  > Re-issuing an invite to somebody who already has a password is the firm resetting its own
+  > client's password — which is exactly what the invite flow exists to prevent (the firm never
+  > holds it). `InvitationAlreadyAccepted` → 409, and the message points at the sign-in page,
+  > which is the door somebody who forgot their password already has.
+  >
+  > **THROTTLED PER CONTACT, NOT PER SENDER**, because the cost of getting it wrong lands on an
+  > inbox outside the firm. Unlike `requestMagicLink`'s budget this one is REPORTED as a 429:
+  > there is no account to be coy about, and silence would look exactly like the send failing.
+  >
+  > **THE SCREEN DID NOT EXIST, AND THAT WAS THE BIGGER FIND.** `/admin/people` has said for
+  > months — under the button, and in the outcome notice — *"invite a client's own people from
+  > that client's page"*. There was no such thing. The whole portal-invite and gate-4 surface
+  > (T6.5, G3.4) shipped API-only: **five routes with no caller anywhere in the frontend**, so
+  > the only way a firm could let a client into the portal it had been sold was a curl command.
+  > `clients/[partyId]/portal-contacts.tsx` is that screen — who at the client can see this,
+  > whether each of them ever got in, who let them in, invite, resend, remove, and the closed
+  > grants underneath.
+  >
+  > **AND THE SCREEN WANTED A FACT THE API DID NOT SEND**, which is this repo's own rule firing
+  > again: `PortalAccess` now carries `contactAccepted`. It is a different fact from the dates —
+  > a grant is in force from the day it was written whether or not the letter ever arrived, so a
+  > contact can be fully granted and completely stuck, which is the exact state the resend
+  > exists for. Without it, "Send it again" would have been a button whose commonest outcome is
+  > a 409. An `EXISTS` over `tenancy.credential` in the three record queries; integration-tested,
+  > because it is computed in SQL and nowhere else.
+  >
+  > **THREE THINGS THE WALK FOUND THAT NO PROBE COULD**, all on a panel that measured 0 on every
+  > one of the nine and on contrast, rings and tab order in both themes:
+  >
+  >   1. **The throttle's refusal described the wrong act.** *"too many sign-in attempts for this
+  >      account; retry in 3582s"* — nobody had attempted to sign in, the only account named was
+  >      the client's, and `3582s` is a number a machine produced. `TooManyAttempts` now takes
+  >      the sentence (the sign-in one is still the default, so that path did not move) and
+  >      `retryIn()` says the wait the way a person says one, rounding UP so "come back in 59
+  >      minutes" cannot land on the same refusal.
+  >   2. **`disabled={busy}` on a panel of rows hands focus to an arbitrary button.** `busy`
+  >      disabled EVERY row button, the browser blurred them, and `Button`'s own focus-restore
+  >      (dc832ae) gave focus to whichever re-enabled first — measured: after inviting somebody,
+  >      focus landed on another contact's **Remove access**. Only the pressed button is marked
+  >      now, and with `loading` rather than `disabled`, which is what that component's own note
+  >      has been arguing for.
+  >   3. **`useSwapFocus` fired one render too early.** "Remove access" unmounts by succeeding,
+  >      so focus goes to `<body>` — but the outcome notice was set BEFORE the reload, so the
+  >      effect ran while the pressed button was still mounted and focused, correctly did
+  >      nothing, and was asleep by the time the row went. Every write in the panel reloads
+  >      first and sets the outcome second. The order is the fix.
+
 - [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
 - [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).

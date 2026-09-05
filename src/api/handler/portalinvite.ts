@@ -106,6 +106,60 @@ const inviteRoute = createRoute({
   },
 });
 
+const ResendParam = z.object({
+  membershipId: z.string().uuid().openapi({
+    param: { name: "membershipId", in: "path" },
+    description:
+      "WHO is re-invited, and the only thing this route accepts. There is no address in the " +
+      "body and there will not be one: the letter goes to the account's own email. Moving a " +
+      "contact's portal access to a different mailbox is a different act.",
+  }),
+});
+
+const ResentInvitationSchema = z
+  .object({
+    membershipId: z.string().uuid(),
+    userId: z.string().uuid(),
+    expiresAt: z.string().datetime().openapi({
+      description:
+        "When the NEW link stops working. The token is not here, for the same reason it is " +
+        "not on the first invitation: a firm that could read its client's link could sign in " +
+        "as that client.",
+    }),
+  })
+  .openapi("ResentPortalInvitation");
+
+const resendRoute = createRoute({
+  method: "post",
+  path: "/api/v1/portal-invites/{membershipId}/resend",
+  tags: ["portal"],
+  summary: "Send a client contact their portal invitation again",
+  description:
+    "SAME PERSON, SAME ADDRESS — the letter goes to the email already on the account and no " +
+    "parameter can change it. This exists because the first send can fail once a real relay " +
+    "carries it (a bounce, a typo, a full mailbox), and the contact is then created, granted " +
+    "and — before this route — permanently uninvitable: staff can ask the sign-in page for a " +
+    "fresh link, a client contact who has never set a password has no other door. Issuing a " +
+    "new link SPENDS every live one, so nobody ever holds two password setters at once. " +
+    "Refused once they have set a password: at that point re-issuing would be the firm " +
+    "resetting its own client's password, which is what the invite flow exists to prevent. " +
+    "Throttled per contact, because the cost of getting it wrong lands on their inbox.",
+  request: { params: ResendParam },
+  responses: {
+    200: {
+      description: "The letter has gone again",
+      content: { "application/json": { schema: ResentInvitationSchema } },
+    },
+    401: errorResponse("No authenticated session, or the account cannot be written to"),
+    403: errorResponse("The session has not selected an org, or the role may not grant access"),
+    404: errorResponse("No such membership at this firm"),
+    409: errorResponse(
+      "A staff login, a revoked one, or a contact who has already set their password",
+    ),
+    429: errorResponse("Too many invitations to this contact — wait, and try again"),
+  },
+});
+
 const acceptRoute = createRoute({
   method: "post",
   path: "/api/v1/portal-invites/accept",
@@ -158,6 +212,16 @@ export function registerPortalInviteRoutes(
     return c.json(invitation, 201);
   });
 
+  app.openapi(resendRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const resent = await deps.service.resend(
+      { tenantId: s.tenantId, membershipId: c.req.valid("param").membershipId },
+      s.actor,
+    );
+    return c.json(resent, 200);
+  });
+
   app.openapi(acceptRoute, async (c) => {
     const { token, password } = c.req.valid("json");
     const result: SignInResult = await deps.identity.acceptPortalInvite(token, password);
@@ -179,5 +243,6 @@ export function registerPortalInviteRoutes(
 
 export const portalInviteRoutes = {
   invite: inviteRoute,
+  resend: resendRoute,
   accept: acceptRoute,
 } as const;

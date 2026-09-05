@@ -56,6 +56,18 @@ export interface PortalAccessRecord {
   readonly clientName: string;
   readonly contactDisplayName: string | null;
   readonly contactEmail: string;
+  /**
+   * Have they ever set a password — i.e. has the invitation been ACCEPTED.
+   *
+   * On the record and not derived on a screen, because nothing a screen holds
+   * could derive it. It is the fact that decides whether "send the invitation
+   * again" is an action worth offering at all: a contact who has accepted has
+   * no invitation left, and re-issuing one would be the firm resetting its own
+   * client's password (`InvitationAlreadyAccepted`). Without it, that route's
+   * refusal is the only way to find out, which means offering a button whose
+   * commonest outcome is an error.
+   */
+  readonly contactAccepted: boolean;
   readonly grantedByDisplayName: string | null;
   readonly grantedByEmail: string | null;
 }

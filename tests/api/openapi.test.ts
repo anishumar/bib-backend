@@ -401,10 +401,19 @@ function deps(): RouterDeps {
     portalRequests: { service: requestService() },
     portalInvites: {
       service: new PortalInviteService({
-        identity: { invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z") },
-        memberships: { inviteMember: () => Promise.resolve({ id: "m", userId: "u" }) },
+        identity: {
+          invitePortalContact: () => Promise.resolve("2026-09-08T00:00:00.000Z"),
+          resendPortalInvite: () =>
+            Promise.resolve({ expiresAt: "2026-09-08T00:00:00.000Z", supersededLinks: 0 }),
+        },
+        memberships: {
+          inviteMember: () => Promise.resolve({ id: "m", userId: "u" }),
+          findMembership: () =>
+            Promise.resolve({ id: "m", userId: "u", audience: "CLIENT_PORTAL", isActive: true }),
+        },
         access: { grant: () => Promise.resolve({ id: "g" }) },
         firms: { tenantNames: () => Promise.resolve(new Map()) },
+        events: new RecordingEventSink(),
       }),
       identity: sharedIdentity,
       cookieName: "bib_session",

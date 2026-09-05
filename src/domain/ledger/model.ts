@@ -121,6 +121,14 @@ export const EVENT_VERBS = {
   "portal_access.granted":       { objectType: "portal_access",       lane: "platform",   description: "A client-portal login was allowed to read one client's records. ONE CLIENT PER EVENT, deliberately: a contact who may see four companies has four grants and four of these, so who decided each one is answerable. Access is never derived from a group relationship." },
   "portal_access.ended":         { objectType: "portal_access",       lane: "platform",   description: "A portal login stopped being able to read a client's records. NOT a delete: the row stays, which is what makes \"could this person see this on 14 March\" answerable a year later. The payload carries the FIRST DAY NOT IN FORCE." },
 
+  // The letter, sent AGAIN. Recorded because it is the one act in this product
+  // that mails a credential to somebody outside the firm on a staff member's
+  // say-so, and because the question asked afterwards is never "did they get
+  // in" — it is WHO kept sending it, and how often. The address is not in the
+  // payload and cannot be: it is personal data (3.4), and it is also the fact
+  // this route deliberately cannot change.
+  "portal_invitation.resent":    { objectType: "membership",          lane: "platform",   description: "A client contact's portal invitation was sent again — same person, same address, which is the only shape this route has. The payload carries how many still-live invitations it superseded: issuing a new one spends the old, so a contact never holds two password setters at once. NO EMAIL in the payload; the membership id is who." },
+
   // ── platform · the configuration registry (P2 / T2.5) ─────────────────────
   // Configuration decides what everyone else may do, so who changed it, when,
   // and to which version is exactly what gets asked about later. Only versions

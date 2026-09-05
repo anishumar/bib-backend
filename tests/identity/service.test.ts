@@ -20,6 +20,8 @@ import type { Mailer } from "../../src/usecase/identity/ports";
 import {
   InvalidCredentials,
   InvalidMagicLink,
+  InvitationAlreadyAccepted,
+  retryIn,
   TooManyAttempts,
   NoActiveMembership,
   NotAMember,
@@ -35,6 +37,7 @@ import {
   LOGIN_ATTEMPTS_PER_WINDOW,
   LOGIN_WINDOW_SECONDS,
   MAGIC_LINKS_PER_WINDOW,
+  PORTAL_INVITE_RESENDS_PER_WINDOW,
 } from "../../src/usecase/identity/service";
 import type { RecordingEventSink } from "../../src/testfakes/ledger";
 
@@ -662,6 +665,163 @@ describe("a send that fails", () => {
     const userId = await seedUser(h, "meera@cobaltfoods.in");
 
     await expect(h.service.invitePortalContact(userId, "10x Global")).rejects.toThrow();
+    expect(relay.attempted).toEqual([{ to: "meera@cobaltfoods.in", kind: "invite" }]);
+  });
+});
+
+
+describe("re-sending a portal invitation (T7.0b)", () => {
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** A client contact as they exist between being invited and accepting: an
+   *  account, a membership, and NO password. `seedUser` sets one, which is
+   *  exactly the state this route refuses. */
+  async function seedContact(email = "meera@cobaltfoods.in"): Promise<string> {
+    const user = await h.users.create({ id: uuidFor(`user:${email}`), email });
+    await h.memberships.create({
+      id: uuidFor(`membership:${TENANT_A}:${email}`),
+      tenantId: TENANT_A,
+      userId: user.id,
+      audience: "CLIENT_PORTAL",
+      role: "client_contact",
+      commercialVisibility: false,
+    });
+    return user.id;
+  }
+
+  it("sends the SAME letter to the SAME address, and there is no way to say otherwise", async () => {
+    const userId = await seedContact();
+
+    const out = await h.service.resendPortalInvite(userId, "10x Global");
+
+    expect(h.mailer.invites).toHaveLength(1);
+    expect(h.mailer.invites[0]?.to).toBe("meera@cobaltfoods.in");
+    expect(h.mailer.invites[0]?.firmName).toBe("10x Global");
+    // The password page, not the sign-in one: a contact with no password who
+    // followed a `/auth/magic-link` would open a session and still have none.
+    expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
+    expect(out.expiresAt).toBe(h.mailer.invites[0]?.expiresAt);
+    // And it is not the sign-in letter wearing a different subject.
+    expect(h.mailer.sent).toHaveLength(0);
+  });
+
+  it("SPENDS the live link it replaces, so nobody holds two password setters", async () => {
+    const userId = await seedContact();
+    await h.service.invitePortalContact(userId, "10x Global");
+
+    const first = new URL(h.mailer.invites[0]!.url).searchParams.get("token")!;
+    const out = await h.service.resendPortalInvite(userId, "10x Global");
+    const second = new URL(h.mailer.invites[1]!.url).searchParams.get("token")!;
+
+    expect(out.supersededLinks).toBe(1);
+    // The old one is dead — and this is the assertion that matters, because an
+    // invite link SETS A PASSWORD. One left alive after the contact has used
+    // the new one is a password reset sitting in an inbox.
+    await expect(h.service.acceptPortalInvite(first, PASSWORD)).rejects.toBeInstanceOf(
+      InvalidMagicLink,
+    );
+    await expect(h.service.acceptPortalInvite(second, PASSWORD)).resolves.toBeTruthy();
+  });
+
+  it("reports ZERO superseded when the previous link had already expired", async () => {
+    const userId = await seedContact();
+    await h.service.invitePortalContact(userId, "10x Global");
+    h.clock.advanceMinutes(8 * 24 * 60);
+
+    // The commonest reason anybody presses this button, and the count has to be
+    // honest about it: nothing live was replaced.
+    const out = await h.service.resendPortalInvite(userId, "10x Global");
+    expect(out.supersededLinks).toBe(0);
+  });
+
+  it("REFUSES once they have set a password — a firm may not reset its client's", async () => {
+    const userId = await seedContact();
+    await h.service.invitePortalContact(userId, "10x Global");
+    const token = new URL(h.mailer.invites[0]!.url).searchParams.get("token")!;
+    await h.service.acceptPortalInvite(token, PASSWORD);
+
+    await expect(h.service.resendPortalInvite(userId, "10x Global")).rejects.toBeInstanceOf(
+      InvitationAlreadyAccepted,
+    );
+    // And nothing was mailed. A refusal that still sent the letter would be the
+    // worst of both.
+    expect(h.mailer.invites).toHaveLength(1);
+  });
+
+  it("refuses an account that is not there, or is deactivated", async () => {
+    await expect(
+      h.service.resendPortalInvite(uuidFor("user:nobody"), "10x Global"),
+    ).rejects.toBeInstanceOf(InvalidMagicLink);
+    expect(h.mailer.invites).toHaveLength(0);
+  });
+
+  it("is throttled PER CONTACT, and says so — the cost lands on their inbox", async () => {
+    const userId = await seedContact();
+
+    for (let i = 0; i < PORTAL_INVITE_RESENDS_PER_WINDOW; i += 1) {
+      await h.service.resendPortalInvite(userId, "10x Global");
+    }
+
+    // Reported as a refusal, unlike `requestMagicLink`'s quiet return: the
+    // caller is a member of the firm looking at a contact they already named,
+    // so there is no account to be coy about — and silence here would look
+    // exactly like the send failing.
+    await expect(h.service.resendPortalInvite(userId, "10x Global")).rejects.toBeInstanceOf(
+      TooManyAttempts,
+    );
+    expect(h.mailer.invites).toHaveLength(PORTAL_INVITE_RESENDS_PER_WINDOW);
+  });
+
+  it("does NOT say 'sign-in attempts' — the refusal has to describe THIS act", async () => {
+    // Found by walking the screen: a partner pressing "Send it again" was told
+    // "too many sign-in attempts for this account". Nobody had attempted to
+    // sign in, and the only account named was somebody else's — so the reader
+    // goes looking for a login problem that does not exist.
+    const userId = await seedContact();
+    for (let i = 0; i < PORTAL_INVITE_RESENDS_PER_WINDOW; i += 1) {
+      await h.service.resendPortalInvite(userId, "10x Global");
+    }
+
+    await expect(h.service.resendPortalInvite(userId, "10x Global")).rejects.toThrow(
+      /invitations in the last hour/,
+    );
+    await expect(h.service.resendPortalInvite(userId, "10x Global")).rejects.not.toThrow(
+      /sign-in attempts/,
+    );
+    // And the wait is said the way a person says one, not as `3582s`.
+    expect(retryIn(3582)).toBe("an hour");
+    expect(retryIn(150)).toBe("3 minutes");
+    expect(retryIn(20)).toBe("20 seconds");
+  });
+
+  it("spends the budget on the CHECK, so a refused send does not buy a free retry", async () => {
+    const relay = new UnreachableMailer();
+    const h2 = harness(relay);
+    const user = await h2.users.create({
+      id: uuidFor("user:meera@cobaltfoods.in"),
+      email: "meera@cobaltfoods.in",
+    });
+
+    for (let i = 0; i < PORTAL_INVITE_RESENDS_PER_WINDOW; i += 1) {
+      await expect(h2.service.resendPortalInvite(user.id, "10x Global")).rejects.toThrow();
+    }
+    await expect(h2.service.resendPortalInvite(user.id, "10x Global")).rejects.toBeInstanceOf(
+      TooManyAttempts,
+    );
+  });
+
+  it("surfaces a refused relay, exactly as the FIRST invitation does", async () => {
+    const relay = new UnreachableMailer();
+    const h2 = harness(relay);
+    const user = await h2.users.create({
+      id: uuidFor("user:meera@cobaltfoods.in"),
+      email: "meera@cobaltfoods.in",
+    });
+
+    await expect(h2.service.resendPortalInvite(user.id, "10x Global")).rejects.toThrow();
     expect(relay.attempted).toEqual([{ to: "meera@cobaltfoods.in", kind: "invite" }]);
   });
 });

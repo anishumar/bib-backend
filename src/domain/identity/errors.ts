@@ -27,7 +27,8 @@ export type IdentityErrorCode =
   | "NOT_A_MEMBER"
   | "USER_DISABLED"
   | "WEAK_PASSWORD"
-  | "TOO_MANY_ATTEMPTS";
+  | "TOO_MANY_ATTEMPTS"
+  | "INVITATION_ALREADY_ACCEPTED";
 
 export class InvalidCredentials extends IdentityError {
   constructor() {
@@ -73,11 +74,70 @@ export class UserDisabled extends IdentityError {
   }
 }
 
+/**
+ * A per-account budget is spent.
+ *
+ * ── THE SENTENCE IS A PARAMETER, AND THAT IS NOT TIDINESS ─────────────────
+ *
+ * One code (429) covers several different acts, and for two tasks the wording
+ * covered only the first of them. Walking the product found a partner pressing
+ * "Send it again" on a client contact and being told *"too many sign-in
+ * attempts for this account"* — nobody had attempted to sign in, and the only
+ * account named was somebody else's. A refusal that describes the wrong act is
+ * worse than a bare 429, because the reader goes looking for the wrong cause.
+ *
+ * The default is the sign-in sentence, so nothing about that path changed.
+ */
 export class TooManyAttempts extends IdentityError {
-  constructor(readonly retryAfterSeconds: number) {
+  constructor(
+    readonly retryAfterSeconds: number,
+    message = `too many sign-in attempts for this account; retry in ${String(retryAfterSeconds)}s`,
+  ) {
+    super("TOO_MANY_ATTEMPTS", message);
+  }
+}
+
+/**
+ * How long to wait, as somebody at a screen would say it.
+ *
+ * `3582s` is a number a machine produced. A person reads a wait in minutes,
+ * and rounds UP — telling somebody to come back in 59 minutes when the window
+ * closes in 59 minutes and 42 seconds sends them back to the same refusal.
+ */
+export function retryIn(seconds: number): string {
+  if (seconds < 90) return `${String(Math.max(1, Math.ceil(seconds)))} seconds`;
+  const minutes = Math.ceil(seconds / 60);
+  if (minutes < 60) return `${String(minutes)} minutes`;
+  const hours = Math.ceil(minutes / 60);
+  return hours === 1 ? "an hour" : `${String(hours)} hours`;
+}
+
+/**
+ * The invitation was already used: this account HAS a password.
+ *
+ * ── AND IT IS A REFUSAL, NOT A CONVENIENCE ────────────────────────────────
+ *
+ * A portal invite link is redeemed by SETTING a password, so re-issuing one to
+ * somebody who already has theirs is not "sending the invitation again". It is
+ * the firm resetting its client's password — a different act with a different
+ * risk, and one a firm should never be able to perform on a person outside it.
+ * The whole point of the invite flow is that the firm never holds a client's
+ * password (`PortalInviteService`), and a resend that quietly worked here would
+ * hand it back.
+ *
+ * The contact is not stuck: the sign-in page issues a magic link to any active
+ * account, which is the door somebody who has forgotten their password already
+ * has. The message says so, because the person reading it is at a screen
+ * deciding what to do next.
+ */
+export class InvitationAlreadyAccepted extends IdentityError {
+  constructor() {
     super(
-      "TOO_MANY_ATTEMPTS",
-      `too many sign-in attempts for this account; retry in ${String(retryAfterSeconds)}s`,
+      "INVITATION_ALREADY_ACCEPTED",
+      `this contact has already set a password, so there is no invitation left to re-send. ` +
+        `Re-issuing one would let the firm reset its own client's password, which is exactly ` +
+        `what the invite flow exists to prevent. If they cannot get in, they ask the sign-in ` +
+        `page to email them a link.`,
     );
   }
 }

@@ -34,6 +34,8 @@ import {
 import {
   InvalidCredentials,
   InvalidMagicLink,
+  InvitationAlreadyAccepted,
+  retryIn,
   TooManyAttempts,
   NoActiveMembership,
   NotAMember,
@@ -61,6 +63,24 @@ export const LOGIN_ATTEMPTS_PER_WINDOW = 10;
 export const LOGIN_WINDOW_SECONDS = 3600;
 export const MAGIC_LINKS_PER_WINDOW = 3;
 export const MAGIC_LINK_WINDOW_SECONDS = 3600;
+
+/**
+ * Re-invitations to one CONTACT, per hour.
+ *
+ * Keyed on the account being written to and not on the member of the firm
+ * pressing the button, because the cost of getting this wrong lands on somebody
+ * outside the firm: without a limit, this route mails an unbounded stream of
+ * letters to a client an attacker — or a stuck retry loop, or an impatient
+ * partner — chooses. Three is more than a lost link ever needs.
+ *
+ * Unlike `requestMagicLink`'s budget this one is REPORTED, as a 429. That one
+ * returns quietly because answering differently would confirm the address has
+ * an account; here the caller is a member of the firm looking at a contact they
+ * already named, so there is nothing to be quiet about, and silence would look
+ * exactly like the send failing.
+ */
+export const PORTAL_INVITE_RESENDS_PER_WINDOW = 3;
+export const PORTAL_INVITE_RESEND_WINDOW_SECONDS = 3600;
 
 export interface Deps {
   readonly users: UserDirectory;
@@ -103,6 +123,20 @@ export interface SignInResult {
  * working, which is only meaningful if one went. It is null when no link was
  * written at all.
  */
+/**
+ * What came of sending a portal invitation again.
+ *
+ * `supersededLinks` is not decoration: it is how many still-live password
+ * setters this issue spent, and it is the number the ledger event carries. Zero
+ * is the ordinary answer when the first link has already expired — which is the
+ * commonest reason anybody presses the button — and anything above one means
+ * the contact had been re-invited before and had not acted.
+ */
+export interface ResentInvitation {
+  readonly expiresAt: string;
+  readonly supersededLinks: number;
+}
+
 export interface StaffWelcome {
   readonly expiresAt: string | null;
   readonly sent: boolean;
@@ -273,6 +307,100 @@ export class IdentityService {
       firmName,
     );
     return expiresAt;
+  }
+
+  /**
+   * Send the portal invitation AGAIN — same person, same address.
+   *
+   * ── WHY THE ADDRESS IS NOT AN ARGUMENT ──────────────────────────────────
+   *
+   * It comes off the account, and there is no parameter that could change it.
+   * That is the whole security design of this route. "Re-invite this contact"
+   * has two questions behind it — did they lose the link, or has somebody else
+   * taken over that mailbox — and only the first one is answered here. The
+   * second is a new door: it would let anybody holding a firm login move a
+   * client's portal access to an address of their choosing, which wants its own
+   * act, its own ledger event and probably an approval. Guessing it into this
+   * method would have shipped that door with no decision behind it.
+   *
+   * ── THE THREE REFUSALS, AND WHY EACH IS A REFUSAL AND NOT A NO-OP ───────
+   *
+   * A missing or deactivated account answers as `invitePortalContact` does —
+   * there is nobody to write to, and the caller has just picked them off a
+   * screen, so this is a race rather than a typo.
+   *
+   * An account that already has a PASSWORD is refused loudly. See
+   * `InvitationAlreadyAccepted`: re-issuing an invite to somebody who has set
+   * their password is the firm resetting its client's password, and this
+   * product's invite flow exists precisely so the firm never holds it.
+   *
+   * And the budget is spent on the CHECK, before anything is written, so a
+   * caller cannot walk around it by whatever happens next.
+   *
+   * ── AND THE OLD LINKS DIE ───────────────────────────────────────────────
+   *
+   * `consumeUnusedFor` first, so that at most one live invitation exists per
+   * contact at any moment. Before the resend route there was exactly one by
+   * construction; a route that issues a second without spending the first would
+   * quietly turn "one link in one inbox" into a growing pile of password
+   * setters, all valid for seventy-two hours.
+   *
+   * A failed send THROWS, exactly as the first invitation does, and for the
+   * same reason: a client has no other door and a member of the firm is
+   * watching a screen that must not say the letter went when it did not.
+   */
+  async resendPortalInvite(userId: string, firmName: string | null): Promise<ResentInvitation> {
+    const budget = await this.deps.attempts.check(
+      `portal-invite:${userId}`,
+      PORTAL_INVITE_RESENDS_PER_WINDOW,
+      PORTAL_INVITE_RESEND_WINDOW_SECONDS,
+    );
+    if (!budget.allowed) {
+      // NOT the default sentence. This is the one place in the product that
+      // mails a credential to somebody outside the firm, and the refusal is
+      // read by a member of the firm looking at that contact — being told
+      // "too many sign-in attempts for this account" sends them looking for a
+      // login problem that does not exist. Found by walking the screen.
+      throw new TooManyAttempts(
+        budget.retryAfterSeconds,
+        `this contact has already been sent ${String(PORTAL_INVITE_RESENDS_PER_WINDOW)} ` +
+          `invitations in the last hour, so the next one will not go for about ` +
+          `${retryIn(budget.retryAfterSeconds)}. The limit is per contact rather than per ` +
+          `sender, because the cost of getting this wrong lands on their inbox. If none of ` +
+          `them arrived, the address on the account is probably wrong — and changing it is ` +
+          `not something this route can do.`,
+      );
+    }
+
+    const user = await this.deps.users.findById(userId);
+    if (!user || user.status !== "active") throw new InvalidMagicLink();
+
+    const credential = await this.deps.credentials.findByUserId(userId);
+    if (credential) throw new InvitationAlreadyAccepted();
+
+    const now = this.deps.clock.now();
+    const supersededLinks = await this.deps.magicLinks.consumeUnusedFor(
+      userId,
+      "invite",
+      now.toISOString(),
+    );
+
+    const token = this.deps.tokens.newToken();
+    const expiresAt = portalInviteExpiryFrom(now);
+    await this.deps.magicLinks.create({
+      id: this.deps.ids.newId(),
+      userId: user.id,
+      tokenHash: this.deps.tokens.hash(token),
+      purpose: "invite",
+      expiresAt,
+    });
+    await this.deps.mailer.sendPortalInvite(
+      user.email,
+      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      expiresAt,
+      firmName,
+    );
+    return { expiresAt, supersededLinks };
   }
 
   /**

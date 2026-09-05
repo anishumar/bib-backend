@@ -212,6 +212,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `client_assignment.ended` | client_assignment | An assignment was closed — somebody stopped holding a client with nobody named in their place. NOT a delete. |
 | `portal_access.granted` | portal_access | A client-portal login was allowed to read one client's records. ONE CLIENT PER EVENT — a contact who may see four companies has four grants and four of these. Never derived from a group relationship. |
 | `portal_access.ended` | portal_access | A portal login stopped being able to read a client's records. NOT a delete: the payload carries the FIRST DAY NOT IN FORCE. |
+| `portal_invitation.resent` | membership | A client contact's portal invitation was sent again — SAME person, SAME address, which is the only shape that route has. Recorded because it is the one act here that mails a credential to somebody outside the firm on a staff member's say-so, and the question asked afterwards is who kept sending it. Payload: `supersededLinks`, how many still-live invitations this one spent. No email — that is personal data (3.4) and is also the fact the route cannot change. |
 
 > **`membership.revoked` was registered from the first draft of this contract and written by
 > nothing for six tasks.** The vocabulary was agreed before the capability existed, and a verb

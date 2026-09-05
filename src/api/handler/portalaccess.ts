@@ -38,6 +38,16 @@ const PortalAccessSchema = z
         "name or there is no person.",
     }),
     contactDisplayName: z.string().nullable(),
+    contactAccepted: z.boolean().openapi({
+      description:
+        "Whether they have ever set a password — i.e. whether the invitation was ACCEPTED. " +
+        "False is an ordinary state and not a fault: it means the letter went and nobody has " +
+        "acted on it yet. It is on this response because it is what decides whether re-sending " +
+        "the invitation is an action worth offering — once somebody has a password there is no " +
+        "invitation left, and re-issuing one would be the firm resetting its own client's " +
+        "password. Not a date: WHEN they accepted is not a fact this table holds, and a " +
+        "plausible one derived from the grant would be indistinguishable from a real one.",
+    }),
     validFrom: IsoDate,
     validTo: IsoDate.nullable().openapi({
       description:
@@ -121,6 +131,7 @@ function toWire(r: PortalAccessRecord): z.infer<typeof PortalAccessSchema> {
     clientName: r.clientName,
     contactEmail: r.contactEmail,
     contactDisplayName: r.contactDisplayName,
+    contactAccepted: r.contactAccepted,
     validFrom: r.access.validFrom,
     validTo: r.access.validTo,
     grantedByEmail: r.grantedByEmail,

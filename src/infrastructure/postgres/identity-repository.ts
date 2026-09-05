@@ -175,4 +175,22 @@ export class PostgresMagicLinkRepository implements MagicLinkRepository {
     `;
     return rows.length === 1;
   }
+
+  /**
+   * `expires_at > now()` is in the predicate on purpose: an already-expired
+   * link needs no superseding, and leaving its `consumed_at` null keeps the
+   * count honest — the caller reports how many LIVE links this issue replaced,
+   * which is the number worth recording on the ledger event.
+   */
+  async consumeUnusedFor(userId: string, purpose: MagicLinkPurpose, at: string): Promise<number> {
+    const rows = await this.app<{ id: string }[]>`
+      UPDATE tenancy.magic_link SET consumed_at = ${at}::timestamptz
+      WHERE user_id = ${userId}
+        AND purpose = ${purpose}
+        AND consumed_at IS NULL
+        AND expires_at > now()
+      RETURNING id
+    `;
+    return rows.length;
+  }
 }

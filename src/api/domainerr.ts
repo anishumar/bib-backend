@@ -11,6 +11,7 @@ import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
 import { PortalAccessError } from "../domain/portalaccess/errors";
+import { PortalInviteError } from "../domain/portalinvite/errors";
 import { ClientAskError } from "../domain/clientask/errors";
 import { ClientRequestError } from "../domain/clientrequest/errors";
 import { ChaserError } from "../domain/chaser/errors";
@@ -483,6 +484,23 @@ export function mapError(err: unknown): MappedError {
     }
   }
 
+  // Re-sending a client's invitation. Three states, and every one of them is a
+  // well-formed request refused by the firm's own records — the caller fixes it
+  // on the contacts list or by picking a different person, never by resending
+  // this. The FOURTH refusal on that route ("they already set a password") is
+  // an IdentityError, because the password is identity's fact.
+  if (err instanceof PortalInviteError) {
+    switch (err.code) {
+      case "PORTAL_CONTACT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "PORTAL_CONTACT_NOT_A_CLIENT_LOGIN":
+      case "PORTAL_CONTACT_INACTIVE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
   if (err instanceof ClientAssignmentError) {
     switch (err.code) {
       // Malformed in shape or incoherent on its face — the caller fixes the
@@ -879,6 +897,11 @@ export function mapError(err: unknown): MappedError {
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "TOO_MANY_ATTEMPTS":
         return { status: 429, code: "RATE_LIMITED", message: err.message, reason: err.code };
+      // 409: the request is well formed and the STATE refuses it — the contact
+      // has already accepted, so there is no invitation left to send again.
+      // Not a 403: nothing about the caller's access is wrong.
+      case "INVITATION_ALREADY_ACCEPTED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

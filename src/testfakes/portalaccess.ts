@@ -20,8 +20,14 @@ import type {
 
 export class FakePortalAccessRepo implements PortalAccessRepository {
   readonly rows: PortalAccess[] = [];
-  /** membershipId → the contact behind it, for the joined reads. */
-  readonly contacts = new Map<string, { email: string; displayName: string | null }>();
+  /** membershipId → the contact behind it, for the joined reads. `accepted`
+   *  mirrors the adapter's EXISTS over `tenancy.credential`: false is the
+   *  ordinary state of somebody invited who has not set a password yet, so it
+   *  is the DEFAULT here rather than the exception. */
+  readonly contacts = new Map<
+    string,
+    { email: string; displayName: string | null; accepted?: boolean }
+  >();
   /** partyId → client name. */
   readonly clientNames = new Map<string, string>();
   /** userId → the granter, LEFT-join style: an id with no entry resolves to
@@ -37,6 +43,7 @@ export class FakePortalAccessRepo implements PortalAccessRepository {
       clientName: this.clientNames.get(row.clientPartyId) ?? "unnamed client",
       contactDisplayName: contact?.displayName ?? null,
       contactEmail: contact?.email ?? "unknown@example.test",
+      contactAccepted: contact?.accepted ?? false,
       grantedByDisplayName: granter?.displayName ?? null,
       grantedByEmail: granter?.email ?? null,
     };

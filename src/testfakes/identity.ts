@@ -10,7 +10,7 @@
 // identity's UserDirectory and MembershipDirectory, which is interface
 // segregation working as intended: identity asked for a narrow read, and the
 // existing fakes provide it unchanged.
-import type { MagicLink, Session } from "../domain/identity/model";
+import type { MagicLink, MagicLinkPurpose, Session } from "../domain/identity/model";
 import type {
   CredentialRepository,
   Mailer,
@@ -157,6 +157,25 @@ export class FakeMagicLinkRepo implements MagicLinkRepository {
     if (current === undefined || current.consumedAt !== null) return Promise.resolve(false);
     this.rows[i] = { ...current, consumedAt: at };
     return Promise.resolve(true);
+  }
+
+  /**
+   * Mirrors the adapter, INCLUDING the expiry predicate.
+   *
+   * A fake that spent expired links too would let a test assert a superseded
+   * count the real query never returns — and that count is what the resend's
+   * ledger event carries.
+   */
+  consumeUnusedFor(userId: string, purpose: MagicLinkPurpose, at: string): Promise<number> {
+    let n = 0;
+    this.rows.forEach((row, i) => {
+      if (row.userId !== userId || row.purpose !== purpose) return;
+      if (row.consumedAt !== null) return;
+      if (Date.parse(row.expiresAt) <= Date.parse(at)) return;
+      this.rows[i] = { ...row, consumedAt: at };
+      n += 1;
+    });
+    return Promise.resolve(n);
   }
 }
 

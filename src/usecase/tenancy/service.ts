@@ -422,6 +422,23 @@ export class TenancyService {
   }
 
   /**
+   * One membership at this firm, or null.
+   *
+   * Public because a second use case needs it — `PortalInviteService.resend`
+   * starts from an id off a screen and has to know whose account it is, what
+   * audience it is for and whether it still works before it mails anybody. The
+   * tenant id is the first argument and not a convenience: `findById` filters
+   * on it, which is the tenant wall stated in code as well as in RLS.
+   *
+   * Null rather than a throw, because the callers disagree about what a miss
+   * MEANS — this service's own writes raise `MembershipNotFound`, and the
+   * invite path has its own sentence to say about it.
+   */
+  async findMembership(tenantId: string, membershipId: string): Promise<Membership | null> {
+    return this.deps.memberships.findById(tenantId, membershipId);
+  }
+
+  /**
    * Give somebody access to this firm, by email.
    *
    * By EMAIL rather than by user id, because an admin knows an address and not

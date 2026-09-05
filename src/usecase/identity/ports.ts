@@ -101,6 +101,24 @@ export interface MagicLinkRepository {
    * conditional UPDATE, so two simultaneous clicks cannot both open a session.
    */
   consume(id: string, at: string): Promise<boolean>;
+
+  /**
+   * Spend every unused, unexpired link of one purpose for one user, and say how
+   * many were spent.
+   *
+   * ── WHY ISSUING A LINK MUST KILL THE ONES BEFORE IT ─────────────────────
+   *
+   * An `invite` link is redeemed by SETTING A PASSWORD. One still live after
+   * the contact has set theirs is therefore a password reset sitting in an
+   * inbox for a week (`PORTAL_INVITE_TTL_DAYS`), and the resend route is what makes
+   * several of them exist at once. Superseding is the standard shape for a
+   * re-issued invitation and it is what makes the route safe to offer at all.
+   *
+   * Marked CONSUMED rather than deleted, for the same reason `revoke` on a
+   * session is an update: that a link was issued and when it stopped being
+   * usable is itself worth keeping, and `bib_app` holds no DELETE grant here.
+   */
+  consumeUnusedFor(userId: string, purpose: MagicLinkPurpose, at: string): Promise<number>;
 }
 
 // ── Notifications ────────────────────────────────────────────────────────────
