@@ -120,6 +120,27 @@ const RelationshipRecordSchema = z
   })
   .openapi("PartyRelationshipRecord");
 
+/**
+ * One code from the product's relationship vocabulary.
+ *
+ * BOTH sentences are on the wire, and that is the point of the read. A
+ * relationship is one row read from two ends — "Priya is a director of Cobalt
+ * Foods" and "Cobalt Foods has director Priya" — so a screen that recorded one
+ * without the inverse would have to invent the other half, and a screen that
+ * had neither renders `director_of` and an arrow, which is what the client page
+ * showed until this existed.
+ */
+const RelationshipTypeSchema = z
+  .object({
+    code: z.string(),
+    label: z.string().openapi({ description: 'Reads as "{from} is {label} {to}".' }),
+    inverseLabel: z.string().openapi({ description: "The same row from the other end." }),
+    category: z.string().openapi({
+      description: "governance · ownership · employment · commercial.",
+    }),
+  })
+  .openapi("RelationshipType");
+
 const PartyProfileSchema = z
   .object({
     party: PartySchema,
@@ -291,6 +312,41 @@ const addRelationshipRoute = createRoute({
   },
 });
 
+/**
+ * The relationship vocabulary. A LITERAL path, and it must stay one.
+ *
+ * `/api/v1/parties/relationship-types` sits under the same prefix as
+ * `/api/v1/parties/{partyId}`, and the permission table compiles literals
+ * ahead of templates for exactly this reason — a firm's party id would
+ * otherwise be a plausible match for this route and vice versa.
+ */
+const relationshipTypesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/parties/relationship-types",
+  tags: ["party"],
+  summary: "The relationship vocabulary — every code, and the sentence it reads as",
+  description:
+    "Product-owned and the same for every firm, like a currency list: no tenant, nothing " +
+    "editable. It is a READ rather than a constant in each client because the alternative is " +
+    "a copy of a migration's seed data living in a screen, which goes stale the first time " +
+    "the product adds a code — and because a picker that offers `parent_of` is offering a " +
+    "column value to a partner.",
+  responses: {
+    200: {
+      description: "The vocabulary",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ types: z.array(RelationshipTypeSchema) })
+            .openapi("RelationshipTypeList"),
+        },
+      },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
+  },
+});
+
 const listPartiesRoute = createRoute({
   method: "get",
   path: "/api/v1/parties",
@@ -417,6 +473,13 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       s.actor,
     );
     return c.json(identifier, 201);
+  });
+
+  app.openapi(relationshipTypesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const types = await deps.service.relationshipTypes();
+    return c.json({ types: types.map((t) => ({ ...t })) }, 200);
   });
 
   app.openapi(addRelationshipRoute, async (c) => {

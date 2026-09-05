@@ -35,6 +35,7 @@ import type {
   IdentifierRepository,
   PartyRepository,
   RelationshipRecord,
+  RelationshipType,
   RelationshipRepository,
 } from "./ports";
 
@@ -248,6 +249,21 @@ export class PartyService {
       payload: { partyId: input.partyId, identifierType: input.type },
     });
     return identifier;
+  }
+
+  /**
+   * The relationship vocabulary — six product-owned codes, with the sentence
+   * each one reads as from either end.
+   *
+   * A read with no tenant and no permission of its own beyond `party:read`,
+   * because there is nothing here belonging to anybody: it is the same list for
+   * every firm on the platform. It exists because the screen that RECORDS a
+   * relationship had to hardcode the codes and their English to offer them, and
+   * a copy of a migration's seed data living in a component is a copy that goes
+   * stale the first time the product adds a code.
+   */
+  async relationshipTypes(): Promise<readonly RelationshipType[]> {
+    return this.deps.relationships.listRelationshipTypes();
   }
 
   /** Record an effective-dated relationship between two parties. */

@@ -154,10 +154,37 @@ export interface RelationshipRecord {
   readonly direction: "outgoing" | "incoming";
 }
 
+/**
+ * One code from `core.relationship_type` — a GLOBAL, product-owned lookup.
+ *
+ * `label` and `inverseLabel` are the whole reason this is READ and not just
+ * validated. The table stores the sentence both ways round because a
+ * relationship is one row read from two ends: "Priya is a director of Cobalt
+ * Foods" and "Cobalt Foods has director Priya". A screen that only had the
+ * code renders `director_of →`, which is what the client page did until this
+ * read existed — a raw column name and an arrow, shown to a partner.
+ *
+ * Not tenant-scoped, so no `tenantId`: the set belongs to the product. A
+ * firm-editable set is a later feature and would be a different table.
+ */
+export interface RelationshipType {
+  readonly code: string;
+  /** Reads as "{from} is {label} {to}" — "a director of", "the parent of". */
+  readonly label: string;
+  /** The same row from the other end: "has director", "a subsidiary of". */
+  readonly inverseLabel: string;
+  /** governance · ownership · employment · commercial. Groups the choices on a
+   *  picker without the screen inventing its own grouping. */
+  readonly category: string;
+}
+
 export interface RelationshipRepository {
   add(r: NewRelationship): Promise<PartyRelationship>;
   /** relationship_type is a GLOBAL product lookup — a non-tenant read. */
   relationshipTypeExists(code: string): Promise<boolean>;
+  /** The whole lookup, for a picker. Also a non-tenant read, and the reason a
+   *  screen can say "is the parent of" instead of `parent_of`. */
+  listRelationshipTypes(): Promise<RelationshipType[]>;
   /** Every relationship the party is on either side of, each with the party at
    *  the other end — one query, not one per row. */
   listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]>;

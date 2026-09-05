@@ -27,19 +27,39 @@ import type {
   PartyRepository,
   RelationshipRecord,
   RelationshipRepository,
+  RelationshipType,
 } from "../usecase/party/ports";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
 
-// The seeded relationship_type codes (migration 0002).
-const RELATIONSHIP_TYPES = new Set([
-  "director_of",
-  "authorised_signatory_of",
-  "shareholder_of",
-  "parent_of",
-  "employee_of",
-  "client_of",
-]);
+// The seeded relationship_type rows (migration 0002), labels and all — the
+// fake answers `listRelationshipTypes` from the same place it answers
+// `relationshipTypeExists`, so a test cannot pass against a code the picker
+// would never offer.
+const RELATIONSHIP_TYPE_ROWS: readonly RelationshipType[] = [
+  { code: "client_of", label: "a client of", inverseLabel: "serves", category: "commercial" },
+  { code: "employee_of", label: "an employee of", inverseLabel: "employs", category: "employment" },
+  {
+    code: "authorised_signatory_of",
+    label: "an authorised signatory of",
+    inverseLabel: "has authorised signatory",
+    category: "governance",
+  },
+  {
+    code: "director_of",
+    label: "a director of",
+    inverseLabel: "has director",
+    category: "governance",
+  },
+  { code: "parent_of", label: "the parent of", inverseLabel: "a subsidiary of", category: "ownership" },
+  {
+    code: "shareholder_of",
+    label: "a shareholder of",
+    inverseLabel: "has shareholder",
+    category: "ownership",
+  },
+];
+const RELATIONSHIP_TYPES = new Set(RELATIONSHIP_TYPE_ROWS.map((r) => r.code));
 
 export class FakePartyRepo implements PartyRepository {
   parties: Party[] = [];
@@ -239,6 +259,10 @@ export class FakeRelationshipRepo implements RelationshipRepository {
 
   relationshipTypeExists(code: string): Promise<boolean> {
     return Promise.resolve(RELATIONSHIP_TYPES.has(code));
+  }
+
+  listRelationshipTypes(): Promise<RelationshipType[]> {
+    return Promise.resolve([...RELATIONSHIP_TYPE_ROWS]);
   }
 
   /** The counterparty join the real adapter does in SQL. Set `parties` so the

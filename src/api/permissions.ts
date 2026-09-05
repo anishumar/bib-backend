@@ -79,6 +79,11 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
 /** The permission each business route requires. */
 export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/parties"), "party:read" as const],
+  // The product's own vocabulary, not the firm's data — but still behind a
+  // session and behind `party:read`, because it is only ever wanted by somebody
+  // looking at a party and an unauthenticated read is a surface with no reason
+  // to exist.
+  [routeKey("GET", "/api/v1/parties/relationship-types"), "party:read" as const],
   [routeKey("GET", "/api/v1/parties/{partyId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/parties/organizations"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/persons"), "party:write" as const],

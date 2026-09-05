@@ -9,6 +9,7 @@ import type {
   NewRelationship,
   RelationshipRecord,
   RelationshipRepository,
+  RelationshipType,
 } from "../../usecase/party/ports";
 
 interface RelationshipRow {
@@ -52,6 +53,34 @@ export class PostgresRelationshipRepository implements RelationshipRepository {
       if (!row) throw new Error("party_relationship insert returned no row");
       return toRelationship(row);
     });
+  }
+
+  /**
+   * The whole lookup, in the order a picker should offer it.
+   *
+   * Ordered by category then code IN SQL rather than by the caller: the set is
+   * six rows of product data and every screen that shows it wants the same
+   * order, so a component sorting it is one more place for two screens to
+   * disagree about what "first" means.
+   *
+   * No tenant, and no `withTenant`: `core.relationship_type` carries no
+   * `tenant_id` and is deliberately outside RLS — it is ours, like a currency
+   * list, and `bib_app` holds SELECT on it and nothing else.
+   */
+  async listRelationshipTypes(): Promise<RelationshipType[]> {
+    const rows = await this.app<
+      { code: string; label: string; inverse_label: string; category: string }[]
+    >`
+      SELECT code, label, inverse_label, category
+        FROM core.relationship_type
+       ORDER BY category, code
+    `;
+    return rows.map((r) => ({
+      code: r.code,
+      label: r.label,
+      inverseLabel: r.inverse_label,
+      category: r.category,
+    }));
   }
 
   async relationshipTypeExists(code: string): Promise<boolean> {
