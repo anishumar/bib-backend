@@ -942,6 +942,11 @@ export function wire(cfg: Config, log: Logger): Wired {
     // this port structurally, so neither module imports the other — the same
     // seam the catalogue and the reference series arrive through.
     firm: tenancy,
+    // THE QUOTE A LETTER IS WRITTEN UP FROM (T3.5b). The SAME instance the
+    // proposal routes hold, satisfied structurally by `findQuote` — so neither
+    // use case imports the other, and there is one answer to "what did we
+    // actually quote" rather than two reads that can drift.
+    quotes: proposal,
     esign: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),
     ids: systemIds,

@@ -701,6 +701,11 @@ export function mapError(err: unknown): MappedError {
       // CLAUSE_LAW_NOT_ISSUERS (G1.8) sits beside CLAUSE_WRONG_JURISDICTION
       // because it is the same kind of answer — this clause, on this letter,
       // no — and the caller fixes it by naming a different clause.
+      // QUOTE_JURISDICTION_UNCLEAR (T3.5b) is a FIELD the caller did not send,
+      // and the message names the choice. Its sibling QUOTE_NAMES_NO_ENTITY is
+      // deliberately NOT here: nothing about that request is wrong — the quote
+      // is for a prospect holding no entity, which is a fact in the firm's own
+      // records and is fixed there.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -715,11 +720,13 @@ export function mapError(err: unknown): MappedError {
       case "SIGNATURE_INCOMPLETE":
       case "ADVANCE_AMOUNT_REQUIRED":
       case "INVALID_DATE":
+      case "QUOTE_JURISDICTION_UNCLEAR":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LETTER_NOT_FOUND":
       case "LETTER_LINE_NOT_FOUND":
       case "CLAUSE_NOT_FOUND":
       case "ENGAGEMENT_NOT_FOUND":
+      case "QUOTE_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The letter is not in the state this call assumed." None is a malformed
       // request and resending changes nothing — LETTER_NOT_EDITABLE on a SIGNED
@@ -731,7 +738,10 @@ export function mapError(err: unknown): MappedError {
       // for the same reason NO_ISSUING_ENTITY is below: the request is well
       // formed and resending it changes nothing. What is missing is a row in
       // the firm's own records — the issuing entity's registration — and the
-      // message names what to add.
+      // message names what to add. The three QUOTE_ refusals (T3.5b) are the
+      // same shape: a quote in the wrong state, with nothing on it, or naming
+      // no company to deliver to. Each is answered somewhere else — by
+      // recording the acceptance, by adding lines, or by naming the entity.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -743,6 +753,9 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_SUPERSEDABLE":
       case "ALREADY_SUPERSEDED":
       case "ISSUER_JURISDICTION_UNKNOWN":
+      case "QUOTE_NOT_ACCEPTED":
+      case "QUOTE_HAS_NO_LINES":
+      case "QUOTE_NAMES_NO_ENTITY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -80,6 +80,44 @@ export function isAmount(v: string): boolean {
   return AMOUNT_PATTERN.test(v);
 }
 
+/**
+ * The scale an EXCHANGE RATE is stored at — ten, not four.
+ *
+ * ── AND THE BUG THIS EXISTS TO END ────────────────────────────────────────
+ *
+ * `fx_rate` is `numeric(20,10)` on a proposal, an engagement letter and an
+ * invoice, and every one of those routes validated it with `isAmount`, which
+ * allows FOUR. So the API refused a value its own database had just handed
+ * back: Postgres prints a `numeric(20,10)` at full scale, so a rate stored as
+ * "1" reads as "1.0000000000" and re-submitting it answered *"must be a
+ * non-negative decimal STRING with at most four decimal places"*.
+ *
+ * It never bit while every rate was typed by a person, because a person could
+ * only ever type four. Writing a quote up as a letter (T3.5b) is the first
+ * thing in this product that feeds a STORED rate back into a write, and it
+ * failed on the first real click.
+ *
+ * A rate is not a price and four places is a PRICE's rule — minor units run
+ * from 0 to 3, and a unit charge wants a fourth. A rate genuinely needs more:
+ * JPY→INR is 0.5567 to four places and loses real money on a large invoice.
+ * The column has said ten since 0011; this makes the door as wide as the room.
+ */
+export const MAX_RATE_SCALE = 10;
+
+const RATE_PATTERN = /^\d{1,10}(?:\.\d{1,10})?$/;
+
+/**
+ * Whether a string is an exchange rate this product will store.
+ *
+ * Positivity is NOT checked here — the callers do it, because "must be greater
+ * than zero" is a different sentence from "is not a decimal string" and each
+ * deserves its own. Same shape as `isAmount` above it.
+ */
+export function isExchangeRate(v: string): boolean {
+  return RATE_PATTERN.test(v);
+}
+
+
 const SIGNED_AMOUNT_PATTERN = /^-?\d{1,15}(?:\.\d{1,4})?$/;
 
 /**

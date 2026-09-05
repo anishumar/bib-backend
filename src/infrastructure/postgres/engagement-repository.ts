@@ -27,6 +27,7 @@ import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
+  BillableEngagement,
   EngagementRepository,
   FirmSignatureRecord,
   LetterClauseRecord,
@@ -900,4 +901,81 @@ export class PostgresEngagementRepository implements EngagementRepository {
       return rows.map(toEngagement);
     });
   }
+
+  /**
+   * What this client can be billed for, with the terms its letters agreed.
+   *
+   * ONLY SIGNED letters, because an engagement only exists once one is signed —
+   * the join is belt and braces, and it is the column an invoice screen must
+   * not be able to reach past.
+   *
+   * Ordered by the entity and then the letter line's own position, so a group
+   * of four companies reads as four blocks in the order the contract lists
+   * them rather than in insertion order.
+   */
+  async listBillable(
+    tenantId: string,
+    partyId: string,
+  ): Promise<readonly BillableEngagement[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<BillableRow[]>`
+        SELECT e.id, e.entity_party_id, e.status,
+               e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
+               ep.display_name AS entity_name,
+               l.id AS letter_id, l.ref AS letter_ref,
+               ll.description, ll.quantity::text AS quantity,
+               ll.unit_amount::text AS unit_amount, ll.pricing_note,
+               ll.currency, ll.discount_percent::text AS discount_percent,
+               ll.billing_frequency
+          FROM crm.engagement e
+          JOIN crm.engagement_letter l
+            ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
+          JOIN crm.engagement_letter_line ll
+            ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+          JOIN core.party ep
+            ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
+         WHERE e.party_id = ${partyId}
+         ORDER BY ep.display_name ASC, ll.position ASC
+      `;
+      return rows.map((r) => ({
+        engagementId: r.id,
+        entityPartyId: r.entity_party_id,
+        entityName: r.entity_name,
+        letterId: r.letter_id,
+        letterRef: r.letter_ref,
+        description: r.description,
+        quantity: r.quantity,
+        unitAmount: r.unit_amount,
+        pricingNote: r.pricing_note,
+        currency: r.currency,
+        discountPercent: r.discount_percent,
+        billingFrequency: r.billing_frequency,
+        status: r.status,
+        effectiveFrom: r.effective_from,
+        endsOn: r.ends_on,
+      }));
+    });
+  }
+}
+
+/** The joined row behind `listBillable`. `::text` on every numeric and date for
+ *  the reason at the top of this file: postgres.js turns a `date` into an
+ *  INSTANT and a `numeric` into a float, and money is a decimal string here
+ *  from the database to the screen. */
+interface BillableRow {
+  id: string;
+  entity_party_id: string;
+  entity_name: string;
+  letter_id: string;
+  letter_ref: string;
+  description: string;
+  quantity: string;
+  unit_amount: string | null;
+  pricing_note: string | null;
+  currency: string;
+  discount_percent: string;
+  billing_frequency: string | null;
+  status: string;
+  effective_from: string;
+  ends_on: string | null;
 }

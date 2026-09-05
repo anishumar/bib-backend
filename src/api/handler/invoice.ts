@@ -147,8 +147,29 @@ const InvoiceRecordSchema = z
   })
   .openapi("InvoiceRecord");
 
+const BalanceOnListSchema = z
+  .object({
+    paid: Decimal,
+    credited: Decimal,
+    outstanding: Decimal,
+  })
+  .openapi("InvoiceListBalance");
+
 const InvoiceSummarySchema = z
-  .object({ invoice: InvoiceSchema, party: PartyRefSchema, totals: TotalsSchema })
+  .object({
+    invoice: InvoiceSchema,
+    party: PartyRefSchema,
+    totals: TotalsSchema,
+    balance: BalanceOnListSchema.nullable().openapi({
+      description:
+        "What is still owed, from the same view /receivables reads. On the LIST because " +
+        "`status` is about the document and says nothing about money: walked, a fully-settled " +
+        "invoice sat beside one 75 days overdue, both reading `issued` and both showing their " +
+        "full value. NULL on a draft — nobody has been asked yet, and a zero outstanding there " +
+        "would read as settled. Redacted with every other figure for a caller without the fee " +
+        "axis.",
+    }),
+  })
   .openapi("InvoiceSummary");
 
 const RaiseInvoiceRequest = z
@@ -713,6 +734,17 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
           invoice: toInvoiceBody(r.invoice, fees),
           party: { id: r.party.id, displayName: r.party.displayName },
           totals: toTotalsBody(r.totals, fees),
+          // REDACTED WITH THE REST OF THE MONEY, not refused. Somebody without
+          // the fee axis sees which invoices exist and no figures — the rule
+          // every other amount on this screen already follows.
+          balance:
+            r.balance === null || !fees
+              ? null
+              : {
+                  paid: r.balance.paid,
+                  credited: r.balance.credited,
+                  outstanding: r.balance.outstanding,
+                },
         })),
       },
       200,

@@ -41,7 +41,7 @@ import {
 } from "../../domain/engagement/model";
 import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
-import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
   isBillingFrequency,
   outOfPocketProblem,
@@ -61,6 +61,11 @@ import {
   InvalidAmount,
   InvalidDate,
   InvalidJurisdiction,
+  QuoteHasNoLines,
+  QuoteJurisdictionUnclear,
+  QuoteNamesNoEntity,
+  QuoteNotAccepted,
+  QuoteNotFound,
   IssuerJurisdictionUnknown,
   InvalidLetterTransition,
   InvalidLineBillingFrequency,
@@ -82,6 +87,8 @@ import type {
   ContentHasher,
   DocumentIdentity,
   ESignProvider,
+  AcceptedQuoteDirectory,
+  BillableEngagement,
   EngagementRecord,
   EngagementRepository,
   FirmSignatory,
@@ -105,6 +112,9 @@ export interface Deps {
    *  the composition root. */
   readonly firm: FirmSignatory;
   readonly esign: ESignProvider;
+  /** The accepted quote a letter is written up from (T3.5b). Satisfied
+   *  structurally by `ProposalService`, so neither use case imports the other. */
+  readonly quotes: AcceptedQuoteDirectory;
   readonly hasher: ContentHasher;
   readonly ids: IdGen;
   readonly clock: Clock;
@@ -182,6 +192,64 @@ export interface AddLetterLineInput {
   readonly pricingNote?: string | undefined;
 }
 
+export interface DraftFromQuoteInput {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  /**
+   * The country this letter is under.
+   *
+   * Optional, and absent is the ordinary case: when every line of the quote
+   * names the same country, that is the answer and nobody should have to retype
+   * it. When they disagree — or none says — this is REQUIRED, because a letter
+   * states ONE and it settles governing law, the courts and which of the firm's
+   * own companies contracts. Derived-when-obvious, asked-for otherwise; never
+   * guessed.
+   */
+  readonly jurisdiction?: string | undefined;
+  /** Defaults to the quote's own title. */
+  readonly title?: string | undefined;
+  /** The firm's decision and NOT the quote's — a proposal has no advance. */
+  readonly advanceRequired: boolean;
+  readonly advanceAmount?: string | undefined;
+  /**
+   * The company to file a quote line against when the LINE names none.
+   *
+   * Explicit, never inferred. A proposal may quote a prospect that holds no
+   * entity yet, and a letter line must name one because signing it creates an
+   * engagement — one service for one legal entity. Absent, those lines are
+   * SKIPPED and reported rather than filed against a company somebody would
+   * have to notice was wrong on a signed page.
+   */
+  readonly defaultEntityPartyId?: string | undefined;
+  readonly background?: string | undefined;
+  readonly addressedToPartyId?: string | undefined;
+  readonly issuedOn?: string | undefined;
+  readonly effectiveFrom?: string | undefined;
+  readonly issuingEntityPartyId?: string | undefined;
+}
+
+/** A quote line that did NOT become a letter line, and why. */
+export interface SkippedQuoteLine {
+  readonly proposalLineId: string;
+  readonly description: string;
+  readonly reason: string;
+}
+
+/**
+ * What came of writing a quote up as a letter.
+ *
+ * `skipped` is not an error list and must not be rendered as one — it is the
+ * same shape the dashboard's MRR exclusions have, and for the same reason: a
+ * carry-forward that silently dropped three of eight lines would be worse than
+ * one that never ran, because the letter LOOKS complete. Every screen showing
+ * this shows both halves.
+ */
+export interface LetterFromQuote {
+  readonly letter: EngagementLetter;
+  readonly lines: readonly LetterLine[];
+  readonly skipped: readonly SkippedQuoteLine[];
+}
+
 export interface SignInput {
   readonly tenantId: string;
   readonly letterId: string;
@@ -204,7 +272,11 @@ export class EngagementService {
 
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(input.currency);
-    if (!isAmount(input.fxRate) || Number(input.fxRate) <= 0) {
+    // A RATE, not a price: `numeric(20,10)` on this column, so a stored
+    // rate read back at full scale ("1.0000000000") has to be acceptable
+    // input. `isAmount` allows four places and refused it — see
+    // `isExchangeRate`.
+    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
       throw new InvalidAmount("exchange rate", input.fxRate);
     }
 
@@ -308,6 +380,197 @@ export class EngagementService {
       },
     });
     return letter;
+  }
+
+  /**
+   * Write an ACCEPTED quote up as a draft engagement letter (T3.5b).
+   *
+   * ── THE HOLE THIS CLOSES, AND IT WAS FOUND BY WALKING THE PRODUCT ───────
+   *
+   * The accepted proposal's lines, prices and discount reached nothing. The
+   * letter form had no reference to a proposal AT ALL, so 1,75,000 was typed by
+   * hand a second time and nothing in the system would have caught a fourth
+   * digit. And pressing "Client accepted" left a page with zero controls on it:
+   * the next thing IS a letter, and the product neither said so nor offered it.
+   *
+   * ── WHAT IS COPIED, AND WHAT IS DELIBERATELY NOT ────────────────────────
+   *
+   * Every line, with its pinned service version, its wording, its quantity, its
+   * price, its discount, its billing frequency, its four scope overrides, its
+   * out-of-pocket estimate and its pricing note. The CURRENCY, the rate and the
+   * rate's date come from the quote and cannot be overridden: changing the
+   * currency underneath copied amounts would reinterpret 1,75,000 rupees as
+   * 1,75,000 dollars, which is the exact class of mistake this method exists to
+   * end.
+   *
+   * NOT copied: the advance (a proposal has none — it is the firm's decision
+   * here), the clauses (a letter's terms are chosen from the library against
+   * ITS jurisdiction, and a quote has none), and the totals (a number the
+   * database computed for a different document; the letter computes its own).
+   *
+   * ── THE TWO THINGS A QUOTE CANNOT ANSWER, AND NEITHER IS GUESSED ────────
+   *
+   * A letter states ONE country and a proposal states one PER LINE. When the
+   * lines agree that is the answer; when they do not, the caller says which,
+   * because that field settles governing law and the courts.
+   *
+   * And a letter line must name the company the work is for, while a proposal
+   * line may not: a proposal is an offer and the prospect may hold no entity
+   * yet. A line with none is filed against `defaultEntityPartyId` when the
+   * caller named one, and otherwise SKIPPED AND REPORTED — never filed against
+   * a company nobody chose, because on a signed page a guessed party is
+   * indistinguishable from one somebody agreed to.
+   *
+   * ── ORDER, AND WHY NOTHING IS WRITTEN UNTIL EVERY REFUSAL HAS RUN ───────
+   *
+   * `draft` draws a reference number from a counter that commits on its own, so
+   * a letter that fails after that point BURNS one. Every check therefore
+   * happens first, including "could any line be copied at all" — a letter with
+   * a spent number, no lines and no way to add any is a worse outcome than a
+   * refusal naming what to fix.
+   */
+  async draftFromQuote(input: DraftFromQuoteInput, actor: Actor): Promise<LetterFromQuote> {
+    const found = await this.deps.quotes.findQuote(input.tenantId, input.proposalId);
+    if (found === null) throw new QuoteNotFound(input.proposalId);
+    const quote = found.proposal;
+    if (quote.status !== "accepted") throw new QuoteNotAccepted(quote.ref, quote.status);
+    if (found.lines.length === 0) throw new QuoteHasNoLines(quote.ref);
+
+    const jurisdiction = this.jurisdictionFor(quote.ref, found.lines, input.jurisdiction);
+
+    // Decided BEFORE the reference number is drawn. `entityFor` is pure, so
+    // asking it twice costs nothing and buys the one thing that matters: a
+    // quote whose every line is entity-less is refused with a sentence rather
+    // than turned into an empty letter holding a spent number.
+    const usable = found.lines.filter(
+      (line) => this.entityFor(line, input.defaultEntityPartyId) !== null,
+    );
+    if (usable.length === 0) throw new QuoteNamesNoEntity(quote.ref, found.lines.length);
+
+    const letter = await this.draft(
+      {
+        tenantId: input.tenantId,
+        partyId: quote.partyId,
+        proposalId: quote.id,
+        // The quote's own issuer unless the caller says otherwise: the firm
+        // already decided which of its companies was offering this, and a
+        // letter that quietly contracted through a different one would change
+        // the client's counterparty between the quote and the contract.
+        issuingEntityPartyId: input.issuingEntityPartyId ?? quote.issuingEntityPartyId,
+        jurisdiction,
+        title: input.title ?? quote.title,
+        currency: quote.currency,
+        fxRate: quote.fxRate,
+        fxRateDate: quote.fxRateDate,
+        advanceRequired: input.advanceRequired,
+        advanceAmount: input.advanceAmount,
+        background: input.background,
+        addressedToPartyId: input.addressedToPartyId,
+        issuedOn: input.issuedOn,
+        effectiveFrom: input.effectiveFrom,
+      },
+      actor,
+    );
+
+    const lines: LetterLine[] = [];
+    const skipped: SkippedQuoteLine[] = [];
+    // IN ORDER, one at a time. `addLine` takes each line's `position` from what
+    // is already on the letter, so writing these in parallel would put the
+    // terms of a contract in an order decided by which round trip finished
+    // first.
+    for (const line of found.lines) {
+      const entityPartyId = this.entityFor(line, input.defaultEntityPartyId);
+      if (entityPartyId === null) {
+        skipped.push({
+          proposalLineId: line.id,
+          description: line.description,
+          reason:
+            "This line does not say which company the work is for. A letter line has to, " +
+            "because signing it creates an engagement — one service for one legal entity. " +
+            "Add it to the letter by hand, naming the company.",
+        });
+        continue;
+      }
+      lines.push(
+        await this.addLine({
+          tenantId: input.tenantId,
+          letterId: letter.id,
+          entityPartyId,
+          serviceVersionId: line.serviceVersionId,
+          description: line.description,
+          quantity: line.quantity,
+          ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
+          discountPercent: line.discountPercent,
+          ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
+          ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+          ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
+          ...(line.clientObligationsOverride === null
+            ? {}
+            : { clientObligationsOverride: line.clientObligationsOverride }),
+          ...(line.volumeLimitsOverride === null
+            ? {}
+            : { volumeLimitsOverride: line.volumeLimitsOverride }),
+          ...(line.exclusionsOverride === null
+            ? {}
+            : { exclusionsOverride: line.exclusionsOverride }),
+          ...(line.oopEstimate === null ? {} : { oopEstimate: line.oopEstimate }),
+          ...(line.pricingNote === null ? {} : { pricingNote: line.pricingNote }),
+        }),
+      );
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "engagement_letter.drafted_from_proposal",
+      objectId: letter.id,
+      actor,
+      // Counts, not content. HOW MANY of a client's agreed lines did not make
+      // it onto the contract is what this row is read for, and the descriptions
+      // that would answer "which" are the client's own words.
+      payload: {
+        proposalId: quote.id,
+        linesCopied: lines.length,
+        linesSkipped: skipped.length,
+        // Whether a person had to state the country, or the quote answered it.
+        jurisdictionStated: input.jurisdiction !== undefined,
+        defaultEntityUsed: input.defaultEntityPartyId !== undefined,
+      },
+    });
+
+    return { letter, lines, skipped };
+  }
+
+  /** The company a quote line's work is for: the line's own, then the caller's
+   *  stated fallback, then null — which is a SKIP and never a guess. */
+  private entityFor(
+    line: { readonly entityPartyId: string | null },
+    fallback: string | undefined,
+  ): string | null {
+    return line.entityPartyId ?? fallback ?? null;
+  }
+
+  /**
+   * The country the letter is under.
+   *
+   * Stated wins; otherwise the quote answers only when its lines AGREE. Two
+   * countries on one quote is a real thing a firm sells and it is two letters,
+   * because governing law is a document-level term — so the refusal says that
+   * rather than picking whichever line came first.
+   */
+  private jurisdictionFor(
+    ref: string,
+    lines: readonly { readonly jurisdiction: string | null }[],
+    stated: string | undefined,
+  ): string {
+    if (stated !== undefined && stated.trim() !== "") return stated;
+    const named = [
+      ...new Set(
+        lines.map((l) => l.jurisdiction).filter((j): j is string => j !== null && j.trim() !== ""),
+      ),
+    ];
+    const only = named[0];
+    if (named.length !== 1 || only === undefined) throw new QuoteJurisdictionUnclear(ref, named);
+    return only;
   }
 
   async addLine(input: AddLetterLineInput): Promise<LetterLine> {
@@ -747,6 +1010,36 @@ export class EngagementService {
     });
     for (const engagement of result.released) await this.recordActivation(engagement, actor);
     return { letter: result.letter, released: this.withState(result.released) };
+  }
+
+  /**
+   * What this client can be billed for, with the terms its letters agreed
+   * (T3.5b).
+   *
+   * ── THE OTHER HALF OF THE CARRY-FORWARD, AND IT IS A READ ───────────────
+   *
+   * The walk found the letter's agreed price reaching nothing: the invoice line
+   * had no catalogue picker and no link to the letter, so the same figure was
+   * typed a third time. `crm.invoice_line.engagement_id` has existed since T3.4
+   * with nothing offering it — this is the read that lets a screen offer it,
+   * with the agreed price beside each one.
+   *
+   * A READ rather than a "raise an invoice from this letter" write, and that is
+   * the design: a letter is the whole contract and an invoice bills a PERIOD of
+   * it. Which period, which of the client's companies and which services go on
+   * one document are decisions somebody takes every month, so a bulk act would
+   * produce a document nobody chose the shape of and the firm would edit it
+   * back down — more typing than it saved.
+   *
+   * EVERY engagement comes back, including the ones that cannot be billed yet:
+   * `pending_advance` means the letter asked for an advance nobody has
+   * recorded. Filtering them out here would leave a screen unable to explain
+   * why a service the client signed for is missing from the picker, which is
+   * the blank-versus-absent failure this codebase has now paid for several
+   * times. The caller decides what to OFFER; this says what is true.
+   */
+  async billableFor(tenantId: string, partyId: string): Promise<readonly BillableEngagement[]> {
+    return this.deps.letters.listBillable(tenantId, partyId);
   }
 
   async listEngagements(tenantId: string, letterId: string): Promise<readonly EngagementRecord[]> {

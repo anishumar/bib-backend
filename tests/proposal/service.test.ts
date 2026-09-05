@@ -203,7 +203,33 @@ describe("drafting", () => {
     ).rejects.toBeInstanceOf(InvalidQuoteCurrency);
   });
 
-  it.each([["0"], ["-1"], ["one"], ["1.000000001"]])(
+  it("ACCEPTS a rate at the column's full scale, because that is what it reads back as", async () => {
+    // Postgres prints a `numeric(20,10)` at full scale, so a rate stored as "1"
+    // comes back as "1.0000000000". Refusing it made the API reject a value it
+    // had itself just produced — invisible while every rate was typed by a
+    // person, and the first click of writing a quote up as a letter hit it.
+    const s = setup();
+    const drafted = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "x",
+        currency: "INR",
+        fxRate: "1.0000000000",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    expect(drafted.fxRate).toBe("1.0000000000");
+  });
+
+  // "1.000000001" USED TO BE ON THIS LIST and should not have been. It is nine
+  // decimal places and `fx_rate` is `numeric(20,10)`, so the database stores it
+  // exactly — the assertion was encoding `isAmount`'s FOUR-place rule, which is
+  // a PRICE's rule, on a column that never had it. Eleven places is the real
+  // boundary: past the column's scale, Postgres rounds silently, and a rate
+  // quietly rounded is a converted total quietly wrong.
+  it.each([["0"], ["-1"], ["one"], ["1.00000000001"]])(
     "refuses %j as an exchange rate",
     async (rate) => {
       // Zero in particular: it would make every converted total zero, and

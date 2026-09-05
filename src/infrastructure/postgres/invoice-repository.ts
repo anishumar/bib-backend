@@ -309,6 +309,9 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           net: string | null;
           tax: string | null;
           total: string | null;
+          paid: string | null;
+          credited: string | null;
+          outstanding: string | null;
         })[]
       >`
         SELECT i.id, i.tenant_id, i.party_id, i.entity_party_id, i.number, i.financial_year,
@@ -316,13 +319,21 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
                i.due_on, i.irn, i.irn_registered_at, i.notes,
                p.display_name AS party_name,
                t.line_count::text, t.gross::text, t.discount::text, t.net::text,
-               t.tax::text, t.total::text
+               t.tax::text, t.total::text,
+               b.paid::text, b.credited::text, b.outstanding::text
         FROM crm.invoice i
         JOIN core.party p ON p.id = i.party_id
         -- LEFT, because a draft with no lines yet has no totals row and must
         -- still appear in the list — that is precisely the invoice somebody is
         -- looking for when they open this screen.
         LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id
+        -- WHAT IS STILL OWED, from the SAME view /receivables reads, so the
+        -- list and the collections screen cannot disagree about a settled
+        -- invoice. The view holds a row for EVERY invoice, drafts included, so
+        -- this join never misses — which is why the draft rule lives in the
+        -- mapping below rather than here, where a LEFT JOIN would look like it
+        -- was doing something it is not.
+        JOIN crm.invoice_balance b ON b.invoice_id = i.id
         WHERE (${filters.status ?? null}::text IS NULL OR i.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR i.party_id = ${filters.partyId ?? null})
         ORDER BY i.created_at DESC
@@ -339,6 +350,25 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           total: r.total ?? "0",
           currency: r.currency,
         },
+        // ONLY AN ISSUED INVOICE OWES ANYTHING, and the rule is here rather
+        // than in the query because `crm.invoice_balance` holds a row for every
+        // invoice whatever its status.
+        //
+        // A DRAFT's "outstanding" is its own total and nobody has been asked
+        // for it. A CANCELLED one's is the total of a document that was
+        // WITHDRAWN — walked, and it read as ₹7,080 owed on an invoice the firm
+        // had already pulled. `/receivables` has always filtered
+        // `status = 'issued'`; this is the same rule, so the list and the
+        // collections screen cannot disagree about who owes what. The fake
+        // mirrors it exactly.
+        balance:
+          r.status === "issued"
+            ? {
+                paid: r.paid ?? "0",
+                credited: r.credited ?? "0",
+                outstanding: r.outstanding ?? "0",
+              }
+            : null,
       }));
     });
   }

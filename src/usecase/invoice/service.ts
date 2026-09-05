@@ -37,7 +37,7 @@ import {
   isSeriesPrefix,
 } from "../../domain/invoice/model";
 import {
-  isAmount,
+  isAmount, isExchangeRate,
   isCurrencyCode,
   isSignedAmount,
   normalizeCurrency,
@@ -117,7 +117,11 @@ export class InvoiceService {
     if (!isCurrencyCode(currency)) throw new InvalidInvoiceCurrency(input.currency);
     // Positive, not merely non-negative: a rate of zero would make every
     // converted total zero and nothing would look wrong until a report did.
-    if (!isAmount(input.fxRate) || Number(input.fxRate) <= 0) {
+    // A RATE, not a price: `numeric(20,10)` on this column, so a stored
+    // rate read back at full scale ("1.0000000000") has to be acceptable
+    // input. `isAmount` allows four places and refused it — see
+    // `isExchangeRate`.
+    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
       throw new InvalidInvoiceAmount("fxRate", input.fxRate);
     }
     this.dateOrThrow("fxRateDate", input.fxRateDate);

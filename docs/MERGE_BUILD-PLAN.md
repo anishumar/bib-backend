@@ -4306,6 +4306,77 @@ phase is unchanged and still externally gated.
   >      refusal. This repo's own rule — offering what will fail is a slower error — applied to a
   >      row that was easy to miss because the other three impossible ones were already disabled.
 
+- [x] `(A)` **T3.5b** The pipeline carries its terms forward, so a price is typed ONCE. *Acc: an accepted quote is written up as a letter with every line, price and discount carried; an invoice line is billed from the engagement the letter created, at the price it agreed; and `/invoices` says what is still owed.*
+  > **DONE 2026-09-07. No migration** — `engagement_letter.proposal_id` (0017) and
+  > `invoice_line.engagement_id` (0027) have both existed since their modules shipped, with
+  > nothing offering either. `check` **1639** · `test:integration` **582** · frontend `check`
+  > clean · `demo:verify` **71** either side of the walk.
+  >
+  > **THE FINDING, FROM THE 2026-09-07 WALK.** ₹1,75,000 was typed by hand THREE times: once on
+  > the quote, once on the letter, once on the invoice. Nothing in the system would have caught
+  > a fourth digit. The letter form had no reference to a proposal at all, the invoice line had
+  > no link to the letter, and pressing "Client accepted" left a page with **zero controls** on
+  > it — the next thing is a letter and the product neither said so nor offered it.
+  >
+  > **HOP ONE IS A WRITE: `POST /proposals/{id}/engagement-letter`.** Every line comes across
+  > with its pinned service version, wording, quantity, price, discount, billing frequency, four
+  > scope overrides and pricing note. The CURRENCY and the rate come from the quote and cannot
+  > be overridden — changing the currency underneath copied amounts reinterprets every figure on
+  > the document, which is the exact mistake this exists to end. NOT carried: the advance (a
+  > proposal has none), the clauses (chosen against the LETTER's jurisdiction), the totals (a
+  > number computed for a document being replaced).
+  >
+  > **THE TWO THINGS A QUOTE CANNOT ANSWER, AND NEITHER IS GUESSED.** A letter states ONE
+  > country and a proposal states one PER LINE: when they agree that is the answer and the field
+  > never appears; when they disagree the caller says which, because it settles governing law
+  > and the courts. And a letter line MUST name the company the work is for while a proposal
+  > line may not — a proposal is an offer and the prospect may hold no entity yet. Such a line
+  > is filed against an explicitly stated fallback or **SKIPPED AND REPORTED**, never against a
+  > company nobody chose: on a signed page a guessed party is indistinguishable from an agreed
+  > one. The screen says which lines will stay behind BEFORE it carries, and the letter shows a
+  > banner after, because a letter that dropped two of eight terms LOOKS complete.
+  >
+  > **HOP TWO IS A READ: `GET /parties/{id}/billable-engagements`**, and that is the design. A
+  > letter is the whole contract; an invoice bills a PERIOD of it, and which period, which
+  > company and which services go on one document are decisions somebody takes every month — a
+  > bulk "invoice this letter" would produce a document nobody chose the shape of. The invoice
+  > line's picker prefills from the LETTER LINE's agreed figure, never the catalogue's list
+  > price, which would quietly bill a negotiated discount away. Rows behind the advance gate
+  > come back MARKED rather than filtered out, so the screen can explain why a signed service
+  > cannot be billed yet.
+  >
+  > **AND `/invoices` NOW SAYS WHAT IS OWED (4d).** `status` is about the DOCUMENT, so a
+  > fully-settled invoice sat beside one 75 days overdue, both reading `issued` and both showing
+  > their full value. From `crm.invoice_balance`, the same view `/receivables` reads. Still no
+  > "paid" badge and there must not be one: paid is arithmetic over invoices, payments and
+  > credit notes, and a cached flag drifts the first time a payment is corrected.
+  >
+  > **THE CATALOGUE PICKER FILLS THE BOXES BESIDE IT (4c)**, on both the proposal and the
+  > letter. Picking "Statutory audit — ₹1,75,000.00" left the wording and the price empty, so
+  > the figure the option had just printed was typed underneath it. Prefilled and EDITABLE, and
+  > the price only when the catalogue's currency matches the document's — a USD list price in a
+  > rupee box is worse than an empty field, because one is obviously unanswered.
+  >
+  > **THREE DEFECTS THE WALK FOUND, and the first is the sharpest:**
+  >
+  >   1. **THE API REFUSED A VALUE ITS OWN DATABASE HAD JUST PRODUCED.** `fx_rate` is
+  >      `numeric(20,10)` on a proposal, a letter and an invoice, and all three validated it
+  >      with `isAmount`, which allows FOUR places. Postgres prints the column at full scale, so
+  >      a rate stored as "1" reads back as "1.0000000000" and re-submitting it answered *"must
+  >      be a non-negative decimal STRING with at most four decimal places"*. Invisible for four
+  >      tasks because every rate was typed by a person and a person can only type four; this is
+  >      the first thing in the product that feeds a STORED rate back into a write, and it died
+  >      on the first real click. `isExchangeRate` / `RateSchema` now match the column. **An
+  >      existing test asserted the wrong rule** — it refused a nine-decimal rate the database
+  >      stores exactly — and was corrected to the real boundary, eleven, past which Postgres
+  >      rounds silently.
+  >   2. **A CANCELLED INVOICE READ AS ₹7,080 OWED.** The balance view holds a row for every
+  >      invoice whatever its status, so the new column showed the total of a document the firm
+  >      had withdrawn. Only an ISSUED invoice carries a balance now — `/receivables`' own rule,
+  >      so the two screens cannot disagree.
+  >   3. **The letter page's Jest-worker 500** was a stale dev server, not the change. Noted
+  >      because it cost time twice: `curl` the route before believing the console.
+
 - [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
 - [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).

@@ -370,8 +370,26 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // that wants signing held back from delivery staff can publish its own role
   // this afternoon, with no deploy. Revisit when one asks.
   [routeKey("GET", "/api/v1/engagement-letters"), "party:read" as const],
+
+  // What a client can be billed for (T3.5b). `party:read`, like every other
+  // read of that client's commercial record — the FIGURES on it are governed by
+  // the fee axis, which is a different question from the permission and is
+  // applied in the handler, exactly as it is on a letter and a proposal.
+  [
+    routeKey("GET", "/api/v1/parties/{partyId}/billable-engagements"),
+    "party:read" as const,
+  ],
   [routeKey("GET", "/api/v1/engagement-letters/{letterId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/engagement-letters"), "party:write" as const],
+
+  // Writing an accepted quote up as a letter (T3.5b). `party:write`, the same
+  // as drafting one by hand, because that is exactly what it is — the terms
+  // arrive already typed. Reading the quote it copies is `party:read`, which
+  // anybody holding `party:write` also has, so this needs no second permission.
+  [
+    routeKey("POST", "/api/v1/proposals/{proposalId}/engagement-letter"),
+    "party:write" as const,
+  ],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/lines"), "party:write" as const],
   [
     routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/lines/{lineId}"),

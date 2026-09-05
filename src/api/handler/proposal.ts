@@ -48,6 +48,19 @@ export const STATUS_VALUES = [
 /** An amount, as it travels: a decimal string, never a JSON number. */
 const AmountSchema = z.string().regex(/^\d{1,15}(?:\.\d{1,4})?$/);
 const CurrencySchema = z.string().length(3);
+
+/**
+ * AN EXCHANGE RATE, and it is NOT the amount schema.
+ *
+ * `fx_rate` is `numeric(20,10)`, so Postgres hands a rate stored as "1" back as
+ * "1.0000000000" — and the amount schema allows four places, so the API refused
+ * a value its own database had just produced. Invisible while every rate was
+ * typed by a person (four is all anybody can type); it failed on the first
+ * click of writing a quote up as a letter, which is the first thing here that
+ * feeds a stored rate back into a write. See `isExchangeRate`.
+ */
+const RateSchema = z.string().regex(/^\d{1,10}(?:\.\d{1,10})?$/);
+
 const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 
 // ── Response schemas ────────────────────────────────────────────────────────
@@ -193,7 +206,7 @@ const ProposalSchema = z
     title: z.string(),
     status: z.enum(STATUS_VALUES),
     currency: CurrencySchema,
-    fxRate: AmountSchema.nullable(),
+    fxRate: RateSchema.nullable(),
     fxRateDate: DaySchema,
     validUntil: DaySchema.nullable(),
     sentAt: z.string().nullable(),
@@ -400,7 +413,7 @@ const DraftProposalRequest = z
     // Both required, and the rate is "1" when they match — stored rather than
     // omitted, so "did we convert this?" is never a question about a null.
     currency: CurrencySchema,
-    fxRate: AmountSchema,
+    fxRate: RateSchema,
     fxRateDate: DaySchema,
     validUntil: DaySchema.optional(),
   })

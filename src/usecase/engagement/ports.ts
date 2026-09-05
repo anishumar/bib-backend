@@ -523,6 +523,15 @@ export interface EngagementRepository {
   ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }>;
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]>;
+
+  /**
+   * Every engagement of one CLIENT, with the terms its letter line agreed.
+   *
+   * Joined in the QUERY and not looked up per row: a screen offering these has
+   * to show the price beside each one, and a lookup per engagement is the
+   * per-row join this codebase keeps being caught by.
+   */
+  listBillable(tenantId: string, partyId: string): Promise<readonly BillableEngagement[]>;
 }
 
 /**
@@ -586,4 +595,127 @@ export interface ESignProvider {
  *  node:crypto, and one adapter serves this and the share tokens. */
 export interface ContentHasher {
   hash(content: string): string;
+}
+
+// ── THE QUOTE A LETTER IS WRITTEN UP FROM (T3.5b) ──────────────────────────
+//
+// Declared in THIS use case's vocabulary rather than imported from
+// `usecase/proposal`, so no use case imports another — the arrangement
+// `usecase/lead` has with `PartyService` through `ProspectDirectory`, and
+// `usecase/portalinvite` has with `TenancyService`. Satisfied structurally by
+// `ProposalService.findQuote`.
+//
+// It asks for the LINES and not the totals, deliberately: a total is a number
+// the database computed for a document that is about to be replaced by another
+// document. What carries across is what was agreed, line by line, and the new
+// document computes its own.
+
+export interface QuotedLine {
+  readonly id: string;
+  /** NULLABLE here and REQUIRED on a letter line, and that asymmetry is the
+   *  whole difficulty of this hop: a proposal may quote a prospect that holds
+   *  no entity yet. See `draftFromQuote`. */
+  readonly entityPartyId: string | null;
+  readonly serviceVersionId: string;
+  readonly description: string;
+  readonly quantity: string;
+  readonly unitAmount: string | null;
+  readonly discountPercent: string;
+  readonly jurisdiction: string | null;
+  readonly billingFrequency: string | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: {
+    readonly min: string;
+    readonly max: string;
+    readonly currency: string;
+  } | null;
+  readonly pricingNote: string | null;
+}
+
+/**
+ * The header, exactly as `Proposal` spells it — so `ProposalService.findQuote`
+ * satisfies this without a mapping step. A mapping would be a second place for
+ * the quote and the letter to drift apart, on the one path whose entire job is
+ * that they do not.
+ */
+export interface QuotedProposalHeader {
+  readonly id: string;
+  /** `PR-2026-0007` — what every refusal on this path quotes back, because a
+   *  uuid is not something anybody can look up on a screen. */
+  readonly ref: string;
+  readonly partyId: string;
+  readonly issuingEntityPartyId: string;
+  readonly title: string;
+  readonly status: string;
+  /** The letter INHERITS all three and there is no override. Reinterpreting
+   *  ₹1,75,000 as $1,75,000 by changing the currency underneath copied amounts
+   *  is precisely the class of mistake this whole hop exists to end. */
+  readonly currency: string;
+  readonly fxRate: string;
+  readonly fxRateDate: string;
+}
+
+export interface QuotedProposal {
+  readonly proposal: QuotedProposalHeader;
+  readonly lines: readonly QuotedLine[];
+}
+
+export interface AcceptedQuoteDirectory {
+  findQuote(tenantId: string, proposalId: string): Promise<QuotedProposal | null>;
+}
+
+/**
+ * WHAT A CLIENT CAN BE BILLED FOR, and the terms already agreed for it (T3.5b).
+ *
+ * ── WHY THIS IS A READ AND NOT A "MAKE AN INVOICE FROM THIS LETTER" WRITE ──
+ *
+ * An invoice is not a letter. A letter is the whole contract; an invoice bills
+ * a PERIOD of it, and which period, which of the client's companies and which
+ * of its services go on one document are decisions a person takes every month.
+ * A bulk "invoice this letter" would produce a document nobody chose the shape
+ * of, and the firm would edit it back down — which is more typing than it saved.
+ *
+ * So the fix for "the letter's agreed price does not reach the invoice" is that
+ * the invoice LINE knows what was agreed. `crm.invoice_line.engagement_id` has
+ * existed since T3.4 with nothing offering it; this is the read that lets a
+ * screen offer it, with the price beside it.
+ *
+ * ── AND THE PRICE IS THE LETTER LINE'S, NOT THE CATALOGUE'S ────────────────
+ *
+ * The catalogue says what the firm asks; the letter says what this client
+ * agreed, which is routinely less. Reading the list price here would quietly
+ * bill a discount away.
+ */
+export interface BillableEngagement {
+  readonly engagementId: string;
+  /** Who the work is DELIVERED TO — an engagement is one service for one legal
+   *  entity, so a group of four companies bills as four of these. */
+  readonly entityPartyId: string;
+  readonly entityName: string;
+  /** The letter this term came from, so a screen can say where the figure is
+   *  from and link to the document the client signed. */
+  readonly letterId: string;
+  readonly letterRef: string;
+  /** The line's own wording — what the client read and agreed to, not the
+   *  catalogue's standard description. */
+  readonly description: string;
+  readonly quantity: string;
+  /** NULL is a real answer and must not render as zero: "as mutually agreed" is
+   *  a term two parties signed, and `pricingNote` says why. An invoice LINE
+   *  cannot be unpriced — it is a demand for a specific sum — so a screen has
+   *  to ask for the figure here rather than prefill one. */
+  readonly unitAmount: string | null;
+  readonly pricingNote: string | null;
+  readonly currency: string;
+  readonly discountPercent: string;
+  readonly billingFrequency: string | null;
+  /** The commercial gate. `pending_advance` means the letter asked for an
+   *  advance nobody has recorded, and billing before that is the firm invoicing
+   *  work it has not been cleared to start. */
+  readonly status: string;
+  readonly effectiveFrom: string;
+  readonly endsOn: string | null;
 }

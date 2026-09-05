@@ -56,6 +56,19 @@ export const ENGAGEMENT_STATE_VALUES = [
 
 const AmountSchema = z.string().regex(/^\d{1,15}(?:\.\d{1,4})?$/);
 const CurrencySchema = z.string().length(3);
+
+/**
+ * AN EXCHANGE RATE, and it is NOT the amount schema.
+ *
+ * `fx_rate` is `numeric(20,10)`, so Postgres hands a rate stored as "1" back as
+ * "1.0000000000" — and the amount schema allows four places, so the API refused
+ * a value its own database had just produced. Invisible while every rate was
+ * typed by a person (four is all anybody can type); it failed on the first
+ * click of writing a quote up as a letter, which is the first thing here that
+ * feeds a stored rate back into a write. See `isExchangeRate`.
+ */
+const RateSchema = z.string().regex(/^\d{1,10}(?:\.\d{1,10})?$/);
+
 const DaySchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const JurisdictionSchema = z.string().length(2);
 
@@ -171,7 +184,7 @@ const LetterSchema = z
     title: z.string(),
     status: z.enum(LETTER_STATUS_VALUES),
     currency: CurrencySchema,
-    fxRate: AmountSchema.nullable(),
+    fxRate: RateSchema.nullable(),
     fxRateDate: DaySchema,
     advanceRequired: z.boolean(),
     advanceAmount: AmountSchema.nullable(),
@@ -398,7 +411,7 @@ const DraftLetterRequest = z
     jurisdiction: JurisdictionSchema,
     title: z.string().min(1),
     currency: CurrencySchema,
-    fxRate: AmountSchema,
+    fxRate: RateSchema,
     fxRateDate: DaySchema,
     advanceRequired: z.boolean().default(false),
     advanceAmount: AmountSchema.optional(),
@@ -472,7 +485,177 @@ const SignRequest = z
   })
   .openapi("SignEngagementLetterRequest");
 
+const DraftFromProposalRequest = z
+  .object({
+    jurisdiction: JurisdictionSchema.optional().openapi({
+      description:
+        "The country this letter is under. OMIT IT when every line of the quote names the same " +
+        "one — that is the answer, and nobody should retype it. Required only when the lines " +
+        "disagree or none says, because a letter states ONE and it settles governing law, the " +
+        "courts and which of the firm's own companies contracts. Derived when it is obvious, " +
+        "asked for otherwise, never guessed.",
+    }),
+    title: z.string().min(1).optional().openapi({
+      description: "Defaults to the quote's own title.",
+    }),
+    advanceRequired: z.boolean().default(false).openapi({
+      description:
+        "The FIRM's decision and not the quote's — a proposal has no advance, so this is not " +
+        "carried across and there is nothing here to inherit.",
+    }),
+    advanceAmount: AmountSchema.optional(),
+    defaultEntityPartyId: z.string().uuid().optional().openapi({
+      description:
+        "Which company to file a quote line against when the LINE names none. Explicit, never " +
+        "inferred: a proposal may quote a prospect that holds no entity yet, and a letter line " +
+        "must name one because signing it creates an engagement — one service for one legal " +
+        "entity. Omit it and those lines are SKIPPED and reported rather than filed against a " +
+        "company nobody chose, which on a signed page is indistinguishable from one somebody " +
+        "agreed to.",
+    }),
+    issuingEntityPartyId: z.string().uuid().optional().openapi({
+      description:
+        "Defaults to the QUOTE's issuer. The firm already decided which of its companies was " +
+        "offering this, and contracting through a different one would change the client's " +
+        "counterparty between the offer and the contract.",
+    }),
+    background: z.string().min(1).max(20000).optional(),
+    addressedToPartyId: z.string().uuid().optional(),
+    issuedOn: DaySchema.optional(),
+    effectiveFrom: DaySchema.optional(),
+  })
+  .openapi("DraftLetterFromProposalRequest");
+
+const SkippedQuoteLineSchema = z
+  .object({
+    proposalLineId: z.string().uuid(),
+    description: z.string(),
+    reason: z.string(),
+  })
+  .openapi("SkippedQuoteLine");
+
+const LetterFromProposalSchema = z
+  .object({
+    letter: LetterSchema,
+    linesCopied: z.number().int(),
+    skipped: z.array(SkippedQuoteLineSchema).openapi({
+      description:
+        "Quote lines that did NOT become letter lines, each with the reason. NOT an error " +
+        "list, and a screen must show it beside the success rather than instead of it: a " +
+        "carry-forward that silently dropped three of eight lines is worse than one that never " +
+        "ran, because the letter LOOKS complete.",
+    }),
+  })
+  .openapi("LetterFromProposal");
+
+const BillableEngagementSchema = z
+  .object({
+    engagementId: z.string().uuid(),
+    entityPartyId: z.string().uuid(),
+    entityName: z.string().openapi({
+      description:
+        "Who the work is DELIVERED TO. An engagement is one service for one legal entity, so a " +
+        "group of four companies appears as four of these — which is exactly the distinction " +
+        "an invoice line has to get right.",
+    }),
+    letterId: z.string().uuid(),
+    letterRef: z.string().openapi({
+      description: "Where the figure comes from, so a screen can cite the signed document.",
+    }),
+    description: z.string().openapi({
+      description:
+        "The LETTER LINE's own wording — what the client read and agreed to, not the " +
+        "catalogue's standard description.",
+    }),
+    quantity: AmountSchema,
+    unitAmount: AmountSchema.nullable().openapi({
+      description:
+        "The price AGREED, not the catalogue's list price — reading the list price here would " +
+        "quietly bill a negotiated discount away. NULL is a real answer: 'as mutually agreed' " +
+        "is a term two parties signed, and `pricingNote` says why. An invoice line cannot be " +
+        "unpriced, so a screen has to ASK for the figure there rather than prefill one.",
+    }),
+    pricingNote: z.string().nullable(),
+    currency: CurrencySchema,
+    discountPercent: AmountSchema,
+    billingFrequency: z.string().nullable(),
+    status: z.string().openapi({
+      description:
+        "The commercial gate. `pending_advance` means the letter asked for an advance nobody " +
+        "has recorded, and billing then is the firm invoicing work it has not been cleared to " +
+        "start. Every engagement is returned including those — a picker that silently dropped " +
+        "them could not explain why a signed service is missing from it.",
+    }),
+    effectiveFrom: DaySchema,
+    endsOn: DaySchema.nullable(),
+  })
+  .openapi("BillableEngagement");
+
+const BillableEngagementsResponse = z
+  .object({ engagements: z.array(BillableEngagementSchema) })
+  .openapi("BillableEngagementsResponse");
+
 // ── Routes ──────────────────────────────────────────────────────────────────
+
+const draftFromProposalRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/{proposalId}/engagement-letter",
+  tags: ["engagement-letters"],
+  summary: "Write an accepted quote up as a draft engagement letter",
+  description:
+    "CARRIES THE TERMS ACROSS so nobody types a price twice. Every line comes over with its " +
+    "pinned service version, its wording, its quantity, its price, its discount, its billing " +
+    "frequency, its scope overrides and its pricing note; the currency and the exchange rate " +
+    "come from the quote and CANNOT be overridden, because changing the currency underneath " +
+    "copied amounts reinterprets every figure on the document. The advance and the clauses are " +
+    "not carried: a proposal has no advance, and a letter's terms are chosen from the library " +
+    "against ITS jurisdiction. Refused unless the client has ACCEPTED — recording the " +
+    "acceptance is the act that turns an offer into something to write up.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: {
+      content: { "application/json": { schema: DraftFromProposalRequest } },
+      required: true,
+    },
+  },
+  responses: {
+    201: {
+      description: "Drafted, with an account of any line that could not be carried",
+      content: { "application/json": { schema: LetterFromProposalSchema } },
+    },
+    400: errorResponse("The quote's lines name more than one country, so say which this letter is under"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse(
+      "The quote is not accepted, has no lines, or names no company for any of them",
+    ),
+  },
+});
+
+const billableRoute = createRoute({
+  method: "get",
+  path: "/api/v1/parties/{partyId}/billable-engagements",
+  tags: ["engagement-letters"],
+  summary: "What this client can be billed for, and the price its letters agreed",
+  description:
+    "THE OTHER HALF OF THE CARRY-FORWARD. `crm.invoice_line.engagement_id` has existed since " +
+    "T3.4 with nothing offering it, so a letter's agreed price reached the invoice only by " +
+    "somebody typing it a third time. This is the read an invoice line's picker is built on: " +
+    "one row per engagement, carrying the LETTER LINE's wording, quantity, agreed price and " +
+    "discount, plus the letter it came from. It is a read and not a 'raise an invoice from " +
+    "this letter' write, because a letter is the whole contract and an invoice bills a period " +
+    "of it — which period and which services is a decision somebody takes every month.",
+  request: { params: z.object({ partyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "Every engagement of this client, billable or not yet",
+      content: { "application/json": { schema: BillableEngagementsResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
 
 const draftRoute = createRoute({
   method: "post",
@@ -863,6 +1046,46 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const body = c.req.valid("json");
     const letter = await deps.service.draft({ tenantId: s.tenantId, ...body }, s.actor);
     return c.json(toLetterBody(letter, seesFees(c.get("principal"))), 201);
+  });
+
+  app.openapi(draftFromProposalRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const out = await deps.service.draftFromQuote(
+      { tenantId: s.tenantId, proposalId, ...body },
+      s.actor,
+    );
+    return c.json(
+      {
+        letter: toLetterBody(out.letter, seesFees(c.get("principal"))),
+        linesCopied: out.lines.length,
+        skipped: out.skipped.map((sk) => ({ ...sk })),
+      },
+      201,
+    );
+  });
+
+  app.openapi(billableRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const engagements = await deps.service.billableFor(s.tenantId, partyId);
+    // MONEY IS REDACTED, NOT REFUSED, exactly as it is on a letter and a
+    // proposal: somebody without the fee axis sees which services the client
+    // has signed for and no figures, rather than an empty list that reads as
+    // "this client has no engagements".
+    const fees = seesFees(c.get("principal"));
+    return c.json(
+      {
+        engagements: engagements.map((e) => ({
+          ...e,
+          unitAmount: fees ? e.unitAmount : null,
+        })),
+      },
+      200,
+    );
   });
 
   app.openapi(listRoute, async (c) => {

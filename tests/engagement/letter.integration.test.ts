@@ -59,6 +59,7 @@ import {
   PostgresObligationInstanceRepository,
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
 import { ObligationService } from "../../src/usecase/obligation/service";
+import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -159,6 +160,11 @@ const service = new EngagementService({
   library: configRepository,
   documents,
   firm: tenancy,
+  // This file exercises the SQL behind a letter, not the quote it may have come
+  // from, so the seam answers "no such proposal" for everything. A real
+  // `ProposalService` here would drag the whole commercial module into a test
+  // about `crm.engagement_letter`.
+  quotes: new FakeAcceptedQuotes(),
   esign: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
   ids: systemIds,
@@ -1206,5 +1212,87 @@ describe("effective dates", () => {
       `,
     ).catch((e: unknown) => e);
     expect((err as { code?: string }).code).toBe("23502"); // not_null_violation
+  });
+});
+
+
+describe("what a client can be BILLED for (T3.5b)", () => {
+  // The other half of the carry-forward, and it is a JOIN — so only Postgres
+  // can say whether it reads the right columns. The whole finding was that the
+  // letter's agreed price reached nothing, so the one thing that matters here
+  // is WHERE THE MONEY COMES FROM.
+
+  it("carries the LETTER LINE's agreed price, not the catalogue's list price", async () => {
+    const id = await signedLetter();
+
+    // Scoped to the letter this test signed. Every case in this file writes to
+    // the same firm and the suite is single-threaded by design, so a read of
+    // "everything partyA has signed" grows with the file.
+    const billable = (await letters.listBillable(tenantA, partyA)).filter(
+      (b) => b.letterId === id,
+    );
+
+    const gst = billable.find((b) => b.description === "GST filing, 12 months");
+    expect(gst).toBeDefined();
+    // 2000 is what this client agreed on the line. The catalogue's own figure
+    // is a different number and reading it here would quietly bill a
+    // negotiated discount away.
+    expect(Number(gst?.unitAmount)).toBe(2000);
+    expect(Number(gst?.quantity)).toBe(12);
+    expect(gst?.currency).toBe("INR");
+  });
+
+  it("says which COMPANY each one is for — a group bills as several", async () => {
+    const id = await signedLetter();
+
+    const billable = (await letters.listBillable(tenantA, partyA)).filter(
+      (b) => b.letterId === id,
+    );
+
+    // An engagement is one service for one legal entity, so the two lines of
+    // one letter are two billable rows naming two different companies. An
+    // invoice line that got this wrong would bill the wrong entity.
+    expect(new Set(billable.map((b) => b.entityPartyId))).toEqual(
+      new Set([entityA1, entityA2]),
+    );
+    expect(billable.every((b) => b.entityName.length > 0)).toBe(true);
+  });
+
+  it("names the letter it came from, so a screen can cite the signed document", async () => {
+    const id = await signedLetter();
+
+    const billable = await letters.listBillable(tenantA, partyA);
+
+    const mine = billable.filter((b) => b.letterId === id);
+    expect(mine).toHaveLength(2);
+    expect(mine.every((b) => b.letterRef.length > 0)).toBe(true);
+  });
+
+  it("returns work still behind the ADVANCE GATE, marked, rather than hiding it", async () => {
+    // Filtering here would leave a screen unable to explain why a service the
+    // client signed for is missing from the picker — the blank-versus-absent
+    // failure this codebase has paid for several times. The caller decides what
+    // to OFFER; this says what is true.
+    const id = await signedLetter("50000");
+
+    const billable = (await letters.listBillable(tenantA, partyA)).filter(
+      (b) => b.letterId === id,
+    );
+
+    expect(billable.length).toBeGreaterThan(0);
+    expect(billable.every((b) => b.status === "pending_advance")).toBe(true);
+  });
+
+  it("does not reach another firm's engagements", async () => {
+    await signedLetter();
+
+    // The tenant wall, stated as a test rather than trusted: this read joins
+    // four tables and a missing `tenant_id` on any one of them is invisible
+    // until somebody else's contract appears in a picker.
+    expect(await letters.listBillable(tenantB, partyA)).toEqual([]);
+  });
+
+  it("is empty for a client with nothing signed — not an error", async () => {
+    expect(await letters.listBillable(tenantA, partyBId)).toEqual([]);
   });
 });

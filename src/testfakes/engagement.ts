@@ -17,6 +17,8 @@ import type {
 import { readClauseBody, readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
+  AcceptedQuoteDirectory,
+  BillableEngagement,
   ClauseLibrary,
   ContentHasher,
   ESignProvider,
@@ -31,6 +33,7 @@ import type {
   NewLetterClause,
   NewLetterLine,
   PinnedService,
+  QuotedProposal,
   SignatureRecord,
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
@@ -289,6 +292,44 @@ export class FakeEngagementRepo implements EngagementRepository {
     );
   }
 
+  /**
+   * The join the adapter does in SQL, done here over the same in-memory rows.
+   *
+   * The one thing it must reproduce is WHERE THE MONEY COMES FROM: the LETTER
+   * LINE's agreed amount and discount, never the catalogue's list price. A fake
+   * that read the pin would let a test pass on a version that quietly bills a
+   * negotiated discount away.
+   */
+  listBillable(tenantId: string, partyId: string): Promise<readonly BillableEngagement[]> {
+    const rows = this.engagements
+      .filter((e) => e.tenantId === tenantId && e.partyId === partyId)
+      .map((e) => {
+        const line = this.lines.find((l) => l.id === e.engagementLetterLineId);
+        const letter = this.letters.find((l) => l.id === e.engagementLetterId);
+        if (!line || !letter) return null;
+        const row: BillableEngagement = {
+          engagementId: e.id,
+          entityPartyId: e.entityPartyId,
+          entityName: `Entity ${e.entityPartyId.slice(-2)}`,
+          letterId: letter.id,
+          letterRef: letter.ref,
+          description: line.description,
+          quantity: line.quantity,
+          unitAmount: line.unitAmount,
+          pricingNote: line.pricingNote,
+          currency: line.currency,
+          discountPercent: line.discountPercent,
+          billingFrequency: line.billingFrequency,
+          status: e.status,
+          effectiveFrom: e.effectiveFrom,
+          endsOn: e.endsOn,
+        };
+        return row;
+      })
+      .filter((r): r is BillableEngagement => r !== null);
+    return Promise.resolve(rows);
+  }
+
   async describeLetter(tenantId: string, letterId: string): Promise<LetterRecord | null> {
     const letter = await this.findLetter(tenantId, letterId);
     if (letter === null) return null;
@@ -531,6 +572,10 @@ export function makeEngagementFakes(): Deps & {
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
   esign: FakeSigner;
+  /** The accepted quotes on file, so a test can put one there — the concrete
+   *  type rather than the port, like `letters` and `library` above, because a
+   *  test needs `add()` and a cast at every call site is a worse way to say so. */
+  quotes: FakeAcceptedQuotes;
   /** The firm's issuing-entity rule, so a test can change it or empty it. */
   firmEntities: FakePreferenceRepo;
   /** Who binds the firm, so a test can name one — or leave nobody. */
@@ -552,6 +597,7 @@ export function makeEngagementFakes(): Deps & {
     documents: identity.documents,
     firmEntities: identity.firmEntities,
     firm: new FakeFirmSignatory(),
+    quotes: new FakeAcceptedQuotes(),
     esign: new FakeSigner(),
     hasher: new FakeHasher(),
     ids: new FakeIds(),
@@ -665,4 +711,25 @@ function pinnedServiceOf(
 function strip(l: LetterLine & { removed: boolean }): LetterLine {
   const { removed: _removed, ...line } = l;
   return line;
+}
+
+/**
+ * The accepted quote a letter is written up from (T3.5b).
+ *
+ * Holds whole quotes by id and answers null for anything else, which is the
+ * one behaviour the adapter has that matters here: `draftFromQuote` says
+ * something different about a proposal that is not there than about one that is
+ * in the wrong state, and a fake that threw would collapse the two.
+ */
+export class FakeAcceptedQuotes implements AcceptedQuoteDirectory {
+  readonly quotes = new Map<string, QuotedProposal>();
+
+  add(quote: QuotedProposal): QuotedProposal {
+    this.quotes.set(quote.proposal.id, quote);
+    return quote;
+  }
+
+  findQuote(_tenantId: string, proposalId: string): Promise<QuotedProposal | null> {
+    return Promise.resolve(this.quotes.get(proposalId) ?? null);
+  }
 }

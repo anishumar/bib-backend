@@ -120,11 +120,21 @@ export class FakeInvoiceRepo implements InvoiceRepository {
             (filters.status === undefined || i.status === filters.status) &&
             (filters.partyId === undefined || i.partyId === filters.partyId),
         )
-        .map((invoice) => ({
-          invoice,
-          party: { id: invoice.partyId, displayName: this.nameOf(invoice.partyId) },
-          totals: this.totalsOf(invoice),
-        })),
+        .map((invoice) => {
+          const b = this.balance(invoice);
+          return {
+            invoice,
+            party: { id: invoice.partyId, displayName: this.nameOf(invoice.partyId) },
+            totals: this.totalsOf(invoice),
+            // ONLY AN ISSUED INVOICE OWES ANYTHING, mirroring the adapter: a
+            // draft has not been asked for and a cancelled one was withdrawn.
+            // `/receivables` has always read it this way.
+            balance:
+              invoice.status === "issued"
+                ? { paid: b.paid, credited: b.credited, outstanding: b.outstanding }
+                : null,
+          };
+        }),
     );
   }
 

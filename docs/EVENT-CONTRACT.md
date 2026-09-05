@@ -254,6 +254,7 @@ version is exactly what gets asked about afterwards.
 | `proposal.rejected` | proposal | A proposal was declined by the recipient. |
 | `proposal.expired` | proposal | A proposal passed its validity date. Written LAZILY — nothing here runs on a timer, so it is recorded the first time somebody tries to act on the proposal. |
 | `engagement_letter.drafted` | engagement_letter | An engagement letter was drafted — the first row in the timeline of a document that will create obligations. |
+| `engagement_letter.drafted_from_proposal` | engagement_letter | A letter was written up FROM an accepted quote (T3.5b), carrying its lines, prices, discounts and scope overrides across. Recorded BESIDE `drafted`, not instead of it — the draft is the same act either way, and this is the extra fact. Payload: `proposalId`, `linesCopied`, `linesSkipped`, and whether a person had to state the country or name a fallback company. Counts only: what would say WHICH lines were dropped is the client's own wording. |
 | `engagement_letter.sent` | engagement_letter | It went to the client for signature. |
 | `engagement_letter.withdrawn` | engagement_letter | Pulled before signature. A SIGNED letter is never withdrawn — it is superseded by a new one. |
 | `engagement_letter.signed` | engagement_letter | The client signed. The letter freezes at this moment (a trigger, 0017) and one engagement is created per line. Payload carries the signature METHOD and the content hash, never the signer's name — that is personal data and lives in the erasable row. |

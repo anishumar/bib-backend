@@ -316,3 +316,121 @@ describe("the tenant wall, at the use case", () => {
     ).rejects.toBeInstanceOf(InvoiceNotFound);
   });
 });
+
+
+describe("the list says what is still OWED, not just what was billed", () => {
+  // Walked: a fully-settled invoice sat beside one seventy-five days overdue,
+  // both reading `issued` and both showing their full value. `status` is about
+  // the DOCUMENT and says nothing about money; /receivables already dropped the
+  // settled one, so the data existed and the list simply never asked for it.
+
+  it("carries paid, credited and outstanding on every ISSUED invoice", async () => {
+    const h = setup();
+    const invoice = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({
+      tenantId: TENANT,
+      invoiceId: invoice.id,
+      description: "Statutory audit",
+      quantity: "1",
+      unitAmount: "100000.00",
+    });
+    await h.service.issue(TENANT, invoice.id, ACTOR);
+    await h.service.recordPayment(
+      { tenantId: TENANT, invoiceId: invoice.id, amount: "40000.00", receivedOn: "2026-07-10", method: "bank_transfer" },
+      ACTOR,
+    );
+
+    const [row] = await h.service.list(TENANT, {});
+
+    // Compared as NUMBERS here and nowhere else in the product: the in-memory
+    // fake carries four decimals where Postgres carries two, and the assertion
+    // is about the arithmetic rather than the scale. Nothing that renders money
+    // may do this — see the note on `formatMoney` in the frontend.
+    expect(Number(row?.balance?.paid)).toBe(40000);
+    expect(Number(row?.balance?.credited)).toBe(0);
+    expect(Number(row?.balance?.outstanding)).toBe(60000);
+  });
+
+  it("tells a SETTLED invoice from an unpaid one, which `status` cannot", async () => {
+    const h = setup();
+    const settled = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({
+      tenantId: TENANT,
+      invoiceId: settled.id,
+      description: "Paid in full",
+      quantity: "1",
+      unitAmount: "10000.00",
+    });
+    await h.service.issue(TENANT, settled.id, ACTOR);
+    await h.service.recordPayment(
+      { tenantId: TENANT, invoiceId: settled.id, amount: "10000.00", receivedOn: "2026-07-10", method: "bank_transfer" },
+      ACTOR,
+    );
+
+    const owing = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({
+      tenantId: TENANT,
+      invoiceId: owing.id,
+      description: "Not paid",
+      quantity: "1",
+      unitAmount: "10000.00",
+    });
+    await h.service.issue(TENANT, owing.id, ACTOR);
+
+    const rows = await h.service.list(TENANT, {});
+    const bySettled = rows.find((r) => r.invoice.id === settled.id);
+    const byOwing = rows.find((r) => r.invoice.id === owing.id);
+
+    // Both are `issued` and both show their full total. Only this tells them
+    // apart, which is the whole point of putting it on the list.
+    expect(bySettled?.invoice.status).toBe(byOwing?.invoice.status);
+    expect(bySettled?.totals.total).toBe(byOwing?.totals.total);
+    expect(Number(bySettled?.balance?.outstanding)).toBe(0);
+    expect(Number(byOwing?.balance?.outstanding)).toBe(10000);
+  });
+
+  it("is NULL on a CANCELLED invoice — it was withdrawn, so it owes nothing", async () => {
+    // Walked: a cancelled invoice sat in the list reading ₹7,080 outstanding.
+    // /receivables has always filtered `status = 'issued'`; the list now reads
+    // it the same way, so the two cannot disagree about who owes what.
+    const h = setup();
+    const killed = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({
+      tenantId: TENANT,
+      invoiceId: killed.id,
+      description: "Withdrawn",
+      quantity: "1",
+      unitAmount: "7080.00",
+    });
+    await h.service.issue(TENANT, killed.id, ACTOR);
+    await h.service.cancel(TENANT, killed.id, ACTOR);
+
+    const [row] = await h.service.list(TENANT, {});
+
+    expect(row?.invoice.status).toBe("cancelled");
+    expect(row?.balance).toBeNull();
+    // The TOTAL stays: a cancelled invoice keeps its number and its figures
+    // forever, which is the whole reason cancelling is not deleting.
+    expect(Number(row?.totals.total)).toBe(7080);
+  });
+
+  it("is NULL on a draft — nobody has been asked, and zero would read as settled", async () => {
+    const h = setup();
+    const draft = await h.service.raise(raise(), ACTOR);
+    await h.service.addLine({
+      tenantId: TENANT,
+      invoiceId: draft.id,
+      description: "Not issued yet",
+      quantity: "1",
+      unitAmount: "10000.00",
+    });
+
+    const [row] = await h.service.list(TENANT, {});
+
+    expect(row?.invoice.status).toBe("draft");
+    expect(row?.balance).toBeNull();
+    // The TOTAL is still there: what the document says is a fact even before
+    // anybody is asked to pay it.
+    expect(Number(row?.totals.total)).toBe(10000);
+  });
+});

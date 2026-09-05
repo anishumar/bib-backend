@@ -70,6 +70,30 @@ export interface InvoiceSummary {
   readonly invoice: Invoice;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly totals: InvoiceTotals;
+  /**
+   * What is still owed on THIS invoice, and what has come off it.
+   *
+   * ── WHY THE LIST CANNOT DO WITHOUT IT ──────────────────────────────────
+   *
+   * Walked: a fully-settled invoice sat beside one seventy-five days overdue,
+   * both reading `issued` and both showing their full value, because `status`
+   * is about the DOCUMENT — drafted, issued, cancelled — and says nothing about
+   * money. `/receivables` correctly dropped the settled one, so the data
+   * existed; the list simply never asked for it.
+   *
+   * From `crm.invoice_balance`, the same view the collections screen reads, so
+   * the two cannot disagree. NOT a stored column and never a badge: "paid" is
+   * arithmetic over invoices, payments and credit notes, and a cached answer
+   * drifts the first time a payment is corrected.
+   *
+   * Null on a DRAFT, which owes nothing because nobody has been asked yet —
+   * and null is not zero: a zero outstanding on a draft would read as settled.
+   */
+  readonly balance: {
+    readonly paid: string;
+    readonly credited: string;
+    readonly outstanding: string;
+  } | null;
 }
 
 export interface InvoiceFilters {

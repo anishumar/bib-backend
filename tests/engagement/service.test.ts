@@ -8,6 +8,7 @@
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import type { QuotedLine, QuotedProposal } from "../../src/usecase/engagement/ports";
 import {
   AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
@@ -26,6 +27,11 @@ import {
   LetterNotSupersedable,
   NoClauses,
   NotAClause,
+  QuoteHasNoLines,
+  QuoteJurisdictionUnclear,
+  QuoteNamesNoEntity,
+  QuoteNotAccepted,
+  QuoteNotFound,
   ServiceNotQuotable,
   InvalidLineBillingFrequency,
   InvalidOutOfPocketEstimate,
@@ -1455,5 +1461,303 @@ describe("G1.8 — a letter cannot print another country's law", () => {
     const record = await s.letters.describeLetter(TENANT, id);
     const law = record?.clauses.find((c) => c.title.startsWith("Governing law"));
     expect(law?.governingLaw?.text).toBe("the laws of the State of Delaware");
+  });
+});
+
+
+describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
+  const QUOTE = "00000000-0000-0000-0000-0000000000q1";
+
+  /** One quote line, with everything a letter line needs already on it. */
+  function quoteLine(over: Partial<QuotedLine> = {}): QuotedLine {
+    return {
+      id: `line-${String(over.description ?? "a")}`,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST monthly filing",
+      quantity: "12",
+      unitAmount: "6000.00",
+      discountPercent: "15",
+      jurisdiction: "IN",
+      billingFrequency: null,
+      scopeOverride: null,
+      clientObligationsOverride: null,
+      volumeLimitsOverride: null,
+      exclusionsOverride: null,
+      oopEstimate: null,
+      pricingNote: null,
+      ...over,
+    };
+  }
+
+  function quoted(
+    lines: readonly QuotedLine[],
+    over: Partial<QuotedProposal["proposal"]> = {},
+  ): QuotedProposal {
+    return {
+      proposal: {
+        id: QUOTE,
+        ref: "PR-2026-0007",
+        partyId: PARTY,
+        issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+        title: "Compliance retainer",
+        status: "accepted",
+        currency: "INR",
+        fxRate: "1.0",
+        fxRateDate: "2026-07-01",
+        ...over,
+      },
+      lines,
+    };
+  }
+
+  function withQuote(quote: QuotedProposal) {
+    const h = setup();
+    h.quotes.add(quote);
+    return h;
+  }
+
+  const ask = (over: Record<string, unknown> = {}) => ({
+    tenantId: TENANT,
+    proposalId: QUOTE,
+    advanceRequired: false,
+    ...over,
+  });
+
+  it("CARRIES THE PRICE ACROSS — the whole point, and what a walk found missing", async () => {
+    // Walked before this existed: the accepted proposal reached nothing, so
+    // 1,75,000 was typed by hand a second time and nothing would have caught a
+    // fourth digit.
+    const h = withQuote(quoted([quoteLine()]));
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines).toHaveLength(1);
+    expect(out.skipped).toEqual([]);
+    expect(out.lines[0]).toMatchObject({
+      description: "GST monthly filing",
+      quantity: "12",
+      unitAmount: "6000.00",
+      discountPercent: "15",
+      serviceVersionId: GST,
+      entityPartyId: ENTITY_A,
+    });
+  });
+
+  it("takes the quote's CURRENCY and rate, and offers no way to change them", async () => {
+    // Changing the currency underneath copied amounts would reinterpret every
+    // figure on the document. There is deliberately no parameter for it.
+    const h = withQuote(quoted([quoteLine()], { currency: "AED", fxRate: "22.5" }));
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.letter.currency).toBe("AED");
+    expect(out.letter.fxRate).toBe("22.5");
+    expect(out.lines[0]?.currency).toBe("AED");
+  });
+
+  it("links the letter back to the quote, and inherits its issuer and title", async () => {
+    const h = withQuote(quoted([quoteLine()]));
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.letter.proposalId).toBe(QUOTE);
+    expect(out.letter.title).toBe("Compliance retainer");
+    // Contracting through a different company would change the client's
+    // counterparty between the offer and the contract.
+    expect(out.letter.issuingEntityPartyId).toBe(SEEDED_FIRM_ENTITY);
+  });
+
+  it("carries an UNPRICED line with its reason, and does not turn it into zero", async () => {
+    const h = withQuote(
+      quoted([
+        quoteLine({ description: "Advisory", unitAmount: null, discountPercent: "0", pricingNote: "As mutually agreed" }),
+      ]),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines[0]?.unitAmount).toBeNull();
+    expect(out.lines[0]?.pricingNote).toBe("As mutually agreed");
+  });
+
+  it("carries the four scope overrides — the words the client actually read", async () => {
+    const h = withQuote(
+      quoted([
+        quoteLine({
+          scopeOverride: "Monthly GSTR-1 and GSTR-3B for two GSTINs.",
+          exclusionsOverride: "Annual return is not included.",
+        }),
+      ]),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines[0]?.scopeOverride).toBe("Monthly GSTR-1 and GSTR-3B for two GSTINs.");
+    expect(out.lines[0]?.exclusionsOverride).toBe("Annual return is not included.");
+  });
+
+  it("keeps the quote's ORDER — the terms of a contract are not a set", async () => {
+    const h = withQuote(
+      quoted([
+        quoteLine({ description: "First" }),
+        quoteLine({ description: "Second" }),
+        quoteLine({ description: "Third" }),
+      ]),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines.map((l) => l.description)).toEqual(["First", "Second", "Third"]);
+    expect(out.lines.map((l) => l.position)).toEqual([...out.lines.map((l) => l.position)].sort((a, b) => a - b));
+  });
+
+  it("derives the country when every line agrees, and nobody retypes it", async () => {
+    const h = withQuote(quoted([quoteLine(), quoteLine({ description: "TDS" })]));
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.letter.jurisdiction).toBe("IN");
+  });
+
+  it("REFUSES when the lines disagree, rather than picking the first", async () => {
+    // Governing law is a document-level term, and two countries on one quote is
+    // two letters. Picking whichever line came first would settle which courts
+    // hear a dispute by array order.
+    const h = withQuote(
+      quoted([quoteLine(), quoteLine({ description: "UAE VAT", jurisdiction: "AE" })]),
+    );
+
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(
+      QuoteJurisdictionUnclear,
+    );
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toThrow(/IN, AE/);
+  });
+
+  it("accepts a stated country when the lines disagree", async () => {
+    const h = withQuote(
+      quoted([quoteLine(), quoteLine({ description: "UAE VAT", jurisdiction: "AE" })]),
+    );
+
+    const out = await h.service.draftFromQuote(ask({ jurisdiction: "AE" }), ACTOR);
+
+    expect(out.letter.jurisdiction).toBe("AE");
+  });
+
+  it("SKIPS a line that names no company, and says so instead of guessing one", async () => {
+    // A proposal may quote a prospect holding no entity; a letter line must
+    // name one, because signing it creates an engagement. On a signed page a
+    // guessed party is indistinguishable from one somebody agreed to.
+    const h = withQuote(
+      quoted([quoteLine(), quoteLine({ description: "Incorporation", entityPartyId: null })]),
+    );
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.lines).toHaveLength(1);
+    expect(out.skipped).toHaveLength(1);
+    expect(out.skipped[0]).toMatchObject({ description: "Incorporation" });
+    expect(out.skipped[0]?.reason).toMatch(/which company the work is for/);
+  });
+
+  it("uses a stated fallback company for those lines when the caller names one", async () => {
+    const h = withQuote(
+      quoted([quoteLine({ description: "Incorporation", entityPartyId: null })]),
+    );
+
+    const out = await h.service.draftFromQuote(ask({ defaultEntityPartyId: ENTITY_B }), ACTOR);
+
+    expect(out.skipped).toEqual([]);
+    expect(out.lines[0]?.entityPartyId).toBe(ENTITY_B);
+  });
+
+  it("refuses BEFORE drafting when no line can be carried — a spent number for nothing", async () => {
+    // `draft` draws a reference from a counter that commits on its own, so a
+    // letter that fails after that point burns one. A letter with a spent
+    // number, no lines and no way to add any is worse than a refusal.
+    const h = withQuote(quoted([quoteLine({ entityPartyId: null })]));
+
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(
+      QuoteNamesNoEntity,
+    );
+    expect(await h.service.list(TENANT, {})).toHaveLength(0);
+  });
+
+  it("refuses a quote the client has not accepted, naming the state it is in", async () => {
+    const h = withQuote(quoted([quoteLine()], { status: "sent" }));
+
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(QuoteNotAccepted);
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toThrow(/PR-2026-0007 is sent/);
+  });
+
+  it("refuses a rejected or expired quote — a client who comes back is a new quote", async () => {
+    for (const status of ["rejected", "expired", "draft"]) {
+      const h = withQuote(quoted([quoteLine()], { status }));
+      await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(
+        QuoteNotAccepted,
+      );
+    }
+  });
+
+  it("refuses a quote with no lines, and one that is not there at all", async () => {
+    const empty = withQuote(quoted([]));
+    await expect(empty.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(
+      QuoteHasNoLines,
+    );
+
+    const missing = setup();
+    await expect(missing.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(
+      QuoteNotFound,
+    );
+  });
+
+  it("records the carry BESIDE the draft, with counts and no client wording", async () => {
+    const h = withQuote(
+      quoted([quoteLine(), quoteLine({ description: "Incorporation", entityPartyId: null })]),
+    );
+
+    await h.service.draftFromQuote(ask(), ACTOR);
+
+    const verbs = h.events.verbs();
+    // Both, and in that order: the draft is the same act either way, and the
+    // second row is the extra fact that the terms were CARRIED.
+    expect(verbs).toContain("engagement_letter.drafted");
+    expect(verbs).toContain("engagement_letter.drafted_from_proposal");
+    const carried = h.events.recorded.find(
+      (e) => e.verb === "engagement_letter.drafted_from_proposal",
+    );
+    expect(carried?.payload).toMatchObject({
+      proposalId: QUOTE,
+      linesCopied: 1,
+      linesSkipped: 1,
+      jurisdictionStated: false,
+      defaultEntityUsed: false,
+    });
+    // Counts only. What would say WHICH lines were dropped is the client's own
+    // wording, and this log cannot be erased.
+    expect(JSON.stringify(carried?.payload)).not.toMatch(/Incorporation/);
+  });
+
+  it("does NOT carry the advance — a proposal has none, so it is the firm's call", async () => {
+    const h = withQuote(quoted([quoteLine()]));
+
+    const out = await h.service.draftFromQuote(
+      ask({ advanceRequired: true, advanceAmount: "50000.00" }),
+      ACTOR,
+    );
+
+    expect(out.letter.advanceRequired).toBe(true);
+    expect(out.letter.advanceAmount).toBe("50000.00");
+  });
+
+  it("leaves the letter a DRAFT with no clauses — terms are chosen against ITS country", async () => {
+    const h = withQuote(quoted([quoteLine()]));
+
+    const out = await h.service.draftFromQuote(ask(), ACTOR);
+
+    expect(out.letter.status).toBe("draft");
+    // And it therefore cannot be sent yet, which is correct: a letter with no
+    // clauses has no terms at all.
+    await expect(h.service.send(TENANT, out.letter.id, ACTOR)).rejects.toBeInstanceOf(NoClauses);
   });
 });

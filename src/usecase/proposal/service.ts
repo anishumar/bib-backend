@@ -41,7 +41,7 @@ import {
   needsDiscountApproval,
   parseShareToken,
 } from "../../domain/proposal/model";
-import { isAmount, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import { readServiceBody } from "../../domain/config/model";
 import {
   isBillingFrequency,
@@ -206,7 +206,11 @@ export class ProposalService {
     if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(input.currency);
     // Positive, not merely non-negative: a rate of zero would make every
     // converted total zero and nothing would look wrong until a report did.
-    if (!isAmount(input.fxRate) || Number(input.fxRate) <= 0) {
+    // A RATE, not a price: `numeric(20,10)` on this column, so a stored
+    // rate read back at full scale ("1.0000000000") has to be acceptable
+    // input. `isAmount` allows four places and refused it — see
+    // `isExchangeRate`.
+    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
       throw new InvalidFxRate(input.fxRate);
     }
 
@@ -399,6 +403,31 @@ export class ProposalService {
 
   async list(tenantId: string, filters: ProposalFilters): Promise<readonly ProposalSummary[]> {
     return this.deps.proposals.list(tenantId, filters);
+  }
+
+  /**
+   * The quote, flat, for whoever is writing it up as a contract (T3.5b).
+   *
+   * NULL rather than a throw, unlike `describe`: the caller is
+   * `EngagementService.draftFromQuote`, and it has its own sentence to say
+   * about a proposal that is not there — one that talks about drafting a
+   * letter rather than about reading a proposal.
+   *
+   * The LINES, unwrapped, and no totals. A total is a number the database
+   * computed for a document that is about to be replaced by a different one;
+   * what carries across is what was agreed, line by line, and the letter
+   * computes its own. Every field a letter line needs is already on
+   * `ProposalLine` under the same name, which is why this returns the rows
+   * rather than a mapped shape — a mapping here would be a second place for
+   * the two documents to drift apart.
+   */
+  async findQuote(
+    tenantId: string,
+    proposalId: string,
+  ): Promise<{ readonly proposal: Proposal; readonly lines: readonly ProposalLine[] } | null> {
+    const record = await this.deps.proposals.describe(tenantId, proposalId);
+    if (record === null) return null;
+    return { proposal: record.proposal, lines: record.lines.map((l) => l.line) };
   }
 
   /**

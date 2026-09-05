@@ -41,7 +41,12 @@ export type EngagementErrorCode =
   | "ALREADY_SUPERSEDED"
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_NOT_ACTIVE"
-  | "SIGNATURE_INCOMPLETE";
+  | "SIGNATURE_INCOMPLETE"
+  | "QUOTE_NOT_FOUND"
+  | "QUOTE_NOT_ACCEPTED"
+  | "QUOTE_HAS_NO_LINES"
+  | "QUOTE_JURISDICTION_UNCLEAR"
+  | "QUOTE_NAMES_NO_ENTITY";
 
 export class LetterNotFound extends EngagementError {
   constructor(id: string) {
@@ -354,6 +359,69 @@ export class SignatureIncomplete extends EngagementError {
       "SIGNATURE_INCOMPLETE",
       `a signature needs ${missing}. A letter recorded as signed with any of it missing is one ` +
         `nobody can verify, which is worse than an unsigned one because it claims otherwise.`,
+    );
+  }
+}
+
+// ── DRAFTING A LETTER FROM AN ACCEPTED QUOTE (T3.5b) ───────────────────────
+//
+// Five refusals, and every one of them is a question only a person can answer.
+// The alternative to each is this product GUESSING a term of a contract — which
+// company the work is for, which country's law governs it — and a guessed term
+// is indistinguishable, on the signed page, from one somebody agreed.
+
+export class QuoteNotFound extends EngagementError {
+  constructor(id: string) {
+    super("QUOTE_NOT_FOUND", `no proposal ${JSON.stringify(id)} at this firm.`);
+  }
+}
+
+export class QuoteNotAccepted extends EngagementError {
+  constructor(ref: string, status: string) {
+    super(
+      "QUOTE_NOT_ACCEPTED",
+      `${ref} is ${status}, and a letter is drafted from a quote the client has ACCEPTED. ` +
+        `Record the acceptance first — that is the act that turns an offer into something to ` +
+        `write up. A quote that was rejected or has expired is not re-opened: a client who ` +
+        `comes back is a new quote.`,
+    );
+  }
+}
+
+export class QuoteHasNoLines extends EngagementError {
+  constructor(ref: string) {
+    super(
+      "QUOTE_HAS_NO_LINES",
+      `${ref} has no lines, so there is nothing to carry across. Drafting an empty letter ` +
+        `would spend a reference number on a document with no terms in it.`,
+    );
+  }
+}
+
+export class QuoteJurisdictionUnclear extends EngagementError {
+  constructor(ref: string, found: readonly string[]) {
+    super(
+      "QUOTE_JURISDICTION_UNCLEAR",
+      found.length === 0
+        ? `no line on ${ref} says which country the work is in, and a letter states one for the ` +
+            `whole document — it settles governing law, the courts, and which of the firm's own ` +
+            `companies contracts. Say which.`
+        : `${ref} quotes work in ${found.join(", ")}, and a letter states ONE country for the ` +
+            `whole document because that is what decides its governing law. Say which this ` +
+            `letter is under, or write one letter per country.`,
+    );
+  }
+}
+
+export class QuoteNamesNoEntity extends EngagementError {
+  constructor(ref: string, lineCount: number) {
+    super(
+      "QUOTE_NAMES_NO_ENTITY",
+      `not one line on ${ref} names the company the work is for, so nothing can be carried ` +
+        `across: a proposal may quote a prospect that holds no entity yet, and every letter ` +
+        `line must name one because signing it creates an engagement, which is one service ` +
+        `for one legal entity. Name the company ${lineCount === 1 ? "that line" : "those lines"} ` +
+        `is for, or add the lines by hand.`,
     );
   }
 }
