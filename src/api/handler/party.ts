@@ -224,6 +224,15 @@ const AddRelationshipBody = z
   })
   .openapi("AddRelationshipRequest");
 
+const EndRelationshipBody = z
+  .object({
+    /** Half-open: the first day the relationship is NOT in force. A director
+     *  who resigned on the 12th is ended on the 12th and the 11th is her last
+     *  day — the same convention as every other date range in this product. */
+    validTo: z.string().date(),
+  })
+  .openapi("EndRelationshipRequest");
+
 // ── Routes ────────────────────────────────────────────────────────────────
 
 const createOrganizationRoute = createRoute({
@@ -309,6 +318,35 @@ const addRelationshipRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org"),
     404: errorResponse("A party was not found"),
+  },
+});
+
+/**
+ * Close an open relationship.
+ *
+ * A POST to a sub-path rather than a PATCH on the relationship: it is one act
+ * with one meaning and one event, not a field being edited, and this codebase
+ * has said so about every other transition it exposes. `{relationshipId}` sits
+ * under `/parties/relationships/`, which is itself a LITERAL — so it cannot
+ * collide with `/parties/{partyId}` the way `/parties/relationship-types`
+ * could.
+ */
+const endRelationshipRoute = createRoute({
+  method: "post",
+  path: "/api/v1/parties/relationships/{relationshipId}/end",
+  tags: ["party"],
+  summary: "Close an open relationship with the day it stopped being in force",
+  request: {
+    params: z.object({ relationshipId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EndRelationshipBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Relationship closed", content: { "application/json": { schema: RelationshipSchema } } },
+    400: errorResponse("The end date is not after the day it began"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
+    404: errorResponse("No such relationship"),
+    409: errorResponse("The relationship has already ended"),
   },
 });
 
@@ -491,6 +529,18 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       s.actor,
     );
     return c.json(relationship, 201);
+  });
+
+  app.openapi(endRelationshipRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { relationshipId } = c.req.valid("param");
+    const { validTo } = c.req.valid("json");
+    const relationship = await deps.service.endRelationship(
+      { tenantId: s.tenantId, relationshipId, validTo },
+      s.actor,
+    );
+    return c.json(relationship, 200);
   });
 
   app.openapi(archivePartyRoute, async (c) => {

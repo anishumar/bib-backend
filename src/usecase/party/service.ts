@@ -29,6 +29,9 @@ import {
   PartyAlreadyArchived,
   PartyNotArchived,
   PartyNotFound,
+  RelationshipAlreadyEnded,
+  RelationshipEndsBeforeItBegan,
+  RelationshipNotFound,
   SelfRelationship,
 } from "../../domain/party/errors";
 import type {
@@ -91,6 +94,16 @@ export interface AddIdentifierInput {
 export interface ArchivePartyInput {
   readonly tenantId: string;
   readonly partyId: string;
+}
+
+export interface EndRelationshipInput {
+  readonly tenantId: string;
+  readonly relationshipId: string;
+  /** The first day the relationship is NOT in force — half-open, the same
+   *  convention as `crm.portal_access`, `crm.client_assignment`,
+   *  `crm.client_freeze` and `core.party_identifier`. A director who resigned
+   *  on the 12th is ended on the 12th, and the 11th is her last day. */
+  readonly validTo: string;
 }
 
 export interface AddRelationshipInput {
@@ -305,6 +318,77 @@ export class PartyService {
       },
     });
     return relationship;
+  }
+
+  /**
+   * Close an open relationship (`party_relationship.ended`).
+   *
+   * ── THE VERB WAS DECLARED AND NOTHING RAISED IT ─────────────────────────
+   *
+   * `party_relationship.ended` has been in the ledger vocabulary since the
+   * module was built, with no route, no service method and no repository
+   * method behind it — the screen that records a relationship said so in prose
+   * and asked a partner to type an end date at the moment of RECORDING, which
+   * only works for a relationship that was already over when the firm heard
+   * about it. A directorship that ends while the product is watching had
+   * nowhere to be written down.
+   *
+   * ── A DATE, NOT "TODAY" ─────────────────────────────────────────────────
+   *
+   * `endAccountTeamAssignment` ends on the caller's own day because that is an
+   * operational fact the firm controls as it happens. This is not: a
+   * resignation has a date the registrar recorded, the firm hears about it
+   * afterwards, and ending it "today" would be wrong by however long the post
+   * took. So the caller names the day and this refuses one that is not after
+   * the day it began — which the database also refuses
+   * (`party_relationship_dates_chk`), and which is why the check here is a
+   * sentence a partner can read rather than the rule itself.
+   *
+   * ── AND IT IS NOT AN EDIT ───────────────────────────────────────────────
+   *
+   * A relationship that already carries an end date is refused rather than
+   * moved. Correcting a date somebody has already been told about is a
+   * different act and would need its own verb; quietly overwriting one would
+   * leave the ledger saying it ended twice, on two different days, with
+   * nothing to say which was true.
+   */
+  async endRelationship(input: EndRelationshipInput, actor: Actor): Promise<PartyRelationship> {
+    const existing = await this.deps.relationships.find(input.tenantId, input.relationshipId);
+    if (!existing) throw new RelationshipNotFound(input.relationshipId);
+    if (existing.validTo !== null) {
+      throw new RelationshipAlreadyEnded(input.relationshipId, existing.validTo);
+    }
+    if (!isValidDateRange(existing.validFrom, input.validTo)) {
+      // NOT `InvalidDateRange`: this caller supplied one date, not two, and the
+      // refusal has to say which day it must be after. See the error's own
+      // comment — it was written after reading the other one on the screen.
+      throw new RelationshipEndsBeforeItBegan(existing.validFrom, input.validTo);
+    }
+
+    const ended = await this.deps.relationships.endIfOpen(
+      input.tenantId,
+      input.relationshipId,
+      input.validTo,
+    );
+    // The read above and this write are two statements. Losing the race reads
+    // exactly like clicking twice, and both are refused rather than writing a
+    // second `ended` event about the same relationship.
+    if (!ended) throw new RelationshipAlreadyEnded(input.relationshipId, input.validTo);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party_relationship.ended",
+      objectId: ended.id,
+      actor,
+      payload: {
+        fromPartyId: ended.fromPartyId,
+        toPartyId: ended.toPartyId,
+        relationshipType: ended.type,
+        validFrom: ended.validFrom,
+        validTo: ended.validTo,
+      },
+    });
+    return ended;
   }
 
   // ── The party lifecycle: archived, never deleted ──────────────────────────

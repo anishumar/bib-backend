@@ -594,6 +594,7 @@ export function mapError(err: unknown): MappedError {
   if (err instanceof PartyError) {
     switch (err.code) {
       case "PARTY_NOT_FOUND":
+      case "RELATIONSHIP_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // Each of these is "the party is not in the state this call assumed", and
       // none is a malformed request. PARTY_HAS_REFERENCES in particular is the
@@ -603,12 +604,14 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_ALREADY_ARCHIVED":
       case "PARTY_NOT_ARCHIVED":
       case "PARTY_HAS_REFERENCES":
+      case "RELATIONSHIP_ALREADY_ENDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":
       case "INVALID_DATE_RANGE":
+      case "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN":
       case "SELF_RELATIONSHIP":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:

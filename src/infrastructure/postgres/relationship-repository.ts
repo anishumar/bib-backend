@@ -55,6 +55,45 @@ export class PostgresRelationshipRepository implements RelationshipRepository {
     });
   }
 
+  async find(tenantId: string, relationshipId: string): Promise<PartyRelationship | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<RelationshipRow[]>`
+        SELECT id, tenant_id, from_party_id, to_party_id, type,
+               valid_from::text AS valid_from, valid_to::text AS valid_to, attributes
+          FROM core.party_relationship
+         WHERE id = ${relationshipId}
+      `;
+      return row ? toRelationship(row) : null;
+    });
+  }
+
+  /**
+   * Close it, and let the WHERE decide whether there was anything to close.
+   *
+   * `valid_to IS NULL` is the guard, so the transition is atomic and the second
+   * of two clicks updates no row and returns null. The date comparison stays in
+   * the database as well (`party_relationship_dates_chk`, 0002): this method is
+   * only ever reached after the service has checked the same thing, and the
+   * constraint is what makes that check a convenience rather than the rule.
+   */
+  async endIfOpen(
+    tenantId: string,
+    relationshipId: string,
+    validTo: string,
+  ): Promise<PartyRelationship | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<RelationshipRow[]>`
+        UPDATE core.party_relationship
+           SET valid_to = ${validTo}
+         WHERE id = ${relationshipId}
+           AND valid_to IS NULL
+        RETURNING id, tenant_id, from_party_id, to_party_id, type,
+                  valid_from::text AS valid_from, valid_to::text AS valid_to, attributes
+      `;
+      return row ? toRelationship(row) : null;
+    });
+  }
+
   /**
    * The whole lookup, in the order a picker should offer it.
    *

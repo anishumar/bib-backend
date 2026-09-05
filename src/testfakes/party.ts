@@ -257,6 +257,31 @@ export class FakeRelationshipRepo implements RelationshipRepository {
     return Promise.resolve(row);
   }
 
+  find(tenantId: string, relationshipId: string): Promise<PartyRelationship | null> {
+    return Promise.resolve(
+      this.rows.find((r) => r.tenantId === tenantId && r.id === relationshipId) ?? null,
+    );
+  }
+
+  /** The real adapter's guard is `AND valid_to IS NULL` in the WHERE, so the
+   *  fake carries it too: a fake that closed an already-closed row would let a
+   *  test pass on a race the database refuses. */
+  endIfOpen(
+    tenantId: string,
+    relationshipId: string,
+    validTo: string,
+  ): Promise<PartyRelationship | null> {
+    const i = this.rows.findIndex(
+      (r) => r.tenantId === tenantId && r.id === relationshipId && r.validTo === null,
+    );
+    if (i === -1) return Promise.resolve(null);
+    const row = this.rows[i];
+    if (!row) return Promise.resolve(null);
+    const ended: PartyRelationship = { ...row, validTo };
+    this.rows[i] = ended;
+    return Promise.resolve(ended);
+  }
+
   relationshipTypeExists(code: string): Promise<boolean> {
     return Promise.resolve(RELATIONSHIP_TYPES.has(code));
   }

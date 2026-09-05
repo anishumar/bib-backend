@@ -13,6 +13,9 @@ import {
   PartyHasReferences,
   PartyNotArchived,
   PartyNotFound,
+  RelationshipAlreadyEnded,
+  RelationshipEndsBeforeItBegan,
+  RelationshipNotFound,
   SelfRelationship,
 } from "../../src/domain/party/errors";
 
@@ -200,6 +203,103 @@ describe("addRelationship", () => {
         toPartyId: orgId, type: "director_of", validFrom: "2021-04-01",
       }, ACTOR),
     ).rejects.toBeInstanceOf(PartyNotFound);
+  });
+});
+
+describe("endRelationship", () => {
+  /**
+   * The verb `party_relationship.ended` was in the ledger vocabulary with
+   * nothing raising it. These are the four things that can happen to a firm
+   * closing a directorship, and the fourth is the one a screen cannot prevent.
+   */
+  async function openDirectorship() {
+    const { service, events } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme" }, ACTOR);
+    const person = await service.createPerson({ tenantId: TENANT, fullName: "Priya Menon" }, ACTOR);
+    const rel = await service.addRelationship({
+      tenantId: TENANT,
+      fromPartyId: person.partyId,
+      toPartyId: org.partyId,
+      type: "director_of",
+      validFrom: "2021-04-01",
+    }, ACTOR);
+    return { service, events, rel };
+  }
+
+  it("closes an open relationship on the day given, and says so in the ledger", async () => {
+    const { service, events, rel } = await openDirectorship();
+    const ended = await service.endRelationship(
+      { tenantId: TENANT, relationshipId: rel.id, validTo: "2026-08-12" },
+      ACTOR,
+    );
+    expect(ended.validTo).toBe("2026-08-12");
+    expect(events.verbs()).toContain("party_relationship.ended");
+    const last = events.recorded[events.recorded.length - 1];
+    expect(last?.objectId).toBe(rel.id);
+    // The payload carries BOTH dates: a reader of the log should not have to
+    // fetch the row to know how long the relationship ran.
+    expect(last?.payload).toMatchObject({ validFrom: "2021-04-01", validTo: "2026-08-12" });
+    // And no name. The ledger carries ids and dates; who Priya is belongs to
+    // the party record.
+    expect(JSON.stringify(events.recorded)).not.toContain("Priya Menon");
+  });
+
+  it("refuses a relationship that has already ended, and does not move the date", async () => {
+    const { service, events, rel } = await openDirectorship();
+    await service.endRelationship(
+      { tenantId: TENANT, relationshipId: rel.id, validTo: "2026-08-12" },
+      ACTOR,
+    );
+    await expect(
+      service.endRelationship(
+        { tenantId: TENANT, relationshipId: rel.id, validTo: "2026-09-01" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(RelationshipAlreadyEnded);
+    // ONE `ended` event, not two. A log that says a relationship ended twice on
+    // two different days cannot be corrected.
+    expect(events.verbs().filter((v) => v === "party_relationship.ended")).toHaveLength(1);
+  });
+
+  it("refuses an end date that is not after the day it began, and names the day", async () => {
+    const { service, rel } = await openDirectorship();
+    // NOT `InvalidDateRange`. That message reads back both of the caller's own
+    // dates, which is right for the form that sends both and useless to
+    // somebody who typed one — measured on the screen before this error existed.
+    const refusal = await service
+      .endRelationship({ tenantId: TENANT, relationshipId: rel.id, validTo: "2021-04-01" }, ACTOR)
+      .catch((e: unknown) => e);
+    expect(refusal).toBeInstanceOf(RelationshipEndsBeforeItBegan);
+    expect((refusal as Error).message).toContain("2021-04-01");
+    expect((refusal as Error).message).toContain("began");
+  });
+
+  it("refuses an unknown relationship", async () => {
+    const { service } = await openDirectorship();
+    await expect(
+      service.endRelationship(
+        {
+          tenantId: TENANT,
+          relationshipId: "44444444-4444-4444-4444-444444444444",
+          validTo: "2026-08-12",
+        },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(RelationshipNotFound);
+  });
+
+  it("refuses another tenant's relationship rather than closing it", async () => {
+    const { service, rel } = await openDirectorship();
+    await expect(
+      service.endRelationship(
+        {
+          tenantId: "22222222-2222-2222-2222-222222222222",
+          relationshipId: rel.id,
+          validTo: "2026-08-12",
+        },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(RelationshipNotFound);
   });
 });
 

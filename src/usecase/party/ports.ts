@@ -180,6 +180,25 @@ export interface RelationshipType {
 
 export interface RelationshipRepository {
   add(r: NewRelationship): Promise<PartyRelationship>;
+  /** One relationship by id, tenant-scoped. Read before ending one so the
+   *  refusal can name WHY — no such row, already closed, or a date before the
+   *  day it began — rather than surfacing a check-constraint violation. */
+  find(tenantId: string, relationshipId: string): Promise<PartyRelationship | null>;
+  /**
+   * Close an OPEN relationship, atomically.
+   *
+   * `valid_to IS NULL` belongs in the WHERE and not in a check the caller makes
+   * first: the read and the write are two statements, so two clicks would
+   * otherwise put two `party_relationship.ended` rows in a ledger that can
+   * never be corrected. Null means nothing was open to close — the service
+   * turns that into the same refusal the pre-read gives, so a race and a repeat
+   * read identically.
+   */
+  endIfOpen(
+    tenantId: string,
+    relationshipId: string,
+    validTo: string,
+  ): Promise<PartyRelationship | null>;
   /** relationship_type is a GLOBAL product lookup — a non-tenant read. */
   relationshipTypeExists(code: string): Promise<boolean>;
   /** The whole lookup, for a picker. Also a non-tenant read, and the reason a

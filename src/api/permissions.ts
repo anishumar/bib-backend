@@ -93,6 +93,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   ],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
+  // Ending one is the same permission as recording one. It is not a delete —
+  // the row stays, it still resolves by id, and what changes is a date the
+  // firm always could have written at the moment of recording.
+  [routeKey("POST", "/api/v1/parties/relationships/{relationshipId}/end"), "party:write" as const],
   // Archiving reuses `party:write` rather than inventing party:archive. It is
   // not a delete — the row stays, it still resolves by id, and un-archiving is
   // one call away — so it is no more destructive than renaming a client, which
