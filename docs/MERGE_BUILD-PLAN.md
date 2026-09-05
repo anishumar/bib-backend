@@ -3572,10 +3572,16 @@ together (what is asked for, and who does the asking), then `T6.7`.
   > this line. A filing approaching its statutory date asks the client for nothing until the
   > firm raises an ask about it — *"your GSTR-3B is due in 3 days"* is a NUDGE, not a request,
   > and it is `T6.7`'s "proactive nudges" with a different subject and a different cadence.
-  > Shrestha's call, 2026-09-01. And there is no SCREEN for the ladder yet: it is reachable
-  > through the generic config API, and an `/admin/chaser-ladder` belongs with the first firm
-  > that wants to edit one — the same position `/admin/structure` took about the confidence
-  > tiers.
+  > Shrestha's call, 2026-09-01.
+  >
+  > **THE SCREEN EXISTS NOW (2026-09-06): `/admin/client-reminders`**, and it holds BOTH
+  > outward ladders — this one and T6.7's nudge — because a partner deciding how often the
+  > firm speaks to the people who pay it is answering one question, and two screens invite two
+  > answers. Separate kinds, separate entries, separate drafts, separate publishes, as 0065 and
+  > 0067 require. Until it was built, a number that lands on a CLIENT was settable only by
+  > curl: the freeze panel on `/clients/[partyId]` read the ladder and named its rungs, and
+  > nothing in the product wrote it. Walked end to end — a draft saved, published, and the
+  > freeze panel then read the new threshold back.
 - [x] `(B)` **T6.7** Self-serve library (docs/challans/invoices), proactive nudges, monthly digest. *Acc: a client finds last year's challan without emailing anyone.*
   > **DONE 2026-09-01 (migrations 0066 and 0067).** `usecase/portallibrary` + `usecase/nudge`,
   > four portal routes, three portal screens, and the reader `client_ask_chase` had been
