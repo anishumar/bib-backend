@@ -49,13 +49,13 @@ export class InvalidKey extends ConfigError {
 
 export class InvalidBody extends ConfigError {
   constructor(kind: string, problem: string) {
-    super("INVALID_BODY", `this ${kind} configuration is not valid: ${problem}`);
+    super("INVALID_BODY", `This ${kind} configuration is not valid: ${problem}`);
   }
 }
 
 export class EntryNotFound extends ConfigError {
   constructor(kind: string, key: string) {
-    super("ENTRY_NOT_FOUND", `this firm has no ${kind} configuration called ${JSON.stringify(key)}`);
+    super("ENTRY_NOT_FOUND", `This firm has no ${kind} configuration called ${JSON.stringify(key)}`);
   }
 }
 
@@ -63,7 +63,7 @@ export class EntryExists extends ConfigError {
   constructor(kind: string, key: string) {
     super(
       "ENTRY_EXISTS",
-      `this firm already has a ${kind} called ${JSON.stringify(key)}. ` +
+      `This firm already has a ${kind} called ${JSON.stringify(key)}. ` +
         `To change it, add a version to it rather than defining it again.`,
     );
   }
@@ -71,7 +71,7 @@ export class EntryExists extends ConfigError {
 
 export class VersionNotFound extends ConfigError {
   constructor(ref: string) {
-    super("VERSION_NOT_FOUND", `no configuration version ${ref}`);
+    super("VERSION_NOT_FOUND", `No configuration version ${ref}`);
   }
 }
 
@@ -93,7 +93,7 @@ export class NoOneWouldAdminister extends ConfigError {
     // helps nobody.
     super(
       "WOULD_LOCK_OUT_ADMINISTRATION",
-      `publishing this would leave the firm's administrator permission only on ` +
+      `Publishing this would leave the firm's administrator permission only on ` +
         `${adminRoles.map((r) => JSON.stringify(r)).join(", ")}, which no active member holds. ` +
         `Nobody would be able to change configuration, including changing it back. Give somebody ` +
         `one of those roles first, or keep the permission on a role people actually have.`,
@@ -105,7 +105,7 @@ export class WouldLockOutAdministration extends ConfigError {
   constructor(role: string, adminPermission: string) {
     super(
       "WOULD_LOCK_OUT_ADMINISTRATION",
-      `publishing this would leave no role in the firm carrying ${JSON.stringify(adminPermission)}, ` +
+      `Publishing this would leave no role in the firm carrying ${JSON.stringify(adminPermission)}, ` +
         `and that permission is what lets anyone change configuration at all — including this. ` +
         `Nobody could undo it from inside the product. Give another role ${JSON.stringify(adminPermission)} ` +
         `first, or keep it on ${JSON.stringify(role)}.`,

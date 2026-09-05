@@ -40,13 +40,13 @@ export type ProposalErrorCode =
 
 export class ProposalNotFound extends ProposalError {
   constructor(id: string) {
-    super("PROPOSAL_NOT_FOUND", `no proposal ${JSON.stringify(id)} at this firm`);
+    super("PROPOSAL_NOT_FOUND", `No proposal ${JSON.stringify(id)} at this firm`);
   }
 }
 
 export class LineNotFound extends ProposalError {
   constructor(id: string) {
-    super("LINE_NOT_FOUND", `no line ${JSON.stringify(id)} on this proposal`);
+    super("LINE_NOT_FOUND", `No line ${JSON.stringify(id)} on this proposal`);
   }
 }
 
@@ -56,7 +56,7 @@ export class NotADraft extends ProposalError {
     // a sent proposal the answer is never "edit it".
     super(
       "NOT_A_DRAFT",
-      `this proposal is ${status}, and only a draft can be changed. The client has the document ` +
+      `This proposal is ${status}, and only a draft can be changed. The client has the document ` +
         `as it was sent; altering it now would leave no record of what they were shown. Draft a ` +
         `new proposal instead — the old one stays readable as what was actually offered.`,
     );
@@ -67,7 +67,7 @@ export class EmptyProposal extends ProposalError {
   constructor() {
     super(
       "EMPTY_PROPOSAL",
-      `a proposal with no lines offers nothing. Add at least one service before sending it.`,
+      `A proposal with no lines offers nothing. Add at least one service before sending it.`,
     );
   }
 }
@@ -76,7 +76,7 @@ export class InvalidTransition extends ProposalError {
   constructor(from: string, to: string) {
     super(
       "INVALID_TRANSITION",
-      `a proposal cannot go from ${from} to ${to}. Sending is one-way, and accepted, rejected ` +
+      `A proposal cannot go from ${from} to ${to}. Sending is one-way, and accepted, rejected ` +
         `and expired are final: a client who comes back is a new quote, which is what keeps the ` +
         `old one readable as what they turned down.`,
     );
@@ -97,7 +97,7 @@ export class ProposalExpired extends ProposalError {
   constructor(validUntil: string) {
     super(
       "PROPOSAL_EXPIRED",
-      `this proposal was valid until ${validUntil} and has now been marked expired. Honouring it ` +
+      `This proposal was valid until ${validUntil} and has now been marked expired. Honouring it ` +
         `late is a commercial decision, not a data one — draft a new proposal, dated today.`,
     );
   }
@@ -124,7 +124,7 @@ export class ApprovalNotNeeded extends ProposalError {
     // decision nobody made.
     super(
       "APPROVAL_NOT_NEEDED",
-      `nothing to approve: the largest discount on this proposal is ${largest}%, within the ` +
+      `Nothing to approve: the largest discount on this proposal is ${largest}%, within the ` +
         `firm's limit of ${limit}%. Recording an approval here would put a sign-off in the audit ` +
         `trail for a decision that was never required.`,
     );
@@ -138,7 +138,7 @@ export class AlreadyApproved extends ProposalError {
     // audit trail would show two approvals where a person gave one.
     super(
       "ALREADY_APPROVED",
-      `this proposal's discount was already approved at ${approvedAt}. Approving again would ` +
+      `This proposal's discount was already approved at ${approvedAt}. Approving again would ` +
         `record a second sign-off for one decision in a log that cannot be corrected. If the ` +
         `discount has changed since, the quote has too — draft a new proposal.`,
     );
@@ -149,7 +149,7 @@ export class ServiceNotFound extends ProposalError {
   constructor(versionId: string) {
     super(
       "SERVICE_NOT_FOUND",
-      `no configuration version ${JSON.stringify(versionId)} at this firm. A proposal line is ` +
+      `No configuration version ${JSON.stringify(versionId)} at this firm. A proposal line is ` +
         `quoted from a catalogue version, and the id has to be one this firm published.`,
     );
   }
@@ -159,7 +159,7 @@ export class NotAService extends ProposalError {
   constructor(versionId: string, kind: string) {
     super(
       "NOT_A_SERVICE",
-      `configuration version ${JSON.stringify(versionId)} is a ${kind}, not a service. A proposal ` +
+      `Configuration version ${JSON.stringify(versionId)} is a ${kind}, not a service. A proposal ` +
         `line quotes something the firm sells.`,
     );
   }
@@ -172,7 +172,7 @@ export class ServiceNotPublished extends ProposalError {
     // quoting it would put a price on a document that the firm never agreed to.
     super(
       "SERVICE_NOT_PUBLISHED",
-      `configuration version ${JSON.stringify(versionId)} is still a draft and was never in ` +
+      `Configuration version ${JSON.stringify(versionId)} is still a draft and was never in ` +
         `force, so it cannot be quoted. Publish it first. (A version that has since been ` +
         `superseded is fine — that is what a pinned quote is supposed to resolve to.)`,
     );
@@ -187,7 +187,7 @@ export class ShareLinkUnknown extends ProposalError {
     // act on the distinction anyway.
     super(
       "SHARE_LINK_UNKNOWN",
-      `this link is not one we recognise. It may have been mistyped, or the proposal may have ` +
+      `This link is not one we recognise. It may have been mistyped, or the proposal may have ` +
         `been withdrawn — ask whoever sent it for a new one.`,
     );
   }
@@ -197,7 +197,7 @@ export class InvalidQuantity extends ProposalError {
   constructor(quantity: string) {
     super(
       "INVALID_QUANTITY",
-      `quantity ${JSON.stringify(quantity)} must be a positive decimal STRING with at most four ` +
+      `Quantity ${JSON.stringify(quantity)} must be a positive decimal STRING with at most four ` +
         `decimal places — "1", "2.5". A number is refused for the same reason an amount is: a ` +
         `float does not hold it exactly.`,
     );
@@ -208,7 +208,7 @@ export class InvalidUnitAmount extends ProposalError {
   constructor(amount: string) {
     super(
       "INVALID_UNIT_AMOUNT",
-      `unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
+      `Unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
         `four decimal places — "25000", "1499.50" — never a number, because a float cannot hold ` +
         `1499.50 exactly and the error is invisible in one line and material in a total.`,
     );
@@ -219,7 +219,7 @@ export class UnpricedLineNeedsReason extends ProposalError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `a line with no unit amount has to say WHY — "As mutually agreed", "Quoted on receipt of ` +
+      `A line with no unit amount has to say WHY — "As mutually agreed", "Quoted on receipt of ` +
         `the registrar's schedule". Send a "pricingNote" with it. Leaving a price blank with no ` +
         `reason is indistinguishable on the client's document from a figure somebody forgot to ` +
         `type, and quoting it as "0" says something different again.`,
@@ -231,7 +231,7 @@ export class UnpricedLineHasDiscount extends ProposalError {
   constructor(percent: string) {
     super(
       "UNPRICED_LINE_HAS_DISCOUNT",
-      `a line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
+      `A line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
         `percentage off "as mutually agreed" is not a number. It would also count towards the ` +
         `largest discount on the proposal and hold it at the approval gate over a discount that ` +
         `does not exist. Price the line, or send "0".`,
@@ -243,7 +243,7 @@ export class InvalidLineBillingFrequency extends ProposalError {
   constructor(value: string, allowed: readonly string[]) {
     super(
       "INVALID_BILLING_FREQUENCY",
-      `billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
+      `Billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
         `how often this DEAL is invoiced, which is not how often the work comes round — a ` +
         `monthly service billed quarterly is why it is a field at all.`,
     );
@@ -254,7 +254,7 @@ export class InvalidLineJurisdiction extends ProposalError {
   constructor(value: string) {
     super(
       "INVALID_LINE_JURISDICTION",
-      `line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
+      `Line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
         `letters, like "IN" or "AE". It is where the WORK is, stated rather than inferred.`,
     );
   }
@@ -264,7 +264,7 @@ export class InvalidOutOfPocketEstimate extends ProposalError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
         `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do. Its currency need not be ` +
         `the document's: a client quoted in INR still faces a filing fee in USD.`,
@@ -276,7 +276,7 @@ export class InvalidDiscount extends ProposalError {
   constructor(percent: string) {
     super(
       "INVALID_DISCOUNT",
-      `discount ${JSON.stringify(percent)} must be a decimal STRING between "0" and "100".`,
+      `Discount ${JSON.stringify(percent)} must be a decimal STRING between "0" and "100".`,
     );
   }
 }
@@ -285,7 +285,7 @@ export class InvalidFxRate extends ProposalError {
   constructor(rate: string) {
     super(
       "INVALID_FX_RATE",
-      `exchange rate ${JSON.stringify(rate)} must be a positive decimal STRING. Quote in the ` +
+      `Exchange rate ${JSON.stringify(rate)} must be a positive decimal STRING. Quote in the ` +
         `firm's own currency and it is "1" — stored, not omitted, so that "did we convert this?" ` +
         `is never a question about a missing value.`,
     );
@@ -296,7 +296,7 @@ export class InvalidQuoteCurrency extends ProposalError {
   constructor(currency: string) {
     super(
       "INVALID_CURRENCY",
-      `quote currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, like ` +
+      `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, like ` +
         `"INR" or "AED".`,
     );
   }

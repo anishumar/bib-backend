@@ -45,7 +45,7 @@ export class InvalidAxisCode extends ServiceAxisError {
   constructor(code: string) {
     super(
       "INVALID_AXIS_CODE",
-      `code ${JSON.stringify(code)} is not in canonical form. Upper case letters and digits, ` +
+      `Code ${JSON.stringify(code)} is not in canonical form. Upper case letters and digits, ` +
         `separated by single spaces, hyphens or underscores, at most 48 characters — "FRC", ` +
         `"VCFO CONSOLE". The form is demanded at the write because this value is what a ` +
         `service body names and what work is grouped by, and "frc" beside "FRC" is one ` +
@@ -58,7 +58,7 @@ export class InvalidAxisName extends ServiceAxisError {
   constructor(name: string) {
     super(
       "INVALID_AXIS_NAME",
-      `name ${JSON.stringify(name)} must be a non-empty label of at most 120 characters. ` +
+      `Name ${JSON.stringify(name)} must be a non-empty label of at most 120 characters. ` +
         `Unlike the code it has no form requirement and may be changed freely — it is what ` +
         `people read, while the code is what every service body joins on.`,
     );
@@ -69,7 +69,7 @@ export class AxisCodeTaken extends ServiceAxisError {
   constructor(axis: string, code: string) {
     super(
       "AXIS_CODE_TAKEN",
-      `this firm already has a ${axis === "dept" ? "Dept" : "delivery team"} with code ` +
+      `This firm already has a ${axis === "dept" ? "Dept" : "delivery team"} with code ` +
         `${JSON.stringify(code)}. Codes are unique within a list — the same code on the ` +
         `OTHER list is fine, because the two are independent dimensions and nothing ` +
         `cross-validates them.`,
@@ -79,7 +79,7 @@ export class AxisCodeTaken extends ServiceAxisError {
 
 export class AxisNotFound extends ServiceAxisError {
   constructor(ref: string) {
-    super("AXIS_NOT_FOUND", `no Dept or delivery team ${JSON.stringify(ref)} at this firm`);
+    super("AXIS_NOT_FOUND", `No Dept or delivery team ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -134,7 +134,7 @@ export class WorkSplitAxisEmpty extends ServiceAxisError {
     // to take effect and does not.
     super(
       "WORK_SPLIT_AXIS_EMPTY",
-      `this firm cannot split work by ${axis === "dept" ? "Dept" : "delivery team"} while ` +
+      `This firm cannot split work by ${axis === "dept" ? "Dept" : "delivery team"} while ` +
         `it has no active ${axis === "dept" ? "Depts" : "delivery teams"} defined. Every job ` +
         `would land in the same unfiled group, which is what "none" already does. Define the ` +
         `list first, then choose it here.`,

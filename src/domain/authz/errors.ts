@@ -25,7 +25,7 @@ export class NotPermitted extends AuthzError {
   constructor(role: string, permission: string) {
     super(
       "NOT_PERMITTED",
-      `role ${JSON.stringify(role)} does not carry ${JSON.stringify(permission)}`,
+      `Role ${JSON.stringify(role)} does not carry ${JSON.stringify(permission)}`,
     );
   }
 }

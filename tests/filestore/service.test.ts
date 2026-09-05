@@ -204,7 +204,7 @@ describe("versions", () => {
         bytes: bytes("x"),
         actor,
       }),
-    ).rejects.toThrow(/no document/);
+    ).rejects.toThrow(/no document/i);
   });
 });
 
@@ -424,6 +424,6 @@ describe("rendering one of the product's own records", () => {
         tenantId: TENANT, kind: "invoice", subjectKind: "invoice",
         subjectRef: "77777777-7777-7777-7777-777777777777", partyId: null, actor,
       }),
-    ).rejects.toThrow(/no invoice/);
+    ).rejects.toThrow(/no invoice/i);
   });
 });

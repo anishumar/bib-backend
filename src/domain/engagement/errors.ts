@@ -50,13 +50,13 @@ export type EngagementErrorCode =
 
 export class LetterNotFound extends EngagementError {
   constructor(id: string) {
-    super("LETTER_NOT_FOUND", `no engagement letter ${JSON.stringify(id)} at this firm`);
+    super("LETTER_NOT_FOUND", `No engagement letter ${JSON.stringify(id)} at this firm`);
   }
 }
 
 export class LetterLineNotFound extends EngagementError {
   constructor(id: string) {
-    super("LETTER_LINE_NOT_FOUND", `no line ${JSON.stringify(id)} on this engagement letter`);
+    super("LETTER_LINE_NOT_FOUND", `No line ${JSON.stringify(id)} on this engagement letter`);
   }
 }
 
@@ -78,7 +78,7 @@ export class EmptyLetter extends EngagementError {
   constructor() {
     super(
       "EMPTY_LETTER",
-      `an engagement letter with no lines commits the firm to nothing and the client to ` +
+      `An engagement letter with no lines commits the firm to nothing and the client to ` +
         `nothing. Add at least one service before sending it.`,
     );
   }
@@ -91,7 +91,7 @@ export class NoClauses extends EngagementError {
     // into it.
     super(
       "NO_CLAUSES",
-      `an engagement letter with no clauses has no terms — no scope, no liability limit, no ` +
+      `An engagement letter with no clauses has no terms — no scope, no liability limit, no ` +
         `termination. Signing one leaves the firm bound by whatever is read into it. Add at ` +
         `least one clause from the library first.`,
     );
@@ -102,7 +102,7 @@ export class InvalidLetterTransition extends EngagementError {
   constructor(from: string, to: string) {
     super(
       "INVALID_LETTER_TRANSITION",
-      `an engagement letter cannot go from ${from} to ${to}. Signing is final — the document ` +
+      `An engagement letter cannot go from ${from} to ${to}. Signing is final — the document ` +
         `freezes — and a withdrawn letter stays withdrawn, so that the interval in which it ` +
         `was off the table is still on the record.`,
     );
@@ -113,7 +113,7 @@ export class InvalidJurisdiction extends EngagementError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two letters, ` +
+      `Jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two letters, ` +
         `like "IN" or "AE". The letter records the jurisdiction it was WRITTEN for, which is ` +
         `not always the client's or the firm's, so it has to be stated rather than inferred.`,
     );
@@ -124,7 +124,7 @@ export class ClauseNotFound extends EngagementError {
   constructor(versionId: string) {
     super(
       "CLAUSE_NOT_FOUND",
-      `no configuration version ${JSON.stringify(versionId)} at this firm. A letter's terms ` +
+      `No configuration version ${JSON.stringify(versionId)} at this firm. A letter's terms ` +
         `come from the clause library, and the id has to be one this firm published.`,
     );
   }
@@ -134,7 +134,7 @@ export class NotAClause extends EngagementError {
   constructor(versionId: string, kind: string) {
     super(
       "NOT_A_CLAUSE",
-      `configuration version ${JSON.stringify(versionId)} is a ${kind}, not a clause.`,
+      `Configuration version ${JSON.stringify(versionId)} is a ${kind}, not a clause.`,
     );
   }
 }
@@ -146,7 +146,7 @@ export class ClauseNotPublished extends EngagementError {
     // contract binds the client to wording the firm never adopted.
     super(
       "CLAUSE_NOT_PUBLISHED",
-      `clause version ${JSON.stringify(versionId)} is still a draft and was never in force, so ` +
+      `Clause version ${JSON.stringify(versionId)} is still a draft and was never in force, so ` +
         `it cannot be put in a contract. Publish it first. (A version that has since been ` +
         `superseded is fine — that is what a pinned clause is supposed to resolve to.)`,
     );
@@ -157,7 +157,7 @@ export class ClauseWrongJurisdiction extends EngagementError {
   constructor(title: string, clauseJurisdictions: readonly string[], letter: string) {
     super(
       "CLAUSE_WRONG_JURISDICTION",
-      `the clause ${JSON.stringify(title)} applies in ${clauseJurisdictions.join(", ")} and this ` +
+      `The clause ${JSON.stringify(title)} applies in ${clauseJurisdictions.join(", ")} and this ` +
         `letter is written for ${letter}. A term drafted for another jurisdiction may be ` +
         `unenforceable or simply wrong here, so it is refused rather than quietly included.`,
     );
@@ -185,7 +185,7 @@ export class ClauseLawNotIssuers extends EngagementError {
   constructor(title: string, term: "governing law" | "courts", named: string, issuer: string) {
     super(
       "CLAUSE_LAW_NOT_ISSUERS",
-      `the clause ${JSON.stringify(title)} names ${named} as its ${term}, and this letter is ` +
+      `The clause ${JSON.stringify(title)} names ${named} as its ${term}, and this letter is ` +
         `issued by an entity registered in ${issuer}. A document cannot put another country's ` +
         `${term} on the firm's own counterparty, so it is refused rather than printed. Use a ` +
         `clause whose ${term} is ${issuer}, or issue the letter from the ${named} entity.`,
@@ -213,7 +213,7 @@ export class IssuerJurisdictionUnknown extends EngagementError {
   constructor(title: string, entityName: string) {
     super(
       "ISSUER_JURISDICTION_UNKNOWN",
-      `the clause ${JSON.stringify(title)} names a governing law or a forum, and this letter is ` +
+      `The clause ${JSON.stringify(title)} names a governing law or a forum, and this letter is ` +
         `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction — so ` +
         `there is nothing to check the term against. Register that entity (its jurisdiction, ` +
         `entity type and incorporation) and the clause goes on, or use a clause that names ` +
@@ -224,7 +224,7 @@ export class IssuerJurisdictionUnknown extends EngagementError {
 
 export class ServiceNotQuotable extends EngagementError {
   constructor(versionId: string, reason: string) {
-    super("SERVICE_NOT_QUOTABLE", `service version ${JSON.stringify(versionId)}: ${reason}`);
+    super("SERVICE_NOT_QUOTABLE", `Service version ${JSON.stringify(versionId)}: ${reason}`);
   }
 }
 
@@ -232,7 +232,7 @@ export class AdvanceNotRequired extends EngagementError {
   constructor() {
     super(
       "ADVANCE_NOT_REQUIRED",
-      `this letter does not require an advance, so there is nothing to record. Recording one ` +
+      `This letter does not require an advance, so there is nothing to record. Recording one ` +
         `would put a receipt in the audit trail for money nobody asked for.`,
     );
   }
@@ -242,7 +242,7 @@ export class AdvanceAlreadyRecorded extends EngagementError {
   constructor(at: string) {
     super(
       "ADVANCE_ALREADY_RECORDED",
-      `the advance on this letter was already recorded at ${at}. Recording it twice would show ` +
+      `The advance on this letter was already recorded at ${at}. Recording it twice would show ` +
         `two receipts in a log that cannot be corrected for one payment.`,
     );
   }
@@ -252,7 +252,7 @@ export class AdvanceAmountRequired extends EngagementError {
   constructor() {
     super(
       "ADVANCE_AMOUNT_REQUIRED",
-      `a letter that requires an advance has to say how much. "An advance is required" with no ` +
+      `A letter that requires an advance has to say how much. "An advance is required" with no ` +
         `figure is a gate nobody can pass.`,
     );
   }
@@ -273,7 +273,7 @@ export class UnpricedLineNeedsReason extends EngagementError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `a line with no unit amount has to say WHY — "As mutually agreed". Send a "pricingNote" ` +
+      `A line with no unit amount has to say WHY — "As mutually agreed". Send a "pricingNote" ` +
         `with it. On a letter this is a TERM: the signature commits to it, and a blank where a ` +
         `price belongs is a term nobody can read afterwards.`,
     );
@@ -284,7 +284,7 @@ export class UnpricedLineHasDiscount extends EngagementError {
   constructor(percent: string) {
     super(
       "UNPRICED_LINE_HAS_DISCOUNT",
-      `a line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
+      `A line with no unit amount cannot carry a discount of ${JSON.stringify(percent)}: a ` +
         `percentage off "as mutually agreed" is not a number. Price the line, or send "0".`,
     );
   }
@@ -294,7 +294,7 @@ export class InvalidLineBillingFrequency extends EngagementError {
   constructor(value: string, allowed: readonly string[]) {
     super(
       "INVALID_BILLING_FREQUENCY",
-      `billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
+      `Billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
         `how often this DEAL is invoiced, which is not how often the work comes round.`,
     );
   }
@@ -304,7 +304,7 @@ export class InvalidOutOfPocketEstimate extends EngagementError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
         `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do.`,
     );
@@ -329,7 +329,7 @@ export class LetterNotSupersedable extends EngagementError {
     // named, because those are the ones somebody reaches for it by mistake.
     super(
       "LETTER_NOT_SUPERSEDABLE",
-      `only a SIGNED letter can be superseded, and this one is ${status}. A draft is edited in ` +
+      `Only a SIGNED letter can be superseded, and this one is ${status}. A draft is edited in ` +
         `place; a letter that went out and was never signed is withdrawn. Superseding exists for ` +
         `the agreement the client actually made, which is the one thing that can never be edited.`,
     );
@@ -349,7 +349,7 @@ export class AlreadySuperseded extends EngagementError {
 
 export class EngagementNotFound extends EngagementError {
   constructor(id: string) {
-    super("ENGAGEMENT_NOT_FOUND", `no engagement ${JSON.stringify(id)} at this firm`);
+    super("ENGAGEMENT_NOT_FOUND", `No engagement ${JSON.stringify(id)} at this firm`);
   }
 }
 
@@ -357,7 +357,7 @@ export class SignatureIncomplete extends EngagementError {
   constructor(missing: string) {
     super(
       "SIGNATURE_INCOMPLETE",
-      `a signature needs ${missing}. A letter recorded as signed with any of it missing is one ` +
+      `A signature needs ${missing}. A letter recorded as signed with any of it missing is one ` +
         `nobody can verify, which is worse than an unsigned one because it claims otherwise.`,
     );
   }
@@ -372,7 +372,7 @@ export class SignatureIncomplete extends EngagementError {
 
 export class QuoteNotFound extends EngagementError {
   constructor(id: string) {
-    super("QUOTE_NOT_FOUND", `no proposal ${JSON.stringify(id)} at this firm.`);
+    super("QUOTE_NOT_FOUND", `No proposal ${JSON.stringify(id)} at this firm.`);
   }
 }
 
@@ -417,7 +417,7 @@ export class QuoteNamesNoEntity extends EngagementError {
   constructor(ref: string, lineCount: number) {
     super(
       "QUOTE_NAMES_NO_ENTITY",
-      `not one line on ${ref} names the company the work is for, so nothing can be carried ` +
+      `Not one line on ${ref} names the company the work is for, so nothing can be carried ` +
         `across: a proposal may quote a prospect that holds no entity yet, and every letter ` +
         `line must name one because signing it creates an engagement, which is one service ` +
         `for one legal entity. Name the company ${lineCount === 1 ? "that line" : "those lines"} ` +

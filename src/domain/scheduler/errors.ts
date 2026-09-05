@@ -16,7 +16,7 @@ export type SchedulerErrorCode = "JOB_NOT_FOUND" | "INVALID_TRANSITION" | "INVAL
 
 export class JobNotFound extends SchedulerError {
   constructor(ref: string) {
-    super("JOB_NOT_FOUND", `no job ${JSON.stringify(ref)} at this firm`);
+    super("JOB_NOT_FOUND", `No job ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -27,7 +27,7 @@ export class InvalidTransition extends SchedulerError {
     // already completed — that is a duplicate filing, not a retry.
     super(
       "INVALID_TRANSITION",
-      `a job cannot go from ${JSON.stringify(from)} to ${JSON.stringify(to)}. ` +
+      `A job cannot go from ${JSON.stringify(from)} to ${JSON.stringify(to)}. ` +
         `Terminal states are final: a job that is done or cancelled stays that way, and work ` +
         `that must happen again is a NEW job with its own cause.`,
     );

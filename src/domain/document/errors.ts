@@ -37,7 +37,7 @@ export class NoIssuingEntity extends DocumentError {
   constructor(clientJurisdiction: string | null) {
     super(
       "NO_ISSUING_ENTITY",
-      `this firm has not said which of its own entities issues documents` +
+      `This firm has not said which of its own entities issues documents` +
         (clientJurisdiction === null ? "" : ` to clients in ${clientJurisdiction}`) +
         `, and it has no fallback either. A document must name who is contracting: the ` +
         `governing law, the courts and who the client's counterparty actually is all follow ` +
@@ -63,7 +63,7 @@ export class FirmEntityNotFound extends DocumentError {
   constructor(partyId: string) {
     super(
       "FIRM_ENTITY_NOT_FOUND",
-      `no party ${JSON.stringify(partyId)} at this firm, so it cannot be named as the entity ` +
+      `No party ${JSON.stringify(partyId)} at this firm, so it cannot be named as the entity ` +
         `that issues documents. The firm's own entities are parties in its own book — create ` +
         `the organization first.`,
     );
@@ -93,7 +93,7 @@ export class BlankBlockBody extends DocumentError {
   constructor() {
     super(
       "BLANK_BLOCK_BODY",
-      "a block's body cannot be blank. An empty line in an exclusions list prints as a gap, " +
+      "A block's body cannot be blank. An empty line in an exclusions list prints as a gap, " +
         "which a reader takes for a term somebody forgot to write.",
     );
   }
@@ -103,7 +103,7 @@ export class InvalidSortOrder extends DocumentError {
   constructor(given: number) {
     super(
       "INVALID_SORT_ORDER",
-      `sortOrder must be a positive integer, got ${String(given)}. It is the order the line ` +
+      `A sortOrder must be a positive integer, and this is ${String(given)}. It is the order the line ` +
         `prints in, counted from 1 within its kind.`,
     );
   }
@@ -111,13 +111,13 @@ export class InvalidSortOrder extends DocumentError {
 
 export class StandardBlockNotFound extends DocumentError {
   constructor(id: string) {
-    super("STANDARD_BLOCK_NOT_FOUND", `no standard block ${JSON.stringify(id)} in this firm.`);
+    super("STANDARD_BLOCK_NOT_FOUND", `No standard block ${JSON.stringify(id)} in this firm.`);
   }
 }
 
 export class DocumentBlockNotFound extends DocumentError {
   constructor(id: string) {
-    super("DOCUMENT_BLOCK_NOT_FOUND", `no block ${JSON.stringify(id)} on this document.`);
+    super("DOCUMENT_BLOCK_NOT_FOUND", `No block ${JSON.stringify(id)} on this document.`);
   }
 }
 
@@ -149,7 +149,7 @@ export class DocumentBlockFrozen extends DocumentError {
   constructor() {
     super(
       "DOCUMENT_BLOCK_FROZEN",
-      `this letter is signed, so its prose is frozen with its terms — the database refuses ` +
+      `This letter is signed, so its prose is frozen with its terms — the database refuses ` +
         `the change, not just this code. The exclusions a client agreed to are part of what ` +
         `they agreed to. Draft a new letter that supersedes it; the old one stays readable ` +
         `as what was actually signed.`,
@@ -161,7 +161,7 @@ export class BlocksAlreadySeeded extends DocumentError {
   constructor(documentId: string, count: number) {
     super(
       "BLOCKS_ALREADY_SEEDED",
-      `document ${JSON.stringify(documentId)} already carries ${String(count)} block(s). The ` +
+      `Document ${JSON.stringify(documentId)} already carries ${String(count)} block(s). The ` +
         `standard set is copied ONCE, at creation; edit the document's own blocks from here.`,
     );
   }

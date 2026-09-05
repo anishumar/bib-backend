@@ -35,7 +35,7 @@ export class InvalidPortalDates extends PortalAccessError {
   constructor(validFrom: string, validTo: string | null) {
     super(
       "INVALID_PORTAL_DATES",
-      `validFrom ${JSON.stringify(validFrom)} and validTo ${JSON.stringify(validTo)} do not ` +
+      `The dates ${JSON.stringify(validFrom)} and ${JSON.stringify(validTo)} do not ` +
         `describe a grant. validTo is the FIRST DAY NOT IN FORCE: granting needs it LATER ` +
         `than validFrom, because a grant in force on no day reads as "granted" and lets ` +
         `nobody in. Ending is different — the same day is allowed there, and is how access ` +
@@ -48,7 +48,7 @@ export class PortalMembershipNotFound extends PortalAccessError {
   constructor(membershipId: string) {
     super(
       "PORTAL_MEMBERSHIP_NOT_FOUND",
-      `no membership ${JSON.stringify(membershipId)} at this firm. A grant is against a ` +
+      `No membership ${JSON.stringify(membershipId)} at this firm. A grant is against a ` +
         `MEMBERSHIP and not an account: the same person may hold a portal login at two firms, ` +
         `and what they may see at each is this firm's decision alone.`,
     );
@@ -59,7 +59,7 @@ export class PortalMembershipNotAClientLogin extends PortalAccessError {
   constructor(membershipId: string, audience: string) {
     super(
       "PORTAL_MEMBERSHIP_NOT_A_CLIENT_LOGIN",
-      `membership ${JSON.stringify(membershipId)} is a ${audience} login, and portal access ` +
+      `Membership ${JSON.stringify(membershipId)} is a ${audience} login, and portal access ` +
         `is only meaningful for a CLIENT_PORTAL one. A colleague already reaches the firm's ` +
         `whole book through the staff workspace; granting them a client here would record a ` +
         `permission that governs nothing and read as though it did.`,
@@ -71,7 +71,7 @@ export class PortalMembershipInactive extends PortalAccessError {
   constructor(membershipId: string) {
     super(
       "PORTAL_MEMBERSHIP_INACTIVE",
-      `membership ${JSON.stringify(membershipId)} has been revoked, so there is nothing to ` +
+      `Membership ${JSON.stringify(membershipId)} has been revoked, so there is nothing to ` +
         `grant access to. Restore the membership on the roster first — granting a client to a ` +
         `revoked login would leave the firm believing somebody has access that no session can ` +
         `ever use.`,
@@ -83,7 +83,7 @@ export class PortalClientNotFound extends PortalAccessError {
   constructor(clientPartyId: string) {
     super(
       "PORTAL_CLIENT_NOT_FOUND",
-      `no party ${JSON.stringify(clientPartyId)} at this firm to grant access to.`,
+      `No party ${JSON.stringify(clientPartyId)} at this firm to grant access to.`,
     );
   }
 }
@@ -101,7 +101,7 @@ export class PortalClientArchived extends PortalAccessError {
 
 export class PortalGrantNotFound extends PortalAccessError {
   constructor(grantId: string) {
-    super("PORTAL_GRANT_NOT_FOUND", `no portal grant ${JSON.stringify(grantId)} at this firm.`);
+    super("PORTAL_GRANT_NOT_FOUND", `No portal grant ${JSON.stringify(grantId)} at this firm.`);
   }
 }
 
@@ -109,7 +109,7 @@ export class PortalGrantAlreadyEnded extends PortalAccessError {
   constructor(grantId: string, validTo: string) {
     super(
       "PORTAL_GRANT_ALREADY_ENDED",
-      `portal grant ${JSON.stringify(grantId)} already stopped being in force on ${validTo}. ` +
+      `Portal grant ${JSON.stringify(grantId)} already stopped being in force on ${validTo}. ` +
         `A grant is closed once and never re-closed: moving that date would rewrite who could ` +
         `see this client in March, which is the question this table exists to answer.`,
     );
@@ -120,7 +120,7 @@ export class PortalGrantDuplicate extends PortalAccessError {
   constructor(clientName: string) {
     super(
       "PORTAL_GRANT_DUPLICATE",
-      `this login already has access to ${clientName} over those days. Granting it twice ` +
+      `This login already has access to ${clientName} over those days. Granting it twice ` +
         `would make "who could see this client" answer with the same person twice — end the ` +
         `existing grant first if you mean to change the dates.`,
     );

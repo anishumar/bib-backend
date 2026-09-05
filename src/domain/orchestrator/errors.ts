@@ -32,13 +32,13 @@ export type OrchestratorErrorCode =
 
 export class JobNotFound extends OrchestratorError {
   constructor(jobId: string) {
-    super("JOB_NOT_FOUND", `no job ${JSON.stringify(jobId)} at this firm`);
+    super("JOB_NOT_FOUND", `No job ${JSON.stringify(jobId)} at this firm`);
   }
 }
 
 export class StepNotFound extends OrchestratorError {
   constructor(ref: string) {
-    super("STEP_NOT_FOUND", `no step ${JSON.stringify(ref)} on this job`);
+    super("STEP_NOT_FOUND", `No step ${JSON.stringify(ref)} on this job`);
   }
 }
 
@@ -50,7 +50,7 @@ export class NoTemplatePublished extends OrchestratorError {
     // firm's behalf, or a job quietly completing with no work done.
     super(
       "NO_TEMPLATE_PUBLISHED",
-      `this firm has no published workflow template ${JSON.stringify(key)}, so a job using it ` +
+      `This firm has no published workflow template ${JSON.stringify(key)}, so a job using it ` +
         `cannot start. The work is not lost — the job waits until a process is published. ` +
         `Write it on the workflow screen and publish it; jobs already waiting pick it up on ` +
         `the next sweep.`,
@@ -66,7 +66,7 @@ export class TemplateUnreadable extends OrchestratorError {
     // whole point of pinning is that the job does not silently change path.
     super(
       "TEMPLATE_UNREADABLE",
-      `the workflow version ${JSON.stringify(versionId)} this job is pinned to does not read ` +
+      `The workflow version ${JSON.stringify(versionId)} this job is pinned to does not read ` +
         `as a workflow template. The job is deliberately NOT moved onto the current version: ` +
         `a job that silently changed process is the thing pinning exists to prevent.`,
     );
@@ -77,7 +77,7 @@ export class StepNotWaiting extends OrchestratorError {
   constructor(stepKey: string, status: string) {
     super(
       "STEP_NOT_WAITING",
-      `step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}, not waiting for anybody. ` +
+      `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}, not waiting for anybody. ` +
         `Only a blocked step can be completed by hand — a second completion would overwrite ` +
         `who did it and when.`,
     );
@@ -98,7 +98,7 @@ export class ProposalUndecided extends OrchestratorError {
   constructor(stepKey: string) {
     super(
       "PROPOSAL_UNDECIDED",
-      `step ${JSON.stringify(stepKey)} has an answer from a machine that nobody has ` +
+      `Step ${JSON.stringify(stepKey)} has an answer from a machine that nobody has ` +
         `decided about. Accept it, correct it, or reject it with a reason — ticking it done ` +
         `would record that a person did the work and lose whether the machine was right.`,
     );
@@ -118,7 +118,7 @@ export class NothingProposed extends OrchestratorError {
   constructor(stepKey: string) {
     super(
       "NOTHING_PROPOSED",
-      `step ${JSON.stringify(stepKey)} has no answer from a machine to decide about. It is ` +
+      `Step ${JSON.stringify(stepKey)} has no answer from a machine to decide about. It is ` +
         `waiting for a person to do the work and mark it done.`,
     );
   }
@@ -143,7 +143,7 @@ export class CorrectionChangedNothing extends OrchestratorError {
   constructor(stepKey: string) {
     super(
       "CORRECTION_CHANGED_NOTHING",
-      `the correction to step ${JSON.stringify(stepKey)} is identical to what the machine ` +
+      `The correction to step ${JSON.stringify(stepKey)} is identical to what the machine ` +
         `proposed. If it was right, accept it — recording it as a correction would say the ` +
         `machine got it wrong, and that number is the only measure of whether it is improving.`,
     );
@@ -163,7 +163,7 @@ export class AwaitingCheck extends OrchestratorError {
   constructor(stepKey: string) {
     super(
       "AWAITING_CHECK",
-      `step ${JSON.stringify(stepKey)} is finished and waiting for somebody else to check it. ` +
+      `Step ${JSON.stringify(stepKey)} is finished and waiting for somebody else to check it. ` +
         `It is not yours to tick off again — and by the firm's own rule it could not be ` +
         `yours to approve either.`,
     );

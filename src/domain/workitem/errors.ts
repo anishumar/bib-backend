@@ -59,7 +59,7 @@ export class InvalidVocabularyCode extends WorkItemError {
   constructor(code: string) {
     super(
       "INVALID_VOCABULARY_CODE",
-      `code ${JSON.stringify(code)} is not a lowercase handle (2-40 chars, letters, digits, ` +
+      `Code ${JSON.stringify(code)} is not a lowercase handle (2-40 chars, letters, digits, ` +
         `"-" or "_") — like "waiting_client". It is the firm's stable name for the row and ` +
         `nothing in the product compares it; the label people read is the name, which has no ` +
         `such restriction.`,
@@ -71,7 +71,7 @@ export class InvalidRank extends WorkItemError {
   constructor(rank: number) {
     super(
       "INVALID_RANK",
-      `rank ${JSON.stringify(rank)} must be a whole number above zero, where 1 is the MOST ` +
+      `Rank ${JSON.stringify(rank)} must be a whole number above zero, where 1 is the MOST ` +
         `urgent. Ranks need not be unique or consecutive — two priorities may share one, and ` +
         `gaps are how a firm leaves room to insert one later.`,
     );
@@ -82,7 +82,7 @@ export class InvalidSortOrder extends WorkItemError {
   constructor(sortOrder: number) {
     super(
       "INVALID_SORT_ORDER",
-      `sortOrder ${JSON.stringify(sortOrder)} must be a whole number. It decides the order a ` +
+      `A sortOrder of ${JSON.stringify(sortOrder)} is not a whole number. It decides the order a ` +
         `board renders its columns in and nothing else.`,
     );
   }
@@ -92,20 +92,20 @@ export class VocabularyCodeTaken extends WorkItemError {
   constructor(kind: "state" | "priority", code: string) {
     super(
       "VOCABULARY_CODE_TAKEN",
-      `this firm already has a work-item ${kind} with code ${JSON.stringify(code)}`,
+      `This firm already has a work-item ${kind} with code ${JSON.stringify(code)}`,
     );
   }
 }
 
 export class StateNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("STATE_NOT_FOUND", `no work-item state ${JSON.stringify(ref)} at this firm`);
+    super("STATE_NOT_FOUND", `No work-item state ${JSON.stringify(ref)} at this firm`);
   }
 }
 
 export class PriorityNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("PRIORITY_NOT_FOUND", `no work-item priority ${JSON.stringify(ref)} at this firm`);
+    super("PRIORITY_NOT_FOUND", `No work-item priority ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -138,7 +138,7 @@ export class NoInitialState extends WorkItemError {
   constructor() {
     super(
       "NO_INITIAL_STATE",
-      `this firm has no starting state for work items, so nothing can be created. Exactly one ` +
+      `This firm has no starting state for work items, so nothing can be created. Exactly one ` +
         `state must be marked as the one new work begins in — the product seeds "Not Started" ` +
         `at every firm, so reaching this means it was un-marked and nothing was marked in its ` +
         `place. Set it on the work-vocabulary screen.`,
@@ -150,7 +150,7 @@ export class NoDefaultPriority extends WorkItemError {
   constructor() {
     super(
       "NO_DEFAULT_PRIORITY",
-      `this firm has no default priority for work items, so nothing can be created. One ` +
+      `This firm has no default priority for work items, so nothing can be created. One ` +
         `priority must be marked as what ordinary work gets — the product seeds "Medium" at ` +
         `every firm. Set it on the work-vocabulary screen.`,
     );
@@ -163,7 +163,7 @@ export class LastInitialState extends WorkItemError {
     // one and never AT LEAST one, so the floor lives here.
     super(
       "LAST_INITIAL_STATE",
-      `this would leave the firm with no starting state, and no work item could then be ` +
+      `This would leave the firm with no starting state, and no work item could then be ` +
         `created at all. Mark another state as the starting one first — the change is then ` +
         `two ticks and never a moment with none.`,
     );
@@ -174,7 +174,7 @@ export class LastDefaultPriority extends WorkItemError {
   constructor(which: "default" | "statutory default") {
     super(
       "LAST_DEFAULT_PRIORITY",
-      `this would leave the firm with no ${which} priority, and new work would have nothing ` +
+      `This would leave the firm with no ${which} priority, and new work would have nothing ` +
         `to be created with. Mark another priority as the ${which} first.`,
     );
   }
@@ -194,13 +194,13 @@ export class ConflictingStateFlags extends WorkItemError {
 
 export class WorkItemNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("WORK_ITEM_NOT_FOUND", `no work item ${JSON.stringify(ref)} at this firm`);
+    super("WORK_ITEM_NOT_FOUND", `No work item ${JSON.stringify(ref)} at this firm`);
   }
 }
 
 export class WorkItemClientNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("WORK_ITEM_CLIENT_NOT_FOUND", `no party ${JSON.stringify(ref)} at this firm`);
+    super("WORK_ITEM_CLIENT_NOT_FOUND", `No party ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -218,7 +218,7 @@ export class WorkItemTitleRequired extends WorkItemError {
   constructor() {
     super(
       "WORK_ITEM_TITLE_REQUIRED",
-      `a work item needs a title — it is the whole of what a board row says, and an untitled ` +
+      `A work item needs a title — it is the whole of what a board row says, and an untitled ` +
         `task is one nobody can pick up`,
     );
   }
@@ -242,7 +242,7 @@ export class AssigneeNotStaff extends WorkItemError {
     // policy satisfied.
     super(
       "ASSIGNEE_NOT_STAFF",
-      `user ${JSON.stringify(userId)} is not active staff at this firm, so work cannot be ` +
+      `User ${JSON.stringify(userId)} is not active staff at this firm, so work cannot be ` +
         `put on their desk`,
     );
   }
@@ -264,7 +264,7 @@ export class WorkItemAlreadyInState extends WorkItemError {
   constructor(stateName: string) {
     super(
       "WORK_ITEM_ALREADY_IN_STATE",
-      `this work item is already in ${JSON.stringify(stateName)}`,
+      `This work item is already in ${JSON.stringify(stateName)}`,
     );
   }
 }
@@ -277,7 +277,7 @@ export class WorkItemBlockedByDependency extends WorkItemError {
     // never started is a real act, and refusing it would trap the item.
     super(
       "WORK_ITEM_BLOCKED_BY_DEPENDENCY",
-      `this cannot be started while it is still waiting on ${titles.length} unfinished ` +
+      `This cannot be started while it is still waiting on ${titles.length} unfinished ` +
         `item(s): ${titles.map((t) => JSON.stringify(t)).join(", ")}. Finish or cancel those ` +
         `first, or remove the dependency if it no longer holds.`,
     );
@@ -288,7 +288,7 @@ export class WorkItemBlockedByDependency extends WorkItemError {
 
 export class ChecklistItemNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("CHECKLIST_ITEM_NOT_FOUND", `no checklist item ${JSON.stringify(ref)} on this task`);
+    super("CHECKLIST_ITEM_NOT_FOUND", `No checklist item ${JSON.stringify(ref)} on this task`);
   }
 }
 
@@ -296,7 +296,7 @@ export class ChecklistItemDone extends WorkItemError {
   constructor() {
     super(
       "CHECKLIST_ITEM_DONE",
-      `this line is ticked and cannot be removed — the tick is the record that somebody did ` +
+      `This line is ticked and cannot be removed — the tick is the record that somebody did ` +
         `it, and it lives nowhere else. Untick it first if it was ticked by mistake.`,
     );
   }
@@ -306,7 +306,7 @@ export class DependencyCycle extends WorkItemError {
   constructor() {
     super(
       "DEPENDENCY_CYCLE",
-      `this dependency would make two items wait on each other, directly or through a chain, ` +
+      `This dependency would make two items wait on each other, directly or through a chain, ` +
         `and neither could ever start`,
     );
   }
@@ -314,13 +314,13 @@ export class DependencyCycle extends WorkItemError {
 
 export class DependencyExists extends WorkItemError {
   constructor() {
-    super("DEPENDENCY_EXISTS", `this item already waits on that one`);
+    super("DEPENDENCY_EXISTS", `This item already waits on that one`);
   }
 }
 
 export class DependencyNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("DEPENDENCY_NOT_FOUND", `no dependency ${JSON.stringify(ref)} on this task`);
+    super("DEPENDENCY_NOT_FOUND", `No dependency ${JSON.stringify(ref)} on this task`);
   }
 }
 
@@ -330,7 +330,7 @@ export class ReviewAlreadyOpen extends WorkItemError {
   constructor() {
     super(
       "REVIEW_ALREADY_OPEN",
-      `this work item is already waiting to be checked. Two open reviews would let one ` +
+      `This work item is already waiting to be checked. Two open reviews would let one ` +
         `person's approval and another's rejection both stand.`,
     );
   }
@@ -338,7 +338,7 @@ export class ReviewAlreadyOpen extends WorkItemError {
 
 export class ReviewNotFound extends WorkItemError {
   constructor(ref: string) {
-    super("REVIEW_NOT_FOUND", `no review ${JSON.stringify(ref)} at this firm`);
+    super("REVIEW_NOT_FOUND", `No review ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -346,7 +346,7 @@ export class ReviewAlreadyDecided extends WorkItemError {
   constructor(decision: string) {
     super(
       "REVIEW_ALREADY_DECIDED",
-      `this review was already ${decision} — somebody else got there first, and their ` +
+      `This review was already ${decision} — somebody else got there first, and their ` +
         `decision is the one that stands`,
     );
   }
@@ -360,7 +360,7 @@ export class ReviewSelfApproval extends WorkItemError {
     // this code.
     super(
       "REVIEW_SELF_APPROVAL",
-      `the person who did the work can never be the person who checks it. This is a database ` +
+      `The person who did the work can never be the person who checks it. This is a database ` +
         `constraint as well as a rule here, because a rule that lives only in a form is one ` +
         `a script or an agent walks straight past.`,
     );
@@ -371,7 +371,7 @@ export class ReviewRejectionNeedsNote extends WorkItemError {
   constructor() {
     super(
       "REVIEW_REJECTION_NEEDS_NOTE",
-      `sending work back needs a note saying what for. It is the only signal that ever ` +
+      `Sending work back needs a note saying what for. It is the only signal that ever ` +
         `explains why rework happens — marking the task Completed later erases the fact that ` +
         `it was rejected at all.`,
     );

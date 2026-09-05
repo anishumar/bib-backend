@@ -64,7 +64,7 @@ export class AxisRequiredForSpoc extends ClientAssignmentError {
   constructor() {
     super(
       "AXIS_REQUIRED_FOR_SPOC",
-      `a SPOC is the contact for a particular part of the work, so it must name one of the ` +
+      `A SPOC is the contact for a particular part of the work, so it must name one of the ` +
         `firm's Depts or delivery teams. A contact for everything is the Key Manager — ` +
         `assign that role instead. Without this rule a SPOC with no axis would quietly ` +
         `become a second key manager under another name.`,
@@ -76,7 +76,7 @@ export class AxisNotAllowedForKeyManager extends ClientAssignmentError {
   constructor() {
     super(
       "AXIS_NOT_ALLOWED_FOR_KEY_MANAGER",
-      `the Key Manager owns the whole client relationship, not one Dept of it, so this role ` +
+      `The Key Manager owns the whole client relationship, not one Dept of it, so this role ` +
         `takes no Dept or delivery team. If the firm means "the contact for TRC", that is a ` +
         `SPOC.`,
     );
@@ -87,7 +87,7 @@ export class AssignmentAxisNotFound extends ClientAssignmentError {
   constructor(axisId: string) {
     super(
       "ASSIGNMENT_AXIS_NOT_FOUND",
-      `no Dept or delivery team ${JSON.stringify(axisId)} at this firm. The firm's own two ` +
+      `No Dept or delivery team ${JSON.stringify(axisId)} at this firm. The firm's own two ` +
         `lists are maintained on the firm-structure screen; a SPOC can only be assigned to a ` +
         `row that is on one of them.`,
     );
@@ -115,7 +115,7 @@ export class AssignmentClientNotFound extends ClientAssignmentError {
   constructor(clientPartyId: string) {
     super(
       "ASSIGNMENT_CLIENT_NOT_FOUND",
-      `no party ${JSON.stringify(clientPartyId)} at this firm`,
+      `No party ${JSON.stringify(clientPartyId)} at this firm`,
     );
   }
 }
@@ -145,7 +145,7 @@ export class AssignmentHolderNotStaff extends ClientAssignmentError {
     // and the same reason.
     super(
       "ASSIGNMENT_HOLDER_NOT_STAFF",
-      `user ${JSON.stringify(userId)} is not an active member of staff at this firm, so ` +
+      `User ${JSON.stringify(userId)} is not an active member of staff at this firm, so ` +
         `they cannot be given a client. A login is global in this product and belongs to no ` +
         `firm on its own; the roster is what says who works here.`,
     );
@@ -156,7 +156,7 @@ export class AssignmentNotFound extends ClientAssignmentError {
   constructor(assignmentId: string) {
     super(
       "ASSIGNMENT_NOT_FOUND",
-      `no client assignment ${JSON.stringify(assignmentId)} at this firm`,
+      `No client assignment ${JSON.stringify(assignmentId)} at this firm`,
     );
   }
 }
@@ -165,7 +165,7 @@ export class AssignmentAlreadyEnded extends ClientAssignmentError {
   constructor(validTo: string) {
     super(
       "ASSIGNMENT_ALREADY_ENDED",
-      `this assignment already ended on ${validTo} and is history now. History is not ` +
+      `This assignment already ended on ${validTo} and is history now. History is not ` +
         `corrected by writing over it — if the end date is wrong, that is a correction ` +
         `somebody has to make deliberately, and if the person is back, assign them again ` +
         `from the day they returned.`,
@@ -180,7 +180,7 @@ export class AssignmentDuplicate extends ClientAssignmentError {
     // than anything the firm meant.
     super(
       "ASSIGNMENT_DUPLICATE",
-      `this person has been the ${role === "key_manager" ? "Key Manager" : "SPOC"} for this ` +
+      `This person has been the ${role === "key_manager" ? "Key Manager" : "SPOC"} for this ` +
         `client since ${from} and still is, so assigning them again would be the same fact ` +
         `recorded twice. To move the date, end that assignment and make a new one.`,
     );
@@ -196,7 +196,7 @@ export class AssignmentPredatesIncumbent extends ClientAssignmentError {
     // are told which date is in the way.
     super(
       "ASSIGNMENT_PREDATES_INCUMBENT",
-      `this client's current Key Manager took over on ${from}, so a new one cannot start ` +
+      `This client's current Key Manager took over on ${from}, so a new one cannot start ` +
         `on or before that date — the handover would have to close a period that never ` +
         `opened. Record the change from ${from} or later, or correct the earlier ` +
         `assignment first.`,

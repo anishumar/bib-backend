@@ -554,7 +554,7 @@ describe("writing a rule", () => {
         },
         ACTOR,
       ),
-    ).rejects.toThrow(/no catalogue service/);
+    ).rejects.toThrow(/no catalogue service/i);
   });
 
   it("refuses a second rule with the same identity, and says how to revise", async () => {

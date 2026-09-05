@@ -50,13 +50,13 @@ export class NotRenderable extends RenderError {
   constructor(kind: string, known: readonly string[]) {
     super(
       "NOT_RENDERABLE",
-      `there is no way to render a ${JSON.stringify(kind)} yet. Renderable today: ${known.join(", ")}.`,
+      `There is no way to render a ${JSON.stringify(kind)} yet. Renderable today: ${known.join(", ")}.`,
     );
   }
 }
 
 export class SourceNotFound extends RenderError {
   constructor(kind: string, ref: string) {
-    super("SOURCE_NOT_FOUND", `no ${kind} ${JSON.stringify(ref)} at this firm`);
+    super("SOURCE_NOT_FOUND", `No ${kind} ${JSON.stringify(ref)} at this firm`);
   }
 }

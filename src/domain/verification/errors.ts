@@ -41,7 +41,7 @@ export class NotEligibleToCheck extends VerificationError {
 
 export class ApprovalNotFound extends VerificationError {
   constructor(ref: string) {
-    super("APPROVAL_NOT_FOUND", `no check ${JSON.stringify(ref)} at this firm`);
+    super("APPROVAL_NOT_FOUND", `No check ${JSON.stringify(ref)} at this firm`);
   }
 }
 
@@ -52,7 +52,7 @@ export class ApprovalAlreadyDecided extends VerificationError {
     // overwriting a decision that is part of the audit record.
     super(
       "APPROVAL_ALREADY_DECIDED",
-      `check ${JSON.stringify(ref)} was already ${decision} by somebody else. Their decision ` +
+      `Check ${JSON.stringify(ref)} was already ${decision} by somebody else. Their decision ` +
         `stands — reload the queue to see it.`,
     );
   }
@@ -62,7 +62,7 @@ export class CheckAlreadyOpen extends VerificationError {
   constructor(stepKey: string) {
     super(
       "CHECK_ALREADY_OPEN",
-      `step ${JSON.stringify(stepKey)} is already waiting to be checked. One open check per ` +
+      `Step ${JSON.stringify(stepKey)} is already waiting to be checked. One open check per ` +
         `step, so that two people cannot each approve the other's.`,
     );
   }
@@ -72,7 +72,7 @@ export class StepNotCheckable extends VerificationError {
   constructor(stepKey: string, status: string) {
     super(
       "STEP_NOT_CHECKABLE",
-      `step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}, and only a step somebody ` +
+      `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}, and only a step somebody ` +
         `has finished can be checked. There is nothing to look at until the work is done.`,
     );
   }
@@ -82,7 +82,7 @@ export class RejectionNeedsAReason extends VerificationError {
   constructor() {
     super(
       "REJECTION_NEEDS_A_REASON",
-      `sending work back needs a note saying what is wrong with it. That note is the only ` +
+      `Sending work back needs a note saying what is wrong with it. That note is the only ` +
         `thing that ever explains why rework happened — approving needs none, this does.`,
     );
   }
@@ -92,7 +92,7 @@ export class ReportsToCycle extends VerificationError {
   constructor(names: readonly string[]) {
     super(
       "REPORTS_TO_CYCLE",
-      `this would make the reporting line a loop — ${names.join(" reports to ")} — and then ` +
+      `This would make the reporting line a loop — ${names.join(" reports to ")} — and then ` +
         `nobody in it has a manager who could check their work.`,
     );
   }

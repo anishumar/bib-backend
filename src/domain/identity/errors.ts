@@ -32,19 +32,19 @@ export type IdentityErrorCode =
 
 export class InvalidCredentials extends IdentityError {
   constructor() {
-    super("INVALID_CREDENTIALS", "email or password is incorrect");
+    super("INVALID_CREDENTIALS", "Email or password is incorrect");
   }
 }
 
 export class InvalidMagicLink extends IdentityError {
   constructor() {
-    super("INVALID_MAGIC_LINK", "this sign-in link is not valid, has expired, or has been used");
+    super("INVALID_MAGIC_LINK", "This sign-in link is not valid, has expired, or has been used");
   }
 }
 
 export class SessionInvalid extends IdentityError {
   constructor() {
-    super("SESSION_INVALID", "the session is unknown, expired, or revoked — sign in again");
+    super("SESSION_INVALID", "The session is unknown, expired, or revoked — sign in again");
   }
 }
 
@@ -62,7 +62,7 @@ export class NotAMember extends IdentityError {
   constructor(tenantId: string) {
     super(
       "NOT_A_MEMBER",
-      `this user holds no active membership in tenant ${JSON.stringify(tenantId)}, ` +
+      `This user holds no active membership in tenant ${JSON.stringify(tenantId)}, ` +
         `so the session cannot switch to it`,
     );
   }
@@ -70,7 +70,7 @@ export class NotAMember extends IdentityError {
 
 export class UserDisabled extends IdentityError {
   constructor(email: string) {
-    super("USER_DISABLED", `the account for ${JSON.stringify(email)} is disabled`);
+    super("USER_DISABLED", `The account for ${JSON.stringify(email)} is disabled`);
   }
 }
 
@@ -134,7 +134,7 @@ export class InvitationAlreadyAccepted extends IdentityError {
   constructor() {
     super(
       "INVITATION_ALREADY_ACCEPTED",
-      `this contact has already set a password, so there is no invitation left to re-send. ` +
+      `This contact has already set a password, so there is no invitation left to re-send. ` +
         `Re-issuing one would let the firm reset its own client's password, which is exactly ` +
         `what the invite flow exists to prevent. If they cannot get in, they ask the sign-in ` +
         `page to email them a link.`,
@@ -146,7 +146,7 @@ export class WeakPassword extends IdentityError {
   constructor(min: number, max: number) {
     super(
       "WEAK_PASSWORD",
-      `password must be between ${String(min)} and ${String(max)} characters. ` +
+      `Password must be between ${String(min)} and ${String(max)} characters. ` +
         `Length is the only rule — a long passphrase beats a short one with symbols.`,
     );
   }

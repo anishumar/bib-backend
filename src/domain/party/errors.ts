@@ -28,14 +28,14 @@ export type PartyErrorCode =
 
 export class PartyNotFound extends PartyError {
   constructor(ref: string) {
-    super("PARTY_NOT_FOUND", `no party for ${JSON.stringify(ref)}`);
+    super("PARTY_NOT_FOUND", `No party for ${JSON.stringify(ref)}`);
   }
 }
 export class NotAnOrganization extends PartyError {
   constructor(ref: string) {
     super(
       "NOT_AN_ORGANIZATION",
-      `party ${JSON.stringify(ref)} is not an organization; a legal entity can only register against one`,
+      `Party ${JSON.stringify(ref)} is not an organization; a legal entity can only register against one`,
     );
   }
 }
@@ -46,42 +46,42 @@ export class InvalidIdentifier extends PartyError {
 }
 export class InvalidIdentifierType extends PartyError {
   constructor(type: string) {
-    super("INVALID_IDENTIFIER_TYPE", `unknown identifier type ${JSON.stringify(type)}`);
+    super("INVALID_IDENTIFIER_TYPE", `Unknown identifier type ${JSON.stringify(type)}`);
   }
 }
 export class InvalidRelationshipType extends PartyError {
   constructor(type: string) {
-    super("INVALID_RELATIONSHIP_TYPE", `unknown relationship type ${JSON.stringify(type)}`);
+    super("INVALID_RELATIONSHIP_TYPE", `Unknown relationship type ${JSON.stringify(type)}`);
   }
 }
 export class InvalidDateRange extends PartyError {
   constructor(from: string, to: string | null) {
-    super("INVALID_DATE_RANGE", `date range ${from}..${to ?? "open"} is invalid`);
+    super("INVALID_DATE_RANGE", `Date range ${from}..${to ?? "open"} is invalid`);
   }
 }
 export class SelfRelationship extends PartyError {
   constructor() {
-    super("SELF_RELATIONSHIP", "a party cannot hold a relationship to itself");
+    super("SELF_RELATIONSHIP", "A party cannot hold a relationship to itself");
   }
 }
 export class DuplicateIdentifier extends PartyError {
   constructor(type: string, value: string) {
     super(
       "DUPLICATE_IDENTIFIER",
-      `identifier ${type} ${JSON.stringify(value)} already exists for this tenant`,
+      `Identifier ${type} ${JSON.stringify(value)} already exists for this tenant`,
     );
   }
 }
 export class PartyAlreadyArchived extends PartyError {
   constructor(ref: string) {
-    super("PARTY_ALREADY_ARCHIVED", `party ${JSON.stringify(ref)} is already archived`);
+    super("PARTY_ALREADY_ARCHIVED", `Party ${JSON.stringify(ref)} is already archived`);
   }
 }
 export class PartyNotArchived extends PartyError {
   constructor(ref: string) {
     super(
       "PARTY_NOT_ARCHIVED",
-      `party ${JSON.stringify(ref)} is not archived, so there is nothing to restore`,
+      `Party ${JSON.stringify(ref)} is not archived, so there is nothing to restore`,
     );
   }
 }
@@ -101,7 +101,7 @@ export class PartyHasReferences extends PartyError {
   ) {
     super(
       "PARTY_HAS_REFERENCES",
-      `party ${JSON.stringify(ref)} cannot be archived: it is still referenced by ${referrers.join(", ")}`,
+      `Party ${JSON.stringify(ref)} cannot be archived: it is still referenced by ${referrers.join(", ")}`,
     );
   }
 }

@@ -33,7 +33,7 @@ export type FileStoreErrorCode =
 
 export class DocumentNotFound extends FileStoreError {
   constructor(id: string) {
-    super("DOCUMENT_NOT_FOUND", `no document ${JSON.stringify(id)} at this firm`);
+    super("DOCUMENT_NOT_FOUND", `No document ${JSON.stringify(id)} at this firm`);
   }
 }
 
@@ -67,7 +67,7 @@ export class ContentTooLarge extends FileStoreError {
   constructor(byteSize: number, limitBytes: number) {
     super(
       "CONTENT_TOO_LARGE",
-      `this file is ${byteSize} bytes and the limit is ${limitBytes} ` +
+      `This file is ${byteSize} bytes and the limit is ${limitBytes} ` +
         `(BIB_MAX_UPLOAD_BYTES). Raise the limit deliberately if the firm genuinely needs it — ` +
         `the whole file is held in memory to be hashed, so the limit is a memory budget and not ` +
         `an arbitrary preference.`,
@@ -99,7 +99,7 @@ export class InvalidTitle extends FileStoreError {
   constructor() {
     super(
       "INVALID_TITLE",
-      `a document needs a title — it is what somebody scanning a client's file sees, and the ` +
+      `A document needs a title — it is what somebody scanning a client's file sees, and the ` +
         `filename is not always legible ("scan_0043.pdf")`,
     );
   }
@@ -123,7 +123,7 @@ export class AlreadyAttached extends FileStoreError {
   constructor(subjectKind: string, subjectRef: string) {
     super(
       "ALREADY_ATTACHED",
-      `this document is already attached to ${subjectKind} ${JSON.stringify(subjectRef)}. ` +
+      `This document is already attached to ${subjectKind} ${JSON.stringify(subjectRef)}. ` +
         `Attaching the same file to the same thing twice is a double-click, not a second fact.`,
     );
   }
@@ -137,7 +137,7 @@ export class BytesMissing extends FileStoreError {
     // would send whoever reads it looking for a deleted document instead.
     super(
       "BYTES_MISSING",
-      `the storage backend has no object at ${JSON.stringify(storageKey)}, but a version row ` +
+      `The storage backend has no object at ${JSON.stringify(storageKey)}, but a version row ` +
         `says it should. The document's metadata is intact and its bytes are not — this is a ` +
         `storage fault, not a missing document.`,
     );
@@ -148,7 +148,7 @@ export class BrandAssetNotFound extends FileStoreError {
   constructor(entityPartyId: string, kind: string) {
     super(
       "BRAND_ASSET_NOT_FOUND",
-      `this firm's entity ${JSON.stringify(entityPartyId)} has no active ${kind}`,
+      `This firm's entity ${JSON.stringify(entityPartyId)} has no active ${kind}`,
     );
   }
 }

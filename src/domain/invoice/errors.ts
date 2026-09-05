@@ -33,13 +33,13 @@ export type InvoiceErrorCode =
 
 export class InvoiceNotFound extends InvoiceError {
   constructor(id: string) {
-    super("INVOICE_NOT_FOUND", `no invoice ${JSON.stringify(id)} at this firm.`);
+    super("INVOICE_NOT_FOUND", `No invoice ${JSON.stringify(id)} at this firm.`);
   }
 }
 
 export class InvoiceLineNotFound extends InvoiceError {
   constructor(id: string) {
-    super("INVOICE_LINE_NOT_FOUND", `no line ${JSON.stringify(id)} on this invoice.`);
+    super("INVOICE_LINE_NOT_FOUND", `No line ${JSON.stringify(id)} on this invoice.`);
   }
 }
 
@@ -54,7 +54,7 @@ export class InvoiceNotEditable extends InvoiceError {
   constructor(id: string, status: string) {
     super(
       "INVOICE_NOT_EDITABLE",
-      `invoice ${JSON.stringify(id)} is ${status}, so what it says the client owes cannot ` +
+      `Invoice ${JSON.stringify(id)} is ${status}, so what it says the client owes cannot ` +
         `change. Cancel it and issue a new one — both stay readable, which is the point.`,
     );
   }
@@ -65,7 +65,7 @@ export class EmptyInvoice extends InvoiceError {
   constructor(id: string) {
     super(
       "EMPTY_INVOICE",
-      `invoice ${JSON.stringify(id)} has no lines, so it asks the client for nothing. Add a ` +
+      `Invoice ${JSON.stringify(id)} has no lines, so it asks the client for nothing. Add a ` +
         `line before issuing it.`,
     );
   }
@@ -75,7 +75,7 @@ export class InvalidInvoiceTransition extends InvoiceError {
   constructor(from: string, to: string) {
     super(
       "INVALID_INVOICE_TRANSITION",
-      `an invoice cannot go from ${from} to ${to}. An issued invoice is cancelled, never ` +
+      `An invoice cannot go from ${from} to ${to}. An issued invoice is cancelled, never ` +
         `returned to draft: a copy has left the building.`,
     );
   }
@@ -126,7 +126,7 @@ export class IrnAlreadyRegistered extends InvoiceError {
   constructor(id: string, irn: string) {
     super(
       "IRN_ALREADY_REGISTERED",
-      `invoice ${JSON.stringify(id)} is already registered as IRN ${JSON.stringify(irn)}. ` +
+      `Invoice ${JSON.stringify(id)} is already registered as IRN ${JSON.stringify(irn)}. ` +
         `That is the registry's identifier for this document and cannot be replaced.`,
     );
   }
@@ -168,7 +168,7 @@ export class InvoiceNotIssued extends InvoiceError {
   constructor(id: string, status: string) {
     super(
       "INVOICE_NOT_ISSUED",
-      `invoice ${JSON.stringify(id)} is ${status}, so money cannot be applied to it. A draft ` +
+      `Invoice ${JSON.stringify(id)} is ${status}, so money cannot be applied to it. A draft ` +
         `has asked the client for nothing; a cancelled invoice is a refund or a reallocation, ` +
         `not a settlement.`,
     );
@@ -189,7 +189,7 @@ export class CreditExceedsInvoice extends InvoiceError {
   constructor(id: string, requested: string, remaining: string) {
     super(
       "CREDIT_EXCEEDS_INVOICE",
-      `crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
+      `Crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
         `${remaining} of it is uncredited. Credit the remainder, or check whether this belongs ` +
         `against a different invoice.`,
     );
@@ -200,7 +200,7 @@ export class CreditExceedsInvoice extends InvoiceError {
 
 export class DunningActionNotFound extends InvoiceError {
   constructor(id: string) {
-    super("DUNNING_ACTION_NOT_FOUND", `no dunning action ${JSON.stringify(id)} at this firm.`);
+    super("DUNNING_ACTION_NOT_FOUND", `No dunning action ${JSON.stringify(id)} at this firm.`);
   }
 }
 
@@ -216,7 +216,7 @@ export class DunningNotAwaitingApproval extends InvoiceError {
   constructor(id: string, action: string) {
     super(
       "DUNNING_NOT_AWAITING_APPROVAL",
-      `dunning action ${JSON.stringify(id)} is a ${JSON.stringify(action)} and is not waiting ` +
+      `Dunning action ${JSON.stringify(id)} is a ${JSON.stringify(action)} and is not waiting ` +
         `for anybody. Only credit hold and legal action need a partner, and only a person may ` +
         `decide one.`,
     );
@@ -234,7 +234,7 @@ export class DunningAlreadyDecided extends InvoiceError {
   constructor(id: string, state: string) {
     super(
       "DUNNING_ALREADY_DECIDED",
-      `dunning action ${JSON.stringify(id)} was already ${state}, and a decision about a client ` +
+      `Dunning action ${JSON.stringify(id)} was already ${state}, and a decision about a client ` +
         `is not editable. Take the next step instead.`,
     );
   }

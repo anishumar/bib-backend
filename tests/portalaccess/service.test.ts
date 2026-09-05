@@ -144,13 +144,13 @@ describe("granting a client to a portal login", () => {
         { tenantId: FIRM, membershipId: "00000000-0000-4000-8000-0000000000ff", clientPartyId: COBALT, grantedBy: PARTNER },
         SYSTEM_ACTOR,
       ),
-    ).rejects.toThrow(/no membership/);
+    ).rejects.toThrow(/no membership/i);
     await expect(
       w.service.grant(
         { tenantId: FIRM, membershipId: PORTAL_LOGIN, clientPartyId: "00000000-0000-4000-8000-0000000000fe", grantedBy: PARTNER },
         SYSTEM_ACTOR,
       ),
-    ).rejects.toThrow(/no party/);
+    ).rejects.toThrow(/no party/i);
   });
 
   it("refuses an ARCHIVED client, and says archiving is what that means", async () => {
@@ -321,7 +321,7 @@ describe("ending a grant", () => {
         { tenantId: FIRM, grantId: "00000000-0000-4000-8000-0000000000fd" },
         SYSTEM_ACTOR,
       ),
-    ).rejects.toThrow(/no portal grant/);
+    ).rejects.toThrow(/no portal grant/i);
   });
 });
 

@@ -36,7 +36,7 @@ export class PortalContactNotFound extends PortalInviteError {
   constructor(membershipId: string) {
     super(
       "PORTAL_CONTACT_NOT_FOUND",
-      `no membership ${JSON.stringify(membershipId)} at this firm to write to. An invitation ` +
+      `No membership ${JSON.stringify(membershipId)} at this firm to write to. An invitation ` +
         `is re-sent to a MEMBERSHIP and not to an account: the same person may hold a portal ` +
         `login at two firms, and each firm may only write to its own.`,
     );
@@ -47,7 +47,7 @@ export class PortalContactNotAClientLogin extends PortalInviteError {
   constructor(membershipId: string, audience: string) {
     super(
       "PORTAL_CONTACT_NOT_A_CLIENT_LOGIN",
-      `membership ${JSON.stringify(membershipId)} is a ${audience} login, and this route ` +
+      `Membership ${JSON.stringify(membershipId)} is a ${audience} login, and this route ` +
         `re-sends the CLIENT PORTAL invitation — the letter on which a password is chosen. A ` +
         `colleague is sent a different letter, and does not need one: the sign-in page issues ` +
         `them a fresh link on request.`,
@@ -59,7 +59,7 @@ export class PortalContactInactive extends PortalInviteError {
   constructor(membershipId: string) {
     super(
       "PORTAL_CONTACT_INACTIVE",
-      `membership ${JSON.stringify(membershipId)} has been revoked, so there is nobody to ` +
+      `Membership ${JSON.stringify(membershipId)} has been revoked, so there is nobody to ` +
         `write to. Restore it on the client's contacts list first — re-inviting a revoked ` +
         `login would mail somebody the firm has shut out a link that cannot open anything.`,
     );

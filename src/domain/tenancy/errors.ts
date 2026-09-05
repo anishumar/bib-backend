@@ -29,7 +29,7 @@ export type TenancyErrorCode =
 
 export class InvalidSlug extends TenancyError {
   constructor(slug: string) {
-    super("INVALID_SLUG", `tenant slug ${JSON.stringify(slug)} is not url-safe lowercase (2-40 chars)`);
+    super("INVALID_SLUG", `Tenant slug ${JSON.stringify(slug)} is not url-safe lowercase (2-40 chars)`);
   }
 }
 export class InvalidCurrency extends TenancyError {
@@ -39,7 +39,7 @@ export class InvalidCurrency extends TenancyError {
     // rather than 180 codes nobody will read.
     super(
       "INVALID_CURRENCY",
-      `reporting currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, ` +
+      `Reporting currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, ` +
         `like "INR" or "AED". It is what this firm's books are kept in, and it cannot be changed ` +
         `afterwards, because every exchange rate stored later is struck against it.`,
     );
@@ -47,32 +47,32 @@ export class InvalidCurrency extends TenancyError {
 }
 export class InvalidAudience extends TenancyError {
   constructor(audience: string) {
-    super("INVALID_AUDIENCE", `audience ${JSON.stringify(audience)} must be STAFF or CLIENT_PORTAL`);
+    super("INVALID_AUDIENCE", `Audience ${JSON.stringify(audience)} must be STAFF or CLIENT_PORTAL`);
   }
 }
 export class SlugTaken extends TenancyError {
   constructor(slug: string) {
-    super("SLUG_TAKEN", `a tenant with slug ${JSON.stringify(slug)} already exists`);
+    super("SLUG_TAKEN", `A tenant with slug ${JSON.stringify(slug)} already exists`);
   }
 }
 export class EmailTaken extends TenancyError {
   constructor(email: string) {
-    super("EMAIL_TAKEN", `a user with email ${JSON.stringify(email)} already exists`);
+    super("EMAIL_TAKEN", `A user with email ${JSON.stringify(email)} already exists`);
   }
 }
 export class TenantNotFound extends TenancyError {
   constructor(ref: string) {
-    super("TENANT_NOT_FOUND", `no tenant for ${JSON.stringify(ref)}`);
+    super("TENANT_NOT_FOUND", `No tenant for ${JSON.stringify(ref)}`);
   }
 }
 export class UserNotFound extends TenancyError {
   constructor(ref: string) {
-    super("USER_NOT_FOUND", `no user for ${JSON.stringify(ref)}`);
+    super("USER_NOT_FOUND", `No user for ${JSON.stringify(ref)}`);
   }
 }
 export class MembershipNotFound extends TenancyError {
   constructor(ref: string) {
-    super("MEMBERSHIP_NOT_FOUND", `no membership ${JSON.stringify(ref)} at this firm`);
+    super("MEMBERSHIP_NOT_FOUND", `No membership ${JSON.stringify(ref)} at this firm`);
   }
 }
 export class MembershipExists extends TenancyError {
@@ -111,7 +111,7 @@ export class SignatoryNotAMember extends TenancyError {
     // that matters is that they actually work here.
     super(
       "SIGNATORY_NOT_A_MEMBER",
-      `user ${JSON.stringify(userId)} has no active staff membership at this firm, so they ` +
+      `User ${JSON.stringify(userId)} has no active staff membership at this firm, so they ` +
         `cannot be named as the person who binds it. Whoever signs the firm's engagement ` +
         `letters has to work here — add them to the roster first, or reinstate their access.`,
     );
@@ -122,7 +122,7 @@ export class LastAdministrator extends TenancyError {
   constructor(adminPermission: string) {
     super(
       "LAST_ADMINISTRATOR",
-      `this would leave the firm with nobody who can administer it — no active member holding a ` +
+      `This would leave the firm with nobody who can administer it — no active member holding a ` +
         `role that carries ${JSON.stringify(adminPermission)}. That permission is what lets anyone ` +
         `change roles or memberships at all, including undoing this, so nobody could put it back ` +
         `from inside the product. Give somebody else an administrator role first.`,
