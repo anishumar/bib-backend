@@ -39,6 +39,7 @@ import {
   defaultPriorityFor,
   dueOnFrom,
   initialState,
+  underReviewState,
   isIsoDate,
   isValidRank,
   isValidVocabularyCode,
@@ -132,6 +133,9 @@ export interface CreateStateInput {
   /** Reaching it means the work was DONE rather than abandoned. Only a terminal
    *  state may carry it — see `refuseConflictingFlags`. */
   readonly isSuccess?: boolean | undefined;
+  /** Whether work sent for review lands here (0073). At most one state per
+   *  firm; ticking it un-ticks whichever held it. */
+  readonly isUnderReview?: boolean | undefined;
   readonly sortOrder?: number | undefined;
 }
 
@@ -144,6 +148,9 @@ export interface UpdateStateInput {
   readonly isTerminal?: boolean | undefined;
   readonly isBlocked?: boolean | undefined;
   readonly isSuccess?: boolean | undefined;
+  /** Whether work sent for review lands here (0073). At most one state per
+   *  firm; ticking it un-ticks whichever held it. */
+  readonly isUnderReview?: boolean | undefined;
   readonly sortOrder?: number | undefined;
   readonly isActive?: boolean | undefined;
 }
@@ -191,7 +198,8 @@ export class WorkVocabularyService {
     const isTerminal = input.isTerminal ?? false;
     const isBlocked = input.isBlocked ?? false;
     const isSuccess = input.isSuccess ?? false;
-    this.refuseConflictingFlags(isInitial, isTerminal, isBlocked, isSuccess);
+    const isUnderReview = input.isUnderReview ?? false;
+    this.refuseConflictingFlags(isInitial, isTerminal, isBlocked, isSuccess, isUnderReview);
 
     // Checked rather than left to the unique constraint, which would surface as
     // an unexplained 500 on a screen where the fix is obvious.
@@ -208,6 +216,7 @@ export class WorkVocabularyService {
       isTerminal,
       isBlocked,
       isSuccess,
+      isUnderReview,
       sortOrder,
     } satisfies NewWorkItemState);
 
@@ -216,7 +225,7 @@ export class WorkVocabularyService {
       verb: "work_item_state.created",
       objectId: state.id,
       actor,
-      payload: { code: state.code, isInitial, isTerminal, isBlocked, isSuccess },
+      payload: { code: state.code, isInitial, isTerminal, isBlocked, isSuccess, isUnderReview },
     });
     return state;
   }
@@ -251,10 +260,17 @@ export class WorkVocabularyService {
       isTerminal: input.isTerminal ?? state.isTerminal,
       isBlocked: input.isBlocked ?? state.isBlocked,
       isSuccess: input.isSuccess ?? state.isSuccess,
+      isUnderReview: input.isUnderReview ?? state.isUnderReview,
       sortOrder: input.sortOrder ?? state.sortOrder,
       isActive: input.isActive ?? state.isActive,
     };
-    this.refuseConflictingFlags(next.isInitial, next.isTerminal, next.isBlocked, next.isSuccess);
+    this.refuseConflictingFlags(
+      next.isInitial,
+      next.isTerminal,
+      next.isBlocked,
+      next.isSuccess,
+      next.isUnderReview,
+    );
 
     // Losing the starting flag, or retiring the row that holds it, both leave
     // the firm unable to create any work at all. The same refusal, because they
@@ -268,6 +284,7 @@ export class WorkVocabularyService {
       next.isTerminal !== state.isTerminal ||
       next.isBlocked !== state.isBlocked ||
       next.isSuccess !== state.isSuccess ||
+      next.isUnderReview !== state.isUnderReview ||
       next.sortOrder !== state.sortOrder ||
       next.isActive !== state.isActive;
     if (!changed) return state;
@@ -289,6 +306,9 @@ export class WorkVocabularyService {
         ...(next.isTerminal === state.isTerminal ? {} : { isTerminal: next.isTerminal }),
         ...(next.isBlocked === state.isBlocked ? {} : { isBlocked: next.isBlocked }),
         ...(next.isSuccess === state.isSuccess ? {} : { isSuccess: next.isSuccess }),
+        ...(next.isUnderReview === state.isUnderReview
+          ? {}
+          : { isUnderReview: next.isUnderReview }),
         ...(next.sortOrder === state.sortOrder ? {} : { sortOrder: next.sortOrder }),
         ...(next.isActive === state.isActive ? {} : { isActive: next.isActive }),
       },
@@ -410,6 +430,12 @@ export class WorkVocabularyService {
       isTerminal: s.isTerminal,
       isBlocked: s.isBlocked,
       isSuccess: s.isSuccess,
+      // NEVER seeded, and this literal is the promise. The firm's eight
+      // starting states came from a previous vendor and one of them is called
+      // "Under Review" — ticking it here would be this product deciding that a
+      // name means a mechanism, which is the whole thing 0050 made these rows
+      // to avoid. A firm says so on its own vocabulary screen, or never does.
+      isUnderReview: false,
       sortOrder: s.sortOrder,
     }));
 
@@ -479,7 +505,32 @@ export class WorkVocabularyService {
     isTerminal: boolean,
     isBlocked: boolean,
     isSuccess: boolean,
+    isUnderReview: boolean,
   ): void {
+    // 0073's three CHECKs, said as sentences. The blocked one is the sharp
+    // one and its reason is not symmetry: 0051's trigger demands a
+    // `blocked_reason` on every row in a blocked state, and sending work to be
+    // checked has no reason to give — so a firm that ticked both would make
+    // every review request fail on a field the admin never saw.
+    if (isUnderReview && isBlocked) {
+      throw new ConflictingStateFlags(
+        "A state cannot mean both 'with a checker' and 'blocked': work is moved here " +
+          "automatically when somebody sends it for review, and a blocked state demands a " +
+          "written reason that nobody would have typed.",
+      );
+    }
+    if (isUnderReview && isTerminal) {
+      throw new ConflictingStateFlags(
+        "A state cannot mean both 'with a checker' and finished: work waiting to be checked " +
+          "is not work that is done.",
+      );
+    }
+    if (isUnderReview && isInitial) {
+      throw new ConflictingStateFlags(
+        "A state cannot be both the starting state and 'with a checker': every new task would " +
+          "be created as though somebody had already sent it to be reviewed.",
+      );
+    }
     if (isSuccess && !isTerminal) {
       throw new ConflictingStateFlags(
         "Only a state the firm treats as finished can mean the work was done: mark it " +
@@ -1318,10 +1369,34 @@ export class WorkItemService {
    * a maker-checker control, because the way past the constraint would be to
    * name somebody else as the maker and approve it yourself.
    *
-   * The state is deliberately NOT moved to "Under Review". There is no flag
-   * saying which of the firm's states means that, and comparing the code is the
-   * one thing this module never does — so the firm moves it, and the board
-   * shows the open review beside whatever state it is actually in.
+   * ── AND IT MOVES THE STATE NOW, IF THE FIRM HAS SAID WHERE (0073) ───────
+   *
+   * It did not, and the reason written here was right: there was no flag saying
+   * which of the firm's states means "with a checker", and comparing the code
+   * is the one thing this module never does. The cost was found by using the
+   * product — press this and the buttons become Approve / Send back while the
+   * header goes on reading "In Progress", with the firm's own "Under Review"
+   * sitting in the state dropdown as a second answer to the same question. On a
+   * board organised BY STATE the task sat in the wrong column while somebody's
+   * queue said it was theirs.
+   *
+   * So 0073 added the flag rather than this method reading a name.
+   * `underReviewState` returns null for a firm that has not said, and null
+   * keeps exactly the old behaviour — that is a supported answer, not a gap.
+   *
+   * THE MOVE IS AFTER THE APPROVAL, and the order is deliberate. Opening the
+   * check is the act; the state is how the board renders it. A failed move
+   * leaves an open review on work that still reads "In Progress", which is
+   * where every firm was before this — survivable, and visible. The reverse
+   * would move the task into a column meaning "somebody is checking this" with
+   * nobody checking it.
+   *
+   * Three states are left alone, and each for its own reason: work already
+   * THERE (nothing to do), work in a TERMINAL state (moving it out would clear
+   * `completedAt` and reopen finished work as a side effect of asking for a
+   * check), and the dependency rule, which is NOT applied — sending work to be
+   * checked says the work has been done, and refusing to record that because a
+   * dependency is open would be refusing a fact that has already happened.
    */
   async requestReview(input: RequestReviewInput, actor: Actor): Promise<WorkItemApproval> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
@@ -1356,6 +1431,8 @@ export class WorkItemService {
     // somebody clicked twice, or two people clicked together.
     if (!approval) throw new ReviewAlreadyOpen();
 
+    const movedTo = await this.moveIntoReview(input.tenantId, item, actor);
+
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "work_item.review_requested",
@@ -1368,9 +1445,71 @@ export class WorkItemService {
         // Whether there is a maker AT ALL is the fact that decides whether
         // maker != checker can bite; the id itself is already on the row.
         hasMaker: approval.submittedBy !== null,
+        // Null when the firm has named no "with a checker" state, or the item
+        // was already in it, or it is finished. Recorded because "why did this
+        // task not move" is asked of this trail, and the answer is a decision
+        // the firm has or has not taken on its own vocabulary screen.
+        movedToStateId: movedTo,
       },
     });
     return approval;
+  }
+
+  /**
+   * Put the item in the firm's "with a checker" state, if it has one.
+   *
+   * Returns the state it moved to, or null when nothing moved — see
+   * `requestReview` for which three cases those are and why each is left alone.
+   *
+   * It writes through the same `setState` the manual move uses rather than
+   * calling `moveToState`, because that method refuses a move to the state the
+   * item is already in (`WorkItemAlreadyInState`) — correct for somebody
+   * pressing a dropdown, wrong for a side effect, where "it is already there"
+   * is success. The timestamp rules are simpler here than there and 0073 is why:
+   * the target can be neither blocked nor terminal nor initial, so the only one
+   * that applies is `startedAt`, and only on the way out of the starting state.
+   */
+  private async moveIntoReview(
+    tenantId: string,
+    item: WorkItem,
+    actor: Actor,
+  ): Promise<string | null> {
+    const to = underReviewState(await this.deps.vocabulary.listStates(tenantId));
+    if (!to || to.id === item.stateId) return null;
+
+    const from = await this.requireStateRow(tenantId, item.stateId);
+    if (from.isTerminal) return null;
+
+    const now = this.deps.clock.now().toISOString();
+    await this.deps.items.setState(tenantId, item.id, {
+      stateId: to.id,
+      // Leaving a block is leaving a block, whichever door it goes out of: a
+      // stale sentence on work that is now with a checker would be read as the
+      // reason it is stuck. The ledger keeps what it said.
+      blockedReason: null,
+      blockedAt: null,
+      startedAt: item.startedAt ?? (from.isInitial ? now : null),
+      completedAt: null,
+    });
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "work_item.state_changed",
+      objectId: item.id,
+      actor,
+      payload: {
+        fromStateId: from.id,
+        toStateId: to.id,
+        isBlocked: false,
+        isTerminal: false,
+        isSuccess: false,
+        // What separates this row from a person choosing the state by hand.
+        // The two are the same write and are not the same fact — "who moved
+        // this and why" is exactly what an audit trail is read for.
+        byReviewRequest: true,
+      },
+    });
+    return to.id;
   }
 
   /**

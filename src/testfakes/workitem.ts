@@ -86,6 +86,7 @@ export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
     // it everywhere else in the same act. A fake that let two rows hold it
     // would make "the firm always has exactly one starting state" untestable.
     if (state.isInitial) this.clearInitial(state.tenantId, null);
+    if (state.isUnderReview) this.clearUnderReview(state.tenantId, null);
     const row: WorkItemState = { ...state, isActive: true };
     this.states.push(row);
     return Promise.resolve(row);
@@ -97,6 +98,7 @@ export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
     patch: WorkItemStatePatch,
   ): Promise<WorkItemState> {
     if (patch.isInitial) this.clearInitial(tenantId, stateId);
+    if (patch.isUnderReview) this.clearUnderReview(tenantId, stateId);
     const i = this.states.findIndex((s) => s.tenantId === tenantId && s.id === stateId);
     const current = this.states[i];
     if (i < 0 || !current) throw new Error(`no state ${stateId}`);
@@ -173,6 +175,18 @@ export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
       const s = this.states[i];
       if (s && s.tenantId === tenantId && s.isInitial && s.id !== exceptId) {
         this.states[i] = { ...s, isInitial: false };
+      }
+    }
+  }
+
+  /** 0073's partial unique index, reproduced for the same reason as the one
+   *  above: a fake that let two rows mean "with a checker" would make "work
+   *  sent for review lands in ONE place" untestable. */
+  private clearUnderReview(tenantId: string, exceptId: string | null): void {
+    for (let i = 0; i < this.states.length; i += 1) {
+      const s = this.states[i];
+      if (s && s.tenantId === tenantId && s.isUnderReview && s.id !== exceptId) {
+        this.states[i] = { ...s, isUnderReview: false };
       }
     }
   }

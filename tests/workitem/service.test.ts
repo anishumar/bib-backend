@@ -694,6 +694,123 @@ describe("review — and the rule no firm may configure away", () => {
     return { h, item };
   }
 
+  /**
+   * The firm names one of its own states as "with a checker" (0073).
+   *
+   * Written as a helper rather than into the harness on purpose: NOT having one
+   * is the shipped state and the default every other test in this file runs
+   * under, so a test that wants the move has to ask for it.
+   */
+  async function nameAReviewState(h: Awaited<ReturnType<typeof harness>>): Promise<string> {
+    const states = await h.vocab.listStates(FIRM);
+    const target = states.find((st) => st.code === "under_review");
+    if (!target) throw new Error("the seed no longer ships an under_review state");
+    await h.vocab.updateState({ tenantId: FIRM, stateId: target.id, isUnderReview: true }, ACTOR);
+    return target.id;
+  }
+
+  it("MOVES the item into the firm's 'with a checker' state", async () => {
+    // The defect this closes, found by using the product: the buttons became
+    // Approve / Send back while the header went on reading "In Progress", and
+    // on a board organised by state the task sat in the wrong column while
+    // somebody's queue said it was theirs.
+    const { h, item } = await readyForReview();
+    const reviewStateId = await nameAReviewState(h);
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const after = await h.service.detail(FIRM, item.id);
+    expect(after.record.item.stateId).toBe(reviewStateId);
+  });
+
+  it("leaves the state ALONE when the firm has named none — the shipped answer", async () => {
+    // Null is supported, not a gap. There is deliberately no fallback to a
+    // state NAMED "Under Review": the firm owns the words, and a product that
+    // reads a name breaks the morning somebody renames it.
+    const { h, item } = await readyForReview();
+    const before = (await h.service.detail(FIRM, item.id)).record.item.stateId;
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
+  });
+
+  it("records the move, and says it was the REVIEW that moved it", async () => {
+    const { h, item } = await readyForReview();
+    const reviewStateId = await nameAReviewState(h);
+    const before = h.recorded().length;
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const written = h.recorded().slice(before);
+    const moved = written.find((e) => e.verb === "work_item.state_changed");
+    // A person choosing the state from a dropdown and a review request moving
+    // it are the same WRITE and are not the same FACT.
+    expect(moved?.payload).toMatchObject({ toStateId: reviewStateId, byReviewRequest: true });
+    const asked = written.find((e) => e.verb === "work_item.review_requested");
+    expect(asked?.payload).toMatchObject({ movedToStateId: reviewStateId });
+  });
+
+  it("says on the event when NOTHING moved, because that is a firm's decision", async () => {
+    const { h, item } = await readyForReview();
+    const before = h.recorded().length;
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const written = h.recorded().slice(before);
+    expect(written.some((e) => e.verb === "work_item.state_changed")).toBe(false);
+    expect(
+      written.find((e) => e.verb === "work_item.review_requested")?.payload,
+    ).toMatchObject({ movedToStateId: null });
+  });
+
+  it("clears a stale block on the way in — it is not stuck, it is with a checker", async () => {
+    const { h, item } = await readyForReview();
+    const reviewStateId = await nameAReviewState(h);
+    const states = await h.vocab.listStates(FIRM);
+    const blocked = states.find((st) => st.isBlocked);
+    if (!blocked) throw new Error("the seed no longer ships a blocked state");
+    await h.service.moveToState(
+      {
+        tenantId: FIRM,
+        workItemId: item.id,
+        stateId: blocked.id,
+        blockedReason: "waiting on the client's bank statement",
+      },
+      ACTOR,
+    );
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const after = (await h.service.detail(FIRM, item.id)).record.item;
+    expect(after.stateId).toBe(reviewStateId);
+    // A sentence left behind from the block would be read as the reason the
+    // work is where it is now, and it is not. The ledger keeps what it said.
+    expect(after.blockedReason).toBeNull();
+    expect(after.blockedAt).toBeNull();
+  });
+
+  it("does not reopen FINISHED work by asking for a check", async () => {
+    const { h, item } = await readyForReview();
+    await nameAReviewState(h);
+    const states = await h.vocab.listStates(FIRM);
+    const done = states.find((st) => st.isTerminal && st.isSuccess);
+    if (!done) throw new Error("the seed no longer ships a successful terminal state");
+    await h.service.moveToState(
+      { tenantId: FIRM, workItemId: item.id, stateId: done.id },
+      ACTOR,
+    );
+
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    const after = (await h.service.detail(FIRM, item.id)).record.item;
+    // Moving it out would clear `completedAt` as a side effect of asking for a
+    // check, which is finished work being reopened by a button that says
+    // nothing about reopening.
+    expect(after.stateId).toBe(done.id);
+    expect(after.completedAt).not.toBeNull();
+  });
+
   it("derives the maker from the item's assignee — the caller cannot set it", async () => {
     const { h, item } = await readyForReview();
     const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);

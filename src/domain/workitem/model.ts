@@ -53,6 +53,25 @@ export interface WorkItemState {
    * A flag rather than the code, for the reason at the top of this interface.
    */
   readonly isSuccess: boolean;
+  /**
+   * The work is WITH A CHECKER (0073).
+   *
+   * Sending an item for review moves it here, so the board column and the open
+   * `work_item_approval` cannot disagree — before this they routinely did: the
+   * buttons said Approve / Send back while the header still read "In Progress",
+   * and the firm's own "Under Review" state sat in the state dropdown as a
+   * second answer to the same question. Found by using the product.
+   *
+   * A flag rather than the code, for the reason at the top of this interface,
+   * and FALSE EVERYWHERE until a firm says which of its states means this. None
+   * is a real answer: a firm that never says gets exactly the old behaviour,
+   * because deciding that a state called "Under Review" means under review is
+   * this product having an opinion about the firm's own words.
+   *
+   * At most one per firm, and it can be neither blocked (0051's trigger would
+   * demand a reason nobody typed), terminal, nor initial.
+   */
+  readonly isUnderReview: boolean;
   readonly sortOrder: number;
   /** Whether the firm still moves work into it. Retired states still READ —
    *  items sitting in one are not orphaned — they are simply not offered. */
@@ -358,6 +377,20 @@ export function isValidRank(rank: number): boolean {
  *  `isInitial`. */
 export function initialState(states: readonly WorkItemState[]): WorkItemState | null {
   return states.find((s) => s.isInitial) ?? null;
+}
+
+/**
+ * Where work goes when somebody sends it to be checked, or null (0073).
+ *
+ * NULL IS A SUPPORTED ANSWER AND NOT A GAP. A firm that has not said which of
+ * its own states means "with a checker" gets the behaviour that shipped before
+ * this flag existed: the review opens and the state stays where it is. There is
+ * no fallback to a state called "Under Review" and there must not be — the
+ * whole reason these are rows is that the firm owns the words, and a product
+ * that reads a name is a product that breaks the moment a firm renames it.
+ */
+export function underReviewState(states: readonly WorkItemState[]): WorkItemState | null {
+  return states.find((s) => s.isUnderReview) ?? null;
 }
 
 /**

@@ -35,6 +35,7 @@ export interface NewWorkItemState {
   readonly isTerminal: boolean;
   readonly isBlocked: boolean;
   readonly isSuccess: boolean;
+  readonly isUnderReview: boolean;
   readonly sortOrder: number;
 }
 
@@ -52,6 +53,7 @@ export interface WorkItemStatePatch {
   readonly isTerminal: boolean;
   readonly isBlocked: boolean;
   readonly isSuccess: boolean;
+  readonly isUnderReview: boolean;
   readonly sortOrder: number;
   readonly isActive: boolean;
 }

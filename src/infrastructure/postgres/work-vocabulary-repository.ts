@@ -21,6 +21,7 @@ interface StateRow {
   is_terminal: boolean;
   is_blocked: boolean;
   is_success: boolean;
+  is_under_review: boolean;
   sort_order: number;
   is_active: boolean;
 }
@@ -46,6 +47,7 @@ function toState(r: StateRow): WorkItemState {
     isTerminal: r.is_terminal,
     isBlocked: r.is_blocked,
     isSuccess: r.is_success,
+    isUnderReview: r.is_under_review,
     sortOrder: r.sort_order,
     isActive: r.is_active,
   };
@@ -65,8 +67,8 @@ function toPriority(r: PriorityRow): WorkItemPriority {
 }
 
 const STATE_COLUMNS =
-  "id, tenant_id, code, name, is_initial, is_terminal, is_blocked, is_success, sort_order, " +
-  "is_active";
+  "id, tenant_id, code, name, is_initial, is_terminal, is_blocked, is_success, " +
+  "is_under_review, sort_order, is_active";
 const PRIORITY_COLUMNS =
   "id, tenant_id, code, name, rank, is_default, is_statutory_default, is_active";
 
@@ -109,14 +111,18 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
       // otherwise, and the caller would see a constraint violation where the
       // firm made a perfectly ordinary change.
       if (state.isInitial) await this.clearInitial(db, null);
+      // Same transaction, same reason: 0073's partial unique index is the same
+      // shape as the starting state's, so a firm moving "with a checker" from
+      // one state to another must not pass through a moment where both hold it.
+      if (state.isUnderReview) await this.clearUnderReview(db, null);
       const [row] = await db<StateRow[]>`
         INSERT INTO delivery.work_item_state
           (id, tenant_id, code, name, is_initial, is_terminal, is_blocked, is_success,
-           sort_order)
+           is_under_review, sort_order)
         VALUES
           (${state.id}, ${state.tenantId}, ${state.code}, ${state.name},
            ${state.isInitial}, ${state.isTerminal}, ${state.isBlocked}, ${state.isSuccess},
-           ${state.sortOrder})
+           ${state.isUnderReview}, ${state.sortOrder})
         RETURNING ${db.unsafe(STATE_COLUMNS)}
       `;
       if (!row) throw new Error("work_item_state insert returned no row");
@@ -131,6 +137,7 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
   ): Promise<WorkItemState> {
     return withTenant(this.app, tenantId, async (db) => {
       if (patch.isInitial) await this.clearInitial(db, stateId);
+      if (patch.isUnderReview) await this.clearUnderReview(db, stateId);
       // The service has already resolved absent fields to their current values,
       // so every column is present here and the SQL needs no dynamic assembly —
       // the convention `StaffGradeRepository.update` set, and it means there is
@@ -142,6 +149,7 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
             is_terminal = ${patch.isTerminal},
             is_blocked  = ${patch.isBlocked},
             is_success  = ${patch.isSuccess},
+            is_under_review = ${patch.isUnderReview},
             sort_order  = ${patch.sortOrder},
             is_active   = ${patch.isActive}
         WHERE id = ${stateId}
@@ -294,6 +302,16 @@ export class PostgresWorkVocabularyRepository implements WorkVocabularyRepositor
     await db`
       UPDATE delivery.work_item_state SET is_initial = false
       WHERE is_initial AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
+    `;
+  }
+
+  private async clearUnderReview(
+    db: Parameters<Parameters<typeof withTenant>[2]>[0],
+    exceptId: string | null,
+  ): Promise<void> {
+    await db`
+      UPDATE delivery.work_item_state SET is_under_review = false
+      WHERE is_under_review AND (${exceptId}::uuid IS NULL OR id <> ${exceptId}::uuid)
     `;
   }
 

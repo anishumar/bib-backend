@@ -60,6 +60,17 @@ const WorkItemStateSchema = z
         "from this flag, and cancelling a task must never record that a statutory return " +
         "was filed.",
     }),
+    isUnderReview: z.boolean().openapi({
+      description:
+        "Work in this state is WITH A CHECKER, and sending an item for review moves it here " +
+        "automatically — so the board column and the open review cannot disagree. Before this " +
+        "flag they routinely did: the buttons said Approve / Send back while the header still " +
+        "read 'In Progress'. At most one state per firm may carry it, it cannot also be " +
+        "blocked, terminal or the starting state, and FALSE EVERYWHERE is the shipped answer: " +
+        "a firm that has not said which of its own states means this keeps the old behaviour, " +
+        "because deciding that a state NAMED 'Under Review' means under review is this " +
+        "product having an opinion about the firm's words.",
+    }),
     sortOrder: z.number().int(),
     isActive: z.boolean().openapi({
       description:
@@ -364,6 +375,7 @@ const CreateStateRequest = z
     isTerminal: z.boolean().optional(),
     isBlocked: z.boolean().optional(),
     isSuccess: z.boolean().optional(),
+    isUnderReview: z.boolean().optional(),
     sortOrder: z.number().int().optional(),
   })
   .openapi("CreateWorkItemStateRequest");
@@ -375,6 +387,7 @@ const UpdateStateRequest = z
     isTerminal: z.boolean().optional(),
     isBlocked: z.boolean().optional(),
     isSuccess: z.boolean().optional(),
+    isUnderReview: z.boolean().optional(),
     sortOrder: z.number().int().optional(),
     isActive: z.boolean().optional(),
   })
@@ -446,6 +459,7 @@ function toStateWire(s: WorkItemState): z.infer<typeof WorkItemStateSchema> {
     isTerminal: s.isTerminal,
     isBlocked: s.isBlocked,
     isSuccess: s.isSuccess,
+    isUnderReview: s.isUnderReview,
     sortOrder: s.sortOrder,
     isActive: s.isActive,
   };
@@ -1232,6 +1246,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         isTerminal: body.isTerminal,
         isBlocked: body.isBlocked,
         isSuccess: body.isSuccess,
+        isUnderReview: body.isUnderReview,
         sortOrder: body.sortOrder,
       },
       s.actor,
@@ -1253,6 +1268,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         isTerminal: body.isTerminal,
         isBlocked: body.isBlocked,
         isSuccess: body.isSuccess,
+        isUnderReview: body.isUnderReview,
         sortOrder: body.sortOrder,
         isActive: body.isActive,
       },

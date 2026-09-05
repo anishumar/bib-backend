@@ -4250,6 +4250,62 @@ phase is unchanged and still externally gated.
   >      nothing, and was asleep by the time the row went. Every write in the panel reloads
   >      first and sets the outcome second. The order is the fix.
 
+- [x] `(B)` **T3.1c** "Send for review" moves the task, because two answers to one question is a bug. *Acc: a firm names one of its own states as "with a checker"; sending a task for review puts it there, and the board column, the header and the review queue stop disagreeing. A firm that names none keeps exactly the old behaviour.*
+  > **DONE 2026-09-07. Migration 0073** (`work_item_state.is_under_review`). `check` **1616** ·
+  > `test:integration` **576** · frontend `check` clean · `demo:verify` **71** either side of the
+  > walk. Frontend: the vocabulary screen's tick box, the state picker's re-sync, and
+  > `api:generate`.
+  >
+  > **THE DEFECT, AND THE COMMENT THAT WAS RIGHT ABOUT WHY IT EXISTED.** Press "Send for review"
+  > and the buttons become Approve / Send back while the header goes on reading **In Progress** —
+  > and the firm's own state called "Under Review" sits in the dropdown as a second answer to the
+  > same question. `requestReview` said out loud why it did not move anything: *"There is no flag
+  > saying which of the firm's states means that, and comparing the code is the one thing this
+  > module never does."* That reasoning is correct, so 0073 adds the flag rather than working
+  > around it.
+  >
+  > **A FLAG, NEVER A NAME.** States are ROWS the firm owns (0050) — it may call this one "QC" or
+  > "With the reviewer" — so the only thing code may read is `is_under_review`, exactly as it
+  > reads `is_blocked`, `is_terminal`, `is_initial` and `is_success`. There is deliberately no
+  > fallback to a state NAMED "Under Review", and the seed does not tick it: a firm that has not
+  > said gets exactly the behaviour that shipped before, which is a supported answer and not a
+  > gap. The eight starting states came from a previous vendor and are still unconfirmed.
+  >
+  > **THE `NOT BLOCKED` CHECK IS THE SHARP ONE.** 0051's trigger demands a `blocked_reason` on
+  > every row in a blocked state and sending work to be checked has no reason to give, so a firm
+  > that ticked both would make every review request fail on a field the admin never saw. Not
+  > terminal and not initial follow 0050's own pairs. Partial unique index: at most one per firm,
+  > because "where does work go when it is sent to be checked" must not be a coin toss.
+  >
+  > **THREE STATES ARE LEFT ALONE and each has its own reason**: already there (nothing to do),
+  > TERMINAL (moving it out would clear `completedAt` and reopen finished work as a side effect
+  > of asking for a check), and the dependency rule is NOT applied — sending work to be checked
+  > says the work has been done, and refusing to record that because a dependency is open would
+  > be refusing a fact that already happened. A stale `blocked_reason` IS cleared on the way in:
+  > the task is not stuck, it is with a checker, and the sentence would be read as the reason it
+  > is where it is now.
+  >
+  > **THE MOVE IS AFTER THE APPROVAL.** Opening the check is the act; the state is how the board
+  > renders it. A failed move leaves an open review on work that still reads "In Progress" —
+  > where every firm was before this, survivable and visible. The reverse would move a task into
+  > a column meaning "somebody is checking this" with nobody checking it. `movedToStateId` is on
+  > the `review_requested` event (null when the firm has named no state) and the state change
+  > carries `byReviewRequest: true`, because a person choosing from a dropdown and a review
+  > moving it are the same WRITE and are not the same FACT.
+  >
+  > **TWO MORE THINGS THE WALK FOUND, both invisible to every gate:**
+  >
+  >   1. **The state picker never re-synced.** `useState(currentStateId)` reads the prop once at
+  >      mount and that component never unmounts, so the screen showed "Not Started" on an item
+  >      the API had already put in "Under Review" — undoing the entire change on the one screen
+  >      it was for. Latent before 0073, because nothing else moved a state from outside. Fixed
+  >      with React's own compare-and-set-during-render recipe rather than an effect (renders the
+  >      wrong value once first) or a `key` (remounts, blurring whatever had focus).
+  >   2. **The admin screen offered a tick that could not be saved.** "Not Started" is the
+  >      starting state and the API refuses the pair, so the row was enabled and the answer was a
+  >      refusal. This repo's own rule — offering what will fail is a slower error — applied to a
+  >      row that was easy to miss because the other three impossible ones were already disabled.
+
 - [ ] `(B)` **T7.1** GST / GSP + TRACES (filing, IRN e-invoicing).
 - [ ] `(B)` **T7.2** MCA (RUN, SPICe+, AGILE-PRO) — RPA if no API.
 - [ ] `(A)` **T7.3** Accounting: Zoho / Tally / QuickBooks / Xero (books pull at T–3).
