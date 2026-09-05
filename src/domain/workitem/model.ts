@@ -257,6 +257,29 @@ export interface WorkItemBlocker {
   readonly title: string;
 }
 
+/**
+ * One dependency edge with the item at the OTHER end of it resolved.
+ *
+ * A bare `WorkItemDependency` is three uuids, which is right for the aggregate
+ * and renders as three uuids — and that is exactly what a screen showing "this
+ * waits on 8f0e1c5f-…" would say. The same joined-read-model shape as
+ * `WorkItemCheck`, `RelationshipRecord`, `MemberRecord` and `LeadRecord`, for
+ * the same reason, and the sixth time this codebase has learnt it.
+ *
+ * `dependsOnIsTerminal` is the FLAG, never a state code: a firm owns the names
+ * of its states and may call the finished one anything. It is what separates a
+ * dependency that is still holding this item back from one that is a record of
+ * what it used to wait on — the first refuses a start, the second does not, and
+ * a screen that drew them the same would be offering somebody a reason to
+ * remove a dependency that costs nothing.
+ */
+export interface WorkItemDependencyRecord {
+  readonly dependency: WorkItemDependency;
+  readonly dependsOnTitle: string;
+  readonly dependsOnStateName: string;
+  readonly dependsOnIsTerminal: boolean;
+}
+
 /** One review as a queue renders it. */
 export interface WorkItemCheck {
   readonly approval: WorkItemApproval;

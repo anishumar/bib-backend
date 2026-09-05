@@ -15,6 +15,7 @@ import type {
   WorkItem,
   WorkItemBlocker,
   WorkItemDependency,
+  WorkItemDependencyRecord,
   WorkItemRecord,
 } from "../../domain/workitem/model";
 import type {
@@ -500,6 +501,42 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
         FROM delivery.work_item_dependency
       `;
       return rows.map(toDependency);
+    });
+  }
+
+  /**
+   * One item's dependencies, joined to what each waits on.
+   *
+   * `is_terminal` is read off the blocker's STATE ROW, the same way
+   * `openBlockers` does — a firm renames its states and nothing here may
+   * compare a code. Ordered unfinished first and then by title, so the ones
+   * actually holding this item back are at the top of the panel rather than
+   * wherever the insert order put them.
+   */
+  async listDependenciesFor(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly WorkItemDependencyRecord[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<
+        (DependencyRow & { title: string; state_name: string; is_terminal: boolean })[]
+      >`
+        SELECT d.id, d.tenant_id, d.work_item_id, d.depends_on_work_item_id,
+               b.title, bs.name AS state_name, bs.is_terminal
+        FROM delivery.work_item_dependency d
+        JOIN delivery.work_item b
+          ON b.id = d.depends_on_work_item_id AND b.tenant_id = d.tenant_id
+        JOIN delivery.work_item_state bs
+          ON bs.id = b.state_id AND bs.tenant_id = b.tenant_id
+        WHERE d.work_item_id = ${workItemId}
+        ORDER BY bs.is_terminal, b.title
+      `;
+      return rows.map((r) => ({
+        dependency: toDependency(r),
+        dependsOnTitle: r.title,
+        dependsOnStateName: r.state_name,
+        dependsOnIsTerminal: r.is_terminal,
+      }));
     });
   }
 

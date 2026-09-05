@@ -17,6 +17,7 @@ import type {
   WorkItemApproval,
   WorkItemCheck,
   WorkItemDependency,
+  WorkItemDependencyRecord,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -344,6 +345,13 @@ export interface WorkItemRepository {
    *  the graph in the domain: reachability is not expressible in SQL, and a
    *  firm's edge list is tens to low hundreds of rows. */
   listAllDependencies(tenantId: string): Promise<readonly WorkItemDependency[]>;
+  /** One item's dependencies, each with the item it waits on resolved — the
+   *  join is here rather than a lookup per row, which is the per-row read this
+   *  codebase has been caught by repeatedly. */
+  listDependenciesFor(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly WorkItemDependencyRecord[]>;
   addDependency(dep: {
     readonly id: string;
     readonly tenantId: string;

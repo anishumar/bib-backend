@@ -15,6 +15,7 @@ import type {
 import type {
   ChecklistItem,
   WorkItemCheck,
+  WorkItemDependencyRecord,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -185,11 +186,32 @@ const ChecklistItemSchema = z
   })
   .openapi("ChecklistItem");
 
+/**
+ * One dependency, with the item at the other end of it RESOLVED.
+ *
+ * It was three uuids until a screen tried to render it. `WorkItem.blockedByOpen`
+ * already carried the titles of the UNFINISHED blockers, so the detail response
+ * could name some of what an item waits on and not the rest — and carried no
+ * `dependencyId` at all, which is the one value the DELETE route takes. A panel
+ * built on that could show a task and not offer to lift it.
+ */
 const DependencySchema = z
   .object({
     id: z.string().uuid(),
     workItemId: z.string().uuid(),
     dependsOnWorkItemId: z.string().uuid(),
+    dependsOnTitle: z.string(),
+    dependsOnStateName: z.string().openapi({
+      description: "The FIRM's own word for the state that item is in, never a code.",
+    }),
+    dependsOnIsTerminal: z.boolean().openapi({
+      description:
+        "Whether the item this one waits on is FINISHED. The flag, never a state code — a " +
+        "firm owns the names of its states. An unfinished blocker refuses this item's start; " +
+        "a finished one is a record of what it used to wait on and refuses nothing, and a " +
+        "screen drawing them the same offers somebody a reason to lift a dependency that is " +
+        "not costing anything.",
+    }),
   })
   .openapi("WorkItemDependency");
 
@@ -512,6 +534,19 @@ function toWire(r: WorkItemRecord): z.infer<typeof WorkItemSchema> {
     checklistTotal: r.checklistTotal,
     hasOpenReview: r.hasOpenReview,
     blockedByOpen: r.blockedByOpen.map((b) => ({ workItemId: b.workItemId, title: b.title })),
+  };
+}
+
+function toDependencyWire(
+  d: WorkItemDependencyRecord,
+): z.infer<typeof DependencySchema> {
+  return {
+    id: d.dependency.id,
+    workItemId: d.dependency.workItemId,
+    dependsOnWorkItemId: d.dependency.dependsOnWorkItemId,
+    dependsOnTitle: d.dependsOnTitle,
+    dependsOnStateName: d.dependsOnStateName,
+    dependsOnIsTerminal: d.dependsOnIsTerminal,
   };
 }
 
@@ -1014,11 +1049,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
       {
         item: toWire(detail.record),
         checklist: detail.checklist.map(toChecklistWire),
-        dependencies: detail.dependencies.map((d) => ({
-          id: d.id,
-          workItemId: d.workItemId,
-          dependsOnWorkItemId: d.dependsOnWorkItemId,
-        })),
+        dependencies: detail.dependencies.map(toDependencyWire),
         reviews: detail.reviews.map(toReviewWire),
       },
       200,
@@ -1144,10 +1175,17 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
       dependsOnWorkItemId,
       s.actor,
     );
-    return c.json(
-      { id: dep.id, workItemId: dep.workItemId, dependsOnWorkItemId: dep.dependsOnWorkItemId },
-      201,
+    // READ BACK THROUGH THE JOINED LIST, like every other create in this
+    // codebase that answers with names. A 201 carrying three uuids while the
+    // list carries titles leaves the screen re-fetching to render what it just
+    // made — and this one would then have to guess the state name.
+    const created = (await deps.service.detail(s.tenantId, workItemId)).dependencies.find(
+      (d) => d.dependency.id === dep.id,
     );
+    if (created === undefined) {
+      throw new Error(`work item dependency ${dep.id} was not readable after creation`);
+    }
+    return c.json(toDependencyWire(created), 201);
   });
 
   app.openapi(removeDependencyRoute, async (c) => {

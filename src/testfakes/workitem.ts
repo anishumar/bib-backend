@@ -26,6 +26,7 @@ import type {
   WorkItemBlocker,
   WorkItemCheck,
   WorkItemDependency,
+  WorkItemDependencyRecord,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -348,6 +349,37 @@ export class FakeWorkItemRepo implements WorkItemRepository {
 
   listAllDependencies(tenantId: string): Promise<readonly WorkItemDependency[]> {
     return Promise.resolve(this.dependencies.filter((d) => d.tenantId === tenantId));
+  }
+
+  /** The join the real adapter does in SQL, over the rows this fake already
+   *  holds — so a test cannot pass against a title the database would never
+   *  produce. An edge pointing at an item this fake does not hold resolves to
+   *  nothing and is dropped, which is what the INNER JOIN does too. */
+  listDependenciesFor(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<readonly WorkItemDependencyRecord[]> {
+    const out: WorkItemDependencyRecord[] = [];
+    for (const d of this.dependencies) {
+      if (d.tenantId !== tenantId || d.workItemId !== workItemId) continue;
+      const blocker = this.rows.find((i) => i.id === d.dependsOnWorkItemId);
+      if (blocker === undefined) continue;
+      const state = this.vocabulary.states.find((v) => v.id === blocker.stateId);
+      if (state === undefined) continue;
+      out.push({
+        dependency: d,
+        dependsOnTitle: blocker.title,
+        dependsOnStateName: state.name,
+        dependsOnIsTerminal: state.isTerminal,
+      });
+    }
+    return Promise.resolve(
+      out.sort(
+        (a, b) =>
+          Number(a.dependsOnIsTerminal) - Number(b.dependsOnIsTerminal) ||
+          a.dependsOnTitle.localeCompare(b.dependsOnTitle),
+      ),
+    );
   }
 
   addDependency(dep: {

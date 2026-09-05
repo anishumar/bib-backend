@@ -28,6 +28,7 @@ import type {
   WorkItemApproval,
   WorkItemCheck,
   WorkItemDependency,
+  WorkItemDependencyRecord,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -689,7 +690,16 @@ export interface WorkItemCheckOnDesk extends WorkItemCheck {
 export interface WorkItemDetail {
   readonly record: WorkItemRecord;
   readonly checklist: readonly ChecklistItem[];
-  readonly dependencies: readonly WorkItemDependency[];
+  /**
+   * What this item waits on, each RESOLVED.
+   *
+   * It was the bare edge — three uuids — for as long as it existed, and no
+   * screen ever rendered it, which is how it stayed that way. `record.blockedByOpen`
+   * carried the titles of the UNFINISHED blockers all along, so a screen could
+   * name half of these and had no way to name the other half, and no way to
+   * reach the `dependencyId` that the DELETE route takes.
+   */
+  readonly dependencies: readonly WorkItemDependencyRecord[];
   /** Every review it has ever had, newest first — the rejections are the
    *  point. */
   readonly reviews: readonly WorkItemCheck[];
@@ -723,9 +733,10 @@ export class WorkItemService {
     return {
       record,
       checklist: await this.deps.items.listChecklist(tenantId, workItemId),
-      dependencies: (await this.deps.items.listAllDependencies(tenantId)).filter(
-        (d) => d.workItemId === workItemId,
-      ),
+      // ONE QUERY FOR THIS ITEM, not the firm's whole edge list filtered in
+      // memory. `listAllDependencies` exists for the cycle walk, which genuinely
+      // needs every edge; a detail read that borrowed it grew with the firm.
+      dependencies: await this.deps.items.listDependenciesFor(tenantId, workItemId),
       reviews: await this.deps.approvals.listForWorkItem(tenantId, workItemId),
     };
   }
