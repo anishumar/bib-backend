@@ -917,6 +917,43 @@ describe("review — and the rule no firm may configure away", () => {
     expect(asRavi[0]?.viewer.reason).toMatch(/permission/i);
   });
 
+  it("gives an item's own page the same verdict its queue row gets, and only on the OPEN one", async () => {
+    // The defect this closes: the item's page derived maker != checker locally
+    // from `submittedBy` — one third of the rule — so the ladder and the grade
+    // threshold were discovered by pressing Approve and reading a 403, while
+    // the queue screen had been showing the same person the full answer since
+    // T2.9. Two screens, one question, two answers.
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview(
+      { tenantId: FIRM, workItemId: item.id },
+      ACTOR,
+    );
+
+    // Word for word what `pendingChecks` says to each of them.
+    const queueRavi = (await h.service.pendingChecks(FIRM, RAVI))[0];
+    const detailRavi = await h.service.detail(FIRM, item.id, RAVI);
+    expect(detailRavi.openReviewViewer).toEqual(queueRavi?.viewer);
+    expect(detailRavi.openReviewViewer?.reason).toMatch(/permission/i);
+
+    const detailPriya = await h.service.detail(FIRM, item.id, PRIYA);
+    expect(detailPriya.openReviewViewer?.eligible).toBe(false);
+    expect(detailPriya.openReviewViewer?.reason).toMatch(/did this work/i);
+
+    const detailAnand = await h.service.detail(FIRM, item.id, ANAND);
+    expect(detailAnand.openReviewViewer).toEqual({ eligible: true, reason: null });
+
+    // NULL ONCE IT IS DECIDED, and that is not tidiness: "may you check this"
+    // is not a question about a review already approved, and a verdict there
+    // would be a sentence nobody should act on.
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+    const after = await h.service.detail(FIRM, item.id, ANAND);
+    expect(after.reviews).toHaveLength(1);
+    expect(after.openReviewViewer).toBeNull();
+  });
+
   it("empties the queue once the work has been checked", async () => {
     const { h, item } = await readyForReview();
     const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);

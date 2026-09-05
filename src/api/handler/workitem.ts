@@ -259,6 +259,29 @@ const CheckerOptionSchema = z
 
 const BoardResponse = z.object({ items: z.array(WorkItemSchema) }).openapi("WorkBoardResponse");
 
+/**
+ * MAY THE VIEWER DECIDE THIS CHECK — one SHAPE, and deliberately not one
+ * registered schema.
+ *
+ * A FACTORY, because `.nullable()` on a schema that has been `.openapi(name)`d
+ * mutates the registered COMPONENT. Sharing one object between the queue (where
+ * a verdict is always present) and an item's page (where it is null once the
+ * review is decided) marked `WorkItemCheckViewer` nullable for both — so the
+ * generated client made the queue's own verdict optional and every reader of it
+ * a compile error. Found by regenerating and reading the spec, which is the
+ * only place it shows.
+ */
+const viewerVerdict = () =>
+  z.object({
+    eligible: z.boolean(),
+    reason: z.string().nullable().openapi({
+      description:
+        "What to SAY when they may not — the SENTENCE, not a code, and the same prose the " +
+        "checkers endpoint returns, so one refusal is never phrased two ways. Null when " +
+        "they may check it.",
+    }),
+  });
+
 const WorkItemDetailResponse = z
   .object({
     item: WorkItemSchema,
@@ -269,6 +292,16 @@ const WorkItemDetailResponse = z
         "Every review this item has ever had, newest first. The REJECTIONS are the point: a " +
         "list of only open ones makes work that came back twice read as work that sailed " +
         "through.",
+    }),
+    openReviewViewer: viewerVerdict().nullable().openapi({
+      description:
+        "May the CALLER decide the open review — the same verdict `/work-item-checks` puts on " +
+        "every one of its rows, and null when there is no open review. One field rather than " +
+        "one per row, because the question only exists for the open one: 'may you check this' " +
+        "is not asked of a review already approved or sent back. Before this the item's page " +
+        "could derive only maker != checker from `submittedBy` — one third of the rule — so " +
+        "the ladder and the grade threshold were found by pressing Approve and reading a 403, " +
+        "while the queue screen had been showing the same person the full answer since T2.9.",
     }),
   })
   .openapi("WorkItemDetailResponse");
@@ -293,17 +326,9 @@ const VocabularyResponse = z
  * question about a decision already made.
  */
 const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
-  viewer: z
-    .object({
-      eligible: z.boolean(),
-      reason: z.string().nullable().openapi({
-        description:
-          "What to SAY when they may not — the SENTENCE, not a code, and the same prose the " +
-          "checkers endpoint returns, so one refusal is never phrased two ways. Null when " +
-          "they may check it.",
-      }),
-    })
-    .openapi("WorkItemCheckViewer"),
+  // NEVER NULL HERE: every row of the queue is an OPEN check, so the question
+  // always applies.
+  viewer: viewerVerdict().openapi("WorkItemCheckViewer"),
 }).openapi("WorkItemCheckRow");
 
 const ChecksResponse = z
@@ -1044,13 +1069,17 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { workItemId } = c.req.valid("param");
-    const detail = await deps.service.detail(s.tenantId, workItemId);
+    // THE CALLER, so the verdict is about them. `pendingChecks` takes the same
+    // argument from the same place.
+    const detail = await deps.service.detail(s.tenantId, workItemId, s.userId);
     return c.json(
       {
         item: toWire(detail.record),
         checklist: detail.checklist.map(toChecklistWire),
         dependencies: detail.dependencies.map(toDependencyWire),
         reviews: detail.reviews.map(toReviewWire),
+        openReviewViewer:
+          detail.openReviewViewer === null ? null : { ...detail.openReviewViewer },
       },
       200,
     );

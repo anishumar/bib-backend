@@ -703,6 +703,28 @@ export interface WorkItemDetail {
   /** Every review it has ever had, newest first — the rejections are the
    *  point. */
   readonly reviews: readonly WorkItemCheck[];
+  /**
+   * MAY THE CALLER DECIDE THE OPEN REVIEW — the same verdict the queue puts on
+   * every one of its rows, and null when there is no open review.
+   *
+   * ONE FIELD RATHER THAN ONE PER ROW, because the question only exists for the
+   * open one: "may you check this" is not asked of a review already approved or
+   * sent back, and a verdict on a decided row would be a sentence nobody should
+   * act on.
+   *
+   * It exists because the item's own page could derive only maker != checker,
+   * from `submittedBy` — one third of the rule. The comment on that screen said
+   * so and named this as the fix. The ladder rule and the grade threshold were
+   * found by pressing Approve and reading a 403, while the QUEUE screen had
+   * been showing the same person the full answer since T2.9. Two screens, one
+   * question, two answers.
+   */
+  readonly openReviewViewer: {
+    readonly eligible: boolean;
+    /** The SENTENCE, not the code — `INELIGIBILITY_MESSAGES`, the same prose
+     *  the queue and `/checkers` return. One refusal, one wording. */
+    readonly reason: string | null;
+  } | null;
 }
 
 export class WorkItemService {
@@ -727,9 +749,21 @@ export class WorkItemService {
     return boardOrder(await this.deps.items.list(tenantId, filter), today);
   }
 
-  async detail(tenantId: string, workItemId: string): Promise<WorkItemDetail> {
+  /**
+   * One item and everything its own screen shows.
+   *
+   * `viewer` is the caller, and it is OPTIONAL for the same reason
+   * `pendingChecks` takes it that way: a caller who is not a person — a test,
+   * an import — gets the honest "not on the roster" answer rather than a crash.
+   */
+  async detail(
+    tenantId: string,
+    workItemId: string,
+    viewer?: string | null,
+  ): Promise<WorkItemDetail> {
     const record = await this.deps.items.findRecord(tenantId, workItemId);
     if (!record) throw new WorkItemNotFound(workItemId);
+    const reviews = await this.deps.approvals.listForWorkItem(tenantId, workItemId);
     return {
       record,
       checklist: await this.deps.items.listChecklist(tenantId, workItemId),
@@ -737,7 +771,44 @@ export class WorkItemService {
       // memory. `listAllDependencies` exists for the cycle walk, which genuinely
       // needs every edge; a detail read that borrowed it grew with the firm.
       dependencies: await this.deps.items.listDependenciesFor(tenantId, workItemId),
-      reviews: await this.deps.approvals.listForWorkItem(tenantId, workItemId),
+      reviews,
+      openReviewViewer: await this.verdictOnOpenReview(tenantId, reviews, viewer ?? null),
+    };
+  }
+
+  /**
+   * The queue's verdict, about this item's open review.
+   *
+   * IT IS THE QUEUE'S OWN CODE and not a second copy of it — `isEligible`, the
+   * PINNED policy and `INELIGIBILITY_MESSAGES` are exactly what `pendingChecks`
+   * uses. A second implementation of "who may check whose work" is the thing
+   * this module has already refused twice (T2.9's rule is imported rather than
+   * rewritten), and it would drift the first time a firm changed its policy.
+   */
+  private async verdictOnOpenReview(
+    tenantId: string,
+    reviews: readonly WorkItemCheck[],
+    viewer: string | null,
+  ): Promise<WorkItemDetail["openReviewViewer"]> {
+    const open = reviews.find((r) => r.approval.decision === "pending");
+    if (open === undefined) return null;
+
+    const staff = await this.deps.reviewers.activeStaff(tenantId);
+    const me =
+      viewer === null
+        ? undefined
+        : (await this.candidates(tenantId, staff)).find((c) => c.userId === viewer);
+    const policy = await this.pinnedPolicyOf(tenantId, open.approval);
+    // Not on the active roster at all. Their session resolved, so they hold a
+    // membership; this is the deactivated-between-requests case, and the honest
+    // answer is the one `decideReview` would give them.
+    const verdict =
+      me === undefined
+        ? { eligible: false, reason: "NO_WORK_PERMISSION" as const }
+        : isEligible(me, this.makerOf(open.approval, staff), policy);
+    return {
+      eligible: verdict.eligible,
+      reason: verdict.reason === null ? null : INELIGIBILITY_MESSAGES[verdict.reason],
     };
   }
 
