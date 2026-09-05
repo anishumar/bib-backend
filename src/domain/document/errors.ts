@@ -21,7 +21,8 @@ export type DocumentErrorCode =
   | "INVALID_SORT_ORDER"
   | "STANDARD_BLOCK_NOT_FOUND"
   | "DOCUMENT_BLOCK_NOT_FOUND"
-  | "BLOCKS_ALREADY_SEEDED";
+  | "BLOCKS_ALREADY_SEEDED"
+  | "DOCUMENT_BLOCK_FROZEN";
 
 /**
  * The firm has published no entity that could issue this document.
@@ -129,6 +130,33 @@ export class DocumentBlockNotFound extends DocumentError {
  * before, and hide a caller that has lost track of its own state — the same
  * argument the scheduler's derived job id makes, reached from the other end.
  */
+/**
+ * A block on a letter that has been SIGNED.
+ *
+ * `crm.refuse_signed_child_change()` is what actually refuses it — the same
+ * trigger that freezes the letter's lines and its clauses, firing on this table
+ * because it carries `engagement_letter_id`. This class only puts our own
+ * sentence round it, exactly as `PartyHasReferences` does for the archive
+ * guard, so the rule holds for an import, an agent and a psql session too.
+ *
+ * IT EXISTED AS A DOCUMENTED 409 AND ANSWERED 500. All three block routes
+ * promise "The letter is signed — its prose is frozen with its terms"; nothing
+ * threw it, because the service never asks the owning letter's status and the
+ * trigger's `restrict_violation` reached the edge untranslated. Nobody found
+ * it, because until now the routes had no caller at all.
+ */
+export class DocumentBlockFrozen extends DocumentError {
+  constructor() {
+    super(
+      "DOCUMENT_BLOCK_FROZEN",
+      `this letter is signed, so its prose is frozen with its terms — the database refuses ` +
+        `the change, not just this code. The exclusions a client agreed to are part of what ` +
+        `they agreed to. Draft a new letter that supersedes it; the old one stays readable ` +
+        `as what was actually signed.`,
+    );
+  }
+}
+
 export class BlocksAlreadySeeded extends DocumentError {
   constructor(documentId: string, count: number) {
     super(

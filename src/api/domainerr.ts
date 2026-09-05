@@ -807,8 +807,12 @@ export function mapError(err: unknown): MappedError {
       // request is well formed and resending it changes nothing. What is
       // missing is a row in the firm's own configuration, and the message names
       // the call that adds it.
+      // DOCUMENT_BLOCK_FROZEN is a CONFLICT and not a FORBIDDEN: the caller is
+      // permitted, the request is well formed, and it is the STATE of the
+      // document that refuses — resending it changes nothing.
       case "NO_ISSUING_ENTITY":
       case "BLOCKS_ALREADY_SEEDED":
+      case "DOCUMENT_BLOCK_FROZEN":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

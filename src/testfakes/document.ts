@@ -222,7 +222,9 @@ export class FakeDocumentBlockRepo implements DocumentBlockRepository {
   }
 
   addMany(blocks: readonly NewDocumentBlock[]): Promise<readonly DocumentBlock[]> {
-    const saved = blocks.map((b) => ({ ...b, removed: false }));
+    // A freshly inserted line is not edited — `updated_at = created_at`, which
+    // is what the real projection reads.
+    const saved = blocks.map((b) => ({ ...b, removed: false, isEdited: false }));
     this.rows.push(...saved);
     return Promise.resolve(saved);
   }
@@ -242,6 +244,10 @@ export class FakeDocumentBlockRepo implements DocumentBlockRepository {
       ...(e.body === undefined ? {} : { body: e.body }),
       ...(e.isHeading === undefined ? {} : { isHeading: e.isHeading }),
       ...(e.sortOrder === undefined ? {} : { sortOrder: e.sortOrder }),
+      // `set_updated_at` fires on any UPDATE, so the real projection reads true
+      // from here on. Set the same way rather than by comparing bodies: an edit
+      // that put a line back to its original wording still HAPPENED.
+      isEdited: true,
     };
     this.rows[at] = row;
     return Promise.resolve(row);

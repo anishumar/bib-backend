@@ -11,6 +11,7 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { BlockKind, DocumentBlock, StandardBlock } from "../../domain/document/model";
 import { isBlockKind } from "../../domain/document/model";
+import { DocumentBlockFrozen } from "../../domain/document/errors";
 import type {
   BlockOwner,
   DocumentBlockEdit,
@@ -141,6 +142,7 @@ interface DocumentBlockRow {
   is_heading: boolean;
   sort_order: number;
   source_id: string | null;
+  is_edited: boolean;
 }
 
 function toDocumentBlock(r: DocumentBlockRow): DocumentBlock {
@@ -152,10 +154,36 @@ function toDocumentBlock(r: DocumentBlockRow): DocumentBlock {
     isHeading: r.is_heading,
     sortOrder: r.sort_order,
     sourceId: r.source_id,
+    isEdited: r.is_edited,
   };
 }
 
-const BLOCK_COLUMNS = "id, tenant_id, kind, body, is_heading, sort_order, source_id";
+// `is_edited` is DERIVED in the projection rather than stored: the only UPDATE
+// this table takes is an edit, and `set_updated_at` fires on it. A stored flag
+// would be a second place for the same fact to live, and the one that goes
+// stale is always the copy.
+/**
+ * SQLSTATE 23001, `restrict_violation` — what `crm.refuse_signed_child_change()`
+ * raises on this table and nothing else on these statements can.
+ *
+ * Matching the CODE rather than the message keeps the translation independent
+ * of the wording, the same way `isArchiveRefusal` does for the party guard. The
+ * refusal is not written here: the trigger is what holds against an import, an
+ * agent or a psql session, and this only puts our own sentence round it.
+ *
+ * Without this the three block routes documented a 409 and answered 500. Nobody
+ * had found it, because until a screen called them nothing ever did.
+ */
+function asFrozen(err: unknown): never {
+  if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23001") {
+    throw new DocumentBlockFrozen();
+  }
+  throw err;
+}
+
+const BLOCK_COLUMNS =
+  "id, tenant_id, kind, body, is_heading, sort_order, source_id, " +
+  "(updated_at > created_at) AS is_edited";
 
 export class PostgresDocumentBlockRepository implements DocumentBlockRepository {
   constructor(private readonly app: Db) {}
@@ -213,7 +241,7 @@ export class PostgresDocumentBlockRepository implements DocumentBlockRepository 
           })),
         )}
         RETURNING ${db.unsafe(BLOCK_COLUMNS)}
-      `;
+      `.catch(asFrozen);
       return rows.map(toDocumentBlock);
     });
   }
@@ -233,7 +261,7 @@ export class PostgresDocumentBlockRepository implements DocumentBlockRepository 
                sort_order = COALESCE(${e.sortOrder ?? null}, sort_order)
          WHERE id = ${id} AND removed_at IS NULL
         RETURNING ${db.unsafe(BLOCK_COLUMNS)}
-      `;
+      `.catch(asFrozen);
       if (!row) throw new Error(`document block ${id} vanished during update`);
       return toDocumentBlock(row);
     });
@@ -246,10 +274,11 @@ export class PostgresDocumentBlockRepository implements DocumentBlockRepository 
     await withTenant(
       this.app,
       tenantId,
-      (db) => db`
-        UPDATE crm.document_block SET removed_at = now()
-        WHERE id = ${id} AND removed_at IS NULL
-      `,
+      (db) =>
+        db`
+          UPDATE crm.document_block SET removed_at = now()
+          WHERE id = ${id} AND removed_at IS NULL
+        `.catch(asFrozen),
     );
   }
 }

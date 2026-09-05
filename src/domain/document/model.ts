@@ -372,6 +372,22 @@ export interface DocumentBlock {
    *  be retired or rewritten years later, and this must neither stop that nor
    *  acquire its new wording. */
   readonly sourceId: string | null;
+  /**
+   * Whether this line has been CHANGED since it landed on the document.
+   *
+   * 0025's own comment says `source_id` exists "for a screen that wants to say
+   * 'standard' beside an untouched line and 'edited' beside a changed one" —
+   * and `source_id` alone cannot say the second half. It survives an edit, so
+   * a house line somebody reworded for this client goes on pointing at the
+   * standard row and reads, on any screen, as the firm's standard wording.
+   *
+   * That was harmless while nothing could edit a block. The moment
+   * `PATCH /document-blocks/{id}` had a caller it became a screen saying
+   * something untrue about a contract, so the flag is derived where the fact
+   * is: `updated_at > created_at`, and the only UPDATE this table takes is an
+   * edit.
+   */
+  readonly isEdited: boolean;
 }
 
 /**

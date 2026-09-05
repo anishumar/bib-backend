@@ -228,6 +228,15 @@ const DocumentBlockSchema = z
     isHeading: z.boolean(),
     sortOrder: z.number().int(),
     sourceId: z.string().uuid().nullable(),
+    isEdited: z.boolean().openapi({
+      description:
+        "Whether this line has been CHANGED since it landed on the document. `sourceId` " +
+        "survives an edit, so a house line somebody reworded for this client goes on " +
+        "pointing at the standard row — 0025's own comment asks for a screen that says " +
+        "'standard' beside an untouched line and 'edited' beside a changed one, and " +
+        "`sourceId` alone can only say the first half. Derived from `updated_at > " +
+        "created_at`; the only UPDATE this table takes is an edit.",
+    }),
   })
   .openapi("DocumentBlock");
 
@@ -452,6 +461,7 @@ function toDocumentBlockBody(b: DocumentBlock): {
   isHeading: boolean;
   sortOrder: number;
   sourceId: string | null;
+  isEdited: boolean;
 } {
   return {
     id: b.id,
@@ -460,5 +470,6 @@ function toDocumentBlockBody(b: DocumentBlock): {
     isHeading: b.isHeading,
     sortOrder: b.sortOrder,
     sourceId: b.sourceId,
+    isEdited: b.isEdited,
   };
 }
