@@ -10,6 +10,8 @@
 // because they assert on the thrown sentinel and only a real HTTP request ever
 // sees a status code.
 
+import { longDay } from "../day";
+
 export class PortalAccessError extends Error {
   constructor(
     readonly code: PortalAccessErrorCode,
@@ -109,7 +111,7 @@ export class PortalGrantAlreadyEnded extends PortalAccessError {
   constructor(grantId: string, validTo: string) {
     super(
       "PORTAL_GRANT_ALREADY_ENDED",
-      `Portal grant ${JSON.stringify(grantId)} already stopped being in force on ${validTo}. ` +
+      `Portal grant ${JSON.stringify(grantId)} already stopped being in force on ${longDay(validTo)}. ` +
         `A grant is closed once and never re-closed: moving that date would rewrite who could ` +
         `see this client in March, which is the question this table exists to answer.`,
     );

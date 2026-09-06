@@ -270,8 +270,12 @@ describe("endRelationship", () => {
       .endRelationship({ tenantId: TENANT, relationshipId: rel.id, validTo: "2021-04-01" }, ACTOR)
       .catch((e: unknown) => e);
     expect(refusal).toBeInstanceOf(RelationshipEndsBeforeItBegan);
-    expect((refusal as Error).message).toContain("2021-04-01");
     expect((refusal as Error).message).toContain("began");
+    // THE DAY, WRITTEN THE WAY THE PRODUCT WRITES A DAY. This sentence is shown
+    // to a partner verbatim, on a screen where every other date reads
+    // "01 Apr 2021" — see `domain/day.ts`.
+    expect((refusal as Error).message).toContain("01 Apr 2021");
+    expect((refusal as Error).message).not.toContain("2021-04-01");
   });
 
   it("refuses an unknown relationship", async () => {

@@ -3,6 +3,8 @@
 // (domainerr.ts). Adapters translate their own failures INTO these, never the
 // reverse. Match with `instanceof`, never by string.
 
+import { longDay } from "../day";
+
 export class PartyError extends Error {
   constructor(
     readonly code: PartyErrorCode,
@@ -59,7 +61,10 @@ export class InvalidRelationshipType extends PartyError {
 }
 export class InvalidDateRange extends PartyError {
   constructor(from: string, to: string | null) {
-    super("INVALID_DATE_RANGE", `Date range ${from}..${to ?? "open"} is invalid`);
+    super(
+      "INVALID_DATE_RANGE",
+      `Date range ${longDay(from)}..${to === null ? "open" : longDay(to)} is invalid`,
+    );
   }
 }
 export class RelationshipNotFound extends PartyError {
@@ -82,7 +87,7 @@ export class RelationshipAlreadyEnded extends PartyError {
   constructor(ref: string, endedOn: string) {
     super(
       "RELATIONSHIP_ALREADY_ENDED",
-      `Relationship ${JSON.stringify(ref)} already ended on ${endedOn}`,
+      `Relationship ${JSON.stringify(ref)} already ended on ${longDay(endedOn)}`,
     );
   }
 }
@@ -103,9 +108,9 @@ export class RelationshipEndsBeforeItBegan extends PartyError {
   constructor(validFrom: string, validTo: string) {
     super(
       "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN",
-      `A relationship cannot end before it began. This one began on ${validFrom}, and ` +
-        `${validTo} is not after that — the end date is the first day it is NO LONGER in ` +
-        `force, so the earliest it can be is the day after it began.`,
+      `A relationship cannot end before it began. This one began on ${longDay(validFrom)}, and ` +
+        `${longDay(validTo)} is not after that — the end date is the first day it is NO LONGER ` +
+        `in force, so the earliest it can be is the day after it began.`,
     );
   }
 }

@@ -10,6 +10,8 @@
 // perfectly happy, because they assert on the thrown sentinel and only a real
 // HTTP request ever sees a status code.
 
+import { longDay } from "../day";
+
 export class ClientAssignmentError extends Error {
   constructor(
     readonly code: ClientAssignmentErrorCode,
@@ -165,7 +167,7 @@ export class AssignmentAlreadyEnded extends ClientAssignmentError {
   constructor(validTo: string) {
     super(
       "ASSIGNMENT_ALREADY_ENDED",
-      `This assignment already ended on ${validTo} and is history now. History is not ` +
+      `This assignment already ended on ${longDay(validTo)} and is history now. History is not ` +
         `corrected by writing over it — if the end date is wrong, that is a correction ` +
         `somebody has to make deliberately, and if the person is back, assign them again ` +
         `from the day they returned.`,
@@ -181,7 +183,7 @@ export class AssignmentDuplicate extends ClientAssignmentError {
     super(
       "ASSIGNMENT_DUPLICATE",
       `This person has been the ${role === "key_manager" ? "Key Manager" : "SPOC"} for this ` +
-        `client since ${from} and still is, so assigning them again would be the same fact ` +
+        `client since ${longDay(from)} and still is, so assigning them again would be the same fact ` +
         `recorded twice. To move the date, end that assignment and make a new one.`,
     );
   }
@@ -196,9 +198,9 @@ export class AssignmentPredatesIncumbent extends ClientAssignmentError {
     // are told which date is in the way.
     super(
       "ASSIGNMENT_PREDATES_INCUMBENT",
-      `This client's current Key Manager took over on ${from}, so a new one cannot start ` +
+      `This client's current Key Manager took over on ${longDay(from)}, so a new one cannot start ` +
         `on or before that date — the handover would have to close a period that never ` +
-        `opened. Record the change from ${from} or later, or correct the earlier ` +
+        `opened. Record the change from ${longDay(from)} or later, or correct the earlier ` +
         `assignment first.`,
     );
   }

@@ -14,6 +14,8 @@
 // AND what to do about it, in the firm's terms rather than the schema's — a
 // refusal a partner cannot act on just becomes a support ticket.
 
+import { longDay } from "../day";
+
 export class ObligationError extends Error {
   constructor(
     readonly code: ObligationErrorCode,
@@ -225,8 +227,8 @@ export class AlreadySuperseded extends ObligationError {
   constructor(name: string, endsOn: string) {
     super(
       "ALREADY_SUPERSEDED",
-      `${name} already hands over on ${endsOn}, so it is not the rule in force. Amend the one ` +
-        `that governs periods from then on — superseding this row a second time would leave ` +
+      `${name} already hands over on ${longDay(endsOn)}, so it is not the rule in force. Amend the ` +
+        `one that governs periods from then on — superseding this row a second time would leave ` +
         `two successors covering the same periods, which is two filings for one return.`,
     );
   }

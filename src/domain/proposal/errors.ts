@@ -2,6 +2,8 @@
 // the domain; the api layer maps them to HTTP status codes (domainerr.ts).
 // Match with `instanceof`, never by string.
 
+import { longDay } from "../day";
+
 export class ProposalError extends Error {
   constructor(
     readonly code: ProposalErrorCode,
@@ -97,8 +99,8 @@ export class ProposalExpired extends ProposalError {
   constructor(validUntil: string) {
     super(
       "PROPOSAL_EXPIRED",
-      `This proposal was valid until ${validUntil} and has now been marked expired. Honouring it ` +
-        `late is a commercial decision, not a data one — draft a new proposal, dated today.`,
+      `This proposal was valid until ${longDay(validUntil)} and has now been marked expired. ` +
+        `Honouring it late is a commercial decision, not a data one — draft a new proposal, dated today.`,
     );
   }
 }
