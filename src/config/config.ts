@@ -14,7 +14,26 @@ import { CAPABILITIES } from "../api/capabilities";
 import type { InternalClient } from "../api/capabilities";
 
 const EnvSchema = z.object({
-  BIB_ENVIRONMENT: z.enum(["development", "qa", "uat", "production"]).default("development"),
+  // NO DEFAULT, and that is the whole point of this line.
+  //
+  // It defaulted to `development`, which is not a neutral value: it is the one
+  // that turns ON trusting an `x-user-id` header as proof of identity, serves
+  // the OpenAPI spec, drops `Secure` from the session cookie and accepts the
+  // mailer that prints sign-in links to the log. A deployment that forgot this
+  // one variable got all of that, silently, and every other check in
+  // `validate.ts` is gated on this value so none of them would fire either.
+  //
+  // Defaults are for things whose absence is harmless. The environment label is
+  // a security control — `isProductionLike` reads it — so an unset one is a
+  // question nobody answered, and the honest response to that is to refuse to
+  // boot and say which variable is missing. Local work sets it in `.env`; the
+  // example file carries it too.
+  BIB_ENVIRONMENT: z.enum(["development", "qa", "uat", "production"], {
+    required_error:
+      "BIB_ENVIRONMENT is not set. It decides whether dev header auth, the docs, an " +
+      "insecure cookie and the logging mailer are allowed, so there is no safe default: " +
+      "set it to development, qa, uat or production.",
+  }),
   BIB_LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   BIB_PORT: z.coerce.number().int().positive().default(8080),
   BIB_DATABASE_URL: z.string().min(1),
@@ -83,6 +102,12 @@ const EnvSchema = z.object({
   // one bucket throttles everyone; with no proxy in front, ON lets any client
   // invent its own key and opt out of rate limiting entirely.
   BIB_TRUST_PROXY: z.enum(["true", "false"]).default("false"),
+  // HOW MANY proxies, when they are trusted. X-Forwarded-For is a list the
+  // client starts and each hop appends to, so the only entries that mean
+  // anything are the right-hand ones a proxy wrote. This says how far in from
+  // that end the real client is. One load balancer is 1; a CDN in front of one
+  // is 2. Too high hands the key back to the caller — see api/ratelimit.ts.
+  BIB_TRUSTED_PROXY_HOPS: z.coerce.number().int().positive().max(10).default(1),
   // ── the worker (T2.6) ──
   // A cron expression rather than an interval, because "every day at 06:00 in
   // the firm's morning" is a business cadence and an interval drifts. Default
@@ -192,6 +217,8 @@ export interface CorsConfig {
 
 export interface RateLimitConfig {
   readonly trustProxy: boolean;
+  /** How many trusted proxies stand in front. Only read when trustProxy. */
+  readonly trustedProxyHops: number;
   /** Per client, per minute, on the unauthenticated sign-in routes. */
   readonly authPerMinute: number;
   /** Per client, per minute, everywhere else. */
@@ -299,6 +326,7 @@ export function load(): Config {
     },
     rateLimit: {
       trustProxy: env.BIB_TRUST_PROXY === "true",
+      trustedProxyHops: env.BIB_TRUSTED_PROXY_HOPS,
       authPerMinute: env.BIB_RATELIMIT_AUTH_PER_MINUTE,
       generalPerMinute: env.BIB_RATELIMIT_GENERAL_PER_MINUTE,
     },

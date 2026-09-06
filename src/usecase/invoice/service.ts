@@ -37,10 +37,12 @@ import {
   isSeriesPrefix,
 } from "../../domain/invoice/model";
 import {
+  compareAmounts,
   isAmount, isExchangeRate,
   isCurrencyCode,
   isSignedAmount,
   normalizeCurrency,
+  subtractAmounts,
 } from "../../domain/money/model";
 import {
   EmptyInvoice,
@@ -459,9 +461,16 @@ export class InvoiceService {
     // see — the honest place for it is the one that can read the siblings.
     const balance = await this.deps.invoices.balanceOf(input.tenantId, input.invoiceId);
     if (balance !== null) {
-      const remaining = Number(balance.invoiced) - Number(balance.credited);
-      if (Number(input.amount) > remaining) {
-        throw new CreditExceedsInvoice(input.invoiceId, input.amount, remaining.toFixed(4));
+      // ON THE DIGITS, never on a float. This was
+      // `Number(invoiced) - Number(credited)` compared with `Number(amount)`,
+      // which is the one rule this codebase states about money broken on the
+      // one check that decides whether money may leave: 100.10 less 100.00 is
+      // 0.09999999999999432 in binary floating point, so the last ten paise of
+      // a legitimate credit note were refused — and a cap could be passed by
+      // the same error in the other direction.
+      const remaining = subtractAmounts(balance.invoiced, balance.credited);
+      if (compareAmounts(input.amount, remaining) > 0) {
+        throw new CreditExceedsInvoice(input.invoiceId, input.amount, remaining);
       }
     }
 

@@ -69,6 +69,8 @@ export interface VerbSpec {
 export const EVENT_VERBS = {
   // ── platform · tenancy + party (the spine) ─────────────────────────────────
   "tenant.created":              { objectType: "tenant",              lane: "platform",   description: "A firm was registered as a tenant." },
+  "tenant.suspended":            { objectType: "tenant",              lane: "platform",   description: "A firm was suspended by the PLATFORM. Every session pointed at it loses its tenant context on its next request — `resolveSession` reads `tenant.status`, so this takes effect immediately rather than at session expiry. Not something a firm can do to itself: the only route is /internal." },
+  "tenant.reinstated":           { objectType: "tenant",              lane: "platform",   description: "A suspended firm was let back in. Sessions that survived the suspension resume working on their next request; ones that expired meanwhile are gone, like any other." },
   "membership.granted":          { objectType: "membership",          lane: "platform",   description: "A user was given a role in a tenant, for one audience." },
   "membership.revoked":          { objectType: "membership",          lane: "platform",   description: "A membership was deactivated. The person's next request stops — resolveSession re-reads this on every one." },
   "membership.restored":         { objectType: "membership",          lane: "platform",   description: "A deactivated membership was reinstated." },

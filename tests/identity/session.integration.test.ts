@@ -19,6 +19,7 @@ import {
   PostgresMagicLinkRepository,
   PostgresSessionRepository,
 } from "../../src/infrastructure/postgres/identity-repository";
+import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { ScryptPasswordHasher } from "../../src/infrastructure/crypto/scrypt-hasher";
@@ -43,6 +44,7 @@ const sessions = new PostgresSessionRepository(app);
 const identity = new IdentityService({
   users: new PostgresUserRepository(app),
   memberships: new PostgresMembershipRepository(app),
+  tenants: new PostgresTenantRepository(app),
   credentials: new PostgresCredentialRepository(app),
   sessions,
   magicLinks,

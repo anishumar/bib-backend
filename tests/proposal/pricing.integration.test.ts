@@ -707,7 +707,7 @@ describe("the share link", () => {
     expect(row?.share_token_digest).not.toContain(shareToken);
   });
 
-  it("counts every open and stamps the first, as the CHECK requires", async () => {
+  it("counts one SITTING for two opens, and stamps both dates", async () => {
     const id = await draft();
     await service.addLine({
       tenantId: tenantA,
@@ -723,8 +723,16 @@ describe("the share link", () => {
     await service.viewShared(shareToken, SYSTEM_ACTOR);
 
     const after = await proposals.findById(tenantA, id);
-    expect(after?.viewCount).toBe(2);
+    // ONE, not two. The share link is public, so counting requests counted
+    // refreshes, back buttons and whatever a chat app does when it unfurls a
+    // URL — and a partner reads the number as "they came back to it". Two opens
+    // a moment apart are one reading; see VIEW_DEDUPE_MINUTES.
+    expect(after?.viewCount).toBe(1);
+    // Both stamps move even so — first_viewed_at is what the CHECK in 0014
+    // requires alongside a non-zero count, and last_viewed_at is what makes the
+    // de-duplication possible at all.
     expect(after?.firstViewedAt).not.toBeNull();
+    expect(after?.lastViewedAt).not.toBeNull();
   });
 
   it("the database refuses a draft that carries a link", async () => {

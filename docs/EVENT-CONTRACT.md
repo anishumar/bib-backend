@@ -181,6 +181,8 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | Verb | Object | Means |
 |---|---|---|
 | `tenant.created` | tenant | A firm was registered as a tenant. Payload carries `slug` and `reportingCurrency` — the currency its books are kept in, recorded here because it is the one money fact that can never be restated later. |
+| `tenant.suspended` | tenant | A firm was suspended by the PLATFORM. Every session pointed at it loses its tenant context on its next request, because the session resolver reads `tenant.status` on every one. Not a firm's own act: the route is `PUT /internal/v1/tenants/{tenantId}/status`. |
+| `tenant.reinstated` | tenant | A suspended firm was let back in. Sessions that outlived the suspension resume on their next request. |
 | `membership.granted` | membership | A user was given a role in a tenant, for one audience. |
 | `membership.revoked` | membership | A membership was deactivated. The person's next request stops — the session resolver re-reads this every time. |
 | `membership.restored` | membership | A deactivated membership was reinstated. |

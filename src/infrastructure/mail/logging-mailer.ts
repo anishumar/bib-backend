@@ -51,4 +51,20 @@ export class LoggingMailer implements Mailer {
     );
     return Promise.resolve();
   }
+
+  sendPortalWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.log.warn(
+      { to, url, expiresAt, firmName },
+      "portal welcome NOT emailed — the logging mailer is registered. Open the url above to " +
+        "sign in as them. This is the letter a client contact gets when the address already " +
+        "has a login somewhere else on this product, so it hands over a SESSION and leaves " +
+        "their existing password alone.",
+    );
+    return Promise.resolve();
+  }
 }

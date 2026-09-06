@@ -15,6 +15,14 @@ export interface Session {
   readonly issuedAt: string;
   readonly expiresAt: string;
   readonly revokedAt: string | null;
+  /**
+   * When this session was last used, to within `SESSION_TOUCH_MINUTES`.
+   *
+   * The IDLE clock. `expiresAt` is the ABSOLUTE one and answers a different
+   * question — how long one sign-in may last at most — and a session ends on
+   * whichever of the two comes first.
+   */
+  readonly lastSeenAt: string;
 }
 
 /**
@@ -46,6 +54,41 @@ export interface MagicLink {
  */
 export const SESSION_TTL_DAYS = 14;
 
+/**
+ * How long a session may sit UNUSED before it stops working.
+ *
+ * ── WHY FOURTEEN DAYS WAS NOT ENOUGH ON ITS OWN ────────────────────────────
+ *
+ * `SESSION_TTL_DAYS` measures from the moment somebody signed in, so it says
+ * nothing about whether anybody has touched the session since. A laptop left
+ * open in a co-working space, a browser on a phone that has been sold, a
+ * session opened on a client's machine to show them something — every one of
+ * those stayed valid for a fortnight of doing nothing, and the product could
+ * not tell them apart from somebody who signed in this morning.
+ *
+ * ── AND WHY SEVEN DAYS ─────────────────────────────────────────────────────
+ *
+ * This is a workspace people are in every working day, so the number wants to
+ * be long enough that a holiday, a long weekend or a week on a client site does
+ * not sign the whole firm out, and short enough that a machine nobody is using
+ * stops being a way in. A week clears the weekend twice over.
+ *
+ * It cannot be longer than the absolute TTL and there is no point making it
+ * equal to it — that would be the same clock written twice.
+ */
+export const SESSION_IDLE_DAYS = 7;
+
+/**
+ * How stale the recorded `lastSeenAt` may get before it is written again.
+ *
+ * The idle clock needs the session touched on use, and touching it on EVERY
+ * request would turn every authenticated read into a write on the hottest row
+ * in the system. Five minutes buys almost all of the accuracy for a fraction of
+ * the writes: the recorded value is never worse than five minutes stale, which
+ * is nothing against a seven-day timeout.
+ */
+export const SESSION_TOUCH_MINUTES = 5;
+
 /** A magic link is a bearer credential sitting in an inbox, so it is short.
  *  Fifteen minutes is enough to switch to an email client and click. */
 export const MAGIC_LINK_TTL_MINUTES = 15;
@@ -73,7 +116,23 @@ export function isAcceptablePassword(password: string): boolean {
  *  Everything that asks "is this request authenticated" ends here. */
 export function isUsableSession(session: Session, now: Date): boolean {
   if (session.revokedAt !== null) return false;
-  return Date.parse(session.expiresAt) > now.getTime();
+  if (Date.parse(session.expiresAt) <= now.getTime()) return false;
+  // The IDLE clock, and it is checked in the same function as the absolute one
+  // deliberately: every caller that asks "is this session good" gets both
+  // answers, and there is no path that could acquire one and miss the other.
+  return !hasGoneIdle(session, now);
+}
+
+/** Whether a session has sat unused past `SESSION_IDLE_DAYS`. */
+export function hasGoneIdle(session: Session, now: Date): boolean {
+  const idleMs = now.getTime() - Date.parse(session.lastSeenAt);
+  return idleMs > SESSION_IDLE_DAYS * 24 * 60 * 60 * 1000;
+}
+
+/** Whether the recorded `lastSeenAt` is stale enough to be worth a write. See
+ *  `SESSION_TOUCH_MINUTES`: the point is NOT to write on every request. */
+export function shouldTouch(session: Session, now: Date): boolean {
+  return now.getTime() - Date.parse(session.lastSeenAt) > SESSION_TOUCH_MINUTES * 60 * 1000;
 }
 
 /** A magic link is usable exactly once, and only before it expires. */

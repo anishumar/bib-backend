@@ -372,7 +372,6 @@ describe("rendering one of the product's own records", () => {
       kind: "engagement_letter",
       subjectKind: "engagement_letter",
       subjectRef: ENGAGEMENT,
-      partyId: PARTY,
       actor,
     });
 
@@ -396,11 +395,11 @@ describe("rendering one of the product's own records", () => {
 
     const first = await service.render({
       tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
-      subjectRef: ENGAGEMENT, partyId: PARTY, actor,
+      subjectRef: ENGAGEMENT, actor,
     });
     const second = await service.render({
       tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
-      subjectRef: ENGAGEMENT, partyId: PARTY, actor,
+      subjectRef: ENGAGEMENT, actor,
     });
 
     expect(second.latestVersion.contentHash).toBe(first.latestVersion.contentHash);
@@ -412,7 +411,7 @@ describe("rendering one of the product's own records", () => {
     await expect(
       service.render({
         tenantId: TENANT, kind: "working_paper", subjectKind: "engagement",
-        subjectRef: ENGAGEMENT, partyId: null, actor,
+        subjectRef: ENGAGEMENT, actor,
       }),
     ).rejects.toThrow(/Renderable today: engagement_letter, invoice/);
   });
@@ -422,8 +421,46 @@ describe("rendering one of the product's own records", () => {
     await expect(
       service.render({
         tenantId: TENANT, kind: "invoice", subjectKind: "invoice",
-        subjectRef: "77777777-7777-7777-7777-777777777777", partyId: null, actor,
+        subjectRef: "77777777-7777-7777-7777-777777777777", actor,
       }),
     ).rejects.toThrow(/no invoice/i);
+  });
+
+  it("files the PDF under the party the RECORD names, not one a caller picked", async () => {
+    // The route used to take `partyId` in its body. A rendered invoice is
+    // client-visible by default, so naming another client filed one firm's
+    // invoice in that client's portal library — through the front door, with
+    // every gate answering correctly.
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0009"));
+    renderSource.parties.set(ENGAGEMENT, PARTY);
+
+    const record = await service.render({
+      tenantId: TENANT,
+      kind: "engagement_letter",
+      subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT,
+      actor,
+    });
+
+    expect(record.document.partyId).toBe(PARTY);
+  });
+
+  it("files it under nobody when the record itself names nobody", async () => {
+    // Null is a real answer and must not be papered over: it means the source
+    // has no party for this record, which is a fact about the record rather
+    // than something the caller may supply.
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0010"));
+
+    const record = await service.render({
+      tenantId: TENANT,
+      kind: "engagement_letter",
+      subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT,
+      actor,
+    });
+
+    expect(record.document.partyId).toBeNull();
   });
 });

@@ -31,12 +31,27 @@ export class NotPermitted extends AuthzError {
 }
 
 export class UnknownRole extends AuthzError {
+  /**
+   * The firm's own role names — for a LOG, never for the response body.
+   *
+   * They used to be spliced into the message, which `mapError` sends to the
+   * caller verbatim. That made a 403 enumerate the firm's whole role
+   * vocabulary to whoever provoked it: every role name, on a refusal, to
+   * somebody the product has just decided may not be here. The names are the
+   * useful half for an operator and none of the caller's business, so they live
+   * on the error where a log can read them and the envelope cannot.
+   */
+  readonly definedRoles: readonly string[];
+
   constructor(role: string, known: readonly string[]) {
     // Two genuinely different faults share this code, and the message separates
     // them because the fixes are different. A role the firm does not define is
     // somebody's typo in a membership. NO roles at all is a firm whose
     // configuration was never seeded — every one of its people is locked out,
     // and no amount of correcting role names will help.
+    //
+    // Both sentences name the role the MEMBERSHIP carries, which the caller
+    // already holds and learns nothing from, and neither lists the alternatives.
     super(
       "UNKNOWN_ROLE",
       known.length === 0
@@ -44,8 +59,9 @@ export class UnknownRole extends AuthzError {
           `role configuration at all. Every member is locked out until it has one. Roles are seeded ` +
           `when a tenant is created, so this firm's provisioning did not finish.`
         : `membership role ${JSON.stringify(role)} is not one this firm defines, so it carries no ` +
-          `permissions. This firm's roles: ${known.join(", ")}. Either the membership names the ` +
-          `wrong one, or the role needs defining in the configuration registry.`,
+          `permissions. Either the membership names the wrong one, or the role needs defining in ` +
+          `the configuration registry — an administrator can see both lists on the roles screen.`,
     );
+    this.definedRoles = known;
   }
 }

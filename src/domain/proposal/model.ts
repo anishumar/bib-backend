@@ -58,6 +58,27 @@ export function isProposalDecision(v: string): v is ProposalDecision {
   return v === "accepted" || v === "rejected";
 }
 
+/**
+ * How long after an open another open counts as the same reading.
+ *
+ * ── WHAT `view_count` WAS ACTUALLY COUNTING ────────────────────────────────
+ *
+ * Requests. The share route is public by design — a proposal goes to somebody
+ * who has no login and will not get one — so every open incremented it: a
+ * refresh, a link preview unfurled by a chat app, a back button, a bored
+ * recipient. A partner reads "the client looked at this four times" and acts on
+ * it; the number could say anything, and only a per-address rate limit stood
+ * between it and nonsense.
+ *
+ * With the LAST view recorded, the count can advance only when the previous one
+ * was long enough ago to be a separate act of reading. Half an hour makes the
+ * number mean SITTINGS, which is what it was always read as.
+ *
+ * The ledger half was already right: `proposal.viewed` is recorded once, on the
+ * first view, so the audit trail was never spammed.
+ */
+export const VIEW_DEDUPE_MINUTES = 30;
+
 export interface Proposal {
   readonly id: string;
   readonly tenantId: string;
@@ -114,6 +135,9 @@ export interface Proposal {
    * page is not fifty facts about the business.
    */
   readonly firstViewedAt: string | null;
+  /** When the share link was last opened. Null until it has been. Written on
+   *  EVERY view, unlike the count — see `VIEW_DEDUPE_MINUTES`. */
+  readonly lastViewedAt: string | null;
   readonly viewCount: number;
   /**
    * WHY the client said no.

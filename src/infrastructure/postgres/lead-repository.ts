@@ -7,6 +7,7 @@ import { withTenant } from "../../db/tenant";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 import type { PartyKind } from "../../domain/party/model";
 import type { LeadRecord, LeadRepository, NewLead } from "../../usecase/lead/ports";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 /** The lead columns, as Postgres hands them over. Exported because the
  *  assignment adapter (lead-assignment.ts) returns a lead from its own UPDATE
@@ -143,6 +144,9 @@ export class PostgresLeadRepository implements LeadRepository {
               JOIN core.party p ON p.id = l.party_id
               LEFT JOIN tenancy.user_account u ON u.id = l.owner_user_id
               ORDER BY l.captured_at DESC
+              -- A CEILING, not pagination — see MAX_LIST_ROWS. The pipeline
+              -- grows for as long as the firm does.
+              LIMIT ${MAX_LIST_ROWS}
             `
           : await db<LeadRecordRow[]>`
               SELECT l.id, l.tenant_id, l.title, l.party_id, l.source, l.stage, l.owner_user_id,
@@ -154,6 +158,7 @@ export class PostgresLeadRepository implements LeadRepository {
               LEFT JOIN tenancy.user_account u ON u.id = l.owner_user_id
               WHERE l.stage = ${stage}
               ORDER BY l.captured_at DESC
+              LIMIT ${MAX_LIST_ROWS}
             `;
       return rows.map(toRecord);
     });

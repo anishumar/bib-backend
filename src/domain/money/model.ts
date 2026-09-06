@@ -139,6 +139,76 @@ export function isSignedAmount(v: string): boolean {
   return SIGNED_AMOUNT_PATTERN.test(v);
 }
 
+/**
+ * Compare two decimal strings EXACTLY. -1, 0 or 1, like every comparator.
+ *
+ * -- WHY THIS EXISTS AND WHY IT IS NOT `Number(a) - Number(b)` ---------------
+ *
+ * The credit-note cap — the one check in the product that decides whether money
+ * may leave — was written as `Number(balance.invoiced) - Number(balance.credited)`
+ * and compared against `Number(input.amount)`. That is the exact thing this
+ * module's own header forbids, on the one calculation where it matters most.
+ * The failure is not theoretical: an invoice of 100.10 with 100.00 credited
+ * leaves 0.10, and in binary floating point `100.10 - 100.00` is
+ * 0.09999999999999432, so the last ten paise of a legitimate credit note were
+ * refused with a message printing "0.1000".
+ *
+ * So the comparison is done on the digits. Both sides are padded to the same
+ * scale and compared as BigInt, which is exact for any value these patterns
+ * admit — fifteen integer digits and four decimal places is far inside what
+ * BigInt holds — and no intermediate is ever a `number`.
+ *
+ * Postgres would answer this too, in `numeric`, and for a SUM it must. This is
+ * for the case the database cannot answer alone: comparing a value the caller
+ * just sent against one it has already computed.
+ */
+export function compareAmounts(a: Amount, b: Amount): -1 | 0 | 1 {
+  const [ai, af] = splitDecimal(a);
+  const [bi, bf] = splitDecimal(b);
+  const scale = Math.max(af.length, bf.length);
+  const left = BigInt(ai + af.padEnd(scale, "0"));
+  const right = BigInt(bi + bf.padEnd(scale, "0"));
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+/**
+ * `a - b`, exactly, as a decimal string at the wider of the two scales.
+ *
+ * Trailing zeros are kept rather than trimmed: the result of this is printed in
+ * a refusal ("you may credit at most X"), and 0.1000 and 0.1 are the same
+ * number but "at most 0.1000" is the one that matches what the invoice screen
+ * already shows.
+ */
+export function subtractAmounts(a: Amount, b: Amount): string {
+  const [ai, af] = splitDecimal(a);
+  const [bi, bf] = splitDecimal(b);
+  const scale = Math.max(af.length, bf.length);
+  const difference = BigInt(ai + af.padEnd(scale, "0")) - BigInt(bi + bf.padEnd(scale, "0"));
+  const negative = difference < 0n;
+  const digits = (negative ? -difference : difference).toString().padStart(scale + 1, "0");
+  const whole = digits.slice(0, digits.length - scale);
+  const fraction = scale === 0 ? "" : `.${digits.slice(digits.length - scale)}`;
+  return `${negative ? "-" : ""}${whole}${fraction}`;
+}
+
+/**
+ * A decimal string as (integer part with its sign, fractional digits).
+ *
+ * Deliberately tolerant of what Postgres hands back: `numeric` prints at the
+ * column's full scale, so an amount stored as 1 reads as "1.0000" and a rate as
+ * "1.0000000000". Neither is a different number and neither should take a
+ * different code path.
+ */
+function splitDecimal(value: string): [string, string] {
+  const trimmed = value.trim();
+  const dot = trimmed.indexOf(".");
+  if (dot === -1) return [trimmed === "" ? "0" : trimmed, ""];
+  const whole = trimmed.slice(0, dot);
+  return [whole === "" || whole === "-" ? `${whole}0` : whole, trimmed.slice(dot + 1)];
+}
+
 /** An amount and what it is denominated in. Neither half means anything alone —
  *  which is why they are one type and never two loose fields. */
 export interface Money {

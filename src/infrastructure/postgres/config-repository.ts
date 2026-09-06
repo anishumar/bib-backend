@@ -422,6 +422,21 @@ export class PostgresConfigRepository
    *
    * `jsonb_exists` over the permissions array asks the question in the database
    * rather than reading every role body back to filter in TypeScript.
+   *
+   * -- AND WHY IT IS STAFF-ONLY -----------------------------------------------
+   *
+   * The one caller asks "does this firm still have anyone who can administer
+   * it", and only a STAFF role can be an answer to that: gate 2 admits a
+   * CLIENT_PORTAL session to `PORTAL_PATHS` and nothing else, so a portal role
+   * carrying `tenant:admin` grants the ability to administer precisely nothing.
+   * Counting one meant a firm could move `tenant:admin` onto `client_contact`,
+   * satisfy both last-administrator guards, and end up with nobody able to
+   * change its configuration back — the unrecoverable state the guards exist to
+   * prevent, reached THROUGH them.
+   *
+   * An absent `audience` reads as STAFF, which is `readRoleAudience`'s rule and
+   * the fail-closed direction: every role written before the field existed was
+   * a staff role.
    */
   async rolesWith(tenantId: string, permission: Permission): Promise<readonly string[]> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -431,6 +446,7 @@ export class PostgresConfigRepository
         JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
         WHERE e.kind = 'role'
           AND jsonb_exists(v.body -> 'permissions', ${permission})
+          AND COALESCE(v.body ->> 'audience', 'STAFF') = 'STAFF'
         ORDER BY e.key
       `;
       return rows.map((r) => r.key);

@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
-import { parseShareToken } from "../../src/domain/proposal/model";
+import { VIEW_DEDUPE_MINUTES, parseShareToken } from "../../src/domain/proposal/model";
 import {
   AlreadyApproved,
   ApprovalNotNeeded,
@@ -1009,9 +1009,12 @@ describe("the share link", () => {
     expect(JSON.stringify(shared)).not.toContain(GST_VERSION);
   });
 
-  it("counts every open and records only the first", async () => {
+  it("counts SITTINGS, not requests, and records only the first", async () => {
     // The count is commercial signal; the event is a state transition. A client
-    // refreshing a page is not fifty facts about the business.
+    // refreshing a page is not fifty facts about the business — and it is not
+    // three readings either. The link is PUBLIC, so counting requests counted
+    // refreshes, back buttons and whatever a chat app does when it unfurls a
+    // URL; a partner reads the number as "they came back to it" and acts on it.
     const s = setup();
     const { id, token } = await sent(s);
     const anon = { type: "system" as const, id: null };
@@ -1020,8 +1023,27 @@ describe("the share link", () => {
     await s.service.viewShared(token, anon);
 
     const after = await s.proposals.findById(TENANT, id);
-    expect(after?.viewCount).toBe(3);
+    expect(after?.viewCount).toBe(1);
     expect(after?.firstViewedAt).not.toBeNull();
+    // The DATE moves every time even so: "they opened it again" is true however
+    // briefly, and it is the more useful of the two facts on its own.
+    expect(after?.lastViewedAt).not.toBeNull();
+    expect(s.events.recorded.filter((e) => e.verb === "proposal.viewed")).toHaveLength(1);
+  });
+
+  it("counts a second reading when it is genuinely a second reading", async () => {
+    const s = setup();
+    const { id, token } = await sent(s);
+    const anon = { type: "system" as const, id: null };
+    await s.service.viewShared(token, anon);
+
+    s.clock.advanceMinutes(VIEW_DEDUPE_MINUTES + 1);
+    await s.service.viewShared(token, anon);
+
+    const after = await s.proposals.findById(TENANT, id);
+    expect(after?.viewCount).toBe(2);
+    // Still ONE event: the ledger holds the state transition, and "they read it
+    // twice" is not one.
     expect(s.events.recorded.filter((e) => e.verb === "proposal.viewed")).toHaveLength(1);
   });
 

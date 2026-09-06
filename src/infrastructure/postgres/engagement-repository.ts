@@ -42,6 +42,7 @@ import type {
   PinnedService,
   SignatureRecord,
 } from "../../usecase/engagement/ports";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 interface LetterRow {
   id: string;
@@ -575,6 +576,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         WHERE (${filters.status ?? null}::text IS NULL OR l.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR l.party_id = ${filters.partyId ?? null})
         ORDER BY l.created_at DESC
+        -- A CEILING, not pagination — see MAX_LIST_ROWS.
+        LIMIT ${MAX_LIST_ROWS}
       `;
       return rows.map(
         (r): LetterSummary => ({

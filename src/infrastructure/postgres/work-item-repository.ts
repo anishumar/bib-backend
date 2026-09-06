@@ -25,6 +25,7 @@ import type {
   WorkItemRepository,
   WorkItemStateWrite,
 } from "../../usecase/workitem/ports";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 interface ItemRow {
   id: string;
@@ -324,6 +325,11 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
           AND (${filter.jobId ?? null}::uuid IS NULL
                OR w.job_id = ${filter.jobId ?? null}::uuid)
           AND (${filter.openOnly ?? false}::boolean IS NOT TRUE OR NOT s.is_terminal)
+        -- A CEILING, not pagination — see MAX_LIST_ROWS. The board is ORDERED
+        -- in the domain (boardOrder, which needs the caller's calendar day), so
+        -- the cap here is on the SET the domain is handed: an unfiltered board
+        -- at a firm with years of history was the whole table.
+        LIMIT ${MAX_LIST_ROWS}
       `;
       // Ordering is the domain's job (`boardOrder`) — "overdue" needs the
       // CALLER's calendar day, which SQL here has no honest access to.

@@ -147,10 +147,16 @@ export function activeMemberships(all: readonly Membership[]): readonly Membersh
  * same predicate serves a role change and a deactivation.
  */
 export function hasActiveAdministrator(
-  members: readonly Pick<Membership, "role" | "isActive">[],
+  members: readonly Pick<Membership, "role" | "isActive" | "audience">[],
   adminRoles: ReadonlySet<string>,
 ): boolean {
-  return members.some((m) => m.isActive && adminRoles.has(m.role));
+  // STAFF, and the audience is not a detail. A CLIENT_PORTAL membership is a
+  // login on the other side of the wall: gate 2 admits it only to PORTAL_PATHS,
+  // and none of those can administer anything. Counting one as an administrator
+  // meant this guard could be satisfied by somebody who structurally cannot
+  // reach a single administration route — the firm passes the check and is
+  // stranded exactly as completely as if the check had never run.
+  return members.some((m) => m.isActive && m.audience === "STAFF" && adminRoles.has(m.role));
 }
 
 /** The roster as it would be after one membership changes — the input to the

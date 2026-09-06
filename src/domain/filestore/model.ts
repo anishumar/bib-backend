@@ -257,6 +257,65 @@ export function normaliseMediaType(raw: string): string | null {
 }
 
 /**
+ * What a CLIENT may upload — an allowlist, and only on the portal route.
+ *
+ * -- WHY THE TWO SURFACES GET DIFFERENT RULES --------------------------------
+ *
+ * The staff route stays open on purpose. A firm uploads whatever its own work
+ * produces: a .msg from Outlook, a CSV a bank exported, a zip a registry sent
+ * back. Refusing those would be the product telling a firm what its own filing
+ * cabinet may hold, and the person uploading is inside the firm and accountable
+ * for it.
+ *
+ * The portal route is the opposite case. The uploader is outside the firm, the
+ * download echoes the media type they chose, and the person who opens the file
+ * is a colleague who trusted the product to hand them what a client sent. There
+ * is no scanner in this product — the route description says so out loud — so
+ * the only control available is what may arrive at all.
+ *
+ * -- WHAT IS ON IT, AND WHAT IS DELIBERATELY NOT -----------------------------
+ *
+ * What a client actually sends: a scanned PDF, a photograph of a challan, a
+ * spreadsheet of transactions, a Word document, a plain CSV or text file.
+ *
+ * NOT `text/html` or `image/svg+xml`, which are documents that carry script;
+ * `attachment` and `nosniff` already stop a browser running one, and this means
+ * it is never stored to be re-served in the first place. NOT
+ * `application/zip` — an archive is a container whose contents nothing here can
+ * see, and the case for one on this route has not come up. NOT
+ * `application/octet-stream`, which is not a type so much as the absence of
+ * one: a client whose browser cannot name the file needs to be told, not to
+ * have it filed as bytes nobody can open safely.
+ *
+ * A firm that needs something else asks the client to send it another way and
+ * uploads it themselves, which puts a member of the firm behind the decision.
+ * That is the right shape for the exception.
+ */
+export const PORTAL_UPLOAD_MEDIA_TYPES: readonly string[] = [
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/heic",
+  "image/heif",
+  "image/tiff",
+  "image/webp",
+  "text/plain",
+  "text/csv",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.oasis.opendocument.text",
+  "application/vnd.oasis.opendocument.spreadsheet",
+];
+
+/** Whether a NORMALISED media type may be uploaded through the client portal.
+ *  Call `normaliseMediaType` first; this compares the bare type/subtype. */
+export function isPortalUploadable(mediaType: string): boolean {
+  return PORTAL_UPLOAD_MEDIA_TYPES.includes(mediaType);
+}
+
+/**
  * The filename, kept as a LABEL and never as a path.
  *
  * Directory separators and `..` are stripped rather than refused, because a
@@ -275,6 +334,46 @@ export function safeFilename(raw: string): string | null {
   if (cleaned.length === 0) return null;
   if (cleaned === "." || cleaned === "..") return null;
   return cleaned.slice(0, 255);
+}
+
+/**
+ * The `Content-Disposition` header value that names a stored file.
+ *
+ * -- THE BUG THIS EXISTS TO END ----------------------------------------------
+ *
+ * Both byte routes spliced the filename straight into
+ * `attachment; filename="..."` with only the quote character removed. An HTTP
+ * header value is a ByteString -- every code point must be under 256 -- so the
+ * moment a file was named in an Indian language the header could not be built
+ * and the DOWNLOAD answered 500. Upload accepted it; the bytes were stored
+ * correctly; only fetching them failed, and the message said "internal error".
+ * `जीएसटी चालान.txt` is not an edge case at a firm in this market, it is
+ * Tuesday.
+ *
+ * -- WHAT RFC 5987 / RFC 6266 SAY TO DO --------------------------------------
+ *
+ * Send BOTH forms. `filename=` carries an ASCII fallback for anything that
+ * cannot read the other one, and `filename*=UTF-8''...` carries the real name
+ * percent-encoded, which every browser released this decade prefers. So a name
+ * that is already ASCII travels exactly as before -- no behaviour change for
+ * the files that worked -- and one that is not finally arrives intact instead
+ * of crashing the route.
+ *
+ * The ASCII fallback replaces each non-ASCII character with `_` rather than
+ * dropping it, so `चालान.txt` falls back to something with an extension rather
+ * than to `.txt` or to nothing. Characters that would end the quoted string or
+ * escape it (`"` and `\`) are removed outright.
+ */
+export function contentDispositionFor(filename: string): string {
+  const ascii = filename.replace(/[^\x20-\x7e]/g, "_").replace(/["\\]/g, "");
+  const fallback = ascii.trim().length === 0 ? "download" : ascii;
+  // encodeURIComponent leaves ! ' ( ) * alone, and RFC 5987's grammar does not
+  // allow them raw in ext-value, so they are encoded here too.
+  const encoded = encodeURIComponent(filename).replace(
+    /['()!*]/g,
+    (ch) => "%" + ch.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
 export function isDocumentKind(value: string): value is DocumentKind {

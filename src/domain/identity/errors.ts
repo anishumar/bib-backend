@@ -28,7 +28,8 @@ export type IdentityErrorCode =
   | "USER_DISABLED"
   | "WEAK_PASSWORD"
   | "TOO_MANY_ATTEMPTS"
-  | "INVITATION_ALREADY_ACCEPTED";
+  | "INVITATION_ALREADY_ACCEPTED"
+  | "USER_NOT_FOUND";
 
 export class InvalidCredentials extends IdentityError {
   constructor() {
@@ -139,6 +140,29 @@ export class InvitationAlreadyAccepted extends IdentityError {
         `what the invite flow exists to prevent. If they cannot get in, they ask the sign-in ` +
         `page to email them a link.`,
     );
+  }
+}
+
+/**
+ * There is no such account — said out loud, and ONLY where saying it is safe.
+ *
+ * -- WHY THIS IS NOT THE ENUMERATION ORACLE THE REST OF THIS FILE AVOIDS ----
+ *
+ * Every public path in this module is careful never to distinguish "no such
+ * user" from "wrong password", because a login endpoint that tells them apart
+ * hands an anonymous caller the firm's client list one address at a time. That
+ * argument is about ANONYMOUS callers on the /api/v1 surface.
+ *
+ * This one is raised on /internal, where the caller has already presented a
+ * provisioning key carrying `identity.grant` — a capability that lets them set
+ * anybody's password, which is strictly more than knowing whether an id exists.
+ * There is nothing left to protect, and the alternative is what was happening:
+ * the credential upsert's foreign key failed, nothing mapped it, and the
+ * provisioning system got a 500 saying "internal error" for its own typo.
+ */
+export class UserNotFound extends IdentityError {
+  constructor(userId: string) {
+    super("USER_NOT_FOUND", `No user ${userId}`);
   }
 }
 

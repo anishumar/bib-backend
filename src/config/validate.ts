@@ -93,6 +93,39 @@ export function validateServer(cfg: Config): void {
       );
     }
 
+    // The session cookie's own hardening, which BIB_SESSION_COOKIE_SECURE can
+    // switch off — and did, in any environment, because the flag is read
+    // before the environment is. Without `Secure` the browser sends the session
+    // over plain http, so anything between the user and the API reads it and
+    // becomes them; the cookie is httpOnly and SameSite, which defend against
+    // other things entirely and not against this one.
+    //
+    // The default already computes to true here. This refuses the OVERRIDE, so
+    // "we turned it off to debug staging" cannot survive into a public
+    // environment unnoticed.
+    if (!cfg.auth.sessionCookieSecure) {
+      throw new Error(
+        `BIB_SESSION_COOKIE_SECURE=false while BIB_ENVIRONMENT=${cfg.environment} ` +
+          `(production-like). Without Secure the session cookie travels over plain http and ` +
+          `anything on the path can read it and become that user. Remove the variable — it ` +
+          `defaults to true here — or set it to true.`,
+      );
+    }
+
+    // Trusting X-Forwarded-For without a proxy in front lets any caller invent
+    // its own rate-limit key per request and opt out of rate limiting entirely;
+    // NOT trusting it behind one makes every client share the balancer's
+    // address, so a single bucket throttles the whole customer base. Neither is
+    // detectable from inside the process, so this only checks the half that is:
+    // a hop count that cannot be right.
+    if (cfg.rateLimit.trustProxy && cfg.rateLimit.trustedProxyHops < 1) {
+      throw new Error(
+        `BIB_TRUSTED_PROXY_HOPS must be at least 1 when BIB_TRUST_PROXY=true. It says how ` +
+          `far in from the RIGHT of X-Forwarded-For the real client sits; a value below one ` +
+          `would read the attacker-written left of the list.`,
+      );
+    }
+
     // Same rule, applied to notifications: the only registered mailer writes
     // magic links to the log instead of sending them. Booting with it in a
     // public environment would mean sign-in links appear in log aggregation

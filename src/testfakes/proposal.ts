@@ -16,6 +16,7 @@
 //   real Postgres.
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
+import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
 import { readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
@@ -79,6 +80,7 @@ export class FakeProposalRepo implements ProposalRepository {
       discountApprovedBy: null,
       discountApprovedAt: null,
       firstViewedAt: null,
+      lastViewedAt: null,
       viewCount: 0,
       declinedReason: null,
     };
@@ -206,7 +208,18 @@ export class FakeProposalRepo implements ProposalRepository {
     let wasFirst = false;
     this.replace(tenantId, proposalId, (p) => {
       wasFirst = p.viewCount === 0;
-      return { ...p, viewCount: p.viewCount + 1, firstViewedAt: p.firstViewedAt ?? at };
+      // The count advances only outside the de-duplication window; the DATE
+      // moves every time. See VIEW_DEDUPE_MINUTES: the share link is public, so
+      // counting requests counted refreshes and link previews.
+      const separate =
+        p.lastViewedAt === null ||
+        Date.parse(at) - Date.parse(p.lastViewedAt) > VIEW_DEDUPE_MINUTES * 60 * 1000;
+      return {
+        ...p,
+        viewCount: p.viewCount + (separate ? 1 : 0),
+        firstViewedAt: p.firstViewedAt ?? at,
+        lastViewedAt: at,
+      };
     });
     return Promise.resolve(wasFirst);
   }
@@ -372,6 +385,10 @@ export function makeProposalFakes(): Deps & {
   shareTokens: FakeTokenFactory;
   /** The firm's issuing-entity rule, so a test can change it or empty it. */
   firmEntities: FakePreferenceRepo;
+  /** The clock, as the FAKE and not as the port. A share-link test has to be
+   *  able to move it: `view_count` de-duplicates opens inside a window, and
+   *  without a movable clock there is no way to write a second reading. */
+  clock: FakeClock;
   events: RecordingEventSink;
 } {
   // The REAL DocumentService over in-memory ports: quoting must fail here if

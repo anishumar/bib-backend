@@ -27,6 +27,7 @@ interface SessionRow {
   issued_at: Date;
   expires_at: Date;
   revoked_at: Date | null;
+  last_seen_at: Date;
 }
 
 function toSession(r: SessionRow): Session {
@@ -38,6 +39,7 @@ function toSession(r: SessionRow): Session {
     issuedAt: r.issued_at.toISOString(),
     expiresAt: r.expires_at.toISOString(),
     revokedAt: r.revoked_at === null ? null : r.revoked_at.toISOString(),
+    lastSeenAt: r.last_seen_at.toISOString(),
   };
 }
 
@@ -88,7 +90,8 @@ export class PostgresSessionRepository implements SessionRepository {
       VALUES
         (${s.id}, ${s.userId}, ${s.tokenHash}, ${s.activeTenantId}, ${s.activeAudience},
          ${s.expiresAt}::timestamptz)
-      RETURNING id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at
+      RETURNING id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at,
+                last_seen_at
     `;
     if (!row) throw new Error("session insert returned no row");
     return toSession(row);
@@ -96,7 +99,8 @@ export class PostgresSessionRepository implements SessionRepository {
 
   async findByTokenHash(tokenHash: string): Promise<Session | null> {
     const [row] = await this.app<SessionRow[]>`
-      SELECT id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at
+      SELECT id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at,
+             last_seen_at
       FROM tenancy.session WHERE token_hash = ${tokenHash}
     `;
     return row ? toSession(row) : null;
@@ -111,7 +115,8 @@ export class PostgresSessionRepository implements SessionRepository {
       UPDATE tenancy.session
       SET active_tenant_id = ${tenantId}, active_audience = ${audience}
       WHERE id = ${sessionId} AND revoked_at IS NULL
-      RETURNING id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at
+      RETURNING id, user_id, active_tenant_id, active_audience, issued_at, expires_at, revoked_at,
+                last_seen_at
     `;
     if (!row) {
       throw new Error(
@@ -137,6 +142,44 @@ export class PostgresSessionRepository implements SessionRepository {
       RETURNING id
     `;
     return rows.length;
+  }
+
+  /** The idle clock's write. `revoked_at IS NULL` so a touch cannot resuscitate
+   *  a session somebody has just ended from another tab. */
+  async touch(sessionId: string, at: string): Promise<void> {
+    await this.app`
+      UPDATE tenancy.session SET last_seen_at = ${at}::timestamptz
+      WHERE id = ${sessionId} AND revoked_at IS NULL
+    `;
+  }
+
+  /**
+   * The sweep. See the port, and migration 0075 for why DELETE is right here.
+   *
+   * `before` is a cut-off, not "now": a row is removed once it has been dead
+   * for long enough that nobody is going to ask about it, so that an operator
+   * looking into "why was I signed out an hour ago" still finds the row.
+   *
+   * The three conditions are three different kinds of dead and all of them are
+   * spent keys: past its absolute expiry, revoked, or idle beyond its budget.
+   */
+  async purgeExpired(
+    before: string,
+  ): Promise<{ readonly sessions: number; readonly magicLinks: number }> {
+    const sessions = await this.app<{ id: string }[]>`
+      DELETE FROM tenancy.session
+       WHERE expires_at < ${before}::timestamptz
+          OR revoked_at < ${before}::timestamptz
+          OR last_seen_at < ${before}::timestamptz
+      RETURNING id
+    `;
+    const links = await this.app<{ id: string }[]>`
+      DELETE FROM tenancy.magic_link
+       WHERE expires_at < ${before}::timestamptz
+          OR consumed_at < ${before}::timestamptz
+      RETURNING id
+    `;
+    return { sessions: sessions.length, magicLinks: links.length };
   }
 }
 

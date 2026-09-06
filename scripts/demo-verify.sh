@@ -37,6 +37,36 @@ set -euo pipefail
 API=${API:-http://localhost:8080}
 H='content-type: application/json'
 PASSWORD=${BIB_DEMO_PASSWORD:-'10x Global demo 2026'}
+
+# ── THE ONE THING THIS SCRIPT MUST NEVER DO ─────────────────────────────────
+#
+# It seeds FIXED logins with a FIXED password. That is exactly what makes the
+# demo usable — `siddharth@10xglobal.in` is written in DEMO.md and typed by
+# whoever is presenting — and it is also a set of published credentials. Run
+# against anything but a throwaway local database, it puts them there.
+#
+# So the API has to be a local one, or BIB_DEMO_PASSWORD has to be set
+# deliberately. Naming the variable in the refusal is the point: somebody who
+# genuinely means to seed a shared environment says so in one line, and nobody
+# does it by leaving $API pointing at yesterday's tunnel.
+case "$API" in
+  http://localhost:*|http://127.0.0.1:*|http://[::1]:*|https://localhost:*)
+    ;;
+  *)
+    if [ -z "${BIB_DEMO_PASSWORD:-}" ]; then
+      echo "refusing to seed $API with the built-in demo password." >&2
+      echo >&2
+      echo "This script creates five FIXED logins (siddharth@10xglobal.in and four" >&2
+      echo "others) with a password that is committed in this repository. That is safe" >&2
+      echo "on a throwaway local database and nowhere else." >&2
+      echo >&2
+      echo "Either point API at localhost, or set BIB_DEMO_PASSWORD to something you" >&2
+      echo "chose:  BIB_DEMO_PASSWORD=\"$(openssl rand -base64 24 2>/dev/null || echo '<a password>')\" $0" >&2
+      exit 1
+    fi
+    ;;
+esac
+
 DOMAIN=10xglobal.in
 TODAY=$(python3 -c 'import datetime;print(datetime.date.today().isoformat())')
 

@@ -14,7 +14,8 @@ import { z, errorResponse } from "../openapi";
 import { toEnvelope } from "../httpresp";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
-import { SESSION_TTL_DAYS } from "../../domain/identity/model";
+import { MAX_PASSWORD_LENGTH, SESSION_TTL_DAYS } from "../../domain/identity/model";
+import { MAX_EMAIL_LENGTH, MAX_TOKEN_LENGTH } from "../bounds";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
 import type { TenancyService } from "../../usecase/tenancy/service";
 import type { PortalAccessService } from "../../usecase/portalaccess/service";
@@ -130,20 +131,41 @@ const SignInSchema = z
   })
   .openapi("SignInResponse");
 
+/**
+ * `.max(MAX_PASSWORD_LENGTH)`, and it is not cosmetic.
+ *
+ * The cap was enforced only where a password is SET, so the sign-in route
+ * accepted any length — and sign-in is the one route an anonymous caller can
+ * reach. A multi-megabyte string was fed straight into scrypt, which is
+ * memory-hard by design: the work factor that makes a stolen hash expensive to
+ * crack is the same work factor that makes hashing junk expensive to serve.
+ * Refusing at the schema costs nothing and happens before the hasher is asked
+ * for anything.
+ *
+ * `.max()` on the LOGIN password does not weaken anything: nobody can have set
+ * a password longer than this, so a longer one cannot be right.
+ */
 const LoginBody = z
-  .object({ email: z.string().email(), password: z.string().min(1) })
+  .object({
+    email: z.string().email().max(MAX_EMAIL_LENGTH),
+    password: z.string().min(1).max(MAX_PASSWORD_LENGTH),
+  })
   .openapi("LoginRequest");
 
-const MagicLinkBody = z.object({ email: z.string().email() }).openapi("MagicLinkRequest");
+const MagicLinkBody = z
+  .object({ email: z.string().email().max(MAX_EMAIL_LENGTH) })
+  .openapi("MagicLinkRequest");
 
-const RedeemBody = z.object({ token: z.string().min(1) }).openapi("RedeemMagicLinkRequest");
+const RedeemBody = z
+  .object({ token: z.string().min(1).max(MAX_TOKEN_LENGTH) })
+  .openapi("RedeemMagicLinkRequest");
 
 const SwitchTenantBody = z
   .object({ tenantId: z.string().uuid() })
   .openapi("SwitchTenantRequest");
 
 const SetPasswordBody = z
-  .object({ password: z.string().min(1) })
+  .object({ password: z.string().min(1).max(MAX_PASSWORD_LENGTH) })
   .openapi("SetPasswordRequest");
 
 // ── Routes ───────────────────────────────────────────────────────────────────
@@ -333,7 +355,10 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
 
   app.openapi(loginRoute, async (c) => {
     const { email, password } = c.req.valid("json");
-    const result = await deps.service.login(email, password);
+    // The caller's key, from the rate limiter. The per-account attempt budget
+    // is spent per caller, so ten wrong guesses cost the guesser their own
+    // budget instead of locking out the person whose address they typed.
+    const result = await deps.service.login(email, password, c.get("clientKey"));
     issue(c, result);
     return c.json(await signInBody(result), 200);
   });

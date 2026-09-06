@@ -51,6 +51,13 @@ export const ROUTE_CAPABILITIES: ReadonlyMap<RouteKey, Capability> = new Map([
   [routeKey("POST", "/internal/v1/users"), "user.provision" as const],
   [routeKey("POST", "/internal/v1/memberships"), "membership.grant" as const],
   [routeKey("PUT", "/internal/v1/users/{userId}/password"), "credential.set" as const],
+  // Suspending a firm and disabling a login are the two controls that STOP
+  // things, and each sits with the capability that CREATED the thing it stops:
+  // whoever may bring a firm into existence may take it out of service, and the
+  // same for an account. Neither needs `credential.set`, which is the one that
+  // hands over a login and is deliberately held alone.
+  [routeKey("PUT", "/internal/v1/tenants/{tenantId}/status"), "tenant.provision" as const],
+  [routeKey("PUT", "/internal/v1/users/{userId}/status"), "user.provision" as const],
 ]);
 
 /** A named caller and what it is trusted with. */

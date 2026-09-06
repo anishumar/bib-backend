@@ -283,6 +283,7 @@ function deps(): RouterDeps {
   const identity = new IdentityService({
         users: fakes.users,
         memberships: fakes.memberships,
+        tenants: fakes.tenants,
         credentials: new FakeCredentialRepo(),
         sessions: new FakeSessionRepo(),
         magicLinks: new FakeMagicLinkRepo(),
@@ -570,7 +571,9 @@ function app(principal: Principal | null = null) {
     authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
-    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: () => Promise.resolve(principal),
   });
 }
@@ -680,10 +683,13 @@ describe("every route is accounted for", () => {
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
       rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
       rateLimit: {
         auth: { limit: 1000, windowSeconds: 60 },
         general: { limit: 10000, windowSeconds: 60 },
         trustProxy: false,
+        trustedProxyHops: 1,
       },
       principalOf: () => Promise.resolve(null),
     });
@@ -1016,7 +1022,12 @@ describe("gate 3 — role", () => {
     expect(res.status).toBe(403);
     const body = (await res.json()) as { error: { reason?: string; message: string } };
     expect(body.error.reason).toBe("UNKNOWN_ROLE");
-    expect(body.error.message).toContain("partner");
+    // It names the role the MEMBERSHIP carries — which the caller already has —
+    // and NOT the firm's other role names. Listing those made a 403 enumerate
+    // the firm's whole role vocabulary to whoever provoked it. An operator gets
+    // the list off the error object, in the log.
+    expect(body.error.message).toContain("rm");
+    expect(body.error.message).not.toContain("partner");
   });
 
   it("does not let a literal route be swallowed by a template", async () => {
@@ -1095,8 +1106,11 @@ describe("CORS — the frontend is a separate origin", () => {
         auth: { limit: 3, windowSeconds: 60 },
         general: { limit: 3, windowSeconds: 60 },
         trustProxy: false,
+        trustedProxyHops: 1,
       },
       corsOrigins: [ALLOWED],
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
       principalOf: () => Promise.resolve(null),
     });
 
@@ -1134,8 +1148,11 @@ describe("the /internal surface authorizes, not just authenticates", () => {
         auth: { limit: 1000, windowSeconds: 60 },
         general: { limit: 10000, windowSeconds: 60 },
         trustProxy: false,
+        trustedProxyHops: 1,
       },
       corsOrigins: ["http://localhost:3000"],
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
       principalOf: () => Promise.resolve(null),
     });
   }

@@ -44,7 +44,7 @@ import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
 import type { PortalLibraryService } from "../../usecase/portallibrary/service";
 import type { DocumentVersion } from "../../domain/filestore/model";
-import { DOCUMENT_KINDS } from "../../domain/filestore/model";
+import { DOCUMENT_KINDS, contentDispositionFor } from "../../domain/filestore/model";
 import type {
   PortalDigest,
   PortalDocumentRow,
@@ -348,15 +348,20 @@ function bytesResponse(bytes: Uint8Array, version: DocumentVersion): Response {
     headers: {
       "content-type": version.mediaType,
       "content-length": String(bytes.byteLength),
-      // `attachment` and NEVER `inline`. See the header.
-      "content-disposition": `attachment; filename="${version.filename.replace(/"/g, "")}"`,
-      // The bytes are immutable — a version never changes — so this is safe to
-      // cache hard, and the hash is a natural strong validator. `private`
-      // matters more here than on the staff route: a shared cache holding one
-      // client's challan is the one way these bytes could reach the wrong
-      // browser after passing every gate correctly.
+      // `attachment` and NEVER `inline`. See the header. Both RFC 6266 forms,
+      // because a challan named in Hindi is ordinary here and the old
+      // single-form header could not be built for one at all.
+      "content-disposition": contentDispositionFor(version.filename),
+      // The media type came from whoever uploaded the file — on THIS surface,
+      // possibly from the client. The browser must not look past it.
+      "x-content-type-options": "nosniff",
       etag: `"${version.contentHash}"`,
-      "cache-control": "private, max-age=31536000, immutable",
+      // `no-store`, not a year. The bytes never change; who may read them does.
+      // A shared or disk cache holding one client's challan is the one way
+      // these bytes reach the wrong browser after passing every gate correctly,
+      // and a revoked portal grant must take effect on the next request rather
+      // than at the end of a cache lifetime.
+      "cache-control": "private, no-store",
     },
   });
 }

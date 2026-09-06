@@ -126,9 +126,12 @@ describe("require", () => {
       .require(principal({ role: "rm" }), "party:read")
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(UnknownRole);
-    // It names the roles this firm actually has, which is the only thing that
-    // helps somebody locked out by a typo.
-    expect((err as Error).message).toContain("partner");
+    // The roles this firm actually has are what helps somebody locked out by a
+    // typo — and they are on the ERROR rather than in the message, because the
+    // message is sent to the caller verbatim and a refusal must not enumerate
+    // the firm's role vocabulary to whoever provoked it.
+    expect((err as UnknownRole).definedRoles).toContain("partner");
+    expect((err as Error).message).not.toContain("partner");
   });
 
   it("says so differently when the firm has NO roles at all", async () => {

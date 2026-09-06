@@ -68,6 +68,7 @@ import type {
   NewInvoiceLine,
   NewPayment,
 } from "../../usecase/invoice/ports";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 interface InvoiceRow {
   id: string;
@@ -337,6 +338,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         WHERE (${filters.status ?? null}::text IS NULL OR i.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR i.party_id = ${filters.partyId ?? null})
         ORDER BY i.created_at DESC
+        -- A CEILING, not pagination — see MAX_LIST_ROWS. A firm invoices every
+        -- month forever, so this list is one of the few that genuinely has no
+        -- upper bound of its own.
+        LIMIT ${MAX_LIST_ROWS}
       `;
       return rows.map((r) => ({
         invoice: toInvoice(r),

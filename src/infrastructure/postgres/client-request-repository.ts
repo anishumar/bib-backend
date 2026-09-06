@@ -29,6 +29,7 @@ import type {
   RequestRepository,
 } from "../../usecase/clientrequest/ports";
 import { isoInstant } from "./instant";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 interface RequestRow {
   id: string;
@@ -360,6 +361,10 @@ export class PostgresClientRequestRepository implements RequestRepository {
          AND (${scope} = 'any'
               OR (${scope} = 'live')     = (r.status IN ('open', 'answered')))
        ORDER BY r.raised_at DESC
+       -- A CEILING, not pagination — see MAX_LIST_ROWS. The FINISHED list is
+       -- the one that grows without bound: every request a firm has ever
+       -- closed stays in it.
+       LIMIT ${MAX_LIST_ROWS}
     `;
   }
 }

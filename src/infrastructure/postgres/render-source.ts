@@ -24,7 +24,7 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
 import type { RenderableDocument, Section } from "../../domain/render/model";
-import type { RenderSource } from "../../usecase/render/ports";
+import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
 import { isoInstant, utcDayOf } from "./instant";
 
 /** What this source can describe. Anything else is refused BY NAME rather than
@@ -32,6 +32,9 @@ import { isoInstant, utcDayOf } from "./instant";
 const RENDERABLE: readonly DocumentKind[] = ["engagement_letter", "invoice"];
 
 interface LetterRow {
+  /** Whose letter this is. Read for FILING the rendered PDF, never drawn on
+   *  it — see `DescribedDocument`. */
+  party_id: string;
   ref: string;
   title: string;
   jurisdiction: string;
@@ -66,6 +69,9 @@ interface BlockRow {
 }
 
 interface InvoiceRow {
+  /** Whose invoice this is. Read for FILING the rendered PDF, never drawn on
+   *  it — see `DescribedDocument`. */
+  party_id: string;
   number: string;
   currency: string;
   issued_on: string | null;
@@ -156,16 +162,16 @@ export class PostgresRenderSource implements RenderSource {
     readonly tenantId: string;
     readonly kind: DocumentKind;
     readonly subjectRef: string;
-  }): Promise<RenderableDocument | null> {
+  }): Promise<DescribedDocument | null> {
     if (input.kind === "engagement_letter") return this.letter(input.tenantId, input.subjectRef);
     if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef);
     return null;
   }
 
-  private async letter(tenantId: string, letterId: string): Promise<RenderableDocument | null> {
+  private async letter(tenantId: string, letterId: string): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
-        SELECT el.ref, el.title, el.jurisdiction, el.currency, el.background,
+        SELECT el.party_id, el.ref, el.title, el.jurisdiction, el.currency, el.background,
                el.issued_on::text, el.effective_from::text,
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
@@ -228,7 +234,7 @@ export class PostgresRenderSource implements RenderSource {
         0,
       );
 
-      return {
+      const document: RenderableDocument = {
         documentTitle: row.title,
         reference: row.ref,
         issuer: {
@@ -275,13 +281,14 @@ export class PostgresRenderSource implements RenderSource {
         logo: await this.logo(db, tenantId, letterId, "engagement_letter"),
         issuedOn: row.issued_on ?? row.created_on,
       };
+      return { document, partyId: row.party_id };
     });
   }
 
-  private async invoice(tenantId: string, invoiceId: string): Promise<RenderableDocument | null> {
+  private async invoice(tenantId: string, invoiceId: string): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
-        SELECT i.number, i.currency, i.issued_on::text, i.due_on::text,
+        SELECT i.party_id, i.number, i.currency, i.issued_on::text, i.due_on::text,
                ${db.unsafe(utcDayOf("i.created_at", "created_on"))}, i.irn,
                client.display_name AS client_name,
                entity.display_name AS entity_name,
@@ -312,7 +319,7 @@ export class PostgresRenderSource implements RenderSource {
       // Absent is ordinary — nothing in this product talks to the IRP yet.
       if (row.irn !== null) meta.push({ label: "IRN", value: row.irn });
 
-      return {
+      const document: RenderableDocument = {
         documentTitle: "Tax Invoice",
         reference: row.number,
         issuer: { name: row.entity_name, lines: [] },
@@ -348,6 +355,7 @@ export class PostgresRenderSource implements RenderSource {
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
         issuedOn: row.issued_on ?? row.created_on,
       };
+      return { document, partyId: row.party_id };
     });
   }
 

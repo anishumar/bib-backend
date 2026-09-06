@@ -922,10 +922,46 @@ export function mapError(err: unknown): MappedError {
       // Not a 403: nothing about the caller's access is wrong.
       case "INVITATION_ALREADY_ACCEPTED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 404, and it only ever reaches a provisioning caller — see the error's
+      // own note for why naming it is safe there. It answered 500 before, from
+      // an unmapped foreign-key violation two layers down.
+      case "USER_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
   }
+  // A UNIQUE VIOLATION that no check-then-insert caught in time.
+  //
+  // -- WHY THE CHECKS ARE NOT ENOUGH ON THEIR OWN --------------------------
+  //
+  // Several writes ask "is there one already?" and then insert, and every one
+  // of them is a race: two requests read the same empty answer and both go on
+  // to insert. The database is the thing that actually decides, and when it
+  // refuses, the caller was getting a 500 — for a duplicate they can see and
+  // understand, on a button they most likely double-clicked.
+  //
+  // `inviteMember` (duplicate membership) and `attach` (duplicate document
+  // link) are the two the audit found; the internal `addMember` has no
+  // pre-check at all, so for it a duplicate grant was ALWAYS a 500. This maps
+  // the class rather than the three cases, because the next check-then-insert
+  // will have the same race and nobody will remember to come back here.
+  //
+  // Deliberately last, after every domain family: a service that has its own
+  // word for this conflict (`MembershipExists`, `AlreadyAttached`) has already
+  // been matched above and says something far more useful. This is the floor.
+  const violation = uniqueViolationOf(err);
+  if (violation !== null) {
+    return {
+      status: 409,
+      code: "CONFLICT",
+      message:
+        "that already exists — something else created it between this request being " +
+        "checked and being written",
+      reason: violation,
+    };
+  }
+
   // A refused event is OUR bug, never the caller's: services build events from
   // their own vocabulary, so an unknown verb or a personal-data payload means
   // this codebase got it wrong. Reporting it as a 400 would blame the client
@@ -940,6 +976,26 @@ export function mapError(err: unknown): MappedError {
 /** Hono raises HTTPException with a numeric status; this narrows it into the
  *  closed set the rest of the system speaks. A 4xx we do not name is the
  *  client's fault and reported as VALIDATION; anything else is ours. */
+/**
+ * The constraint name, when this error is Postgres refusing a duplicate row.
+ *
+ * Duck-typed rather than `instanceof PostgresError`, and that is on purpose:
+ * this module maps MEANINGS to statuses and should not acquire a dependency on
+ * which driver is underneath. SQLSTATE 23505 is the standard's code for a
+ * unique violation and every driver surfaces it under `.code`.
+ *
+ * The constraint name goes in `reason` and never in `message` — it is a schema
+ * detail, useful in a log and not the caller's business.
+ */
+function uniqueViolationOf(err: unknown): string | null {
+  if (typeof err !== "object" || err === null) return null;
+  const candidate = err as { code?: unknown; constraint_name?: unknown };
+  if (candidate.code !== "23505") return null;
+  return typeof candidate.constraint_name === "string"
+    ? `UNIQUE_VIOLATION:${candidate.constraint_name}`
+    : "UNIQUE_VIOLATION";
+}
+
 function fromHttpException(err: HTTPException): MappedError {
   switch (err.status) {
     case 400:
@@ -952,6 +1008,12 @@ function fromHttpException(err: HTTPException): MappedError {
       return { status: 404, code: "NOT_FOUND", message: err.message };
     case 409:
       return { status: 409, code: "CONFLICT", message: err.message };
+    case 413:
+      // The body limit's own refusal, when something throws it rather than
+      // answering directly. PAYLOAD_TOO_LARGE and not VALIDATION: the request
+      // is well formed and it is the SIZE that is refused, which is the
+      // distinction the code was added for.
+      return { status: 413, code: "PAYLOAD_TOO_LARGE", message: err.message };
     case 429:
       return { status: 429, code: "RATE_LIMITED", message: err.message };
     default:

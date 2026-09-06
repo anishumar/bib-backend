@@ -42,6 +42,7 @@ import {
   configRef,
   isConfigKind,
   isValidKey,
+  readRoleAudience,
   readRolePermissions,
   roleBodyOf,
   validateBody,
@@ -392,14 +393,29 @@ export class ConfigService {
       this.deps.registry.listPublished(tenantId, "role"),
       this.deps.holders.rolesInUse(tenantId),
     ]);
+    // STAFF roles only, on both sides of the map.
+    //
+    // A CLIENT_PORTAL role holding `tenant:admin` administers nothing — gate 2
+    // admits a portal session to PORTAL_PATHS and no further — so counting one
+    // here let a firm move the permission onto `client_contact`, pass this
+    // guard and the roster's twin, and end with no staff role able to change
+    // configuration back. That is the exact unrecoverable state both guards
+    // exist to refuse, reached by satisfying them.
+    //
+    // The DRAFT's own audience decides whether the version being published
+    // counts, not the audience of whatever it says today: publishing a role
+    // ACROSS the audience boundary is the move that hides the permission.
     const after = new Map<string, readonly Permission[]>();
     for (const row of published) {
       // The entry being published is represented by its DRAFT below, not by
       // what it says today — that version is about to be archived.
       if (row.entry.id === entry.id || row.published === null) continue;
+      if (readRoleAudience(row.published.body) !== "STAFF") continue;
       after.set(row.entry.key, readRolePermissions(row.published.body));
     }
-    after.set(entry.key, readRolePermissions(draft.body));
+    if (readRoleAudience(draft.body) === "STAFF") {
+      after.set(entry.key, readRolePermissions(draft.body));
+    }
 
     // First: does the permission survive at all?
     if (leavesNobodyAdmin(after)) {

@@ -20,7 +20,10 @@
 // and are mounted here; ops, error mapping and docs are cross-cutting and stay.
 import { swaggerUI } from "@hono/swagger-ui";
 import { cors } from "hono/cors";
+import { bodyLimit } from "hono/body-limit";
+import { secureHeaders } from "hono/secure-headers";
 import type { OpenAPIHono } from "@hono/zod-openapi";
+import type { MiddlewareHandler } from "hono";
 import type { AppEnv } from "./guards";
 import { internalGuard, permissionGuard, sessionGuard } from "./guards";
 import type { PrincipalResolver } from "./principal";
@@ -28,6 +31,8 @@ import type { AuthzService } from "../usecase/authz/service";
 import type { RateLimiter } from "../platform/ratelimit";
 import { rateLimit } from "./ratelimit";
 import type { RateLimitConfig } from "./ratelimit";
+import { originGuard } from "./origin";
+import { boundedStrings } from "./bounds";
 import { PUBLIC_PATHS } from "./guards";
 import type { InternalClient } from "./capabilities";
 import type { Logger } from "../platform/log";
@@ -93,6 +98,39 @@ import type { AuthDeps } from "./handler/auth";
 import { mapError } from "./domainerr";
 import { toEnvelope } from "./httpresp";
 
+/**
+ * The largest JSON body this API will read, in bytes.
+ *
+ * 256 KB is roughly two orders of magnitude more than the biggest form in the
+ * product and small enough that buffering one costs nothing. It is deliberately
+ * not configurable: a body limit somebody can raise in an environment variable
+ * is one that gets raised the first time a request is refused.
+ */
+const MAX_JSON_BODY_BYTES = 256 * 1024;
+
+/** What a multipart envelope costs on top of the file itself — boundaries, part
+ *  headers and the other form fields. Generous; the point is that the SERVICE's
+ *  check on the file's own bytes stays the one that decides. */
+const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
+
+/**
+ * The three routes that carry a file, as patterns over the CONCRETE path.
+ *
+ * Matched here rather than mounted per-path, because `app.use(path, …)`
+ * registers an entry in Hono's route table and `tests/api/auth-coverage.test.ts`
+ * reads that table to prove every route declares who may reach it. A body limit
+ * is not a route and must not look like one.
+ */
+const UPLOAD_PATHS = [
+  /^\/api\/v1\/documents$/,
+  /^\/api\/v1\/documents\/[^/]+\/versions$/,
+  /^\/api\/v1\/portal\/asks\/[^/]+\/documents$/,
+] as const;
+
+function isUploadPath(path: string): boolean {
+  return UPLOAD_PATHS.some((p) => p.test(path));
+}
+
 export interface RouterOptions {
   /** Serve /openapi.json and /docs. Off in production-like environments unless
    *  BIB_DOCS_ENABLED is set — the spec enumerates every endpoint. */
@@ -106,6 +144,19 @@ export interface RouterOptions {
   readonly rateLimit: RateLimitConfig;
   /** Exact browser origins allowed to send credentialed requests. */
   readonly corsOrigins: readonly string[];
+  /**
+   * The largest upload the store accepts, in bytes (BIB_MAX_UPLOAD_BYTES).
+   *
+   * The edge needs it because the SERVICE's check is too late: `parseBody()`
+   * has already pulled the whole multipart body into memory by the time the
+   * use case measures it. Passed in rather than imported so the one number
+   * lives in config and both layers read the same value.
+   */
+  readonly maxUploadBytes: number;
+  /** Whether to send Strict-Transport-Security. On in production-like only —
+   *  the header pins a browser to https for the WHOLE host, which on localhost
+   *  breaks every other service the developer runs. */
+  readonly hstsEnabled: boolean;
 }
 
 /** Per-module dependencies the router mounts. One field per capability. */
@@ -165,6 +216,65 @@ export function buildRouter(
     return c.json(toEnvelope(m), m.status);
   });
 
+  // An unknown path, in the SAME envelope as every other refusal.
+  //
+  // Hono's own 404 is `text/plain` with no CORS headers, so a browser client
+  // could not read it and a typed client could not parse it — the one response
+  // in the product that did not look like the product. Registered here rather
+  // than per-module because nobody owns a path that does not exist.
+  app.notFound((c) =>
+    c.json(
+      toEnvelope({ status: 404, code: "NOT_FOUND", message: "no such endpoint" }),
+      404,
+    ),
+  );
+
+  // SECURITY HEADERS on every response, ops routes included.
+  //
+  // This is a JSON API and never a rendered page, so most of what a browser
+  // could be told is irrelevant — except for two things it genuinely does with
+  // these bytes. `nosniff` matters because document downloads echo an
+  // uploader-supplied media type, and without it a browser may sniff an
+  // uploaded file into script. `frame-ancestors 'none'` and X-Frame-Options
+  // matter because /docs is a real page. The referrer policy keeps a token
+  // that rode in a URL from travelling on in a Referer header.
+  //
+  // HSTS is set only in production-like: a Strict-Transport-Security header on
+  // http://localhost pins the developer's browser to https for the whole host
+  // and breaks every other local service on it.
+  app.use(
+    "*",
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'none'"],
+        frameAncestors: ["'none'"],
+        // Swagger UI, when it is served, loads its bundle and styles from
+        // jsDelivr and runs an inline bootstrap — that is what @hono/swagger-ui
+        // renders, and naming the host it actually uses is the difference
+        // between a policy and a blank page. Everything here is behind
+        // `docsEnabled`, which is off in every production-like environment, so
+        // the policy a public deployment sends is the strict one below.
+        scriptSrc: opts.docsEnabled
+          ? ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"]
+          : ["'none'"],
+        styleSrc: opts.docsEnabled
+          ? ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"]
+          : ["'none'"],
+        imgSrc: opts.docsEnabled ? ["'self'", "data:", "https://cdn.jsdelivr.net"] : ["'none'"],
+        connectSrc: opts.docsEnabled ? ["'self'"] : ["'none'"],
+      },
+      xFrameOptions: "DENY",
+      referrerPolicy: "no-referrer",
+      strictTransportSecurity: opts.hstsEnabled
+        ? "max-age=31536000; includeSubDomains"
+        : false,
+      // The default sends `require-corp`, which would refuse the cross-origin
+      // fetches this whole API exists to answer.
+      crossOriginEmbedderPolicy: false,
+      crossOriginResourcePolicy: "cross-origin",
+    }),
+  );
+
   // Ops — always auth-free. Deliberately mounted BEFORE the guards: a load
   // balancer cannot hold a credential, and neither endpoint reveals anything.
   app.get("/health", (c) => c.json({ status: "ok" }));
@@ -208,6 +318,63 @@ export function buildRouter(
       maxAge: 600,
     }),
   );
+
+  // BODY LIMITS, before anything reads a body.
+  //
+  // Hono has no default: without this every route buffers whatever arrives, and
+  // an unauthenticated caller could hand the login route thirty megabytes and
+  // have the server scrypt-hash all of it. Mounted ahead of the guards for the
+  // same reason the rate limiter is — the cost of a huge body is paid on the
+  // way IN, before anything knows who is calling.
+  //
+  // Two sizes, because the product has two kinds of request. Everything that
+  // carries JSON is a form somebody filled in and fits in a fraction of a
+  // megabyte; the three multipart routes carry a scanned PDF and are the reason
+  // BIB_MAX_UPLOAD_BYTES exists. The upload limit is the CONFIGURED one plus a
+  // small allowance for the multipart envelope, so the edge refuses a file that
+  // is genuinely over budget and never one the service would have accepted.
+  // Typed to THIS app's env. `bodyLimit` is declared over an untyped one, and
+  // handing it a typed context without saying so is an unsafe-argument error.
+  const uploadLimit: MiddlewareHandler<AppEnv> = bodyLimit({
+    maxSize: opts.maxUploadBytes + MULTIPART_OVERHEAD_BYTES,
+    onError: (c) =>
+      c.json(
+        toEnvelope({
+          status: 413,
+          code: "PAYLOAD_TOO_LARGE",
+          message: `the upload is larger than the ${String(opts.maxUploadBytes)} bytes this store accepts`,
+        }),
+        413,
+      ),
+  });
+  const jsonLimit: MiddlewareHandler<AppEnv> = bodyLimit({
+    maxSize: MAX_JSON_BODY_BYTES,
+    onError: (c) =>
+      c.json(
+        toEnvelope({
+          status: 413,
+          code: "PAYLOAD_TOO_LARGE",
+          message: `request body is larger than the ${String(MAX_JSON_BODY_BYTES)} bytes this API accepts`,
+        }),
+        413,
+      ),
+  });
+  // Named and annotated rather than inline: an inline handler is inferred from
+  // `app.use`'s overload with an untyped Input, and handing THAT context to
+  // another middleware is an unsafe argument. One annotation settles both.
+  const limitBody: MiddlewareHandler<AppEnv> = async (c, next) =>
+    isUploadPath(c.req.path) ? uploadLimit(c, next) : jsonLimit(c, next);
+  app.use("*", limitBody);
+
+  // And a ceiling on any ONE string inside a body that is itself within the
+  // limit. See bounds.ts: the body limit stops a caller sending a megabyte, this
+  // stops them spending the whole allowance on a single stored field.
+  app.use("*", boundedStrings());
+
+  // CSRF, the half that does not depend on the cookie's SameSite. See origin.ts.
+  // Only on the product surface: /internal is service-to-service and no browser
+  // reaches it, so it has no origin to check.
+  app.use("/api/v1/*", originGuard(opts.corsOrigins));
 
   // RATE LIMITING, before anything else that costs something. It runs ahead of
   // the guards so an unauthenticated flood is refused at the cheapest possible

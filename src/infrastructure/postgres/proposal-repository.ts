@@ -10,6 +10,7 @@
 // selects the figures and turns them into strings; it never adds two of them
 // together.
 import type { Db } from "../../db/pool";
+import { VIEW_DEDUPE_MINUTES } from "../../domain/proposal/model";
 import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
@@ -46,6 +47,7 @@ interface ProposalRow {
   discount_approved_by: string | null;
   discount_approved_at: Date | null;
   first_viewed_at: Date | null;
+  last_viewed_at: Date | null;
   view_count: number;
   declined_reason: string | null;
 }
@@ -111,6 +113,7 @@ function toProposal(r: ProposalRow): Proposal {
     discountApprovedBy: r.discount_approved_by,
     discountApprovedAt: r.discount_approved_at?.toISOString() ?? null,
     firstViewedAt: r.first_viewed_at?.toISOString() ?? null,
+    lastViewedAt: r.last_viewed_at?.toISOString() ?? null,
     viewCount: r.view_count,
     declinedReason: r.declined_reason,
   };
@@ -188,7 +191,8 @@ export class PostgresProposalRepository implements ProposalRepository {
            ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil})
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
+                  view_count,
                   declined_reason
       `;
       if (!row) throw new Error("proposal insert returned no row");
@@ -201,7 +205,8 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [row] = await db<ProposalRow[]>`
         SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-               discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+               discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
+                  view_count,
                   declined_reason
         FROM crm.proposal WHERE id = ${proposalId}
       `;
@@ -223,7 +228,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count, p.declined_reason,
+               p.first_viewed_at, p.last_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                approver.display_name AS approver_display_name,
@@ -349,7 +354,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                p.title, p.status, p.currency,
                p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
                p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.view_count, p.declined_reason,
+               p.first_viewed_at, p.last_viewed_at, p.view_count, p.declined_reason,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
@@ -481,7 +486,8 @@ export class PostgresProposalRepository implements ProposalRepository {
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
+                  view_count,
                   declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-transition`);
@@ -622,8 +628,19 @@ export class PostgresProposalRepository implements ProposalRepository {
       // even if two opens land at the same moment.
       const [row] = await db<{ was_first: boolean }[]>`
         UPDATE crm.proposal
-           SET view_count = view_count + 1,
-               first_viewed_at = coalesce(first_viewed_at, ${at}::timestamptz)
+           -- The count advances only when the last open was long enough ago to
+           -- be a separate reading. The link is PUBLIC, so counting requests
+           -- meant counting refreshes, link previews and back buttons — see
+           -- VIEW_DEDUPE_MINUTES. The DATE moves every time, because "they
+           -- opened it again yesterday" is true however briefly.
+           SET view_count = view_count + CASE
+                 WHEN last_viewed_at IS NULL
+                   OR last_viewed_at < ${at}::timestamptz
+                      - make_interval(mins => ${VIEW_DEDUPE_MINUTES})
+                 THEN 1 ELSE 0
+               END,
+               first_viewed_at = coalesce(first_viewed_at, ${at}::timestamptz),
+               last_viewed_at = ${at}::timestamptz
          WHERE id = ${proposalId}
         RETURNING (view_count = 1) AS was_first
       `;
@@ -644,7 +661,8 @@ export class PostgresProposalRepository implements ProposalRepository {
          WHERE id = ${proposalId}
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
                   currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, view_count,
+                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
+                  view_count,
                   declined_reason
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-approval`);

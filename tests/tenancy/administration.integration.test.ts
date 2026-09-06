@@ -39,6 +39,7 @@ import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { withTenant } from "../../src/db/tenant";
 import { LastAdministrator } from "../../src/domain/tenancy/errors";
 import {
   PostgresObligationExceptionRepository,
@@ -131,6 +132,7 @@ const tenancy = new TenancyService({
 const identity = new IdentityService({
   users,
   memberships,
+  tenants: new PostgresTenantRepository(app),
   credentials: new PostgresCredentialRepository(app),
   sessions: new PostgresSessionRepository(app),
   magicLinks: new PostgresMagicLinkRepository(app),
@@ -140,6 +142,7 @@ const identity = new IdentityService({
     sendMagicLink: () => Promise.resolve(),
     sendPortalInvite: () => Promise.resolve(),
     sendStaffWelcome: () => Promise.resolve(),
+    sendPortalWelcome: () => Promise.resolve(),
   },
   ids: systemIds,
   clock: systemClock,
@@ -318,6 +321,47 @@ describe("the firm keeps an administrator, against real rows", () => {
     await expect(
       tenancy.setMemberActive(
         { tenantId, membershipId: adminMembershipId, isActive: false },
+        SYSTEM_ACTOR,
+      ),
+    ).resolves.toBeDefined();
+  });
+
+  it("the DATABASE refuses it too, with the service guard bypassed entirely", async () => {
+    // The service's guard is a check-then-act: it reads the roster, decides,
+    // and writes in a second statement. Two administrators deactivating each
+    // other at the same instant both read a roster with two in it, both decide
+    // one would survive, and both writes land — leaving a firm nobody can
+    // administer, which is unrecoverable from inside the product because
+    // configuration writes need the permission that just disappeared.
+    //
+    // Migration 0078 puts the same rule inside the transaction that writes.
+    // This proves it by going round the service altogether — an UPDATE straight
+    // at the row, which is what a concurrent writer effectively is once the
+    // guard's read is stale.
+    //
+    // The last remaining administrator here is the colleague, who holds
+    // `office-admin` after the test above.
+    const err = await withTenant(app, tenantId, (db) =>
+      db`UPDATE tenancy.membership SET is_active = false WHERE id = ${colleagueMembershipId}`,
+    ).catch((e: unknown) => e);
+    expect((err as { code?: string }).code).toBe("23514");
+
+    // And the row is untouched, because the refusal happened BEFORE the write.
+    const [row] = await withTenant(app, tenantId, (db) =>
+      db<{ is_active: boolean }[]>`
+        SELECT is_active FROM tenancy.membership WHERE id = ${colleagueMembershipId}
+      `,
+    );
+    expect(row?.is_active).toBe(true);
+  });
+
+  it("lets through a change that takes nothing away", async () => {
+    // The trigger fires only when a row STOPS being an active staff
+    // administrator. Everything else has to pass untouched, or every ordinary
+    // membership write would pay for a lock and a count it does not need.
+    await expect(
+      tenancy.changeMemberRole(
+        { tenantId, membershipId: colleagueMembershipId, role: "partner" },
         SYSTEM_ACTOR,
       ),
     ).resolves.toBeDefined();

@@ -12,7 +12,7 @@
 //      isUsableSession(), so revoking a row ends access on the next request —
 //      the behaviour a firm expects the afternoon it dismisses someone.
 import type { IdGen } from "../../platform/ids";
-import type { Clock } from "../../platform/clock";
+import type { Clock, Sleeper } from "../../platform/clock";
 import type { RateLimiter } from "../../platform/ratelimit";
 import type { Principal } from "../../platform/callctx";
 import type { Membership, UserAccount } from "../../domain/tenancy/model";
@@ -26,6 +26,7 @@ import {
   isUsableForSession,
   isUsableMagicLink,
   isUsableSession,
+  shouldTouch,
   magicLinkExpiryFrom,
   portalInviteExpiryFrom,
   sessionExpiryFrom,
@@ -40,6 +41,7 @@ import {
   NoActiveMembership,
   NotAMember,
   UserDisabled,
+  UserNotFound,
   WeakPassword,
 } from "../../domain/identity/errors";
 import type {
@@ -49,6 +51,7 @@ import type {
   MembershipDirectory,
   PasswordHasher,
   SessionRepository,
+  TenantStanding,
   TokenFactory,
   UserDirectory,
 } from "./ports";
@@ -58,9 +61,68 @@ import type {
  * who has forgotten which passphrase they used and hopeless for a machine
  * working through a list. Three sign-in emails an hour is more than anyone
  * needs and stops the endpoint being used to flood an inbox.
+ *
+ * -- AND WHY THERE ARE NOW TWO LOGIN BUDGETS --------------------------------
+ *
+ * There was one, keyed on the account and spent before the password was
+ * checked. It did stop a botnet grinding one person's password -- and it also
+ * meant anyone who knew an email address could lock its owner out for an hour
+ * with ten deliberately wrong guesses, with no CAPTCHA, no back-off and no way
+ * to end it but waiting. A control a stranger can aim at a named person is a
+ * denial of service wearing a security control's clothes.
+ *
+ * The fix is to spend the tight budget PER CALLER. A guesser gets ten tries an
+ * hour at an account and then their own address is refused; the account's owner
+ * is untouched, because their address has its own ten. Everything the old
+ * budget defended is still defended, and the weapon points back at the person
+ * holding it.
+ *
+ * That leaves the distributed case -- a thousand addresses, ten guesses each --
+ * which is what the second budget below is for.
  */
 export const LOGIN_ATTEMPTS_PER_WINDOW = 10;
 export const LOGIN_WINDOW_SECONDS = 3600;
+
+/**
+ * The whole-account budget, across every caller.
+ *
+ * Fifty an hour is far past anything a person does and far under what a botnet
+ * needs. It exists because the per-caller budget above is, by construction, per
+ * caller: a thousand hosts each spending ten would otherwise be a thousand
+ * times the intended rate against one account.
+ *
+ * Crucially it decides only what a WRONG password costs. It is read after the
+ * verification, never before, so it cannot refuse somebody who typed the right
+ * thing -- which is what stops it becoming the lockout weapon the tight budget
+ * used to be.
+ */
+export const LOGIN_ACCOUNT_ATTEMPTS_PER_WINDOW = 50;
+
+
+/**
+ * How long `POST /auth/magic-link` takes, whoever asked and whether or not the
+ * address has an account.
+ *
+ * -- THE ORACLE THIS CLOSES --------------------------------------------------
+ *
+ * Everything in `requestMagicLink` is careful to say nothing: unknown address,
+ * inactive account and rate-limited caller all return quietly and the route
+ * answers 202 to all of them. The one thing it could not hide was how long it
+ * took. A known address generates a token, hashes it, INSERTs a row and hands a
+ * letter to the mailer; an unknown one returns after a single SELECT. Measured
+ * against the logging mailer that was 7-8 ms versus 14-22 ms — enough to
+ * enumerate a firm's client list with a stopwatch, and a real SMTP relay widens
+ * the gap to hundreds of milliseconds.
+ *
+ * The login route already pays a dummy hash for exactly this reason. This is
+ * the same idea, expressed as a floor rather than as fake work, because the
+ * work here is a network send and there is no cheap imitation of one.
+ *
+ * 400 ms is comfortably above the slow path's own cost, so the padding is what
+ * dominates and the remaining variance is noise. It is a cost paid only by this
+ * one route, which nobody calls in a loop.
+ */
+export const MAGIC_LINK_FLOOR_MS = 400;
 export const MAGIC_LINKS_PER_WINDOW = 3;
 export const MAGIC_LINK_WINDOW_SECONDS = 3600;
 
@@ -85,6 +147,9 @@ export const PORTAL_INVITE_RESEND_WINDOW_SECONDS = 3600;
 export interface Deps {
   readonly users: UserDirectory;
   readonly memberships: MembershipDirectory;
+  /** Whether the firm a session points at is still open. See `TenantStanding`:
+   *  the column had no reader, so suspending a firm did nothing at all. */
+  readonly tenants: TenantStanding;
   readonly credentials: CredentialRepository;
   readonly sessions: SessionRepository;
   readonly magicLinks: MagicLinkRepository;
@@ -93,6 +158,15 @@ export interface Deps {
   readonly mailer: Mailer;
   readonly ids: IdGen;
   readonly clock: Clock;
+  /**
+   * How this service waits. Only `requestMagicLink` uses it, to hold its
+   * answer for a constant time — see `MAGIC_LINK_FLOOR_MS`.
+   *
+   * Optional so that every existing harness keeps working; absent means no
+   * floor, which is right for a unit test and wrong for a server, and the
+   * composition root supplies the real one.
+   */
+  readonly sleeper?: Sleeper;
   readonly events: EventSink;
   /** Keyed on the ACCOUNT, not the caller — see the note on login(). */
   readonly attempts: RateLimiter;
@@ -156,6 +230,15 @@ export class IdentityService {
     if (!isAcceptablePassword(password)) {
       throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);
     }
+    // Asked BEFORE the hash, not because of the cost but because of the answer.
+    // Without it the credential insert's foreign key failed, nothing mapped
+    // that, and a provisioning caller who mistyped a uuid was told "internal
+    // error" — sending them to look for a fault in this service instead of at
+    // the id they sent. The only caller that reaches this with an unknown id
+    // holds `identity.grant`, so naming the miss tells them nothing they could
+    // not already find out.
+    const user = await this.deps.users.findById(userId);
+    if (!user) throw new UserNotFound(userId);
     const hash = await this.deps.passwords.hash(password);
     await this.deps.credentials.upsert(userId, hash);
     await this.deps.sessions.revokeAllForUser(userId, this.deps.clock.now().toISOString());
@@ -164,21 +247,35 @@ export class IdentityService {
   /**
    * Sign in with email + password.
    *
-   * Throttled PER ACCOUNT, which is a different defence from the edge's
-   * per-address limit and does not replace it. A botnet spreads its guesses
-   * across a thousand addresses and sails past any per-IP rule; what it cannot
-   * spread is the account it is trying to break into.
+   * Throttled PER ACCOUNT AND PER CALLER, which is a different defence from the
+   * edge's per-address limit and does not replace it. The edge asks "is this
+   * address making too many requests"; this asks "is this address making too
+   * many attempts at THIS account", which is the question a credential-stuffing
+   * run answers wrongly while staying under every per-address limit.
    *
-   * The attempt is counted before the password is checked, not after a failure.
-   * Counting only failures would tell an attacker which guesses were right by
-   * whether the counter moved, and would let a correct guess reset the budget
-   * they are burning.
+   * See the budgets above for why there are two and why neither can be aimed at
+   * a person by a stranger. In short:
+   *
+   *   the TIGHT budget is per (account, caller) and is spent BEFORE the password
+   *   is checked, so a guesser pays for their guesses whether or not they are
+   *   right -- and pays out of their own bucket, never the owner's;
+   *
+   *   the WIDE budget is per account across every caller and is consulted only
+   *   AFTER a wrong password, so it closes the door on a distributed grind and
+   *   can never refuse somebody who typed the right thing.
+   *
+   * `caller` is the rate limiter's key for where the request came from, handed
+   * down from the edge because that is the only layer that knows whether a
+   * forwarded header may be believed. An absent caller collapses to one shared
+   * bucket, which fails closed.
    */
-  async login(email: string, password: string): Promise<SignInResult> {
+  async login(email: string, password: string, caller?: string | null): Promise<SignInResult> {
     const normalized = normalizeEmail(email);
+    const perCaller = `login:${normalized}:${caller ?? "unknown-client"}`;
+    const perAccount = `login:${normalized}`;
 
     const budget = await this.deps.attempts.check(
-      `login:${normalized}`,
+      perCaller,
       LOGIN_ATTEMPTS_PER_WINDOW,
       LOGIN_WINDOW_SECONDS,
     );
@@ -191,15 +288,31 @@ export class IdentityService {
     const stored = user ? await this.deps.credentials.findByUserId(user.id) : null;
     const encoded = stored?.passwordHash ?? this.deps.passwords.dummyHash();
     const ok = await this.deps.passwords.verify(password, encoded);
-    if (!user || !stored || !ok) throw new InvalidCredentials();
+    if (!user || !stored || !ok) {
+      // The wide budget is spent HERE, on the failure, and read in the same
+      // breath. Spending it on every attempt would make it the lockout weapon
+      // the tight one used to be; spending it only on failures means the worst
+      // an attacker achieves is to make their own wrong guesses answer 429
+      // rather than 401.
+      const account = await this.deps.attempts.check(
+        perAccount,
+        LOGIN_ACCOUNT_ATTEMPTS_PER_WINDOW,
+        LOGIN_WINDOW_SECONDS,
+      );
+      if (!account.allowed) throw new TooManyAttempts(account.retryAfterSeconds);
+      throw new InvalidCredentials();
+    }
 
     // Only past a correct password do we say anything more specific. These two
     // are worth naming — a disabled user or one with no membership needs to
     // know why, and by this point the caller has already proved who they are.
     if (user.status !== "active") throw new UserDisabled(normalized);
     // Cleared on success, so one person mistyping their password three times is
-    // not then locked out by finally getting it right.
-    await this.deps.attempts.reset(`login:${normalized}`);
+    // not then locked out by finally getting it right. BOTH buckets: somebody
+    // who has just proved they own the account is the best evidence there is
+    // that the failures before it were theirs.
+    await this.deps.attempts.reset(perCaller);
+    await this.deps.attempts.reset(perAccount);
     return this.openSession(user);
   }
 
@@ -210,6 +323,22 @@ export class IdentityService {
    * learns nothing; the person who owns the inbox learns everything.
    */
   async requestMagicLink(email: string): Promise<void> {
+    // Every `return` below is an early one that says nothing — and used to say
+    // it FASTER than the path that does the work, which is an enumeration
+    // oracle built out of a stopwatch. The whole body is wrapped so that every
+    // exit, including a thrown one, is held to the same floor.
+    const startedAt = this.deps.clock.now().getTime();
+    try {
+      await this.issueMagicLink(email);
+    } finally {
+      const spent = this.deps.clock.now().getTime() - startedAt;
+      if (spent < MAGIC_LINK_FLOOR_MS) {
+        await this.deps.sleeper?.sleep(MAGIC_LINK_FLOOR_MS - spent);
+      }
+    }
+  }
+
+  private async issueMagicLink(email: string): Promise<void> {
     const normalized = normalizeEmail(email);
 
     // Throttled per address, because the cost here lands on someone who did not
@@ -291,15 +420,52 @@ export class IdentityService {
     // would need a case in `domainerr.ts` to avoid answering 500.
     if (!user || user.status !== "active") throw new InvalidMagicLink();
 
+    // ── WHOSE PASSWORD IS THIS, ANYWAY ───────────────────────────────────────
+    //
+    // Identity is ABOVE tenant (ADR-02): one account per person, shared by
+    // every firm they deal with. So the address a partner types into "invite
+    // this client's CFO" may already belong to somebody — a colleague at
+    // another firm on this product, or a contact another firm invited last
+    // year. The ordinary invitation is a link on which a password is CHOSEN,
+    // and `acceptPortalInvite` sets it through `setPassword`, which upserts the
+    // one credential row and revokes every session that account holds.
+    //
+    // Which means, before this branch: any firm could send an invitation to any
+    // address, and the moment the recipient opened it — a perfectly ordinary
+    // thing to do with a letter that names a firm you actually work with —
+    // their password everywhere was replaced and every session they held died.
+    // No confirmation, no notice, no trace outside this firm's ledger.
+    //
+    // The resend path already refused this case (`InvitationAlreadyAccepted`);
+    // the first-invite path never looked. It looks now, and it DOWNGRADES
+    // rather than refusing: refusing would mean a firm simply cannot give
+    // portal access to somebody who has an account, which is a real client
+    // whose CFO happens to work with two firms. A single-use sign-in link gets
+    // them in and leaves their credential alone.
+    const existing = await this.deps.credentials.findByUserId(user.id);
+
     const token = this.deps.tokens.newToken();
     const expiresAt = portalInviteExpiryFrom(this.deps.clock.now());
     await this.deps.magicLinks.create({
       id: this.deps.ids.newId(),
       userId: user.id,
+      // `welcome`, not `invite`: this one opens a SESSION and must never be
+      // redeemable at the password-setting page. The purpose is what
+      // `redeemMagicLink` and `acceptPortalInvite` each check, so the two
+      // letters cannot be interchanged by anyone holding either link.
+      purpose: existing ? "welcome" : "invite",
       tokenHash: this.deps.tokens.hash(token),
-      purpose: "invite",
       expiresAt,
     });
+    if (existing) {
+      await this.deps.mailer.sendPortalWelcome(
+        user.email,
+        `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
+        expiresAt,
+        firmName,
+      );
+      return expiresAt;
+    }
     await this.deps.mailer.sendPortalInvite(
       user.email,
       `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
@@ -545,9 +711,56 @@ export class IdentityService {
    * next request instead of at expiry, and it is worth paying.
    */
   async resolveSession(token: string): Promise<Principal | null> {
+    const now = this.deps.clock.now();
     const session = await this.deps.sessions.findByTokenHash(this.deps.tokens.hash(token));
-    if (!session || !isUsableSession(session, this.deps.clock.now())) return null;
+    if (!session || !isUsableSession(session, now)) return null;
+
+    // ── THE IDLE CLOCK'S ONE WRITE ────────────────────────────────────────
+    //
+    // `isUsableSession` has just READ `lastSeenAt`; this is what keeps it
+    // meaning something. Not on every request — see `SESSION_TOUCH_MINUTES`:
+    // that would make every authenticated read a write on the hottest row in
+    // the system to buy accuracy nobody needs against a seven-day timeout.
+    //
+    // Not awaited on the critical path's behalf either: a touch that fails
+    // costs this session a few minutes of its idle budget, and failing the
+    // REQUEST over a bookkeeping write would turn a slow disk into an outage.
+    if (shouldTouch(session, now)) {
+      await this.deps.sessions.touch(session.id, now.toISOString()).catch(() => undefined);
+    }
+
+    // ── THE ACCOUNT, re-checked on every request ──────────────────────────
+    //
+    // `user_account.status` was read at login and at magic-link redemption and
+    // NOWHERE ELSE, so disabling an account left every session it already held
+    // working for up to a fortnight. That is the same hole the membership
+    // re-check below was written to close, one level up: a control that only
+    // acts on the paths which OPEN a session misses the one every request
+    // takes. Disabling an account is what somebody reaches for when a laptop is
+    // stolen, and "it takes effect next time they sign in" is the wrong answer
+    // to that.
+    const user = await this.deps.users.findById(session.userId);
+    if (!user || user.status !== "active") return null;
+
     if (session.activeTenantId === null) return toPrincipal(session, undefined);
+
+    // ── AND THE FIRM ──────────────────────────────────────────────────────
+    //
+    // Same argument, for `tenancy.tenant.status`. A suspended firm keeps its
+    // session alive but loses its tenant context, which lands the person on the
+    // org switcher rather than a login screen — the same treatment a revoked
+    // membership gets below, and for the same reason: somebody who works at two
+    // firms should still reach the other one.
+    if (!(await this.deps.tenants.isOpen(session.activeTenantId))) {
+      return {
+        userId: session.userId,
+        sessionId: session.id,
+        tenantId: null,
+        audience: null,
+        role: null,
+        commercialVisibility: null,
+      };
+    }
 
     // The membership is read for the revocation check above; the role and fee
     // flag ride out of that same read, so gate 3 costs nothing extra.
@@ -573,6 +786,11 @@ export class IdentityService {
       (m) => m.isActive && m.tenantId === tenantId,
     );
     if (!membership) throw new NotAMember(tenantId);
+    // A suspended firm answers the same way as one you do not belong to. The
+    // alternative — a distinct refusal — would tell every member of every firm
+    // on the platform when one of them is suspended, which is the firm's
+    // business and not the switcher's.
+    if (!(await this.deps.tenants.isOpen(tenantId))) throw new NotAMember(tenantId);
     const session = await this.deps.sessions.setActiveContext(
       sessionId,
       tenantId,

@@ -34,6 +34,15 @@ export interface TenantRepository {
    * already sent carries the signature block it went out with.
    */
   setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant>;
+  /**
+   * Suspend a firm, or let it back in. Null when there is no such firm.
+   *
+   * The writer `status` did not have. The column shipped in 0001 and nothing
+   * ever set it, so an operator could believe a firm was suspended while every
+   * one of its sessions kept working. `IdentityService` is the reader — see
+   * `TenantStanding`.
+   */
+  setStatus(tenantId: string, status: "active" | "suspended"): Promise<Tenant | null>;
 }
 
 export interface NewUser {
@@ -48,6 +57,16 @@ export interface UserRepository {
   create(u: NewUser): Promise<UserAccount>;
   findByEmail(email: string): Promise<UserAccount | null>;
   findById(id: string): Promise<UserAccount | null>;
+  /**
+   * Disable an account across the platform, or let it back in. Null when there
+   * is no such account.
+   *
+   * NOT `setMemberActive`, which ends access to ONE firm. Identity is above
+   * tenant: this says the person may not sign in anywhere. `status` was checked
+   * at login from the day it existed and had no writer, which made it a comment
+   * rather than a control.
+   */
+  setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null>;
 }
 
 export interface NewMembership {

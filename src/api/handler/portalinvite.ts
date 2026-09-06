@@ -12,7 +12,8 @@ import { z, errorResponse } from "../openapi";
 import type { PortalInviteService } from "../../usecase/portalinvite/service";
 import type { IdentityService, SignInResult } from "../../usecase/identity/service";
 import { scopeOf } from "../scope";
-import { SESSION_TTL_DAYS } from "../../domain/identity/model";
+import { MAX_PASSWORD_LENGTH, SESSION_TTL_DAYS } from "../../domain/identity/model";
+import { MAX_TOKEN_LENGTH } from "../bounds";
 
 export interface PortalInviteDeps {
   readonly service: PortalInviteService;
@@ -64,13 +65,13 @@ const PortalInvitationSchema = z
 
 const AcceptPortalInviteRequest = z
   .object({
-    token: z.string().min(1).openapi({
+    token: z.string().min(1).max(MAX_TOKEN_LENGTH).openapi({
       description:
         "The single-use token from the emailed link, sent in the BODY. Never in the path: a " +
         "path lands in access logs and Referer headers, and this one is a credential until " +
         "it is spent — the same rule the proposal share link follows.",
     }),
-    password: z.string().min(1).openapi({
+    password: z.string().min(1).max(MAX_PASSWORD_LENGTH).openapi({
       description:
         "The password being SET, not one being checked. Refused before the token is spent if " +
         "it is too short, so somebody who typed something weak can try again with the same " +

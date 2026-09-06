@@ -39,6 +39,21 @@ export interface RateLimitConfig {
    * why it is configuration and not a guess.
    */
   readonly trustProxy: boolean;
+  /**
+   * How many proxies stand in front of this process.
+   *
+   * The number that makes `trustProxy` safe. X-Forwarded-For is a list a client
+   * can start and every proxy appends to, so the LEFT of it is attacker-typed
+   * and the RIGHT is what each hop actually saw. Counting in from the right by
+   * the number of hops you actually run lands on the address the outermost
+   * trusted proxy observed — the real client — and no value the client wrote
+   * can move it.
+   *
+   * One is the ordinary answer: one load balancer. Two is a CDN in front of a
+   * load balancer. Setting it higher than the truth hands the key back to the
+   * caller, which is the bug this replaces.
+   */
+  readonly trustedProxyHops: number;
 }
 
 /**
@@ -56,7 +71,12 @@ export function rateLimit(
   return async (c, next) => {
     const isAuth = authPaths.has(c.req.path);
     const rule = isAuth ? cfg.auth : cfg.general;
-    const client = clientKey(c.req.raw, () => remoteAddressOf(c), cfg.trustProxy);
+    const client = clientKey(c.req.raw, () => remoteAddressOf(c), cfg);
+    // Published for the login handler: the per-account attempt budget is spent
+    // per caller, so that ten wrong guesses cost the guesser their own budget
+    // rather than locking the account's owner out. This is the only place that
+    // knows how to derive an address it is safe to believe.
+    c.set("clientKey", client);
 
     const decision = await limiter.check(
       `${isAuth ? "auth" : "general"}:${client}`,
@@ -100,6 +120,24 @@ function remoteAddressOf(c: { env: unknown }): string | undefined {
 /**
  * The client's address.
  *
+ * ── WHY THE RIGHT-HAND END, NOT THE LEFT ─────────────────────────────────────
+ *
+ * This read the LEFTMOST X-Forwarded-For entry, on the reasoning printed in
+ * every explanation of the header: the left is the originating client. That is
+ * true of a header nobody tampers with, and X-Forwarded-For is not one. A
+ * client writes whatever it likes and each proxy APPENDS the peer it actually
+ * saw, so `X-Forwarded-For: 203.0.113.9` from the caller arrives at this
+ * process as `203.0.113.9, <the caller's real address>`. Reading the left of it
+ * meant every request could carry a fresh invented key — a brand new bucket per
+ * request, and both the auth limit and the general limit switched off, in
+ * exactly the topology `trustProxy` exists to support.
+ *
+ * So it counts in from the RIGHT by the number of hops actually deployed. Entry
+ * `length - hops` is what the outermost trusted proxy observed; everything left
+ * of it is a claim, and the claims are ignored. A caller can lengthen the list
+ * but not shorten it, so padding it only pushes their own address further right
+ * — which the arithmetic follows.
+ *
  * Falls back to a single shared key when the address cannot be determined,
  * which fails CLOSED — everyone shares one bucket and the limit still bites.
  * The alternative, a unique key per unknown client, would make the limiter
@@ -108,13 +146,21 @@ function remoteAddressOf(c: { env: unknown }): string | undefined {
 function clientKey(
   req: Request,
   remoteAddress: () => string | undefined,
-  trustProxy: boolean,
+  cfg: Pick<RateLimitConfig, "trustProxy" | "trustedProxyHops">,
 ): string {
-  if (trustProxy) {
-    const forwarded = req.headers.get("x-forwarded-for");
-    // The left-most entry is the originating client; the rest are proxies.
-    const first = forwarded?.split(",")[0]?.trim();
-    if (first !== undefined && first !== "") return first;
+  if (cfg.trustProxy) {
+    const entries = (req.headers.get("x-forwarded-for") ?? "")
+      .split(",")
+      .map((e) => e.trim())
+      .filter((e) => e !== "");
+    // At least one, so a misconfigured zero cannot read past the end of the
+    // list and land back on the attacker-controlled left.
+    const hops = Math.max(1, cfg.trustedProxyHops);
+    const observed = entries[entries.length - hops];
+    if (observed !== undefined) return observed;
+    // Fewer entries than hops: the request did not come through the proxies
+    // this deployment claims. Fall through to the socket address rather than
+    // believing the shortest list on offer.
   }
   return remoteAddress() ?? "unknown-client";
 }

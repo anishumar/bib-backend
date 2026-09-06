@@ -67,6 +67,22 @@ export class FakeTenantRepo implements TenantRepository {
   findById(id: string): Promise<Tenant | null> {
     return Promise.resolve(this.rows.find((r) => r.id === id) ?? null);
   }
+  /** `TenantStanding`. A firm nobody seeded answers TRUE here, deliberately:
+   *  most tests never create a tenant row and every one of them would otherwise
+   *  start failing on a check that is not what they are about. A test that
+   *  cares about suspension seeds the row and sets the status. */
+  isOpen(tenantId: string): Promise<boolean> {
+    const row = this.rows.find((r) => r.id === tenantId);
+    return Promise.resolve(row === undefined ? true : row.status === "active");
+  }
+  setStatus(tenantId: string, status: "active" | "suspended"): Promise<Tenant | null> {
+    const index = this.rows.findIndex((r) => r.id === tenantId);
+    const current = this.rows[index];
+    if (current === undefined) return Promise.resolve(null);
+    const updated: Tenant = { ...current, status };
+    this.rows[index] = updated;
+    return Promise.resolve(updated);
+  }
   setFirmSignatory(tenantId: string, userId: string, title: string): Promise<Tenant> {
     const index = this.rows.findIndex((r) => r.id === tenantId);
     const current = this.rows[index];
@@ -98,6 +114,14 @@ export class FakeUserRepo implements UserRepository {
   }
   findById(id: string): Promise<UserAccount | null> {
     return Promise.resolve(this.rows.find((r) => r.id === id) ?? null);
+  }
+  setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null> {
+    const index = this.rows.findIndex((r) => r.id === id);
+    const current = this.rows[index];
+    if (current === undefined) return Promise.resolve(null);
+    const updated: UserAccount = { ...current, status };
+    this.rows[index] = updated;
+    return Promise.resolve(updated);
   }
 }
 

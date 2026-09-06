@@ -7,6 +7,7 @@ import {
   DOCUMENT_KINDS,
   DOCUMENT_ORIGINS,
   SUBJECT_KINDS,
+  contentDispositionFor,
   isContentHash,
   normaliseMediaType,
   safeFilename,
@@ -144,5 +145,55 @@ describe("content hashes", () => {
     expect(isContentHash("A".repeat(64))).toBe(false);
     expect(isContentHash("a".repeat(63))).toBe(false);
     expect(isContentHash("")).toBe(false);
+  });
+});
+
+describe("contentDispositionFor", () => {
+  // The header that answered 500. Both byte routes spliced the filename into
+  // `attachment; filename="…"` with only the quote stripped — and an HTTP
+  // header value is a ByteString, so the first file named in an Indian
+  // language could be uploaded, was stored correctly, and could not be
+  // fetched. `जीएसटी चालान.txt` is not an edge case at a firm in this market.
+  it("survives a name the old header could not hold at all", () => {
+    const header = contentDispositionFor("जीएसटी चालान.txt");
+    // Every byte under 256, which is the property that was violated.
+    expect([...header].every((ch) => ch.charCodeAt(0) < 256)).toBe(true);
+    expect(header).toContain("filename*=UTF-8''");
+    // And the real name is recoverable from it.
+    expect(decodeURIComponent(header.split("filename*=UTF-8''")[1] ?? "")).toBe(
+      "जीएसटी चालान.txt",
+    );
+  });
+
+  it("leaves an ASCII name exactly as it was", () => {
+    // No behaviour change for the files that already worked.
+    expect(contentDispositionFor("invoice-2026.pdf")).toContain('filename="invoice-2026.pdf"');
+  });
+
+  it("keeps an extension in the ASCII fallback", () => {
+    // `_` rather than dropping the character, so a reader whose client ignores
+    // filename* still gets something with a .txt on the end rather than ".txt".
+    const header = contentDispositionFor("चालान.txt");
+    expect(header).toContain('filename="_____.txt"');
+  });
+
+  it("refuses to let a name escape the quoted string", () => {
+    // A quote would end the quoted string; a backslash would escape whatever
+    // came next. Both are removed rather than encoded, because neither belongs
+    // in a filename anybody meant to give a file.
+    const header = contentDispositionFor('a"b\\c.txt');
+    expect(header).toContain('filename="abc.txt"');
+  });
+
+  it("survives the separator characters that break a header value", () => {
+    // U+2028 is the one the audit found: it is not a control character, so
+    // `safeFilename` keeps it, and it is above 255, so the header could not be
+    // built.
+    const header = contentDispositionFor("in\u2028voice.txt");
+    expect([...header].every((ch) => ch.charCodeAt(0) < 256)).toBe(true);
+  });
+
+  it("still names something when the whole name is non-ASCII", () => {
+    expect(contentDispositionFor("चालान")).toContain('filename="');
   });
 });

@@ -22,7 +22,7 @@ import type {
   NewDocumentLink,
   NewDocumentVersion,
 } from "../usecase/filestore/ports";
-import type { DocumentRenderer, RenderSource } from "../usecase/render/ports";
+import type { DescribedDocument, DocumentRenderer, RenderSource } from "../usecase/render/ports";
 import type { RenderableDocument } from "../domain/render/model";
 
 export class FakeDocumentStoreRepo implements DocumentStoreRepository {
@@ -303,14 +303,20 @@ export class FakeRenderer implements DocumentRenderer {
  *  record" path the service turns into a refusal. */
 export class FakeRenderSource implements RenderSource {
   readonly documents = new Map<string, RenderableDocument>();
+  /** Whose each record is. Absent means the source has no party for it, which
+   *  is the null branch — and NOT the same thing as the caller not saying,
+   *  because the caller no longer gets to say. */
+  readonly parties = new Map<string, string>();
   renderable: string[] = ["engagement_letter", "invoice"];
 
   supports(kind: string): boolean {
     return this.renderable.includes(kind);
   }
 
-  describe(input: { subjectRef: string }): Promise<RenderableDocument | null> {
-    return Promise.resolve(this.documents.get(input.subjectRef) ?? null);
+  describe(input: { subjectRef: string }): Promise<DescribedDocument | null> {
+    const document = this.documents.get(input.subjectRef);
+    if (document === undefined) return Promise.resolve(null);
+    return Promise.resolve({ document, partyId: this.parties.get(input.subjectRef) ?? null });
   }
 }
 

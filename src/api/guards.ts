@@ -43,6 +43,20 @@ export interface AppEnv {
     /** Which provisioning caller made this request, on /internal only. Named in
      *  the audit trail so "system did it" can be traced to a system. */
     internalClient: InternalClient | null;
+    /**
+     * WHERE this request came from, as the rate limiter's own key for it.
+     *
+     * Set by `rateLimit()` — the one place that knows whether a forwarded
+     * header may be believed and how far in from the right the real address
+     * sits, and therefore the only place that should be answering this. It
+     * carries to the login handler so a per-account budget can be spent per
+     * CALLER: ten wrong guesses locked the account itself, which meant anyone
+     * who knew an email could lock its owner out for an hour.
+     *
+     * Never a stable identifier for a person and never in the ledger — it is a
+     * network address, it moves, and it is shared behind carrier NAT.
+     */
+    clientKey: string | null;
   };
 }
 

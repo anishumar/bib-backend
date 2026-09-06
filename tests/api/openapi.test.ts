@@ -211,6 +211,7 @@ function identityService(): IdentityService {
   return new IdentityService({
     users: fakes.users,
     memberships: fakes.memberships,
+    tenants: fakes.tenants,
     credentials: new FakeCredentialRepo(),
     sessions: new FakeSessionRepo(),
     magicLinks: new FakeMagicLinkRepo(),
@@ -562,7 +563,9 @@ function app() {
     authz: new AuthzService({ permissions }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
-    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: devPrincipal,
   });
 }
@@ -589,7 +592,9 @@ describe("OpenAPI spec", () => {
     authz: new AuthzService({ permissions }),
     rateLimiter: new InMemoryRateLimiter(systemClock),
     corsOrigins: ["http://localhost:3000"],
-    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false },
+    maxUploadBytes: 25 * 1024 * 1024,
+    hstsEnabled: false,
+    rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
       principalOf: devPrincipal,
     }).request("/openapi.json");
     expect(res.status).toBe(404);

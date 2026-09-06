@@ -390,9 +390,14 @@ export interface ProposalRepository {
   findShared(tenantId: string, digest: string): Promise<SharedProposal | null>;
 
   /**
-   * Count an open. Returns true when it was the FIRST — the caller records
+   * Record an open. Returns true when it was the FIRST — the caller records
    * `proposal.viewed` only then, because the ledger holds state transitions and
    * a client refreshing a page is not fifty facts about the business.
+   *
+   * `last_viewed_at` moves every time; `view_count` advances only when the
+   * previous open was more than `VIEW_DEDUPE_MINUTES` ago. The link is public,
+   * so without that the count is a number anybody holding it can turn — see the
+   * constant.
    */
   recordView(tenantId: string, proposalId: string, at: string): Promise<boolean>;
 

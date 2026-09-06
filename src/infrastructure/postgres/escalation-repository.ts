@@ -38,6 +38,7 @@ import type {
   EscalationViewer,
   NewEscalationNotice,
 } from "../../usecase/escalation/ports";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 /**
  * The firm's published ladder.
@@ -303,6 +304,10 @@ export class PostgresEscalationNoticeRepository implements EscalationNoticeRepos
             AND oi.resolved_at IS NULL
             AND os.is_terminal = false
           )
+        -- A CEILING, not pagination — see MAX_LIST_ROWS. Notices accumulate for
+        -- as long as the ladder keeps firing, and this list is filtered and
+        -- ordered in TypeScript, so the cap has to be on what SQL hands over.
+        LIMIT ${MAX_LIST_ROWS}
       `;
 
       const mine = (r: RecordRow): boolean => {

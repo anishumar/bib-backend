@@ -30,6 +30,7 @@ import {
   BRAND_ASSET_KINDS,
   DOCUMENT_KINDS,
   SUBJECT_KINDS,
+  contentDispositionFor,
   isBrandAssetKind,
   isDocumentKind,
 } from "../../domain/filestore/model";
@@ -245,7 +246,12 @@ const RenderRequest = z
       description: "What to render. Deliberately narrow — the API says what it can do.",
     }),
     subjectRef: z.string().uuid(),
-    partyId: z.string().uuid().nullable().optional(),
+    // NO `partyId`. It was here, and it decided which client's portal library
+    // the rendered PDF lands in — so a stale or invented id filed one client's
+    // invoice under another, where `clientVisibleByDefault("invoice")` shows it
+    // to them. The record already knows whose it is and the service reads it
+    // there. Left OUT of the schema rather than accepted-and-ignored so the
+    // generated client stops sending it.
   })
   .openapi("RenderDocumentRequest");
 
@@ -592,11 +598,25 @@ function bytesResponse(bytes: Uint8Array, version: DocumentVersion): Response {
     headers: {
       "content-type": version.mediaType,
       "content-length": String(bytes.byteLength),
-      "content-disposition": `attachment; filename="${version.filename.replace(/"/g, "")}"`,
-      // The bytes are immutable — a version never changes — so this is safe to
-      // cache hard, and the hash is a natural strong validator.
+      // RFC 6266, both forms. A filename in Devanagari used to make this header
+      // unbuildable and the route answered 500 — see contentDispositionFor.
+      "content-disposition": contentDispositionFor(version.filename),
+      // The media type here was supplied by whoever uploaded the file, so the
+      // browser must be told not to look past it. Without this an uploaded HTML
+      // or SVG file can be sniffed into something the browser executes —
+      // `attachment` already makes that hard, and this closes it.
+      "x-content-type-options": "nosniff",
       etag: `"${version.contentHash}"`,
-      "cache-control": "private, max-age=31536000, immutable",
+      // NOT `max-age=31536000, immutable`, which is what this said.
+      //
+      // The BYTES are immutable, so that was true of the bytes. It was not true
+      // of the permission to read them: a document can be hidden from a client,
+      // a portal grant can be revoked, a person can leave the firm — and a year
+      // in a disk cache means the browser keeps answering from a copy it took
+      // while the answer was still yes. `no-store` is the norm for a file whose
+      // only authorisation is a cookie, and re-fetching a document is cheap
+      // compared with one leaving through a cache after access was withdrawn.
+      "cache-control": "private, no-store",
     },
   });
 }
@@ -726,7 +746,6 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
       // an invoice filed against something else.
       subjectKind: body.kind,
       subjectRef: body.subjectRef,
-      partyId: body.partyId ?? null,
       actor: s.actor,
     });
     return c.json(toWire(record), 201);

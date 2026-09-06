@@ -298,6 +298,53 @@ export class TenancyService {
     return this.deps.users.create({ id: this.deps.ids.newId(), email: normalized, displayName });
   }
 
+  /**
+   * Suspend a firm, or let it back in — the platform's act, not the firm's.
+   *
+   * Setting a firm to `suspended` is the only control that stops a whole tenant
+   * at once, and until it had a reader it stopped nothing. Now
+   * `IdentityService.resolveSession` refuses the tenant context on every
+   * request, so this takes effect on the NEXT request rather than at session
+   * expiry, which is the same promise membership revocation makes.
+   *
+   * Idempotent: setting the status it already has records nothing, because
+   * nothing changed.
+   */
+  async setTenantStatus(
+    tenantId: string,
+    status: "active" | "suspended",
+    actor: Actor = SYSTEM_ACTOR,
+  ): Promise<Tenant> {
+    const current = await this.deps.tenants.findById(tenantId);
+    if (!current) throw new TenantNotFound(tenantId);
+    if (current.status === status) return current;
+    const updated = await this.deps.tenants.setStatus(tenantId, status);
+    if (!updated) throw new TenantNotFound(tenantId);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: status === "suspended" ? "tenant.suspended" : "tenant.reinstated",
+      objectId: tenantId,
+      actor,
+      payload: { from: current.status, to: status },
+    });
+    return updated;
+  }
+
+  /**
+   * Disable a login across the platform, or let it back in.
+   *
+   * The other status with no writer. Deliberately NOT in the ledger: the ledger
+   * is per tenant and an account is global, so there is no one firm this
+   * belongs to — writing it against whichever firm happened to be handy would
+   * put a fact in a book it is not about. The provisioning caller's own log is
+   * the record, and the caller is named in it.
+   */
+  async setUserStatus(userId: string, status: "active" | "disabled"): Promise<UserAccount> {
+    const updated = await this.deps.users.setStatus(userId, status);
+    if (!updated) throw new UserNotFound(userId);
+    return updated;
+  }
+
   /** Register a user, failing loudly if the email is already taken. Use when a
    *  fresh identity is expected; use ensureUser when linking is intended. */
   async registerUser(email: string): Promise<UserAccount> {

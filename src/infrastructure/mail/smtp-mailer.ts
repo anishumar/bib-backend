@@ -220,6 +220,92 @@ export class SmtpMailer implements Mailer {
       ]),
     });
   }
+
+  /**
+   * The letter a client contact gets when the address ALREADY HAS A LOGIN.
+   *
+   * ── WHY THIS IS NOT THE PORTAL INVITE WITH A DIFFERENT BUTTON ────────────
+   *
+   * Because the invite's button says "Choose a password", and this reader has
+   * one. Accounts are global here: the CFO being invited may be staff at
+   * another firm on this same product, or a contact somebody else invited last
+   * year. Sending them the password-setting link would replace the password
+   * they use everywhere and sign them out of everything, on a letter they had
+   * every reason to open. So this one hands over a session instead.
+   *
+   * Everything else it copies from the invitation deliberately: it arrives
+   * unasked from a firm the reader may not expect mail from, so it names that
+   * firm in the subject and the first line, says what the portal is for, and
+   * ends with what to do if it was not expected. The one sentence it adds is
+   * the reassuring half of the difference — nothing about their existing
+   * password has changed, which is the first thing a person wonders when a
+   * second firm emails them about an account they already have.
+   */
+  sendPortalWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    const firm = headerSafe(firmName);
+    const who = firm ?? "The firm you work with";
+    const subject =
+      firm === null
+        ? `You have been given access to a client portal`
+        : `${firm} has given you access to their client portal`;
+    const when = readableInstant(expiresAt);
+
+    const text = [
+      `${who} uses ${PRODUCT} to work with its clients, and has given you access`,
+      `to their client portal.`,
+      ``,
+      `You already have a ${PRODUCT} login with this email address, so there is`,
+      `nothing to set up and your password has not changed. Open this link to`,
+      `sign in:`,
+      url,
+      ``,
+      `Once you are in you can see what they are working on for you, send them`,
+      `documents they have asked for, find things they have filed, and see what`,
+      `you have been invoiced.`,
+      ``,
+      `The link works ONCE and stops working at ${when}. If it has expired by the`,
+      `time you read this, nothing is lost — sign in as you normally do.`,
+      ``,
+      `If you were not expecting this, please check with your contact at`,
+      `${who} before opening it, rather than replying to this message.`,
+    ].join("\n");
+
+    return this.transport.send({
+      to,
+      subject,
+      text,
+      html: page([
+        paragraph(
+          `<strong>${esc(who)}</strong> uses ${esc(PRODUCT)} to work with its clients, and ` +
+            `has given you access to their client portal.`,
+        ),
+        paragraph(
+          `You already have a ${esc(PRODUCT)} login with this email address, so there is ` +
+            `nothing to set up and <strong>your password has not changed</strong>.`,
+        ),
+        button(url, "Sign in"),
+        paragraph(
+          `Once you are in you can see what they are working on for you, send them documents ` +
+            `they have asked for, find things they have filed, and see what you have been ` +
+            `invoiced.`,
+        ),
+        paragraph(
+          `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
+            `expired by the time you read this, nothing is lost — sign in as you normally do.`,
+        ),
+        paragraph(
+          `If you were not expecting this, please check with your contact at ` +
+            `${esc(who)} before opening it, rather than replying to this message.`,
+        ),
+        fallback(url),
+      ]),
+    });
+  }
 }
 
 /**

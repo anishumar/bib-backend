@@ -328,6 +328,72 @@ const registerUserRoute = createRoute({
   },
 });
 
+const setTenantStatusRoute = createRoute({
+  method: "put",
+  path: "/internal/v1/tenants/{tenantId}/status",
+  tags: ["tenancy"],
+  summary: "Suspend a firm, or let it back in",
+  description:
+    "Platform surface, and deliberately not reachable from any session: a firm cannot " +
+    "suspend itself and no firm may suspend another. A suspended firm's sessions lose " +
+    "their tenant context on their NEXT request — `resolveSession` reads this column on " +
+    "every one — so the people signed in land on the org switcher rather than continuing " +
+    "until their cookies expire. Idempotent: setting the status it already has is a 200 " +
+    "and records nothing.",
+  request: {
+    params: z.object({ tenantId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ status: z.enum(["active", "suspended"]) })
+            .openapi("SetTenantStatusRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Status set", content: { "application/json": { schema: TenantSchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("Missing or wrong platform key"),
+    403: errorResponse("That key does not carry tenant.provision"),
+    404: errorResponse("No such tenant"),
+  },
+});
+
+const setUserStatusRoute = createRoute({
+  method: "put",
+  path: "/internal/v1/users/{userId}/status",
+  tags: ["tenancy"],
+  summary: "Disable a login across the platform, or let it back in",
+  description:
+    "NOT the same as deactivating a membership, which ends somebody's access to ONE firm " +
+    "and is the firm's own decision (`PATCH /api/v1/tenancy/members/{membershipId}`). " +
+    "Identity is above tenant, so this says the person may not sign in anywhere — and it " +
+    "takes effect on their next request, not at session expiry.",
+  request: {
+    params: z.object({ userId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ status: z.enum(["active", "disabled"]) })
+            .openapi("SetUserStatusRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Status set", content: { "application/json": { schema: UserAccountSchema } } },
+    400: errorResponse("Request failed validation"),
+    401: errorResponse("Missing or wrong platform key"),
+    403: errorResponse("That key does not carry user.provision"),
+    404: errorResponse("No such user"),
+  },
+});
+
 const addMemberRoute = createRoute({
   method: "post",
   path: "/internal/v1/memberships",
@@ -591,6 +657,38 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     const input = c.req.valid("json");
     const user = await deps.service.ensureUser(input.email, input.displayName);
     return c.json(user, 201);
+  });
+
+  app.openapi(setTenantStatusRoute, async (c) => {
+    const { tenantId } = c.req.valid("param");
+    const { status } = c.req.valid("json");
+    const tenant = await deps.service.setTenantStatus(tenantId, status, {
+      // The provisioning caller, named. A suspension with "system" as its only
+      // actor is a fact nobody can trace back to a decision.
+      type: "system",
+      id: c.get("internalClient")?.name ?? "internal",
+    });
+    // Field by field, like createTenant above and for the same reason.
+    return c.json(
+      {
+        id: tenant.id,
+        slug: tenant.slug,
+        name: tenant.name,
+        status: tenant.status,
+        reportingCurrency: tenant.reportingCurrency,
+      },
+      200,
+    );
+  });
+
+  app.openapi(setUserStatusRoute, async (c) => {
+    const { userId } = c.req.valid("param");
+    const { status } = c.req.valid("json");
+    const user = await deps.service.setUserStatus(userId, status);
+    return c.json(
+      { id: user.id, email: user.email, displayName: user.displayName, status: user.status },
+      200,
+    );
   });
 
   app.openapi(addMemberRoute, async (c) => {

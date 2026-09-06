@@ -18,6 +18,8 @@ import {
   PostgresTenantDirectory,
 } from "../infrastructure/postgres/job-repository";
 import { BossJobQueue } from "../infrastructure/pgboss/boss-queue";
+import { CredentialSweeper } from "../usecase/identity/sweep";
+import { PostgresSessionRepository } from "../infrastructure/postgres/identity-repository";
 import { LedgerService } from "../usecase/ledger/service";
 import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
@@ -118,6 +120,28 @@ export const CHASER_QUEUE = "delivery.chaser";
  *  separately to get one answer — but not the queue, because a poisoned job in
  *  one would stop the others. */
 export const NUDGE_QUEUE = "delivery.nudge";
+
+/**
+ * The credential sweep: dead sessions and spent magic links, deleted.
+ *
+ * ── WHY IT IS HERE AND NOT ANYWHERE ELSE ───────────────────────────────────
+ *
+ * Nothing removed either, ever. `bib_app` held no DELETE grant on the two
+ * tables (migration 0075 grants it, and says why these two are the exception to
+ * this schema's no-deletes rule), so both grew without limit: every expired
+ * session of everybody who has ever signed in, and every spent fifteen-minute
+ * token since the product existed.
+ *
+ * PLATFORM-WIDE and not per firm, which makes it different from every other
+ * sweep on this worker. Sessions and magic links are GLOBAL — identity is above
+ * tenant — so there is no per-firm loop and no one firm's failure to isolate
+ * from another's.
+ *
+ * On the escalation cron because once a day is far more often than a
+ * thirty-day retention window needs, and a knob nobody will ever turn is worse
+ * than a shared one.
+ */
+export const CREDENTIAL_SWEEP_QUEUE = "platform.credential-sweep";
 
 export interface WiredWorker {
   readonly pools: Pools;
@@ -344,6 +368,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // 0067 states both halves: a statutory date is the LAW's and travels whether
   // or not a fee is in dispute, and a freeze is keyed on `client_party_id` while
   // an obligation carries `entity_party_id`.
+  // The credential sweep's one dependency. Deliberately not a whole
+  // IdentityService: that one is wired with a mailer, a hasher and a ledger to
+  // serve requests, and none of it has anything to do with deleting spent keys.
+  const credentialSweeper = new CredentialSweeper({
+    sessions: new PostgresSessionRepository(pools.app),
+    clock: systemClock,
+  });
+
   const nudges = new NudgeService({
     tenants: new PostgresNudgeTenants(pools.app),
     ladders: new PostgresNudgeLadder(pools.app),
@@ -545,6 +577,18 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(NUDGE_QUEUE, cfg.worker.escalationCron);
+
+      // THE CREDENTIAL SWEEP. See CREDENTIAL_SWEEP_QUEUE: platform-wide rather
+      // than per firm, because sessions and magic links are global.
+      await queue.register(CREDENTIAL_SWEEP_QUEUE, async () => {
+        const swept = await credentialSweeper.run();
+        if (swept.sessions === 0 && swept.magicLinks === 0) return;
+        log.info(
+          { sessions: swept.sessions, magicLinks: swept.magicLinks },
+          "swept dead sessions and magic links",
+        );
+      });
+      await queue.schedule(CREDENTIAL_SWEEP_QUEUE, cfg.worker.escalationCron);
     },
   };
 }

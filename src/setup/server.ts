@@ -4,11 +4,12 @@
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../api/guards";
 import type { Config } from "../config/config";
+import { isProductionLike } from "../config/config";
 import { createPools } from "../db/pool";
 import type { Pools } from "../db/pool";
 import { assertLedgerAppendOnly, assertTenantWall } from "../db/boot-check";
 import { systemIds } from "../platform/ids";
-import { systemClock } from "../platform/clock";
+import { systemClock, systemSleeper } from "../platform/clock";
 import { InMemoryRateLimiter } from "../platform/ratelimit";
 import type { Logger } from "../platform/log";
 import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
@@ -508,8 +509,12 @@ export function wire(cfg: Config, log: Logger): Wired {
   // so a tenant without them is a tenant nobody can sign in to. The seam is a
   // port on tenancy (RoleRegistrySeeder) rather than a direct call, so neither
   // use case knows the other exists; this is the one place they meet.
+  // ONE instance, shared by the two services that need it. `IdentityService`
+  // reads `isOpen` on every authenticated request; `TenancyService` owns the
+  // rest of the firm's row.
+  const tenantRepository = new PostgresTenantRepository(pools.app);
   const tenancy = new TenancyService({
-    tenants: new PostgresTenantRepository(pools.app),
+    tenants: tenantRepository,
     users,
     memberships,
     roleSeeder: {
@@ -574,6 +579,10 @@ export function wire(cfg: Config, log: Logger): Wired {
   const identity = new IdentityService({
     users,
     memberships,
+    // Whether the firm a session points at is still open. The column had no
+    // reader at all before this — suspending a firm changed a string and
+    // nothing else.
+    tenants: tenantRepository,
     credentials: new PostgresCredentialRepository(pools.app),
     sessions: new PostgresSessionRepository(pools.app),
     magicLinks: new PostgresMagicLinkRepository(pools.app),
@@ -587,6 +596,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     mailer: mailerFor(cfg, log),
     ids: systemIds,
     clock: systemClock,
+    // The constant-time floor on the sign-in-link route. Injected because a
+    // real setTimeout in a unit test would make the whole suite pay it —
+    // see MAGIC_LINK_FLOOR_MS.
+    sleeper: systemSleeper,
     events: ledger,
     attempts: rateLimiter,
     magicLinkBaseUrl: cfg.auth.appBaseUrl,
@@ -1011,10 +1024,17 @@ export function wire(cfg: Config, log: Logger): Wired {
         authz,
         rateLimiter,
         corsOrigins: cfg.cors.origins,
+        // The edge's copy of the upload budget. The service checks the FILE's
+        // bytes; this refuses the REQUEST before parseBody() has pulled the
+        // whole multipart body into memory to be measured.
+        maxUploadBytes: cfg.storage.maxUploadBytes,
+        // HSTS only where the API is actually served over https.
+        hstsEnabled: isProductionLike(cfg),
         rateLimit: {
           auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },
           general: { limit: cfg.rateLimit.generalPerMinute, windowSeconds: 60 },
           trustProxy: cfg.rateLimit.trustProxy,
+          trustedProxyHops: cfg.rateLimit.trustedProxyHops,
         },
       },
     ),

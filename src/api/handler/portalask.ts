@@ -38,6 +38,7 @@ import { scopeOf } from "../scope";
 import type { ClientAskService } from "../../usecase/clientask/service";
 import type { PortalAskRow } from "../../domain/clientask/model";
 import { ASK_KINDS } from "../../domain/clientask/model";
+import { isPortalUploadable, normaliseMediaType } from "../../domain/filestore/model";
 import { UnsupportedMediaType } from "../../domain/filestore/errors";
 
 export interface PortalAskDeps {
@@ -231,14 +232,17 @@ const uploadRoute = createRoute({
     "Multipart, because base64 in a JSON body inflates a scanned PDF by a third. The file is " +
     "filed against the task the ask was raised from, under the document kind the FIRM chose " +
     "when it asked — you do not choose where in their store it lands. It is stored exactly as " +
-    "it arrives: there is no virus scanner in this product today.",
+    "it arrives: there is no virus scanner in this product today, so the KINDS of file this " +
+    "route accepts are an allowlist — PDFs, photographs and scans, spreadsheets, Word and " +
+    "OpenDocument files, plain text and CSV. Anything else is refused rather than filed for " +
+    "a colleague to open.",
   request: {
     params: AskParam,
     body: { content: { "multipart/form-data": { schema: UploadForm } }, required: true },
   },
   responses: {
     200: { description: "Sent", content: { "application/json": { schema: AskSchema } } },
-    400: errorResponse("Empty file, or an unusable filename or media type"),
+    400: errorResponse("Empty file, an unusable filename, or a kind of file this route does not accept"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("Not a client-portal session, or this contact may only look"),
     404: errorResponse("No such ask you can reach"),
@@ -351,6 +355,21 @@ async function filePart(
   const part = body["file"];
   if (typeof part === "string" || part === undefined || !(part instanceof File)) {
     throw new UnsupportedMediaType(typeof part === "string" ? "text/plain" : "none");
+  }
+  // WHAT A CLIENT MAY SEND, checked here and not on the staff route.
+  //
+  // This is the one upload path in the product whose uploader is outside the
+  // firm, and there is no scanner behind it. The bytes are later downloaded by
+  // a colleague, with the media type the client chose echoed back — so an
+  // executable, an HTML page or an SVG stored here is a file a member of staff
+  // is invited to open. `attachment` and `nosniff` stop a browser rendering
+  // one; the allowlist stops it being stored at all.
+  //
+  // The staff route deliberately has no equivalent — see
+  // PORTAL_UPLOAD_MEDIA_TYPES for why the two surfaces differ.
+  const normalised = normaliseMediaType(part.type);
+  if (normalised === null || !isPortalUploadable(normalised)) {
+    throw new UnsupportedMediaType(part.type === "" ? "none" : part.type);
   }
   return {
     bytes: new Uint8Array(await part.arrayBuffer()),

@@ -23,6 +23,26 @@ export interface MembershipDirectory {
   listByUser(userId: string): Promise<Membership[]>;
 }
 
+/**
+ * Whether a FIRM is still open for business.
+ *
+ * `tenancy.tenant.status` has existed since 0001 and, until now, had no reader
+ * anywhere: suspending a firm changed a string in a row and nothing else, so a
+ * suspended firm kept working exactly as before. That is worse than not having
+ * the column — an operator suspends a tenant, sees the status change, and
+ * believes something happened.
+ *
+ * Declared in identity's own words because this is the module that decides
+ * whether a request has a tenant context at all; the tenancy repository
+ * satisfies it. `tenancy.tenant` is GLOBAL and carries no RLS, so this is a
+ * primary-key read on a small table and costs a fraction of a millisecond.
+ */
+export interface TenantStanding {
+  /** False when the firm is suspended, and when it does not exist at all —
+   *  which are different facts with the same consequence here. */
+  isOpen(tenantId: string): Promise<boolean>;
+}
+
 // ── Credentials ──────────────────────────────────────────────────────────────
 
 export interface CredentialRepository {
@@ -82,6 +102,27 @@ export interface SessionRepository {
   revoke(sessionId: string, at: string): Promise<void>;
   /** Every session of one user — a password change, or "log me out everywhere". */
   revokeAllForUser(userId: string, at: string): Promise<number>;
+  /**
+   * Record that this session was just used — the IDLE clock's write.
+   *
+   * Called only when the stored value is already stale (`shouldTouch`), so this
+   * is one write per session per few minutes rather than one per request. It
+   * returns nothing and its failure is not the caller's problem: a touch that
+   * does not land costs the session a few minutes of its idle budget, and
+   * failing the REQUEST over it would turn a bookkeeping write into an outage.
+   */
+  touch(sessionId: string, at: string): Promise<void>;
+  /**
+   * Delete sessions and links that are already dead — expired, revoked or
+   * spent, and old enough that nobody is going to ask about them.
+   *
+   * The one place in this schema with a DELETE grant, and migration 0075 says
+   * why: these rows are CREDENTIALS, not records. The trail of who signed in and
+   * when is `ledger.event`, which has no DELETE grant and never will.
+   *
+   * Returns how many of each went, so the sweep can say what it did.
+   */
+  purgeExpired(before: string): Promise<{ readonly sessions: number; readonly magicLinks: number }>;
 }
 
 export interface NewMagicLink {
@@ -157,6 +198,30 @@ export interface Mailer {
    * not resolve degrades the wording rather than trapping somebody outside.
    */
   sendStaffWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void>;
+
+  /**
+   * Sends a client contact who ALREADY HAS A LOGIN their way into the portal.
+   *
+   * A FOURTH letter, and the reason it exists is a security bug rather than a
+   * wording preference. Accounts in this product are global (ADR-02): one
+   * person, one login, however many firms they deal with. So a firm can invite
+   * somebody who is already staff somewhere else, or already a client contact
+   * at another firm — and the ordinary invitation is a link on which a password
+   * is CHOSEN, which would have overwritten the password they already had and
+   * signed them out of everything.
+   *
+   * This letter carries a single-use SIGN-IN link instead. Same firm-naming,
+   * same expiry, same "if you were not expecting this" paragraph — the only
+   * difference is that it hands over a session rather than a password form,
+   * because the reader already has a password and it is none of this firm's
+   * business.
+   */
+  sendPortalWelcome(
     to: string,
     url: string,
     expiresAt: string,

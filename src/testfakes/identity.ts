@@ -10,6 +10,7 @@
 // identity's UserDirectory and MembershipDirectory, which is interface
 // segregation working as intended: identity asked for a narrow read, and the
 // existing fakes provide it unchanged.
+import type { Clock } from "../platform/clock";
 import type { MagicLink, MagicLinkPurpose, Session } from "../domain/identity/model";
 import type {
   CredentialRepository,
@@ -72,15 +73,29 @@ export class FakeSessionRepo implements SessionRepository {
   readonly rows: Session[] = [];
   private readonly hashes = new Map<string, string>(); // tokenHash to sessionId
 
+  /**
+   * THE SAME CLOCK THE SERVICE HOLDS, when a test gives it one.
+   *
+   * It used to stamp `issuedAt` from the real `Date`, which was harmless while
+   * nothing read it — and stopped being harmless the moment sessions grew an
+   * IDLE clock. A row stamped "now" and read against a fake clock set to
+   * January produces a negative idle time, so every idle assertion would have
+   * passed whatever the code did.
+   */
+  constructor(private readonly clock: Clock = { now: () => new Date() }) {}
+
   create(s: NewSession): Promise<Session> {
+    const at = this.clock.now().toISOString();
     const row: Session = {
       id: s.id,
       userId: s.userId,
       activeTenantId: s.activeTenantId,
       activeAudience: s.activeAudience,
-      issuedAt: new Date().toISOString(),
+      issuedAt: at,
       expiresAt: s.expiresAt,
       revokedAt: null,
+      // A brand-new session was, by definition, just used.
+      lastSeenAt: at,
     };
     this.rows.push(row);
     this.hashes.set(s.tokenHash, s.id);
@@ -125,6 +140,26 @@ export class FakeSessionRepo implements SessionRepository {
       }
     });
     return Promise.resolve(n);
+  }
+
+  touch(sessionId: string, at: string): Promise<void> {
+    const i = this.rows.findIndex((r) => r.id === sessionId && r.revokedAt === null);
+    const current = this.rows[i];
+    if (current !== undefined) this.rows[i] = { ...current, lastSeenAt: at };
+    return Promise.resolve();
+  }
+
+  purgeExpired(before: string): Promise<{ sessions: number; magicLinks: number }> {
+    const cutoff = Date.parse(before);
+    const dead = (r: Session): boolean =>
+      Date.parse(r.expiresAt) < cutoff ||
+      (r.revokedAt !== null && Date.parse(r.revokedAt) < cutoff) ||
+      Date.parse(r.lastSeenAt) < cutoff;
+    const removed = this.rows.filter(dead);
+    for (const row of removed) this.rows.splice(this.rows.indexOf(row), 1);
+    // The fake owns only sessions; the real adapter sweeps both tables in one
+    // call and the magic-link half has no fake to sweep.
+    return Promise.resolve({ sessions: removed.length, magicLinks: 0 });
   }
 }
 
@@ -188,6 +223,15 @@ export class FakeMailer implements Mailer {
   /** And a third, for the same reason: a test asserting a colleague was
    *  WELCOMED must not pass on a portal invite that happens to have gone out. */
   readonly welcomes: { to: string; url: string; expiresAt: string; firmName: string | null }[] = [];
+  /** And a fourth. This one is the whole assertion for the invite downgrade: a
+   *  contact who already has a password must be sent a SIGN-IN link, and a test
+   *  that could not tell it apart from an invitation would pass on the bug. */
+  readonly portalWelcomes: {
+    to: string;
+    url: string;
+    expiresAt: string;
+    firmName: string | null;
+  }[] = [];
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
     this.sent.push({ to, url, expiresAt });
@@ -213,6 +257,16 @@ export class FakeMailer implements Mailer {
     this.welcomes.push({ to, url, expiresAt, firmName });
     return Promise.resolve();
   }
+
+  sendPortalWelcome(
+    to: string,
+    url: string,
+    expiresAt: string,
+    firmName: string | null,
+  ): Promise<void> {
+    this.portalWelcomes.push({ to, url, expiresAt, firmName });
+    return Promise.resolve();
+  }
 }
 
 /**
@@ -233,10 +287,18 @@ export class UnreachableMailer implements Mailer {
   /** What was ATTEMPTED. A test that asserts a failure must still be able to
    *  prove the letter was tried, or it cannot tell "the relay refused" from
    *  "the code never called the mailer". */
-  readonly attempted: { to: string; kind: "magic-link" | "invite" | "welcome" }[] = [];
+  readonly attempted: {
+    to: string;
+    kind: "magic-link" | "invite" | "welcome" | "portal-welcome";
+  }[] = [];
 
   sendMagicLink(to: string): Promise<void> {
     this.attempted.push({ to, kind: "magic-link" });
+    return Promise.reject(new Error("smtp: connection refused"));
+  }
+
+  sendPortalWelcome(to: string): Promise<void> {
+    this.attempted.push({ to, kind: "portal-welcome" });
     return Promise.reject(new Error("smtp: connection refused"));
   }
 

@@ -463,7 +463,10 @@ export class FileStoreService {
     readonly kind: DocumentKind;
     readonly subjectKind: string;
     readonly subjectRef: string;
-    readonly partyId: string | null;
+    // NO `partyId`. It used to be one, taken from the request body, and it
+    // decided which client's portal library a rendered invoice appears in —
+    // see `DescribedDocument` for what that let a caller do. The record knows
+    // whose it is.
     readonly actor: Actor;
   }): Promise<DocumentRecord> {
     const subjectKind = this.requireSubjectKind(input.subjectKind);
@@ -471,12 +474,13 @@ export class FileStoreService {
       throw new NotRenderable(input.kind, ["engagement_letter", "invoice"]);
     }
 
-    const described = await this.deps.renderSource.describe({
+    const source = await this.deps.renderSource.describe({
       tenantId: input.tenantId,
       kind: input.kind,
       subjectRef: input.subjectRef,
     });
-    if (described === null) throw new SourceNotFound(input.kind, input.subjectRef);
+    if (source === null) throw new SourceNotFound(input.kind, input.subjectRef);
+    const described = source.document;
 
     const bytes = await this.deps.renderer.render(described);
     const contentHash = this.deps.digest.ofBytes(bytes);
@@ -495,7 +499,10 @@ export class FileStoreService {
         title: `${described.documentTitle} ${described.reference}`,
         origin: "generated",
         kind: input.kind,
-        partyId: input.partyId,
+        // WHOSE record this is, off the record itself. Never the caller's word
+        // for it: a rendered invoice is client-visible by default, so a wrong
+        // id here files one firm's invoice in another client's portal library.
+        partyId: source.partyId,
         // Same rule for a rendered document. A generated engagement letter is
         // the one the client signed; a generated proposal is a quote that may
         // never be sent, which is why `proposal` is false in that mapping.

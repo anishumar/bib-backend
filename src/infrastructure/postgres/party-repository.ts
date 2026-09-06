@@ -27,6 +27,7 @@ import {
   PartyNotArchived,
   PartyNotFound,
 } from "../../domain/party/errors";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 interface PartyRow {
   id: string;
@@ -246,12 +247,15 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
             SELECT id, tenant_id, kind, display_name, archived_at
             FROM core.party
             ORDER BY display_name
+            -- A CEILING, not pagination — see MAX_LIST_ROWS.
+            LIMIT ${MAX_LIST_ROWS}
           `
         : await db<PartyRow[]>`
             SELECT id, tenant_id, kind, display_name, archived_at
             FROM core.party
             WHERE archived_at IS NULL
             ORDER BY display_name
+            LIMIT ${MAX_LIST_ROWS}
           `;
       return rows.map(toParty);
     });

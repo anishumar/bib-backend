@@ -43,4 +43,26 @@ export class PostgresUserRepository implements UserRepository {
     `;
     return row ? toUser(row) : null;
   }
+
+  /**
+   * Disable an account across the whole platform, or let it back in.
+   *
+   * The writer `status` never had. It was checked at login and at magic-link
+   * redemption from the day it existed, and nothing in the product could set
+   * it — a control with a reader and no writer, which reads as a feature and
+   * behaves as a comment.
+   *
+   * This is NOT `setMemberActive`, which ends somebody's access to ONE firm.
+   * Identity is above tenant: this is the platform saying the person may not
+   * sign in anywhere, which is why it lives on /internal and why no firm's
+   * session can reach it.
+   */
+  async setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null> {
+    const [row] = await this.app<UserRow[]>`
+      UPDATE tenancy.user_account SET status = ${status}
+       WHERE id = ${id}
+      RETURNING id, email::text AS email, display_name, status
+    `;
+    return row ? toUser(row) : null;
+  }
 }

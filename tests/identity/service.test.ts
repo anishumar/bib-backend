@@ -2,6 +2,7 @@
 // are the negative ones: what the system refuses to reveal, and what stops
 // working the moment a session is revoked.
 import { FakeClock } from "../../src/testfakes/clock";
+import { InstantSleeper } from "../../src/platform/clock";
 import { beforeEach, describe, expect, it } from "vitest";
 import { IdentityService } from "../../src/usecase/identity/service";
 import { InMemoryRateLimiter } from "../../src/platform/ratelimit";
@@ -29,13 +30,17 @@ import {
   WeakPassword,
 } from "../../src/domain/identity/errors";
 import {
+  SESSION_IDLE_DAYS,
+  SESSION_TOUCH_MINUTES,
   SESSION_TTL_DAYS,
   MAGIC_LINK_TTL_MINUTES,
   STAFF_WELCOME_TTL_HOURS,
 } from "../../src/domain/identity/model";
 import {
+  LOGIN_ACCOUNT_ATTEMPTS_PER_WINDOW,
   LOGIN_ATTEMPTS_PER_WINDOW,
   LOGIN_WINDOW_SECONDS,
+  MAGIC_LINK_FLOOR_MS,
   MAGIC_LINKS_PER_WINDOW,
   PORTAL_INVITE_RESENDS_PER_WINDOW,
 } from "../../src/usecase/identity/service";
@@ -54,19 +59,26 @@ interface Harness {
   magicLinks: FakeMagicLinkRepo;
   mailer: FakeMailer;
   clock: FakeClock;
+  /** What the sign-in-link route waited for. Its constant-time floor is a
+   *  security property, so it is observable rather than a hidden setTimeout. */
+  sleeper: InstantSleeper;
   events: RecordingEventSink;
 }
 
 function harness(mailerOverride?: Mailer): Harness {
   const fakes = makeFakes();
   const credentials = new FakeCredentialRepo();
-  const sessions = new FakeSessionRepo();
   const magicLinks = new FakeMagicLinkRepo();
   const mailer = new FakeMailer();
   const clock = new FakeClock();
+  // AFTER the clock, and it takes it: a session's timestamps have to move with
+  // the same time the service reads, or every idle assertion is vacuous.
+  const sessions = new FakeSessionRepo(clock);
+  const sleeper = new InstantSleeper();
   const service = new IdentityService({
     users: fakes.users,
     memberships: fakes.memberships,
+    tenants: fakes.tenants,
     credentials,
     sessions,
     magicLinks,
@@ -75,12 +87,14 @@ function harness(mailerOverride?: Mailer): Harness {
     mailer: mailerOverride ?? mailer,
     ids: fakes.ids,
     clock,
+    sleeper,
     events: fakes.events,
     attempts: new InMemoryRateLimiter(clock),
     magicLinkBaseUrl: "https://app.example.com",
   });
   return {
     service,
+    sleeper,
     users: fakes.users,
     memberships: fakes.memberships,
     credentials,
@@ -249,10 +263,53 @@ describe("sessions", () => {
   it("stops resolving once the session expires", async () => {
     await seedUser(h);
     const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
-    h.clock.advanceDays(SESSION_TTL_DAYS - 1);
-    expect(await h.service.resolveSession(token)).not.toBeNull();
+    // USED along the way, a day at a time. Without that the IDLE clock would
+    // end it first and this would be testing the wrong thing — which is the
+    // point of having both: the absolute TTL is what stops a session somebody
+    // IS using, and it is the only thing that can.
+    for (let day = 0; day < SESSION_TTL_DAYS - 1; day += 1) {
+      h.clock.advanceDays(1);
+      expect(await h.service.resolveSession(token)).not.toBeNull();
+    }
     h.clock.advanceDays(2);
     expect(await h.service.resolveSession(token)).toBeNull();
+  });
+
+  it("stops resolving a session nobody has used, long before it expires", async () => {
+    // The clock the fortnight-long TTL could not see. A laptop left open in a
+    // co-working space, a browser on a phone that has been sold, a session
+    // opened on a client's machine to show them something — every one of them
+    // stayed valid for fourteen days of doing nothing, and the product had no
+    // way to tell that from somebody who signed in this morning.
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+
+    h.clock.advanceDays(SESSION_IDLE_DAYS - 1);
+    expect(await h.service.resolveSession(token)).not.toBeNull();
+
+    // And that read moved the idle clock on, so the budget starts again.
+    h.clock.advanceDays(SESSION_IDLE_DAYS - 1);
+    expect(await h.service.resolveSession(token)).not.toBeNull();
+
+    h.clock.advanceDays(SESSION_IDLE_DAYS + 1);
+    expect(await h.service.resolveSession(token)).toBeNull();
+  });
+
+  it("does not write on every request to keep that clock", async () => {
+    // The idle clock is only affordable because it is NOT a write per request:
+    // this is the hottest row in the system and every authenticated read
+    // touches it. Two reads a second apart must move nothing.
+    await seedUser(h);
+    const { token } = await h.service.login("priya@harbourpoint.in", PASSWORD);
+    const before = h.sessions.rows[0]?.lastSeenAt;
+
+    h.clock.advanceMinutes(1);
+    await h.service.resolveSession(token);
+    expect(h.sessions.rows[0]?.lastSeenAt).toBe(before);
+
+    h.clock.advanceMinutes(SESSION_TOUCH_MINUTES + 1);
+    await h.service.resolveSession(token);
+    expect(h.sessions.rows[0]?.lastSeenAt).not.toBe(before);
   });
 
   it("drops the tenant the moment the membership is deactivated", async () => {
@@ -364,6 +421,38 @@ describe("magic links", () => {
     if (token === null) throw new Error(`no token in ${last.url}`);
     return token;
   }
+
+  it("takes the same time whether or not the address has an account", async () => {
+    // The route already says nothing: unknown address, inactive account and a
+    // spent budget all return quietly and the handler answers 202 to all of
+    // them. What it could not hide was how LONG it took — a known address
+    // generates a token, inserts a row and hands a letter to a relay; an
+    // unknown one returns after one SELECT. That gap is an enumeration oracle
+    // with a stopwatch for a tool, and a real SMTP relay widens it to hundreds
+    // of milliseconds.
+    await seedUser(h);
+
+    await h.service.requestMagicLink("priya@harbourpoint.in");
+    const known = h.sleeper.waited.at(-1);
+
+    await h.service.requestMagicLink("nobody@nowhere.invalid");
+    const unknown = h.sleeper.waited.at(-1);
+
+    // Both padded to the same floor. The fake clock does not advance, so both
+    // measure zero work and both wait the whole floor — what is asserted is
+    // that BOTH paths are padded, which is the property; the arithmetic that
+    // subtracts real elapsed time is the same line for both.
+    expect(known).toBe(MAGIC_LINK_FLOOR_MS);
+    expect(unknown).toBe(MAGIC_LINK_FLOOR_MS);
+  });
+
+  it("pads the rate-limited path too — it is the cheapest exit of all", async () => {
+    await seedUser(h);
+    for (let i = 0; i < MAGIC_LINKS_PER_WINDOW + 1; i += 1) {
+      await h.service.requestMagicLink("priya@harbourpoint.in");
+    }
+    expect(h.sleeper.waited.at(-1)).toBe(MAGIC_LINK_FLOOR_MS);
+  });
 
   it("emails a link that redeems for a session", async () => {
     await seedUser(h);
@@ -538,69 +627,130 @@ describe("per-account throttling", () => {
     h = harness();
   });
 
-  // The edge limits by client address; this limits by ACCOUNT. A botnet spreads
-  // its guesses over a thousand addresses and walks past any per-IP rule — what
-  // it cannot spread is whose password it is trying to break.
-  it("stops a password from being ground down, however many addresses try", async () => {
+  /** Two callers, so the per-(account, caller) budget can be told apart. The
+   *  edge derives these from the connection; a test just names them. */
+  const GUESSER = "203.0.113.9";
+  const OWNER = "198.51.100.4";
+
+  // The edge limits by client address; this limits by ACCOUNT AND CALLER. A
+  // botnet spreads its guesses over a thousand addresses and walks past any
+  // per-IP rule — what it cannot spread is whose password it is trying to
+  // break.
+  it("stops one caller grinding one password down", async () => {
     await seedUser(h);
     for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
       await expect(
-        h.service.login("priya@harbourpoint.in", `guess-${String(i)}`),
+        h.service.login("priya@harbourpoint.in", `guess-${String(i)}`, GUESSER),
       ).rejects.toBeInstanceOf(InvalidCredentials);
     }
     await expect(
-      h.service.login("priya@harbourpoint.in", "guess-again"),
+      h.service.login("priya@harbourpoint.in", "guess-again", GUESSER),
     ).rejects.toBeInstanceOf(TooManyAttempts);
   });
 
-  it("refuses even the CORRECT password once the budget is spent", async () => {
-    // The attempt is counted before the password is checked. Counting only
-    // failures would let a correct guess refund the budget being burned, and
-    // would tell an attacker which guesses were right by whether it moved.
+  it("CANNOT be aimed at somebody — a stranger's guesses do not lock the owner out", async () => {
+    // THE BUG THIS EXISTS TO END. The budget used to be per ACCOUNT alone and
+    // was spent before the password was checked, so ten deliberately wrong
+    // guesses at any address you knew locked its owner out for an hour — no
+    // CAPTCHA, no back-off, no way to end it but waiting. A control a stranger
+    // can point at a named person is a denial of service wearing a security
+    // control's clothes.
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW + 5; i += 1) {
+      await h.service.login("priya@harbourpoint.in", "wrong", GUESSER).catch(() => null);
+    }
+    // The guesser is refused; the owner, at their own address, signs in.
+    await expect(
+      h.service.login("priya@harbourpoint.in", "wrong", GUESSER),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
+    await expect(
+      h.service.login("priya@harbourpoint.in", PASSWORD, OWNER),
+    ).resolves.toBeDefined();
+  });
+
+  it("still closes the door on a DISTRIBUTED grind", async () => {
+    // The per-caller budget is, by construction, per caller: a thousand hosts
+    // each spending ten would be a thousand times the intended rate against one
+    // account. So a second budget counts the account's FAILURES across every
+    // caller — and it is read only after a wrong password, so it can never
+    // refuse somebody who typed the right thing either.
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ACCOUNT_ATTEMPTS_PER_WINDOW; i += 1) {
+      await h.service
+        .login("priya@harbourpoint.in", "wrong", `host-${String(i)}`)
+        .catch(() => null);
+    }
+    // A fresh address, which has spent none of its own budget, is refused.
+    await expect(
+      h.service.login("priya@harbourpoint.in", "wrong", "203.0.113.77"),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
+  });
+
+  it("and the owner still gets in while that grind is running", async () => {
+    // The property that makes the wide budget safe to have at all. It decides
+    // what a WRONG password costs and nothing else.
+    await seedUser(h);
+    for (let i = 0; i < LOGIN_ACCOUNT_ATTEMPTS_PER_WINDOW + 10; i += 1) {
+      await h.service
+        .login("priya@harbourpoint.in", "wrong", `host-${String(i)}`)
+        .catch(() => null);
+    }
+    await expect(
+      h.service.login("priya@harbourpoint.in", PASSWORD, OWNER),
+    ).resolves.toBeDefined();
+  });
+
+  it("refuses even the CORRECT password once ONE CALLER has spent its budget", async () => {
+    // Within a single caller the attempt is still counted before the password
+    // is checked: counting only failures there would let a correct guess refund
+    // the budget being burned. The blast radius is that caller and nobody else,
+    // which is the whole change.
     await seedUser(h);
     for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
-      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+      await h.service.login("priya@harbourpoint.in", "wrong", GUESSER).catch(() => null);
     }
-    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).rejects.toBeInstanceOf(
-      TooManyAttempts,
-    );
+    await expect(
+      h.service.login("priya@harbourpoint.in", PASSWORD, GUESSER),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
   });
 
   it("throttles the account, not the caller — an unknown email is limited too", async () => {
     // Otherwise the endpoint answers "is this address one of yours?" by which
     // requests get throttled.
     for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
-      await h.service.login("stranger@example.com", "guess").catch(() => null);
+      await h.service.login("stranger@example.com", "guess", GUESSER).catch(() => null);
     }
-    await expect(h.service.login("stranger@example.com", "guess")).rejects.toBeInstanceOf(
-      TooManyAttempts,
-    );
+    await expect(
+      h.service.login("stranger@example.com", "guess", GUESSER),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
   });
 
   it("clears the budget on a successful sign-in", async () => {
     // Someone who mistypes their passphrase twice and then gets it right must
     // not be locked out by their own success.
     await seedUser(h);
-    await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
-    await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
-    await h.service.login("priya@harbourpoint.in", PASSWORD);
+    await h.service.login("priya@harbourpoint.in", "wrong", OWNER).catch(() => null);
+    await h.service.login("priya@harbourpoint.in", "wrong", OWNER).catch(() => null);
+    await h.service.login("priya@harbourpoint.in", PASSWORD, OWNER);
 
     for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
-      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+      await h.service.login("priya@harbourpoint.in", "wrong", OWNER).catch(() => null);
     }
     // The budget was reset by the success, so the full allowance was available.
-    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).rejects.toBeInstanceOf(
-      TooManyAttempts,
-    );
+    await expect(
+      h.service.login("priya@harbourpoint.in", PASSWORD, OWNER),
+    ).rejects.toBeInstanceOf(TooManyAttempts);
   });
 
   it("recovers after the window", async () => {
     await seedUser(h);
     for (let i = 0; i < LOGIN_ATTEMPTS_PER_WINDOW; i += 1) {
-      await h.service.login("priya@harbourpoint.in", "wrong").catch(() => null);
+      await h.service.login("priya@harbourpoint.in", "wrong", OWNER).catch(() => null);
     }
     h.clock.advanceMinutes(LOGIN_WINDOW_SECONDS / 60 + 1);
-    await expect(h.service.login("priya@harbourpoint.in", PASSWORD)).resolves.toBeDefined();
+    await expect(
+      h.service.login("priya@harbourpoint.in", PASSWORD, OWNER),
+    ).resolves.toBeDefined();
   });
 
   it("caps sign-in emails, so the endpoint cannot flood someone's inbox", async () => {
@@ -660,12 +810,90 @@ describe("a send that fails", () => {
     // The opposite decision, for the opposite reason. There is no account to be
     // quiet about: a member of the firm has just named this person, and a
     // silent failure is a client who never gets in and nobody knowing.
+    //
+    // No password on the account, which is what makes this the INVITE path
+    // rather than the sign-in one — see the downgrade tests below.
     const relay = new UnreachableMailer();
     const h = harness(relay);
+    const user = await h.users.create({
+      id: uuidFor("user:meera@cobaltfoods.in"),
+      email: "meera@cobaltfoods.in",
+    });
+
+    await expect(h.service.invitePortalContact(user.id, "10x Global")).rejects.toThrow();
+    expect(relay.attempted).toEqual([{ to: "meera@cobaltfoods.in", kind: "invite" }]);
+  });
+});
+
+
+describe("inviting an address that ALREADY has a login", () => {
+  // Accounts are global (ADR-02) and the invitation is a link on which a
+  // password is CHOSEN. Before this, a firm inviting somebody who was already
+  // staff at another firm handed them a letter that — when opened, which is the
+  // ordinary thing to do — replaced their password everywhere and revoked every
+  // session they held. Any firm, any address, no confirmation.
+
+  let h: Harness;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  /** The token out of the SIGN-IN letter this path sends. Kept apart from the
+   *  invite letter's by the fake, which is the whole assertion. */
+  function tokenFromUrl(url: string): string {
+    const token = new URL(url).searchParams.get("token");
+    if (token === null) throw new Error(`no token in ${url}`);
+    return token;
+  }
+
+  it("sends a SIGN-IN link instead of a password-setting one", async () => {
     const userId = await seedUser(h, "meera@cobaltfoods.in");
 
-    await expect(h.service.invitePortalContact(userId, "10x Global")).rejects.toThrow();
-    expect(relay.attempted).toEqual([{ to: "meera@cobaltfoods.in", kind: "invite" }]);
+    await h.service.invitePortalContact(userId, "10x Global");
+
+    // Not on `invites`: the password-setting letter must not have gone.
+    expect(h.mailer.invites).toEqual([]);
+    expect(h.mailer.portalWelcomes).toHaveLength(1);
+    expect(h.mailer.portalWelcomes[0]?.to).toBe("meera@cobaltfoods.in");
+    expect(h.mailer.portalWelcomes[0]?.firmName).toBe("10x Global");
+    // And it points at the sign-in redemption page, not the accept-invite one.
+    expect(h.mailer.portalWelcomes[0]?.url).toContain("/auth/magic-link?token=");
+  });
+
+  it("issues a link that cannot be redeemed to set a password", async () => {
+    const userId = await seedUser(h, "meera@cobaltfoods.in");
+    await h.service.invitePortalContact(userId, "10x Global");
+    const token = tokenFromUrl(h.mailer.portalWelcomes[0]?.url ?? "");
+
+    // The whole point: this token opens a session and is refused by the route
+    // that would overwrite the credential.
+    await expect(h.service.acceptPortalInvite(token, "a new password entirely")).rejects.toThrow(
+      InvalidMagicLink,
+    );
+  });
+
+  it("leaves the password they already had working", async () => {
+    const userId = await seedUser(h, "meera@cobaltfoods.in");
+    await h.service.invitePortalContact(userId, "10x Global");
+    const token = tokenFromUrl(h.mailer.portalWelcomes[0]?.url ?? "");
+
+    // Redeeming it signs them in, and the credential is untouched afterwards.
+    await h.service.redeemMagicLink(token);
+    const signedIn = await h.service.login("meera@cobaltfoods.in", PASSWORD);
+    expect(signedIn.principal.userId).toBe(userId);
+  });
+
+  it("still sends the password-setting letter to somebody with no login", async () => {
+    const user = await h.users.create({
+      id: uuidFor("user:new@cobaltfoods.in"),
+      email: "new@cobaltfoods.in",
+    });
+
+    await h.service.invitePortalContact(user.id, "10x Global");
+
+    expect(h.mailer.portalWelcomes).toEqual([]);
+    expect(h.mailer.invites).toHaveLength(1);
+    expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
   });
 });
 
