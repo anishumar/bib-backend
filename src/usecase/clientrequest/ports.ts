@@ -101,6 +101,12 @@ export interface RequestRepository {
   /** Everything not finished, newest first — the whole inbox. */
   listLive(tenantId: string): Promise<readonly ClientRequestRecord[]>;
 
+  /** What is FINISHED — closed by the firm or withdrawn by the client. The
+   *  complement of `listLive`, not a hand-listed pair of statuses: a status
+   *  added later belongs in whatever the inbox does not show, and two lists
+   *  that each name their own statuses is how a row ends up on neither. */
+  listFinished(tenantId: string): Promise<readonly ClientRequestRecord[]>;
+
   findById(tenantId: string, requestId: string): Promise<ClientRequestRecord | null>;
 
   /**

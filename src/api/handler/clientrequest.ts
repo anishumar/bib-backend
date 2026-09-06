@@ -170,9 +170,24 @@ const listRoute = createRoute({
   tags: ["client-requests"],
   summary: "What clients have asked YOU for",
   description:
-    "The firm-wide inbox of requests clients raised themselves — everything not finished, " +
-    "newest first. `awaitingFirm` is the flag to work from, and `routing` says whether this " +
-    "firm places them on anybody's desk automatically.",
+    "The firm-wide inbox of requests clients raised themselves, newest first. `awaitingFirm` " +
+    "is the flag to work from, and `routing` says whether this firm places them on anybody's " +
+    "desk automatically. `state=finished` reads the ARCHIVE instead — what was closed or " +
+    "withdrawn, which the inbox drops and which nothing else could read.",
+  request: {
+    query: z.object({
+      state: z
+        .enum(["live", "finished"])
+        .optional()
+        .openapi({
+          description:
+            "`live` (the default) is the work queue: open and answered. `finished` is its " +
+            "complement — closed by the firm, withdrawn by the client. Two lists rather than " +
+            "one flag on every row because they are two jobs: one is worked, the other is " +
+            "looked up.",
+        }),
+    }),
+  },
   responses: {
     200: {
       description: "The live requests with their threads, and the firm's routing setting",
@@ -331,7 +346,8 @@ export function registerClientRequestRoutes(
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const inbox = await deps.service.inbox(s.tenantId);
+    const { state } = c.req.valid("query");
+    const inbox = await deps.service.inbox(s.tenantId, state ?? "live");
     return c.json({ requests: inbox.requests.map(toWire), routing: inbox.routing }, 200);
   });
 

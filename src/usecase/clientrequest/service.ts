@@ -176,14 +176,26 @@ export class ClientRequestService {
    * screen shows which company each is from and who spoke last, which is what
    * makes an unrouted list workable while it is short.
    */
-  async inbox(tenantId: string): Promise<RequestInbox> {
+  async inbox(tenantId: string, scope: "live" | "finished" = "live"): Promise<RequestInbox> {
     // THE SETTING TRAVELS WITH THE LIST, and that is T4.5's `ladderPublished`
     // decision applied again. An inbox where nothing is assigned because the
     // firm routes nothing, and one where the rule ran and could not place
     // anything, are the same picture — and only one of them is somebody's to
     // fix. A screen cannot tell them apart without this.
+    //
+    // ── AND THE ARCHIVE IS THE SAME READ, ON PURPOSE ──────────────────────
+    //
+    // A finished request is not a different KIND of thing and does not deserve
+    // a second shape on the wire. What it needed was a way to be asked for at
+    // all: `listLive` was the only list, so the moment somebody pressed Close
+    // the record of what a client asked and what the firm answered left every
+    // staff screen — while the client's own portal went on showing the whole
+    // thread, because that list filters by nothing. The two surfaces disagreed
+    // and the CLIENT held the fuller record.
     const [requests, routing] = await Promise.all([
-      this.deps.requests.listLive(tenantId),
+      scope === "finished"
+        ? this.deps.requests.listFinished(tenantId)
+        : this.deps.requests.listLive(tenantId),
       this.deps.routing.routingFor(tenantId),
     ]);
     return { requests, routing };

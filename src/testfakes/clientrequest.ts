@@ -183,12 +183,21 @@ export class FakeRequestRepo implements RequestRepository {
   constructor(private readonly store: FakeRequestStore) {}
 
   listLive(tenantId: string): Promise<readonly ClientRequestRecord[]> {
-    return Promise.resolve(
-      this.store.requests
-        .filter((r) => r.tenantId === tenantId && LIVE.includes(r.status))
-        .sort((a, b) => b.raisedAt.localeCompare(a.raisedAt))
-        .map((r) => this.store.toRecord(r)),
-    );
+    return Promise.resolve(this.listWhere(tenantId, true));
+  }
+
+  /** The COMPLEMENT of live, exactly as the SQL writes it — a fake that named
+   *  the two finished statuses itself would keep passing on the day a third
+   *  status appeared and the real query started dropping it from both lists. */
+  listFinished(tenantId: string): Promise<readonly ClientRequestRecord[]> {
+    return Promise.resolve(this.listWhere(tenantId, false));
+  }
+
+  private listWhere(tenantId: string, live: boolean): readonly ClientRequestRecord[] {
+    return this.store.requests
+      .filter((r) => r.tenantId === tenantId && LIVE.includes(r.status) === live)
+      .sort((a, b) => b.raisedAt.localeCompare(a.raisedAt))
+      .map((r) => this.store.toRecord(r));
   }
 
   findById(tenantId: string, requestId: string): Promise<ClientRequestRecord | null> {

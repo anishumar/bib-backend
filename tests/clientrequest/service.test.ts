@@ -461,6 +461,43 @@ describe("the firm's inbox", () => {
     // A firm-wide inbox is only usable while it is short.
     expect((await ctx.service.inbox(TENANT)).requests).toEqual([]);
   });
+
+  it("keeps what it dropped, and hands it back as the archive", async () => {
+    /*
+     * THE HOLE THIS CLOSES. `listLive` was the only list, so the moment
+     * somebody pressed Close the record of what a client asked and what the
+     * firm answered left every staff screen — while the CLIENT's own portal
+     * went on showing the whole thread, because that list filters by nothing.
+     * The two surfaces disagreed and the client held the fuller record.
+     */
+    const ctx = withMeera();
+    const live = await raised(ctx, "Still going");
+    const closed = await raised(ctx, "Closed by us");
+    const withdrawn = await raised(ctx, "Taken back");
+    await ctx.service.close({ tenantId: TENANT, requestId: closed.requestId, actor: partner });
+    await ctx.service.withdraw({
+      tenantId: TENANT,
+      userId: MEERA,
+      requestId: withdrawn.requestId,
+      actor: meera,
+    });
+
+    const inbox = await ctx.service.inbox(TENANT);
+    const archive = await ctx.service.inbox(TENANT, "finished");
+    expect(inbox.requests.map((r) => r.request.id)).toEqual([live.requestId]);
+    // BOTH ways it can finish, and the two are one list: a firm looking up what
+    // it told somebody does not care which side ended the conversation.
+    expect(archive.requests.map((r) => r.request.subject).sort()).toEqual([
+      "Closed by us",
+      "Taken back",
+    ]);
+    // The thread comes back with it — the archive is read to be READ, and a
+    // record of a conversation without the conversation is a row.
+    expect(archive.requests.every((r) => Array.isArray(r.replies))).toBe(true);
+    // And the two lists are complements: nothing is on both, nothing on neither.
+    const all = [...inbox.requests, ...archive.requests].map((r) => r.request.id).sort();
+    expect(all).toEqual([live.requestId, closed.requestId, withdrawn.requestId].sort());
+  });
 });
 
 

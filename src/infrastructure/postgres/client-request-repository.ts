@@ -75,7 +75,24 @@ export class PostgresClientRequestRepository implements RequestRepository {
 
   async listLive(tenantId: string): Promise<readonly ClientRequestRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await this.select(db, tenantId, null, true);
+      const rows = await this.select(db, tenantId, null, "live");
+      return rows.map(toRecord);
+    });
+  }
+
+  /**
+   * What is FINISHED — closed by the firm, or withdrawn by the client.
+   *
+   * The inbox is a work queue and is right to drop these. Nothing else read
+   * them, which meant the record of what a client asked and what the firm
+   * answered left every staff screen the moment somebody pressed Close —
+   * while the CLIENT's own portal went on showing the whole thread, because
+   * that list has no status filter at all. The two surfaces disagreed, and the
+   * client held the fuller record.
+   */
+  async listFinished(tenantId: string): Promise<readonly ClientRequestRecord[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await this.select(db, tenantId, null, "finished");
       return rows.map(toRecord);
     });
   }
@@ -244,21 +261,26 @@ export class PostgresClientRequestRepository implements RequestRepository {
     tenantId: string,
     requestId: string,
   ): Promise<ClientRequestRecord | null> {
-    const rows = await this.select(db, tenantId, requestId, false);
+    const rows = await this.select(db, tenantId, requestId, "any");
     const row = rows[0];
     return row ? toRecord(row) : null;
   }
 
   /**
-   * The one query. `requestId` null means the list; `liveOnly` is what the
-   * inbox filters on and is written here rather than in two statements, so the
-   * joins and the reply aggregate exist once.
+   * The one query. `requestId` null means the list; `scope` is what the inbox
+   * and the archive filter on, and it is written here rather than in three
+   * statements so the joins and the reply aggregate exist once.
+   *
+   * `finished` is the complement of `live` and is written as one, not as a
+   * list of the two finished statuses: a status added later belongs in whatever
+   * the inbox does NOT show, and a hard-coded `IN ('closed','withdrawn')` would
+   * silently drop it from both screens.
    */
   private select(
     db: Db,
     tenantId: string,
     requestId: string | null,
-    liveOnly: boolean,
+    scope: "live" | "finished" | "any",
   ): Promise<RequestRow[]> {
     return db<RequestRow[]>`
       SELECT r.id,
@@ -335,7 +357,8 @@ export class PostgresClientRequestRepository implements RequestRepository {
         LEFT JOIN tenancy.user_account holder  ON holder.id = r.assignee_user_id
        WHERE r.tenant_id = ${tenantId}
          AND (${requestId}::uuid IS NULL OR r.id = ${requestId}::uuid)
-         AND (NOT ${liveOnly}::boolean OR r.status IN ('open', 'answered'))
+         AND (${scope} = 'any'
+              OR (${scope} = 'live')     = (r.status IN ('open', 'answered')))
        ORDER BY r.raised_at DESC
     `;
   }
