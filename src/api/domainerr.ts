@@ -10,6 +10,7 @@ import { TenancyError } from "../domain/tenancy/errors";
 import { StaffGradeError } from "../domain/staffgrade/errors";
 import { ServiceAxisError } from "../domain/serviceaxis/errors";
 import { ClientAssignmentError } from "../domain/clientassignment/errors";
+import { ClientImportError } from "../domain/clientimport/errors";
 import { PortalAccessError } from "../domain/portalaccess/errors";
 import { PortalInviteError } from "../domain/portalinvite/errors";
 import { ClientAskError } from "../domain/clientask/errors";
@@ -495,6 +496,26 @@ export function mapError(err: unknown): MappedError {
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "PORTAL_CONTACT_NOT_A_CLIENT_LOGIN":
       case "PORTAL_CONTACT_INACTIVE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
+  if (err instanceof ClientImportError) {
+    switch (err.code) {
+      // The upload itself is wrong — not a spreadsheet, no header row, nothing
+      // under it, or no client sheet at all. The caller fixes the file.
+      case "SHEET_UNREADABLE":
+      case "SHEET_HEADER_MISSING":
+      case "SHEET_EMPTY":
+      case "CLIENT_SHEET_REQUIRED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "CLIENT_IMPORT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      // Confirming what is already loaded, or what the report still refuses.
+      case "CLIENT_IMPORT_ALREADY_CONFIRMED":
+      case "CLIENT_IMPORT_BLOCKED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -115,6 +115,12 @@ export const EVENT_VERBS = {
   "client_assignment.created":   { objectType: "client_assignment",   lane: "platform",   description: "Somebody at the firm was put in charge of a client — the Key Manager, or a SPOC for one Dept or delivery team. A key-manager handover carries `handedOverFrom`, naming the assignment it closed in the same transaction." },
   "client_assignment.ended":     { objectType: "client_assignment",   lane: "platform",   description: "An assignment was closed — somebody stopped holding a client, with nobody named in their place. NOT a delete: the row stays and is what answers who held it before. The payload carries the date it stopped being in force, which is the FIRST DAY NOT IN FORCE." },
 
+  // ── platform · loading a firm's existing book (client import) ─────────────
+  // The staging row is the object. Both payloads are COUNTS: the sheet carries
+  // names, emails and registration numbers, and this log cannot be erased.
+  "client_import.staged":        { objectType: "client_import",       lane: "platform",   description: "A spreadsheet of the firm's existing clients was uploaded, parsed and checked against what the firm already has — and STAGED with its report. Nothing else was written; a row already on file is skipped, never updated." },
+  "client_import.confirmed":     { objectType: "client_import",       lane: "platform",   description: "A staged import was loaded: every row went through the ordinary party, assignment and engagement services, so each client, letter and assignment it created has its own event. The payload carries what was created, skipped and failed, by count." },
+
   // GATE 4 (G3.4). The table is effective-dated and already answers "who could
   // see this client in March"; these answer what it cannot — WHO DECIDED to let
   // them in, and who took it away. NO NAMES in either payload: the client's name

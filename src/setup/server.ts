@@ -34,6 +34,11 @@ import { NodemailerTransport } from "../infrastructure/mail/nodemailer-transport
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
+import {
+  PostgresClientImportDirectory,
+  PostgresClientImportRepository,
+} from "../infrastructure/postgres/client-import-repository";
+import { NodeSheetReader } from "../infrastructure/sheet/grid-reader";
 import { PostgresPortalAccessRepository } from "../infrastructure/postgres/portal-access-repository";
 import { PostgresPortalHomeRepository } from "../infrastructure/postgres/portal-home-repository";
 import { PostgresPortalLibraryRepository } from "../infrastructure/postgres/portal-library-repository";
@@ -118,6 +123,7 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
+import { ClientImportService } from "../usecase/clientimport/service";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { StaffInviteService } from "../usecase/staffinvite/service";
@@ -967,6 +973,24 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // LOADING A FIRM'S EXISTING BOOK. The three WRITER ports are the real party,
+  // assignment and engagement services, narrowed structurally — an imported
+  // client goes through exactly the doors a typed one does, so it is the same
+  // thing: same events, same triggers, same calendar. The directory is one
+  // adapter reading the tables the snapshot needs in one shape; the only table
+  // this module writes is its own staging row.
+  const clientImports = new ClientImportService({
+    store: new PostgresClientImportRepository(pools.app),
+    directory: new PostgresClientImportDirectory(pools.app),
+    sheets: new NodeSheetReader(),
+    parties: party,
+    assignments: clientAssignments,
+    letters: engagement,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   return {
     app: buildRouter(
       {
@@ -986,6 +1010,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
+        clientImports: { service: clientImports },
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
         clientAsks: { service: clientAsks },

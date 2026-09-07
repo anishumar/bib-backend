@@ -123,7 +123,7 @@ const SYSTEM_ACTOR: Actor = { type: "system", id: null };
  * same reach-back inventing missed deadlines — see the port.
  */
 const HORIZON_DAYS = 365;
-const REACH_BACK_DAYS = 90;
+export const REACH_BACK_DAYS = 90;
 
 /**
  * How many instances one firm may gain in one sweep.

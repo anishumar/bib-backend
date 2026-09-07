@@ -2639,6 +2639,58 @@ CHANGED. Dropping it turns 2 integration tests red.
 - **THE FIRM'S SCREEN SAID ONE THING TWICE** — a "Waiting on us" chip beside a raw `open` chip.
   This codebase's duplication bug for the fourth time.
 
+## Loading a firm's existing book — the client import (T6.12)
+
+`usecase/clientimport` + `crm.client_import` (migration 0079 — **the last number in (B)'s
+range**). Every firm arrives as spreadsheets and the screens are for the clients that arrive
+after that; typing four hundred companies through five screens is data entry somebody abandons
+halfway, and a half-true book is worse than none, because the calendar is empty for exactly the
+clients everybody assumes are in.
+
+**TWO ACTS, TWO REQUESTS, ONE STAGED ROW.** `POST /api/v1/client-imports` (multipart: a
+clients sheet, optional people and engagements sheets, `.csv` or `.xlsx` read by the
+dependency-free reader in `infrastructure/sheet/`) parses, checks every row against ONE snapshot
+of what the firm already has, and stores rows + report. Nothing else is written.
+`POST …/confirm` re-checks — the firm's records may have moved — and then walks the plan. The
+staged row is where the sheet lives between the two, because the JSON limit is 256 KB and
+because the person confirming must confirm what they READ.
+
+**EVERYTHING GOES THROUGH THE SAME DOORS AS THE SCREENS, enforced by what the module does not
+have.** Its three writer ports are `PartyService`, `ClientAssignmentService` and
+`EngagementService`, narrowed structurally; the only table it writes is its own. So an imported
+client is a client — `party.created`, `legal_entity.registered`, `client_assignment.created`,
+`engagement_letter.signed`, `contract.activated` — and from there the scheduler and the calendar
+do what they do for a typed one. The import's own two verbs carry COUNTS only.
+
+**A MIGRATED ENGAGEMENT IS A REAL SIGNED LETTER**, because `crm.engagement` cannot exist without
+a letter line (0017). One letter per client per currency, dated from its earliest engagement,
+`advanceRequired: false`, clauses chosen by `clausesFor` (apply to the country, name no other
+country's law), sent, then signed with the sheet's Signatory (or a sentence saying the name is
+on the paper) and the paper letter's whereabouts in the reference. **The signature day is TODAY
+and cannot be backdated** — `signedOn` in `demo-seed.sh` has always been silently dropped by zod
+— which is honest: the attestation happened on import day. `issuedOn` and `effectiveFrom` do
+backdate, and `effectiveFrom` is what the calendar reaches back from.
+
+**Consequences stated in the report rather than discovered:** a letter's country must have a
+clause in the firm's library or every line for it is BLOCKING; a firm with no
+`compliance_policy` floor and engagements older than ninety days gets a WARNING naming the
+count, because every filing already made in Excel will otherwise show as MISSED — walked, and
+that is exactly what happened.
+
+**BLOCKING is the sheet's fault; a warning is worth a look.** A row already on file (by
+registration number first, name second) is SKIPPED, never updated — a sheet that disagrees with
+the database is a question for the firm. The second run is boring by design, and that is what
+makes a partial first run recoverable: **confirm is NOT one transaction**, each service call
+commits alone, and a row that fails halfway is reported with what it got done.
+
+**The account team goes on the group's row.** A group's companies are billed on the group's
+letter and their work is routed by the group's SPOCs; a SPOC typed on a company's own row is
+recorded on that company and routes nothing. The template says so; the validator does not
+guess.
+
+`tenant:admin` on every route, because one confirm creates parties, letters and assignments in
+one act, and the report names the roster by email.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,

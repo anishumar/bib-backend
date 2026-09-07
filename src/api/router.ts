@@ -49,6 +49,8 @@ import type { EscalationDeps } from "./handler/escalation";
 import type { ServiceAxisDeps } from "./handler/serviceaxis";
 import { registerClientAssignmentRoutes } from "./handler/clientassignment";
 import type { ClientAssignmentDeps } from "./handler/clientassignment";
+import { registerClientImportRoutes } from "./handler/clientimport";
+import type { ClientImportDeps } from "./handler/clientimport";
 import { registerPortalAccessRoutes } from "./handler/portalaccess";
 import type { PortalAccessDeps } from "./handler/portalaccess";
 import { registerPortalInviteRoutes } from "./handler/portalinvite";
@@ -114,7 +116,7 @@ const MAX_JSON_BODY_BYTES = 256 * 1024;
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
 /**
- * The three routes that carry a file, as patterns over the CONCRETE path.
+ * The routes that carry a file, as patterns over the CONCRETE path.
  *
  * Matched here rather than mounted per-path, because `app.use(path, …)`
  * registers an entry in Hono's route table and `tests/api/auth-coverage.test.ts`
@@ -125,6 +127,8 @@ const UPLOAD_PATHS = [
   /^\/api\/v1\/documents$/,
   /^\/api\/v1\/documents\/[^/]+\/versions$/,
   /^\/api\/v1\/portal\/asks\/[^/]+\/documents$/,
+  // The client import: three spreadsheets in one multipart body.
+  /^\/api\/v1\/client-imports$/,
 ] as const;
 
 function isUploadPath(path: string): boolean {
@@ -167,6 +171,7 @@ export interface RouterDeps {
   readonly obligations: ObligationDeps;
   readonly escalations: EscalationDeps;
   readonly clientAssignments: ClientAssignmentDeps;
+  readonly clientImports: ClientImportDeps;
   readonly portalAccess: PortalAccessDeps;
   readonly portalInvites: PortalInviteDeps;
   readonly portalHome: PortalHomeDeps;
@@ -407,6 +412,7 @@ export function buildRouter(
   registerObligationRoutes(app, deps.obligations);
   registerEscalationRoutes(app, deps.escalations);
   registerClientAssignmentRoutes(app, deps.clientAssignments);
+  registerClientImportRoutes(app, deps.clientImports);
   registerPortalAccessRoutes(app, deps.portalAccess);
   registerPortalInviteRoutes(app, deps.portalInvites);
   registerPortalHomeRoutes(app, deps.portalHome);

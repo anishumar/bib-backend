@@ -133,6 +133,17 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // the rows happen to be the caller's.
   [routeKey("GET", "/api/v1/my-clients"), "party:read" as const],
 
+  // Loading a firm's existing book of clients. `tenant:admin` rather than
+  // `party:write`, and not because the rows are special: one confirm creates
+  // parties, legal entities, people, Key Managers, SPOCs and SIGNED engagement
+  // letters in one act, and its report names the roster by email — a
+  // `tenant:admin` read. Onboarding a book is the administrator's act.
+  [routeKey("POST", "/api/v1/client-imports"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/client-imports"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/client-imports/template"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/client-imports/{importId}"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/client-imports/{importId}/confirm"), "tenant:admin" as const],
+
   // Gate 4's grants (G3.4). The READS carry the same permission as the writes,
   // deliberately: this list names a client's own people and what each of them
   // may see, which is not a fact the whole firm needs and is exactly what

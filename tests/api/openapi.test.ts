@@ -86,6 +86,15 @@ import {
   FakeClientAssignmentRepo,
   FakeClientDirectory,
 } from "../../src/testfakes/clientassignment";
+import { ClientImportService } from "../../src/usecase/clientimport/service";
+import {
+  FakeClientImportStore,
+  FakeImportDirectory,
+  FakeSheetReader,
+  RecordingAssignmentWriter,
+  RecordingLetterWriter,
+  RecordingPartyWriter,
+} from "../../src/testfakes/clientimport";
 import {
   FakePortalAccessRepo,
   FakePortalClients,
@@ -359,6 +368,19 @@ function deps(): RouterDeps {
         ids: makeFakes().ids,
         clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         events: makeFakes().events,
+      }),
+    },
+    clientImports: {
+      service: new ClientImportService({
+        store: new FakeClientImportStore(),
+        directory: new FakeImportDirectory(),
+        sheets: new FakeSheetReader(),
+        parties: new RecordingPartyWriter(),
+        assignments: new RecordingAssignmentWriter(),
+        letters: new RecordingLetterWriter(),
+        ids: new FakeIds(),
+        clock: new FakeClock(new Date("2026-09-07T00:00:00.000Z")),
+        events: new RecordingEventSink(),
       }),
     },
     portalAccess: {
