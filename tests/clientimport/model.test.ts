@@ -69,6 +69,8 @@ function client(over: Partial<ClientRow> = {}): ClientRow {
     keyManagerEmail: "anita@firm.test",
     spocEmails: { TRC: "ravi@firm.test" },
     signatory: null,
+    portalInviteRaw: null,
+    portalEmail: null,
     ...over,
   };
 }
@@ -374,6 +376,95 @@ describe("a people row", () => {
     expect(skipped.rows.find((r) => r.sheet === "people")?.action).toBe("skip");
     const twice = validateImport({ clients: [client()], people: [person(), person({ lineNo: 3 })], engagements: [] }, snapshot());
     expect(blockingMessages(twice)).toContain("the same Email is on row 2 — one person, one row");
+  });
+});
+
+// ── Portal Invite ────────────────────────────────────────────────────────────
+
+describe("the Portal Invite column", () => {
+  it("plans an invite for TRUE with a valid email, and counts it", () => {
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: "TRUE", portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(report.blocking).toBe(0);
+    expect(report.counts.portalInvitesToSend).toBe(1);
+    expect(report.portalInvites).toEqual([
+      { clientLineNo: 2, clientName: "Cobalt Foods Private Limited", clientPartyId: null, email: "priya.menon@cobalt.test" },
+    ]);
+  });
+
+  it("reads TRUE/FALSE case-insensitively and trims it", () => {
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: " true ", portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(report.blocking).toBe(0);
+    expect(report.counts.portalInvitesToSend).toBe(1);
+  });
+
+  it("sends nothing for FALSE or blank, even with an email given", () => {
+    const withFalse = validateImport(
+      { clients: [client({ portalInviteRaw: "FALSE", portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(withFalse.blocking).toBe(0);
+    expect(withFalse.counts.portalInvitesToSend).toBe(0);
+    expect(withFalse.portalInvites).toEqual([]);
+
+    const blank = validateImport(
+      { clients: [client({ portalInviteRaw: null, portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blank.counts.portalInvitesToSend).toBe(0);
+  });
+
+  it("refuses a value that is not TRUE or FALSE, naming it", () => {
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: "yes please" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(report)).toContain('Portal Invite "yes please" is not TRUE or FALSE');
+    expect(report.counts.portalInvitesToSend).toBe(0);
+  });
+
+  it("refuses TRUE with no email — nobody to send the login to", () => {
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: "TRUE", portalEmail: null })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(report)).toContain(
+      "Portal Invite is TRUE but no Portal Email is given — nobody to send the login to",
+    );
+  });
+
+  it("refuses TRUE with a malformed email", () => {
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: "TRUE", portalEmail: "not-an-email" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(report)).toContain('Portal Email "not-an-email" is not an email address');
+  });
+
+  it("still plans the invite when the client is already on file", () => {
+    const onFile = { partyId: "party-cobalt", displayName: "Cobalt Foods Private Limited", registered: true, jurisdiction: "IN", billToPartyId: "party-cobalt", archived: false };
+    const report = validateImport(
+      { clients: [client({ portalInviteRaw: "TRUE", portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot({ byIdentifier: new Map([["pan:AAACC1234F", onFile]]) }),
+    );
+    expect(report.rows[0]?.action).toBe("skip");
+    expect(report.portalInvites).toEqual([
+      { clientLineNo: 2, clientName: "Cobalt Foods Private Limited", clientPartyId: "party-cobalt", email: "priya.menon@cobalt.test" },
+    ]);
+  });
+
+  it("plans no invite for a client blocked for an unrelated reason", () => {
+    const report = validateImport(
+      { clients: [client({ entityType: null, portalInviteRaw: "TRUE", portalEmail: "priya.menon@cobalt.test" })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(report.blocking).toBeGreaterThan(0);
+    expect(report.portalInvites).toEqual([]);
   });
 });
 

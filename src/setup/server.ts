@@ -124,6 +124,7 @@ import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
 import { ClientImportService } from "../usecase/clientimport/service";
+import type { PortalMemberFinder } from "../usecase/clientimport/ports";
 import { PortalAccessService } from "../usecase/portalaccess/service";
 import { PortalInviteService } from "../usecase/portalinvite/service";
 import { StaffInviteService } from "../usecase/staffinvite/service";
@@ -728,6 +729,29 @@ export function wire(cfg: Config, log: Logger): Wired {
     events: ledger,
   });
 
+  // One instance, reused by the invite route AND by the client import: both
+  // are "one of the firm's people invites one of a client's" acting through
+  // the SAME three writes, and two instances would just be the same deps
+  // built twice.
+  const portalInvite = portalAccessForInvite();
+
+  // No use case answers "does this email already hold a CLIENT_PORTAL login
+  // at this firm" — the client import is the first caller to need it, and it
+  // is a narrow enough question that a second service would exist for this
+  // one method. Satisfied here with a closure over the roster, the same move
+  // `usecase/obligation`'s filing reconciliation documents for a use case
+  // that needs one fact from another without importing it.
+  const portalMemberFinder: PortalMemberFinder = {
+    async findClientMembership(tenantId, email) {
+      const wanted = email.trim().toLowerCase();
+      const roster = await tenancy.listMembers(tenantId);
+      const found = roster.find(
+        (m) => m.membership.audience === "CLIENT_PORTAL" && m.email.trim().toLowerCase() === wanted,
+      );
+      return found ? { membershipId: found.membership.id } : null;
+    },
+  };
+
   // THE PORTAL'S OWN READ (T6.5) — and this line is where the firm's write
   // surface and the client's read surface meet, which is the only place they
   // should.
@@ -986,6 +1010,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     parties: party,
     assignments: clientAssignments,
     letters: engagement,
+    portalInvites: portalInvite,
+    portalAccess,
+    portalMembers: portalMemberFinder,
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -1020,7 +1047,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         portalLibrary: { service: portalLibrary },
         portalRequests: { service: clientRequests },
         portalInvites: {
-          service: portalAccessForInvite(),
+          service: portalInvite,
           identity,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,

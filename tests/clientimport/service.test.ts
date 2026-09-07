@@ -17,10 +17,13 @@ import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeClientImportStore,
   FakeImportDirectory,
+  FakePortalMemberFinder,
   FakeSheetReader,
   RecordingAssignmentWriter,
   RecordingLetterWriter,
   RecordingPartyWriter,
+  RecordingPortalAccessGranter,
+  RecordingPortalInviteWriter,
   sheetBytes,
 } from "../../src/testfakes/clientimport";
 
@@ -30,10 +33,10 @@ const ACTOR = SYSTEM_ACTOR;
 const TODAY = "2026-09-07";
 
 const CLIENTS = [
-  "Client Name,Known As,Client Since,Group,Country,Entity Type,Incorporated On,Financial Year End,PAN,Key Manager,SPOC: TRC,Signatory",
-  "Kaveri Group,,2019-04-01,,,,,,,anita@firm.test,,Rajesh Kumar",
-  "Kaveri Foods Private Limited,Kaveri Foods,,Kaveri Group,IN,private_limited,2019-06-11,03-31,AAACK1111K,,ravi@firm.test,",
-  "Cobalt Foods Private Limited,,2021-01-15,,IN,private_limited,2020-11-03,03-31,AAACC1234F,anita@firm.test,ravi@firm.test,Priya Menon",
+  "Client Name,Known As,Client Since,Group,Country,Entity Type,Incorporated On,Financial Year End,PAN,Key Manager,SPOC: TRC,Signatory,Portal Invite,Portal Email",
+  "Kaveri Group,,2019-04-01,,,,,,,anita@firm.test,,Rajesh Kumar,TRUE,rajesh@kaveri.test",
+  "Kaveri Foods Private Limited,Kaveri Foods,,Kaveri Group,IN,private_limited,2019-06-11,03-31,AAACK1111K,,ravi@firm.test,,,",
+  "Cobalt Foods Private Limited,,2021-01-15,,IN,private_limited,2020-11-03,03-31,AAACC1234F,anita@firm.test,ravi@firm.test,Priya Menon,TRUE,priya.menon@cobalt.test",
 ].join("\n");
 
 const PEOPLE = [
@@ -71,6 +74,9 @@ interface Harness {
   parties: RecordingPartyWriter;
   assignments: RecordingAssignmentWriter;
   letters: RecordingLetterWriter;
+  portalInvites: RecordingPortalInviteWriter;
+  portalAccess: RecordingPortalAccessGranter;
+  portalMembers: FakePortalMemberFinder;
   events: RecordingEventSink;
 }
 
@@ -79,6 +85,9 @@ function harness(dir: FakeImportDirectory = directory()): Harness {
   const parties = new RecordingPartyWriter();
   const assignments = new RecordingAssignmentWriter();
   const letters = new RecordingLetterWriter();
+  const portalInvites = new RecordingPortalInviteWriter();
+  const portalAccess = new RecordingPortalAccessGranter();
+  const portalMembers = new FakePortalMemberFinder();
   const events = new RecordingEventSink();
   const service = new ClientImportService({
     store,
@@ -87,11 +96,14 @@ function harness(dir: FakeImportDirectory = directory()): Harness {
     parties,
     assignments,
     letters,
+    portalInvites,
+    portalAccess,
+    portalMembers,
     ids: new FakeIds(),
     clock: new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)),
     events,
   });
-  return { service, store, dir, parties, assignments, letters, events };
+  return { service, store, dir, parties, assignments, letters, portalInvites, portalAccess, portalMembers, events };
 }
 
 function upload(text: string, filename: string) {
@@ -197,7 +209,7 @@ describe("confirming an import", () => {
     const confirmed = await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
 
     expect(confirmed.status).toBe("confirmed");
-    expect(confirmed.outcome?.created).toEqual({ clients: 3, entities: 2, people: 2, assignments: 4, letters: 2, engagements: 3 });
+    expect(confirmed.outcome?.created).toEqual({ clients: 3, entities: 2, people: 2, assignments: 4, letters: 2, engagements: 3, portalInvites: 2 });
     expect(confirmed.outcome?.failed).toBe(0);
     expect(confirmed.confirmedBy?.userId).toBe(ADMIN);
 
@@ -261,6 +273,16 @@ describe("confirming an import", () => {
     expect(confirmed.outcome?.letters.map((l) => [l.clientName, l.action, l.engagementIds.length])).toEqual([
       ["Kaveri Group", "created", 1],
       ["Cobalt Foods Private Limited", "created", 2],
+    ]);
+
+    // Portal invites: one per TRUE row, sent after everyone has a party.
+    expect(h.portalInvites.of("invite")).toEqual([
+      { method: "invite", input: { tenantId: TENANT, email: "rajesh@kaveri.test", clientPartyId: "party-0001", validFrom: TODAY, invitedBy: ADMIN } },
+      { method: "invite", input: { tenantId: TENANT, email: "priya.menon@cobalt.test", clientPartyId: "party-0002", validFrom: TODAY, invitedBy: ADMIN } },
+    ]);
+    expect(confirmed.outcome?.portalInvites).toEqual([
+      { clientName: "Kaveri Group", email: "rajesh@kaveri.test", action: "invited", detail: null },
+      { clientName: "Cobalt Foods Private Limited", email: "priya.menon@cobalt.test", action: "invited", detail: null },
     ]);
     expect(h.events.verbs()).toEqual(["client_import.staged", "client_import.confirmed"]);
     expect(h.events.recorded[1]?.payload).toMatchObject({ created: { clients: 3, letters: 2 }, skipped: 0, failed: 0 });

@@ -53,6 +53,7 @@ import {
   type KnownAxis,
   type KnownOrganization,
   type LetterPlan,
+  type PortalInvitePlan,
 } from "../../domain/clientimport/model";
 import {
   ClientImportAlreadyConfirmed,
@@ -64,6 +65,8 @@ import {
 } from "../../domain/clientimport/errors";
 import { clauseApplies } from "../../domain/engagement/model";
 import { normalizeIdentifier } from "../../domain/party/model";
+import { MembershipExists } from "../../domain/tenancy/errors";
+import { PortalGrantDuplicate } from "../../domain/portalaccess/errors";
 import type {
   AssignmentWriter,
   ClauseOnFile,
@@ -74,6 +77,10 @@ import type {
   LetterWriter,
   OutcomeRow,
   PartyWriter,
+  PortalAccessGranter,
+  PortalInviteOutcome,
+  PortalInviteWriter,
+  PortalMemberFinder,
   SheetReader,
   StagedImport,
   StagedImportSummary,
@@ -94,6 +101,9 @@ export interface Deps {
   readonly parties: PartyWriter;
   readonly assignments: AssignmentWriter;
   readonly letters: LetterWriter;
+  readonly portalInvites: PortalInviteWriter;
+  readonly portalAccess: PortalAccessGranter;
+  readonly portalMembers: PortalMemberFinder;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -184,7 +194,7 @@ export class ClientImportService {
     const report = validateImport(staged.rows, snapshot);
     if (!mayConfirm(report)) throw new ClientImportBlocked(report.blocking, true);
 
-    const outcome = await this.execute(input.tenantId, staged.rows, report, snapshot, actor);
+    const outcome = await this.execute(input.tenantId, staged.rows, report, snapshot, actor, input.confirmedBy);
     const confirmed = await this.deps.store.confirm(
       input.tenantId,
       staged.id,
@@ -307,13 +317,15 @@ export class ClientImportService {
     report: ImportReport,
     snapshot: ImportSnapshot,
     actor: Actor,
+    confirmedBy: string,
   ): Promise<ImportOutcome> {
     const today = this.today();
     const firm = await this.deps.directory.firm(tenantId);
     const clauses = await this.deps.directory.clauses(tenantId);
     const outcomeRows: OutcomeRow[] = [];
     const letterOutcomes: LetterOutcome[] = [];
-    const created = { clients: 0, entities: 0, people: 0, assignments: 0, letters: 0, engagements: 0 };
+    const portalOutcomes: PortalInviteOutcome[] = [];
+    const created = { clients: 0, entities: 0, people: 0, assignments: 0, letters: 0, engagements: 0, portalInvites: 0 };
     let skipped = 0;
     let failed = 0;
 
@@ -567,7 +579,16 @@ export class ClientImportService {
       });
     }
 
-    return { rows: outcomeRows, letters: letterOutcomes, created, skipped, failed };
+    // ── Portal invites — after everybody who could be billed has a party ────
+    for (const plan of report.portalInvites) {
+      const result = await this.invitePortal(tenantId, plan, partyOfLine, today, confirmedBy, actor);
+      portalOutcomes.push(result);
+      if (result.action === "invited" || result.action === "granted") created.portalInvites += 1;
+      else if (result.action === "already granted") skipped += 1;
+      else failed += 1;
+    }
+
+    return { rows: outcomeRows, letters: letterOutcomes, portalInvites: portalOutcomes, created, skipped, failed };
   }
 
   private async writeLetter(
@@ -672,6 +693,84 @@ export class ClientImportService {
       };
     } catch (err) {
       return failed(`${step}: ${messageOf(err)}${letterId === null ? "" : " — the draft is left for somebody to finish or withdraw"}`, letterId);
+    }
+  }
+
+  /**
+   * One Portal Invite=TRUE row.
+   *
+   * `invite()` refuses a SECOND membership for an email already holding a
+   * CLIENT_PORTAL login at this firm (`MembershipExists`) — which a sheet
+   * hits legitimately whenever one contact is named for more than one
+   * company that is not a `parent_of` group (an accountant who looks after
+   * three unrelated clients, say). That case is not a failure: it is
+   * answered by finding the existing login and GRANTING it this company
+   * instead, with no second mail — the product's own rule that a contact who
+   * should see several companies gets several GRANTS, never a wider one.
+   *
+   * A re-run of the same sheet reaches the grant a second time and meets
+   * `PortalGrantDuplicate`, which is the boring, expected shape every other
+   * row in this module already has: already done, reported, nothing repeated.
+   */
+  private async invitePortal(
+    tenantId: string,
+    plan: PortalInvitePlan,
+    partyOfLine: ReadonlyMap<number, string>,
+    today: IsoDate,
+    confirmedBy: string,
+    actor: Actor,
+  ): Promise<PortalInviteOutcome> {
+    const clientPartyId = plan.clientPartyId ?? partyOfLine.get(plan.clientLineNo) ?? null;
+    if (clientPartyId === null) {
+      return {
+        clientName: plan.clientName,
+        email: plan.email,
+        action: "failed",
+        detail: `"${plan.clientName}" was not created, so there is nobody to invite`,
+      };
+    }
+    try {
+      await this.deps.portalInvites.invite(
+        { tenantId, email: plan.email, clientPartyId, validFrom: today, invitedBy: confirmedBy },
+        actor,
+      );
+      return { clientName: plan.clientName, email: plan.email, action: "invited", detail: null };
+    } catch (err) {
+      if (!(err instanceof MembershipExists)) {
+        return { clientName: plan.clientName, email: plan.email, action: "failed", detail: messageOf(err) };
+      }
+    }
+    // The email already has a login here — find it and grant it this company.
+    const existing = await this.deps.portalMembers.findClientMembership(tenantId, plan.email);
+    if (existing === null) {
+      return {
+        clientName: plan.clientName,
+        email: plan.email,
+        action: "failed",
+        detail: `"${plan.email}" already has a portal login at this firm, but it could not be found to grant`,
+      };
+    }
+    try {
+      await this.deps.portalAccess.grant(
+        { tenantId, membershipId: existing.membershipId, clientPartyId, validFrom: today, grantedBy: confirmedBy },
+        actor,
+      );
+      return {
+        clientName: plan.clientName,
+        email: plan.email,
+        action: "granted",
+        detail: "already had a portal login here — granted this company, no second mail sent",
+      };
+    } catch (err) {
+      if (err instanceof PortalGrantDuplicate) {
+        return {
+          clientName: plan.clientName,
+          email: plan.email,
+          action: "already granted",
+          detail: "already invited and granted this company",
+        };
+      }
+      return { clientName: plan.clientName, email: plan.email, action: "failed", detail: messageOf(err) };
     }
   }
 

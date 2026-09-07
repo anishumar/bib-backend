@@ -57,9 +57,23 @@ export interface LetterOutcome {
   readonly engagementIds: readonly string[];
 }
 
+/** What happened to one Portal Invite=TRUE row. `invited` sent a fresh
+ *  login and mail; `granted` added this company to an email that already
+ *  holds a portal login at this firm — no second mail; `already granted` is
+ *  a re-run, both the login and this exact grant already exist. */
+export type PortalInviteAction = "invited" | "granted" | "already granted" | "failed";
+
+export interface PortalInviteOutcome {
+  readonly clientName: string;
+  readonly email: string;
+  readonly action: PortalInviteAction;
+  readonly detail: string | null;
+}
+
 export interface ImportOutcome {
   readonly rows: readonly OutcomeRow[];
   readonly letters: readonly LetterOutcome[];
+  readonly portalInvites: readonly PortalInviteOutcome[];
   readonly created: {
     readonly clients: number;
     readonly entities: number;
@@ -67,6 +81,7 @@ export interface ImportOutcome {
     readonly assignments: number;
     readonly letters: number;
     readonly engagements: number;
+    readonly portalInvites: number;
   };
   readonly skipped: number;
   readonly failed: number;
@@ -317,4 +332,50 @@ export interface LetterWriter {
     },
     actor: Actor,
   ): Promise<{ readonly engagements: readonly { readonly engagement: { readonly id: string } }[] }>;
+}
+
+// ── The portal — a THIRD kind of write, and deliberately not through a
+// service that assumes it is inviting a person the firm has already met.
+// `PortalInviteWriter` is the real `PortalInviteService.invite`, narrowed;
+// `PortalAccessGranter` is the real `PortalAccessService.grant`, narrowed —
+// used only when the email already holds a login at this firm, so a second
+// company is a GRANT, never a second invite. `PortalMemberFinder` has no real
+// service behind it: no use case answers "does this email already have a
+// portal login here", so the composition root satisfies it with a closure
+// over the roster, the same move `usecase/obligation`'s filing reconciliation
+// documents for the same reason — two use cases that would otherwise have to
+// import each other to ask one small question.
+
+export interface PortalInviteWriter {
+  invite(
+    input: {
+      readonly tenantId: string;
+      readonly email: string;
+      readonly clientPartyId: string;
+      readonly validFrom?: string | undefined;
+      readonly invitedBy: string;
+    },
+    actor: Actor,
+  ): Promise<{ readonly membershipId: string }>;
+}
+
+export interface PortalAccessGranter {
+  grant(
+    input: {
+      readonly tenantId: string;
+      readonly membershipId: string;
+      readonly clientPartyId: string;
+      readonly validFrom?: string | undefined;
+      readonly grantedBy: string;
+    },
+    actor: Actor,
+  ): Promise<{ readonly id: string }>;
+}
+
+export interface PortalMemberFinder {
+  /** The existing CLIENT_PORTAL membership for this email at this firm, if
+   *  one was created by an earlier row in this sheet, an earlier import, or a
+   *  manual invite from `/clients/[partyId]`. Null when this is a fresh
+   *  address. */
+  findClientMembership(tenantId: string, email: string): Promise<{ readonly membershipId: string } | null>;
 }

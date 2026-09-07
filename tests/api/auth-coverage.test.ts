@@ -113,6 +113,9 @@ import {
   RecordingAssignmentWriter,
   RecordingLetterWriter,
   RecordingPartyWriter,
+  RecordingPortalAccessGranter,
+  RecordingPortalInviteWriter,
+  FakePortalMemberFinder,
 } from "../../src/testfakes/clientimport";
 import {
   FakePortalAccessRepo,
@@ -452,6 +455,9 @@ function deps(): RouterDeps {
         parties: new RecordingPartyWriter(),
         assignments: new RecordingAssignmentWriter(),
         letters: new RecordingLetterWriter(),
+        portalInvites: new RecordingPortalInviteWriter(),
+        portalAccess: new RecordingPortalAccessGranter(),
+        portalMembers: new FakePortalMemberFinder(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-07T00:00:00.000Z")),
         events: new RecordingEventSink(),

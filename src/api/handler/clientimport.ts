@@ -94,6 +94,15 @@ const LetterPlanSchema = z
   })
   .openapi("ClientImportLetterPlan");
 
+const PortalInvitePlanSchema = z
+  .object({
+    clientLineNo: z.number().int(),
+    clientName: z.string(),
+    clientPartyId: z.string().uuid().nullable(),
+    email: z.string(),
+  })
+  .openapi("ClientImportPortalInvitePlan");
+
 const CountsSchema = z
   .object({
     clientsToCreate: z.number().int(),
@@ -108,6 +117,7 @@ const CountsSchema = z
     engagementsBlocked: z.number().int(),
     lettersToDraft: z.number().int(),
     assignmentsToRecord: z.number().int(),
+    portalInvitesToSend: z.number().int(),
   })
   .openapi("ClientImportCounts");
 
@@ -118,6 +128,7 @@ const ReportSchema = z
     warnings: z.number().int(),
     rows: z.array(RowVerdictSchema),
     letters: z.array(LetterPlanSchema),
+    portalInvites: z.array(PortalInvitePlanSchema),
     counts: CountsSchema,
     compliance: z.object({
       floor: z.string().nullable().openapi({
@@ -152,10 +163,20 @@ const LetterOutcomeSchema = z
   })
   .openapi("ClientImportLetterOutcome");
 
+const PortalInviteOutcomeSchema = z
+  .object({
+    clientName: z.string(),
+    email: z.string(),
+    action: z.enum(["invited", "granted", "already granted", "failed"]),
+    detail: z.string().nullable(),
+  })
+  .openapi("ClientImportPortalInviteOutcome");
+
 const OutcomeSchema = z
   .object({
     rows: z.array(OutcomeRowSchema),
     letters: z.array(LetterOutcomeSchema),
+    portalInvites: z.array(PortalInviteOutcomeSchema),
     created: z.object({
       clients: z.number().int(),
       entities: z.number().int(),
@@ -163,6 +184,7 @@ const OutcomeSchema = z
       assignments: z.number().int(),
       letters: z.number().int(),
       engagements: z.number().int(),
+      portalInvites: z.number().int(),
     }),
     skipped: z.number().int(),
     failed: z.number().int(),
@@ -260,6 +282,7 @@ function reportToWire(r: ImportReport): z.infer<typeof ReportSchema> {
       signatory: l.signatory,
       lines: l.lines.map((x) => ({ ...x })),
     })),
+    portalInvites: r.portalInvites.map((p) => ({ ...p })),
     counts: { ...r.counts },
     compliance: { ...r.compliance },
   };
@@ -277,6 +300,7 @@ function outcomeToWire(o: ImportOutcome): z.infer<typeof OutcomeSchema> {
       lineNos: [...l.lineNos],
       engagementIds: [...l.engagementIds],
     })),
+    portalInvites: o.portalInvites.map((p) => ({ ...p })),
     created: { ...o.created },
     skipped: o.skipped,
     failed: o.failed,
@@ -397,8 +421,10 @@ const confirmRoute = createRoute({
   description:
     "Re-checks the sheet against the firm's records as they stand now, then creates every row " +
     "through the same services the screens use: the company, its registration and identifiers, " +
-    "its people, its Key Manager and SPOCs, and one signed engagement letter per client and " +
-    "currency carrying its engagements. Each row commits on its own and the outcome says what " +
+    "its people, its Key Manager and SPOCs, one signed engagement letter per client and " +
+    "currency carrying its engagements, and a portal invite for every client whose Portal " +
+    "Invite column is TRUE. An address that already holds a login here is GRANTED this company " +
+    "rather than mailed a second invite. Each row commits on its own and the outcome says what " +
     "each became; a row that failed can be uploaded again and only what is missing is attempted.",
   request: { params: ImportParam },
   responses: {

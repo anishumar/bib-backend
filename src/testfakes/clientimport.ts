@@ -8,6 +8,8 @@
 
 import type { Actor } from "../domain/ledger/model";
 import type { IdentifierType } from "../domain/party/model";
+import { MembershipExists } from "../domain/tenancy/errors";
+import { PortalGrantDuplicate } from "../domain/portalaccess/errors";
 import type { KnownAxis, KnownService } from "../domain/clientimport/model";
 import type {
   AssignmentWriter,
@@ -23,6 +25,9 @@ import type {
   OrganizationOnFile,
   PartyWriter,
   PersonOnFile,
+  PortalAccessGranter,
+  PortalInviteWriter,
+  PortalMemberFinder,
   SheetReader,
   StaffMember,
   StagedImport,
@@ -326,5 +331,75 @@ export class RecordingLetterWriter extends Recorder implements LetterWriter {
         engagement: { id: `${input.letterId}-engagement-${String(i + 1)}` },
       })),
     });
+  }
+}
+
+// ── The portal — invite, grant, and the roster lookup between them ──────────
+
+/** Emails this fake treats as already holding a CLIENT_PORTAL login at the
+ *  firm — `invite()` throws the real `MembershipExists` for them, exactly as
+ *  `TenancyService.inviteMember` does. */
+export class RecordingPortalInviteWriter extends Recorder implements PortalInviteWriter {
+  private readonly existing = new Set<string>();
+
+  constructor() {
+    super("portal-invite");
+  }
+
+  /** Mark an email as already invited, so the next `invite()` for it refuses
+   *  the way a real second invite would. */
+  withExisting(email: string): this {
+    this.existing.add(email.trim().toLowerCase());
+    return this;
+  }
+
+  invite(input: Parameters<PortalInviteWriter["invite"]>[0], _actor: Actor) {
+    if (this.existing.has(input.email.trim().toLowerCase())) {
+      return Promise.reject(new MembershipExists(input.email, "CLIENT_PORTAL"));
+    }
+    this.record("invite", input);
+    this.existing.add(input.email.trim().toLowerCase());
+    return Promise.resolve({ membershipId: this.mint() });
+  }
+}
+
+/** `clientPartyId:membershipId` pairs this fake treats as already granted —
+ *  `grant()` throws the real `PortalGrantDuplicate` for them, exactly as
+ *  `PortalAccessService.grant` does under its exclusion constraint. */
+export class RecordingPortalAccessGranter extends Recorder implements PortalAccessGranter {
+  private readonly existing = new Set<string>();
+
+  constructor() {
+    super("portal-grant");
+  }
+
+  withExisting(membershipId: string, clientPartyId: string): this {
+    this.existing.add(`${clientPartyId}:${membershipId}`);
+    return this;
+  }
+
+  grant(input: Parameters<PortalAccessGranter["grant"]>[0], _actor: Actor) {
+    const key = `${input.clientPartyId}:${input.membershipId}`;
+    if (this.existing.has(key)) return Promise.reject(new PortalGrantDuplicate("this client"));
+    this.record("grant", input);
+    this.existing.add(key);
+    return Promise.resolve({ id: this.mint() });
+  }
+}
+
+/** A plain map standing in for the roster lookup the composition root
+ *  satisfies with a closure — seeded directly, since there is no service
+ *  behind the real one to fake. */
+export class FakePortalMemberFinder implements PortalMemberFinder {
+  private readonly byEmail = new Map<string, string>();
+
+  withMembership(email: string, membershipId: string): this {
+    this.byEmail.set(email.trim().toLowerCase(), membershipId);
+    return this;
+  }
+
+  findClientMembership(_tenantId: string, email: string): Promise<{ readonly membershipId: string } | null> {
+    const found = this.byEmail.get(email.trim().toLowerCase());
+    return Promise.resolve(found === undefined ? null : { membershipId: found });
   }
 }

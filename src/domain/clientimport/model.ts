@@ -81,6 +81,8 @@ export const CLIENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Key Manager", required: false, about: "The email of the staff member who owns the relationship." },
   { header: "SPOC: <Dept>", required: false, about: "One column per Dept — its code or name after the colon — holding the SPOC's email." },
   { header: "Signatory", required: false, about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
+  { header: "Portal Invite", required: false, about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
+  { header: "Portal Email", required: false, about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
 ];
 
 export const PEOPLE_SHEET_MARKER = "Name";
@@ -156,6 +158,10 @@ export interface ClientRow {
   /** Dept code or name (as in the header) → SPOC email. */
   readonly spocEmails: Readonly<Record<string, string>>;
   readonly signatory: string | null;
+  /** As typed — "TRUE" / "FALSE" / blank. Parsed and checked in validation,
+   *  not here: a grid reader has no business deciding what a bad value means. */
+  readonly portalInviteRaw: string | null;
+  readonly portalEmail: string | null;
 }
 
 export interface PersonRow {
@@ -265,6 +271,8 @@ export function clientRowsOf(rows: readonly SheetRow[]): readonly ClientRow[] {
       keyManagerEmail: blankToNull(r.cell("Key Manager")),
       spocEmails,
       signatory: blankToNull(r.cell("Signatory")),
+      portalInviteRaw: blankToNull(r.cell("Portal Invite")),
+      portalEmail: blankToNull(r.cell("Portal Email")),
     };
   });
 }
@@ -331,6 +339,20 @@ export function isCalendarDay(iso: string): boolean {
   if (y === undefined || m === undefined || d === undefined) return false;
   const built = new Date(Date.UTC(y, m - 1, d));
   return built.getUTCFullYear() === y && built.getUTCMonth() === m - 1 && built.getUTCDate() === d;
+}
+
+/**
+ * "TRUE" or "FALSE", case-insensitively, trimmed — and nothing else. Blank is
+ * FALSE (no invite is the safe default for a column a sheet may not even
+ * carry yet), and anything unrecognised is null so the caller can refuse it
+ * rather than guess which way a typo meant.
+ */
+export function parsePortalInvite(raw: string | null): boolean | null {
+  if (raw === null) return false;
+  const w = raw.trim().toUpperCase();
+  if (w === "TRUE") return true;
+  if (w === "FALSE") return false;
+  return null;
 }
 
 /** `MM-DD`, and a day that exists in that month. */
@@ -463,6 +485,16 @@ export interface LetterPlan {
   readonly lines: readonly LetterLinePlan[];
 }
 
+/** One client this sheet asks to be invited to its own portal login. */
+export interface PortalInvitePlan {
+  readonly clientLineNo: number;
+  readonly clientName: string;
+  /** Known now when the client is already on file; null means "resolve from
+   *  the line at confirm time", the same convention `LetterLinePlan` uses. */
+  readonly clientPartyId: string | null;
+  readonly email: string;
+}
+
 export interface ImportCounts {
   readonly clientsToCreate: number;
   readonly clientsOnFile: number;
@@ -476,6 +508,7 @@ export interface ImportCounts {
   readonly engagementsBlocked: number;
   readonly lettersToDraft: number;
   readonly assignmentsToRecord: number;
+  readonly portalInvitesToSend: number;
 }
 
 export interface ImportReport {
@@ -484,6 +517,7 @@ export interface ImportReport {
   readonly warnings: number;
   readonly rows: readonly RowVerdict[];
   readonly letters: readonly LetterPlan[];
+  readonly portalInvites: readonly PortalInvitePlan[];
   readonly counts: ImportCounts;
   readonly compliance: {
     readonly floor: IsoDate | null;
@@ -660,6 +694,25 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       }
     }
 
+    // Portal Invite is TRUE, FALSE or blank — nothing else. TRUE requires an
+    // address, because a login with nobody to mail it to is the halfway state
+    // the invite service itself refuses; FALSE (or blank) means nobody is
+    // invited, whatever Portal Email says, and that column is simply ignored.
+    const portalInvite = parsePortalInvite(row.portalInviteRaw);
+    if (portalInvite === null) {
+      bad(`Portal Invite "${row.portalInviteRaw ?? ""}" is not TRUE or FALSE`);
+    }
+    if (portalInvite === true) {
+      if (row.portalEmail === null) {
+        bad("Portal Invite is TRUE but no Portal Email is given — nobody to send the login to");
+      } else {
+        const normalised = normalizeIdentifier("email", row.portalEmail);
+        if (!isValidIdentifier("email", normalised)) {
+          bad(`Portal Email "${row.portalEmail}" is not an email address`);
+        }
+      }
+    }
+
     // On file? By a registration number first — that is the only thing on
     // the sheet that is actually an identity — then by name.
     let onFile: KnownOrganization | null = null;
@@ -704,10 +757,22 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
 
   let assignments = 0;
   let entities = 0;
+  const portalInvites: PortalInvitePlan[] = [];
   for (const c of clients) {
     if (c.blocked) {
       verdicts.push({ sheet: "clients", lineNo: c.row.lineNo, name: c.row.legalName, action: "blocked", detail: null });
       continue;
+    }
+    // Re-derived rather than carried on `ResolvedClient`: a row that reached
+    // here is unblocked, so a bad value or a missing address already refused
+    // it above and cannot appear now.
+    if (parsePortalInvite(c.row.portalInviteRaw) === true && c.row.portalEmail !== null) {
+      portalInvites.push({
+        clientLineNo: c.row.lineNo,
+        clientName: c.row.legalName,
+        clientPartyId: c.onFile?.partyId ?? null,
+        email: normalizeIdentifier("email", c.row.portalEmail),
+      });
     }
     if (c.onFile !== null) {
       warn("clients", c.row.lineNo, c.row.legalName, `already on file as "${c.onFile.displayName}" — skipped, not updated`);
@@ -1068,6 +1133,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     warnings,
     rows: finalVerdicts,
     letters,
+    portalInvites,
     counts: {
       clientsToCreate: count("clients", "create"),
       clientsOnFile: count("clients", "skip"),
@@ -1081,6 +1147,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       engagementsBlocked,
       lettersToDraft: letters.length,
       assignmentsToRecord: assignments,
+      portalInvitesToSend: portalInvites.length,
     },
     compliance: {
       floor: snap.complianceFloor,
