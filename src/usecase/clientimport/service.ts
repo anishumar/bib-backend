@@ -466,12 +466,12 @@ export class ClientImportService {
           );
           made.push("the Key Manager");
         }
-        for (const [word, email] of Object.entries(row.spocEmails)) {
-          const dept = deptOf(word);
-          if (dept === null) continue;
+        for (const spoc of row.spocs) {
+          const dept = deptOf(spoc.dept);
+          if (dept === null || spoc.email === "") continue;
           step = `naming the SPOC for ${dept.code}`;
-          const userId = snapshot.staff.get(email.toLowerCase());
-          if (userId === undefined) throw new Error(`"${email}" is no longer active staff`);
+          const userId = snapshot.staff.get(spoc.email.toLowerCase());
+          if (userId === undefined) throw new Error(`"${spoc.email}" is no longer active staff`);
           await this.deps.assignments.assign(
             { tenantId, clientPartyId: org.partyId, role: "spoc", axisId: dept.id, userId, validFrom: clientSince ?? today },
             actor,

@@ -67,7 +67,7 @@ function client(over: Partial<ClientRow> = {}): ClientRow {
     registeredAddress: null,
     identifiers: [{ type: "pan", value: "AAACC1234F" }],
     keyManagerEmail: "anita@firm.test",
-    spocEmails: { TRC: "ravi@firm.test" },
+    spocs: [{ dept: "TRC", email: "ravi@firm.test", column: "SPOC: TRC" }],
     signatory: null,
     portalInviteRaw: null,
     portalEmail: null,
@@ -130,13 +130,55 @@ describe("reading a grid", () => {
     expect(rowsOf([["Name", "Email"]], CLIENT_SHEET_MARKER)).toBeNull();
   });
 
-  it("reads one SPOC column per Dept, keyed by the word after the colon", () => {
+  it("reads the older Dept-in-the-header form, and a blank cell there is simply no SPOC", () => {
     const grid = [
       ["Client Name", "Country", "Entity Type", "SPOC: TRC", "spoc: Finance"],
       ["Alpha Ltd", "IN", "private_limited", "ravi@firm.test", ""],
     ];
     const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
-    expect(row?.spocEmails).toEqual({ TRC: "ravi@firm.test" });
+    expect(row?.spocs).toEqual([{ dept: "TRC", email: "ravi@firm.test", column: "SPOC: TRC" }]);
+  });
+
+  it("reads the numbered pairs, whose headers are the same at every firm", () => {
+    const grid = [
+      ["Client Name", "SPOC 1 Dept", "SPOC 1 Email", "spoc 2 dept", "SPOC  2  Email"],
+      ["Alpha Ltd", "TRC", "ravi@firm.test", "Finance", "asha@firm.test"],
+    ];
+    const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
+    expect(row?.spocs).toEqual([
+      { dept: "TRC", email: "ravi@firm.test", column: "SPOC 1" },
+      { dept: "Finance", email: "asha@firm.test", column: "SPOC 2" },
+    ]);
+  });
+
+  it("keeps TWO SPOCs named for the SAME Dept — G3.2 allows it, and a map would have lost one", () => {
+    const grid = [
+      ["Client Name", "SPOC 1 Dept", "SPOC 1 Email", "SPOC 2 Dept", "SPOC 2 Email"],
+      ["Alpha Ltd", "TRC", "ravi@firm.test", "TRC", "asha@firm.test"],
+    ];
+    const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
+    expect(row?.spocs.map((s) => s.email)).toEqual(["ravi@firm.test", "asha@firm.test"]);
+  });
+
+  it("keeps a HALF-FILLED pair rather than dropping it, so validation can refuse it by name", () => {
+    const grid = [
+      ["Client Name", "SPOC 1 Dept", "SPOC 1 Email", "SPOC 2 Dept", "SPOC 2 Email"],
+      ["Alpha Ltd", "TRC", "", "", "asha@firm.test"],
+    ];
+    const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
+    expect(row?.spocs).toEqual([
+      { dept: "TRC", email: "", column: "SPOC 1" },
+      { dept: "", email: "asha@firm.test", column: "SPOC 2" },
+    ]);
+  });
+
+  it("reads a sheet carrying BOTH forms, so a file sent before the change still loads", () => {
+    const grid = [
+      ["Client Name", "SPOC: TRC", "SPOC 1 Dept", "SPOC 1 Email"],
+      ["Alpha Ltd", "ravi@firm.test", "Finance", "asha@firm.test"],
+    ];
+    const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
+    expect(row?.spocs.map((s) => s.dept)).toEqual(["TRC", "Finance"]);
   });
 
   it("collects every identifier column that is filled and ignores the blank ones", () => {
@@ -281,7 +323,7 @@ describe("a client row", () => {
 
   it("refuses a Key Manager or a SPOC who is not active staff, and a SPOC column naming no Dept", () => {
     const report = validateImport(
-      { clients: [client({ keyManagerEmail: "gone@firm.test", spocEmails: { TRC: "who@firm.test", Legal: "ravi@firm.test" } })], people: [], engagements: [] },
+      { clients: [client({ keyManagerEmail: "gone@firm.test", spocs: [{ dept: "TRC", email: "who@firm.test", column: "SPOC: TRC" }, { dept: "Legal", email: "ravi@firm.test", column: "SPOC: Legal" }] })], people: [], engagements: [] },
       snapshot(),
     );
     const messages = blockingMessages(report);
@@ -291,10 +333,35 @@ describe("a client row", () => {
     expect(report.findings.find((f) => f.name === "SPOC: Legal")?.sheet).toBe("file");
   });
 
+  it("refuses HALF a numbered pair — a SPOC covers a Dept, so neither half is a smaller SPOC", () => {
+    const noEmail = validateImport(
+      { clients: [client({ spocs: [{ dept: "TRC", email: "", column: "SPOC 1" }] })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(noEmail).some((m) => m.startsWith('SPOC 1 Dept is "TRC" with no SPOC 1 Email'))).toBe(true);
+
+    const noDept = validateImport(
+      { clients: [client({ spocs: [{ dept: "", email: "ravi@firm.test", column: "SPOC 2" }] })], people: [], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(noDept).some((m) => m.startsWith('SPOC 2 Email is "ravi@firm.test" with no SPOC 2 Dept'))).toBe(true);
+  });
+
+  it("refuses a bad Dept in a CELL against the ROW, not the file — one header was wrong for everybody, one cell is not", () => {
+    const report = validateImport(
+      { clients: [client({ spocs: [{ dept: "Legal", email: "ravi@firm.test", column: "SPOC 1" }] })], people: [], engagements: [] },
+      snapshot(),
+    );
+    const finding = report.findings.find((f) => f.severity === "blocking");
+    expect(finding?.sheet).toBe("clients");
+    expect(finding?.lineNo).not.toBeNull();
+    expect(finding?.message).toContain('SPOC 1 Dept is "Legal"');
+  });
+
   it("matches a SPOC column on the Dept's NAME as well as its code, and never on a retired one", () => {
-    const ok = validateImport({ clients: [client({ spocEmails: { Finance: "ravi@firm.test" } })], people: [], engagements: [] }, snapshot());
+    const ok = validateImport({ clients: [client({ spocs: [{ dept: "Finance", email: "ravi@firm.test", column: "SPOC: Finance" }] })], people: [], engagements: [] }, snapshot());
     expect(ok.blocking).toBe(0);
-    const retired = validateImport({ clients: [client({ spocEmails: { OLD: "ravi@firm.test" } })], people: [], engagements: [] }, snapshot());
+    const retired = validateImport({ clients: [client({ spocs: [{ dept: "OLD", email: "ravi@firm.test", column: "SPOC: OLD" }] })], people: [], engagements: [] }, snapshot());
     expect(retired.blocking).toBe(1);
   });
 
@@ -572,7 +639,7 @@ describe("an engagement row", () => {
 
   it("warns about a missing fee and about a Dept with no SPOC on the client", () => {
     const report = validateImport(
-      { clients: [client({ spocEmails: {} })], people: [], engagements: [engagement({ fee: null, currency: null })] },
+      { clients: [client({ spocs: [] })], people: [], engagements: [engagement({ fee: null, currency: null })] },
       snapshot(),
     );
     expect(report.blocking).toBe(0);

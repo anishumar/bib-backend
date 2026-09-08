@@ -60,23 +60,54 @@ export const IDENTIFIER_COLUMNS: readonly { readonly header: string; readonly ty
   { header: "VAT", type: "vat" },
 ];
 
-/** The prefix of a Dept SPOC column. One column per Dept the FIRM has, named
- *  after the colon by that Dept's own code or name — so the real headers are
- *  whatever this firm calls its Depts, and no fixed vocabulary is implied. */
+// ── The SPOC columns, and why there are two spellings of them ────────────────
+//
+// A SPOC covers a Dept. That is not a convention this module could drop if it
+// wanted to: `client_assignment_axis_matches_role` (0049) makes `axis_id` NOT
+// NULL for a SPOC, so an email with no Dept beside it cannot become one. The
+// only question a sheet gets to answer is WHERE the Dept is written.
+//
+// **NUMBERED PAIRS — `SPOC 1 Dept`, `SPOC 1 Email` — are the form to send.**
+// The header is the same at every firm, which is the point: a template whose
+// column names are one firm's Dept codes reads as though the product ships a
+// fixed vocabulary of Depts, and it does not. The Dept moves into a cell, and
+// the sheet can be filled in by somebody who has never seen this firm's
+// structure screen.
+//
+// **`SPOC: <Dept>` — the Dept in the HEADER — is still read**, because sheets
+// in that shape have already been sent out and a migration file that stops
+// being readable a fortnight after somebody was asked to fill it in is its own
+// small disaster. Both forms land in the same list; a sheet may use either or
+// both, and nothing downstream can tell which one it came from.
+//
+// The numbering is not a limit. The reader scans the headers it is given, so a
+// firm that wants a fourth SPOC adds `SPOC 4 Dept` and `SPOC 4 Email` to the
+// sheet by hand and it works — the template ships as many pairs as the firm has
+// Depts because that is the ordinary number, not because it is the maximum.
+
+/** The prefix of the older, Dept-in-the-header form: `SPOC: IDT`. */
 export const SPOC_COLUMN_PREFIX = "SPOC:";
 
+/** `SPOC 1 Dept` / `SPOC 12 Email`, case- and space-insensitively. Captures the
+ *  slot number so the two halves of one pair can be matched to each other. */
+export const SPOC_PAIR_HEADER = /^spoc\s*(\d+)\s*(dept|email)$/;
+
 /**
- * The SPOC column's header in the template, and the only header in it that
- * nobody types as written.
+ * The one entry in `CLIENT_COLUMNS` that stands for a BLOCK of columns rather
+ * than a column, and the only header in the template nobody types as written.
  *
- * `<Dept>` STANDS FOR one of the firm's own Dept codes; a firm with three
- * Depts has three of these columns and none of them is spelled this way. Named
- * here because the template's reader — a screen listing the columns, a
- * generated header row — has to recognise it to expand it, and a magic string
- * repeated in two repositories is how it comes to be typed literally into
- * somebody's spreadsheet.
+ * A firm with three Depts downloads six real columns here — `SPOC 1 Dept`,
+ * `SPOC 1 Email`, `SPOC 2 Dept`… — and the reader that expands it has to
+ * recognise it. Named here rather than typed into both repositories, because a
+ * magic string in two places is how a stand-in ends up literally in somebody's
+ * spreadsheet.
  */
-export const SPOC_COLUMN_TEMPLATE = `${SPOC_COLUMN_PREFIX} <Dept>`;
+export const SPOC_COLUMN_TEMPLATE = "SPOC <n> Dept + SPOC <n> Email";
+
+/** The real headers of one slot, in the order they belong on the sheet. */
+export function spocPairHeaders(slot: number): readonly [string, string] {
+  return [`SPOC ${String(slot)} Dept`, `SPOC ${String(slot)} Email`];
+}
 
 export const CLIENT_SHEET_MARKER = "Client Name";
 export const CLIENT_COLUMNS: readonly SheetColumn[] = [
@@ -93,7 +124,7 @@ export const CLIENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Registered Address", required: false, about: "" },
   ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, about: "" })),
   { header: "Key Manager", required: false, about: "The email of the staff member who owns the relationship." },
-  { header: SPOC_COLUMN_TEMPLATE, required: false, about: "One column per Dept, that Dept's own code or name after the colon, each cell holding that Dept's SPOC's email. The columns are named after the Depts your firm published under Structure — there is no fixed list of Depts, so there is no fixed spelling of this header." },
+  { header: SPOC_COLUMN_TEMPLATE, required: false, about: "A PAIR of columns per SPOC: the Dept's own code or name, and that SPOC's email. Numbered, so the headers are the same at every firm — the Dept goes in the cell, not in the header. Need a fourth? Add \"SPOC 4 Dept\" and \"SPOC 4 Email\" to the sheet. (Sheets using the older \"SPOC: <code>\" headers are still read.)" },
   { header: "Signatory", required: false, about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
   { header: "Portal Invite", required: false, about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
   { header: "Portal Email", required: false, about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
@@ -153,6 +184,16 @@ export interface ImportIdentifier {
   readonly value: string;
 }
 
+/** One SPOC as the sheet names them: a Dept, by code or name, and an email. */
+export interface ImportSpoc {
+  /** As typed — the firm's code or the Dept's full name, resolved later. */
+  readonly dept: string;
+  readonly email: string;
+  /** Which column said it, for a message that points at the right cell:
+   *  `SPOC 2` for a numbered pair, `SPOC: IDT` for the older form. */
+  readonly column: string;
+}
+
 export interface ClientRow {
   /** The row number the operator sees in Excel. Used in every message. */
   readonly lineNo: number;
@@ -169,8 +210,16 @@ export interface ClientRow {
   readonly registeredAddress: string | null;
   readonly identifiers: readonly ImportIdentifier[];
   readonly keyManagerEmail: string | null;
-  /** Dept code or name (as in the header) → SPOC email. */
-  readonly spocEmails: Readonly<Record<string, string>>;
+  /**
+   * The SPOCs this row names, in sheet order.
+   *
+   * A LIST and not a map keyed by Dept, because G3.2 deliberately allows a Dept
+   * to have more than one SPOC — leave cover, a joint SPOC on a large group, a
+   * fortnight's parallel handover. A map would have silently kept the last of
+   * two people named for the same Dept, which is the firm being told something
+   * it did not say.
+   */
+  readonly spocs: readonly ImportSpoc[];
   readonly signatory: string | null;
   /** As typed — "TRUE" / "FALSE" / blank. Parsed and checked in validation,
    *  not here: a grid reader has no business deciding what a bad value means. */
@@ -256,15 +305,47 @@ function blankToNull(s: string): string | null {
   return t === "" ? null : t;
 }
 
+/**
+ * The SPOCs one row names, from both column shapes.
+ *
+ * A HALF-FILLED PAIR IS KEPT, not dropped. `SPOC 2 Dept` with no email beside
+ * it is somebody's unfinished thought about a real client, and a reader that
+ * quietly discarded it would load a client whose sheet plainly says who its
+ * Accounting contact is with no Accounting SPOC on it and nothing said. It
+ * comes through with the empty half blank and validation refuses it by name.
+ * The older form cannot be half-filled — a blank cell there is simply a Dept
+ * this client has no SPOC for, which is the ordinary case and not a finding.
+ */
+function spocsOfRow(r: SheetRow): readonly ImportSpoc[] {
+  const out: ImportSpoc[] = [];
+  const slots = new Map<number, { dept: string; email: string }>();
+  for (const h of r.headers) {
+    const pair = SPOC_PAIR_HEADER.exec(normaliseName(h));
+    if (pair !== null) {
+      const slot = Number(pair[1]);
+      const half = slots.get(slot) ?? { dept: "", email: "" };
+      if (pair[2] === "dept") half.dept = r.cell(h);
+      else half.email = r.cell(h);
+      slots.set(slot, half);
+      continue;
+    }
+    if (!h.toUpperCase().startsWith(SPOC_COLUMN_PREFIX)) continue;
+    const dept = h.slice(SPOC_COLUMN_PREFIX.length).trim();
+    const email = r.cell(h);
+    if (dept !== "" && email !== "") out.push({ dept, email, column: h.trim() });
+  }
+  // Numbered slots after the older form, in slot order — a sheet carrying both
+  // reads the same however the columns happen to be arranged.
+  for (const slot of [...slots.keys()].sort((a, b) => a - b)) {
+    const half = slots.get(slot);
+    if (half === undefined || (half.dept === "" && half.email === "")) continue;
+    out.push({ dept: half.dept, email: half.email, column: `SPOC ${String(slot)}` });
+  }
+  return out;
+}
+
 export function clientRowsOf(rows: readonly SheetRow[]): readonly ClientRow[] {
   return rows.map((r) => {
-    const spocEmails: Record<string, string> = {};
-    for (const h of r.headers) {
-      if (!h.toUpperCase().startsWith(SPOC_COLUMN_PREFIX)) continue;
-      const dept = h.slice(SPOC_COLUMN_PREFIX.length).trim();
-      const email = r.cell(h);
-      if (dept !== "" && email !== "") spocEmails[dept] = email;
-    }
     return {
       lineNo: r.lineNo,
       legalName: r.cell("Client Name"),
@@ -283,7 +364,7 @@ export function clientRowsOf(rows: readonly SheetRow[]): readonly ClientRow[] {
         return value === "" ? [] : [{ type: c.type, value }];
       }),
       keyManagerEmail: blankToNull(r.cell("Key Manager")),
-      spocEmails,
+      spocs: spocsOfRow(r),
       signatory: blankToNull(r.cell("Signatory")),
       portalInviteRaw: blankToNull(r.cell("Portal Invite")),
       portalEmail: blankToNull(r.cell("Portal Email")),
@@ -610,19 +691,24 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       null
     );
   };
-  const spocWords = new Set(rows.clients.flatMap((c) => Object.keys(c.spocEmails)));
-  for (const word of spocWords) {
+  const deptsHere = (): string =>
+    activeDepts.length === 0
+      ? "this firm has published no Depts yet — publish them under Structure first"
+      : `the firm's Depts are ${activeDepts.map((a) => `${a.code} (${a.name})`).join(", ")}`;
+
+  // A Dept written in a HEADER that names nothing is a fault of the FILE: every
+  // row under it is wrong in the same way, and one finding says so once instead
+  // of four hundred times. A Dept written in a CELL is a fault of that ROW, and
+  // is refused below beside the client it was typed against — which is the
+  // quiet advantage of the numbered pairs, not just the tidier header.
+  const headerWords = new Set(
+    rows.clients.flatMap((c) =>
+      c.spocs.filter((s) => s.column.startsWith(SPOC_COLUMN_PREFIX)).map((s) => s.dept),
+    ),
+  );
+  for (const word of headerWords) {
     if (deptOf(word) === null) {
-      block(
-        "file",
-        null,
-        `SPOC: ${word}`,
-        activeDepts.length === 0
-          ? `the column "SPOC: ${word}" names a Dept, and this firm has published none yet — ` +
-            `publish your Depts under Structure first, or remove the SPOC columns from the sheet`
-          : `the column "SPOC: ${word}" names no active Dept at this firm — the firm's Depts are ` +
-            `${activeDepts.map((a) => `${a.code} (${a.name})`).join(", ")}`,
-      );
+      block("file", null, `SPOC: ${word}`, `the column "SPOC: ${word}" names no active Dept — ${deptsHere()}`);
     }
   }
 
@@ -704,10 +790,28 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (row.keyManagerEmail === null && row.group === null) {
       warn("clients", row.lineNo, name, "no Key Manager — nobody at the firm will own this client until somebody is named");
     }
-    for (const [dept, email] of Object.entries(row.spocEmails)) {
-      if (deptOf(dept) === null) continue; // already a file-level refusal
-      if (!snap.staff.has(email.toLowerCase())) {
-        bad(`SPOC for ${dept} "${email}" is not an active member of staff at this firm`);
+    // A pair is both halves or neither. Half of one is not a smaller version of
+    // a SPOC — an email with no Dept cannot become an assignment at all, and a
+    // Dept with no email is a client whose sheet says who covers it and then
+    // does not say who.
+    for (const spoc of row.spocs) {
+      const fromHeader = spoc.column.startsWith(SPOC_COLUMN_PREFIX);
+      if (spoc.dept === "") {
+        bad(`${spoc.column} Email is "${spoc.email}" with no ${spoc.column} Dept beside it — a SPOC covers a Dept, so there is nothing to put them in charge of`);
+        continue;
+      }
+      if (spoc.email === "") {
+        bad(`${spoc.column} Dept is "${spoc.dept}" with no ${spoc.column} Email beside it — say who the SPOC for it is, or clear both cells`);
+        continue;
+      }
+      // A bad header was already refused once for the whole file; a bad CELL is
+      // this row's own and names the client it was typed against.
+      if (deptOf(spoc.dept) === null) {
+        if (!fromHeader) bad(`${spoc.column} Dept is "${spoc.dept}", which is no active Dept at this firm — ${deptsHere()}`);
+        continue;
+      }
+      if (!snap.staff.has(spoc.email.toLowerCase())) {
+        bad(`SPOC for ${spoc.dept} "${spoc.email}" is not an active member of staff at this firm`);
       }
     }
 
@@ -798,7 +902,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     if (c.registered) entities += 1;
     if (c.row.keyManagerEmail !== null) assignments += 1;
-    assignments += Object.keys(c.row.spocEmails).filter((d) => deptOf(d) !== null).length;
+    assignments += c.row.spocs.filter((s) => deptOf(s.dept) !== null && s.email !== "").length;
     const parentName = c.parent?.row.legalName ?? c.parentOnFile?.displayName ?? null;
     verdicts.push({
       sheet: "clients",
@@ -1030,7 +1134,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     // The Dept this service is filed under should have a SPOC on the client.
     if (service.module !== null && company.sheetRow !== null) {
       const owner = sheetParent ?? company.sheetRow;
-      const hasSpoc = Object.keys(owner.row.spocEmails).some((d) => deptOf(d)?.code === service.module);
+      const hasSpoc = owner.row.spocs.some((s) => deptOf(s.dept)?.code === service.module);
       if (!hasSpoc && owner.onFile === null) {
         warn("engagements", e.lineNo, name, `${service.name} is ${service.module}'s work and "${owner.row.legalName}" names no SPOC for ${service.module}`);
       }
