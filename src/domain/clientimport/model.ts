@@ -144,7 +144,10 @@ export const PEOPLE_COLUMNS: readonly SheetColumn[] = [
 export const ENGAGEMENT_SHEET_MARKER = "Company";
 export const ENGAGEMENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Company", required: true, about: "The company the work is delivered to, by registered name." },
-  { header: "Service", required: true, about: "The firm's own catalogue code — A1, H1, R7." },
+  // No example code here, and that is the point: the codes belong to the firm's
+  // own catalogue, and an invented `A1, H1, R7` reads as though the product
+  // ships a fixed list of services. The same mistake the SPOC header made.
+  { header: "Service", required: true, about: "The service's code from your own catalogue, exactly as it is written there. A code the catalogue does not have is refused rather than guessed at." },
   { header: "Started On", required: true, about: "When the firm began delivering it." },
   { header: "Billed", required: false, about: "one_time, monthly, quarterly, annually or custom. Defaults from the service." },
   { header: "Fee", required: false, about: "Per period, as agreed. Blank means 'as per the paper letter' and is noted on the line." },
