@@ -18,6 +18,7 @@ import { FakeClock } from "../../src/testfakes/clock";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { staleAssignments } from "../../src/domain/clientassignment/model";
 import {
   AssignmentAlreadyEnded,
   AssignmentAxisNotFound,
@@ -558,6 +559,78 @@ describe("ending an assignment", () => {
     await expect(
       service.end({ tenantId: TENANT, assignmentId: ABSENT }, ACTOR),
     ).rejects.toThrow(AssignmentNotFound);
+  });
+});
+
+describe("an assignment whose holder has left", () => {
+  // Nothing closes an assignment when somebody is deactivated, deliberately —
+  // closing it would destroy the record of who owned the client. So the client
+  // keeps a Key Manager and a SPOC on paper while the person named has gone,
+  // and `staleAssignments` is the only thing that says so.
+
+  it("is still IN FORCE, and reported as stale", async () => {
+    const { service, assignments } = svc();
+    await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "key_manager", userId: ANITA },
+      ACTOR,
+    );
+    assignments.withHolder(ANITA, {
+      email: "anita@10x.test",
+      displayName: "Anita R",
+      isActiveStaff: false,
+    });
+
+    const view = await service.accountTeam(TENANT, CLIENT);
+    // The row has NOT been closed — that is the point.
+    expect(view.inForce).toHaveLength(1);
+    expect(staleAssignments(view.all, TODAY).map((r) => r.holder.displayName)).toEqual([
+      "Anita R",
+    ]);
+  });
+
+  it("is NOT stale once the row itself is closed — leaving is the ordinary end of a job", async () => {
+    const { service, assignments } = svc();
+    const row = await service.assign(
+      {
+        tenantId: TENANT,
+        clientPartyId: CLIENT,
+        role: "spoc",
+        axisId: FRC,
+        userId: ANITA,
+        validFrom: "2026-05-01",
+      },
+      ACTOR,
+    );
+    await service.end({ tenantId: TENANT, assignmentId: row.id, validTo: "2026-06-01" }, ACTOR);
+    assignments.withHolder(ANITA, {
+      email: "anita@10x.test",
+      displayName: "Anita R",
+      isActiveStaff: false,
+    });
+
+    const view = await service.accountTeam(TENANT, CLIENT);
+    expect(view.inForce).toHaveLength(0);
+    expect(staleAssignments(view.all, TODAY)).toHaveLength(0);
+  });
+
+  it("names only the holder who left, not the colleague who is still here", async () => {
+    const { service, assignments } = svc();
+    await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", axisId: FRC, userId: ANITA },
+      ACTOR,
+    );
+    await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", axisId: TRC, userId: BHAVNA },
+      ACTOR,
+    );
+    assignments.withHolder(ANITA, {
+      email: "anita@10x.test",
+      displayName: "Anita R",
+      isActiveStaff: false,
+    });
+
+    const view = await service.accountTeam(TENANT, CLIENT);
+    expect(staleAssignments(view.all, TODAY).map((r) => r.axis?.code)).toEqual(["FRC"]);
   });
 });
 

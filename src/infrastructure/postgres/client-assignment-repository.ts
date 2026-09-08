@@ -39,6 +39,7 @@ interface AssignmentRow {
 interface AssignmentRecordRow extends AssignmentRow {
   holder_email: string;
   holder_display_name: string | null;
+  holder_is_active_staff: boolean;
   axis_axis: string | null;
   axis_code: string | null;
   axis_name: string | null;
@@ -73,6 +74,7 @@ function toRecord(r: AssignmentRecordRow): ClientAssignmentRecord {
       userId: r.user_id,
       email: r.holder_email,
       displayName: r.holder_display_name,
+      isActiveStaff: r.holder_is_active_staff,
     },
     axis:
       r.axis_id === null || r.axis_code === null
@@ -123,10 +125,22 @@ export class PostgresClientAssignmentRepository
         SELECT a.id, a.tenant_id, a.client_party_id, a.role, a.axis_id, a.user_id,
                a.valid_from::text AS valid_from, a.valid_to::text AS valid_to,
                u.email::text AS holder_email, u.display_name AS holder_display_name,
+               (m.user_id IS NOT NULL) AS holder_is_active_staff,
                x.axis AS axis_axis, x.code AS axis_code, x.name AS axis_name,
                x.is_active AS axis_is_active
         FROM crm.client_assignment a
         JOIN tenancy.user_account u ON u.id = a.user_id
+        -- Whether the holder is STILL staff here, in the same predicate
+        -- PostgresMembershipRepository.isActiveStaff and the lead rotation ask
+        -- — audience = 'STAFF' AND is_active — and the three must stay
+        -- identical. The join is LEFT and the flag is derived from whether it
+        -- matched: an INNER one would drop the assignments of everybody who has
+        -- left, which are exactly the rows worth showing. No foreign key can
+        -- answer this, because tenancy.user_account is GLOBAL — a login that
+        -- no longer works at this firm still satisfies it.
+        LEFT JOIN tenancy.membership m
+               ON m.user_id = a.user_id AND m.tenant_id = a.tenant_id
+              AND m.audience = 'STAFF' AND m.is_active
         -- The tenant predicate is repeated even though RLS is on: a join is not
         -- the thing the policy guards against here, and stating it keeps the
         -- query honest if this is ever read outside a tenant transaction.

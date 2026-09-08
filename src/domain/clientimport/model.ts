@@ -60,9 +60,23 @@ export const IDENTIFIER_COLUMNS: readonly { readonly header: string; readonly ty
   { header: "VAT", type: "vat" },
 ];
 
-/** The prefix of a Dept SPOC column: `SPOC: TRC`, `SPOC: Tax`. One column per
- *  Dept the firm has, matched on the Dept's code or its name. */
+/** The prefix of a Dept SPOC column. One column per Dept the FIRM has, named
+ *  after the colon by that Dept's own code or name — so the real headers are
+ *  whatever this firm calls its Depts, and no fixed vocabulary is implied. */
 export const SPOC_COLUMN_PREFIX = "SPOC:";
+
+/**
+ * The SPOC column's header in the template, and the only header in it that
+ * nobody types as written.
+ *
+ * `<Dept>` STANDS FOR one of the firm's own Dept codes; a firm with three
+ * Depts has three of these columns and none of them is spelled this way. Named
+ * here because the template's reader — a screen listing the columns, a
+ * generated header row — has to recognise it to expand it, and a magic string
+ * repeated in two repositories is how it comes to be typed literally into
+ * somebody's spreadsheet.
+ */
+export const SPOC_COLUMN_TEMPLATE = `${SPOC_COLUMN_PREFIX} <Dept>`;
 
 export const CLIENT_SHEET_MARKER = "Client Name";
 export const CLIENT_COLUMNS: readonly SheetColumn[] = [
@@ -79,7 +93,7 @@ export const CLIENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Registered Address", required: false, about: "" },
   ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, about: "" })),
   { header: "Key Manager", required: false, about: "The email of the staff member who owns the relationship." },
-  { header: "SPOC: <Dept>", required: false, about: "One column per Dept — its code or name after the colon — holding the SPOC's email." },
+  { header: SPOC_COLUMN_TEMPLATE, required: false, about: "One column per Dept, that Dept's own code or name after the colon, each cell holding that Dept's SPOC's email. The columns are named after the Depts your firm published under Structure — there is no fixed list of Depts, so there is no fixed spelling of this header." },
   { header: "Signatory", required: false, about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
   { header: "Portal Invite", required: false, about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
   { header: "Portal Email", required: false, about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
@@ -603,8 +617,11 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         "file",
         null,
         `SPOC: ${word}`,
-        `the column "SPOC: ${word}" names no active Dept at this firm — the firm's Depts are ` +
-          `${activeDepts.length === 0 ? "none yet" : activeDepts.map((a) => `${a.code} (${a.name})`).join(", ")}`,
+        activeDepts.length === 0
+          ? `the column "SPOC: ${word}" names a Dept, and this firm has published none yet — ` +
+            `publish your Depts under Structure first, or remove the SPOC columns from the sheet`
+          : `the column "SPOC: ${word}" names no active Dept at this firm — the firm's Depts are ` +
+            `${activeDepts.map((a) => `${a.code} (${a.name})`).join(", ")}`,
       );
     }
   }

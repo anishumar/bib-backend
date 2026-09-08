@@ -54,6 +54,16 @@ const ClientAssignmentSchema = z
     // to render the account team.
     holderEmail: z.string(),
     holderName: z.string().nullable(),
+    holderIsActiveStaff: z.boolean().openapi({
+      description:
+        "Whether the holder is STILL active staff at this firm. False on a row that is " +
+        "still IN FORCE means the client has a Key Manager or a SPOC who has left — " +
+        "escalation goes to a desk nobody sits at, and the client rings somebody who " +
+        "cannot answer. An assignment is never closed on the firm's behalf when somebody " +
+        "is deactivated, because that would destroy the record of who owned the client, " +
+        "so this is how a stale one becomes visible. On a row already closed it means " +
+        "only that the person has since left, which is the ordinary end of a working life.",
+    }),
     axis: AssignmentAxisSchema.nullable().openapi({
       description: "The Dept or delivery team a SPOC covers. Always null for a Key Manager.",
     }),
@@ -163,6 +173,7 @@ function toWire(r: ClientAssignmentRecord): z.infer<typeof ClientAssignmentSchem
     userId: r.assignment.userId,
     holderEmail: r.holder.email,
     holderName: r.holder.displayName,
+    holderIsActiveStaff: r.holder.isActiveStaff,
     axis: r.axis
       ? {
           id: r.axis.id,

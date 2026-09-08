@@ -83,6 +83,22 @@ export interface AssignmentHolder {
   readonly userId: string;
   readonly email: string;
   readonly displayName: string | null;
+  /**
+   * Whether this person is STILL active staff at the firm, today.
+   *
+   * Not a property of the assignment — a property of the holder, read at the
+   * moment the row is rendered. An assignment survives the person leaving,
+   * deliberately: closing every row when somebody is deactivated would destroy
+   * the record of who owned the client, which is what this table exists for.
+   * The consequence is a live assignment pointing at somebody who has gone,
+   * which no foreign key can catch — `tenancy.user_account` is GLOBAL, so the
+   * key is satisfied by a login that no longer works HERE.
+   *
+   * False on a row that is itself long closed simply means the person has since
+   * left; only a row still IN FORCE is a client nobody is actually covering.
+   * `staleAssignments` is the predicate that says so.
+   */
+  readonly isActiveStaff: boolean;
 }
 
 /** The Dept or team as a row shows it — the firm's own words, not a uuid. A
@@ -225,6 +241,28 @@ export function spocsOn(
       r.assignment.role === "spoc" &&
       (axisId === undefined || r.assignment.axisId === axisId),
   );
+}
+
+/**
+ * The account team rows in force on `onDate` whose holder has since left.
+ *
+ * The client still has a Key Manager or a SPOC on paper, and the person named
+ * is no longer staff — so escalation goes to a desk nobody sits at and the
+ * client rings somebody who cannot answer. Nothing in the product notices this
+ * on its own: an assignment is closed by a HANDOVER, and deactivating a
+ * membership is a different act on a different screen that has no reason to
+ * know which clients that person held.
+ *
+ * A filter over rows already in hand, for the same reason `accountTeamOn` is:
+ * the caller has the whole history, and this is a question about a handful of
+ * them. Closed rows are excluded — a former SPOC who has left is the ordinary
+ * end of a working life, not a fault.
+ */
+export function staleAssignments(
+  rows: readonly ClientAssignmentRecord[],
+  onDate: string,
+): readonly ClientAssignmentRecord[] {
+  return accountTeamOn(rows, onDate).filter((r) => !r.holder.isActiveStaff);
 }
 
 /**

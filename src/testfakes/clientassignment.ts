@@ -22,6 +22,10 @@ import type {
 interface Holder {
   readonly email: string;
   readonly displayName: string | null;
+  /** Whether they are still active staff, as the membership join answers.
+   *  Optional and true by default: almost every test is about somebody who
+   *  works here, and only the stale-assignment cases say otherwise. */
+  readonly isActiveStaff?: boolean;
 }
 
 /**
@@ -61,6 +65,7 @@ export class FakeClientAssignmentRepo implements ClientAssignmentRepository {
         userId: a.userId,
         email: holder?.email ?? `${a.userId}@example.test`,
         displayName: holder?.displayName ?? null,
+        isActiveStaff: holder?.isActiveStaff ?? true,
       },
       axis:
         axis === null
