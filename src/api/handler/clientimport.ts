@@ -109,7 +109,16 @@ const CountsSchema = z
     clientsOnFile: z.number().int(),
     clientsBlocked: z.number().int(),
     entitiesToRegister: z.number().int(),
-    peopleToCreate: z.number().int(),
+    peopleToCreate: z.number().int().openapi({
+      description:
+        "PARTIES this sheet would create, not people ROWS. A people row is a ROLE, so one " +
+        "director of three companies in a group is three rows and one person.",
+    }),
+    rolesToRecord: z.number().int().openapi({
+      description:
+        "Directorships, signatory roles and the like — one per people row that would load, " +
+        "whether or not it also creates the person.",
+    }),
     peopleOnFile: z.number().int(),
     peopleBlocked: z.number().int(),
     engagementsToCreate: z.number().int(),
@@ -180,7 +189,17 @@ const OutcomeSchema = z
     created: z.object({
       clients: z.number().int(),
       entities: z.number().int(),
-      people: z.number().int(),
+      people: z.number().int().openapi({
+        description:
+          "PARTIES created, not people ROWS. A people row is a ROLE, so one director of " +
+          "three companies in a group is three rows and one person — these two numbers " +
+          "differ on purpose.",
+      }),
+      roles: z.number().int().openapi({
+        description:
+          "Directorships, signatory roles and the like — one per people row that loaded, " +
+          "whether or not it also created the person.",
+      }),
       assignments: z.number().int(),
       letters: z.number().int(),
       engagements: z.number().int(),

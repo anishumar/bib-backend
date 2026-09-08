@@ -346,13 +346,31 @@ export class PostgresClientImportDirectory implements ImportDirectory {
   async peopleByEmail(tenantId: string, emails: readonly string[]): Promise<readonly PersonOnFile[]> {
     if (emails.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ email: string; party_id: string; full_name: string }[]>`
-        SELECT i.value AS email, i.party_id, pe.full_name
+      // The roles come back with the person, in one query rather than one per
+      // person: a group's directors sheet asks about the same handful of people
+      // over and over, and `${to}:${type}` is all the caller compares.
+      const rows = await db<{ email: string; party_id: string; full_name: string; roles: string[] }[]>`
+        SELECT i.value AS email, i.party_id, pe.full_name,
+               COALESCE(
+                 ARRAY(
+                   SELECT r.to_party_id || ':' || r.type
+                   FROM core.party_relationship r
+                   WHERE r.from_party_id = i.party_id
+                     AND r.tenant_id = i.tenant_id
+                     AND r.valid_to IS NULL
+                 ),
+                 '{}'
+               ) AS roles
         FROM core.party_identifier i
         JOIN core.person pe ON pe.party_id = i.party_id AND pe.tenant_id = i.tenant_id
         WHERE i.type = 'email' AND i.value = ANY(${db.array([...emails])}::text[])
       `;
-      return rows.map((r) => ({ email: r.email, partyId: r.party_id, name: r.full_name }));
+      return rows.map((r) => ({
+        email: r.email,
+        partyId: r.party_id,
+        name: r.full_name,
+        roles: r.roles,
+      }));
     });
   }
 

@@ -209,7 +209,7 @@ describe("confirming an import", () => {
     const confirmed = await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
 
     expect(confirmed.status).toBe("confirmed");
-    expect(confirmed.outcome?.created).toEqual({ clients: 3, entities: 2, people: 2, assignments: 4, letters: 2, engagements: 3, portalInvites: 2 });
+    expect(confirmed.outcome?.created).toEqual({ clients: 3, entities: 2, people: 2, roles: 2, assignments: 4, letters: 2, engagements: 3, portalInvites: 2 });
     expect(confirmed.outcome?.failed).toBe(0);
     expect(confirmed.confirmedBy?.userId).toBe(ADMIN);
 
@@ -368,6 +368,95 @@ describe("confirming an import", () => {
     expect(first?.action).toBe("failed");
     expect(first?.letterId).toBe("letter-0001");
     expect(first?.detail).toMatch(/^marking it sent: letter refused send — the draft is left/);
+  });
+});
+
+describe("one person, several companies", () => {
+  // The shape a group's directors sheet actually has, and the one that used to
+  // be refused: the same director on three companies is three rows carrying
+  // one email. The party is created ONCE and each row records its own role.
+
+  const CLIENTS_GROUP = [
+    "Client Name,Client Since,Group,Country,Entity Type,Incorporated On,Financial Year End,PAN,Key Manager",
+    "Kaveri Group,2019-04-01,,,,,,,anita@firm.test",
+    "Kaveri Foods Private Limited,,Kaveri Group,IN,private_limited,2019-06-11,03-31,AAACK1111K,",
+    "Kaveri Logistics Private Limited,,Kaveri Group,IN,private_limited,2020-02-01,03-31,AAACL2222L,",
+  ].join("\n");
+
+  const PEOPLE_GROUP = [
+    "Client,Of,Name,Relationship,Since,Email,Phone",
+    "Kaveri Group,Kaveri Foods Private Limited,Anil Kaveri,director,2019-06-11,anil@kaveri.test,+91 98450 00000",
+    "Kaveri Group,Kaveri Logistics Private Limited,Anil Kaveri,director,2020-02-01,anil@kaveri.test,",
+  ].join("\n");
+
+  async function stageGroup(h: Harness) {
+    return h.service.stage(
+      {
+        tenantId: TENANT,
+        stagedBy: ADMIN,
+        clients: upload(CLIENTS_GROUP, "clients.csv"),
+        people: upload(PEOPLE_GROUP, "people.csv"),
+        engagements: null,
+      },
+      ACTOR,
+    );
+  }
+
+  it("creates the party ONCE and records a role from each row", async () => {
+    const h = harness();
+    const staged = await stageGroup(h);
+    expect(staged.report.blocking).toBe(0);
+
+    const confirmed = await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
+    expect(confirmed.outcome?.failed).toBe(0);
+
+    // ONE person and TWO roles — the two numbers differ on purpose, and
+    // reporting "2 people created" for one director would be a lie the firm
+    // would only find by counting the parties themselves.
+    expect(confirmed.outcome?.created.people).toBe(1);
+    expect(confirmed.outcome?.created.roles).toBe(2);
+
+    // ONE person...
+    const created = h.parties.of("createPerson").map((c) => (c.input as { fullName: string }).fullName);
+    expect(created).toEqual(["Anil Kaveri"]);
+    // ...and their email recorded once, not twice.
+    const emails = h.parties
+      .of("addIdentifier")
+      .map((c) => c.input as { type: string; value: string })
+      .filter((i) => i.type === "email");
+    expect(emails).toHaveLength(1);
+
+    // TWO directorships, one per company, each dated from its own row.
+    const directorships = h.parties
+      .of("addRelationship")
+      .map((c) => c.input as { type: string; fromPartyId: string; toPartyId: string; validFrom: string })
+      .filter((r) => r.type === "director_of");
+    expect(directorships).toHaveLength(2);
+    expect(new Set(directorships.map((r) => r.fromPartyId)).size).toBe(1);
+    expect(directorships.map((r) => r.validFrom)).toEqual(["2019-06-11", "2020-02-01"]);
+    expect(new Set(directorships.map((r) => r.toPartyId)).size).toBe(2);
+  });
+
+  it("adds the role to somebody ALREADY ON FILE instead of skipping the row", async () => {
+    const h = harness(
+      directory().withPerson({
+        email: "anil@kaveri.test",
+        partyId: "party-anil",
+        name: "Anil Kaveri",
+        roles: [],
+      }),
+    );
+    const staged = await stageGroup(h);
+    await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
+
+    // Nobody new, and no second email identifier on an existing person.
+    expect(h.parties.of("createPerson")).toHaveLength(0);
+    const directorships = h.parties
+      .of("addRelationship")
+      .map((c) => c.input as { type: string; fromPartyId: string })
+      .filter((r) => r.type === "director_of");
+    expect(directorships).toHaveLength(2);
+    expect(directorships.every((r) => r.fromPartyId === "party-anil")).toBe(true);
   });
 });
 

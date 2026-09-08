@@ -302,7 +302,9 @@ export class ClientImportService {
       clauseJurisdictions,
       byIdentifier,
       byName,
-      peopleByEmail: new Map(people.map((p) => [p.email, { partyId: p.partyId, name: p.name }] as const)),
+      peopleByEmail: new Map(
+        people.map((p) => [p.email, { partyId: p.partyId, name: p.name, roles: new Set(p.roles) }] as const),
+      ),
       activeEngagements: new Set(inForce.map((e) => `${e.entityPartyId}:${e.serviceId}`)),
       complianceFloor: floor,
       reachBackDays: CALENDAR_REACH_BACK_DAYS,
@@ -325,7 +327,7 @@ export class ClientImportService {
     const outcomeRows: OutcomeRow[] = [];
     const letterOutcomes: LetterOutcome[] = [];
     const portalOutcomes: PortalInviteOutcome[] = [];
-    const created = { clients: 0, entities: 0, people: 0, assignments: 0, letters: 0, engagements: 0, portalInvites: 0 };
+    const created = { clients: 0, entities: 0, people: 0, roles: 0, assignments: 0, letters: 0, engagements: 0, portalInvites: 0 };
     let skipped = 0;
     let failed = 0;
 
@@ -500,6 +502,15 @@ export class ClientImportService {
     }
 
     // ── People ────────────────────────────────────────────────────────────
+    //
+    // A row is a ROLE. The same person carries several — a director of three
+    // companies in one group is three rows — so the party is created ONCE, by
+    // the first row naming that email, and every later row finds them here and
+    // records only the new relationship. Seeded with everybody already on file
+    // so a sheet naming an existing director does the same thing.
+    const personByEmail = new Map<string, string>(
+      [...snapshot.peopleByEmail].map(([email, person]) => [email, person.partyId] as const),
+    );
     for (const p of rows.people) {
       const verdict = verdictOf("people", p.lineNo);
       if (verdict === null || verdict.action === "blocked") continue;
@@ -515,33 +526,41 @@ export class ClientImportService {
         outcomeRows.push({ sheet: "people", lineNo: p.lineNo, name: p.fullName, action: "failed", detail: `"${targetName}" was not created, so the role has nothing to attach to`, partyId: null });
         continue;
       }
-      let step = "creating the person";
-      let partyId: string | null = null;
+      const email = p.email === null ? null : normalizeIdentifier("email", p.email);
+      const known = email === null ? undefined : personByEmail.get(email);
+      let step = known === undefined ? "creating the person" : "recording the role";
+      let partyId: string | null = known ?? null;
       try {
-        const person = await this.deps.parties.createPerson({ tenantId, fullName: p.fullName.trim() }, actor);
-        partyId = person.partyId;
         const since = (p.since === null ? null : parseSheetDate(p.since)) ?? today;
-        if (p.email !== null) {
-          step = "adding their email";
-          await this.deps.parties.addIdentifier(
-            { tenantId, partyId: person.partyId, type: "email", value: p.email, isPrimary: true, validFrom: since },
-            actor,
-          );
+        if (known === undefined) {
+          const person = await this.deps.parties.createPerson({ tenantId, fullName: p.fullName.trim() }, actor);
+          partyId = person.partyId;
+          if (email !== null) {
+            step = "adding their email";
+            await this.deps.parties.addIdentifier(
+              { tenantId, partyId: person.partyId, type: "email", value: email, isPrimary: true, validFrom: since },
+              actor,
+            );
+            personByEmail.set(email, person.partyId);
+          }
+          if (p.phone !== null) {
+            step = "adding their phone";
+            await this.deps.parties.addIdentifier(
+              { tenantId, partyId: person.partyId, type: "phone", value: p.phone, validFrom: since },
+              actor,
+            );
+          }
         }
-        if (p.phone !== null) {
-          step = "adding their phone";
-          await this.deps.parties.addIdentifier(
-            { tenantId, partyId: person.partyId, type: "phone", value: p.phone, validFrom: since },
-            actor,
-          );
-        }
+        // Narrowed: either the branch above created them, or `known` had them.
+        const personPartyId = partyId ?? "";
         step = "recording the role";
         const type = RELATIONSHIP_WORDS[normaliseName(p.relationship)] ?? p.relationship;
         await this.deps.parties.addRelationship(
-          { tenantId, fromPartyId: person.partyId, toPartyId: targetId, type, validFrom: since },
+          { tenantId, fromPartyId: personPartyId, toPartyId: targetId, type, validFrom: since },
           actor,
         );
-        created.people += 1;
+        if (known === undefined) created.people += 1;
+        created.roles += 1;
         outcomeRows.push({ sheet: "people", lineNo: p.lineNo, name: p.fullName, action: "created", detail: verdict.detail, partyId });
       } catch (err) {
         failed += 1;

@@ -435,14 +435,113 @@ describe("a people row", () => {
     expect(blockingMessages(report)).toContain('its client "Cobalt Foods Private Limited" has errors on the client sheet');
   });
 
-  it("is skipped when the same email is already on file, and refused twice on one sheet", () => {
-    const skipped = validateImport(
-      { clients: [client()], people: [person()], engagements: [] },
-      snapshot({ peopleByEmail: new Map([["priya@cobalt.test", { partyId: "party-priya", name: "Priya M" }]]) }),
+  // A ROW IS A ROLE, not a person. One director of three companies in a group
+  // is three rows carrying the same email, and both of the tidier readings —
+  // "a repeated email is a duplicate" and "a person on file means skip the
+  // row" — drop a real relationship on the floor.
+
+  it("takes the SAME EMAIL on several rows as one person holding several roles", () => {
+    const report = validateImport(
+      {
+        clients: [client(), client({ lineNo: 3, legalName: "Cobalt Logistics Private Limited", identifiers: [] })],
+        people: [person(), person({ lineNo: 3, client: "Cobalt Logistics Private Limited" })],
+        engagements: [],
+      },
+      snapshot(),
     );
-    expect(skipped.rows.find((r) => r.sheet === "people")?.action).toBe("skip");
-    const twice = validateImport({ clients: [client()], people: [person(), person({ lineNo: 3 })], engagements: [] }, snapshot());
-    expect(blockingMessages(twice)).toContain("the same Email is on row 2 — one person, one row");
+    expect(report.blocking).toBe(0);
+    const people = report.rows.filter((r) => r.sheet === "people");
+    expect(people.map((r) => r.action)).toEqual(["create", "create"]);
+    expect(people[1]?.detail).toContain("added to the person on row 2");
+  });
+
+  it("refuses only the SAME ROLE twice — same person, same company, same relationship", () => {
+    const report = validateImport(
+      { clients: [client()], people: [person(), person({ lineNo: 3 })], engagements: [] },
+      snapshot(),
+    );
+    expect(blockingMessages(report)).toContain(
+      'row 2 already makes "priya@cobalt.test" a director of Cobalt Foods Private Limited',
+    );
+  });
+
+  it("adds the role to a person ALREADY ON FILE rather than skipping the row", () => {
+    const report = validateImport(
+      { clients: [client()], people: [person()], engagements: [] },
+      snapshot({
+        peopleByEmail: new Map([
+          ["priya@cobalt.test", { partyId: "party-priya", name: "Priya Menon", roles: new Set<string>() }],
+        ]),
+      }),
+    );
+    const row = report.rows.find((r) => r.sheet === "people");
+    expect(row?.action).toBe("create");
+    expect(row?.detail).toContain('added to "Priya Menon", already on file');
+  });
+
+  it("skips only when THAT ROLE is already recorded — which is what keeps a re-run boring", () => {
+    const onFile = {
+      partyId: "party-cobalt",
+      displayName: "Cobalt Foods Private Limited",
+      registered: true,
+      jurisdiction: "IN",
+      billToPartyId: "party-cobalt",
+      archived: false,
+    };
+    const report = validateImport(
+      { clients: [], people: [person()], engagements: [] },
+      snapshot({
+        byName: new Map([["cobalt foods private limited", onFile]]),
+        peopleByEmail: new Map([
+          [
+            "priya@cobalt.test",
+            { partyId: "party-priya", name: "Priya Menon", roles: new Set(["party-cobalt:director_of"]) },
+          ],
+        ]),
+      }),
+    );
+    const row = report.rows.find((r) => r.sheet === "people");
+    expect(row?.action).toBe("skip");
+    expect(row?.detail).toContain("already a director of");
+  });
+
+  it('says "an authorised signatory", not "a authorised signatory"', () => {
+    const onFile = {
+      partyId: "party-cobalt",
+      displayName: "Cobalt Foods Private Limited",
+      registered: true,
+      jurisdiction: "IN",
+      billToPartyId: "party-cobalt",
+      archived: false,
+    };
+    const report = validateImport(
+      { clients: [], people: [person({ relationship: "signatory" })], engagements: [] },
+      snapshot({
+        byName: new Map([["cobalt foods private limited", onFile]]),
+        peopleByEmail: new Map([
+          [
+            "priya@cobalt.test",
+            { partyId: "party-priya", name: "Priya Menon", roles: new Set(["party-cobalt:authorised_signatory_of"]) },
+          ],
+        ]),
+      }),
+    );
+    expect(report.rows.find((r) => r.sheet === "people")?.detail).toBe(
+      "already an authorised signatory of Cobalt Foods Private Limited",
+    );
+  });
+
+  it("warns when one email is given two different names, and keeps the first", () => {
+    const report = validateImport(
+      {
+        clients: [client(), client({ lineNo: 3, legalName: "Cobalt Logistics Private Limited", identifiers: [] })],
+        people: [person(), person({ lineNo: 3, fullName: "P. Menon", client: "Cobalt Logistics Private Limited" })],
+        engagements: [],
+      },
+      snapshot(),
+    );
+    expect(report.blocking).toBe(0);
+    expect(report.findings.some((f) => f.severity === "warning" && f.message.includes('calls this email "Priya Menon"'))).toBe(true);
   });
 });
 

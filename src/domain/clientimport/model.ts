@@ -517,8 +517,17 @@ export interface ImportSnapshot {
   readonly byIdentifier: ReadonlyMap<string, KnownOrganization>;
   /** Normalised registered or trading name → the organization on file. */
   readonly byName: ReadonlyMap<string, KnownOrganization>;
-  /** Lower-cased email → the person already on file. */
-  readonly peopleByEmail: ReadonlyMap<string, { readonly partyId: string; readonly name: string }>;
+  /**
+   * Lower-cased email → the person already on file, and the roles they hold.
+   *
+   * `roles` is `${toPartyId}:${type}`. A people row is one ROLE, so a person
+   * already on file is not a reason to skip the row — only a role already
+   * recorded is.
+   */
+  readonly peopleByEmail: ReadonlyMap<
+    string,
+    { readonly partyId: string; readonly name: string; readonly roles: ReadonlySet<string> }
+  >;
   /** `${entityPartyId}:${serviceId}` for every engagement in force today. */
   readonly activeEngagements: ReadonlySet<string>;
   /** The firm's compliance go-live floor, or null for no floor. */
@@ -598,7 +607,13 @@ export interface ImportCounts {
   readonly clientsOnFile: number;
   readonly clientsBlocked: number;
   readonly entitiesToRegister: number;
+  /** PARTIES this sheet would create — not people ROWS. A people row is a
+   *  ROLE, so one director of three companies is three rows and one person. */
   readonly peopleToCreate: number;
+  /** Directorships, signatory roles and the like — one per people row that
+   *  would load, whether or not it also creates the person. */
+  readonly rolesToRecord: number;
+  /** People rows skipped because that exact role is already recorded. */
   readonly peopleOnFile: number;
   readonly peopleBlocked: number;
   readonly engagementsToCreate: number;
@@ -672,6 +687,15 @@ interface PlannedLine {
   readonly currency: string;
   /** The entity's own country, for a letter whose client has none. */
   readonly entityJurisdiction: string | null;
+}
+
+/** The relationship as a sentence reads it: `authorised_signatory_of` becomes
+ *  "an authorised signatory". The article is chosen because the four words this
+ *  reads include one that starts with a vowel, and "a authorised signatory" in
+ *  a refusal is the kind of thing a partner forwards to somebody. */
+function roleWords(relationship: string): string {
+  const word = relationship.replace(/_of$/, "").replace(/_/g, " ");
+  return `${/^[aeiou]/i.test(word) ? "an" : "a"} ${word}`;
 }
 
 export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportReport {
@@ -963,10 +987,26 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
   };
 
   // ── People ───────────────────────────────────────────────────────────────
+  //
+  // A ROW IS A ROLE, NOT A PERSON. One director of three companies in a group
+  // is three rows, and the sheet says so plainly — the same name and the same
+  // email on each. The email is what makes them one person: the first row
+  // carrying it creates them, every later row finds them and adds the new role.
+  //
+  // Which means neither of the two things that would be tidier is right. A
+  // second row with the same email is NOT a duplicate to refuse, and a person
+  // already on file is NOT a row to skip — skipping it drops the role that row
+  // existed to record, silently, on the client that needed it. Only the exact
+  // ROLE being on file already makes a row a no-op, and that is what keeps a
+  // second run of the same sheet boring.
   let peopleToCreate = 0;
+  let rolesToRecord = 0;
   let peopleOnFile = 0;
   let peopleBlocked = 0;
-  const seenEmails = new Map<string, number>();
+  /** `${email}|${target}|${type}` → the row that already said it. */
+  const seenRoles = new Map<string, number>();
+  /** Lower-cased email → the first row naming it, and the name it used. */
+  const seenPeople = new Map<string, { readonly lineNo: number; readonly name: string }>();
   for (const p of rows.people) {
     const name = p.fullName.trim() === "" ? `row ${String(p.lineNo)}` : p.fullName;
     let blocked = false;
@@ -993,10 +1033,15 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     const email = p.email === null ? null : normalizeIdentifier("email", p.email);
     if (email !== null && !isValidIdentifier("email", email)) bad(`Email "${p.email ?? ""}" is not an email address`);
-    if (email !== null) {
-      const earlier = seenEmails.get(email);
-      if (earlier !== undefined) bad(`the same Email is on row ${String(earlier)} — one person, one row`);
-      else seenEmails.set(email, p.lineNo);
+
+    // The SAME ROLE twice — same person, same company, same relationship — is a
+    // duplicate, and the only shape of repeated email that is one.
+    if (email !== null && relationship !== undefined && target !== null) {
+      const key = `${email}|${normaliseName(target.name)}|${relationship}`;
+      const earlier = seenRoles.get(key);
+      if (earlier !== undefined) {
+        bad(`row ${String(earlier)} already makes "${p.email ?? ""}" ${roleWords(relationship)} of ${target.name}`);
+      } else seenRoles.set(key, p.lineNo);
     }
 
     if (blocked) {
@@ -1004,16 +1049,46 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "blocked", detail: null });
       continue;
     }
+
+    // Who this row's person IS: somebody on file, somebody an earlier row made,
+    // or somebody new. A row with no email is always somebody new — there is
+    // nothing to recognise them by, and guessing from a name would merge two
+    // real people who happen to share one.
     const onFile = email === null ? undefined : snap.peopleByEmail.get(email);
-    if (onFile !== undefined) {
-      peopleOnFile += 1;
-      warn("people", p.lineNo, name, `already on file as "${onFile.name}" (same email) — skipped, not updated`);
-      verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "skip", detail: `already on file as "${onFile.name}"` });
-      continue;
+    const earlierRow = email === null ? undefined : seenPeople.get(email);
+    if (email !== null && earlierRow === undefined) {
+      seenPeople.set(email, { lineNo: p.lineNo, name });
     }
-    peopleToCreate += 1;
+    // Said once, on the second row, because it is about the pair.
+    if (earlierRow !== undefined && normaliseName(earlierRow.name) !== normaliseName(name)) {
+      warn("people", p.lineNo, name, `row ${String(earlierRow.lineNo)} calls this email "${earlierRow.name}" — one email is one person, so the role is added to them and this spelling of the name is not recorded`);
+    } else if (onFile !== undefined && normaliseName(onFile.name) !== normaliseName(name)) {
+      warn("people", p.lineNo, name, `already on file as "${onFile.name}" — the role is added to them and this spelling of the name is not recorded`);
+    }
+
+    // Only the exact ROLE already being on file makes this row a no-op. A
+    // company created by this very sheet has no partyId yet and therefore no
+    // roles on file, so there is nothing to compare.
+    const targetOnFileId = target?.onFile?.partyId ?? null;
+    if (onFile !== undefined && targetOnFileId !== null && relationship !== undefined) {
+      if (onFile.roles.has(`${targetOnFileId}:${relationship}`)) {
+        peopleOnFile += 1;
+        warn("people", p.lineNo, name, `already recorded as ${roleWords(relationship)} of ${target?.name ?? p.client} — skipped, not updated`);
+        verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "skip", detail: `already ${roleWords(relationship)} of ${target?.name ?? p.client}` });
+        continue;
+      }
+    }
+
+    rolesToRecord += 1;
+    if (earlierRow === undefined && onFile === undefined) peopleToCreate += 1;
     const word = relationship === undefined ? p.relationship : relationship.replace(/_of$/, "").replace(/_/g, " ");
-    verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "create", detail: `${word} of ${target?.name ?? p.client}` });
+    const whose =
+      earlierRow !== undefined
+        ? ` — added to the person on row ${String(earlierRow.lineNo)}`
+        : onFile !== undefined
+          ? ` — added to "${onFile.name}", already on file`
+          : "";
+    verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "create", detail: `${word} of ${target?.name ?? p.client}${whose}` });
   }
 
   // ── Engagements, and the letters they fold into ──────────────────────────
@@ -1264,6 +1339,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       clientsBlocked: count("clients", "blocked"),
       entitiesToRegister: entities,
       peopleToCreate,
+      rolesToRecord,
       peopleOnFile,
       peopleBlocked,
       engagementsToCreate,

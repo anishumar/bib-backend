@@ -77,7 +77,12 @@ export interface ImportOutcome {
   readonly created: {
     readonly clients: number;
     readonly entities: number;
+    /** PARTIES created — not people ROWS. One director of three companies is
+     *  three rows and one person, so these two numbers differ on purpose. */
     readonly people: number;
+    /** Directorships, signatory roles and the like — one per people row that
+     *  loaded, whether or not it also created the person. */
+    readonly roles: number;
     readonly assignments: number;
     readonly letters: number;
     readonly engagements: number;
@@ -182,6 +187,17 @@ export interface PersonOnFile {
   readonly email: string;
   readonly partyId: string;
   readonly name: string;
+  /**
+   * The roles they already hold, as `${toPartyId}:${type}`.
+   *
+   * Carried because a people row is one ROLE, not one person, and the same
+   * person legitimately appears on several — a director of three companies in
+   * one group is three rows. Without this the import cannot tell "this person
+   * exists, give them the new role" from "this exact role is already recorded,
+   * do nothing", and `core.party_relationship` has no uniqueness constraint to
+   * catch the difference for us. A re-run of the same sheet has to be boring.
+   */
+  readonly roles: readonly string[];
 }
 
 export interface StaffMember {
