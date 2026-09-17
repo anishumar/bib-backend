@@ -446,16 +446,20 @@ describe("idempotency, structurally", () => {
     expect(Number(adHoc[0]?.n)).toBeGreaterThanOrEqual(2);
 
     // And the index itself, asked of the catalogue: a partial unique index on
-    // (tenant_id, engagement_id). Asserting on the definition rather than
-    // provoking it, because provoking it needs a whole signed letter — and the
-    // property worth protecting is that the index EXISTS and is partial, which
-    // is exactly what a later "tidy-up" would get wrong.
+    // (tenant_id, engagement_id, job_id) — per JOB since 0300, because a
+    // monthly engagement has one job and one umbrella task per month, and
+    // NULLS NOT DISTINCT so a null job cannot be a wildcard. Asserting on the
+    // definition rather than provoking it, because provoking it needs a whole
+    // signed letter — and the property worth protecting is that the index
+    // EXISTS and is partial, which is exactly what a later "tidy-up" would get
+    // wrong.
     const [idx] = await owner<{ indexdef: string }[]>`
       SELECT indexdef FROM pg_indexes
       WHERE schemaname = 'delivery' AND indexname = 'idx_work_item_one_per_engagement'
     `;
     expect(idx?.indexdef).toMatch(/UNIQUE/);
-    expect(idx?.indexdef).toMatch(/tenant_id, engagement_id/);
+    expect(idx?.indexdef).toMatch(/tenant_id, engagement_id, job_id/);
+    expect(idx?.indexdef).toMatch(/NULLS NOT DISTINCT/);
     expect(idx?.indexdef).toMatch(/WHERE \(engagement_id IS NOT NULL\)/);
   });
 

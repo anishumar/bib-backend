@@ -4,10 +4,12 @@
 // constraints. A fake agrees with the service by construction, so these are the
 // properties no fake can establish:
 //
-//   1. `job_engagement UNIQUE (tenant_id, engagement_id)` — the DATABASE, not
-//      the application, refuses a second job for work already owed. This is the
-//      load-bearing claim of the whole merge: a second checklist is a second
-//      set of tasks and eventually a second invoice.
+//   1. `job_engagement UNIQUE NULLS NOT DISTINCT (tenant_id, engagement_id,
+//      period_start)` — the DATABASE, not the application, refuses a second job
+//      for work already owed: one per engagement, forever, for a one-time
+//      service, and one per engagement PER PERIOD for a recurring one (0300).
+//      This is the load-bearing claim of the whole merge: a second checklist
+//      is a second set of tasks and eventually a second invoice.
 //   2. The PARTIAL unique index really is partial — one OPEN job per group, and
 //      a second one is legal once the first has finished.
 //   3. The composite foreign keys hold, so one firm's job cannot be linked to
@@ -47,6 +49,9 @@ interface Fixture {
   payroll: string;
   /** GST again, for the client's SECOND company. Per Company: never merges. */
   gstOther: string;
+  /** Bookkeeping — MONTHLY, VCFO CONSOLE, FRC, entity 1, letter 1. Takes the
+   *  per-period route (T6.13), so the activation feed never offers it. */
+  books: string;
   otherTenantEngagement: string;
 }
 let f: Fixture;
@@ -60,6 +65,7 @@ async function service(
   moduleCode: string,
   groupCode: string,
   workflowKey: string | null,
+  recurrence: "one_time" | "monthly" = "one_time",
 ): Promise<string> {
   const entryId = ref();
   await owner`
@@ -76,7 +82,12 @@ async function service(
     group: groupCode,
     jurisdictions: ["IN"],
     billingBasis: "fixed",
-    recurrence: "monthly",
+    // ONE-TIME by default, since T6.13: a monthly service is owed a job PER
+    // PERIOD from a different feed, and the activation feed these tests drive
+    // no longer offers it. The merge rule is the same either way; this file
+    // proves it on the route that has been there since T2.7, and proves the
+    // OTHER route on the one monthly line below.
+    recurrence,
     slaDays: null,
     listPrice: null,
     ...(workflowKey === null ? {} : { workflowTemplateKey: workflowKey }),
@@ -209,6 +220,10 @@ beforeAll(async () => {
   // The client's SECOND company, same service, same letter. Per Company says
   // this may never join the first company's checklist.
   const gstOther = await line(tenant, letter1, client, entity2, svcGst, 4);
+  // The recurring line: activated like the others, and deliberately NOT what
+  // the activation feed offers — see the T6.13 block at the end of this file.
+  const svcBooks = await service(tenant, `books-${stamp}`, "FRC", "VCFO CONSOLE", "monthly-books", "monthly");
+  const books = await line(tenant, letter1, client, entity1, svcBooks, 5);
   await sign(letter1);
   await sign(letter2);
 
@@ -239,6 +254,7 @@ beforeAll(async () => {
     tds,
     payroll,
     gstOther,
+    books,
     otherTenantEngagement,
   };
 });
@@ -402,5 +418,158 @@ describe("RLS on the link table", () => {
         AND grantee = 'bib_app'
     `;
     expect(rows.map((r) => r.privilege_type).sort()).toEqual(["INSERT", "SELECT", "UPDATE"]);
+  });
+});
+
+// ── T6.13 / 0300: a recurring engagement takes the per-period route ─────────
+
+describe("a recurring engagement is owed a job PER PERIOD, and the database holds that", () => {
+  const period = (start: string, end: string, label: string) => ({
+    id: ref(),
+    tenantId: f.tenant,
+    sourceKind: "engagement_period" as const,
+    sourceRef: ref(),
+    runnableAt: new Date().toISOString(),
+    splitAxis: "team" as const,
+    splitCode: "VCFO CONSOLE",
+    periodStart: start,
+    periodEnd: end,
+    periodLabel: label,
+  });
+
+  it("is NOT offered by the activation feed, though its contract activated", async () => {
+    // The monthly line's `contract.activated` event is in the ledger exactly
+    // like the other four. The feed's own predicate keeps it out — a one-time
+    // checklist for a monthly service is the thing this task exists to stop.
+    const offered = await repo.unspawnedActivations(f.tenant, 50);
+    expect(offered.map((a) => a.engagementId)).not.toContain(f.books);
+  });
+
+  it("IS offered by the recurring feed, with the letter's terms and no periods yet", async () => {
+    const rows = await repo.activeRecurring(f.tenant, 50);
+    const books = rows.find((r) => r.engagementId === f.books);
+    expect(books).toMatchObject({
+      engagementLetterId: f.letter1,
+      entityPartyId: f.entity1,
+      recurrence: "monthly",
+      slaDays: null,
+      // LIVE grouping facts, as the activation feed reads them.
+      deptCode: "FRC",
+      teamCode: "VCFO CONSOLE",
+      workflowKey: "monthly-books",
+      linkedPeriods: [],
+    });
+    // A DATE, read as text — never an instant.
+    expect(books?.effectiveFrom).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // And the one-time lines are not in it.
+    expect(rows.map((r) => r.engagementId)).not.toContain(f.gst);
+  });
+
+  it("links one engagement to one job PER PERIOD — the KEY refuses a second for the same month", async () => {
+    const september = await repo.createIfAbsent(period("2026-09-01", "2026-09-30", "Sep 2026"));
+    expect(september.created).toBe(true);
+    expect(september.job).toMatchObject({
+      periodStart: "2026-09-01",
+      periodEnd: "2026-09-30",
+      periodLabel: "Sep 2026",
+    });
+    expect(await repo.linkEngagements(f.tenant, september.job.id, [f.books], "2026-09-01")).toEqual([
+      f.books,
+    ]);
+
+    // A SECOND job for the same month, different cause: the link is refused by
+    // the key, and the caller is told nothing joined.
+    const duplicate = await repo.createIfAbsent(period("2026-09-01", "2026-09-30", "Sep 2026"));
+    expect(await repo.linkEngagements(f.tenant, duplicate.job.id, [f.books], "2026-09-01")).toEqual(
+      [],
+    );
+
+    // A different month is a different piece of work: legal.
+    const october = await repo.createIfAbsent(period("2026-10-01", "2026-10-31", "Oct 2026"));
+    expect(await repo.linkEngagements(f.tenant, october.job.id, [f.books], "2026-10-01")).toEqual([
+      f.books,
+    ]);
+
+    // And the feed's anti-join now reports both, oldest first.
+    const rows = await repo.activeRecurring(f.tenant, 50);
+    expect(rows.find((r) => r.engagementId === f.books)?.linkedPeriods).toEqual([
+      "2026-09-01",
+      "2026-10-01",
+    ]);
+  });
+
+  it("keeps the OLD absolute rule for a one-time engagement: a null period is one value", async () => {
+    // A fresh one-time line on its own letter, so nothing else in this file
+    // has linked it. NULLS NOT DISTINCT is what makes the three-column key
+    // still refuse a second null-period link — a plain UNIQUE would treat
+    // every NULL as a fresh value and let the at-least-once duplicate through.
+    const letterId = await letter(f.tenant, f.client, f.entity2, `once-${stamp}`);
+    const svc = await service(f.tenant, `once-${stamp}`, "FRC", "FINCOMPLIANCE", null);
+    const once = await line(f.tenant, letterId, f.client, f.entity1, svc, 1);
+    await sign(letterId);
+
+    const first = await repo.createIfAbsent({
+      id: ref(),
+      tenantId: f.tenant,
+      sourceKind: "engagement",
+      sourceRef: once,
+      runnableAt: new Date().toISOString(),
+      splitAxis: "none",
+      splitCode: null,
+    });
+    expect(await repo.linkEngagements(f.tenant, first.job.id, [once])).toEqual([once]);
+
+    const second = await repo.createIfAbsent({
+      id: ref(),
+      tenantId: f.tenant,
+      sourceKind: "engagement_group",
+      sourceRef: ref(),
+      runnableAt: new Date().toISOString(),
+      splitAxis: "team",
+      splitCode: "FINCOMPLIANCE",
+    });
+    expect(await repo.linkEngagements(f.tenant, second.job.id, [once])).toEqual([]);
+  });
+
+  it("refuses a period job without its period, and a period on any other kind", async () => {
+    // The two CHECKs in 0300: the kind and the period are one fact.
+    await expect(
+      repo.createIfAbsent({
+        id: ref(),
+        tenantId: f.tenant,
+        sourceKind: "engagement_period",
+        sourceRef: ref(),
+        runnableAt: new Date().toISOString(),
+        splitAxis: "none",
+        splitCode: null,
+      }),
+    ).rejects.toThrow(/job_period_matches_kind/);
+
+    await expect(
+      repo.createIfAbsent({
+        id: ref(),
+        tenantId: f.tenant,
+        sourceKind: "engagement",
+        sourceRef: ref(),
+        runnableAt: new Date().toISOString(),
+        splitAxis: "none",
+        splitCode: null,
+        periodStart: "2026-09-01",
+        periodEnd: "2026-09-30",
+        periodLabel: "Sep 2026",
+      }),
+    ).rejects.toThrow(/job_period_matches_kind/);
+  });
+
+  it("lists an upcoming period job for the board, and not for the orchestrator", async () => {
+    const opens = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    const upcoming = await repo.createIfAbsent({
+      ...period("2026-11-01", "2026-11-30", "Nov 2026"),
+      runnableAt: opens,
+    });
+    const open = await repo.listOpen(f.tenant, 100);
+    expect(open.map((j) => j.id)).toContain(upcoming.job.id);
+    const runnable = await repo.listRunnable(f.tenant, new Date().toISOString(), 100);
+    expect(runnable.map((j) => j.id)).not.toContain(upcoming.job.id);
   });
 });

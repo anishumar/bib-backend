@@ -40,6 +40,7 @@ import {
   DISCOUNT_POLICY_KEY,
   readConfidenceTierBody,
   readMaxDiscountPercent,
+  readFiscalYearStartMonth,
   readMissedFromOn,
   readRoleAudience,
   readRolePermissions,
@@ -57,6 +58,7 @@ import type {
   SeedRow,
 } from "../../usecase/config/ports";
 import type { ServiceDirectory as ObligationServiceDirectory } from "../../usecase/obligation/ports";
+import type { CompliancePolicySource as SchedulerCompliancePolicySource } from "../../usecase/scheduler/ports";
 import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
 import type { Amount } from "../../domain/money/model";
 
@@ -120,6 +122,7 @@ export class PostgresConfigRepository
     TemplateSource,
     TierSource,
     VerificationPolicySource,
+    SchedulerCompliancePolicySource,
     ObligationServiceDirectory
 {
   constructor(private readonly app: Db) {}
@@ -535,6 +538,22 @@ export class PostgresConfigRepository
         WHERE e.kind = 'compliance_policy' AND e.key = ${COMPLIANCE_POLICY_KEY}
       `;
       return row ? readMissedFromOn(row.body) : null;
+    });
+  }
+
+  /** The month the firm's financial year starts (T6.13), off the same
+   *  published policy, or null when the firm has not said. Live, like the
+   *  floor, and for the same reason: a firm that answers expects the next
+   *  sweep to cut its quarters. */
+  async fiscalYearStartMonth(tenantId: string): Promise<number | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ body: Record<string, unknown> }[]>`
+        SELECT v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'compliance_policy' AND e.key = ${COMPLIANCE_POLICY_KEY}
+      `;
+      return row ? readFiscalYearStartMonth(row.body) : null;
     });
   }
 

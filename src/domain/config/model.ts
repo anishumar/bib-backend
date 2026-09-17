@@ -1008,9 +1008,27 @@ export interface CompliancePolicyBody {
    * for a statutory deadline that is a penalty rather than a rounding error.
    */
   readonly missedFromOn: string | null;
+  /**
+   * The month the firm's FINANCIAL YEAR begins, 1–12, or null when the firm
+   * has not said (T6.13). April is 4.
+   *
+   * A firm-level fact, and the one the per-period spawn needs before it can
+   * cut a quarterly or annual service into periods: a quarter is aligned to
+   * the financial year, so "Q2" means Jul–Sep for an Indian firm and Apr–Jun
+   * for one on the calendar year, and the difference is a whole quarter of
+   * work in the wrong job. A monthly service needs no such fact and spawns
+   * without it. An obligation rule carries its OWN `fiscalYearStartMonth`,
+   * per jurisdiction, and that stays: the law's year is the law's, this is
+   * the firm's.
+   *
+   * Null is "not stated", never "January". A quarterly service at a firm that
+   * has not answered produces no jobs and the sweep says so, which is the
+   * shape every silent default in this module was replaced with.
+   */
+  readonly fiscalYearStartMonth: number | null;
 }
 
-const COMPLIANCE_POLICY_FIELDS = ["missedFromOn"];
+const COMPLIANCE_POLICY_FIELDS = ["missedFromOn", "fiscalYearStartMonth"];
 
 /** One entry per firm. There is one calendar, so there is one go-live date —
  *  unlike `policy`, which is keyed by what it governs because a firm has many
@@ -1034,13 +1052,24 @@ function validateCompliancePolicyBody(body: Record<string, unknown>): string | n
   if (unknown) return unknown;
 
   const from = body["missedFromOn"];
-  if (from === null || from === undefined) return null;
-  if (typeof from !== "string" || !isCalendarDay(from)) {
-    return (
-      `"missedFromOn" must be a calendar day as "YYYY-MM-DD" — "2026-04-01" — or null for ` +
-      `no floor at all. A day and never a timestamp: a statutory date is the same day in ` +
-      `every zone, and an instant is not. Got ${describe(from)}`
-    );
+  if (from !== null && from !== undefined) {
+    if (typeof from !== "string" || !isCalendarDay(from)) {
+      return (
+        `"missedFromOn" must be a calendar day as "YYYY-MM-DD" — "2026-04-01" — or null for ` +
+        `no floor at all. A day and never a timestamp: a statutory date is the same day in ` +
+        `every zone, and an instant is not. Got ${describe(from)}`
+      );
+    }
+  }
+
+  const fy = body["fiscalYearStartMonth"];
+  if (fy !== null && fy !== undefined) {
+    if (typeof fy !== "number" || !Number.isInteger(fy) || fy < 1 || fy > 12) {
+      return (
+        `"fiscalYearStartMonth" must be a whole month number from 1 to 12 — 4 for a financial ` +
+        `year that starts in April — or null when the firm has not said. Got ${describe(fy)}`
+      );
+    }
   }
   return null;
 }
@@ -1057,6 +1086,15 @@ function validateCompliancePolicyBody(body: Record<string, unknown>): string | n
 export function readMissedFromOn(body: Record<string, unknown>): string | null {
   const from = body["missedFromOn"];
   return typeof from === "string" && isCalendarDay(from) ? from : null;
+}
+
+/**
+ * The month the firm's financial year starts, off a stored compliance policy,
+ * or null when it has not said. Null is NOT January — see the body type.
+ */
+export function readFiscalYearStartMonth(body: Record<string, unknown>): number | null {
+  const fy = body["fiscalYearStartMonth"];
+  return typeof fy === "number" && Number.isInteger(fy) && fy >= 1 && fy <= 12 ? fy : null;
 }
 
 // `audience` is last because it arrived last (T6.6) and because the "Valid: ..."

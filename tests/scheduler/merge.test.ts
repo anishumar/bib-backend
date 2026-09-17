@@ -17,11 +17,14 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeActivationFeed,
+  FakeCompliancePolicy,
   FakeJobRepo,
+  FakeRecurringFeed,
   FakeTenantDirectory,
   FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { SchedulerService, groupActivations } from "../../src/usecase/scheduler/service";
 import type { Activation } from "../../src/usecase/scheduler/ports";
 
@@ -75,9 +78,14 @@ function engine() {
   const events = new RecordingEventSink();
   const split = new FakeWorkSplit();
   const workItems = new FakeWorkItemSpawner();
+  const recurring = new FakeRecurringFeed();
+  recurring.jobs = jobs;
   const service = new SchedulerService({
     jobs,
     activations,
+    recurring,
+    compliancePolicy: new FakeCompliancePolicy(),
+    timeZone: new FakeFirmTimeZone(),
     tenants: new FakeTenantDirectory([FIRM]),
     splitAxis: split,
     // T3.1's seam. Recorded rather than performed: what the work-item service

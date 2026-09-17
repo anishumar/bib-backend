@@ -25,12 +25,17 @@ export interface SchedulerDeps {
 const JobSchema = z
   .object({
     id: z.string().uuid(),
-    sourceKind: z.enum(["engagement", "obligation", "engagement_group"]).openapi({
-      description:
-        "What caused this job to exist. `engagement_group` is several of a letter's " +
-        "engagements merged into one checklist, because the firm splits its work by Dept " +
-        "or by delivery team.",
-    }),
+    sourceKind: z
+      .enum(["engagement", "obligation", "engagement_group", "engagement_period"])
+      .openapi({
+        description:
+          "What caused this job to exist. `engagement_group` is several of a letter's " +
+          "engagements merged into one checklist, because the firm splits its work by Dept " +
+          "or by delivery team. `engagement_period` is ONE PERIOD of a recurring " +
+          "engagement's work — September's bookkeeping — and carries `periodStart`, " +
+          "`periodEnd` and `periodLabel`; there is one per period for as long as the " +
+          "engagement is active.",
+      }),
     sourceRef: z.string().uuid().openapi({
       description:
         "The id of that cause — an engagement, later an obligation instance. For a merged " +
@@ -68,6 +73,20 @@ const JobSchema = z
       description:
         "The Dept or delivery team this job's work is filed under. Null on `none`, and null " +
         "on a splitting firm whose service is filed under nothing — both real answers.",
+    }),
+    periodStart: z.string().nullable().openapi({
+      description:
+        "The first day of the period an `engagement_period` job is for, `YYYY-MM-DD`. Null " +
+        "on every other kind.",
+    }),
+    periodEnd: z.string().nullable().openapi({
+      description: "The last day of that period, `YYYY-MM-DD`. Null on every other kind.",
+    }),
+    periodLabel: z.string().nullable().openapi({
+      description:
+        "What a person calls the period — `Sep 2026`, `Q2 FY2026-27`. The board renders it " +
+        "beside the services, because twelve identical bookkeeping cards are twelve cards " +
+        "nobody can tell apart. Null on every other kind.",
     }),
     status: z.enum(["pending", "running", "blocked", "done", "cancelled"]).openapi({
       description:
@@ -112,6 +131,9 @@ function toWire(j: Job, detail: JobDetail | undefined): z.infer<typeof JobSchema
     services: detail === undefined ? [] : detail.services.map((sv) => ({ ...sv })),
     splitAxis: j.splitAxis,
     splitCode: j.splitCode,
+    periodStart: j.periodStart,
+    periodEnd: j.periodEnd,
+    periodLabel: j.periodLabel,
     status: j.status,
     templateVersionId: j.templateVersionId,
     runnableAt: j.runnableAt,
@@ -124,12 +146,13 @@ const listRunnableJobsRoute = createRoute({
   method: "get",
   path: "/api/v1/jobs",
   tags: ["delivery"],
-  summary: "The firm's jobs that are ready to run",
+  summary: "The firm's open jobs — in hand, and upcoming",
   description:
-    "What the engine currently has in hand: jobs whose window has opened and that have not " +
-    "reached a terminal state. A job waiting on a future date is deliberately absent — the " +
-    "calendar is materialised ahead of time, and showing a year of it as 'ready' would bury " +
-    "the work that actually is.",
+    "Every job that has not reached a terminal state, soonest window first. A job whose " +
+    "`runnableAt` is still ahead is UPCOMING: a per-period job exists from the day its " +
+    "period begins and opens the day after it ends, and the board shows it for the whole " +
+    "month so the firm can plan from it. Nothing is materialised for a period that has not " +
+    "begun, which is what keeps this from being a year of empty checklists.",
   responses: {
     200: { description: "Runnable jobs", content: { "application/json": { schema: JobsResponse } } },
     401: errorResponse("No authenticated session"),
@@ -161,7 +184,7 @@ export function registerSchedulerRoutes(app: OpenAPIHono<AppEnv>, deps: Schedule
   app.openapi(listRunnableJobsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const jobs = await deps.service.runnableJobs(s.tenantId);
+    const jobs = await deps.service.openJobs(s.tenantId);
     // ONE describe for the whole page, not one per row. The lookup-per-row is
     // the exact failure "lists return read models" exists to prevent.
     const details = await deps.service.describeJobs(

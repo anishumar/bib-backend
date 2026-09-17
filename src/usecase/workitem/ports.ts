@@ -162,6 +162,43 @@ export interface ObligationCoverage {
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>>;
+
+  /**
+   * The subset of `engagementIds` whose SERVICE a dated rule NAMES — the
+   * narrower question a PER-PERIOD task asks (T6.13).
+   *
+   * `coveredEngagements` answers "will the calendar produce rows for this
+   * entity", and a rule owed by "Any service" — the shipped pack's default,
+   * since a pack cannot know a firm's catalogue keys — makes that true of
+   * every engagement at every Indian company the moment one GST rule is
+   * answered. Right for the one-time task, which would otherwise be a
+   * thirteenth row nobody can complete. Wrong for a monthly bookkeeping task:
+   * the calendar's GSTR-3B rows say nothing about whether September's books
+   * were done, and skipping the one dated task bookkeeping has because the
+   * entity also files GST would leave the first real client's first real
+   * service with no deadline on anybody's desk.
+   *
+   * So a per-period task is skipped only where a rule names ITS service — the
+   * service IS a filing, and the calendar already dates it. A filing service
+   * whose rule still says "Any service" gets both rows for a period until the
+   * partner names the service on the rule, which is visible and fixable on
+   * the rules screen; the other reading fails silently, and silence is the
+   * failure this module was built to avoid.
+   */
+  filingEngagements(
+    tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>>;
+}
+
+/**
+ * The period a per-period umbrella task is for (T6.13), as the scheduler
+ * hands it over: what to call it, and the last day of the period the
+ * turnaround counts from.
+ */
+export interface SpawnPeriod {
+  readonly label: string;
+  readonly end: string;
 }
 
 /**

@@ -13,6 +13,8 @@ import {
   internalTargetFor,
   monthsPerPeriod,
   periodsFrom,
+  periodsToMaterialise,
+  recurrenceOfService,
   runnableAtFor,
 } from "../../src/domain/scheduler/model";
 
@@ -177,5 +179,103 @@ describe("date arithmetic has no timezone in it", () => {
     // catches it only fails on their machine.
     const periods = periodsFrom("2026-08-01", "monthly", 3);
     expect(periods.map((p) => p.start)).toEqual(["2026-08-01", "2026-09-01", "2026-10-01"]);
+  });
+});
+
+// ── T6.13: which periods of a recurring ENGAGEMENT should have a job by today ──
+
+describe("the periods a recurring engagement is owed a job for", () => {
+  const monthly = {
+    recurrence: "monthly" as const,
+    fiscalYearStartMonth: INDIA_FY_START,
+    effectiveFrom: "2026-04-15",
+    floor: null,
+    today: "2026-09-17",
+    slaDays: 10,
+  };
+
+  it("with no floor, materialises only the period under way", () => {
+    // The firm has not said when it went live, so it went live now: August's
+    // books (due 10 September) were done outside the system, September's
+    // (begun, due 10 October) are the first this product owns.
+    const periods = periodsToMaterialise(monthly);
+    expect(periods.map((p) => p.label)).toEqual(["Sep 2026"]);
+    expect(periods[0]).toMatchObject({ start: "2026-09-01", end: "2026-09-30" });
+  });
+
+  it("THE CASE THAT DECIDED THE RULE: a client since 2024, onboarded today, gets ONE job", () => {
+    // Twenty months of catch-up, each born late, would escalate on the first
+    // night and fill a partner's queue with deadlines nobody ever had.
+    const periods = periodsToMaterialise({ ...monthly, effectiveFrom: "2024-01-01" });
+    expect(periods.map((p) => p.label)).toEqual(["Sep 2026"]);
+  });
+
+  it("reaches back to the firm's floor, and no further", () => {
+    // Floor 1 July: every period whose turnaround date is on or after it. June
+    // (due 10 July) qualifies; May (due 10 June) does not.
+    const periods = periodsToMaterialise({ ...monthly, floor: "2026-07-01" });
+    expect(periods.map((p) => p.label)).toEqual(["Jun 2026", "Jul 2026", "Aug 2026", "Sep 2026"]);
+  });
+
+  it("never reaches before the engagement itself began", () => {
+    const periods = periodsToMaterialise({
+      ...monthly,
+      effectiveFrom: "2026-09-05",
+      floor: "2026-04-01",
+    });
+    expect(periods.map((p) => p.label)).toEqual(["Sep 2026"]);
+  });
+
+  it("materialises nothing for a period that has not begun", () => {
+    expect(periodsToMaterialise({ ...monthly, effectiveFrom: "2026-10-01" })).toEqual([]);
+  });
+
+  it("counts a missing turnaround as zero, never as a deadline it invented", () => {
+    // No SLA: the cutoff is the period's own end. August ended before today
+    // and is out; September has not and is in.
+    const periods = periodsToMaterialise({ ...monthly, effectiveFrom: "2026-08-01", slaDays: null });
+    expect(periods.map((p) => p.label)).toEqual(["Sep 2026"]);
+  });
+
+  it("cuts a quarter on the FINANCIAL year", () => {
+    const periods = periodsToMaterialise({
+      recurrence: "quarterly",
+      fiscalYearStartMonth: INDIA_FY_START,
+      effectiveFrom: "2026-04-01",
+      floor: "2026-04-01",
+      today: "2026-09-17",
+      slaDays: 15,
+    });
+    expect(periods.map((p) => p.label)).toEqual(["Q1 FY2026-27", "Q2 FY2026-27"]);
+    expect(periods[1]).toMatchObject({ start: "2026-07-01", end: "2026-09-30" });
+  });
+
+  it("cuts a year on the financial year too, and includes the one under way", () => {
+    const periods = periodsToMaterialise({
+      recurrence: "annual",
+      fiscalYearStartMonth: INDIA_FY_START,
+      effectiveFrom: "2025-04-01",
+      floor: "2026-01-01",
+      today: "2026-09-17",
+      slaDays: 60,
+    });
+    expect(periods.map((p) => p.label)).toEqual(["FY2025-26", "FY2026-27"]);
+  });
+});
+
+describe("the catalogue's word for how often, in the engine's vocabulary", () => {
+  it("maps the three that name a period", () => {
+    expect(recurrenceOfService("monthly")).toBe("monthly");
+    expect(recurrenceOfService("quarterly")).toBe("quarterly");
+    expect(recurrenceOfService("annually")).toBe("annual");
+  });
+
+  it("names NO period for one-time, custom, unstated or unknown", () => {
+    // `custom` is the honest one: a period this code cannot compute is a
+    // period it must not invent.
+    expect(recurrenceOfService("one_time")).toBeNull();
+    expect(recurrenceOfService("custom")).toBeNull();
+    expect(recurrenceOfService(null)).toBeNull();
+    expect(recurrenceOfService("weekly")).toBeNull();
   });
 });

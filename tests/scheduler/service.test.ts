@@ -13,12 +13,15 @@ import { describe, expect, it } from "vitest";
 import { SchedulerService } from "../../src/usecase/scheduler/service";
 import {
   FakeActivationFeed,
+  FakeCompliancePolicy,
   FakeJobRepo,
+  FakeRecurringFeed,
   FakeTenantDirectory,
   FakeWorkItemSpawner,
   FakeWorkSplit,
 } from "../../src/testfakes/scheduler";
-import type { Activation } from "../../src/usecase/scheduler/ports";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import type { Activation, RecurringEngagement } from "../../src/usecase/scheduler/ports";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -59,9 +62,16 @@ function engine(tenantIds: string[] = [FIRM_A]) {
   const clock = new FakeClock(new Date(NOW));
   const split = new FakeWorkSplit();
   const workItems = new FakeWorkItemSpawner();
+  const recurring = new FakeRecurringFeed();
+  recurring.jobs = jobs; // the linked-periods anti-join, as the real query does it
+  const policy = new FakeCompliancePolicy();
+  const zone = new FakeFirmTimeZone();
   const service = new SchedulerService({
     jobs,
     activations,
+    recurring,
+    compliancePolicy: policy,
+    timeZone: zone,
     tenants: new FakeTenantDirectory(tenantIds),
     splitAxis: split,
     // T3.1's seam. Recorded rather than performed: what the work-item service
@@ -72,7 +82,7 @@ function engine(tenantIds: string[] = [FIRM_A]) {
     clock,
     events,
   });
-  return { service, jobs, activations, events, clock, split, workItems };
+  return { service, jobs, activations, events, clock, split, workItems, recurring, policy, zone };
 }
 
 describe("a released contract becomes a job", () => {
@@ -351,6 +361,9 @@ describe("one firm's failure must not stop the others", () => {
           return activations.unspawnedActivations(tenantId, limit);
         },
       },
+      recurring: new FakeRecurringFeed(),
+      compliancePolicy: new FakeCompliancePolicy(),
+      timeZone: new FakeFirmTimeZone(),
       tenants: new FakeTenantDirectory([FIRM_A, FIRM_B]),
       splitAxis: new FakeWorkSplit(),
       workItems: new FakeWorkItemSpawner(),
@@ -384,6 +397,9 @@ describe("one firm's failure must not stop the others", () => {
     const service = new SchedulerService({
       jobs,
       activations,
+      recurring: new FakeRecurringFeed(),
+      compliancePolicy: new FakeCompliancePolicy(),
+      timeZone: new FakeFirmTimeZone(),
       tenants: new FakeTenantDirectory([FIRM_A]),
       splitAxis: new FakeWorkSplit(),
       workItems: {
@@ -401,5 +417,242 @@ describe("one firm's failure must not stop the others", () => {
     expect(jobs.rows).toHaveLength(1);
     expect(report).toMatchObject({ spawned: 1, tasksFailed: 1 });
     expect(report?.failure).toBeUndefined();
+  });
+});
+
+// ── T6.13: a recurring engagement is owed a job PER PERIOD ──────────────────
+
+/** A monthly engagement as the feed reports it: bookkeeping since April, ten
+ *  days' turnaround. Defaults are the unsplit, unfiled case, like
+ *  `activation()` above, and for the same reason. */
+function monthly(
+  engagementId: string,
+  over: Partial<Omit<RecurringEngagement, "linkedPeriods">> = {},
+): Omit<RecurringEngagement, "linkedPeriods"> {
+  return {
+    engagementId,
+    engagementLetterId: LETTER_1,
+    entityPartyId: ENTITY_1,
+    deptCode: null,
+    teamCode: null,
+    workflowKey: null,
+    effectiveFrom: "2026-04-01",
+    recurrence: "monthly",
+    slaDays: 10,
+    ...over,
+  };
+}
+
+describe("a recurring engagement gets a job PER PERIOD, not one at activation", () => {
+  // NOW is 29 August. With no floor the firm went live today, so August's
+  // books — begun, due 10 September — are the first period this product owns.
+
+  it("spawns the job for the month under way, carrying its period", async () => {
+    const { service, jobs, recurring, workItems, events } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+
+    const [report] = await service.sweepActivations();
+
+    expect(report).toMatchObject({ spawned: 0, periodsSpawned: 1, awaitingFiscalYear: 0 });
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0]).toMatchObject({
+      sourceKind: "engagement_period",
+      status: "pending",
+      periodStart: "2026-08-01",
+      periodEnd: "2026-08-31",
+      periodLabel: "Aug 2026",
+      // The day AFTER the period ends, at the start of that day on UTC — the
+      // fake firm's zone. "Comes after close of month", in the firm's words.
+      runnableAt: "2026-09-01T00:00:00.000Z",
+    });
+    // The link carries the period, which is what makes the key per period.
+    expect(jobs.linksFor(FIRM_A, ENGAGEMENT_1)).toEqual([
+      expect.objectContaining({ periodStart: "2026-08-01" }),
+    ]);
+    // And the work-item side is told WHICH month, so the umbrella task is
+    // named for it and dated from its end.
+    expect(workItems.calls).toEqual([
+      expect.objectContaining({
+        engagementIds: [ENGAGEMENT_1],
+        period: { label: "Aug 2026", end: "2026-08-31" },
+      }),
+    ]);
+    expect(events.verbs()).toEqual(["job.spawned"]);
+    expect(events.recorded[0]?.payload).toMatchObject({
+      sourceKind: "engagement_period",
+      periodStart: "2026-08-01",
+      periodLabel: "Aug 2026",
+      engagementIds: [ENGAGEMENT_1],
+    });
+  });
+
+  it("reaches back to the firm's floor, one job per month, and no further", async () => {
+    const { service, jobs, recurring, policy } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+    policy.floor = "2026-07-01";
+
+    const [report] = await service.sweepActivations();
+
+    expect(report?.periodsSpawned).toBe(3);
+    expect(jobs.rows.map((j) => j.periodLabel)).toEqual(["Jun 2026", "Jul 2026", "Aug 2026"]);
+  });
+
+  it("does it ONCE, however many times the sweep runs", async () => {
+    const { service, jobs, recurring, events } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+
+    await service.sweepActivations();
+    const [second] = await service.sweepActivations();
+    const [third] = await service.sweepActivations();
+
+    expect(second).toMatchObject({ periodsSpawned: 0, periodsExtended: 0 });
+    expect(third).toMatchObject({ periodsSpawned: 0, periodsExtended: 0 });
+    expect(jobs.rows).toHaveLength(1);
+    // ONE event. The log cannot be corrected, and "how many months did we
+    // owe this client" has to be answerable from it.
+    expect(events.verbs()).toEqual(["job.spawned"]);
+  });
+
+  it("opens the day after the period ends WHERE THE FIRM IS", async () => {
+    const { service, jobs, recurring, zone } = engine();
+    zone.set("Asia/Kolkata");
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+
+    await service.sweepActivations();
+
+    // 1 September, 00:00 in Kolkata — which is 18:30 UTC on the 31st. Midnight
+    // UTC would open the job five and a half hours late for the firm this was
+    // built for.
+    expect(jobs.rows[0]?.runnableAt).toBe("2026-08-31T18:30:00.000Z");
+  });
+
+  it("a quarterly service waits for the firm's financial year, and SAYS so", async () => {
+    const { service, jobs, recurring, policy } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1, { recurrence: "quarterly" }));
+
+    const [before] = await service.sweepActivations();
+    expect(before).toMatchObject({ periodsSpawned: 0, awaitingFiscalYear: 1 });
+    expect(jobs.rows).toHaveLength(0);
+
+    // The firm answers: April. The quarter under way is Jul–Sep.
+    policy.fiscalYear = 4;
+    const [after] = await service.sweepActivations();
+    expect(after).toMatchObject({ periodsSpawned: 1, awaitingFiscalYear: 0 });
+    expect(jobs.rows[0]).toMatchObject({
+      periodStart: "2026-07-01",
+      periodEnd: "2026-09-30",
+      periodLabel: "Q2 FY2026-27",
+    });
+  });
+
+  it("a service that names no period produces nothing here, never a guessed calendar", async () => {
+    // Belt and braces: the real feed never offers a `custom` service, but a
+    // fake that did must still produce nothing.
+    const { service, jobs, recurring } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1, { recurrence: "custom" }));
+    const [report] = await service.sweepActivations();
+    expect(report?.periodsSpawned).toBe(0);
+    expect(jobs.rows).toHaveLength(0);
+  });
+
+  it("cuts a month's work with the SAME rule that cuts a letter's", async () => {
+    // Split by Dept: two monthly services on one letter, both FRC, one
+    // process — ONE August checklist, exactly as their activations would
+    // have been one job.
+    const { service, jobs, recurring, split, workItems } = engine();
+    split.axis = "dept";
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1, { deptCode: "FRC", workflowKey: "monthly-books" }));
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_2, { deptCode: "FRC", workflowKey: "monthly-books" }));
+
+    const [report] = await service.sweepActivations();
+
+    expect(report?.periodsSpawned).toBe(1);
+    expect(jobs.rows).toHaveLength(1);
+    expect(jobs.rows[0]).toMatchObject({ splitAxis: "dept", splitCode: "FRC" });
+    expect(workItems.calls[0]?.engagementIds).toEqual([ENGAGEMENT_1, ENGAGEMENT_2]);
+  });
+
+  it("under `none`, two monthly services on one letter are two checklists a month", async () => {
+    const { service, jobs, recurring } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_2));
+
+    const [report] = await service.sweepActivations();
+
+    expect(report?.periodsSpawned).toBe(2);
+    expect(jobs.rows).toHaveLength(2);
+    expect(new Set(jobs.rows.map((j) => j.sourceRef)).size).toBe(2);
+  });
+
+  it("a service arriving after the month's checklist exists JOINS it, and says so", async () => {
+    const { service, jobs, recurring, split, events } = engine();
+    split.axis = "dept";
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1, { deptCode: "FRC", workflowKey: "monthly-books" }));
+    await service.sweepActivations();
+
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_2, { deptCode: "FRC", workflowKey: "monthly-books" }));
+    const [report] = await service.sweepActivations();
+
+    expect(report).toMatchObject({ periodsSpawned: 0, periodsExtended: 1 });
+    expect(jobs.rows).toHaveLength(1);
+    expect(events.verbs()).toEqual(["job.spawned", "job.scope_extended"]);
+    expect(events.recorded[1]?.payload).toMatchObject({
+      engagementIds: [ENGAGEMENT_2],
+      periodLabel: "Aug 2026",
+    });
+  });
+
+  it("runs beside the one-time spawn, and neither touches the other", async () => {
+    const { service, jobs, activations, recurring } = engine();
+    activations.add(FIRM_A, activation(ENGAGEMENT_1, "2026-08-28T10:00:00.000Z"));
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_2));
+
+    const [report] = await service.sweepActivations();
+
+    expect(report).toMatchObject({ spawned: 1, periodsSpawned: 1 });
+    expect(jobs.rows.map((j) => j.sourceKind).sort()).toEqual(["engagement", "engagement_period"]);
+  });
+
+  it("is on the BOARD as upcoming, and NOT in the orchestrator's hands until its window opens", async () => {
+    const { service, recurring } = engine();
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+    await service.sweepActivations();
+
+    // The month is under way: a partner plans from this row.
+    expect(await service.openJobs(FIRM_A)).toHaveLength(1);
+    // But nothing may start walking it until 1 September.
+    expect(await service.runnableJobs(FIRM_A)).toHaveLength(0);
+  });
+
+  it("keeps the period JOB when its TASK cannot be created, and counts it", async () => {
+    const jobs = new FakeJobRepo();
+    const activations = new FakeActivationFeed();
+    activations.jobs = jobs;
+    const recurring = new FakeRecurringFeed();
+    recurring.jobs = jobs;
+    recurring.add(FIRM_A, monthly(ENGAGEMENT_1));
+
+    const service = new SchedulerService({
+      jobs,
+      activations,
+      recurring,
+      compliancePolicy: new FakeCompliancePolicy(),
+      timeZone: new FakeFirmTimeZone(),
+      tenants: new FakeTenantDirectory([FIRM_A]),
+      splitAxis: new FakeWorkSplit(),
+      workItems: {
+        spawnForEngagements: () => {
+          throw new Error("this firm has no starting state for work items");
+        },
+      },
+      ids: new FakeIds(),
+      clock: new FakeClock(new Date(NOW)),
+      events: new RecordingEventSink(),
+    });
+
+    const [report] = await service.sweepActivations();
+
+    expect(report).toMatchObject({ periodsSpawned: 1, tasksFailed: 1 });
+    expect(jobs.rows).toHaveLength(1);
   });
 });

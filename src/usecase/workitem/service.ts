@@ -104,6 +104,7 @@ import type {
   ReviewPolicySource,
   ReviewerDirectory,
   ReviewerRow,
+  SpawnPeriod,
   SpocDirectory,
   WorkAxisDirectory,
   WorkItemApprovalRepository,
@@ -958,12 +959,23 @@ export class WorkItemService {
    * apart.
    *
    * Returns how many were actually created, for the sweep's log.
+   *
+   * ── WITH A PERIOD, IT IS ONE MONTH'S TASK (T6.13) ─────────────────────────
+   *
+   * A per-period job hands over the period it is for, and three things change
+   * and nothing else: the title names the period ("Bookkeeping — Sep 2026"),
+   * the turnaround counts from the period's END rather than from signing —
+   * which for a month-aligned period is exactly "by the Nth of the following
+   * month", the firm's own words — and the calendar-coverage question becomes
+   * the narrower one `filingEngagements` documents. Routing, priority, the
+   * statutory flag and the SLA snapshot are the same fact either way.
    */
   async spawnForEngagements(
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
     actor: Actor,
+    period?: SpawnPeriod,
   ): Promise<number> {
     if (engagementIds.length === 0) return 0;
 
@@ -982,7 +994,13 @@ export class WorkItemService {
     // that nobody can tell from a real one. See `ObligationCoverage` for why
     // this is derived rather than a flag — the short version is that a wrong
     // flag means silence, and a derived miss means today's behaviour.
-    const covered = await this.deps.obligations.coveredEngagements(tenantId, engagementIds);
+    //
+    // A PERIOD task asks the narrower question. Its row is completable and
+    // dated, so the thirteenth-row argument does not apply; what would be
+    // wrong is skipping September's bookkeeping because the company files GST.
+    const covered = period
+      ? await this.deps.obligations.filingEngagements(tenantId, engagementIds)
+      : await this.deps.obligations.coveredEngagements(tenantId, engagementIds);
 
     let created = 0;
     for (const w of work) {
@@ -1011,13 +1029,19 @@ export class WorkItemService {
         jobId,
         serviceVersionId: w.serviceVersionId,
         deptAxisId: routing.axisId,
-        title: w.serviceName,
+        // The period in the title, because "Bookkeeping" twelve times on one
+        // desk is twelve rows nobody can tell apart. The title is prose the
+        // moment somebody edits it and stays off the ledger either way.
+        title: period ? `${w.serviceName} — ${period.label}` : w.serviceName,
         description: null,
         stateId: state.id,
         priorityId: priority.id,
         assigneeUserId: routing.outcome.userId,
         assignmentNote: routing.outcome.note,
-        dueOn: dueOnFrom(w.effectiveFrom, w.slaDays),
+        // From the END of the period for a month's task, from SIGNING for a
+        // one-time one. Same field, same snapshot; the clock starts at the
+        // event that makes sense for the work.
+        dueOn: dueOnFrom(period ? period.end : w.effectiveFrom, w.slaDays),
         isStatutoryDue: false,
         // The SLA in force AT CREATION, copied. A later catalogue revision must
         // not make finished work retroactively late — G2.3's whole argument.
@@ -1025,8 +1049,8 @@ export class WorkItemService {
         isClientVisible: true,
       } satisfies NewWorkItem);
 
-      // Null means one already exists for this engagement: a redelivery, and
-      // the correct answer is to do nothing and record nothing.
+      // Null means one already exists for this engagement on this job: a
+      // redelivery, and the correct answer is to do nothing and record nothing.
       if (!item) continue;
       created += 1;
       await this.recordCreated(item, actor, "engagement");

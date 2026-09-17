@@ -26,6 +26,15 @@ export interface NewJob {
    *  and null on a firm that DOES split when the service is filed under
    *  nothing — which is a real state and groups together, not dropped. */
   readonly splitCode: string | null;
+  /**
+   * The period an `engagement_period` job is for (T6.13, 0300) — all three
+   * set on that kind, and absent or null on every other, which every caller
+   * written before this task already is. The database CHECKs the agreement so
+   * a caller cannot half-state it.
+   */
+  readonly periodStart?: string | null;
+  readonly periodEnd?: string | null;
+  readonly periodLabel?: string | null;
 }
 
 /** One service inside a job, named as the client's own letter names it. */
@@ -82,11 +91,17 @@ export interface JobRepository {
    *
    * Never removes. Unlinking an engagement from the job that delivered it would
    * erase the only record of what that work was.
+   *
+   * `periodStart` is the period an `engagement_period` job is for, and null —
+   * the default — for every other kind (0300). It is part of the link's key:
+   * one engagement, one job PER PERIOD, and `NULLS NOT DISTINCT` keeps the
+   * old absolute rule for every one-time engagement.
    */
   linkEngagements(
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
+    periodStart?: string | null,
   ): Promise<readonly string[]>;
 
   /**
@@ -113,6 +128,17 @@ export interface JobRepository {
   findById(tenantId: string, jobId: string): Promise<Job | null>;
   /** Jobs whose time has come: runnable_at has passed and they can still move. */
   listRunnable(tenantId: string, asOf: string, limit: number): Promise<readonly Job[]>;
+  /**
+   * Every job that has not finished, soonest window first — the work BOARD's
+   * read (T6.13), as opposed to the orchestrator's.
+   *
+   * The two used to be one query. A per-period job is created the day its
+   * period begins and opens the day after it ends, so for a whole month the
+   * board must show it as UPCOMING — the firm plans capacity from that row —
+   * while the orchestrator must not touch it. `listRunnable` is what the
+   * engine walks; this is what a person sees.
+   */
+  listOpen(tenantId: string, limit: number): Promise<readonly Job[]>;
   updateStatus(
     tenantId: string,
     jobId: string,
@@ -225,18 +251,104 @@ export interface Activation {
  * engagement_id)` rather than counting on the caller to be careful. Returns how
  * many were actually created, for the sweep's log.
  */
+/**
+ * The period a per-period job's umbrella task is for (T6.13): what to call
+ * it, and the day the turnaround counts from. Passed through to the work-item
+ * side, which owns what a due date is.
+ */
+export interface SpawnPeriod {
+  readonly label: string;
+  /** The period's last day, `YYYY-MM-DD`. */
+  readonly end: string;
+}
+
 export interface WorkItemSpawner {
   spawnForEngagements(
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
     actor: Actor,
+    period?: SpawnPeriod,
   ): Promise<number>;
 }
 
 export interface ActivationFeed {
-  /** Activations at this firm with no job against them yet, oldest first. */
+  /**
+   * Activations at this firm with no job against them yet, oldest first.
+   *
+   * EXCLUDING recurring engagements (T6.13). A service whose pinned body says
+   * `monthly`, `quarterly` or `annually` is owed a job PER PERIOD, not one at
+   * activation; the `RecurringEngagementFeed` below is its route into the
+   * engine, and offering it here too would build the one-time checklist this
+   * task exists to stop — a job that walks the process once and can never be
+   * completed because the engagement runs a year.
+   */
   unspawnedActivations(tenantId: string, limit: number): Promise<readonly Activation[]>;
+}
+
+/**
+ * An ACTIVE engagement whose service comes round every period (T6.13).
+ *
+ * The same grouping facts an `Activation` carries, read the same way — Dept,
+ * team and process off the LIVE body — plus the three the period arithmetic
+ * needs: how often it recurs and what turnaround it promised, both off the
+ * PINNED version because they are terms of the letter the client signed, and
+ * the day the engagement began.
+ *
+ * `linkedPeriods` is the anti-join, carried on the row rather than re-queried
+ * per period: the periods this engagement already has a job for, so a sweep
+ * can decide which are missing without one write per period per engagement
+ * per hour. Four hundred clients times three services is twelve hundred
+ * engagements, and an hourly sweep that attempted twelve hundred inserts to
+ * find out nothing was missing would be a sweep nobody could reason about.
+ */
+export interface RecurringEngagement {
+  readonly engagementId: string;
+  readonly engagementLetterId: string;
+  readonly entityPartyId: string;
+  readonly deptCode: string | null;
+  readonly teamCode: string | null;
+  readonly workflowKey: string | null;
+  /** `crm.engagement.effective_from`, a calendar day. */
+  readonly effectiveFrom: string;
+  /** The pinned service body's `recurrence`, verbatim. */
+  readonly recurrence: string;
+  /** The pinned service body's `slaDays`; null when none was stated. */
+  readonly slaDays: number | null;
+  /** `period_start` of every link row this engagement already has. */
+  readonly linkedPeriods: readonly string[];
+}
+
+export interface RecurringEngagementFeed {
+  /** Active recurring engagements at this firm, oldest start first. */
+  activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]>;
+}
+
+/**
+ * The two firm-level facts the per-period spawn reads off the compliance
+ * policy (T6.13): the go-live floor, which is where catch-up stops, and the
+ * month the financial year starts, without which a quarter cannot be cut.
+ *
+ * Declared here in the scheduler's own vocabulary and satisfied by the same
+ * config adapter that answers `usecase/obligation`'s version of the first
+ * question — the port is stated twice, the adapter once, as every shared read
+ * in this codebase is.
+ */
+export interface CompliancePolicySource {
+  missedFromOn(tenantId: string): Promise<string | null>;
+  fiscalYearStartMonth(tenantId: string): Promise<number | null>;
+}
+
+/**
+ * Which calendar this firm's days are cut on (0071).
+ *
+ * The per-period spawn needs it twice: to know what "today" is for the firm
+ * before deciding which periods have begun, and to turn "the day after the
+ * period ends" into the instant `runnable_at` actually is. Both are the day
+ * bugs this product has already had three of, and the zone is the cure.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 /**

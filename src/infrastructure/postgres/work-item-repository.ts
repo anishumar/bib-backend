@@ -260,8 +260,10 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
   }
 
   /**
-   * The spawn path's insert: conflict on the engagement means the work already
-   * exists, and the correct answer is null and NOT an error.
+   * The spawn path's insert: conflict on the engagement AND the job (0300)
+   * means this job's task for the work already exists, and the correct answer
+   * is null and NOT an error. Per job rather than per engagement because a
+   * monthly engagement has one job — and one umbrella task — per month.
    *
    * `ON CONFLICT` names the partial unique index by its predicate, because the
    * index is partial (`WHERE engagement_id IS NOT NULL`) and Postgres will not
@@ -283,7 +285,7 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
            ${item.title}, ${item.description}, ${item.stateId}, ${item.priorityId},
            ${item.assigneeUserId}, ${item.assignmentNote}, ${item.dueOn}::date,
            ${item.isStatutoryDue}, ${item.slaDaysSnapshot}, ${item.isClientVisible})
-        ON CONFLICT (tenant_id, engagement_id) WHERE engagement_id IS NOT NULL DO NOTHING
+        ON CONFLICT (tenant_id, engagement_id, job_id) WHERE engagement_id IS NOT NULL DO NOTHING
         RETURNING ${db.unsafe(COLUMNS)}
       `;
       const row = rows[0];

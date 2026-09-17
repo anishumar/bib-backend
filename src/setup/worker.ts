@@ -255,6 +255,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const scheduler = new SchedulerService({
     jobs,
     activations: jobs,
+    // T6.13 — the same adapter in its third role: which engagements recur,
+    // and which periods each already has a job for.
+    recurring: jobs,
+    // The floor and the financial year, off the compliance policy: the same
+    // config adapter — and the same instance — the calendar sweep reads, so
+    // the two sweeps cannot disagree about when the firm went live.
+    compliancePolicy: configRepository,
+    timeZone: new PostgresFirmTimeZone(pools.app),
     // The one read in this process that is not inside a tenant context, because
     // `tenancy.tenant` is GLOBAL. It returns ids and nothing else; every read
     // that follows is scoped to one of them.

@@ -16,20 +16,28 @@
 import type { WorkSplitAxis } from "../serviceaxis/model";
 
 /**
- * What caused a job to exist. A closed set, mirrored by the CHECK in 0041/0046.
+ * What caused a job to exist. A closed set, mirrored by the CHECK in
+ * 0041/0046/0300.
  *
- *   `engagement`       one engagement's work, and its `sourceRef` is that
- *                      engagement's id. Every job written before T2.7's merge,
- *                      and every job a firm on `work_split_axis = none` writes
- *                      after it.
- *   `engagement_group` several engagements merged into one checklist, because
- *                      the firm splits its work by Dept or by delivery team.
- *                      Its `sourceRef` names NO row in any table — it is the
- *                      group key, derived, and it exists to make a redelivered
- *                      sweep conflict instead of building a second checklist.
- *   `obligation`       a recurring statutory filing. T3.2.
+ *   `engagement`        one engagement's work, and its `sourceRef` is that
+ *                       engagement's id. Every job written before T2.7's merge,
+ *                       and every job a firm on `work_split_axis = none` writes
+ *                       after it.
+ *   `engagement_group`  several engagements merged into one checklist, because
+ *                       the firm splits its work by Dept or by delivery team.
+ *                       Its `sourceRef` names NO row in any table — it is the
+ *                       group key, derived, and it exists to make a redelivered
+ *                       sweep conflict instead of building a second checklist.
+ *   `engagement_period` ONE PERIOD of a recurring engagement's work (T6.13) —
+ *                       September's bookkeeping, Q2's TDS return. Its
+ *                       `sourceRef` is derived from the group key AND the
+ *                       period, its `periodStart/End/Label` say which one, and
+ *                       there is one per period for as long as the engagement
+ *                       is active. The job kind a monthly service should have
+ *                       had from the start.
+ *   `obligation`        a recurring statutory filing. T3.2.
  */
-export type JobSource = "engagement" | "obligation" | "engagement_group";
+export type JobSource = "engagement" | "obligation" | "engagement_group" | "engagement_period";
 
 /**
  * The engine's own mechanics — NOT the firm's vocabulary.
@@ -73,6 +81,15 @@ export interface Job {
   readonly runnableAt: string;
   readonly startedAt: string | null;
   readonly finishedAt: string | null;
+  /**
+   * The period this job is FOR, on an `engagement_period` job; null on every
+   * other kind (0300). Three `date` facts and a label a person reads — "Sep
+   * 2026" — copied at spawn so the board renders them without a join and so
+   * they never move under a job already running.
+   */
+  readonly periodStart: string | null;
+  readonly periodEnd: string | null;
+  readonly periodLabel: string | null;
 }
 
 // ── Recurrence ──────────────────────────────────────────────────────────────
@@ -98,6 +115,33 @@ export const RECURRENCES: readonly Recurrence[] = [
 
 export function isRecurrence(v: string): v is Recurrence {
   return (RECURRENCES as readonly string[]).includes(v);
+}
+
+/**
+ * The catalogue's word for how often a service comes round (`ServiceRecurrence`
+ * in `domain/config`), translated into this engine's period vocabulary — or
+ * null when it does not name a period. Takes a string because the value
+ * arrives off a stored body, which the feed reads verbatim.
+ *
+ * The two sets are deliberately different types owned by different modules.
+ * The catalogue says `annually` and has `one_time` and `custom`; the engine
+ * says `annual`, has `half_yearly` for filings, and has no word for "custom"
+ * because a period it cannot compute is a period it must not invent. This is
+ * the ONE place the two meet, so a service that says `custom` or nothing gets
+ * exactly today's behaviour — one job at activation — and never a calendar
+ * this code guessed.
+ */
+export function recurrenceOfService(value: string | null): Recurrence | null {
+  switch (value) {
+    case "monthly":
+      return "monthly";
+    case "quarterly":
+      return "quarterly";
+    case "annually":
+      return "annual";
+    default:
+      return null;
+  }
 }
 
 /** How many months one period of this recurrence covers. */
@@ -226,6 +270,68 @@ function labelFor(start: string, recurrence: Recurrence, fiscalYearStartMonth: n
   const offset = (month - fiscalYearStartMonth + 12) % 12;
   const index = Math.floor(offset / span) + 1;
   return recurrence === "quarterly" ? `Q${String(index)} ${fyLabel}` : `H${String(index)} ${fyLabel}`;
+}
+
+/**
+ * The periods of a recurring engagement that should have a job by `today`.
+ *
+ * ── THE RULE, IN FOUR PARTS ───────────────────────────────────────────────
+ *
+ *   1. Candidates run from the period CONTAINING `effectiveFrom` — a client
+ *      who signed on the 15th owes that month's books.
+ *   2. A period exists once it has BEGUN (`start <= today`), and not before.
+ *      The job for the month in progress is therefore on the board as
+ *      "upcoming" for the whole month and opens the day after it ends;
+ *      nothing is materialised for months that have not started, so the board
+ *      never shows a year of empty checklists.
+ *   3. A period whose turnaround date (`end + slaDays`) fell before the firm's
+ *      FLOOR is not materialised: that work was done before the firm used this
+ *      product, and a job for it would be born late, escalate on its first
+ *      night and put a deadline nobody ever had in front of a partner. The
+ *      obligation engine reaches ninety days back for the same firm because a
+ *      missed FILING is a legal fact; a bookkeeping month done outside the
+ *      system is not, so this reaches back to the floor and no further.
+ *   4. No floor means TODAY. A firm that has not said when it went live is
+ *      taken to have gone live now — the same conservative reading a
+ *      practice-management tool makes of a repeat whose start date is unset,
+ *      and the one that never invents history.
+ *
+ * Pure: every date arrives as an argument, so "a firm onboarded in September
+ * with a client since 2024 gets September's job and not twenty months of
+ * catch-up" is a test with no clock in it.
+ */
+export interface PeriodPlan {
+  readonly recurrence: Recurrence;
+  readonly fiscalYearStartMonth: number;
+  /** The engagement's own start — `crm.engagement.effective_from`. */
+  readonly effectiveFrom: string;
+  /** The firm's compliance floor (`missedFromOn`), or null for none. */
+  readonly floor: string | null;
+  /** The firm's calendar day, in its own zone. */
+  readonly today: string;
+  /** The turnaround after a period ends; null counts as zero for the floor. */
+  readonly slaDays: number | null;
+}
+
+/** A hard ceiling on candidates: a hundred years of months. Far beyond any
+ *  engagement, and what stops an absurd `effectiveFrom` from looping. */
+const MAX_CANDIDATE_PERIODS = 1200;
+
+export function periodsToMaterialise(plan: PeriodPlan): readonly Period[] {
+  const span = monthsPerPeriod(plan.recurrence);
+  const [fromYear = 0, fromMonth = 1] = plan.effectiveFrom.split("-").map(Number);
+  const [toYear = 0, toMonth = 1] = plan.today.split("-").map(Number);
+  const monthsBetween = toYear * 12 + toMonth - (fromYear * 12 + fromMonth);
+  // Enough to reach today plus the period under way; never fewer than one, so
+  // an engagement that starts next month still yields its first period for
+  // the `start <= today` test to refuse.
+  const count = Math.max(1, Math.min(MAX_CANDIDATE_PERIODS, Math.floor(monthsBetween / span) + 2));
+  const cutoff = plan.floor ?? plan.today;
+  const turnaround = plan.slaDays ?? 0;
+
+  return periodsFrom(plan.effectiveFrom, plan.recurrence, count, plan.fiscalYearStartMonth).filter(
+    (p) => p.start <= plan.today && addDays(p.end, turnaround) >= cutoff,
+  );
 }
 
 // ── Due dates and lead time ─────────────────────────────────────────────────

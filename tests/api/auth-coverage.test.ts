@@ -131,6 +131,8 @@ import {
   FakeTenantDirectory,
   FakeWorkItemSpawner,
   FakeWorkSplit,
+  FakeCompliancePolicy,
+  FakeRecurringFeed,
 } from "../../src/testfakes/scheduler";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
@@ -364,6 +366,9 @@ function deps(): RouterDeps {
       service: new SchedulerService({
         jobs: new FakeJobRepo(),
         activations: new FakeActivationFeed(),
+        recurring: new FakeRecurringFeed(),
+        compliancePolicy: new FakeCompliancePolicy(),
+        timeZone: new FakeFirmTimeZone(),
         tenants: { activeTenantIds: () => Promise.resolve([]) },
         splitAxis: new FakeWorkSplit(),
         workItems: new FakeWorkItemSpawner(),

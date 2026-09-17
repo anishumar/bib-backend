@@ -719,3 +719,46 @@ describe("keys and kinds", () => {
     expect([...KIND_VALUES].sort()).toEqual([...CONFIG_KINDS].sort());
   });
 });
+
+// ── T6.13: the firm's financial year, on the compliance policy ──────────────
+
+describe("the compliance policy's financial year", () => {
+  it("takes a month number, and refuses anything that is not one", async () => {
+    const err = await setup()
+      .service.define(
+        {
+          tenantId: TENANT,
+          kind: "compliance_policy",
+          key: "default",
+          body: { missedFromOn: null, fiscalYearStartMonth: 13 },
+        },
+        ACTOR,
+      )
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(InvalidBody);
+    expect((err as Error).message).toContain("fiscalYearStartMonth");
+    expect((err as Error).message).toContain("1 to 12");
+  });
+
+  it("accepts April, and accepts not having said", async () => {
+    const { service } = setup();
+    await service.define(
+      {
+        tenantId: TENANT,
+        kind: "compliance_policy",
+        key: "default",
+        body: { missedFromOn: "2026-04-01", fiscalYearStartMonth: 4 },
+      },
+      ACTOR,
+    );
+    await service.define(
+      {
+        tenantId: TENANT,
+        kind: "compliance_policy",
+        key: "unsaid",
+        body: { missedFromOn: null },
+      },
+      ACTOR,
+    );
+  });
+});

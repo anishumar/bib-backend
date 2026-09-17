@@ -335,6 +335,13 @@ export function wire(cfg: Config, log: Logger): Wired {
   const scheduler = new SchedulerService({
     jobs,
     activations: jobs,
+    // T6.13 — the same adapter in its third role: which engagements recur.
+    recurring: jobs,
+    // The floor and the financial year, off the compliance policy — the
+    // config adapter in yet another role, and the same instance the calendar
+    // reads, so a sweep and a screen cannot disagree about the firm's year.
+    compliancePolicy: configRepository,
+    timeZone: new PostgresFirmTimeZone(pools.app),
     tenants: new PostgresTenantDirectory(pools.app),
     // ONE adapter satisfying two ports declared in two use cases — the shape
     // AxisDirectory and RoleDirectory already have. `usecase/serviceaxis` owns

@@ -258,3 +258,38 @@ describe("a rule that cannot produce a date does not count as coverage", () => {
     await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
   });
 });
+
+// ── T6.13: the FILING question, which is narrower than coverage ─────────────
+
+describe("whether the client BOUGHT a filing — only a rule that names the service counts", () => {
+  it("an any-service rule covers the entity and does NOT make the service a filing", async () => {
+    // The case the per-period umbrella task turns on: a GST rule owed by "Any
+    // service" reaches every engagement at the entity, so bookkeeping is
+    // COVERED — and September's bookkeeping task must still exist, because the
+    // calendar's GSTR-3B rows say nothing about whether the books were done.
+    const id = await rule({ name: `GSTR-3B any-filing ${stamp}`, serviceEntryId: null });
+
+    expect((await coverage.coveredEngagements(tenantId, [engagementId])).has(engagementId)).toBe(true);
+    expect((await coverage.filingEngagements(tenantId, [engagementId])).has(engagementId)).toBe(false);
+
+    await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
+  });
+
+  it("a rule naming the bought service makes it a filing — both questions say yes", async () => {
+    const id = await rule({ name: `GSTR-3B names-it ${stamp}`, serviceEntryId: boughtEntryId });
+
+    expect((await coverage.coveredEngagements(tenantId, [engagementId])).has(engagementId)).toBe(true);
+    expect((await coverage.filingEngagements(tenantId, [engagementId])).has(engagementId)).toBe(true);
+
+    await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
+  });
+
+  it("a rule naming a service the client did not buy is neither", async () => {
+    const id = await rule({ name: `Payroll names-other ${stamp}`, serviceEntryId: otherEntryId });
+
+    expect((await coverage.coveredEngagements(tenantId, [engagementId])).has(engagementId)).toBe(false);
+    expect((await coverage.filingEngagements(tenantId, [engagementId])).has(engagementId)).toBe(false);
+
+    await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
+  });
+});

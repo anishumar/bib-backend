@@ -1141,3 +1141,73 @@ describe("the board's filters", () => {
     expect(all).toHaveLength(3);
   });
 });
+
+// ── T6.13: one MONTH's task, handed over with its period ────────────────────
+
+describe("a period job's umbrella task is one month's task", () => {
+  const SEPTEMBER = { label: "Sep 2026", end: "2026-09-30" };
+
+  it("names the month and counts the turnaround from the period's END", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly bookkeeping" }));
+
+    const created = await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER);
+
+    expect(created).toBe(1);
+    expect(h.items.rows[0]).toMatchObject({
+      title: "Monthly bookkeeping — Sep 2026",
+      // 30 September + 30 days, NOT the engagement's start plus 30. For a
+      // month-aligned period this is exactly "by the 30th of the following
+      // month", which is how the firm states it.
+      dueOn: "2026-10-30",
+      slaDaysSnapshot: 30,
+      assigneeUserId: PRIYA,
+      isStatutoryDue: false,
+    });
+  });
+
+  it("asks the NARROWER coverage question: an entity that files GST still owes its bookkeeping task", async () => {
+    // The calendar covers the entity (a GST rule reaches it), but no rule
+    // names THIS service. The one-time task would be skipped — correctly, it
+    // would be a thirteenth row — and September's task must not be.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork());
+    h.obligations.covered.add(ENGAGEMENT);
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR)).toBe(0);
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(1);
+  });
+
+  it("skips the month's task only where a rule names the service — it IS a filing", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork());
+    h.obligations.covered.add(ENGAGEMENT);
+    h.obligations.filing.add(ENGAGEMENT);
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(0);
+    expect(h.items.rows).toHaveLength(0);
+  });
+
+  it("is one task per engagement PER JOB, so October's job gets its own", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork());
+    const OCTOBER_JOB = "00000000-0000-4000-8000-0000000000b2";
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(1);
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(0);
+    expect(
+      await h.service.spawnForEngagements(FIRM, OCTOBER_JOB, [ENGAGEMENT], ACTOR, {
+        label: "Oct 2026",
+        end: "2026-10-31",
+      }),
+    ).toBe(1);
+    expect(h.items.rows.map((r) => r.title)).toEqual([
+      "GST monthly filing — Sep 2026",
+      "GST monthly filing — Oct 2026",
+    ]);
+  });
+});

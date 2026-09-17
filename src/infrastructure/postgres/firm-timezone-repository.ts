@@ -21,10 +21,11 @@ import { withTenant } from "../../db/tenant";
 import { DEFAULT_TIME_ZONE } from "../../domain/tenancy/model";
 import type { FirmTimeZone as ChaserFirmTimeZone } from "../../usecase/chaser/ports";
 import type { FirmTimeZone as LibraryFirmTimeZone } from "../../usecase/portallibrary/ports";
+import type { FirmTimeZone as SchedulerFirmTimeZone } from "../../usecase/scheduler/ports";
 import type { TimeZoneSetting } from "../../usecase/serviceaxis/ports";
 
 export class PostgresFirmTimeZone
-  implements ChaserFirmTimeZone, LibraryFirmTimeZone, TimeZoneSetting
+  implements ChaserFirmTimeZone, LibraryFirmTimeZone, SchedulerFirmTimeZone, TimeZoneSetting
 {
   constructor(private readonly app: Db) {}
 

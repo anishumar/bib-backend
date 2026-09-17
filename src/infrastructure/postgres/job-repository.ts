@@ -16,6 +16,8 @@ import type {
   JobDetail,
   JobRepository,
   NewJob,
+  RecurringEngagement,
+  RecurringEngagementFeed,
   TenantDirectory,
 } from "../../usecase/scheduler/ports";
 
@@ -31,6 +33,9 @@ interface JobRow {
   runnable_at: Date | string;
   started_at: Date | string | null;
   finished_at: Date | string | null;
+  period_start: string | null;
+  period_end: string | null;
+  period_label: string | null;
 }
 
 interface DetailRow {
@@ -49,9 +54,25 @@ interface ActivationRow {
   body: Record<string, unknown> | null;
 }
 
+interface RecurringRow {
+  engagement_id: string;
+  engagement_letter_id: string;
+  entity_party_id: string;
+  effective_from: string;
+  recurrence: string;
+  sla_days: string | null;
+  body: Record<string, unknown> | null;
+  linked_periods: string[];
+}
+
 const COLUMNS =
   "id, tenant_id, source_kind, source_ref, status, template_version_id, " +
-  "split_axis, split_code, runnable_at, started_at, finished_at";
+  "split_axis, split_code, runnable_at, started_at, finished_at, " +
+  // The period's DATE columns read as text (0300): postgres.js would hand back
+  // a Date, which is an instant and a different calendar day either side of
+  // midnight UTC — and these are the values the board prints and the sweep
+  // deduplicates on.
+  "period_start::text AS period_start, period_end::text AS period_end, period_label";
 
 /** timestamptz comes back from postgres.js as a Date; the domain speaks ISO
  *  strings, so it is converted once, here at the door. */
@@ -73,10 +94,25 @@ function toJob(r: JobRow): Job {
     runnableAt: ts(r.runnable_at) ?? "",
     startedAt: ts(r.started_at),
     finishedAt: ts(r.finished_at),
+    periodStart: r.period_start,
+    periodEnd: r.period_end,
+    periodLabel: r.period_label,
   };
 }
 
-export class PostgresJobRepository implements JobRepository, ActivationFeed {
+/** A JSON number read out as text; a body that never stated one is null, and
+ *  null means no turnaround rather than one this product invented. Range
+ *  checked rather than bare-cast, because a body published before the
+ *  validator existed could carry a non-numeric value. */
+function wholeDays(raw: string | null): number | null {
+  if (raw === null) return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : null;
+}
+
+export class PostgresJobRepository
+  implements JobRepository, ActivationFeed, RecurringEngagementFeed
+{
   constructor(private readonly app: Db) {}
 
   /**
@@ -103,10 +139,12 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
       // silently match a different index.
       const inserted = await db<JobRow[]>`
         INSERT INTO delivery.job
-          (id, tenant_id, source_kind, source_ref, runnable_at, split_axis, split_code)
+          (id, tenant_id, source_kind, source_ref, runnable_at, split_axis, split_code,
+           period_start, period_end, period_label)
         VALUES (
           ${job.id}, ${job.tenantId}, ${job.sourceKind}, ${job.sourceRef},
-          ${job.runnableAt}, ${job.splitAxis}, ${job.splitCode}
+          ${job.runnableAt}, ${job.splitAxis}, ${job.splitCode},
+          ${job.periodStart ?? null}::date, ${job.periodEnd ?? null}::date, ${job.periodLabel ?? null}
         )
         ON CONFLICT (tenant_id, source_kind, source_ref)
           WHERE status NOT IN ('done', 'cancelled')
@@ -154,14 +192,19 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
+    periodStart: string | null = null,
   ): Promise<readonly string[]> {
     if (engagementIds.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
+      // The three-column key (0300), and `NULLS NOT DISTINCT` on it is what
+      // keeps this the same statement for a one-time engagement: its null
+      // period is one value, so the old absolute rule still refuses a second
+      // link exactly as the two-column key did.
       const rows = await db<{ engagement_id: string }[]>`
-        INSERT INTO delivery.job_engagement (tenant_id, job_id, engagement_id)
-        SELECT ${tenantId}, ${jobId}, e
+        INSERT INTO delivery.job_engagement (tenant_id, job_id, engagement_id, period_start)
+        SELECT ${tenantId}, ${jobId}, e, ${periodStart}::date
         FROM unnest(${db.array([...engagementIds])}::uuid[]) AS e
-        ON CONFLICT (tenant_id, engagement_id) DO NOTHING
+        ON CONFLICT (tenant_id, engagement_id, period_start) DO NOTHING
         RETURNING engagement_id
       `;
       return rows.map((r) => r.engagement_id);
@@ -265,6 +308,21 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
         SELECT ${db.unsafe(COLUMNS)} FROM delivery.job
         WHERE status IN ('pending', 'running', 'blocked') AND runnable_at <= ${asOf}
         ORDER BY runnable_at
+        LIMIT ${limit}
+      `;
+      return rows.map(toJob);
+    });
+  }
+
+  /** The board's read (T6.13): everything open, including the per-period jobs
+   *  whose window has not opened yet. Same statuses as `listRunnable`, no
+   *  clock — the difference IS the upcoming rows. */
+  async listOpen(tenantId: string, limit: number): Promise<readonly Job[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<JobRow[]>`
+        SELECT ${db.unsafe(COLUMNS)} FROM delivery.job
+        WHERE status IN ('pending', 'running', 'blocked')
+        ORDER BY runnable_at, id
         LIMIT ${limit}
       `;
       return rows.map(toJob);
@@ -379,6 +437,14 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
          AND live.tenant_id = pinned.tenant_id
          AND live.status = 'published'
         WHERE ev.verb = 'contract.activated'
+          -- RECURRING SERVICES TAKE THE OTHER ROUTE (T6.13). A pinned body
+          -- that says monthly, quarterly or annually is owed a job PER PERIOD
+          -- from activeRecurring, never the one-time checklist this feed
+          -- produces. PINNED, because how often the work comes round is a
+          -- term of the letter the client signed; the grouping facts above are
+          -- live for the opposite reason. COALESCE so an unresolvable service
+          -- keeps spawning here, exactly as the LEFT joins above intend.
+          AND COALESCE(pinned.body ->> 'recurrence', '') NOT IN ('monthly', 'quarterly', 'annually')
           -- THE ANTI-JOIN, and it is now over the LINK table rather than over
           -- job.source_ref (0046). A merged job's source_ref is a derived
           -- group key that names no engagement, so the old test would have
@@ -401,6 +467,76 @@ export class PostgresJobRepository implements JobRepository, ActivationFeed {
           deptCode: service?.module ?? null,
           teamCode: service?.group ?? null,
           workflowKey: service?.workflowTemplateKey ?? null,
+        };
+      });
+    });
+  }
+
+  // ── RecurringEngagementFeed (T6.13) ──────────────────────────────────────
+
+  /**
+   * Active engagements whose service comes round every period, with the
+   * periods each already has a job for.
+   *
+   * INNER on the line and the pinned version, unlike the feeds above, and
+   * that is not a contradiction: `recurrence` is read off the pinned body, so
+   * an engagement whose version cannot be resolved cannot be KNOWN to recur —
+   * and it is not lost, because the COALESCE in `unspawnedActivations` sends
+   * exactly that engagement down the one-time route. The two predicates are
+   * complements by construction.
+   *
+   * `linked_periods` is aggregated in the row rather than fetched per
+   * engagement, for the reason the port gives: this runs every hour over
+   * every recurring engagement at the firm.
+   */
+  async activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<RecurringRow[]>`
+        SELECT
+          e.id                         AS engagement_id,
+          e.engagement_letter_id,
+          e.entity_party_id,
+          -- A DATE, read as text: the period arithmetic is calendar arithmetic.
+          e.effective_from::text       AS effective_from,
+          -- PINNED: terms of the letter the client signed.
+          pinned.body ->> 'recurrence' AS recurrence,
+          pinned.body ->> 'slaDays'    AS sla_days,
+          -- LIVE: how the firm delivers it now, as unspawnedActivations reads it.
+          live.body                    AS body,
+          COALESCE(
+            (SELECT array_agg(je.period_start::text ORDER BY je.period_start)
+             FROM delivery.job_engagement je
+             WHERE je.engagement_id = e.id AND je.tenant_id = e.tenant_id
+               AND je.period_start IS NOT NULL),
+            '{}'::text[]
+          )                            AS linked_periods
+        FROM crm.engagement e
+        JOIN crm.engagement_letter_line l
+          ON l.id = e.engagement_letter_line_id AND l.tenant_id = e.tenant_id
+        JOIN config.version pinned
+          ON pinned.id = l.service_version_id AND pinned.tenant_id = l.tenant_id
+        LEFT JOIN config.version live
+          ON live.entry_id = pinned.entry_id
+         AND live.tenant_id = pinned.tenant_id
+         AND live.status = 'published'
+        WHERE e.status = 'active'
+          AND pinned.body ->> 'recurrence' IN ('monthly', 'quarterly', 'annually')
+        ORDER BY e.effective_from, e.id
+        LIMIT ${limit}
+      `;
+      return rows.map((r) => {
+        const service = r.body === null ? null : readServiceBody(r.body);
+        return {
+          engagementId: r.engagement_id,
+          engagementLetterId: r.engagement_letter_id,
+          entityPartyId: r.entity_party_id,
+          deptCode: service?.module ?? null,
+          teamCode: service?.group ?? null,
+          workflowKey: service?.workflowTemplateKey ?? null,
+          effectiveFrom: r.effective_from,
+          recurrence: r.recurrence,
+          slaDays: wholeDays(r.sla_days),
+          linkedPeriods: r.linked_periods,
         };
       });
     });

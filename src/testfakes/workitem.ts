@@ -224,13 +224,16 @@ export class FakeWorkItemRepo implements WorkItemRepository {
   }
 
   createIfAbsentForEngagement(item: NewWorkItem): Promise<WorkItem | null> {
-    // The partial unique index on (tenant_id, engagement_id), reproduced. This
-    // is THE property the spawn path rests on; see the note at the top.
+    // The partial unique index on (tenant_id, engagement_id, job_id),
+    // reproduced (0300). This is THE property the spawn path rests on; see the
+    // note at the top. Per JOB since T6.13, because a monthly engagement has
+    // one job — and one umbrella task — per month.
     const clash = this.rows.find(
       (r) =>
         r.tenantId === item.tenantId &&
         r.engagementId !== null &&
-        r.engagementId === item.engagementId,
+        r.engagementId === item.engagementId &&
+        r.jobId === item.jobId,
     );
     if (clash) return Promise.resolve(null);
     const row = this.materialise(item);
@@ -699,12 +702,24 @@ export class FakeEngagementWork implements EngagementWorkSource {
  */
 export class FakeObligationCoverage implements ObligationCoverage {
   readonly covered = new Set<string>();
+  /** Engagements whose SERVICE a rule names — the narrower set a per-period
+   *  task asks about (T6.13). Separate from `covered` because the two answers
+   *  differ in exactly the case the tests are about: an entity that files GST
+   *  is covered, and its bookkeeping engagement is not a filing. */
+  readonly filing = new Set<string>();
 
   coveredEngagements(
     _tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
     return Promise.resolve(new Set(engagementIds.filter((id) => this.covered.has(id))));
+  }
+
+  filingEngagements(
+    _tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    return Promise.resolve(new Set(engagementIds.filter((id) => this.filing.has(id))));
   }
 }
 

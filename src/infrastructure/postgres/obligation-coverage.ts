@@ -1,4 +1,5 @@
-// Which engagements the compliance calendar will produce work for (T3.2).
+// Which engagements the compliance calendar will produce work for (T3.2), and
+// which of them BOUGHT a filing (T6.13).
 //
 // One query, and it is deliberately the GENERATOR'S OWN PREDICATE rather than a
 // convenient approximation of it: an ACTIVE rule, carrying a due formula, that
@@ -11,6 +12,16 @@
 // generates later that night. That is why it asks about RULES and not about
 // rows, and it is also why the answer is safe — a firm with no rules is not
 // covered, so it gets exactly the behaviour it had before this existed.
+//
+// ── TWO QUESTIONS, ONE PREDICATE, ONE SWITCH ───────────────────────────────
+//
+// `coveredEngagements` counts a rule owed by "Any service" — the shipped
+// pack's default — as reaching every engagement at the entity. `filingEngagements`
+// does not: it counts only a rule that NAMES the engagement's service. The
+// second exists for the per-period umbrella task, and the port documents why
+// the wide reading is right for a one-time task and wrong for September's
+// bookkeeping. The switch is a boolean bound into the SAME statement, so the
+// two can never disagree about anything except the one clause they differ on.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { ObligationCoverage } from "../../usecase/workitem/ports";
@@ -18,9 +29,24 @@ import type { ObligationCoverage } from "../../usecase/workitem/ports";
 export class PostgresObligationCoverage implements ObligationCoverage {
   constructor(private readonly app: Db) {}
 
-  async coveredEngagements(
+  coveredEngagements(
     tenantId: string,
     engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    return this.reached(tenantId, engagementIds, false);
+  }
+
+  filingEngagements(
+    tenantId: string,
+    engagementIds: readonly string[],
+  ): Promise<ReadonlySet<string>> {
+    return this.reached(tenantId, engagementIds, true);
+  }
+
+  private async reached(
+    tenantId: string,
+    engagementIds: readonly string[],
+    namedServiceOnly: boolean,
   ): Promise<ReadonlySet<string>> {
     if (engagementIds.length === 0) return new Set();
     return withTenant(this.app, tenantId, async (db) => {
@@ -56,7 +82,15 @@ export class PostgresObligationCoverage implements ObligationCoverage {
          -- names. subjectsFor and gaps both read it correctly and only this
          -- one did not, which is why the integration test below now runs all
          -- three against one database rather than trusting three comments.
-         AND (t.service_entry_id IS NULL OR t.service_entry_id = pinned.entry_id)
+         --
+         -- The NULL branch is switched OFF for the filing question (T6.13):
+         -- "did the client buy a filing" is only answered by a rule that names
+         -- the service. Bound as a parameter so both questions are this one
+         -- statement.
+         AND (
+           t.service_entry_id = pinned.entry_id
+           OR (${namedServiceOnly}::boolean IS FALSE AND t.service_entry_id IS NULL)
+         )
          AND t.jurisdiction = le.jurisdiction
          AND (t.entity_type IS NULL OR t.entity_type = le.entity_type)
          AND t.is_active

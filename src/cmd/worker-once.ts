@@ -36,6 +36,9 @@ async function main(): Promise<void> {
     const spawned = reports.reduce((n, r) => n + r.spawned, 0);
     const already = reports.reduce((n, r) => n + r.alreadySpawned, 0);
     const tasksFailed = reports.reduce((n, r) => n + r.tasksFailed, 0);
+    const periods = reports.reduce((n, r) => n + r.periodsSpawned, 0);
+    const periodsGrew = reports.reduce((n, r) => n + r.periodsExtended, 0);
+    const noFiscalYear = reports.reduce((n, r) => n + r.awaitingFiscalYear, 0);
     const skipped = reports.filter((r) => r.failure !== undefined);
 
     // PRINTED FIRST, and loudly. A firm the sweep could not run at all is the
@@ -56,8 +59,11 @@ async function main(): Promise<void> {
       );
     }
 
-    if (spawned === 0 && already === 0) {
-      console.log("\n  nothing to spawn — no activated contract is without a job.\n");
+    if (spawned === 0 && already === 0 && periods === 0 && periodsGrew === 0) {
+      console.log(
+        "\n  nothing to spawn — no activated contract is without a job, and every recurring " +
+          "engagement has a job for every period that has begun.\n",
+      );
     } else {
       console.log(`\n  spawned ${String(spawned)} job(s) across ${String(reports.length)} firm(s)`);
       // Printed rather than dropped: it is the number that shows idempotency
@@ -66,7 +72,27 @@ async function main(): Promise<void> {
       if (already > 0) {
         console.log(`  ${String(already)} activation(s) already had a job — nothing done`);
       }
+      // THE PER-PERIOD SPAWN (T6.13). Its own lines because it is its own
+      // fact: a month began, not a letter was signed.
+      if (periods > 0) {
+        console.log(
+          `  spawned ${String(periods)} period job(s) — a month or quarter that has begun`,
+        );
+      }
+      if (periodsGrew > 0) {
+        console.log(`  ${String(periodsGrew)} period job(s) gained an engagement`);
+      }
       console.log();
+    }
+    // PRINTED WHETHER OR NOT ANYTHING SPAWNED. A quarterly service at a firm
+    // that has not said when its year starts gets no job and no error, and
+    // this line is the difference between "nothing is owed" and "nothing
+    // could be cut".
+    if (noFiscalYear > 0) {
+      console.log(
+        `  ${String(noFiscalYear)} quarterly/annual engagement(s) got NO period job — the firm ` +
+          `has not published fiscalYearStartMonth on its compliance policy\n`,
+      );
     }
 
     // EVERY sweep, because every sweep is what the worker does. Running only

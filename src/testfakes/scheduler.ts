@@ -12,26 +12,52 @@ import type { WorkSplitAxis } from "../domain/serviceaxis/model";
 import type {
   Activation,
   ActivationFeed,
+  CompliancePolicySource,
   JobDetail,
   JobQueue,
   JobRepository,
   NewJob,
   QueueHandler,
+  RecurringEngagement,
+  RecurringEngagementFeed,
+  SpawnPeriod,
   TenantDirectory,
   WorkItemSpawner,
   WorkSplitSource,
 } from "../usecase/scheduler/ports";
 
+/** One row of the link table, reproduced (0046, 0300). */
+export interface FakeLink {
+  readonly tenantId: string;
+  readonly jobId: string;
+  readonly engagementId: string;
+  /** Null on a one-time engagement's link, the period's first day on a
+   *  period job's — and part of the key either way. */
+  readonly periodStart: string | null;
+}
+
+/** ASCII unit separator — the same choice the service makes for its keys, and
+ *  for the same reason: no uuid or ISO date contains one. */
+const SEP = "";
+
 export class FakeJobRepo implements JobRepository {
   readonly rows: Job[] = [];
-  /** The link table, reproduced: engagement id -> job id. A plain Map, because
-   *  its whole content is the constraint it enforces — one job per engagement. */
-  readonly links = new Map<string, string>();
+  /**
+   * The link table, reproduced: keyed on (tenant, engagement, period) with a
+   * null period as ONE value — `NULLS NOT DISTINCT`, in a Map. Its whole
+   * content is the constraint it enforces: one job per engagement per period,
+   * and one job per engagement, ever, when there is no period.
+   */
+  readonly links = new Map<string, FakeLink>();
+
+  private linkKey(tenantId: string, engagementId: string, periodStart: string | null): string {
+    return [tenantId, engagementId, periodStart ?? ""].join(SEP);
+  }
 
   createIfAbsent(job: NewJob): Promise<{ job: Job; created: boolean }> {
     // The PARTIAL unique key, reproduced (0046): (tenant, kind, ref) among jobs
     // that are still OPEN. Not the id, because the id is derived for one kind
-    // and random for the other, and a caller that minted it differently must
+    // and random for the others, and a caller that minted it differently must
     // STILL lose. Not every row, because a group whose job finished may legally
     // get another one — a fake that refused that would make the case
     // untestable and the case is real.
@@ -45,6 +71,19 @@ export class FakeJobRepo implements JobRepository {
     );
     if (existing) return Promise.resolve({ job: existing, created: false });
 
+    // The two CHECKs in 0300, reproduced as a throw: a period job without its
+    // period, or a period on any other kind, is a row the database refuses.
+    const periodStart = job.periodStart ?? null;
+    const periodEnd = job.periodEnd ?? null;
+    const periodLabel = job.periodLabel ?? null;
+    const hasPeriod = periodStart !== null;
+    if (hasPeriod !== (job.sourceKind === "engagement_period")) {
+      throw new Error("fake job store: the kind and the period disagree (job_period_matches_kind)");
+    }
+    if (hasPeriod && (periodEnd === null || periodLabel === null)) {
+      throw new Error("fake job store: a period is all three facts or none (job_period_is_whole)");
+    }
+
     const row: Job = {
       id: job.id,
       tenantId: job.tenantId,
@@ -57,28 +96,42 @@ export class FakeJobRepo implements JobRepository {
       runnableAt: job.runnableAt,
       startedAt: null,
       finishedAt: null,
+      periodStart,
+      periodEnd,
+      periodLabel,
     };
     this.rows.push(row);
     return Promise.resolve({ job: row, created: true });
   }
 
-  /** `UNIQUE (tenant_id, engagement_id)`, reproduced — and it is ABSOLUTE, not
-   *  scoped to open jobs. One engagement's work exists in exactly one job,
-   *  forever. Returns only what this call actually linked, as the adapter does,
-   *  because the caller records an event on that and nothing else. */
+  /** `UNIQUE NULLS NOT DISTINCT (tenant_id, engagement_id, period_start)`,
+   *  reproduced — and it is ABSOLUTE, not scoped to open jobs. One engagement's
+   *  work for one period exists in exactly one job, forever; with no period,
+   *  one job forever. Returns only what this call actually linked, as the
+   *  adapter does, because the caller records an event on that and nothing
+   *  else. */
   linkEngagements(
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
+    periodStart: string | null = null,
   ): Promise<readonly string[]> {
     const linked: string[] = [];
     for (const id of engagementIds) {
-      const key = `${tenantId}:${id}`;
+      const key = this.linkKey(tenantId, id, periodStart);
       if (this.links.has(key)) continue;
-      this.links.set(key, jobId);
+      this.links.set(key, { tenantId, jobId, engagementId: id, periodStart });
       linked.push(id);
     }
     return Promise.resolve(linked);
+  }
+
+  /** Every link row for one firm's engagement, in insertion order. What a
+   *  test asks when it wants "which jobs is this engagement in". */
+  linksFor(tenantId: string, engagementId: string): readonly FakeLink[] {
+    return [...this.links.values()].filter(
+      (l) => l.tenantId === tenantId && l.engagementId === engagementId,
+    );
   }
 
   /** The read model, from whatever the test put in `serviceNames`. Deliberately
@@ -98,15 +151,14 @@ export class FakeJobRepo implements JobRepository {
       const services: { engagementId: string; serviceName: string }[] = [];
       let entityName: string | null = null;
       let clientName: string | null = null;
-      for (const [key, job] of this.links) {
-        const [t, engagementId] = key.split(":");
-        if (t !== tenantId || job !== jobId || !engagementId) continue;
+      for (const link of this.links.values()) {
+        if (link.tenantId !== tenantId || link.jobId !== jobId) continue;
         services.push({
-          engagementId,
-          serviceName: this.serviceNames.get(engagementId) ?? "(unnamed service)",
+          engagementId: link.engagementId,
+          serviceName: this.serviceNames.get(link.engagementId) ?? "(unnamed service)",
         });
-        entityName ??= this.entityNames.get(engagementId) ?? null;
-        clientName ??= this.clientNames.get(engagementId) ?? null;
+        entityName ??= this.entityNames.get(link.engagementId) ?? null;
+        clientName ??= this.clientNames.get(link.engagementId) ?? null;
       }
       if (services.length > 0) out.set(jobId, { entityName, clientName, services });
     }
@@ -131,6 +183,20 @@ export class FakeJobRepo implements JobRepository {
           r.runnableAt <= asOf,
       )
       .sort((a, b) => a.runnableAt.localeCompare(b.runnableAt))
+      .slice(0, limit);
+    return Promise.resolve(rows);
+  }
+
+  /** The board's read (T6.13): the same statuses, no clock, so an upcoming
+   *  period job is in it and a finished one is not. */
+  listOpen(tenantId: string, limit: number): Promise<readonly Job[]> {
+    const rows = this.rows
+      .filter(
+        (r) =>
+          r.tenantId === tenantId &&
+          (r.status === "pending" || r.status === "running" || r.status === "blocked"),
+      )
+      .sort((a, b) => a.runnableAt.localeCompare(b.runnableAt) || a.id.localeCompare(b.id))
       .slice(0, limit);
     return Promise.resolve(rows);
   }
@@ -195,9 +261,9 @@ export class FakeActivationFeed implements ActivationFeed {
     // — against `sourceRef` — would report every merged engagement as unspawned
     // and the sweep would build it a second checklist on the very next pass.
     const spawned = new Set(
-      [...(this.jobs?.links.keys() ?? [])]
-        .filter((k) => k.startsWith(`${tenantId}:`))
-        .map((k) => k.slice(tenantId.length + 1)),
+      [...(this.jobs?.links.values() ?? [])]
+        .filter((l) => l.tenantId === tenantId)
+        .map((l) => l.engagementId),
     );
     return Promise.resolve(
       all
@@ -205,6 +271,55 @@ export class FakeActivationFeed implements ActivationFeed {
         .sort((a, b) => a.occurredAt.localeCompare(b.occurredAt))
         .slice(0, limit),
     );
+  }
+}
+
+/**
+ * The recurring-engagement read (T6.13), as a list a test writes to.
+ *
+ * `linkedPeriods` is DERIVED from the same job store the service writes to,
+ * exactly as the adapter aggregates it from the link table — so "a second
+ * sweep spawns nothing" is measuring the feed and the store together, which is
+ * the property, rather than a list the test happened to fill in.
+ */
+export class FakeRecurringFeed implements RecurringEngagementFeed {
+  readonly byTenant = new Map<string, Omit<RecurringEngagement, "linkedPeriods">[]>();
+  jobs: FakeJobRepo | null = null;
+
+  add(tenantId: string, row: Omit<RecurringEngagement, "linkedPeriods">): void {
+    const list = this.byTenant.get(tenantId) ?? [];
+    list.push(row);
+    this.byTenant.set(tenantId, list);
+  }
+
+  activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]> {
+    const rows = (this.byTenant.get(tenantId) ?? [])
+      .slice()
+      .sort((a, b) => a.effectiveFrom.localeCompare(b.effectiveFrom))
+      .slice(0, limit)
+      .map((r) => ({
+        ...r,
+        linkedPeriods: (this.jobs?.linksFor(tenantId, r.engagementId) ?? [])
+          .map((l) => l.periodStart)
+          .filter((p): p is string => p !== null),
+      }));
+    return Promise.resolve(rows);
+  }
+}
+
+/** The two compliance-policy facts, settable by a test. Both null by default,
+ *  which is what an unpublished policy means: no floor, and no financial year
+ *  — so a quarterly service produces nothing until a test says otherwise. */
+export class FakeCompliancePolicy implements CompliancePolicySource {
+  floor: string | null = null;
+  fiscalYear: number | null = null;
+
+  missedFromOn(_tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.floor);
+  }
+
+  fiscalYearStartMonth(_tenantId: string): Promise<number | null> {
+    return Promise.resolve(this.fiscalYear);
   }
 }
 
@@ -277,21 +392,26 @@ export class FakeJobQueue implements JobQueue {
  * the work-item service does with them is `tests/workitem/`'s business. So this
  * records the calls and asserts nothing — but it records them PER JOB, because
  * the thing worth testing on this side is that a second sweep hands over
- * NOTHING, which is the same at-least-once property the job table has.
+ * NOTHING, which is the same at-least-once property the job table has. The
+ * period is recorded too (T6.13): that a month's task was asked for WITH its
+ * month is the one thing the scheduler owes the work-item side.
  */
 export class FakeWorkItemSpawner implements WorkItemSpawner {
   readonly calls: {
     readonly tenantId: string;
     readonly jobId: string;
     readonly engagementIds: readonly string[];
+    readonly period: SpawnPeriod | null;
   }[] = [];
 
   spawnForEngagements(
     tenantId: string,
     jobId: string,
     engagementIds: readonly string[],
+    _actor: unknown,
+    period?: SpawnPeriod,
   ): Promise<number> {
-    this.calls.push({ tenantId, jobId, engagementIds: [...engagementIds] });
+    this.calls.push({ tenantId, jobId, engagementIds: [...engagementIds], period: period ?? null });
     return Promise.resolve(engagementIds.length);
   }
 

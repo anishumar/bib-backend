@@ -1009,12 +1009,18 @@ print(len(json.load(sys.stdin)["jobs"]))')
 # line for each of two sister companies, signing fanned it out into one
 # engagement PER COMPANY — the firm's own "Per Company" rule (G0.1) — and the
 # engine turns each into its own job. One job for "the client" would be the bug.
+#
+# And since T6.13 each is a PERIOD job: the service is monthly, so what the
+# sweep owes is this month's checklist, carrying its period and opening the day
+# after the month ends — which is why it is in the list as UPCOMING rather than
+# runnable, and why a second month will bring a second job without a second
+# activation.
 chk "one job per engagement, not per letter" 2 "$AFTER"
 SHAPE=$(curl -s -b $J/partner.txt $API/api/v1/jobs | python3 -c '
 import sys, json
 j = json.load(sys.stdin)["jobs"][0]
-print("%s/%s/%s" % (j["sourceKind"], j["status"], j["templateVersionId"] is None))')
-chk "…owed, pending, no graph yet"      "engagement/pending/True" "$SHAPE"
+print("%s/%s/%s/%s" % (j["sourceKind"], j["status"], j["templateVersionId"] is None, j["periodLabel"] is not None))')
+chk "…owed for THIS month, pending, no graph yet" "engagement_period/pending/True/True" "$SHAPE"
 
 # THE property the whole engine rests on. Every trigger is at-least-once, and a
 # second job is a second set of tasks and eventually a second invoice.
