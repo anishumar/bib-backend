@@ -79,6 +79,44 @@ export interface JobStep {
   readonly startedAt: string | null;
   readonly finishedAt: string | null;
   readonly performedBy: string | null;
+  /** Whose desk it sits on — expected to do it, as distinct from `performedBy`,
+   *  who did. Null: nobody in particular, anybody inside the band may take it. */
+  readonly assigneeUserId: string | null;
+}
+
+/** The grade band a template step names, as this domain needs it — satisfied
+ *  structurally by `StepPerformer` from the config domain. */
+export interface StepBand {
+  readonly minGradeRank: number | null;
+  readonly minGradeCode: string | null;
+  readonly maxGradeRank: number | null;
+  readonly maxGradeCode: string | null;
+}
+
+/**
+ * Whether somebody of this rank may do a step with this band.
+ *
+ * No band means anybody. An UNGRADED person meets no band at all, for the
+ * reason the verification rule gives: a grade is the value that decides who
+ * may do what, and a plausible invented rank is worse than a null. Ends are
+ * inclusive; a null end is open.
+ */
+export function withinBand(gradeRank: number | null, band: StepBand | null): boolean {
+  if (band === null) return true;
+  if (gradeRank === null) return false;
+  if (band.minGradeRank !== null && gradeRank < band.minGradeRank) return false;
+  if (band.maxGradeRank !== null && gradeRank > band.maxGradeRank) return false;
+  return true;
+}
+
+/** The band in words, for a refusal — "Analyst to Senior Associate", "Manager or above". */
+export function bandLabel(band: StepBand): string {
+  const lo = band.minGradeCode ?? (band.minGradeRank === null ? null : `rank ${String(band.minGradeRank)}`);
+  const hi = band.maxGradeCode ?? (band.maxGradeRank === null ? null : `rank ${String(band.maxGradeRank)}`);
+  if (lo !== null && hi !== null) return lo === hi ? lo : `${lo} to ${hi}`;
+  if (lo !== null) return `${lo} or above`;
+  if (hi !== null) return `${hi} or below`;
+  return "anybody";
 }
 
 /** The little this domain needs to know about a step DEFINITION — satisfied

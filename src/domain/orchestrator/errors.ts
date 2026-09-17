@@ -28,7 +28,50 @@ export type OrchestratorErrorCode =
   | "PROPOSAL_UNDECIDED"
   | "NOTHING_PROPOSED"
   | "CORRECTION_CHANGED_NOTHING"
-  | "AWAITING_CHECK";
+  | "AWAITING_CHECK"
+  | "NOT_YOUR_STEP"
+  | "PERFORMER_OUT_OF_BAND"
+  | "STEP_SETTLED"
+  | "NOT_STAFF_HERE";
+
+/** The step sits on somebody else's desk. Take it first — which is one click
+ *  and a ledger row — rather than tick it from underneath them. */
+export class NotYourStep extends OrchestratorError {
+  constructor(stepKey: string, holder: string) {
+    super(
+      "NOT_YOUR_STEP",
+      `Step ${JSON.stringify(stepKey)} is on ${holder}'s desk. Take it first, or ask them to ` +
+        `hand it over — a step is ticked by the person it sits with, so the record of who did ` +
+        `the work means something.`,
+    );
+  }
+}
+
+/** The person is outside the grade band the process names for this step. */
+export class PerformerOutOfBand extends OrchestratorError {
+  constructor(stepKey: string, who: string, grade: string | null, band: string) {
+    super(
+      "PERFORMER_OUT_OF_BAND",
+      `Step ${JSON.stringify(stepKey)} is for ${band}; ${who} is ${grade ?? "not graded"}. ` +
+        `The firm's process says who does this step — change the process, or the person's ` +
+        `grade, rather than the step.`,
+    );
+  }
+}
+
+/** A finished step has no desk. */
+export class StepSettled extends OrchestratorError {
+  constructor(stepKey: string, status: string) {
+    super("STEP_SETTLED", `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)} — it is nobody's desk any more.`);
+  }
+}
+
+/** The person named is not active staff at this firm. */
+export class NotStaffHere extends OrchestratorError {
+  constructor(userId: string) {
+    super("NOT_STAFF_HERE", `${JSON.stringify(userId)} is not an active member of staff at this firm, so a step cannot sit on their desk.`);
+  }
+}
 
 export class JobNotFound extends OrchestratorError {
   constructor(jobId: string) {

@@ -696,6 +696,7 @@ function toResolvedTemplate(
       dependsOn: s.dependsOn,
       condition: s.condition,
       verificationPolicyKey: s.verificationPolicyKey,
+      performer: s.performer,
     })),
   };
 

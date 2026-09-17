@@ -15,6 +15,8 @@ export interface NewJobStep {
   readonly stepKey: string;
   readonly label: string;
   readonly executor: string;
+  /** Whose desk it starts on, or null (0301). */
+  readonly assigneeUserId: string | null;
 }
 
 /** What a step transition changes. Every field the schema's CHECKs care about
@@ -75,6 +77,26 @@ export interface JobStepRepository {
     expect: StepStatus,
     to: StepTransition,
   ): Promise<JobStep | null>;
+
+  /** Move a step to somebody's desk, or off everybody's (null). Refused in
+   *  SQL on a settled step — null back — so a race with a completion cannot
+   *  re-open a finished row's desk. */
+  assign(tenantId: string, stepId: string, assigneeUserId: string | null): Promise<JobStep | null>;
+
+  /** Every open step on one person's desk, across jobs — "what is mine". */
+  listOpenForUser(tenantId: string, userId: string): Promise<readonly JobStep[]>;
+}
+
+/**
+ * Whose desk a job's steps default to (0301): the SPOC for the job's Dept on
+ * the job's client, in force on the day. ONE user id or null — two SPOCs on a
+ * Dept is a real state, and the default is then nobody's until a person
+ * chooses. Read directly from the rows by the adapter rather than through the
+ * work item use case, which owns the same lookup for the umbrella task: the
+ * two use cases must not import each other.
+ */
+export interface StepDeskResolver {
+  spocFor(tenantId: string, jobId: string, onDate: string): Promise<string | null>;
 }
 
 /**
@@ -115,6 +137,14 @@ export interface TemplateStep {
    *  before T2.9 reads as null here, which is exactly what those processes
    *  meant. */
   readonly verificationPolicyKey: string | null;
+  /** The grade band that may do this step (0301), or null for anybody. The
+   *  config domain's `StepPerformer`, stated structurally like everything here. */
+  readonly performer: {
+    readonly minGradeRank: number | null;
+    readonly minGradeCode: string | null;
+    readonly maxGradeRank: number | null;
+    readonly maxGradeCode: string | null;
+  } | null;
 }
 
 export interface ResolvedTemplate {

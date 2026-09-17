@@ -15,6 +15,7 @@ import {
   FakeJobSubjectSource,
   FakeTemplateSource,
   FakeTierSource,
+  FakeStepDeskResolver,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -51,6 +52,7 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
     dependsOn: [],
     condition: null,
     verificationPolicyKey: null,
+    performer: null,
     ...over,
   };
 }
@@ -107,6 +109,7 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
   const tiers = new FakeTierSource().publish(SUGGESTED_TIERS);
   const runs = new FakeAgentRunRepo();
   const service = new OrchestratorService({
+    desks: new FakeStepDeskResolver(),
     jobs,
     steps,
     templates,

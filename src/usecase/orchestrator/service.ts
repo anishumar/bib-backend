@@ -93,6 +93,14 @@ import {
 } from "../../domain/verification/errors";
 import type { Permission } from "../../domain/authz/model";
 import type { PermissionSource } from "../authz/ports";
+import type { StepDeskResolver } from "./ports";
+import { bandLabel, withinBand } from "../../domain/orchestrator/model";
+import {
+  NotStaffHere,
+  NotYourStep,
+  PerformerOutOfBand,
+  StepSettled,
+} from "../../domain/orchestrator/errors";
 
 export interface Deps {
   readonly jobs: JobRepository;
@@ -108,6 +116,8 @@ export interface Deps {
   readonly checks: StepApprovalRepository;
   readonly policies: VerificationPolicySource;
   readonly checkers: CheckerDirectory;
+  /** Whose desk a job's steps default to (0301). */
+  readonly desks: StepDeskResolver;
   /** Resolves a role to its permissions, so eligibility can require the same
    *  `work:write` that doing the step required. Shared with the authz service
    *  rather than restated — one notion of what a role carries. */
@@ -116,6 +126,17 @@ export interface Deps {
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+}
+
+/** One step as the job page reads it (0301). */
+export interface DescribedStep {
+  readonly step: JobStep;
+  readonly performer: ResolvedTemplate["steps"][number]["performer"];
+  readonly assignee: { readonly userId: string; readonly displayName: string } | null;
+  readonly viewer: {
+    readonly mayComplete: boolean;
+    readonly reason: "ON_ANOTHER_DESK" | "OUTSIDE_BAND" | null;
+  };
 }
 
 /** How many jobs one tick takes per firm. A sweep is a fair share of the
@@ -459,7 +480,148 @@ export class OrchestratorService {
     const openCheck = await this.deps.checks.findOpenForStep(input.tenantId, step.id);
     if (openCheck) throw new AwaitingCheck(step.stepKey);
 
+    // WHOSE DESK (0301). A step on somebody else's desk is theirs to tick;
+    // taking it first is one click and one ledger row, and it is what makes
+    // `performed_by` an answer rather than a coincidence. A step on nobody's
+    // desk may be ticked by anybody the process's band allows.
+    const staff = await this.deps.checkers.activeStaff(input.tenantId);
+    if (step.assigneeUserId !== null && step.assigneeUserId !== performedBy) {
+      const holder = staff.find((m) => m.userId === step.assigneeUserId);
+      throw new NotYourStep(step.stepKey, holder?.displayName ?? "somebody else");
+    }
+    const band = await this.bandOf(input.tenantId, job, step.stepKey);
+    if (band !== null) {
+      const me = staff.find((m) => m.userId === performedBy);
+      if (!withinBand(me?.gradeRank ?? null, band)) {
+        throw new PerformerOutOfBand(step.stepKey, me?.displayName ?? "you", me?.gradeName ?? null, bandLabel(band));
+      }
+    }
+
     return this.finishOrSendForChecking(input.tenantId, job, step, performedBy, actor);
+  }
+
+  /** The grade band the pinned process names for a step, or null. */
+  private async bandOf(tenantId: string, job: Job, stepKey: string): Promise<ResolvedTemplate["steps"][number]["performer"]> {
+    if (job.templateVersionId === null) return null;
+    const template = await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
+    return template?.steps.find((s) => s.key === stepKey)?.performer ?? null;
+  }
+
+  /**
+   * Put a step on somebody's desk — theirs (taken), somebody else's (handed
+   * over) or nobody's (released). The band is checked, the roster is checked,
+   * and every move is a ledger row that says which of the three it was.
+   */
+  async assignStep(
+    input: {
+      readonly tenantId: string;
+      readonly jobId: string;
+      readonly stepKey: string;
+      readonly assigneeUserId: string | null;
+    },
+    actor: Actor,
+    byUserId: string,
+  ): Promise<JobStep> {
+    const job = await this.deps.jobs.findById(input.tenantId, input.jobId);
+    if (!job) throw new JobNotFound(input.jobId);
+    const step = await this.deps.steps.findByKey(input.tenantId, input.jobId, input.stepKey);
+    if (!step) throw new StepNotFound(input.stepKey);
+    if (step.status === "done" || step.status === "skipped" || step.status === "failed") {
+      throw new StepSettled(step.stepKey, step.status);
+    }
+    if (input.assigneeUserId !== null) {
+      const staff = await this.deps.checkers.activeStaff(input.tenantId);
+      const who = staff.find((m) => m.userId === input.assigneeUserId);
+      if (!who) throw new NotStaffHere(input.assigneeUserId);
+      const band = await this.bandOf(input.tenantId, job, step.stepKey);
+      if (band !== null && !withinBand(who.gradeRank, band)) {
+        throw new PerformerOutOfBand(step.stepKey, who.displayName, who.gradeName, bandLabel(band));
+      }
+    }
+    const moved = await this.deps.steps.assign(input.tenantId, step.id, input.assigneeUserId);
+    if (!moved) throw new StepSettled(step.stepKey, "settled");
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "job.step_assigned",
+      objectId: job.id,
+      actor,
+      payload: {
+        stepKey: step.stepKey,
+        assigneeUserId: input.assigneeUserId,
+        previousAssigneeUserId: step.assigneeUserId,
+        how:
+          input.assigneeUserId === null
+            ? "released"
+            : input.assigneeUserId === byUserId
+              ? "taken"
+              : "handover",
+      },
+    });
+    return moved;
+  }
+
+  /** Every open step on one person's desk, across the firm's jobs. */
+  async myOpenSteps(tenantId: string, userId: string): Promise<readonly JobStep[]> {
+    return this.deps.steps.listOpenForUser(tenantId, userId);
+  }
+
+  /** Who may do a step: active staff inside its band, for a hand-over picker. */
+  async performersFor(
+    tenantId: string,
+    jobId: string,
+    stepKey: string,
+  ): Promise<readonly { readonly userId: string; readonly displayName: string; readonly gradeName: string | null }[]> {
+    const job = await this.deps.jobs.findById(tenantId, jobId);
+    if (!job) throw new JobNotFound(jobId);
+    const band = await this.bandOf(tenantId, job, stepKey);
+    const staff = await this.deps.checkers.activeStaff(tenantId);
+    return staff
+      .filter((m) => withinBand(m.gradeRank, band))
+      .map((m) => ({ userId: m.userId, displayName: m.displayName, gradeName: m.gradeName }));
+  }
+
+  /**
+   * A job's steps with what the page needs beside each: the band, whose desk,
+   * and whether THIS viewer may tick it — computed here, once, so the button
+   * and the refusal cannot disagree.
+   */
+  async describeSteps(
+    tenantId: string,
+    jobId: string,
+    viewerUserId: string,
+  ): Promise<readonly DescribedStep[]> {
+    const job = await this.deps.jobs.findById(tenantId, jobId);
+    if (!job) throw new JobNotFound(jobId);
+    const steps = await this.stepsOf(tenantId, jobId);
+    const template =
+      job.templateVersionId === null
+        ? null
+        : await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
+    const bands = new Map((template?.steps ?? []).map((s) => [s.key, s.performer]));
+    const staff = await this.deps.checkers.activeStaff(tenantId);
+    const byUser = new Map(staff.map((m) => [m.userId, m]));
+    const viewer = byUser.get(viewerUserId) ?? null;
+    return steps.map((step) => {
+      const performer = bands.get(step.stepKey) ?? null;
+      const reason: DescribedStep["viewer"]["reason"] =
+        step.assigneeUserId !== null && step.assigneeUserId !== viewerUserId
+          ? "ON_ANOTHER_DESK"
+          : withinBand(viewer?.gradeRank ?? null, performer)
+            ? null
+            : "OUTSIDE_BAND";
+      return {
+        step,
+        performer,
+        assignee:
+          step.assigneeUserId === null
+            ? null
+            : {
+                userId: step.assigneeUserId,
+                displayName: byUser.get(step.assigneeUserId)?.displayName ?? "somebody no longer on the roster",
+              },
+        viewer: { mayComplete: reason === null, reason },
+      };
+    });
   }
 
   /**
@@ -926,6 +1088,17 @@ export class OrchestratorService {
     template: ResolvedTemplate,
     actor: Actor,
   ): Promise<readonly JobStep[]> {
+    // WHOSE DESK, BY DEFAULT (0301): the Dept SPOC on this client, when they
+    // are inside the step's band. Outside it — an Analyst's step on a client
+    // whose SPOC is a Director — the step starts on nobody's desk and the job
+    // page says so, rather than routing work to somebody the process says
+    // should not do it. The umbrella task already goes to the same person.
+    const today = this.deps.clock.now().toISOString().slice(0, 10);
+    const spoc = await this.deps.desks.spocFor(tenantId, job.id, today);
+    const spocRank =
+      spoc === null
+        ? null
+        : ((await this.deps.checkers.activeStaff(tenantId)).find((m) => m.userId === spoc)?.gradeRank ?? null);
     const rows: NewJobStep[] = template.steps.map((s) => ({
       // DERIVED from the job and the step key, so a redelivered message builds
       // the same ids and the insert conflicts instead of duplicating. Same
@@ -936,6 +1109,8 @@ export class OrchestratorService {
       stepKey: s.key,
       label: s.label,
       executor: s.executor,
+      assigneeUserId:
+        s.executor === "human" && spoc !== null && withinBand(spocRank, s.performer) ? spoc : null,
     }));
     const result = await this.deps.steps.createAllIfAbsent(rows);
     if (result.created) {
@@ -946,6 +1121,16 @@ export class OrchestratorService {
         actor,
         payload: { steps: rows.length, templateVersionId: template.versionId },
       });
+      for (const r of rows) {
+        if (r.assigneeUserId === null) continue;
+        await this.deps.events.recordEvent({
+          tenantId,
+          verb: "job.step_assigned",
+          objectId: job.id,
+          actor,
+          payload: { stepKey: r.stepKey, assigneeUserId: r.assigneeUserId, previousAssigneeUserId: null, how: "spoc" },
+        });
+      }
     }
     return result.steps;
   }

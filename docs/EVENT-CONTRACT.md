@@ -298,6 +298,7 @@ version is exactly what gets asked about afterwards.
 | `job.template_pinned` | job | A job resolved the firm's published process and PINNED the version it will walk. Everything the job does afterwards is explained by this row: editing the process later never moves a job already walking it. |
 | `job.started` | job | A job's steps were written from its pinned template and the work began. One event, not one per step. |
 | `job.step_advanced` | job | A job's step moved — set aside for a person, taken by an agent, or finished. The payload carries both sides and who was expected to do it. |
+| `job.step_assigned` | job | A job's step was put on somebody's desk or taken off it (0301). `how`: `spoc` (the router, at job start), `taken`, `handover`, `released`. User ids only. |
 | `job.step_skipped` | job | A step will not happen: its condition did not hold, or something it depends on was skipped. NOT the same as done, and recorded as loudly. The payload carries the FACT and its values, never the prose note — a sentence does not GROUP BY, and this log cannot be erased. |
 | `job.step_failed` | job | An agent could not complete a step. Terminal for the step; the job blocks. |
 | `job.completed` | job | A job reached a terminal step. |

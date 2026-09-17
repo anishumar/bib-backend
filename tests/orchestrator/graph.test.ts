@@ -29,6 +29,7 @@ function s(stepKey: string, status: StepStatus): JobStep {
     startedAt: null,
     finishedAt: null,
     performedBy: null,
+    assigneeUserId: null,
   };
 }
 

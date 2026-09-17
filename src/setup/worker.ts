@@ -32,6 +32,7 @@ import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-r
 import { NudgeService } from "../usecase/nudge/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
+import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-resolver";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
@@ -334,6 +335,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     checks: new PostgresStepApprovalRepository(pools.app),
     policies: configRepository,
     checkers: memberships,
+    desks: new PostgresJobDeskResolver(pools.app),
     permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,

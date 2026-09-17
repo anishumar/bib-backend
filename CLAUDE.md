@@ -1277,6 +1277,21 @@ it is not true, it is unknown. Evaluating `not_equals` against a null would let 
 SATISFY a condition, which is the same failure as skipping on one, reached from the opposite
 side. The null check is therefore before the operator is even looked at.
 
+**WHOSE DESK A STEP SITS ON (0301, 2026-09-18).** `performed_by` said who DID a step and nothing
+said who was EXPECTED to; the firm's first real process names "Analyst / Associate / Senior
+Associate" on eight steps and "Manager" on the ninth, and any member of staff could tick any
+step. So a template step carries a `performer` BAND — `{minGradeRank, minGradeCode, maxGradeRank,
+maxGradeCode}`, rank compared and code read, either end open, null for anybody — and a job step
+carries `assignee_user_id`. At `createSteps` every human step inside its band defaults to the
+job's Dept SPOC (`StepDeskResolver`, read from `crm.client_assignment` by the adapter because the
+work item use case owns the same lookup and the two must not import each other); outside the
+band it starts on nobody's desk rather than on a desk the process forbids. `assignStep` takes,
+hands over or releases, checks the roster and the band, and writes `job.step_assigned` with
+`how`. `completeStep` refuses somebody else's step (`NotYourStep` — take it first, one click and
+one ledger row) and a performer outside the band (`PerformerOutOfBand`). `describeSteps` computes
+`viewer.mayComplete` where the refusal is, so the button and the 409 cannot disagree; `my-steps`
+is the desk. `tests/orchestrator/desk.test.ts`.
+
 **`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
 permission, because the row it gates is the record of who did the work.
 

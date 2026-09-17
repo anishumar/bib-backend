@@ -440,6 +440,12 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // filing is done is not the same act as reading the board, and the record of
   // WHO did it is worth only as much as the gate in front of it.
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
+  // Whose desk a step sits on (0301): moving it is doing the work's
+  // housekeeping, so the same gate as ticking it; reading who may do it and
+  // what is on your own desk is reading the board.
+  [routeKey("PUT", "/api/v1/jobs/{jobId}/steps/{stepKey}/assignee"), "work:write" as const],
+  [routeKey("GET", "/api/v1/jobs/{jobId}/steps/{stepKey}/performers"), "party:read" as const],
+  [routeKey("GET", "/api/v1/my-steps"), "party:read" as const],
   // Deciding a machine's output is doing the work, not reading the board: the
   // row it writes is the record of who checked it. Same permission as
   // completing a step, deliberately — a firm that trusts somebody to say "this

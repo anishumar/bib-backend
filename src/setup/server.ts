@@ -139,6 +139,7 @@ import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
 import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
+import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-resolver";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
@@ -397,6 +398,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     checks: new PostgresStepApprovalRepository(pools.app),
     policies: configRepository,
     checkers: memberships,
+    desks: new PostgresJobDeskResolver(pools.app),
     permissions: configRepository,
     tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,

@@ -43,6 +43,7 @@ import {
   FakeJobStepRepo,
   FakeJobSubjectSource,
   FakeTemplateSource,
+  FakeStepDeskResolver,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
@@ -302,6 +303,7 @@ function deps(): RouterDeps {
     staffGrades: { service: new StaffGradeService(makeFakes()) },
     orchestrator: {
       service: new OrchestratorService({
+    desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
         steps: new FakeJobStepRepo(),
         templates: new FakeTemplateSource(),

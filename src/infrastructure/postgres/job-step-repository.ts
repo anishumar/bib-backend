@@ -23,11 +23,12 @@ interface StepRow {
   started_at: Date | string | null;
   finished_at: Date | string | null;
   performed_by: string | null;
+  assignee_user_id: string | null;
 }
 
 const COLUMNS =
   "id, tenant_id, job_id, step_key, label, executor, status, outcome_note, " +
-  "started_at, finished_at, performed_by";
+  "started_at, finished_at, performed_by, assignee_user_id";
 
 function iso(v: Date | string | null): string | null {
   if (v === null) return null;
@@ -51,6 +52,7 @@ function toStep(r: StepRow): JobStep {
     startedAt: iso(r.started_at),
     finishedAt: iso(r.finished_at),
     performedBy: r.performed_by,
+    assigneeUserId: r.assignee_user_id,
   };
 }
 
@@ -93,6 +95,7 @@ export class PostgresJobStepRepository implements JobStepRepository {
             step_key: s.stepKey,
             label: s.label,
             executor: s.executor,
+            assignee_user_id: s.assigneeUserId,
           })),
         )}
         ON CONFLICT (job_id, step_key) DO NOTHING
@@ -177,6 +180,28 @@ export class PostgresJobStepRepository implements JobStepRepository {
         RETURNING ${db.unsafe(COLUMNS)}
       `;
       return row ? toStep(row) : null;
+    });
+  }
+
+  async assign(tenantId: string, stepId: string, assigneeUserId: string | null): Promise<JobStep | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<StepRow[]>`
+        UPDATE delivery.job_step SET assignee_user_id = ${assigneeUserId}
+        WHERE id = ${stepId} AND status IN ('pending', 'running', 'blocked')
+        RETURNING ${db.unsafe(COLUMNS)}
+      `;
+      return row ? toStep(row) : null;
+    });
+  }
+
+  async listOpenForUser(tenantId: string, userId: string): Promise<readonly JobStep[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<StepRow[]>`
+        SELECT ${db.unsafe(COLUMNS)} FROM delivery.job_step
+        WHERE assignee_user_id = ${userId} AND status IN ('pending', 'running', 'blocked')
+        ORDER BY created_at, step_key
+      `;
+      return rows.map(toStep);
     });
   }
 }

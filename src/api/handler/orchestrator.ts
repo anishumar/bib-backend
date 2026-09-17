@@ -19,7 +19,7 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
-import type { CheckOnDesk, OrchestratorService } from "../../usecase/orchestrator/service";
+import type { CheckOnDesk, DescribedStep, OrchestratorService } from "../../usecase/orchestrator/service";
 import type { JobStep } from "../../domain/orchestrator/model";
 import type { AgentRun } from "../../usecase/orchestrator/ports";
 import { scopeOf } from "../scope";
@@ -59,6 +59,15 @@ const ProposalSchema = z
   })
   .openapi("AgentProposal");
 
+const PerformerSchema = z
+  .object({
+    minGradeRank: z.number().int().nullable(),
+    minGradeCode: z.string().nullable(),
+    maxGradeRank: z.number().int().nullable(),
+    maxGradeCode: z.string().nullable(),
+  })
+  .openapi("StepPerformer");
+
 const JobStepSchema = z
   .object({
     id: z.string().uuid(),
@@ -96,15 +105,70 @@ const JobStepSchema = z
         "for a human step, for a machine step nobody built an agent for, and for one that " +
         "committed on its own — in that last case the work is simply done.",
     }),
+    performer: PerformerSchema.nullable().openapi({
+      description:
+        "The grade band the process names for this step, or null for anybody (0301). Ranks are " +
+        "compared; codes are what a person reads.",
+    }),
+    assignee: z
+      .object({ userId: z.string().uuid(), displayName: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Whose desk it sits on — expected to do it, as distinct from performedBy, who did. " +
+          "Null: nobody in particular; anybody inside the band may take it.",
+      }),
+    viewer: z
+      .object({
+        mayComplete: z.boolean(),
+        reason: z.enum(["ON_ANOTHER_DESK", "OUTSIDE_BAND"]).nullable(),
+      })
+      .openapi({
+        description:
+          "Whether the SESSION's user may tick this step, computed where the refusal is, so the " +
+          "button and the 409 cannot disagree.",
+      }),
   })
   .openapi("JobStep");
+
+const MyStepSchema = z
+  .object({
+    id: z.string().uuid(),
+    jobId: z.string().uuid(),
+    stepKey: z.string(),
+    label: z.string(),
+    status: z.enum(["pending", "running", "blocked", "done", "skipped", "failed"]),
+  })
+  .openapi("MyStep");
+
+const MyStepsResponse = z.object({ steps: z.array(MyStepSchema) }).openapi("MyStepsResponse");
+
+const PerformersResponse = z
+  .object({
+    performers: z.array(
+      z.object({ userId: z.string().uuid(), displayName: z.string(), gradeName: z.string().nullable() }),
+    ),
+  })
+  .openapi("StepPerformersResponse");
+
+const AssignStepRequest = z
+  .object({
+    userId: z.string().uuid().nullable().openapi({
+      description: "Whose desk to put it on. Your own id takes it; null releases it.",
+    }),
+  })
+  .openapi("AssignStepRequest");
 
 const JobStepsResponse = z
   .object({ steps: z.array(JobStepSchema) })
   .openapi("JobStepsResponse");
 
-function toWire(s: JobStep, proposal?: AgentRun): z.infer<typeof JobStepSchema> {
+function toWire(d: DescribedStep, proposal?: AgentRun): z.infer<typeof JobStepSchema> {
+  const s: JobStep = d.step;
   return {
+    performer: d.performer,
+    assignee: d.assignee,
+    viewer: d.viewer,
     id: s.id,
     stepKey: s.stepKey,
     label: s.label,
@@ -220,6 +284,50 @@ const completeStepRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not do this"),
     404: errorResponse("No such job or step at this firm"),
     409: errorResponse("The step is not waiting for anybody, or is not a person's to complete"),
+  },
+});
+
+const assignStepRoute = createRoute({
+  method: "put",
+  path: "/api/v1/jobs/{jobId}/steps/{stepKey}/assignee",
+  tags: ["delivery"],
+  summary: "Put a step on somebody's desk — take it, hand it over, or release it",
+  description:
+    "The process names a grade band per step; only somebody inside it may hold the step. " +
+    "Every move is a ledger row saying which of the three it was.",
+  request: { params: StepParam, body: { content: { "application/json": { schema: AssignStepRequest } } } },
+  responses: {
+    200: { description: "The step, on its new desk", content: { "application/json": { schema: JobStepSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such job or step at this firm"),
+    409: errorResponse("The step is finished, the person is not staff here, or is outside the step's band"),
+  },
+});
+
+const performersRoute = createRoute({
+  method: "get",
+  path: "/api/v1/jobs/{jobId}/steps/{stepKey}/performers",
+  tags: ["delivery"],
+  summary: "Who may do this step — active staff inside its grade band",
+  request: { params: StepParam },
+  responses: {
+    200: { description: "The people", content: { "application/json": { schema: PerformersResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such job at this firm"),
+  },
+});
+
+const myStepsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/my-steps",
+  tags: ["delivery"],
+  summary: "Every open process step on the session user's desk, across jobs",
+  responses: {
+    200: { description: "The steps", content: { "application/json": { schema: MyStepsResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
   },
 });
 
@@ -424,11 +532,50 @@ export function registerOrchestratorRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const { jobId } = c.req.valid("param");
     const [steps, proposals] = await Promise.all([
-      deps.service.stepsOf(s.tenantId, jobId),
+      deps.service.describeSteps(s.tenantId, jobId, s.userId),
       // ONE read for the page, not one per step.
       deps.service.proposalsFor(s.tenantId, jobId),
     ]);
-    return c.json({ steps: steps.map((step) => toWire(step, proposals.get(step.id))) }, 200);
+    return c.json({ steps: steps.map((d) => toWire(d, proposals.get(d.step.id))) }, 200);
+  });
+
+  /** One step, described for the session's viewer, after a write moved it. */
+  async function describeOne(tenantId: string, jobId: string, stepId: string, viewer: string) {
+    const all = await deps.service.describeSteps(tenantId, jobId, viewer);
+    const d = all.find((x) => x.step.id === stepId);
+    if (!d) throw new Error(`step ${stepId} vanished after the write`);
+    return d;
+  }
+
+  app.openapi(assignStepRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { jobId, stepKey } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const step = await deps.service.assignStep(
+      { tenantId: s.tenantId, jobId, stepKey, assigneeUserId: body.userId },
+      s.actor,
+      s.userId,
+    );
+    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
+  });
+
+  app.openapi(performersRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { jobId, stepKey } = c.req.valid("param");
+    const performers = await deps.service.performersFor(s.tenantId, jobId, stepKey);
+    return c.json({ performers: [...performers] }, 200);
+  });
+
+  app.openapi(myStepsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const steps = await deps.service.myOpenSteps(s.tenantId, s.userId);
+    return c.json(
+      { steps: steps.map((st) => ({ id: st.id, jobId: st.jobId, stepKey: st.stepKey, label: st.label, status: st.status })) },
+      200,
+    );
   });
 
   app.openapi(decideProposalRoute, async (c) => {
@@ -452,7 +599,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(step), 200);
+    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
   });
 
   app.openapi(completeStepRoute, async (c) => {
@@ -468,7 +615,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(step), 200);
+    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
   });
 
   app.openapi(listChecksRoute, async (c) => {
@@ -525,7 +672,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(step), 200);
+    return c.json(toWire(await describeOne(s.tenantId, step.jobId, step.id, s.userId)), 200);
   });
 }
 

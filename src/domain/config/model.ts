@@ -2407,6 +2407,25 @@ export interface StepCondition {
   readonly value: string | readonly string[];
 }
 
+/**
+ * WHO DOES A STEP, as a band of the firm's own grade ladder (2026-09-18).
+ *
+ * The firm's first real process says "Analyst / Associate / Senior Associate"
+ * on eight steps and "Manager" on the ninth, and a `WorkflowStep` had nowhere
+ * to hold that — "who does it" was documentation, and any member of staff could
+ * tick any step. Rank AND code, both, exactly as `verification_policy` stores
+ * its threshold: the rank is what is compared, the code is what a person reads
+ * after the ladder has been re-ranked. Either end open (null) is an open band —
+ * "Manager or above" is `min` only. Null on the whole field means anybody,
+ * which is every step of every process written before this existed.
+ */
+export interface StepPerformer {
+  readonly minGradeRank: number | null;
+  readonly minGradeCode: string | null;
+  readonly maxGradeRank: number | null;
+  readonly maxGradeCode: string | null;
+}
+
 export interface WorkflowStep {
   /**
    * The step's own key — `collect`, `reconcile`, `review`. Recorded on every
@@ -2440,6 +2459,8 @@ export interface WorkflowStep {
    * would freeze a firm's review rule to whenever it last edited its process.
    */
   readonly verificationPolicyKey: string | null;
+  /** Who is expected to do it — see `StepPerformer`. Null means anybody. */
+  readonly performer: StepPerformer | null;
 }
 
 export interface WorkflowTemplateBody {
@@ -2455,7 +2476,57 @@ const WORKFLOW_STEP_FIELDS = [
   "dependsOn",
   "condition",
   "verificationPolicyKey",
+  "performer",
 ];
+const PERFORMER_FIELDS = ["minGradeRank", "minGradeCode", "maxGradeRank", "maxGradeCode"];
+
+/** The band, validated in isolation. Returns the complaint or null. */
+function validateStepPerformer(at: string, p: unknown): string | null {
+  if (p === null || p === undefined) return null;
+  if (typeof p !== "object" || Array.isArray(p)) {
+    return `${at}.performer must be an object — { minGradeRank, minGradeCode, maxGradeRank, maxGradeCode } — or null for anybody. Got ${describe(p)}`;
+  }
+  const b = p as Record<string, unknown>;
+  const unknown = unknownFields(b, PERFORMER_FIELDS);
+  if (unknown) return `${at}.performer: ${unknown}`;
+  for (const side of ["min", "max"] as const) {
+    const rank = b[`${side}GradeRank`];
+    const code = b[`${side}GradeCode`];
+    if (rank !== null && rank !== undefined && (typeof rank !== "number" || !Number.isInteger(rank) || rank < 0)) {
+      return `${at}.performer.${side}GradeRank must be a whole number from the firm's grade ladder, or null for an open end. Got ${describe(rank)}`;
+    }
+    if (code !== null && code !== undefined && (typeof code !== "string" || code.trim() === "")) {
+      return `${at}.performer.${side}GradeCode must be the grade's code — "analyst", "manager" — or null. Got ${describe(code)}`;
+    }
+    if ((rank === null || rank === undefined) !== (code === null || code === undefined)) {
+      return `${at}.performer.${side}GradeRank and ${side}GradeCode go together: both the rank that is compared and the code a person reads, or both null for an open end.`;
+    }
+  }
+  const min = b["minGradeRank"];
+  const max = b["maxGradeRank"];
+  if ((min === null || min === undefined) && (max === null || max === undefined)) {
+    return `${at}.performer has both ends open, which means anybody — say null instead, so the intent is on the row.`;
+  }
+  if (typeof min === "number" && typeof max === "number" && min > max) {
+    return `${at}.performer runs from rank ${String(min)} down to ${String(max)} — the lower rank goes first.`;
+  }
+  return null;
+}
+
+/** A stored band, read back; absent reads as null (anybody), like every
+ *  optional step field before it. */
+function readStepPerformer(p: unknown): StepPerformer | null {
+  if (p === null || p === undefined || typeof p !== "object") return null;
+  const b = p as Record<string, unknown>;
+  const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  return {
+    minGradeRank: num(b["minGradeRank"]),
+    minGradeCode: str(b["minGradeCode"]),
+    maxGradeRank: num(b["maxGradeRank"]),
+    maxGradeCode: str(b["maxGradeCode"]),
+  };
+}
 
 /** A step key is a lowercase handle, like a config key and for the same reason:
  *  it is compared, stored on every row, and read in an audit trail. */
@@ -2610,6 +2681,9 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
         );
       }
     }
+
+    const performerProblem = validateStepPerformer(at, step["performer"]);
+    if (performerProblem) return performerProblem;
   }
 
   // Every dependency must name a step this template HAS. A typo would otherwise
@@ -2724,6 +2798,7 @@ export function readWorkflowTemplate(
       // it. "Nobody checks this step" is exactly what those templates meant.
       verificationPolicyKey:
         typeof s["verificationPolicyKey"] === "string" ? s["verificationPolicyKey"] : null,
+      performer: readStepPerformer(s["performer"]),
     }),
   );
   return { label: body["label"] as string, steps };

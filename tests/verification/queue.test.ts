@@ -17,6 +17,7 @@ import {
   FakeJobSubjectSource,
   FakeTemplateSource,
   FakeTierSource,
+  FakeStepDeskResolver,
 } from "../../src/testfakes/orchestrator";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
@@ -60,6 +61,7 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
     dependsOn: [],
     condition: null,
     verificationPolicyKey: null,
+    performer: null,
     ...over,
   };
 }
@@ -118,6 +120,7 @@ async function world(policy: VerificationPolicy | null = MANAGER_OR_ABOVE) {
   });
 
   const service = new OrchestratorService({
+    desks: new FakeStepDeskResolver(),
     jobs,
     steps,
     templates,

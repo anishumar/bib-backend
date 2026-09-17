@@ -176,6 +176,14 @@ export function mapError(err: unknown): MappedError {
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Whose desk a step is on (0301). All conflicts: the request is well
+      // formed and what refuses it is the state of the step or the firm's own
+      // process, fixed on the job page or the process editor.
+      case "NOT_YOUR_STEP":
+      case "PERFORMER_OUT_OF_BAND":
+      case "STEP_SETTLED":
+      case "NOT_STAFF_HERE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // A machine has answered this step and nobody has said whether the answer
       // stands. A conflict, not a 400: the request is well formed and what
       // refuses it is the state of the step, fixed by deciding the proposal

@@ -93,6 +93,7 @@ function newStep(tenantId: string, jobId: string, stepKey: string) {
     stepKey,
     label: stepKey,
     executor: "human",
+    assigneeUserId: null,
   };
 }
 

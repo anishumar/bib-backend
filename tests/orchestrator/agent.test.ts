@@ -27,6 +27,7 @@ import {
   FakeJobSubjectSource,
   FakeTemplateSource,
   FakeTierSource,
+  FakeStepDeskResolver,
 } from "../../src/testfakes/orchestrator";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
 import {
@@ -111,6 +112,7 @@ function template(executor: string) {
         dependsOn: [],
         condition: null,
         verificationPolicyKey: null,
+        performer: null,
       },
     ],
   };
@@ -143,6 +145,7 @@ async function world(executor = "agent") {
   });
 
   const service = new OrchestratorService({
+    desks: new FakeStepDeskResolver(),
     jobs,
     steps,
     templates,

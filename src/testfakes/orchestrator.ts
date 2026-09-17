@@ -4,6 +4,7 @@
 import type { JobStep, StepStatus } from "../domain/orchestrator/model";
 import type { ConfidenceTiers } from "../domain/agent/model";
 import type {
+  StepDeskResolver,
   AgentOutcome,
   AgentRun,
   AgentRunRepository,
@@ -55,10 +56,30 @@ export class FakeJobStepRepo implements JobStepRepository {
         startedAt: null,
         finishedAt: null,
         performedBy: null,
+        assigneeUserId: s.assigneeUserId,
       }),
     );
     this.rows.push(...created);
     return Promise.resolve({ steps: created, created: true });
+  }
+
+  assign(_tenantId: string, stepId: string, assigneeUserId: string | null): Promise<JobStep | null> {
+    const i = this.rows.findIndex((r) => r.id === stepId);
+    const row = this.rows[i];
+    if (!row || row.status === "done" || row.status === "skipped" || row.status === "failed") {
+      return Promise.resolve(null);
+    }
+    const moved: JobStep = { ...row, assigneeUserId };
+    this.rows[i] = moved;
+    return Promise.resolve(moved);
+  }
+
+  listOpenForUser(_tenantId: string, userId: string): Promise<readonly JobStep[]> {
+    return Promise.resolve(
+      this.rows.filter(
+        (r) => r.assigneeUserId === userId && (r.status === "pending" || r.status === "running" || r.status === "blocked"),
+      ),
+    );
   }
 
   listForJob(tenantId: string, jobId: string): Promise<readonly JobStep[]> {
@@ -331,5 +352,14 @@ export class FakeAgentRuntime implements AgentRuntime {
       confidence: result?.confidence ?? 1,
       proposed: result?.proposed ?? { value: input.stepKey },
     });
+  }
+}
+
+/** Whose desk a job's steps default to. A test sets `spoc`; null is "nobody". */
+export class FakeStepDeskResolver implements StepDeskResolver {
+  spoc: string | null = null;
+
+  spocFor(_tenantId: string, _jobId: string, _onDate: string): Promise<string | null> {
+    return Promise.resolve(this.spoc);
   }
 }
