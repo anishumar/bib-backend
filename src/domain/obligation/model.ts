@@ -189,13 +189,26 @@ export interface ObligationTemplate {
  *   `event_driven`   no period, so nothing to count from until the event
  *                    happens — and nothing here knows that it has.
  *   `retired`        the firm has moved on. Past instances still read.
+ *   `unconfirmed`    a formula this system could run and nobody at the firm has
+ *                    checked against the statute — every row a pack seeds. It
+ *                    generates NOTHING until the firm confirms it (2026-09-18):
+ *                    a shipped rule that names no service reaches every live
+ *                    engagement at every company in its country, and a firm
+ *                    whose one service EXCLUDES the filing was watching its
+ *                    client's portal call those filings "missed".
  */
-export type RuleCoverage = "generating" | "needs_formula" | "event_driven" | "retired";
+export type RuleCoverage = "generating" | "needs_formula" | "event_driven" | "unconfirmed" | "retired";
 
 export function coverageOf(t: ObligationTemplate): RuleCoverage {
   if (!t.isActive) return "retired";
   if (t.dueRule === null) return "needs_formula";
   if (t.recurrence === "event") return "event_driven";
+  // CONFIRMATION IS LOAD-BEARING. `status` was informational from T3.2 to
+  // 2026-09-17 — "the firm has checked this against the statute" — while the
+  // calendar generated from every active formula regardless. A rule the firm
+  // WRITES is created confirmed (it is the firm's own statement); a rule a pack
+  // SEEDS is not, and stays off the calendar until a partner answers it.
+  if (t.status !== "confirmed") return "unconfirmed";
   return "generating";
 }
 

@@ -74,18 +74,22 @@ async function rule(input: {
   name: string;
   serviceEntryId: string | null;
   generating?: boolean;
+  /** Default true: the rows below stand for rules the firm has answered. A
+   *  pack row the firm has NOT answered is the one case that generates nothing. */
+  confirmed?: boolean;
 }): Promise<string> {
   const [row] = await owner<{ id: string }[]>`
     INSERT INTO delivery.obligation_template
       (tenant_id, jurisdiction, name, recurrence, fiscal_year_start_month,
        due_rule, due_month_offset, due_day_of_month, rule_pack, service_entry_id,
-       unresolved_reason)
+       unresolved_reason, status)
     VALUES (${tenantId}, 'IN', ${input.name}, 'monthly', 4,
             ${input.generating === false ? null : "day_of_month"},
             ${input.generating === false ? null : 1},
             ${input.generating === false ? null : 20},
             ${`cov-${stamp}@1`}, ${input.serviceEntryId},
-            ${input.generating === false ? "the firm has not given the day" : null})
+            ${input.generating === false ? "the firm has not given the day" : null},
+            ${input.confirmed === false ? "unconfirmed" : "confirmed"})
     RETURNING id
   `;
   if (!row) throw new Error("rule seed failed");
@@ -254,6 +258,21 @@ describe("a rule that cannot produce a date does not count as coverage", () => {
 
     const covered = await coverage.coveredEngagements(tenantId, [engagementId]);
     expect(covered.has(engagementId)).toBe(false);
+
+    await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
+  });
+
+  it("is uncovered while nobody at the firm has confirmed it — a pack row, and the gap says so", async () => {
+    // 2026-09-18. A shipped rule names no service, so confirmed it would reach
+    // this engagement whatever the client bought; unconfirmed it reaches
+    // nothing, and the coverage screen names the one thing to do about it.
+    const id = await rule({ name: `Unanswered pack row ${stamp}`, serviceEntryId: null, confirmed: false });
+
+    const covered = await coverage.coveredEngagements(tenantId, [engagementId]);
+    expect(covered.has(engagementId)).toBe(false);
+    const gap = (await generator.gaps(tenantId)).find((g) => g.engagementId === engagementId);
+    expect(gap?.reason).toBe("rules_unconfirmed");
+    expect(gap?.blockedRuleIds).toContain(id);
 
     await owner`DELETE FROM delivery.obligation_template WHERE id = ${id}`;
   });

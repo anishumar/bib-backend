@@ -64,6 +64,7 @@ function successor(over: Partial<NewObligationTemplate> = {}): NewObligationTemp
     leadTimeDays: 0,
     rulePack: "gst-in@2026.09",
     supersedesId: predecessorId,
+    status: "confirmed",
     effectiveFrom: CUTOVER,
     effectiveTo: null,
     ...over,

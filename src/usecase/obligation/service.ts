@@ -344,9 +344,17 @@ export class ObligationService {
         // commitment the firm never made.
         leadTimeDays: 0,
         rulePack: INDIA_RULE_PACK,
-      effectiveFrom: null,
-      effectiveTo: null,
+        effectiveFrom: null,
+        effectiveTo: null,
         supersedesId: null,
+        // UNCONFIRMED, and since 2026-09-18 that is what keeps it OFF the
+        // calendar. A pack row names no service, so it reaches every live
+        // engagement at every company in its country the moment it generates
+        // — including a bookkeeping client whose service excludes the filing,
+        // whose portal then called it "missed". The partner answers each rule
+        // (`status: "confirmed"`, optionally scoped to a service) and THAT
+        // fills the calendar, the same way answering a formula does.
+        status: "unconfirmed",
       });
       if (!template) continue;
       created += 1;
@@ -477,11 +485,13 @@ export class ObligationService {
     actor: Actor,
   ): Promise<number> {
     const today = this.today();
+    const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
     const report = await this.generate(
       tenantId,
       { from: addDays(today, -REACH_BACK_DAYS), to: addDays(today, HORIZON_DAYS) },
       actor,
       templateId,
+      floor,
     );
     return report.created;
   }
@@ -543,6 +553,9 @@ export class ObligationService {
       // different operation with its own method — see `supersedeRule`.
       effectiveFrom: null,
       effectiveTo: null,
+      // The firm wrote it, so the firm has said what the law is: confirmed.
+      // "Checked against the statute" is a question asked of a PACK's rows.
+      status: "confirmed",
     });
     if (!created) throw new TemplateKeyTaken(input.jurisdiction, name, rulePack);
 
@@ -700,6 +713,8 @@ export class ObligationService {
       supersedesId: predecessorId,
       effectiveFrom: input.effectiveFrom,
       effectiveTo: null,
+      // An amendment is the firm's own act, like a rule it writes.
+      status: "confirmed",
     });
 
     await this.deps.events.recordEvent({
@@ -1040,10 +1055,13 @@ export class ObligationService {
 
   async sweepTenant(tenantId: string, actor: Actor = SYSTEM_ACTOR): Promise<GenerateReport> {
     const today = this.today();
+    const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
     const generated = await this.generate(
       tenantId,
       { from: addDays(today, -REACH_BACK_DAYS), to: addDays(today, HORIZON_DAYS) },
       actor,
+      undefined,
+      floor,
     );
     const raised = await this.raise(tenantId, today, actor);
     // AFTER `raise`, deliberately. An obligation that reaches its internal
@@ -1080,6 +1098,16 @@ export class ObligationService {
      * asked; with it, the work is bounded by the one rule they edited.
      */
     onlyTemplateId?: string,
+    /**
+     * The firm's compliance floor (`compliance_policy.missedFromOn`), or null
+     * for none. A filing that fell due BEFORE the floor is never generated —
+     * the firm was not keeping this calendar then — which is the same rule
+     * the per-period spawn applies to months (T6.13). Until 2026-09-18 the
+     * floor governed only the MISSED decision, so the ninety-day reach-back
+     * still put June's and July's returns on the calendar and their tasks on
+     * a desk for a firm that went live in September.
+     */
+    floor: IsoDate | null = null,
   ): Promise<Omit<GenerateReport, "raised" | "missed" | "uncoveredEngagements">> {
     if (!isIsoDate(window.from) || !isIsoDate(window.to) || window.from > window.to) {
       throw new InvalidWindow(window.from, window.to);
@@ -1153,6 +1181,9 @@ export class ObligationService {
           // produces August's return, covering three weeks before the firm was
           // appointed. It is generated here because somebody has to file it.
           if (schedule.statutoryDueOn < subject.effectiveFrom) continue;
+          // THE FIRM'S OWN FLOOR, the same test: a filing due before the day
+          // the firm started keeping this calendar is not the firm's either.
+          if (floor !== null && schedule.statutoryDueOn < floor) continue;
           if (pending.length >= GENERATE_BATCH) {
             full = true;
             break;

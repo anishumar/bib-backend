@@ -96,6 +96,10 @@ export class PostgresObligationCoverage implements ObligationCoverage {
          AND t.is_active
          AND t.due_rule IS NOT NULL
          AND t.recurrence <> 'event'
+         -- Confirmed by the firm — coverageOf() again. An unconfirmed pack row
+         -- covers nothing, so an engagement it would reach still gets its own
+         -- task from the spawn rather than a filing the calendar never dated.
+         AND t.status = 'confirmed'
         WHERE e.id = ANY(${db.array(engagementIds as string[])}::uuid[])
       `;
       return new Set(rows.map((r) => r.engagement_id));

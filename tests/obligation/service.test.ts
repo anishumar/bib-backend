@@ -577,18 +577,45 @@ describe("writing a rule", () => {
     ).rejects.toThrow(/add it under a NEW rule pack/);
   });
 
-  it("lets a partner confirm a date, and records who did", async () => {
-    // Confirming is the moment a date stops coming from a document and starts
-    // coming from the firm.
+  it("creates a rule the firm writes as CONFIRMED — it is the firm's own statement", async () => {
     const rule = await firmWithGst(h);
-    expect(rule.status).toBe("unconfirmed");
-    const { rule: confirmed } = await h.service.updateRule(
+    expect(rule.status).toBe("confirmed");
+  });
+
+  it("lets a partner confirm a shipped date, records who did, and fills the calendar then", async () => {
+    // Confirming is the moment a date stops coming from a document and starts
+    // coming from the firm — and since 2026-09-18 it is also the moment the
+    // rule starts generating at all. A pack row reaches every live engagement
+    // in its country, so an unchecked one on the calendar is a claim about
+    // every client the firm has.
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await h.service.seedIndiaRulePack(FIRM, ACTOR);
+    h.calendarSource.subjects.push({
+      entityPartyId: ENTITY,
+      engagementId: ENGAGEMENT,
+      effectiveFrom: "2026-01-01",
+      jurisdiction: "IN",
+      entityType: "private_limited",
+      serviceEntryId: SERVICE,
+    });
+    const gstr3b = h.templates.rows.find((r) => r.name === "GSTR-3B");
+    if (!gstr3b) throw new Error("no GSTR-3B in the pack");
+    expect(gstr3b.status).toBe("unconfirmed");
+
+    const before = await h.service.generate(FIRM, { from: "2026-04-01", to: "2027-03-31" }, ACTOR);
+    expect(before.created).toBe(0);
+    expect(h.instances.rows).toHaveLength(0);
+
+    const { rule: confirmed, effect } = await h.service.updateRule(
       FIRM,
-      rule.id,
+      gstr3b.id,
       { status: "confirmed" },
       ACTOR,
     );
     expect(confirmed.status).toBe("confirmed");
+    // THE CROSSING: answering it fills the calendar there and then.
+    expect(effect.spawned).toBeGreaterThan(0);
+    expect(h.instances.rows.length).toBe(effect.spawned);
     const event = h.events.recorded.find((e) => e.verb === "obligation_rule.updated");
     expect(event?.payload).toMatchObject({ statusFrom: "unconfirmed", statusTo: "confirmed" });
   });
@@ -1146,6 +1173,10 @@ describe("exceptions", () => {
 describe("the shipped rule pack, seeded", () => {
   it("gives a new firm fifty-seven rules and never overwrites a confirmation", async () => {
     const h = harness();
+    // States first, as every firm has them: confirming a rule now fills the
+    // calendar there and then, and a generated filing has to have somewhere
+    // to begin.
+    await h.service.seedDefaultStates(FIRM, ACTOR);
     const created = await h.service.seedIndiaRulePack(FIRM, ACTOR);
     expect(created).toBe(57);
 

@@ -68,7 +68,7 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
         r.rulePack === t.rulePack,
     );
     if (held) return Promise.resolve(null);
-    const row: ObligationTemplate = { ...t, status: "unconfirmed", isActive: true };
+    const row: ObligationTemplate = { ...t, isActive: true };
     this.rows.push(row);
     return Promise.resolve(row);
   }
@@ -97,7 +97,6 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     const successor: ObligationTemplate = {
       ...t,
       supersedesId: predecessorId,
-      status: "unconfirmed",
       isActive: true,
     };
     this.rows[i] = { ...predecessor, effectiveTo: t.effectiveFrom };

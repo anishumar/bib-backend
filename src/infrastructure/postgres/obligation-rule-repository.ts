@@ -178,14 +178,14 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
           (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
-           effective_from, effective_to)
+           effective_from, effective_to, status)
         VALUES
           (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
            ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${t.supersedesId},
-           ${t.effectiveFrom}::date, ${t.effectiveTo}::date)
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status})
         -- The rule's own identity. A revision is a NEW row under a new pack, so
         -- a conflict here means "we already have this exact rule" and the seed
         -- must leave the firm's own confirmations and lead times alone.
@@ -220,14 +220,14 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
           (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
-           effective_from, effective_to)
+           effective_from, effective_to, status)
         VALUES
           (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
            ${t.unresolvedReason}, ${t.leadTimeDays}, ${t.rulePack}, ${predecessorId},
-           ${t.effectiveFrom}::date, ${t.effectiveTo}::date)
+           ${t.effectiveFrom}::date, ${t.effectiveTo}::date, ${t.status})
         RETURNING ${db.unsafe(TEMPLATE_COLUMNS)}
       `;
       const row = rows[0];
@@ -324,12 +324,15 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
     readonly { readonly template: ObligationTemplate; readonly exceptions: readonly DueRuleException[] }[]
   > {
     return withTenant(this.app, tenantId, async (db) => {
-      // Active rules that carry a formula. `recurrence <> 'event'` is left to
-      // the domain's `generatesDates` rather than duplicated here — one
-      // statement of what "generating" means, and the screen reads the same one.
+      // Active rules that carry a formula AND that the firm has confirmed.
+      // `recurrence <> 'event'` is left to the domain's `generatesDates` rather
+      // than duplicated here — one statement of what "generating" means, and
+      // the screen reads the same one. The status test IS duplicated, on
+      // purpose: this query is the sweep's working set and a firm with fifty
+      // unconfirmed pack rows should not fetch their exceptions every night.
       const rows = await db<TemplateRow[]>`
         SELECT ${db.unsafe(TEMPLATE_COLUMNS)} FROM delivery.obligation_template
-        WHERE is_active AND due_rule IS NOT NULL
+        WHERE is_active AND due_rule IS NOT NULL AND status = 'confirmed'
         ORDER BY jurisdiction, name
       `;
       // EVERY exception for every rule in ONE query rather than one per rule:

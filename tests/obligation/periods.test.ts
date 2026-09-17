@@ -338,8 +338,16 @@ describe("scheduleFor is the one place a rule plus a period becomes dates", () =
 });
 
 describe("what a rule is actually doing, and why an empty calendar is explainable", () => {
-  it("says `generating` only when it is active AND has a formula AND has periods", () => {
-    expect(coverageOf(rule())).toBe("generating");
+  it("says `generating` only when it is active AND has a formula AND has periods AND is confirmed", () => {
+    expect(coverageOf(rule({ status: "confirmed" }))).toBe("generating");
+  });
+
+  it("says `unconfirmed` for a formula nobody at the firm has checked — a pack's every row", () => {
+    // NOT generating. Until 2026-09-18 this row put its filings on the calendar
+    // of every live engagement in its country, including a client whose only
+    // service excluded the filing — and that client's portal called them missed.
+    expect(coverageOf(rule())).toBe("unconfirmed");
+    expect(coverageOf(rule({ status: "unconfirmed" }))).toBe("unconfirmed");
   });
 
   it("says `needs_formula` for a real obligation whose timing we cannot derive", () => {

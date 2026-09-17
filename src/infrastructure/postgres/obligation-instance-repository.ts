@@ -672,10 +672,18 @@ export class PostgresCalendarSource implements CalendarSource {
                  count(*) FILTER (WHERE t.jurisdiction = l.jurisdiction
                                     AND t.is_active
                                     AND t.due_rule IS NOT NULL
-                                    AND t.recurrence <> 'event')                AS generating,
+                                    AND t.recurrence <> 'event')                AS with_formula,
+                 -- coverageOf() in the domain, restated: a formula the firm has
+                 -- CONFIRMED. A pack row nobody has checked is not generating.
+                 count(*) FILTER (WHERE t.jurisdiction = l.jurisdiction
+                                    AND t.is_active
+                                    AND t.due_rule IS NOT NULL
+                                    AND t.recurrence <> 'event'
+                                    AND t.status = 'confirmed')                 AS generating,
                  array_remove(array_agg(t.id) FILTER (
                    WHERE t.jurisdiction = l.jurisdiction
-                     AND (NOT t.is_active OR t.due_rule IS NULL OR t.recurrence = 'event')
+                     AND (NOT t.is_active OR t.due_rule IS NULL OR t.recurrence = 'event'
+                          OR t.status <> 'confirmed')
                  ), NULL)                                                       AS blocked_rule_ids
           FROM live l
           LEFT JOIN delivery.obligation_template t
@@ -703,7 +711,8 @@ export class PostgresCalendarSource implements CalendarSource {
                  WHEN m.named = 0        THEN 'no_rule_names_this_service'
                  WHEN m.in_country = 0   THEN 'no_rule_for_jurisdiction'
                  WHEN m.live_rules = 0   THEN 'rules_retired'
-                 WHEN m.generating = 0   THEN 'rules_need_a_formula'
+                 WHEN m.with_formula = 0 THEN 'rules_need_a_formula'
+                 WHEN m.generating = 0   THEN 'rules_unconfirmed'
                  ELSE 'nothing_due_yet'
                END AS reason,
                m.blocked_rule_ids

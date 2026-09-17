@@ -41,6 +41,10 @@ export interface NewObligationTemplate {
   readonly leadTimeDays: number;
   readonly rulePack: string;
   readonly supersedesId: string | null;
+  /** `confirmed` for a rule the FIRM writes — it is the firm's own statement of
+   *  the law — and `unconfirmed` for one a pack seeds, which nobody at the firm
+   *  has checked yet. Only a confirmed rule generates (`coverageOf`). */
+  readonly status: ObligationTemplate["status"];
   /** The first period start this rule governs, half-open with `effectiveTo`.
    *  Null on both is the ordinary case and means "always" — a rule nobody has
    *  had to amend, which is all of them until somebody supersedes one. */
@@ -338,6 +342,9 @@ export type CoverageGapReason =
   | "rules_need_a_formula"
   /** Rules match and every one has been retired. */
   | "rules_retired"
+  /** Rules match, carry a formula, and not one has been confirmed by the firm
+   *  — the shipped pack's every row until a partner answers it. */
+  | "rules_unconfirmed"
   /** Rules match and generate, but this engagement started after every period
    *  they would have produced. Resolves itself next period. */
   | "nothing_due_yet";

@@ -1875,6 +1875,31 @@ RUNNING the worker, since the unit tests use a fake and the old integration test
 hand. `tests/obligation/restate.integration.test.ts` also proves the WHERE clause refuses a row
 somebody picked up between the read and the write, which is what makes the reported count honest.
 
+### A rule generates only once the FIRM has confirmed it (2026-09-18)
+
+`status` was `unconfirmed | confirmed` from T3.2 and INFORMATIONAL: the sweep generated from
+every active formula regardless. Loading the first real firm found what that costs. Its one
+service was bookkeeping, which EXCLUDES GST filing in the partner's own words; the fifty-seven
+shipped rules name no service, so the eleven with a formula reached every live engagement at
+every Indian company — 98 filings, 17 tasks on an associate's desk, and the client's own portal
+listing returns the firm never took on as MISSED. A calendar row is a claim about a client, and
+a pack cannot make one.
+
+So `coverageOf` has a fifth answer, `unconfirmed`, and only `generating` generates — in the
+domain predicate, in `listGenerating`, in `gaps` (reason `rules_unconfirmed`) and in
+`obligation-coverage.ts`, which `coverage.integration.test.ts` runs against one database. **A
+rule the firm WRITES is created `confirmed`** (it is the firm's own statement of the law, and a
+brand-new rule is still what the nightly sweep is for); **a rule a pack SEEDS is not**, and
+confirming it is the crossing that fills the calendar there and then, exactly as answering a
+formula does. Scoping it to a service at the same time is what keeps a filing off the clients
+who did not buy it.
+
+**And the compliance floor now clips GENERATION, not only the missed decision.** A filing whose
+statutory date falls before `compliance_policy.missedFromOn` is not generated at all — the same
+rule the per-period spawn applies to months (T6.13). Before this the ninety-day reach-back put
+June's and July's returns on the calendar of a firm that went live in September, and raised
+their tasks.
+
 ### The silent hole, and why the cure is a derivation rather than a setting
 
 A recurring engagement now gets one task PER PERIOD from the calendar, so `spawnForEngagements`

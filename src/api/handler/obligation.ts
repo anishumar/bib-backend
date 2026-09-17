@@ -57,7 +57,7 @@ const RuleStatus = z.enum(["unconfirmed", "confirmed"]).openapi({
 });
 
 const Coverage = z
-  .enum(["generating", "needs_formula", "event_driven", "retired"])
+  .enum(["generating", "needs_formula", "event_driven", "unconfirmed", "retired"])
   .openapi({
     description:
       "What this rule is actually doing, derived rather than stored. 'needs_formula' is NOT an " +
@@ -244,6 +244,7 @@ const CoverageGapSchema = z
         "no_rule_for_jurisdiction",
         "rules_need_a_formula",
         "rules_retired",
+        "rules_unconfirmed",
         "nothing_due_yet",
       ])
       .openapi({
