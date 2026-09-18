@@ -26,6 +26,10 @@ import { scopeOf } from "../scope";
 
 export interface OrchestratorDeps {
   readonly service: OrchestratorService;
+  /** The firm's grade ladder, for the band's NAMES on the wire. An associate
+   *  may not read `/tenancy/grades` (that is the admin surface), and a job
+   *  page that said "for analyst to senior_associate" to Kavya was the result. */
+  readonly grades: { listGrades(tenantId: string): Promise<readonly { code: string; name: string }[]> };
 }
 
 // `AgentProposal`, not `Proposal`. This product already has proposals — the
@@ -65,6 +69,14 @@ const PerformerSchema = z
     minGradeCode: z.string().nullable(),
     maxGradeRank: z.number().int().nullable(),
     maxGradeCode: z.string().nullable(),
+    minGradeName: z.string().nullable().openapi({
+      description:
+        "What the firm calls the lowest grade — \"Analyst\" — or null for an open end or a rung " +
+        "the ladder no longer has. Read this, not the code.",
+    }),
+    maxGradeName: z.string().nullable().openapi({
+      description: "What the firm calls the highest grade, likewise.",
+    }),
   })
   .openapi("StepPerformer");
 
@@ -163,10 +175,20 @@ const JobStepsResponse = z
   .object({ steps: z.array(JobStepSchema) })
   .openapi("JobStepsResponse");
 
-function toWire(d: DescribedStep, proposal?: AgentRun): z.infer<typeof JobStepSchema> {
+type Ladder = ReadonlyMap<string, string>;
+
+function toWire(d: DescribedStep, ladder: Ladder, proposal?: AgentRun): z.infer<typeof JobStepSchema> {
   const s: JobStep = d.step;
+  const name = (code: string | null): string | null => (code === null ? null : (ladder.get(code) ?? null));
   return {
-    performer: d.performer,
+    performer:
+      d.performer === null
+        ? null
+        : {
+            ...d.performer,
+            minGradeName: name(d.performer.minGradeCode),
+            maxGradeName: name(d.performer.maxGradeCode),
+          },
     assignee: d.assignee,
     viewer: d.viewer,
     id: s.id,
@@ -531,20 +553,26 @@ export function registerOrchestratorRoutes(
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { jobId } = c.req.valid("param");
-    const [steps, proposals] = await Promise.all([
+    const [steps, proposals, ladder] = await Promise.all([
       deps.service.describeSteps(s.tenantId, jobId, s.userId),
       // ONE read for the page, not one per step.
       deps.service.proposalsFor(s.tenantId, jobId),
+      ladderOf(s.tenantId),
     ]);
-    return c.json({ steps: steps.map((d) => toWire(d, proposals.get(d.step.id))) }, 200);
+    return c.json({ steps: steps.map((d) => toWire(d, ladder, proposals.get(d.step.id))) }, 200);
   });
 
-  /** One step, described for the session's viewer, after a write moved it. */
+  /** Grade code → name, once per request. */
+  async function ladderOf(tenantId: string): Promise<Ladder> {
+    return new Map((await deps.grades.listGrades(tenantId)).map((g) => [g.code, g.name]));
+  }
+
+  /** One step, described for the session's viewer, after a write moved it — on the wire. */
   async function describeOne(tenantId: string, jobId: string, stepId: string, viewer: string) {
-    const all = await deps.service.describeSteps(tenantId, jobId, viewer);
+    const [all, ladder] = await Promise.all([deps.service.describeSteps(tenantId, jobId, viewer), ladderOf(tenantId)]);
     const d = all.find((x) => x.step.id === stepId);
     if (!d) throw new Error(`step ${stepId} vanished after the write`);
-    return d;
+    return toWire(d, ladder);
   }
 
   app.openapi(assignStepRoute, async (c) => {
@@ -557,7 +585,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
+    return c.json(await describeOne(s.tenantId, jobId, step.id, s.userId), 200);
   });
 
   app.openapi(performersRoute, async (c) => {
@@ -599,7 +627,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
+    return c.json(await describeOne(s.tenantId, jobId, step.id, s.userId), 200);
   });
 
   app.openapi(completeStepRoute, async (c) => {
@@ -615,7 +643,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(await describeOne(s.tenantId, jobId, step.id, s.userId)), 200);
+    return c.json(await describeOne(s.tenantId, jobId, step.id, s.userId), 200);
   });
 
   app.openapi(listChecksRoute, async (c) => {
@@ -672,7 +700,7 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toWire(await describeOne(s.tenantId, step.jobId, step.id, s.userId)), 200);
+    return c.json(await describeOne(s.tenantId, step.jobId, step.id, s.userId), 200);
   });
 }
 

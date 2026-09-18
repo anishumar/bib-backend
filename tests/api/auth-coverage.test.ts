@@ -379,6 +379,7 @@ function deps(): RouterDeps {
       }),
     },
     orchestrator: {
+      grades: { listGrades: () => Promise.resolve([]) },
       service: new OrchestratorService({
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),

@@ -302,6 +302,7 @@ function deps(): RouterDeps {
     },
     staffGrades: { service: new StaffGradeService(makeFakes()) },
     orchestrator: {
+      grades: { listGrades: () => Promise.resolve([]) },
       service: new OrchestratorService({
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
