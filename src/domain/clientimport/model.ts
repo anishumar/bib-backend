@@ -42,22 +42,61 @@ import {
 export interface SheetColumn {
   readonly header: string;
   readonly required: boolean;
+  /**
+   * The few words that go IN THE HEADER CELL, in brackets, on every sheet
+   * this product hands out: `Started On (YYYY-MM-DD)`. Nobody reads a guide
+   * (Shrestha, 2026-09-18: "guide wagerah koi padhta nahi hai"), and the one
+   * place a person's eye is when they type a value is the cell above it. So
+   * the format, the vocabulary and the one cross-sheet rule that matters —
+   * "exactly the Client Name from 1-clients" — sit there.
+   *
+   * SHORT and WITHOUT BRACKETS of its own: the reader recognises a header by
+   * what comes before the first "(", so a hint containing one would cut the
+   * header in the wrong place. `tests/clientimport/header-hints.test.ts`
+   * holds both. `about` is the longer sentence the import screen's table and
+   * the guide carry.
+   */
+  readonly hint: string;
   readonly about: string;
+}
+
+/**
+ * A header as a sheet PRINTS it — `Client Name (registered name, spelled the
+ * same on all 3 sheets)` — and the two halves of reading one back.
+ *
+ * `headerKey` is what every header comparison in this module goes through:
+ * the bracketed hint is dropped, then the name is normalised the way a client
+ * name is. So a sheet downloaded with hints, a sheet somebody typed by hand
+ * with plain headers, and a sheet where somebody shortened a hint all read
+ * the same — the hint is for the person filling the cell, never for the
+ * machine reading it. Only ever applied to HEADERS: a client called
+ * "Kaveri (India) Private Limited" keeps its brackets.
+ */
+export function headerWithHint(header: string, hint: string): string {
+  return hint === "" ? header : `${header} (${hint})`;
+}
+
+export function headerKey(raw: string): string {
+  return normaliseName(raw.replace(/\s*\(.*$/s, ""));
 }
 
 /** The registration numbers a firm keeps, one column each. Blank cells are
  *  ignored; a filled one becomes an identifier row on the party. */
-export const IDENTIFIER_COLUMNS: readonly { readonly header: string; readonly type: IdentifierType }[] = [
-  { header: "PAN", type: "pan" },
-  { header: "GSTIN", type: "gstin" },
-  { header: "CIN", type: "cin" },
-  { header: "LLPIN", type: "llpin" },
-  { header: "TAN", type: "tan" },
-  { header: "UEN", type: "uen" },
-  { header: "TRN", type: "trn" },
-  { header: "EIN", type: "ein" },
-  { header: "CRN", type: "crn" },
-  { header: "VAT", type: "vat" },
+export const IDENTIFIER_COLUMNS: readonly {
+  readonly header: string;
+  readonly type: IdentifierType;
+  readonly hint: string;
+}[] = [
+  { header: "PAN", type: "pan", hint: "10 characters, blank if none" },
+  { header: "GSTIN", type: "gstin", hint: "15 characters, blank if none" },
+  { header: "CIN", type: "cin", hint: "21 characters, blank if none" },
+  { header: "LLPIN", type: "llpin", hint: "blank if none" },
+  { header: "TAN", type: "tan", hint: "10 characters, blank if none" },
+  { header: "UEN", type: "uen", hint: "Singapore, blank if none" },
+  { header: "TRN", type: "trn", hint: "UAE, blank if none" },
+  { header: "EIN", type: "ein", hint: "US, blank if none" },
+  { header: "CRN", type: "crn", hint: "UK, blank if none" },
+  { header: "VAT", type: "vat", hint: "blank if none" },
 ];
 
 // ── The SPOC columns, and why there are two spellings of them ────────────────
@@ -111,49 +150,49 @@ export function spocPairHeaders(slot: number): readonly [string, string] {
 
 export const CLIENT_SHEET_MARKER = "Client Name";
 export const CLIENT_COLUMNS: readonly SheetColumn[] = [
-  { header: "Client Name", required: true, about: "The registered name — what prints on a letter." },
-  { header: "Known As", required: false, about: "The trading name, if it differs." },
-  { header: "Industry", required: false, about: "" },
-  { header: "Website", required: false, about: "" },
-  { header: "Client Since", required: false, about: "When the relationship started. Backdated, because it did. Defaults to the earliest engagement start, else today." },
-  { header: "Group", required: false, about: "Leave blank for most rows. A client's name here makes this row a company INSIDE that client's group — billed on the group's letter and routed by the group's account team, so put the Key Manager and SPOCs on the group's own row." },
-  { header: "Country", required: true, about: "Two-letter code. Required with Entity Type — unless this row is a group other rows name." },
-  { header: "Entity Type", required: true, about: "private_limited, llp, pte_ltd, fzco, c_corp… the firm's own word. Required with Country." },
-  { header: "Incorporated On", required: false, about: "2019-06-11 or 11-Jun-2019. Never 11/06/2019." },
-  { header: "Financial Year End", required: false, about: "MM-DD. Every statutory deadline is computed from it." },
-  { header: "Registered Address", required: false, about: "" },
-  ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, about: "" })),
-  { header: "Key Manager", required: false, about: "The email of the staff member who owns the relationship." },
-  { header: SPOC_COLUMN_TEMPLATE, required: false, about: "A PAIR of columns per SPOC: the Dept's own code or name, and that SPOC's email. Numbered, so the headers are the same at every firm — the Dept goes in the cell, not in the header. Need a fourth? Add \"SPOC 4 Dept\" and \"SPOC 4 Email\" to the sheet. (Sheets using the older \"SPOC: <code>\" headers are still read.)" },
-  { header: "Signatory", required: false, about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
-  { header: "Portal Invite", required: false, about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
-  { header: "Portal Email", required: false, about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
+  { header: "Client Name", required: true, hint: "registered name, spelled the same on all 3 sheets", about: "The registered name — what prints on a letter." },
+  { header: "Known As", required: false, hint: "trading name, if different", about: "The trading name, if it differs." },
+  { header: "Industry", required: false, hint: "optional", about: "" },
+  { header: "Website", required: false, hint: "optional", about: "" },
+  { header: "Client Since", required: false, hint: "YYYY-MM-DD, when the relationship began", about: "When the relationship started. Backdated, because it did. Defaults to the earliest engagement start, else today." },
+  { header: "Group", required: false, hint: "blank unless this company sits inside a group client", about: "Leave blank for most rows. A client's name here makes this row a company INSIDE that client's group — billed on the group's letter and routed by the group's account team, so put the Key Manager and SPOCs on the group's own row." },
+  { header: "Country", required: true, hint: "2 letters: IN, AE, SG, GB, US", about: "Two-letter code. Required with Entity Type — unless this row is a group other rows name." },
+  { header: "Entity Type", required: true, hint: "private_limited, llp, partnership, pte_ltd, fzco, c_corp", about: "private_limited, llp, pte_ltd, fzco, c_corp… the firm's own word. Required with Country." },
+  { header: "Incorporated On", required: false, hint: "YYYY-MM-DD", about: "2019-06-11 or 11-Jun-2019. Never 11/06/2019." },
+  { header: "Financial Year End", required: false, hint: "MM-DD, e.g. 03-31", about: "MM-DD. Every statutory deadline is computed from it." },
+  { header: "Registered Address", required: false, hint: "one cell, as on the certificate", about: "" },
+  ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, hint: c.hint, about: "" })),
+  { header: "Key Manager", required: false, hint: "login email of the colleague who owns this client", about: "The email of the staff member who owns the relationship." },
+  { header: SPOC_COLUMN_TEMPLATE, required: false, hint: "pairs: your Dept code, then that colleague's login email", about: "A PAIR of columns per SPOC: the Dept's own code or name, and that SPOC's email. Numbered, so the headers are the same at every firm — the Dept goes in the cell, not in the header. Need a fourth? Add \"SPOC 4 Dept\" and \"SPOC 4 Email\" to the sheet. (Sheets using the older \"SPOC: <code>\" headers are still read.)" },
+  { header: "Signatory", required: false, hint: "who signed the paper letter for the client", about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
+  { header: "Portal Invite", required: false, hint: "TRUE or FALSE", about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
+  { header: "Portal Email", required: false, hint: "the client's own login email, needed when Portal Invite is TRUE", about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
 ];
 
 export const PEOPLE_SHEET_MARKER = "Name";
 export const PEOPLE_COLUMNS: readonly SheetColumn[] = [
-  { header: "Client", required: true, about: "The client, by the same registered name as the client sheet." },
-  { header: "Of", required: false, about: "Which company in the group they hold the role at. The client itself if blank." },
-  { header: "Name", required: true, about: "" },
-  { header: "Relationship", required: true, about: "director, signatory, shareholder or employee." },
-  { header: "Since", required: false, about: "When the role began. Defaults to today." },
-  { header: "Email", required: false, about: "Also how a re-run recognises the same person." },
-  { header: "Phone", required: false, about: "" },
+  { header: "Client", required: true, hint: "exactly the Client Name from 1-clients", about: "The client, by the same registered name as the client sheet." },
+  { header: "Of", required: false, hint: "a company in the group, if not the client itself", about: "Which company in the group they hold the role at. The client itself if blank." },
+  { header: "Name", required: true, hint: "full name", about: "" },
+  { header: "Relationship", required: true, hint: "director, signatory, shareholder or employee", about: "director, signatory, shareholder or employee." },
+  { header: "Since", required: false, hint: "YYYY-MM-DD, optional", about: "When the role began. Defaults to today." },
+  { header: "Email", required: false, hint: "optional", about: "Also how a re-run recognises the same person." },
+  { header: "Phone", required: false, hint: "optional", about: "" },
 ];
 
 export const ENGAGEMENT_SHEET_MARKER = "Company";
 export const ENGAGEMENT_COLUMNS: readonly SheetColumn[] = [
-  { header: "Company", required: true, about: "The company the work is delivered to, by registered name." },
+  { header: "Company", required: true, hint: "exactly the Client Name from 1-clients", about: "The company the work is delivered to, by registered name." },
   // No example code here, and that is the point: the codes belong to the firm's
   // own catalogue, and an invented `A1, H1, R7` reads as though the product
   // ships a fixed list of services. The same mistake the SPOC header made.
-  { header: "Service", required: true, about: "The service's code from your own catalogue, exactly as it is written there. A code the catalogue does not have is refused rather than guessed at." },
-  { header: "Started On", required: true, about: "When the firm began delivering it." },
-  { header: "Billed", required: false, about: "one_time, monthly, quarterly, annually or custom. Defaults from the service." },
-  { header: "Fee", required: false, about: "Per period, as agreed. Blank means 'as per the paper letter' and is noted on the line." },
-  { header: "Currency", required: false, about: "Three-letter code. Required when a Fee is given." },
-  { header: "Where", required: false, about: "Two-letter country the work is in, if not the company's own." },
-  { header: "Basis", required: false, about: "Where the real signed letter is — a folder, a reference. Recorded on the migrated letter." },
+  { header: "Service", required: true, hint: "the service code from your catalogue", about: "The service's code from your own catalogue, exactly as it is written there. A code the catalogue does not have is refused rather than guessed at." },
+  { header: "Started On", required: true, hint: "YYYY-MM-DD", about: "When the firm began delivering it." },
+  { header: "Billed", required: false, hint: "one_time, monthly, quarterly, annually or custom", about: "one_time, monthly, quarterly, annually or custom. Defaults from the service." },
+  { header: "Fee", required: false, hint: "digits only, per period, no commas or symbols", about: "Per period, as agreed. Blank means 'as per the paper letter' and is noted on the line." },
+  { header: "Currency", required: false, hint: "3 letters, e.g. INR", about: "Three-letter code. Required when a Fee is given." },
+  { header: "Where", required: false, hint: "2-letter country if not the company's own, else blank", about: "Two-letter country the work is in, if not the company's own." },
+  { header: "Basis", required: false, hint: "where the signed paper letter is kept", about: "Where the real signed letter is — a folder, a reference. Recorded on the migrated letter." },
 ];
 
 /** What the sheet's Relationship column may say, and the relationship type it
@@ -283,11 +322,16 @@ export function rowsOf(
   grid: readonly (readonly string[])[],
   marker: string,
 ): readonly SheetRow[] | null {
-  const headerAt = grid.findIndex((r) => r.some((c) => normaliseName(c) === normaliseName(marker)));
+  // Headers are compared through `headerKey`, so the bracketed hint every
+  // downloaded sheet carries — `Client Name (registered name, …)` — is the
+  // same column as a plain `Client Name`.
+  const headerAt = grid.findIndex((r) => r.some((c) => headerKey(c) === headerKey(marker)));
   if (headerAt < 0) return null;
   const headerRow = grid[headerAt] ?? [];
-  const keys = headerRow.map(normaliseName);
-  const headers = headerRow.map((h) => h.trim()).filter((h) => h.length > 0);
+  const keys = headerRow.map(headerKey);
+  const headers = headerRow
+    .map((h) => h.replace(/\s*\(.*$/s, "").trim())
+    .filter((h) => h.length > 0);
   const rows: SheetRow[] = [];
   grid.slice(headerAt + 1).forEach((raw, offset) => {
     if (!raw.some((c) => c.trim())) return;
@@ -295,7 +339,7 @@ export function rowsOf(
       lineNo: headerAt + offset + 2,
       headers,
       cell: (name: string) => {
-        const at = keys.indexOf(normaliseName(name));
+        const at = keys.indexOf(headerKey(name));
         return at < 0 ? "" : (raw[at] ?? "").trim();
       },
     });
