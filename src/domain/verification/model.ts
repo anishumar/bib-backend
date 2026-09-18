@@ -72,11 +72,11 @@ export function isVerificationRule(v: string): v is VerificationRule {
  */
 export const VERIFICATION_RULE_DESCRIPTIONS: Readonly<Record<VerificationRule, string>> = {
   rank_threshold:
-    "Anybody at or above a grade you choose may check the work — the firm's own answer, " +
-    '"Manager or above is fine". Nobody waits on one particular person.',
+    "Anybody at or above a grade you choose may check the work, for example " +
+    '"Manager or above". Nobody waits on one particular person.',
   reporting_line:
-    "Only the person the maker reports to may check the work. The tightest rule, and the " +
-    "one that stops the morning that manager is on leave — nobody else becomes eligible.",
+    "Only the person the maker reports to may check the work. This is the strictest rule: " +
+    "if that manager is on leave, nobody else can check it.",
   reporting_line_or_rank:
     "The maker's own manager, OR anybody at or above the grade you choose. The reporting " +
     "line is who normally checks it; the grade is who can when they are away.",
@@ -249,8 +249,8 @@ export function isEligible(
  *  `VERIFICATION_RULE_DESCRIPTIONS`' reason. */
 export const INELIGIBILITY_MESSAGES: Readonly<Record<IneligibilityReason, string>> = {
   IS_THE_MAKER:
-    "You did this work, so you cannot be the one who checks it. Somebody else has to — " +
-    "that is the rule the firm is audited on, and the database refuses it too.",
+    "You did this work, so you cannot be the one who checks it. Somebody else has to. " +
+    "This rule can never be switched off.",
   NO_WORK_PERMISSION:
     "Checking a step writes to the record of who did the work, so it needs the same " +
     "permission as doing it.",

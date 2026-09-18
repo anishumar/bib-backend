@@ -495,7 +495,7 @@ export class ClientImportService {
           lineNo: row.lineNo,
           name: row.legalName,
           action: "failed",
-          detail: `${step}: ${messageOf(err)}${made.length > 0 ? ` — already done: ${made.join(", ")}` : ""}`,
+          detail: `${step}: ${messageOf(err)}${made.length > 0 ? `. Already done: ${made.join(", ")}` : ""}`,
           partyId,
         });
       }
@@ -584,14 +584,14 @@ export class ClientImportService {
       if (verdict === null || verdict.action === "blocked") continue;
       if (verdict.action === "skip") {
         skipped += 1;
-        outcomeRows.push({ sheet: "engagements", lineNo: e.lineNo, name: `${e.company} — ${e.serviceCode}`, action: "skipped", detail: verdict.detail, partyId: null });
+        outcomeRows.push({ sheet: "engagements", lineNo: e.lineNo, name: `${e.company}: ${e.serviceCode}`, action: "skipped", detail: verdict.detail, partyId: null });
         continue;
       }
       const letter = letterOutcomes.find((l) => l.lineNos.includes(e.lineNo));
       outcomeRows.push({
         sheet: "engagements",
         lineNo: e.lineNo,
-        name: `${e.company} — ${e.serviceCode}`,
+        name: `${e.company}: ${e.serviceCode}`,
         action: letter?.action === "created" ? "created" : "failed",
         detail: letter?.action === "created" ? verdict.detail : (letter?.detail ?? "its letter was not written"),
         partyId: null,
@@ -648,7 +648,7 @@ export class ClientImportService {
           tenantId,
           partyId: clientPartyId,
           jurisdiction: plan.jurisdiction,
-          title: `${plan.clientName} — engagements on file`,
+          title: `${plan.clientName}: engagements on file`,
           currency: plan.currency,
           fxRate: "1",
           fxRateDate: plan.effectiveFrom,
@@ -697,7 +697,7 @@ export class ClientImportService {
           tenantId,
           letterId: letter.id,
           signedByName: plan.signatory,
-          reference: `Migrated on ${today}${basis.length > 0 ? ` — ${basis.join("; ")}` : ""}`,
+          reference: `Migrated on ${today}${basis.length > 0 ? `, ${basis.join("; ")}` : ""}`,
         },
         actor,
       );

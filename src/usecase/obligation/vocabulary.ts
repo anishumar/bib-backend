@@ -412,15 +412,15 @@ function refuseConflictingFlags(flags: {
   }
   if (flags.isResolution && !flags.isTerminal) {
     throw new ConflictingStateFlags(
-      "A resolution is an ending — it is where a filing goes when a partner has decided it " +
+      "A resolution is an ending: it is where a filing goes when a partner has decided it " +
         "will never be made. Mark it terminal, or untick the resolution one.",
     );
   }
   if (flags.isMissed && !flags.needsDecision) {
     throw new ConflictingStateFlags(
       "The state a passed deadline moves to has to be one that needs a decision, or the " +
-        "filing would move there and nobody would ever be asked about it — which is the " +
-        "silence this queue exists to break. Tick 'needs a decision', or untick the missed one.",
+        "filing would move there and nobody would ever be asked about it. " +
+        "Tick 'needs a decision', or untick the missed one.",
     );
   }
   if (flags.isInitial && flags.isTerminal) {
@@ -447,7 +447,7 @@ function refuseConflictingFlags(flags: {
     throw new ConflictingStateFlags(
       `A state can only be one of these: where filings start, where a completed one lands, ` +
         `where a passed deadline goes, or where a partner's decision ends it. This one is ` +
-        `marked as ${destinations.join(" and ")} — pick one, and put the other on its own state.`,
+        `marked as ${destinations.join(" and ")}. Pick one, and put the other on its own state.`,
     );
   }
 }

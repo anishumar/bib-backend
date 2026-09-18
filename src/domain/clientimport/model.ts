@@ -150,23 +150,23 @@ export function spocPairHeaders(slot: number): readonly [string, string] {
 
 export const CLIENT_SHEET_MARKER = "Client Name";
 export const CLIENT_COLUMNS: readonly SheetColumn[] = [
-  { header: "Client Name", required: true, hint: "registered name, spelled the same on all 3 sheets", about: "The registered name — what prints on a letter." },
+  { header: "Client Name", required: true, hint: "registered name, spelled the same on all 3 sheets", about: "The registered name, as it should print on a letter." },
   { header: "Known As", required: false, hint: "trading name, if different", about: "The trading name, if it differs." },
   { header: "Industry", required: false, hint: "optional", about: "" },
   { header: "Website", required: false, hint: "optional", about: "" },
   { header: "Client Since", required: false, hint: "YYYY-MM-DD, when the relationship began", about: "When the relationship started. Backdated, because it did. Defaults to the earliest engagement start, else today." },
-  { header: "Group", required: false, hint: "blank unless this company sits inside a group client", about: "Leave blank for most rows. A client's name here makes this row a company INSIDE that client's group — billed on the group's letter and routed by the group's account team, so put the Key Manager and SPOCs on the group's own row." },
-  { header: "Country", required: true, hint: "2 letters: IN, AE, SG, GB, US", about: "Two-letter code. Required with Entity Type — unless this row is a group other rows name." },
+  { header: "Group", required: false, hint: "blank unless this company sits inside a group client", about: "Leave blank for most rows. A client's name here makes this row a company inside that client's group. It is billed on the group's letter and handled by the group's account team, so put the Key Manager and SPOCs on the group's own row." },
+  { header: "Country", required: true, hint: "2 letters: IN, AE, SG, GB, US", about: "Two-letter code. Required with Entity Type, unless this row is a group that other rows name." },
   { header: "Entity Type", required: true, hint: "private_limited, llp, partnership, pte_ltd, fzco, c_corp", about: "private_limited, llp, pte_ltd, fzco, c_corp… the firm's own word. Required with Country." },
   { header: "Incorporated On", required: false, hint: "YYYY-MM-DD", about: "2019-06-11 or 11-Jun-2019. Never 11/06/2019." },
   { header: "Financial Year End", required: false, hint: "MM-DD, e.g. 03-31", about: "MM-DD. Every statutory deadline is computed from it." },
   { header: "Registered Address", required: false, hint: "one cell, as on the certificate", about: "" },
   ...IDENTIFIER_COLUMNS.map((c) => ({ header: c.header, required: false, hint: c.hint, about: "" })),
   { header: "Key Manager", required: false, hint: "login email of the colleague who owns this client", about: "The email of the staff member who owns the relationship." },
-  { header: SPOC_COLUMN_TEMPLATE, required: false, hint: "pairs: your Dept code, then that colleague's login email", about: "A PAIR of columns per SPOC: the Dept's own code or name, and that SPOC's email. Numbered, so the headers are the same at every firm — the Dept goes in the cell, not in the header. Need a fourth? Add \"SPOC 4 Dept\" and \"SPOC 4 Email\" to the sheet. (Sheets using the older \"SPOC: <code>\" headers are still read.)" },
+  { header: SPOC_COLUMN_TEMPLATE, required: false, hint: "pairs: your Dept code, then that colleague's login email", about: "A pair of columns per SPOC: the Dept's own code or name, and that SPOC's email. Numbered, so the headers are the same at every firm. The Dept goes in the cell, not in the header. Need a fourth? Add \"SPOC 4 Dept\" and \"SPOC 4 Email\" to the sheet. (Sheets using the older \"SPOC: <code>\" headers are still read.)" },
   { header: "Signatory", required: false, hint: "who signed the paper letter for the client", about: "Who signed the paper letter for the client. Printed on the migrated letter's attestation." },
   { header: "Portal Invite", required: false, hint: "TRUE or FALSE", about: "TRUE to invite this client to their own portal login, FALSE (or blank) to send nothing. TRUE requires Portal Email." },
-  { header: "Portal Email", required: false, hint: "the client's own login email, needed when Portal Invite is TRUE", about: "The client's own login address — not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
+  { header: "Portal Email", required: false, hint: "the client's own login email, needed when Portal Invite is TRUE", about: "The client's own login address, not a director's. Required when Portal Invite is TRUE; ignored otherwise." },
 ];
 
 export const PEOPLE_SHEET_MARKER = "Name";
@@ -192,7 +192,7 @@ export const ENGAGEMENT_COLUMNS: readonly SheetColumn[] = [
   { header: "Fee", required: false, hint: "digits only, per period, no commas or symbols", about: "Per period, as agreed. Blank means 'as per the paper letter' and is noted on the line." },
   { header: "Currency", required: false, hint: "3 letters, e.g. INR", about: "Three-letter code. Required when a Fee is given." },
   { header: "Where", required: false, hint: "2-letter country if not the company's own, else blank", about: "Two-letter country the work is in, if not the company's own." },
-  { header: "Basis", required: false, hint: "where the signed paper letter is kept", about: "Where the real signed letter is — a folder, a reference. Recorded on the migrated letter." },
+  { header: "Basis", required: false, hint: "where the signed paper letter is kept", about: "Where the real signed letter is kept: a folder, a reference. Recorded on the migrated letter." },
 ];
 
 /** What the sheet's Relationship column may say, and the relationship type it
@@ -764,7 +764,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
   };
   const deptsHere = (): string =>
     activeDepts.length === 0
-      ? "this firm has published no Depts yet — publish them under Structure first"
+      ? "this firm has published no Depts yet. Publish them under Structure first"
       : `the firm's Depts are ${activeDepts.map((a) => `${a.code} (${a.name})`).join(", ")}`;
 
   // A Dept written in a HEADER that names nothing is a fault of the FILE: every
@@ -779,7 +779,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
   );
   for (const word of headerWords) {
     if (deptOf(word) === null) {
-      block("file", null, `SPOC: ${word}`, `the column "SPOC: ${word}" names no active Dept — ${deptsHere()}`);
+      block("file", null, `SPOC: ${word}`, `the column "SPOC: ${word}" names no active Dept: ${deptsHere()}`);
     }
   }
 
@@ -810,8 +810,8 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (hasCountry !== hasType) {
       bad(
         hasCountry
-          ? "has a Country but no Entity Type — a registration needs both"
-          : "has an Entity Type but no Country — a registration needs both",
+          ? "has a Country but no Entity Type. A registration needs both"
+          : "has an Entity Type but no Country. A registration needs both",
       );
     }
     if (hasCountry && !/^[A-Za-z]{2}$/.test(row.jurisdiction ?? "")) {
@@ -825,19 +825,19 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       bad("needs a Country and an Entity Type, or companies under it naming it in Group");
     }
     if (!hasCountry && !hasType && row.group !== null) {
-      bad("a company inside a group needs a Country and an Entity Type — without a registration it cannot be issued a letter or given a deadline");
+      bad("a company inside a group needs a Country and an Entity Type. Without a registration it cannot be issued a letter or given a deadline");
     }
     if (registered && row.financialYearEnd === null) {
-      warn("clients", row.lineNo, name, "no Financial Year End — statutory deadlines cannot be computed for it until one is recorded");
+      warn("clients", row.lineNo, name, "no Financial Year End. Legal deadlines cannot be worked out for it until one is recorded");
     }
     if (row.financialYearEnd !== null && !isMonthDay(row.financialYearEnd)) {
       bad(`Financial Year End "${row.financialYearEnd}" is not MM-DD`);
     }
     if (row.clientSince !== null && parseSheetDate(row.clientSince) === null) {
-      bad(`Client Since "${row.clientSince}" is not a date this reads — use 2026-08-23 or 13-Feb-1995`);
+      bad(`Client Since "${row.clientSince}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);
     }
     if (row.incorporatedOn !== null && parseSheetDate(row.incorporatedOn) === null) {
-      bad(`Incorporated On "${row.incorporatedOn}" is not a date this reads — use 2026-08-23 or 13-Feb-1995`);
+      bad(`Incorporated On "${row.incorporatedOn}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);
     }
 
     for (const id of row.identifiers) {
@@ -859,7 +859,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     // group's and so is its account team — so only a standalone client with no
     // Key Manager is a client nobody owns.
     if (row.keyManagerEmail === null && row.group === null) {
-      warn("clients", row.lineNo, name, "no Key Manager — nobody at the firm will own this client until somebody is named");
+      warn("clients", row.lineNo, name, "no Key Manager. Nobody at the firm will own this client until somebody is named");
     }
     // A pair is both halves or neither. Half of one is not a smaller version of
     // a SPOC — an email with no Dept cannot become an assignment at all, and a
@@ -868,17 +868,17 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     for (const spoc of row.spocs) {
       const fromHeader = spoc.column.startsWith(SPOC_COLUMN_PREFIX);
       if (spoc.dept === "") {
-        bad(`${spoc.column} Email is "${spoc.email}" with no ${spoc.column} Dept beside it — a SPOC covers a Dept, so there is nothing to put them in charge of`);
+        bad(`${spoc.column} Email is "${spoc.email}" with no ${spoc.column} Dept beside it. A SPOC covers a Dept, so there is nothing to put them in charge of`);
         continue;
       }
       if (spoc.email === "") {
-        bad(`${spoc.column} Dept is "${spoc.dept}" with no ${spoc.column} Email beside it — say who the SPOC for it is, or clear both cells`);
+        bad(`${spoc.column} Dept is "${spoc.dept}" with no ${spoc.column} Email beside it. Say who the SPOC for it is, or clear both cells`);
         continue;
       }
       // A bad header was already refused once for the whole file; a bad CELL is
       // this row's own and names the client it was typed against.
       if (deptOf(spoc.dept) === null) {
-        if (!fromHeader) bad(`${spoc.column} Dept is "${spoc.dept}", which is no active Dept at this firm — ${deptsHere()}`);
+        if (!fromHeader) bad(`${spoc.column} Dept is "${spoc.dept}", which is no active Dept at this firm: ${deptsHere()}`);
         continue;
       }
       if (!snap.staff.has(spoc.email.toLowerCase())) {
@@ -896,7 +896,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     if (portalInvite === true) {
       if (row.portalEmail === null) {
-        bad("Portal Invite is TRUE but no Portal Email is given — nobody to send the login to");
+        bad("Portal Invite is TRUE but no Portal Email is given, so there is nobody to send the login to");
       } else {
         const normalised = normalizeIdentifier("email", row.portalEmail);
         if (!isValidIdentifier("email", normalised)) {
@@ -928,11 +928,11 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     const parent = bySheetName.get(gk) ?? null;
     const parentOnFile = parent === null ? (snap.byName.get(gk) ?? null) : null;
     if (parent === null && parentOnFile === null) {
-      block("clients", r.row.lineNo, r.row.legalName, `no client called "${r.row.group}" on this sheet or on file — check the Group column`);
+      block("clients", r.row.lineNo, r.row.legalName, `no client called "${r.row.group}" on this sheet or on file. Check the Group column`);
       return { ...r, blocked: true };
     }
     if (parent !== null && parent.row.group !== null) {
-      block("clients", r.row.lineNo, r.row.legalName, `"${r.row.group}" is itself inside a group — groups are one level deep`);
+      block("clients", r.row.lineNo, r.row.legalName, `"${r.row.group}" is itself inside a group. Groups are one level deep`);
       return { ...r, blocked: true };
     }
     return { ...r, parent, parentOnFile };
@@ -967,7 +967,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       });
     }
     if (c.onFile !== null) {
-      warn("clients", c.row.lineNo, c.row.legalName, `already on file as "${c.onFile.displayName}" — skipped, not updated`);
+      warn("clients", c.row.lineNo, c.row.legalName, `already on file as "${c.onFile.displayName}" . Skipped, not updated`);
       verdicts.push({ sheet: "clients", lineNo: c.row.lineNo, name: c.row.legalName, action: "skip", detail: `already on file as "${c.onFile.displayName}"` });
       continue;
     }
@@ -1070,10 +1070,10 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     const relationship = RELATIONSHIP_WORDS[normaliseName(p.relationship)];
     if (p.relationship.trim() === "") bad("Relationship is blank");
     else if (relationship === undefined || !snap.relationshipTypes.has(relationship)) {
-      bad(`Relationship "${p.relationship}" is not one this reads — use director, signatory, shareholder or employee`);
+      bad(`Relationship "${p.relationship}" is not one this can read. Use director, signatory, shareholder or employee`);
     }
     if (p.since !== null && parseSheetDate(p.since) === null) {
-      bad(`Since "${p.since}" is not a date this reads — use 2026-08-23 or 13-Feb-1995`);
+      bad(`Since "${p.since}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);
     }
     const email = p.email === null ? null : normalizeIdentifier("email", p.email);
     if (email !== null && !isValidIdentifier("email", email)) bad(`Email "${p.email ?? ""}" is not an email address`);
@@ -1105,9 +1105,9 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     // Said once, on the second row, because it is about the pair.
     if (earlierRow !== undefined && normaliseName(earlierRow.name) !== normaliseName(name)) {
-      warn("people", p.lineNo, name, `row ${String(earlierRow.lineNo)} calls this email "${earlierRow.name}" — one email is one person, so the role is added to them and this spelling of the name is not recorded`);
+      warn("people", p.lineNo, name, `row ${String(earlierRow.lineNo)} calls this email "${earlierRow.name}". One email is one person, so the role is added to them and this spelling of the name is not recorded`);
     } else if (onFile !== undefined && normaliseName(onFile.name) !== normaliseName(name)) {
-      warn("people", p.lineNo, name, `already on file as "${onFile.name}" — the role is added to them and this spelling of the name is not recorded`);
+      warn("people", p.lineNo, name, `already on file as "${onFile.name}". The role is added to them and this spelling of the name is not recorded`);
     }
 
     // Only the exact ROLE already being on file makes this row a no-op. A
@@ -1117,7 +1117,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (onFile !== undefined && targetOnFileId !== null && relationship !== undefined) {
       if (onFile.roles.has(`${targetOnFileId}:${relationship}`)) {
         peopleOnFile += 1;
-        warn("people", p.lineNo, name, `already recorded as ${roleWords(relationship)} of ${target?.name ?? p.client} — skipped, not updated`);
+        warn("people", p.lineNo, name, `already recorded as ${roleWords(relationship)} of ${target?.name ?? p.client} . Skipped, not updated`);
         verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "skip", detail: `already ${roleWords(relationship)} of ${target?.name ?? p.client}` });
         continue;
       }
@@ -1128,9 +1128,9 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     const word = relationship === undefined ? p.relationship : relationship.replace(/_of$/, "").replace(/_/g, " ");
     const whose =
       earlierRow !== undefined
-        ? ` — added to the person on row ${String(earlierRow.lineNo)}`
+        ? `, added to the person on row ${String(earlierRow.lineNo)}`
         : onFile !== undefined
-          ? ` — added to "${onFile.name}", already on file`
+          ? `, added to "${onFile.name}", already on file`
           : "";
     verdicts.push({ sheet: "people", lineNo: p.lineNo, name, action: "create", detail: `${word} of ${target?.name ?? p.client}${whose}` });
   }
@@ -1145,7 +1145,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
   const planned: PlannedLine[] = [];
 
   for (const e of rows.engagements) {
-    const name = `${e.company.trim() === "" ? `row ${String(e.lineNo)}` : e.company} — ${e.serviceCode}`;
+    const name = `${e.company.trim() === "" ? `row ${String(e.lineNo)}` : e.company}: ${e.serviceCode}`;
     let blocked = false;
     const bad = (message: string): void => {
       block("engagements", e.lineNo, name, message);
@@ -1156,9 +1156,9 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (e.company.trim() !== "" && company === null) bad(`no company called "${e.company}" on this sheet or on file`);
     if (company !== null && company.blocked) bad(`the company "${company.name}" has errors on the client sheet`);
     if (company !== null && !company.blocked && !company.registered) {
-      bad(`"${company.name}" has no registration — a letter line names a legal entity, so give it a Country and an Entity Type`);
+      bad(`"${company.name}" has no registration. A letter line names a legal entity, so give it a Country and an Entity Type`);
     }
-    if (company?.onFile?.archived === true) bad(`"${company.name}" is archived — unarchive it first`);
+    if (company?.onFile?.archived === true) bad(`"${company.name}" is archived. Unarchive it first`);
 
     const service = e.serviceCode.trim() === "" ? undefined : snap.services.get(normaliseName(e.serviceCode));
     if (e.serviceCode.trim() === "") bad("Service is blank");
@@ -1166,23 +1166,23 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
 
     const startedOn = parseSheetDate(e.startedOn);
     if (e.startedOn.trim() === "") bad("Started On is blank");
-    else if (startedOn === null) bad(`Started On "${e.startedOn}" is not a date this reads — use 2026-08-23 or 13-Feb-1995`);
-    else if (startedOn > snap.today) bad(`Started On ${startedOn} is in the future — a migrated engagement is one the firm is already delivering`);
+    else if (startedOn === null) bad(`Started On "${e.startedOn}" is not a date this can read. Use 2026-08-23 or 13-Feb-1995`);
+    else if (startedOn > snap.today) bad(`Started On ${startedOn} is in the future. A migrated engagement is one the firm is already delivering`);
 
     const billed = e.billed === null ? null : e.billed.trim().toLowerCase().replace(/[\s-]+/g, "_");
     if (billed !== null && !isBillingFrequency(billed)) {
       bad(`Billed "${e.billed ?? ""}" is not one_time, monthly, quarterly, annually or custom`);
     }
     if (billed === null && service !== undefined && service.billingFrequency === null) {
-      bad(`Billed is blank and the service "${service.name}" states no recurrence — say how this one is billed`);
+      bad(`Billed is blank and the service "${service.name}" states no recurrence. Say how this one is billed`);
     }
     const fee = e.fee === null ? null : e.fee.replace(/,/g, "").trim();
-    if (fee !== null && !isAmount(fee)) bad(`Fee "${e.fee ?? ""}" is not an amount — digits and up to four decimals`);
+    if (fee !== null && !isAmount(fee)) bad(`Fee "${e.fee ?? ""}" is not an amount. Use digits and up to four decimals`);
     const currency = e.currency === null ? null : normalizeCurrency(e.currency);
     if (currency !== null && !isCurrencyCode(currency)) bad(`Currency "${e.currency ?? ""}" is not a three-letter code`);
-    if (fee !== null && currency === null) bad("has a Fee with no Currency — money without its currency is the most expensive kind of missing data");
+    if (fee !== null && currency === null) bad("has a Fee with no Currency. Say which currency the fee is in");
     if (fee === null && !blocked) {
-      warn("engagements", e.lineNo, name, "no Fee — the line will read 'as per the paper letter' and carry no amount");
+      warn("engagements", e.lineNo, name, "no Fee. The line will read 'as per the paper letter' and carry no amount");
     }
     if (e.where !== null && !/^[A-Za-z]{2}$/.test(e.where)) bad(`Where "${e.where}" is not a two-letter country code`);
 
@@ -1203,7 +1203,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
 
     if (company.onFile !== null && snap.activeEngagements.has(`${company.onFile.partyId}:${service.serviceId}`)) {
       engagementsOnFile += 1;
-      warn("engagements", e.lineNo, name, `"${company.name}" already has ${service.name} in force — skipped`);
+      warn("engagements", e.lineNo, name, `"${company.name}" already has ${service.name} in force. Skipped`);
       verdicts.push({ sheet: "engagements", lineNo: e.lineNo, name, action: "skip", detail: `${service.name} already in force` });
       continue;
     }
@@ -1313,7 +1313,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       first.billTo.jurisdiction ?? list.map((l) => l.entityJurisdiction).find((j) => j !== null) ?? null;
     if (letterJurisdiction === null) {
       for (const l of list) {
-        block("engagements", l.line.engagementLineNo, `${l.line.entityName} — ${l.line.serviceCode}`, `no country to write the letter for "${first.billTo.name}" under — give the client a Country`);
+        block("engagements", l.line.engagementLineNo, `${l.line.entityName}: ${l.line.serviceCode}`, `no country to write the letter for "${first.billTo.name}" under. Give the client a Country`);
       }
       continue;
     }
@@ -1322,8 +1322,8 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         block(
           "engagements",
           l.line.engagementLineNo,
-          `${l.line.entityName} — ${l.line.serviceCode}`,
-          `no clause in the firm's library applies to ${letterJurisdiction}, so a letter for "${first.billTo.name}" cannot be signed — publish one under the firm's clauses first`,
+          `${l.line.entityName}: ${l.line.serviceCode}`,
+          `no clause in the firm's library applies to ${letterJurisdiction}, so a letter for "${first.billTo.name}" cannot be signed. Publish one under the firm's clauses first`,
         );
       }
       continue;
@@ -1361,7 +1361,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
       "file",
       null,
       "Compliance calendar",
-      `${String(beforeReachBack)} engagement${beforeReachBack === 1 ? "" : "s"} started before ${reachBackFrom}, and the calendar generates ninety days back — without a go-live floor every filing already made in the firm's old records will show as MISSED. Set "ask about deadlines from" on the compliance policy first.`,
+      `${String(beforeReachBack)} engagement${beforeReachBack === 1 ? "" : "s"} started before ${reachBackFrom}, and the calendar looks back ninety days. Until the date deadlines are tracked from is set, every filing already made in the firm's old records will show as missed. Set "ask about deadlines from" on the compliance policy first.`,
     );
   }
 

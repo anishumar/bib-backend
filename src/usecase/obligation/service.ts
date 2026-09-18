@@ -1263,7 +1263,7 @@ export class ObligationService {
           entityPartyId: o.entityPartyId,
           engagementId: o.engagementId,
           serviceEntryId: o.serviceEntryId,
-          title: `${o.templateName} — ${o.entityName ?? "entity"} — ${o.periodLabel}`,
+          title: `${o.templateName} · ${o.entityName ?? "entity"} · ${o.periodLabel}`,
           description: o.authority ? `Filed with ${o.authority}.` : null,
           // The STATUTORY date on the task, never the internal one: the task is
           // due when the law says, and the internal target is only what caused

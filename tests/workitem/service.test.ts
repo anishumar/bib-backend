@@ -1156,7 +1156,7 @@ describe("a period job's umbrella task is one month's task", () => {
 
     expect(created).toBe(1);
     expect(h.items.rows[0]).toMatchObject({
-      title: "Monthly bookkeeping — Sep 2026",
+      title: "Monthly bookkeeping · Sep 2026",
       // 30 September + 30 days, NOT the engagement's start plus 30. For a
       // month-aligned period this is exactly "by the 30th of the following
       // month", which is how the firm states it.
@@ -1206,8 +1206,8 @@ describe("a period job's umbrella task is one month's task", () => {
       }),
     ).toBe(1);
     expect(h.items.rows.map((r) => r.title)).toEqual([
-      "GST monthly filing — Sep 2026",
-      "GST monthly filing — Oct 2026",
+      "GST monthly filing · Sep 2026",
+      "GST monthly filing · Oct 2026",
     ]);
   });
 });

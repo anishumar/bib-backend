@@ -267,7 +267,7 @@ export class PostgresPortalLibraryRepository implements PortalLibraryRepository 
       // `BETWEEN`: `BETWEEN` is inclusive at both ends, so the 1st of the next
       // month would appear in this month's digest and again in the next one's.
       const filed = await db<DigestRow[]>`
-        SELECT t.name || ' — ' || oi.period_label AS label,
+        SELECT t.name || ' · ' || oi.period_label AS label,
                ent.display_name AS company_name,
                oi.filed_on::text AS on_day
           FROM delivery.obligation_instance oi

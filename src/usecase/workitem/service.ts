@@ -1032,7 +1032,7 @@ export class WorkItemService {
         // The period in the title, because "Bookkeeping" twelve times on one
         // desk is twelve rows nobody can tell apart. The title is prose the
         // moment somebody edits it and stays off the ledger either way.
-        title: period ? `${w.serviceName} — ${period.label}` : w.serviceName,
+        title: period ? `${w.serviceName} · ${period.label}` : w.serviceName,
         description: null,
         stateId: state.id,
         priorityId: priority.id,

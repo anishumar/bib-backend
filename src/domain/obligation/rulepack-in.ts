@@ -187,13 +187,13 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
   unresolved("Income Tax", "Tax Audit", "Income Tax", "annual",
     "Two things missing. The sheet's date is 'applicable statutory due date' rather than a " +
       "day, and applicability is a turnover threshold (Rs 1 Cr, or Rs 10 Cr where both cash " +
-      "tests are met) — and nothing here stores a turnover.",
+      "tests are met), and nothing here stores a turnover.",
     "Business turnover > Rs 1 Cr; Rs 10 Cr where cash receipts and payments each <= 5%; " +
       "profession > Rs 50 Lakh"),
 
   // ── TDS ──────────────────────────────────────────────────────────────────
   unresolved("TDS", "TDS deduction", "Income Tax", "event",
-    "Deducted at credit or payment, whichever is earlier — a transaction, not a period. " +
+    "Deducted at credit or payment, whichever is earlier. A transaction, not a period. " +
       "Nothing here yet sees a payment, so there is nothing to count from.",
     "Depends on payment nature, threshold, payee and PAN"),
   // THE MARCH EXCEPTION, and the reason `obligation_template_exception` exists.
@@ -241,14 +241,14 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "GST registered taxpayer filing monthly"),
   unresolved("GST", "GSTR-3B (QRMP quarterly)", "GST", "quarterly",
     "The sheet says 'applicable QRMP date', which varies by State group and by the taxpayer's " +
-      "QRMP election — neither of which this system records.",
+      "QRMP election, neither of which this system records.",
     "GST registered taxpayer under QRMP"),
   unresolved("GST", "GSTR-2B / ITC reconciliation", "GST", "monthly",
-    "The sheet's timing is 'before GSTR-3B' — a deadline relative to another filing rather " +
+    "The sheet's timing is 'before GSTR-3B', a deadline relative to another filing rather " +
       "than to the period. Which day of the month does the firm want this done by?",
     "GST-registered entity claiming ITC"),
   unresolved("GST", "GSTR-9", "GST", "annual",
-    "'Notified annual due date' — set by notification each year rather than by a standing " +
+    "'Notified annual due date' is set by notification each year rather than by a standing " +
       "formula, and exemptions depend on turnover, which is not stored here.",
     "Applicable registered taxpayers; exemptions/thresholds depend on current notifications"),
   unresolved("GST", "GSTR-9C", "GST", "annual",
@@ -256,14 +256,14 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "system cannot test.",
     "Taxpayers for whom the reconciliation statement is applicable"),
   unresolved("GST", "E-invoicing", "GST", "event",
-    "Continuous, at invoice issuance — not a period. Applicability is PAN-level AATO >= Rs 5 " +
+    "Continuous, at invoice issuance, not a period. Applicability is PAN-level AATO >= Rs 5 " +
       "Cr in any preceding FY, a turnover fact this system does not hold.",
     "AATO Rs 5 Cr or more in any preceding FY, subject to exemptions"),
   unresolved("GST", "E-way bill", "GST", "event",
     "Raised before each movement of goods. A transaction, not a period.",
     "Applicable movement of goods; generally consignment value > Rs 50,000"),
   unresolved("GST", "LUT for exports", "GST", "annual",
-    "'Before the relevant FY exports' — the firm's own timing rather than a statutory day. " +
+    "'Before the relevant FY exports' is the firm's own timing rather than a statutory day. " +
       "How many days before the year starts should this be raised?",
     "Eligible exporters supplying zero-rated goods/services without IGST"),
 
@@ -282,7 +282,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
 
   // ── MCA ──────────────────────────────────────────────────────────────────
   unresolved("MCA", "AGM", "MCA", "annual",
-    "'Statutory AGM window' — a window rather than a day, and the day within it is the " +
+    "'Statutory AGM window' is a window rather than a day, and the day within it is the " +
       "company's own choice. Everything below that says 'after AGM' waits on this one.",
     "Companies required to hold an AGM"),
   unresolved("MCA", "AOC-4 / financial statements", "MCA", "annual",
@@ -291,7 +291,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Companies"),
   unresolved("MCA", "MGT-7 / MGT-7A", "MCA", "annual",
     "Also measured from the AGM date, and which of the two forms applies depends on company " +
-      "size — a threshold this system cannot test.",
+      "size, a threshold this system cannot test.",
     "Applicable companies; form depends on status/size"),
   unresolved("MCA", "Small Company classification", "MCA", "annual",
     "An assessment rather than a filing, decided on paid-up capital and turnover thresholds " +
@@ -326,8 +326,8 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Triggered by creation, modification or satisfaction of a charge.",
     "Creation/modification/satisfaction of charge"),
   unresolved("MCA", "CSR", "MCA", "annual",
-    "Applicability is three thresholds in the alternative — net worth, turnover or net profit " +
-      "— and none of those figures are stored here. The annual cycle itself has no stated day.",
+    "Applicability is three thresholds in the alternative (net worth, turnover or net profit), " +
+      "and none of those figures are stored here. The annual cycle itself has no stated day.",
     "Net worth >= Rs 500 Cr OR turnover >= Rs 1,000 Cr OR net profit >= Rs 5 Cr in the " +
       "immediately preceding FY"),
   unresolved("MCA", "Internal Audit", "MCA", "annual",
@@ -347,7 +347,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "reportable related-party transactions exist.",
     "International / specified domestic transactions"),
   unresolved("Transfer Pricing", "TP Documentation", "Income Tax", "annual",
-    "'Contemporaneous' — maintained continuously rather than filed on a day.",
+    "'Contemporaneous' means maintained continuously rather than filed on a day.",
     "Applicable international transactions"),
   unresolved("Transfer Pricing", "Master File", "Income Tax", "annual",
     "Applies on group turnover and international-transaction thresholds, and the sheet gives " +
@@ -374,7 +374,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     unresolvedReason: null,
     applicabilityNote:
       "Indian company issuing eligible equity instruments to a non-resident. Due within 30 " +
-      "days of issue — the formula is recorded, and it will produce dates the day a share " +
+      "days of issue. The formula is recorded, and it will produce dates the day a share " +
       "issue is captured here.",
   },
   unresolved("FEMA / RBI", "FC-TRS", "RBI", "event",
@@ -382,8 +382,8 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "as 'applicable RBI period' rather than a number of days.",
     "Applicable resident/non-resident transfer"),
   unresolved("FEMA / RBI", "ODI / APR", "RBI", "annual",
-    "Two obligations in one row on the sheet — an event-driven ODI filing and an annual APR " +
-      "per foreign entity — and neither carries a stated date.",
+    "Two obligations in one row on the sheet (an event-driven ODI filing and an annual APR " +
+      "per foreign entity), and neither carries a stated date.",
     "Indian entity with overseas investment"),
   unresolved("FEMA / RBI", "ECB-2", "RBI", "monthly",
     "'Within 7 working days from month-end'. Working days are not days, and this system holds " +
@@ -406,7 +406,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "State and UT specific, both for whether it applies and for when.",
     "State/UT-specific establishment criteria"),
   unresolved("Labour", "Minimum wage / wage registers", "State", "monthly",
-    "Continuous rather than filed — registers kept, not a return submitted on a day.",
+    "Continuous rather than filed: registers kept, not a return submitted on a day.",
     "Employer; State/category/employee driven"),
   unresolved("Data Privacy", "DPDP compliance", null, "annual",
     "Applicability follows the notified framework, which the sheet itself describes as still " +

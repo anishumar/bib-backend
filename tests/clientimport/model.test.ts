@@ -240,9 +240,9 @@ describe("a client row", () => {
 
   it("is refused with a country and no entity type, and the other way round", () => {
     const a = validateImport({ clients: [client({ entityType: null })], people: [], engagements: [] }, snapshot());
-    expect(blockingMessages(a)).toContain("has a Country but no Entity Type — a registration needs both");
+    expect(blockingMessages(a)).toContain("has a Country but no Entity Type. A registration needs both");
     const b = validateImport({ clients: [client({ jurisdiction: null })], people: [], engagements: [] }, snapshot());
-    expect(blockingMessages(b)).toContain("has an Entity Type but no Country — a registration needs both");
+    expect(blockingMessages(b)).toContain("has an Entity Type but no Country. A registration needs both");
   });
 
   it("is refused with no registration unless other rows file themselves under it", () => {
@@ -299,7 +299,7 @@ describe("a client row", () => {
 
   it("refuses a group that is on neither the sheet nor the file, naming the column", () => {
     const report = validateImport({ clients: [client({ group: "Nobody Group" })], people: [], engagements: [] }, snapshot());
-    expect(blockingMessages(report)[0]).toMatch(/no client called "Nobody Group" on this sheet or on file — check the Group column/);
+    expect(blockingMessages(report)[0]).toMatch(/no client called "Nobody Group" on this sheet or on file. Check the Group column/);
   });
 
   it("refuses a malformed PAN, a repeated PAN and a repeated name, each naming the other row", () => {
@@ -369,8 +369,8 @@ describe("a client row", () => {
     const report = validateImport({ clients: [client({ keyManagerEmail: null, financialYearEnd: null })], people: [], engagements: [] }, snapshot());
     expect(report.blocking).toBe(0);
     expect(warningMessages(report)).toEqual([
-      "no Financial Year End — statutory deadlines cannot be computed for it until one is recorded",
-      "no Key Manager — nobody at the firm will own this client until somebody is named",
+      "no Financial Year End. Legal deadlines cannot be worked out for it until one is recorded",
+      "no Key Manager. Nobody at the firm will own this client until somebody is named",
     ]);
   });
 
@@ -426,7 +426,7 @@ describe("a people row", () => {
     );
     const messages = blockingMessages(report);
     expect(messages).toContain('no client called "Nobody Ltd" on this sheet or on file');
-    expect(messages).toContain('Relationship "auditor" is not one this reads — use director, signatory, shareholder or employee');
+    expect(messages).toContain('Relationship "auditor" is not one this can read. Use director, signatory, shareholder or employee');
     expect(messages).toContain('Email "not-an-email" is not an email address');
   });
 
@@ -600,7 +600,7 @@ describe("the Portal Invite column", () => {
       snapshot(),
     );
     expect(blockingMessages(report)).toContain(
-      "Portal Invite is TRUE but no Portal Email is given — nobody to send the login to",
+      "Portal Invite is TRUE but no Portal Email is given, so there is nobody to send the login to",
     );
   });
 
@@ -703,14 +703,14 @@ describe("an engagement row", () => {
     );
     const messages = blockingMessages(report);
     expect(messages).toContain('no live service with the code "Z9" in the catalogue');
-    expect(messages).toContain("Started On 2027-01-01 is in the future — a migrated engagement is one the firm is already delivering");
+    expect(messages).toContain("Started On 2027-01-01 is in the future. A migrated engagement is one the firm is already delivering");
     expect(messages).toContain('Billed "weekly" is not one_time, monthly, quarterly, annually or custom');
-    expect(messages).toContain("has a Fee with no Currency — money without its currency is the most expensive kind of missing data");
+    expect(messages).toContain("has a Fee with no Currency. Say which currency the fee is in");
   });
 
   it("refuses a blank Billed when the service states no recurrence", () => {
     const report = validateImport({ clients: [client()], people: [], engagements: [engagement({ serviceCode: "H1" })] }, snapshot());
-    expect(blockingMessages(report)).toContain('Billed is blank and the service "Payroll" states no recurrence — say how this one is billed');
+    expect(blockingMessages(report)).toContain('Billed is blank and the service "Payroll" states no recurrence. Say how this one is billed');
   });
 
   it("refuses a company with no registration — a line names a legal entity", () => {
@@ -722,7 +722,7 @@ describe("an engagement row", () => {
       },
       snapshot(),
     );
-    expect(blockingMessages(report)[0]).toMatch(/has no registration — a letter line names a legal entity/);
+    expect(blockingMessages(report)[0]).toMatch(/has no registration. A letter line names a legal entity/);
   });
 
   it("refuses the whole letter when the firm's clause library cannot cover its country", () => {
@@ -742,7 +742,7 @@ describe("an engagement row", () => {
       snapshot(),
     );
     expect(report.blocking).toBe(0);
-    expect(warningMessages(report)).toContain("no Fee — the line will read 'as per the paper letter' and carry no amount");
+    expect(warningMessages(report)).toContain("no Fee. The line will read 'as per the paper letter' and carry no amount");
     expect(warningMessages(report)).toContain('GST filing is TRC\'s work and "Cobalt Foods Private Limited" names no SPOC for TRC');
   });
 

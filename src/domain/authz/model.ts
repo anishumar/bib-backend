@@ -63,47 +63,34 @@ export function isPermission(v: string): v is Permission {
  * this file.
  */
 export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
-  "party:read": "See the firm's clients, prospects and contacts, and the pipeline.",
-  "party:write": "Create and change clients, contacts, their identifiers and leads.",
-  "ledger:read": "Read the firm's whole audit trail — it names every client the firm has.",
-  "config:read": "See the service catalogue and how the firm's roles are defined.",
+  "party:read": "See the firm's clients, prospects and contacts, and the sales pipeline.",
+  "party:write": "Add and change clients, contacts, their identifiers (PAN, GSTIN and so on) and leads.",
+  "ledger:read": "Read the firm's whole audit trail. It names every client the firm has.",
+  "config:read": "See the service catalogue and how the firm's roles are set up.",
   "proposal:approve":
-    "Authorise a discount larger than the firm's published limit. Anyone who can write a " +
+    "Approve a discount larger than the firm's published limit. Anyone who can write a " +
     "proposal can offer a discount within the limit; this is the sign-off for going past it.",
   "work:write":
-    "Say that a step of a client's work is done. This is the record of WHO did the work, so " +
-    "it is its own permission rather than part of reading the board — and it is what T2.9's " +
-    "maker-checker rule will compare against.",
+    "Mark a step of a client's work as done. This is the record of who did the work, so it " +
+    "is a separate permission from seeing the board.",
   "obligation:resolve":
-    "Decide what happens about a statutory deadline that has already passed — file it late, " +
-    "accept the penalty, or record that it never applied. Separate from doing the work, " +
-    "because this commits the CLIENT'S money and is the one delivery decision a client may " +
-    "later dispute.",
+    "Decide what happens to a legal deadline that has already passed: file it late, accept " +
+    "the penalty, or record that it never applied. Kept separate from doing the work, " +
+    "because this decision commits the client's money.",
   "portal:grant":
-    "Let one of a client's own people sign in and read that client's records — and take it " +
-    "away again. Its own permission because it hands somebody OUTSIDE the firm a view of the " +
-    "firm's work: it is not administering the firm, and it is not the ordinary act of doing " +
-    "the work. One client at a time, always, so who decided each is answerable.",
+    "Give one of a client's own people a login to that client's portal, and take it away " +
+    "again. Access is given one client at a time, so it is always clear who decided.",
   "portal:respond":
-    "Answer the firm on a client's behalf — upload a file it asked for, reply to a question, " +
-    "approve or decline something. THE ONLY PERMISSION IN THIS PRODUCT HELD BY SOMEBODY " +
-    "OUTSIDE THE FIRM, which is why it is the first one whose role declares an audience: it " +
-    "is meaningless on a colleague and it must not be grantable to one by putting it on a " +
-    "staff role. A contact WITHOUT it still sees everything their company's portal shows — " +
-    "reading is authorised by the grant itself (crm.portal_access), not by a permission — " +
-    "and simply cannot act. That is the difference between the two portal roles.",
+    "For client portal roles only. Lets a client contact answer the firm: upload a file " +
+    "that was asked for, reply to a question, approve or decline something. A contact " +
+    "without it can still see everything on their portal, but cannot act.",
   "portal:request":
-    "Ask the firm for something on a client's behalf — a document, a copy, a correction, a " +
-    "call. The SECOND permission held by somebody outside the firm, and the first that lets " +
-    "them start a sentence rather than answer one: everything portal:respond covers is a " +
-    "reply to something the firm raised. It is separate from that one because a firm may " +
-    "well want the clerk who sends the registers every month to keep sending them and NOT to " +
-    "open requests the firm is then expected to act on. client_viewer holds neither, so a " +
-    "read-only contact still sees everything and starts nothing — and a firm that wants that " +
-    "person able to ask adds this one permission to the role.",
+    "For client portal roles only. Lets a client contact ask the firm for something: a " +
+    "document, a copy, a correction, a call. Kept separate from answering, so a firm can let " +
+    "somebody send the registers every month without letting them open new requests.",
   "tenant:admin":
-    "Administer the firm: who works here, what their roles are, and every configuration " +
-    "setting — including this one.",
+    "Administer the firm: who works here, what their roles are, and every setting, " +
+    "including this one.",
 };
 
 /**

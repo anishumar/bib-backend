@@ -85,7 +85,7 @@ export function landingFor(
       if (!ctx.staff.some((s) => s.userId === ctx.assigneeUserId)) {
         return {
           kind: "nobody",
-          note: "The person holding this no longer works here — it needs a new owner.",
+          note: "The person holding this no longer works here. It needs a new owner.",
         };
       }
       return { kind: "person", userId: ctx.assigneeUserId };
@@ -139,8 +139,8 @@ export function landingFor(
         return {
           kind: "nobody",
           note:
-            `Nobody active at this firm holds grade rank ${String(rank)} or above — ` +
-            `set the firm's grades, or lower the rung.`,
+            `Nobody active at this firm holds grade rank ${String(rank)} or above. ` +
+            `Set the firm's grades, or lower the step.`,
         };
       }
       return { kind: "rank", minGradeRank: rank };

@@ -267,8 +267,8 @@ describe("confirming an import", () => {
       "clause-in", "clause-everywhere", "clause-in", "clause-everywhere",
     ]);
     const signatures = h.letters.of("sign").map((c) => c.input as { signedByName: string; reference: string });
-    expect(signatures[0]).toMatchObject({ signedByName: "Rajesh Kumar", reference: `Migrated on ${TODAY} — EL 2025-04` });
-    expect(signatures[1]).toMatchObject({ signedByName: "Priya Menon", reference: `Migrated on ${TODAY} — Drive/Cobalt/EL` });
+    expect(signatures[0]).toMatchObject({ signedByName: "Rajesh Kumar", reference: `Migrated on ${TODAY}, EL 2025-04` });
+    expect(signatures[1]).toMatchObject({ signedByName: "Priya Menon", reference: `Migrated on ${TODAY}, Drive/Cobalt/EL` });
 
     expect(confirmed.outcome?.letters.map((l) => [l.clientName, l.action, l.engagementIds.length])).toEqual([
       ["Kaveri Group", "created", 1],
@@ -318,7 +318,7 @@ describe("confirming an import", () => {
 
     const cobalt = confirmed.outcome?.rows.find((r) => r.sheet === "clients" && r.name === "Cobalt Foods Private Limited");
     expect(cobalt).toMatchObject({ action: "failed", partyId: "party-0002" });
-    expect(cobalt?.detail).toMatch(/^registering the legal entity: party refused registerLegalEntity — already done: the company$/);
+    expect(cobalt?.detail).toMatch(/^registering the legal entity: party refused registerLegalEntity. Already done: the company$/);
     // Cobalt's letter has a client, and its two lines have an entity, so it is
     // still written — an entity the party service created is real.
     expect(confirmed.outcome?.letters.map((l) => l.action)).toEqual(["created", "created"]);
