@@ -24,6 +24,7 @@ import {
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import type { EscalationBody } from "../../src/domain/config/model";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -85,7 +86,10 @@ const LADDER: EscalationBody = {
   ],
 };
 
-function setup(ladder: EscalationBody | null = LADDER): {
+function setup(
+  ladder: EscalationBody | null = LADDER,
+  opts: { now?: Date; zone?: string } = {},
+): {
   service: EscalationService;
   notices: FakeEscalationNotices;
   subjects: FakeEscalationSubjects;
@@ -104,13 +108,14 @@ function setup(ladder: EscalationBody | null = LADDER): {
     { userId: PARTNER, gradeRank: 40, reportsToUserId: null },
   ]);
   const service = new EscalationService({
+    timeZones: new FakeFirmTimeZone(opts.zone),
     ladders,
     notices,
     subjects,
     staff,
     tenants: new FakeEscalationTenants([TENANT]),
     ids: new FakeIds(),
-    clock: new FakeClock(TODAY),
+    clock: new FakeClock(opts.now ?? TODAY),
     events,
   });
   return { service, notices, subjects, staff, events };
@@ -295,6 +300,7 @@ describe("the escalation ladder climbs, and only tells people", () => {
     const staff = new FakeEscalationStaff();
     staff.staff.set(OTHER_FIRM, [{ userId: ASSOCIATE, gradeRank: 10, reportsToUserId: null }]);
     const service = new EscalationService({
+      timeZones: new FakeFirmTimeZone(),
       ladders,
       notices,
       subjects,
@@ -425,5 +431,27 @@ describe("the queue a screen reads", () => {
     });
 
     expect(await service.queue(TENANT, null)).toHaveLength(0);
+  });
+});
+
+describe("which day it is, for the firm (T6.14)", () => {
+  it("counts days past a deadline on the FIRM's calendar, not Greenwich's", async () => {
+    // 20:00 UTC on the 30th is 01:30 on the 31st in Kolkata. A task due on the
+    // 30th is one day late for the firm — the D+1 rung fires tonight — and not
+    // yet late for a server on UTC, which fired every rung five and a half
+    // hours late before the sweep asked the firm which day it was.
+    const now = new Date("2026-08-30T20:00:00Z");
+    const item = { ...task(0, ASSOCIATE), dueOn: "2026-08-30" };
+
+    const kolkata = setup(LADDER, { now, zone: "Asia/Kolkata" });
+    kolkata.subjects.workItems.set(TENANT, [item]);
+    const [k] = await kolkata.service.sweep();
+    expect(k?.raised).toBe(1);
+    expect(kolkata.notices.rows.map((r) => r.rungKey)).toEqual(["nudge"]);
+
+    const greenwich = setup(LADDER, { now, zone: "UTC" });
+    greenwich.subjects.workItems.set(TENANT, [item]);
+    const [g] = await greenwich.service.sweep();
+    expect(g?.raised).toBe(0);
   });
 });

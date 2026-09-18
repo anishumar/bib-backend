@@ -28,6 +28,7 @@ import {
   FakeVerificationPolicySource,
   FakeWorkPermissions,
 } from "../../src/testfakes/verification";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import type { TemplateStep } from "../../src/usecase/orchestrator/ports";
 import type { VerificationPolicy } from "../../src/domain/verification/model";
@@ -120,6 +121,7 @@ async function world(policy: VerificationPolicy | null = MANAGER_OR_ABOVE) {
   });
 
   const service = new OrchestratorService({
+    timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
     jobs,
     steps,

@@ -257,6 +257,7 @@ function deps(): RouterDeps {
     // stores, which is enough to answer what the router exposes.
     escalations: {
       service: new EscalationService({
+        timeZones: new FakeFirmTimeZone(),
         ladders: new FakeEscalationLadder(),
         notices: new FakeEscalationNotices(),
         subjects: new FakeEscalationSubjects(),
@@ -269,6 +270,7 @@ function deps(): RouterDeps {
     },
     obligations: {
       service: new ObligationService({
+        timeZones: new FakeFirmTimeZone(),
         templates: obligationTemplates,
         exceptions: obligationExceptions,
         states: new FakeObligationStateRepo(),
@@ -304,6 +306,7 @@ function deps(): RouterDeps {
     orchestrator: {
       grades: { listGrades: () => Promise.resolve([]) },
       service: new OrchestratorService({
+    timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
         steps: new FakeJobStepRepo(),
@@ -501,6 +504,7 @@ function deps(): RouterDeps {
       authz: new AuthzService({ permissions }),
       service: new InvoiceService(makeInvoiceFakes()),
       dunning: new DunningService({
+        timeZones: new FakeFirmTimeZone(),
         dunning: new FakeDunningRepo(),
         ladders: new FakeDunningLadder(),
         invoices: makeInvoiceFakes().invoices,

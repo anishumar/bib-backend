@@ -48,6 +48,9 @@ export class FakeNudgeLadder implements NudgeLadderSource {
 
 export class FakeNudgeCandidates implements NudgeCandidateSource {
   private readonly rows: NudgeCandidate[] = [];
+  /** The day the sweep last asked about — the real query cuts `daysUntil` on
+   *  it, so a test can prove WHICH day the service handed over. */
+  askedOn: IsoDate | null = null;
 
   upcoming(candidate: NudgeCandidate): this {
     this.rows.push(candidate);
@@ -56,9 +59,10 @@ export class FakeNudgeCandidates implements NudgeCandidateSource {
 
   upcomingFilings(
     _tenantId: string,
-    _asOf: IsoDate,
+    asOf: IsoDate,
     horizonDays: number,
   ): Promise<readonly NudgeCandidate[]> {
+    this.askedOn = asOf;
     // THE WINDOW IS APPLIED HERE TOO, because it is applied in the real query
     // and a fake that ignored it would let a test pass that the database would
     // answer with nothing. `horizonDays` comes from the ladder, so this is also

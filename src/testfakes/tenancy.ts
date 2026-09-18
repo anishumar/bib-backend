@@ -285,6 +285,7 @@ export function makeFakes(): {
   const obligationExceptions = new FakeObligationExceptionRepo();
   obligationTemplates.exceptions = obligationExceptions;
   const obligations = new ObligationService({
+    timeZones: new FakeFirmTimeZone(),
     templates: obligationTemplates,
     exceptions: obligationExceptions,
     states: new FakeObligationStateRepo(),

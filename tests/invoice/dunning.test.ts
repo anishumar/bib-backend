@@ -14,6 +14,7 @@ import { InvoiceService } from "../../src/usecase/invoice/service";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import {
   DunningAlreadyDecided,
   DunningNotAwaitingApproval,
@@ -54,6 +55,7 @@ function setup(): {
   const clock = new FakeClock(TODAY);
   const billing = new InvoiceService({ invoices, ids: new FakeIds(), clock, events });
   const service = new DunningService({
+    timeZones: new FakeFirmTimeZone(),
     dunning,
     ladders,
     invoices,

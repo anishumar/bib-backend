@@ -93,7 +93,8 @@ import {
 } from "../../domain/verification/errors";
 import type { Permission } from "../../domain/authz/model";
 import type { PermissionSource } from "../authz/ports";
-import type { StepDeskResolver } from "./ports";
+import type { FirmTimeZone, StepDeskResolver } from "./ports";
+import { dayInZone } from "../../domain/scheduler/zone";
 import { bandLabel, withinBand } from "../../domain/orchestrator/model";
 import {
   NotStaffHere,
@@ -123,6 +124,7 @@ export interface Deps {
    *  rather than restated — one notion of what a role carries. */
   readonly permissions: PermissionSource;
   readonly tenants: TenantDirectory;
+  readonly timeZones: FirmTimeZone;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -1097,7 +1099,9 @@ export class OrchestratorService {
     // whose SPOC is a Director — the step starts on nobody's desk and the job
     // page says so, rather than routing work to somebody the process says
     // should not do it. The umbrella task already goes to the same person.
-    const today = this.deps.clock.now().toISOString().slice(0, 10);
+    // The assignment window is a pair of DATE columns, and the day a job opens
+    // is the firm's day (0071), not Greenwich's.
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
     const spoc = await this.deps.desks.spocFor(tenantId, job.id, today);
     const spocRank =
       spoc === null

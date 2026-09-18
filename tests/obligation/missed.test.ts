@@ -45,6 +45,7 @@ import {
 } from "../../src/testfakes/obligation";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 
 const TENANT = "00000000-0000-4000-8000-0000000000aa";
 const ACTOR: Actor = { type: "human", id: "00000000-0000-4000-8000-000000000001" };
@@ -56,7 +57,7 @@ function uuid(tag: string, n: number): string {
   return `00000000-0000-4000-8000-${tag}${String(n).padStart(8, "0")}`;
 }
 
-function harness() {
+function harness(opts: { now?: string; zone?: string } = {}) {
   const states = new FakeObligationStateRepo();
   const resolutionOptions = new FakeResolutionOptionRepo();
   const instances = new FakeObligationInstanceRepo();
@@ -85,6 +86,7 @@ function harness() {
   resolutionOptions.rows.push(...optionRows);
 
   const service = new ObligationService({
+    timeZones: new FakeFirmTimeZone(opts.zone),
     templates: new FakeObligationTemplateRepo(),
     exceptions: new FakeObligationExceptionRepo(),
     states,
@@ -96,7 +98,7 @@ function harness() {
     workItems: new FakeWorkItemRaiser(),
     tenants: new FakeObligationTenants(),
     ids,
-    clock: { now: () => new Date(`${TODAY}T00:00:00Z`) },
+    clock: { now: () => new Date(opts.now ?? `${TODAY}T00:00:00Z`) },
     events,
   });
 
@@ -463,5 +465,24 @@ describe("the decision — what a partner chose, and why", () => {
     const newer = h.given({ statutoryDueOn: "2026-08-20" });
     await h.service.markMissed(TENANT, TODAY, ACTOR);
     expect((await h.service.decisionQueue(TENANT)).map((r) => r.id)).toEqual([older, newer]);
+  });
+});
+
+describe("which day it is, for the firm (T6.14)", () => {
+  it("flags MISSED on the firm's calendar, not Greenwich's", async () => {
+    // 20:00 UTC on the 29th is 01:30 on the 30th in Kolkata: for the firm the
+    // 29th has passed with nothing filed; for a server on UTC it is still the
+    // 29th and the filing is "due today", which is left alone.
+    const now = "2026-08-29T20:00:00Z";
+
+    const kolkata = harness({ now, zone: "Asia/Kolkata" });
+    const late = kolkata.given({ statutoryDueOn: "2026-08-29" });
+    expect((await kolkata.service.sweepTenant(TENANT, ACTOR)).missed).toBe(1);
+    expect(kolkata.stateOf(late)).toBe("missed");
+
+    const greenwich = harness({ now, zone: "UTC" });
+    const notYet = greenwich.given({ statutoryDueOn: "2026-08-29" });
+    expect((await greenwich.service.sweepTenant(TENANT, ACTOR)).missed).toBe(0);
+    expect(greenwich.stateOf(notYet)).toBe("pending");
   });
 });

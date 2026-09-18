@@ -488,6 +488,7 @@ The third rule in this family, and the one that decides a PERIOD. Keep all three
 | What DAY is this `date` column? | Read its UTC fields — postgres.js built it at UTC midnight | `day.ts` |
 | When did this `timestamptz` happen, for a reader? | The READER's own zone, client-side | T6.9 |
 | Which MONTH or DAY does this instant belong to, for the FIRM? | **`tenancy.tenant.time_zone`** | 0071 |
+| What is TODAY for a SWEEP, which has no caller to send its day? | **the firm's zone** — `dayInZone(clock.now(), timeZoneFor(tenant))`, per firm, per pass | T6.14 |
 
 **IT WAS THE SERVER'S, AND NOBODY CHOSE THAT.** `x_at::date` uses the session's `TimeZone`,
 which `src/db/pool.ts` does not set. So `/portal/month` answered *"what did you do for me in
@@ -528,10 +529,24 @@ an offset cannot express daylight saving, so a firm on `+01:00` would cut its mo
 wrong for half the year. `tests/portallibrary/digest-timezone.integration.test.ts` pins the
 measurement so a tzdata upgrade surfaces there rather than on a firm's settings screen.
 
-**One adapter, three ports.** `PostgresFirmTimeZone` satisfies `usecase/chaser`'s `FirmTimeZone`,
-`usecase/portallibrary`'s, and `usecase/serviceaxis`'s `TimeZoneSetting`. Two implementations
-would be two answers to the same question, and a chaser counting days in one zone while the
-digest cuts months in another is a disagreement nobody would look for. The PORTAL resolves it
+**One adapter, many ports.** `PostgresFirmTimeZone` satisfies `usecase/chaser`'s `FirmTimeZone`,
+`usecase/portallibrary`'s, `usecase/serviceaxis`'s `TimeZoneSetting`, `usecase/scheduler`'s
+(T6.13) — and since T6.14 the escalation, nudge, obligation, dunning and orchestrator use cases'
+too, each declared beside the use case that needs it. Two implementations would be two answers to
+the same question, and a chaser counting days in one zone while the digest cuts months in another
+is a disagreement nobody would look for.
+
+**EVERY DAILY SWEEP CUTS "TODAY" ON THE FIRM'S CALENDAR (T6.14, 2026-09-18).** A sweep has no
+caller to send `asOf`, and `clock.now().toISOString().slice(0, 10)` is yesterday in India until
+05:30 — so for five and a half hours every night a T-X task was not raised, a filing due yesterday
+was not yet MISSED, a D+1 rung had not fired, a D-1 nudge asked about the wrong day, and a step
+opening at 01:00 was placed against the assignment in force the day before. The per-period spawn
+(T6.13) and the chaser (T6.11) already asked the firm; the other five now do, through
+`firmDay(tenantId)` = `dayInZone(now, timeZoneFor(tenantId))`, resolved per firm inside the
+pass rather than once for all firms. **`filed_on` is the one exception and stays the UTC day**, by
+the 2026-08-30 decision recorded under 0054, with `completed_at` keeping the instant; the
+`today()` that remains in `usecase/obligation` exists for it alone. The routes that take a date
+from the browser are untouched — the caller's day is still the caller's. The PORTAL resolves it
 BEFORE `withPortal` opens — `tenancy.tenant` has no portal policy and must not grow one (T6.9's
 rule about the Key Manager).
 

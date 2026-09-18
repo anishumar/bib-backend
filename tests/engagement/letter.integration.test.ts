@@ -60,6 +60,7 @@ import {
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
 import { ObligationService } from "../../src/usecase/obligation/service";
 import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -100,6 +101,7 @@ const staffGrades = new StaffGradeService({
 // T3.2's seeder, built once and passed as both ports — they are two methods on
 // one service, and constructing it twice would give a firm two rule packs.
 const obligationServiceForSeeding = new ObligationService({
+  timeZones: new FakeFirmTimeZone(),
   templates: new PostgresObligationTemplateRepository(app),
   exceptions: new PostgresObligationExceptionRepository(app),
   states: new PostgresObligationStateRepository(app),

@@ -18,6 +18,8 @@ import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
+import type { FirmTimeZone } from "./ports";
+import { dayInZone } from "../../domain/scheduler/zone";
 import { dueDunningSteps, needsApproval } from "../../domain/config/model";
 import {
   DunningActionNotFound,
@@ -38,6 +40,7 @@ export interface Deps {
   readonly ladders: DunningLadderSource;
   readonly invoices: InvoiceRepository;
   readonly tenants: TenantDirectory;
+  readonly timeZones: FirmTimeZone;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -93,7 +96,7 @@ export class DunningService {
       return { tenantId, escalated: 0, alreadyTaken: 0, awaitingApproval: 0 };
     }
 
-    const today = this.today();
+    const today = await this.firmDay(tenantId);
     let escalated = 0;
     let alreadyTaken = 0;
     let awaitingApproval = 0;
@@ -237,10 +240,11 @@ export class DunningService {
     return decided;
   }
 
-  /** Today as an ISO DATE. A due date is a calendar fact in a jurisdiction, not
-   *  an instant — the same rule the scheduler's arithmetic follows. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** Today for THIS firm (0071). A due date is a calendar fact, not an
+   *  instant, and "days overdue" cut on Greenwich's day sent an Indian
+   *  client's reminder a day late for five and a half hours every night. */
+  private async firmDay(tenantId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 }
 

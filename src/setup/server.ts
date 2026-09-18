@@ -297,6 +297,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // on, and it is visible here in the type as well as in the comments.
   const obligationTemplates = new PostgresObligationTemplateRepository(pools.app);
   const obligations: ObligationService = new ObligationService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     templates: obligationTemplates,
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),
@@ -379,6 +380,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // an API that answered differently from the worker would let somebody tick off
   // work a machine was already doing.
   const orchestrator = new OrchestratorService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
     templates: configRepository,
@@ -489,6 +491,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // and sharing a composition root between them is how one ends up importing
   // the other's config.
   const dunning = new DunningService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     dunning: new PostgresDunningRepository(pools.app),
     ladders: new PostgresDunningLadder(pools.app),
     invoices: invoiceRepository,
@@ -508,6 +511,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // reachable from a request — a monitor a person can trigger is a monitor that
   // can be triggered a hundred times, and nothing here needs it.
   const escalations = new EscalationService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ladders: new PostgresEscalationLadder(pools.app),
     notices: new PostgresEscalationNoticeRepository(pools.app),
     subjects: new PostgresEscalationSubjects(pools.app),

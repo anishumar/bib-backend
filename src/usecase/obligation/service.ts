@@ -106,6 +106,8 @@ import type {
   TenantDirectory,
   WorkItemRaiser,
 } from "./ports.js";
+import type { FirmTimeZone } from "./ports.js";
+import { dayInZone } from "../../domain/scheduler/zone.js";
 
 const SYSTEM_ACTOR: Actor = { type: "system", id: null };
 
@@ -183,6 +185,7 @@ export interface Deps {
   readonly services: ServiceDirectory;
   readonly workItems: WorkItemRaiser;
   readonly tenants: TenantDirectory;
+  readonly timeZones: FirmTimeZone;
   readonly events: EventSink;
   readonly ids: IdGen;
   readonly clock: Clock;
@@ -484,7 +487,7 @@ export class ObligationService {
     templateId: string,
     actor: Actor,
   ): Promise<number> {
-    const today = this.today();
+    const today = await this.firmDay(tenantId);
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
     const report = await this.generate(
       tenantId,
@@ -1054,7 +1057,10 @@ export class ObligationService {
   }
 
   async sweepTenant(tenantId: string, actor: Actor = SYSTEM_ACTOR): Promise<GenerateReport> {
-    const today = this.today();
+    // THE FIRM'S DAY (0071). This one line decides when a T-X task appears
+    // and when a filing turns MISSED; on the UTC day both happened five and
+    // a half hours late for an Indian firm, every night.
+    const today = await this.firmDay(tenantId);
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
     const generated = await this.generate(
       tenantId,
@@ -1471,7 +1477,7 @@ export class ObligationService {
         resolutionCode: option.code,
         closesWithoutFiling: option.closesWithoutFiling,
         statutoryDueOn: obligation.statutoryDueOn,
-        daysLate: daysBetween(obligation.statutoryDueOn, this.today()),
+        daysLate: daysBetween(obligation.statutoryDueOn, await this.firmDay(tenantId)),
         movedToStateId: destination.id,
       },
     });
@@ -1612,10 +1618,17 @@ export class ObligationService {
     return this.deps.templates.countAll(tenantId);
   }
 
-  /** The caller's day is the caller's, and this default is the honest fallback
-   *  for one that did not say. `slice(0, 10)` on a UTC instant is yesterday in
-   *  India before 05:30 — every route that takes a date takes it from the
-   *  browser for exactly that reason. */
+  /** Today for THIS firm (0071) — what the sweep, the spawn and a decision's
+   *  `daysLate` are cut on. A sweep has no caller to send its day, and the UTC
+   *  day is yesterday in India until 05:30. */
+  private async firmDay(tenantId: string): Promise<IsoDate> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+  }
+
+  /** The SERVER's UTC day — kept for ONE thing: `filed_on`, which is the UTC
+   *  day BY DECISION (Shrestha, 2026-08-30, board T3.3) with the cost stated;
+   *  the work item's `completed_at` keeps the exact instant. Nothing else
+   *  should call this. */
   private today(): IsoDate {
     return this.deps.clock.now().toISOString().slice(0, 10);
   }

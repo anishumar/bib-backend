@@ -22,6 +22,7 @@ import {
 } from "../../src/testfakes/obligation";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import type { Actor } from "../../src/domain/ledger/model";
 
 const FIRM = "00000000-0000-4000-8000-0000000000f1";
@@ -51,6 +52,7 @@ function harness() {
   const events = new RecordingEventSink();
 
   const service = new ObligationService({
+    timeZones: new FakeFirmTimeZone(),
     templates,
     exceptions,
     states,

@@ -234,6 +234,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // stated above the work-item service: a calendar that generated differently
   // in the worker than it reads in the browser is one nobody could debug.
   const obligations: ObligationService = new ObligationService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     templates: new PostgresObligationTemplateRepository(pools.app),
     exceptions: new PostgresObligationExceptionRepository(pools.app),
     states: new PostgresObligationStateRepository(pools.app),
@@ -290,6 +291,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // because a worker and an API are separate processes.
   const invoiceRepository = new PostgresInvoiceRepository(pools.app);
   const dunning = new DunningService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     dunning: new PostgresDunningRepository(pools.app),
     ladders: new PostgresDunningLadder(pools.app),
     invoices: invoiceRepository,
@@ -309,6 +311,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // decides whether a machine may act with nobody watching.
 
   const orchestrator = new OrchestratorService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
     // The config repository, in its `TemplateSource` role. The same class the
@@ -387,6 +390,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   });
 
   const nudges = new NudgeService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     tenants: new PostgresNudgeTenants(pools.app),
     ladders: new PostgresNudgeLadder(pools.app),
     candidates: new PostgresNudgeCandidates(pools.app),
@@ -396,6 +400,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   });
 
   const escalations = new EscalationService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ladders: new PostgresEscalationLadder(pools.app),
     notices: new PostgresEscalationNoticeRepository(pools.app),
     subjects: new PostgresEscalationSubjects(pools.app),

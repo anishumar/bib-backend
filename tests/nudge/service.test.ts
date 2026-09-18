@@ -17,6 +17,7 @@ import {
 } from "../../src/testfakes/nudge";
 import { FakeClock } from "../../src/testfakes/clock";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { dueRungs, horizonDays } from "../../src/domain/nudge/model";
 import { readNudgeBody, validateBody } from "../../src/domain/config/model";
 
@@ -46,18 +47,21 @@ function filing(
   };
 }
 
-function svc(opts: { ladder?: readonly { key: string; beforeDays: number; label: string }[] } = {}) {
+function svc(
+  opts: { ladder?: readonly { key: string; beforeDays: number; label: string }[]; now?: string; zone?: string } = {},
+) {
   const ladders = new FakeNudgeLadder();
   if (opts.ladder) ladders.publish(TENANT, opts.ladder);
   const candidates = new FakeNudgeCandidates();
   const nudges = new FakeNudgeRepo();
   const events = new RecordingEventSink();
   const service = new NudgeService({
+    timeZones: new FakeFirmTimeZone(opts.zone),
     tenants: new FakeNudgeTenants([TENANT, OTHER]),
     ladders,
     candidates,
     nudges,
-    clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+    clock: new FakeClock(new Date(opts.now ?? "2026-09-01T00:00:00.000Z")),
     events,
   });
   return { service, ladders, candidates, nudges, events };
@@ -150,7 +154,7 @@ describe("what the sweep may not do", () => {
     // whether or not a fee is in dispute, and a freeze is keyed on
     // `client_party_id` while an obligation carries `entity_party_id`. A port
     // that took freezes and ignored them would be worse than none.
-    const wired = ["tenants", "ladders", "candidates", "nudges", "clock", "events"];
+    const wired = ["tenants", "timeZones", "ladders", "candidates", "nudges", "clock", "events"];
     const actual = Object.keys(
       (svc().service as unknown as { deps: Record<string, unknown> }).deps,
     ).sort();
@@ -268,5 +272,21 @@ describe("the ladder a firm writes down", () => {
       ],
     });
     expect(body.rungs.map((r) => r.key)).toEqual(["week", "eve"]);
+  });
+});
+
+describe("which day it is, for the firm (T6.14)", () => {
+  it("asks the calendar about the FIRM's day, not Greenwich's", async () => {
+    // 20:00 UTC on 19 September is already the 20th in Kolkata, and "due in
+    // one day" is a different filing on each of those days.
+    const now = "2026-09-19T20:00:00.000Z";
+
+    const kolkata = svc({ ladder: LADDER, now, zone: "Asia/Kolkata" });
+    await kolkata.service.sweep();
+    expect(kolkata.candidates.askedOn).toBe("2026-09-20");
+
+    const greenwich = svc({ ladder: LADDER, now, zone: "UTC" });
+    await greenwich.service.sweep();
+    expect(greenwich.candidates.askedOn).toBe("2026-09-19");
   });
 });

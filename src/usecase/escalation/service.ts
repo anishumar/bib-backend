@@ -45,8 +45,10 @@ import type {
   EscalationSubjectSource,
   EscalationTenantDirectory,
   EscalationViewer,
+  FirmTimeZone,
   IsoDate,
 } from "./ports";
+import { dayInZone } from "../../domain/scheduler/zone";
 
 export interface Deps {
   readonly ladders: EscalationLadderSource;
@@ -54,6 +56,7 @@ export interface Deps {
   readonly subjects: EscalationSubjectSource;
   readonly staff: EscalationStaffDirectory;
   readonly tenants: EscalationTenantDirectory;
+  readonly timeZones: FirmTimeZone;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -120,7 +123,7 @@ export class EscalationService {
       return { tenantId, raised: 0, alreadyRaised: 0, unresolved: 0 };
     }
 
-    const today = asOf ?? this.today();
+    const today = asOf ?? (await this.firmDay(tenantId));
     const staff = await this.deps.staff.activeStaff(tenantId);
     const { byWorkItem, byObligation } = groupClimbed(await this.deps.notices.climbed(tenantId));
 
@@ -308,10 +311,12 @@ export class EscalationService {
     return landing.kind === "nobody" ? "nobody" : "raised";
   }
 
-  /** Today as an ISO DATE. A deadline is a calendar fact in a jurisdiction, not
-   *  an instant — the same rule every sweep in this codebase follows. */
-  private today(): IsoDate {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** Today for THIS firm — the calendar day the clock's instant falls on in
+   *  the firm's own zone (0071). A deadline is a calendar fact, not an
+   *  instant, and a sweep has no caller to say which day it is: the UTC day
+   *  is yesterday in India until 05:30, which fired every rung a day late. */
+  private async firmDay(tenantId: string): Promise<IsoDate> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 }
 

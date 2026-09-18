@@ -27,6 +27,7 @@ import {
   FakeVerificationPolicySource,
   FakeWorkPermissions,
 } from "../../src/testfakes/verification";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import type { Job } from "../../src/domain/scheduler/model";
 import type { ResolvedTemplate, TemplateStep } from "../../src/usecase/orchestrator/ports";
@@ -109,6 +110,7 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
   const tiers = new FakeTierSource().publish(SUGGESTED_TIERS);
   const runs = new FakeAgentRunRepo();
   const service = new OrchestratorService({
+    timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
     jobs,
     steps,

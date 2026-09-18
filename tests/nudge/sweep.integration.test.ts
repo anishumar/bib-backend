@@ -32,6 +32,7 @@ import {
 } from "../../src/infrastructure/postgres/nudge-repository";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import type { NudgeRung } from "../../src/domain/nudge/model";
 
 const cfg = load();
@@ -64,6 +65,7 @@ function service(events = new RecordingEventSink()) {
   return {
     events,
     svc: new NudgeService({
+      timeZones: new FakeFirmTimeZone(),
       tenants: new PostgresNudgeTenants(app),
       ladders,
       candidates: new PostgresNudgeCandidates(app),

@@ -23,6 +23,7 @@ import {
   FakeVerificationPolicySource,
   FakeWorkPermissions,
 } from "../../src/testfakes/verification";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import type { ResolvedTemplate, TemplateStep } from "../../src/usecase/orchestrator/ports";
 import { NotYourStep, PerformerOutOfBand } from "../../src/domain/orchestrator/errors";
@@ -62,6 +63,7 @@ async function world(steps: readonly TemplateStep[], spoc: string | null) {
   subjects.set(JOB, { workflowTemplateKey: "close", recurrence: "monthly", jurisdiction: "IN" });
   templates.publish(TENANT, "close", template(steps));
   const service = new OrchestratorService({
+    timeZones: new FakeFirmTimeZone(),
     desks, jobs, steps: stepRepo, templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),
     runs: new FakeAgentRunRepo(),

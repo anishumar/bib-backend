@@ -32,15 +32,18 @@ import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { NudgeSweepReport } from "../../domain/nudge/model";
 import { dueRungs, horizonDays } from "../../domain/nudge/model";
 import type {
+  FirmTimeZone,
   IsoDate,
   NudgeCandidateSource,
   NudgeLadderSource,
   NudgeRepository,
   NudgeTenantDirectory,
 } from "./ports";
+import { dayInZone } from "../../domain/scheduler/zone";
 
 export interface Deps {
   readonly tenants: NudgeTenantDirectory;
+  readonly timeZones: FirmTimeZone;
   readonly ladders: NudgeLadderSource;
   readonly candidates: NudgeCandidateSource;
   readonly nudges: NudgeRepository;
@@ -54,11 +57,11 @@ export class NudgeService {
   /** One pass over every firm. The outer loop is the tenant list because a
    *  worker holds no session; every read below it is tenant-scoped by RLS. */
   async sweep(asOf?: IsoDate): Promise<readonly NudgeSweepReport[]> {
-    const day = asOf ?? this.today();
+    // No single day for the pass: each firm's day is its own (0071).
     const reports: NudgeSweepReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
       try {
-        reports.push(await this.sweepTenant(tenantId, day));
+        reports.push(await this.sweepTenant(tenantId, asOf));
       } catch (err) {
         // ONE FIRM'S BAD DATA NEVER STOPS THE OTHERS — T3.1's lesson, where one
         // firm with no work states stopped the calendar for every firm after it
@@ -76,7 +79,7 @@ export class NudgeService {
   }
 
   async sweepTenant(tenantId: string, asOf?: IsoDate): Promise<NudgeSweepReport> {
-    const day = asOf ?? this.today();
+    const day = asOf ?? (await this.firmDay(tenantId));
 
     // NO LADDER MEANS TELL NOBODY, and it is the shipped state. Returned before
     // the candidate read, so a firm that has published nothing costs one config
@@ -129,9 +132,11 @@ export class NudgeService {
     };
   }
 
-  /** The server's calendar day — the honest fallback for a caller that did not
-   *  say which day it is on, and never the answer when one did. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** Today for THIS firm (0071) — the fallback for a caller that did not say
+   *  which day it is on, and never the answer when one did. A nudge counts
+   *  down to a deadline in days, and "D-1" cut on Greenwich's day reached an
+   *  Indian client a day early for five and a half hours every night. */
+  private async firmDay(tenantId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 }
