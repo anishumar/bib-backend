@@ -142,6 +142,9 @@ describe("ticking a step", () => {
     expect(forKavya.find((d) => d.step.stepKey === "review")?.viewer).toEqual({ mayComplete: false, reason: "OUTSIDE_BAND" });
     const forRajat = await w.service.describeSteps(TENANT, JOB, RAJAT);
     expect(forRajat.find((d) => d.step.stepKey === "review")?.viewer).toEqual({ mayComplete: true, reason: null });
+    // On Rohan's desk AND outside Rajat's grade: the band wins, because taking
+    // it would be refused too — "on another desk" would offer a Take button.
+    expect(forRajat.find((d) => d.step.stepKey === "open")?.viewer).toEqual({ mayComplete: false, reason: "OUTSIDE_BAND" });
     expect(forRajat.find((d) => d.step.stepKey === "open")?.assignee).toEqual({ userId: ROHAN, displayName: "Rohan Mehta" });
     const who = await w.service.performersFor(TENANT, JOB, "review");
     expect(who.map((p) => p.userId)).toEqual([RAJAT]);

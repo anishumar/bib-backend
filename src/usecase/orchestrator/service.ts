@@ -603,12 +603,16 @@ export class OrchestratorService {
     const viewer = byUser.get(viewerUserId) ?? null;
     return steps.map((step) => {
       const performer = bands.get(step.stepKey) ?? null;
-      const reason: DescribedStep["viewer"]["reason"] =
-        step.assigneeUserId !== null && step.assigneeUserId !== viewerUserId
+      // The band first. A viewer outside it can neither tick the step nor
+      // take it — `assignStep` refuses the same grade — so "on another desk"
+      // must not turn into a "Take it" button for a partner reading a
+      // junior's step. Found on 10x Global's August close: every step sat on
+      // Rohan's desk, and Sid was offered all ten.
+      const reason: DescribedStep["viewer"]["reason"] = !withinBand(viewer?.gradeRank ?? null, performer)
+        ? "OUTSIDE_BAND"
+        : step.assigneeUserId !== null && step.assigneeUserId !== viewerUserId
           ? "ON_ANOTHER_DESK"
-          : withinBand(viewer?.gradeRank ?? null, performer)
-            ? null
-            : "OUTSIDE_BAND";
+          : null;
       return {
         step,
         performer,
