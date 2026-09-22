@@ -48,6 +48,7 @@ export interface AuthDeps {
   readonly portalAccess: PortalAccessService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
+  readonly cookieSameSite: "Lax" | "None";
 }
 
 // ── Schemas ──────────────────────────────────────────────────────────────────
@@ -286,7 +287,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     setCookie(c, deps.cookieName, result.token, {
       httpOnly: true,
       secure: deps.cookieSecure,
-      sameSite: "Lax",
+      sameSite: deps.cookieSameSite,
       path: "/",
       maxAge: SESSION_TTL_DAYS * 24 * 60 * 60,
     });
@@ -408,7 +409,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     setCookie(c, deps.cookieName, "", {
       httpOnly: true,
       secure: deps.cookieSecure,
-      sameSite: "Lax",
+      sameSite: deps.cookieSameSite,
       path: "/",
       maxAge: 0,
     });

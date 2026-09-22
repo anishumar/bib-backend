@@ -112,6 +112,19 @@ export function validateServer(cfg: Config): void {
       );
     }
 
+    // SameSite=None WITHOUT Secure is rejected by every current browser, which
+    // drops the cookie entirely — the same symptom as the problem None is set
+    // to solve, reached from the other side and harder to find. Refuse the
+    // combination at boot rather than shipping a login that silently does not
+    // persist.
+    if (cfg.auth.sessionCookieSameSite === "None" && !cfg.auth.sessionCookieSecure) {
+      throw new Error(
+        `BIB_SESSION_COOKIE_SAMESITE=None requires BIB_SESSION_COOKIE_SECURE=true. ` +
+          `Browsers reject a SameSite=None cookie that is not Secure and store nothing, so ` +
+          `every request would arrive with no session.`,
+      );
+    }
+
     // Trusting X-Forwarded-For without a proxy in front lets any caller invent
     // its own rate-limit key per request and opt out of rate limiting entirely;
     // NOT trusting it behind one makes every client share the balancer's

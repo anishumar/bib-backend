@@ -532,6 +532,7 @@ function deps(): RouterDeps {
       identity,
       cookieName: "bib_session",
       cookieSecure: false,
+    cookieSameSite: "Lax",
     },
     staffGrades: {
       service: new StaffGradeService({
@@ -597,6 +598,7 @@ function deps(): RouterDeps {
       }),
       cookieName: "bib_session",
       cookieSecure: false,
+    cookieSameSite: "Lax",
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
   };

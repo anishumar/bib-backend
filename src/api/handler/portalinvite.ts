@@ -23,6 +23,7 @@ export interface PortalInviteDeps {
   readonly identity: IdentityService;
   readonly cookieName: string;
   readonly cookieSecure: boolean;
+  readonly cookieSameSite: "Lax" | "None";
 }
 
 const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -234,7 +235,7 @@ export function registerPortalInviteRoutes(
     setCookie(c, deps.cookieName, result.token, {
       httpOnly: true,
       secure: deps.cookieSecure,
-      sameSite: "Lax",
+      sameSite: deps.cookieSameSite,
       path: "/",
       maxAge: SESSION_TTL_DAYS * 24 * 60 * 60,
     });

@@ -455,6 +455,7 @@ function deps(): RouterDeps {
       identity: sharedIdentity,
       cookieName: "bib_session",
       cookieSecure: false,
+    cookieSameSite: "Lax",
     },
     scheduler: {
       service: new SchedulerService({
@@ -529,6 +530,7 @@ function deps(): RouterDeps {
       }),
       cookieName: "bib_session",
       cookieSecure: false,
+    cookieSameSite: "Lax",
     },
   };
 }

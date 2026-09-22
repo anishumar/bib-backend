@@ -87,7 +87,39 @@ const EnvSchema = z.object({
   // already uses. It records an assertion, not a signature, so a production-like
   // environment refuses to boot on it (validate.ts). A real provider adapter
   // becomes a second value here.
-  BIB_ESIGN_PROVIDER: z.enum(["attested"]).default("attested"),
+  // SameSite for the session cookie. Lax is right when the app and the API
+  // share a registrable domain, and is the DEFAULT because that is the intended
+  // deployment.
+  //
+  // It stops working — silently, and only in a browser — the moment they do
+  // not. Cloud Run's *.run.app is on the Public Suffix List, so
+  // two services under it are different SITES, not merely different origins:
+  // the browser never attaches the cookie to the API call,
+  // every request arrives anonymous, and the app shows "no authenticated
+  // session" immediately after a login that returned 200 and a Set-Cookie.
+  //
+  // api/origin.ts already anticipated this and says so: the ORIGIN guard is
+  // "the half that survives a deployment change" and does not depend on
+  // SameSite, so raising this to None does not leave CSRF undefended.
+  BIB_SESSION_COOKIE_SAMESITE: z.enum(["Lax", "None"]).default("Lax"),
+  BIB_ESIGN_PROVIDER: z.enum(["attested", "docusign"]).default("attested"),
+  // ── DocuSign (JWT Grant) ──────────────────────────────────────────────────
+  // Optional HERE and checked where the signer is CONSTRUCTED, in setup/server.
+  // The reason is least privilege: the worker runs the same validateServer and
+  // must therefore set BIB_ESIGN_PROVIDER to something non-stub to boot, but it
+  // never signs anything — setup/worker.ts constructs no signer at all. Demanding
+  // these in the schema would hand the worker a private key it has no use for,
+  // which is exactly the secret sprawl the internal-key split exists to prevent.
+  // MUST carry the scheme: the transport does `new URL(oauthBase).host` to build
+  // the JWT's `aud`, and a bare host throws there. `.url()` refuses one at boot
+  // with a readable message instead of at the first signature with a stack trace.
+  BIB_DOCUSIGN_OAUTH_BASE: z.string().url().default("https://account.docusign.com"),
+  BIB_DOCUSIGN_INTEGRATION_KEY: z.string().min(1).optional(),
+  BIB_DOCUSIGN_USER_ID: z.string().min(1).optional(),
+  // Null is a real answer: the adapter discovers the account and its base URI
+  // from userinfo when this is unset, which is the ordinary single-account case.
+  BIB_DOCUSIGN_ACCOUNT_ID: z.string().min(1).optional(),
+  BIB_DOCUSIGN_PRIVATE_KEY: z.string().min(1).optional(),
   // The provisioning callers, as JSON: [{name, key, capabilities[]}]. Each
   // caller has its OWN key carrying only what it needs — one key that opens
   // every route is an escalation path (create a user, grant them partner, set
@@ -147,7 +179,12 @@ const EnvSchema = z.object({
   // Where uploaded bytes live. The filesystem adapter is a STUB — per-pod and
   // not restart-safe — and validateServer refuses a production-like boot with
   // it, so this default is a local-development convenience and nothing more.
-  BIB_STORAGE_BACKEND: z.enum(["filesystem"]).default("filesystem"),
+  BIB_STORAGE_BACKEND: z.enum(["filesystem", "gcs"]).default("filesystem"),
+  // The bucket is optional for the same reason the DocuSign keys are: the worker
+  // must name a non-stub backend to pass validateServer, yet constructs no blob
+  // store. setup/server checks it when it builds the adapter.
+  BIB_GCS_BUCKET: z.string().min(1).optional(),
+  BIB_GCS_TIMEOUT_MS: z.coerce.number().int().positive().default(20_000),
   BIB_STORAGE_ROOT: z.string().min(1).default(".data/blobs"),
   // The largest file the store accepts. A MEMORY BUDGET, not a preference: the
   // whole file is held in memory to be hashed before it is written, so this is
@@ -176,12 +213,15 @@ export interface DbConfig {
 export interface AuthConfig {
   readonly sessionCookieName: string;
   readonly sessionCookieSecure: boolean;
+  /** SameSite for the session cookie. `None` is required when the app and the
+   *  API are on different registrable domains, and demands Secure. */
+  readonly sessionCookieSameSite: "Lax" | "None";
   /** Base URL of the frontend, used to build magic links. */
   readonly appBaseUrl: string;
   /** Whether the dev x-user-id principal resolver is registered. */
   readonly devAuthEnabled: boolean;
   readonly mailTransport: "log" | "smtp";
-  readonly esignProvider: "attested";
+  readonly esignProvider: "attested" | "docusign";
   /** The provisioning callers. Each key carries only its own capabilities. */
   readonly internalClients: readonly InternalClient[];
 }
@@ -228,11 +268,25 @@ export interface RateLimitConfig {
 export interface StorageConfig {
   /** Which blob adapter is registered. `filesystem` is a stub — see the honest
    *  registry check in validate.ts. */
-  readonly backend: "filesystem";
+  readonly backend: "filesystem" | "gcs";
   /** Root directory for the filesystem adapter. */
   readonly root: string;
+  /** Bucket for the gcs adapter. Null when the backend is not `gcs`. */
+  readonly bucket: string | null;
+  /** How long one GCS call may take before it is abandoned. */
+  readonly timeoutMs: number;
   /** Largest accepted upload, in bytes. A memory budget. */
   readonly maxUploadBytes: number;
+}
+
+/** DocuSign's JWT Grant credentials, as configured. Every field but the OAuth
+ *  host is nullable because only the API process signs; see BIB_ESIGN_PROVIDER. */
+export interface DocusignConfig {
+  readonly oauthBase: string;
+  readonly integrationKey: string | null;
+  readonly userId: string | null;
+  readonly accountId: string | null;
+  readonly privateKeyPem: string | null;
 }
 
 export interface Config {
@@ -247,6 +301,7 @@ export interface Config {
   readonly cors: CorsConfig;
   readonly worker: WorkerConfig;
   readonly storage: StorageConfig;
+  readonly docusign: DocusignConfig;
   readonly mail: MailConfig;
 }
 
@@ -303,6 +358,7 @@ export function load(): Config {
     docsEnabled,
     auth: {
       sessionCookieName: env.BIB_SESSION_COOKIE_NAME,
+      sessionCookieSameSite: env.BIB_SESSION_COOKIE_SAMESITE,
       sessionCookieSecure:
         env.BIB_SESSION_COOKIE_SECURE !== undefined
           ? env.BIB_SESSION_COOKIE_SECURE === "true"
@@ -352,7 +408,16 @@ export function load(): Config {
     storage: {
       backend: env.BIB_STORAGE_BACKEND,
       root: env.BIB_STORAGE_ROOT,
+      bucket: env.BIB_GCS_BUCKET ?? null,
+      timeoutMs: env.BIB_GCS_TIMEOUT_MS,
       maxUploadBytes: env.BIB_MAX_UPLOAD_BYTES,
+    },
+    docusign: {
+      oauthBase: env.BIB_DOCUSIGN_OAUTH_BASE,
+      integrationKey: env.BIB_DOCUSIGN_INTEGRATION_KEY ?? null,
+      userId: env.BIB_DOCUSIGN_USER_ID ?? null,
+      accountId: env.BIB_DOCUSIGN_ACCOUNT_ID ?? null,
+      privateKeyPem: env.BIB_DOCUSIGN_PRIVATE_KEY ?? null,
     },
     worker: {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,

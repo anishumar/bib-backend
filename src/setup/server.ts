@@ -115,6 +115,12 @@ import {
   PostgresStandardBlockRepository,
 } from "../infrastructure/postgres/block-repository";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
+import { DocusignSigner } from "../infrastructure/esign/docusign-signer";
+import { GlobalFetchHttp, JwtGrantDocusign } from "../infrastructure/esign/docusign-http";
+import { GcsBlobStore } from "../infrastructure/storage/gcs-blob-store";
+import { googleCloudBucket } from "../infrastructure/storage/google-cloud-bucket";
+import type { BlobStore } from "../usecase/filestore/ports";
+import type { ESignProvider } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
@@ -462,7 +468,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // The blob store is named once and handed to BOTH the document store and the
   // render source — the source needs it to fetch a firm's logo, and giving it
   // its own instance would mean two objects believing they own the same files.
-  const blobs = new FilesystemBlobStore(cfg.storage.root);
+  const blobs = blobStoreFor(cfg);
   const fileStore = new FileStoreService({
     documents: new PostgresDocumentStoreRepository(pools.app),
     blobs,
@@ -1003,7 +1009,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     // use case imports the other, and there is one answer to "what did we
     // actually quote" rather than two reads that can drift.
     quotes: proposal,
-    esign: new AttestedSigner(),
+    esign: esignFor(cfg, log),
     hasher: new Sha256ContentHasher(),
     ids: systemIds,
     clock: systemClock,
@@ -1045,6 +1051,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           portalAccess,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
+          cookieSameSite: cfg.auth.sessionCookieSameSite,
         },
         tenancy: tenancyDeps,
         staffGrades: { service: staffGrades },
@@ -1064,6 +1071,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           identity,
           cookieName: cfg.auth.sessionCookieName,
           cookieSecure: cfg.auth.sessionCookieSecure,
+          cookieSameSite: cfg.auth.sessionCookieSameSite,
         },
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
@@ -1130,6 +1138,63 @@ export function wire(cfg: Config, log: Logger): Wired {
  * variable. They are here because the TYPE says nullable and a non-null
  * assertion would be a claim this file cannot make on its own.
  */
+/**
+ * The blob adapter, chosen once — the "one-line change" the T3.6 comment above
+ * promised, now taken.
+ *
+ * UNLIKE `mailerFor`, THE THROW HERE IS REACHABLE. `validateServer` refuses
+ * `filesystem` in a production-like environment, but it deliberately does NOT
+ * demand a bucket, because the worker runs that same gate and must name a
+ * non-stub backend to boot while constructing no blob store at all. So the
+ * bucket is checked at the moment it is needed, by the process that needs it.
+ */
+function blobStoreFor(cfg: Config): BlobStore {
+  if (cfg.storage.backend === "filesystem") return new FilesystemBlobStore(cfg.storage.root);
+  if (cfg.storage.bucket === null) {
+    throw new Error(
+      "BIB_STORAGE_BACKEND=gcs but BIB_GCS_BUCKET is unset, so the Cloud Storage adapter has " +
+        "no bucket to write to. Set BIB_GCS_BUCKET to the bucket name, or set " +
+        "BIB_STORAGE_BACKEND=filesystem for local development.",
+    );
+  }
+  return new GcsBlobStore(
+    googleCloudBucket({ bucket: cfg.storage.bucket, timeoutMs: cfg.storage.timeoutMs }),
+  );
+}
+
+/**
+ * The e-sign adapter, chosen once, and reachable for the same reason: the
+ * worker names a provider to satisfy validateServer and never signs anything.
+ *
+ * Every missing variable is named in ONE message rather than failing on the
+ * first: whoever is configuring this is reading a secret manager, and finding
+ * out about three gaps one redeploy at a time is three redeploys.
+ */
+function esignFor(cfg: Config, log: Logger): ESignProvider {
+  if (cfg.auth.esignProvider === "attested") return new AttestedSigner();
+  const { oauthBase, integrationKey, userId, accountId, privateKeyPem } = cfg.docusign;
+  const missing = [
+    integrationKey === null ? "BIB_DOCUSIGN_INTEGRATION_KEY" : null,
+    userId === null ? "BIB_DOCUSIGN_USER_ID" : null,
+    privateKeyPem === null ? "BIB_DOCUSIGN_PRIVATE_KEY" : null,
+  ].filter((v): v is string => v !== null);
+  if (integrationKey === null || userId === null || privateKeyPem === null) {
+    throw new Error(
+      `BIB_ESIGN_PROVIDER=docusign but ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} ` +
+        "unset. DocuSign's JWT Grant needs the integration key, the impersonated user's id and " +
+        "the RSA private key. Set them, or set BIB_ESIGN_PROVIDER=attested for local development.",
+    );
+  }
+  return new DocusignSigner(
+    new JwtGrantDocusign(
+      { oauthBase, integrationKey, userId, accountId, privateKeyPem },
+      new GlobalFetchHttp(),
+      log,
+    ),
+    log,
+  );
+}
+
 function mailerFor(cfg: Config, log: Logger): Mailer {
   if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
   const { smtp, from, fromName } = cfg.mail;
