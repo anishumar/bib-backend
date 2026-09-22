@@ -48,6 +48,24 @@ export interface BossQueueOptions {
   readonly log: Logger;
 }
 
+/**
+ * The same URL with any `sslmode` removed.
+ *
+ * Returns the string untouched if it will not parse — a malformed URL is a
+ * problem for the driver to report against the value the operator actually set,
+ * not one to mask here by handing pg-boss something different from what the API
+ * is using.
+ */
+function withoutSslMode(connectionString: string): string {
+  try {
+    const url = new URL(connectionString);
+    url.searchParams.delete("sslmode");
+    return url.toString();
+  } catch {
+    return connectionString;
+  }
+}
+
 export class BossJobQueue implements JobQueue {
   private readonly boss: PgBoss;
   private readonly log: Logger;
@@ -55,7 +73,41 @@ export class BossJobQueue implements JobQueue {
 
   constructor(opts: BossQueueOptions) {
     this.boss = new PgBoss({
-      connectionString: opts.connectionString,
+      connectionString: withoutSslMode(opts.connectionString),
+      // TWO DRIVERS, ONE URL, AND THEY DISAGREE ABOUT `sslmode=require`.
+      //
+      // src/db/pool.ts hands this same connection string to postgres.js, which
+      // reads `require` the way libpq defines it: ENCRYPT, do not verify the
+      // certificate. pg-boss is built on node-postgres, which verifies — so
+      // against Cloud SQL, whose server certificate is signed by a per-instance
+      // CA that is in no public trust store, the API connects and the WORKER
+      // dies at startup with:
+      //
+      //   Error: unable to verify the first certificate
+      //   code: 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+      //     at Contractor.isInstalled ... at BossJobQueue.start
+      //
+      // Read that failure carefully before "fixing" it somewhere else: it is
+      // NOT the app's pool being wrong, and it is not a missing grant. It is one
+      // URL meaning two things.
+      //
+      // Matching node-postgres to what postgres.js already does on the identical
+      // string weakens nothing that was not already true of every query this
+      // product makes. What it does NOT do is make the traffic plaintext — TLS
+      // is still negotiated; only the certificate chain goes unchecked, and on
+      // Cloud SQL private IP that traffic never leaves the VPC.
+      //
+      // The stronger answer is to verify against Cloud SQL's server CA in BOTH
+      // drivers, which means distributing that CA to every container. That is a
+      // deliberate piece of work, not a line here, and until somebody does it
+      // the honest position is that these two agree.
+      // AND THE `ssl` OPTION ALONE IS NOT ENOUGH, which is why the string is
+      // rewritten rather than merely accompanied. node-postgres parses
+      // `sslmode` OUT of the connection string and the parsed value wins over
+      // an explicit `ssl` passed beside it — so the first attempt at this fix
+      // changed the stack trace's line number and nothing else. The parameter
+      // has to be gone before the driver sees it.
+      ssl: { rejectUnauthorized: false },
       schema: QUEUE_SCHEMA,
       // Migration 0042 created it. See the note above: leaving this at its
       // default makes the worker refuse to start with `permission denied for

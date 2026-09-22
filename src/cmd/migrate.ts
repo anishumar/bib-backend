@@ -77,11 +77,69 @@ async function ensureRoles(sql: postgres.Sql, appPassword: string): Promise<void
       END IF;
     END $$;
   `);
-  // NOBYPASSRLS is the load-bearing attribute — assert it every run.
+  // NOBYPASSRLS is the load-bearing attribute — checked every run, but READ
+  // rather than written, and that distinction is what lets this run on managed
+  // Postgres at all.
+  //
+  // This statement used to say `NOBYPASSRLS NOSUPERUSER`. PostgreSQL refuses
+  // both from anyone who does not already hold the attribute being set — and it
+  // refuses them even when the caller CREATED the role moments earlier and holds
+  // ADMIN OPTION on it, because the check is on the attribute, not on the role:
+  //
+  //   Only roles with the SUPERUSER attribute may change the SUPERUSER attribute.
+  //   Only roles with the BYPASSRLS attribute may change the BYPASSRLS attribute.
+  //
+  // On a local cluster nobody noticed, because there the migrator is a real
+  // superuser. Cloud SQL has no real superuser to offer — its default user is a
+  // member of `cloudsqlsuperuser`, which carries CREATEROLE and CREATEDB and
+  // neither of these — so the first statement of the first deploy would have
+  // failed and no migration would ever have been applied.
+  //
+  // Nothing is given up. `CREATE ROLE` without the keywords already produces a
+  // role with rolsuper = false and rolbypassrls = false, so the attributes are
+  // right the moment the role exists; the ALTER only ever RE-stated them. What
+  // it genuinely guarded against was somebody granting them later, and a read
+  // catches that just as well — while also catching it on a cluster where we
+  // could never have written it. `assertTenantWall` makes the same check again
+  // at every boot of the API and the worker.
   await sql.unsafe(
-    `ALTER ROLE bib_app WITH LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE PASSWORD '${appPassword.replace(/'/g, "''")}'`,
+    `ALTER ROLE bib_app WITH LOGIN NOCREATEDB NOCREATEROLE PASSWORD '${appPassword.replace(/'/g, "''")}'`,
   );
+  const [attributes] = await sql<{ rolsuper: boolean; rolbypassrls: boolean }[]>`
+    SELECT rolsuper, rolbypassrls FROM pg_roles WHERE rolname = 'bib_app'
+  `;
+  if (attributes === undefined) {
+    throw new Error(
+      "bib_app does not exist immediately after it was created. Something else is altering roles " +
+        "on this cluster while the migration runs.",
+    );
+  }
+  if (attributes.rolsuper || attributes.rolbypassrls) {
+    const held = [
+      attributes.rolsuper ? "SUPERUSER" : null,
+      attributes.rolbypassrls ? "BYPASSRLS" : null,
+    ]
+      .filter((v): v is string => v !== null)
+      .join(" and ");
+    throw new Error(
+      `bib_app holds ${held}, and the tenant wall depends on it holding neither: a role that ` +
+        `bypasses row-level security reads every firm's data through every policy in this ` +
+        `database. Revoke with: ALTER ROLE bib_app WITH NOSUPERUSER NOBYPASSRLS; (a superuser ` +
+        `must run it — on Cloud SQL, that means support, so prefer dropping and recreating the role).`,
+    );
+  }
+  // BOTH roles, and bib_app is not optional on managed Postgres.
+  //
+  // 0042 ends with `ALTER DEFAULT PRIVILEGES FOR ROLE bib_app IN SCHEMA pgboss`,
+  // and PostgreSQL allows that only to a member of bib_app. A superuser is a
+  // member of everything implicitly, so on a developer's cluster this grant was
+  // invisible — the migration simply worked. The migrator on Cloud SQL is not a
+  // superuser, so without this line 0042 fails with
+  // "permission denied to change default privileges" after 0001-0041 have
+  // already been applied, which is the worst place to stop: a half-migrated
+  // database that the next run cannot repair on its own.
   await sql.unsafe(`GRANT bib_owner TO CURRENT_USER`);
+  await sql.unsafe(`GRANT bib_app TO CURRENT_USER`);
 }
 
 main().catch((err: unknown) => {
