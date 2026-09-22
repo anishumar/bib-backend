@@ -29,6 +29,7 @@
   },
   "dependencies": {
     "@fontsource/noto-sans": "^5.3.0",
+    "@google-cloud/storage": "^8.2.0",
     "@hono/node-server": "^1.13.7",
     "@hono/swagger-ui": "^0.5.2",
     "@hono/zod-openapi": "^0.19.10",
