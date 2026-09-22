@@ -23,9 +23,30 @@
 # Verify the BiB backend end to end. Needs: the API on :8080, a migrated DB.
 set -u
 API=${API:-http://localhost:8080}
-KEY=local-dev-internal-key-not-for-any-real-environment
+# OVERRIDABLE, like API above. This default is the .env.example key, which
+# validateServer refuses in any production-like environment — so against a
+# deployed instance the whole walk would 401 on its first provisioning call
+# with nothing explaining why. Pass the real one:
+#   API=https://bib-api-xxxx.run.app KEY=$(gcloud secrets versions access latest \
+#     --secret=bib-internal-keys | python3 -c 'import json,sys;print(json.load(sys.stdin)[0]["key"])') \
+#   npm run smoke
+KEY=${KEY:-local-dev-internal-key-not-for-any-real-environment}
 H='content-type: application/json'
 A="authorization: Bearer $KEY"
+# THE SECOND KEY, and it is not optional against anything public.
+#
+# validateServer REFUSES a production-like boot where one client holds
+# credential.set alongside other capabilities, because those three calls —
+# create a user, grant them partner, set their password — are a complete
+# escalation path behind one key. So a real deployment necessarily has TWO,
+# and this walk sets a password on every persona it creates.
+#
+# Defaulting to $KEY keeps a local run working with the single all-capability
+# dev key. Against a deployed environment, pass both:
+#   CRED_KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
+#     | python3 -c 'import json,sys;print([c["key"] for c in json.load(sys.stdin) if "credential.set" in c["capabilities"]][0])')
+CRED_KEY=${CRED_KEY:-$KEY}
+AC="authorization: Bearer $CRED_KEY"
 # The scratch directory for this run's cookie jars and captured responses.
 #
 # `mktemp -d` returns a POSIX path (/tmp/tmp.XXXX). Bash understands it; on
@@ -107,7 +128,7 @@ for spec in "partner:STAFF:true" "associate:STAFF:false" "client:CLIENT_PORTAL:f
   echo "$U" > $J/$R.id
   curl -s -o /dev/null -XPOST $API/internal/v1/memberships -H "$H" -H "$A" \
     -d "{\"tenantId\":\"$T\",\"userId\":\"$U\",\"audience\":\"$AUD\",\"role\":\"$ROLE\",\"commercialVisibility\":$VIS}"
-  curl -s -o /dev/null -XPUT $API/internal/v1/users/$U/password -H "$H" -H "$A" -d '{"password":"correct horse battery staple"}'
+  curl -s -o /dev/null -XPUT $API/internal/v1/users/$U/password -H "$H" -H "$AC" -d '{"password":"correct horse battery staple"}'
   curl -s -c $J/$R.txt -o /dev/null -XPOST $API/api/v1/auth/login -H "$H" -d "{\"email\":\"$R-$S@example.com\",\"password\":\"correct horse battery staple\"}"
 done
 echo "  (seeded firm ${T:0:8}… with partner, associate, client contact)"
