@@ -1,0 +1,243 @@
+# The global external Application Load Balancer, the custom domains, and the
+# certificate.
+#
+# THIS IS WHERE var.api_domain AND var.app_domain BECOME REAL, and it is worth
+# saying once, here, what depends on them being right:
+#
+#   * the API's BIB_CORS_ORIGINS is https://app_domain and nothing else, and the
+#     browser silently discards every response if it disagrees;
+#   * the frontend image's NEXT_PUBLIC_API_BASE_URL is https://api_domain, baked
+#     in at build time and compiled into the page's connect-src, so a mismatch
+#     blocks every call before it leaves the browser;
+#   * BIB_TRUSTED_PROXY_HOPS = 1 counts exactly the balancer built below.
+#
+# Those three facts are the single source of truth for two variables. Changing a
+# domain is a Terraform apply, a frontend rebuild and a DNS change, in that
+# order, and skipping the middle one produces a product where signing in works
+# and nothing else does.
+
+resource "google_compute_global_address" "lb" {
+  name         = "bib-lb-${local.env}"
+  project      = var.project_id
+  address_type = "EXTERNAL"
+  ip_version   = "IPV4"
+
+  # THE DNS RECORDS ARE NOT MANAGED HERE. This configuration does not create a
+  # Cloud DNS zone, because the zone for a firm's own domain is very often not
+  # in this project and quite often not at Google at all. outputs.tf prints this
+  # address; two A records point at it by hand. Taking ownership of somebody
+  # else's apex zone to save two records is not a trade worth making.
+
+  depends_on = [google_project_service.enabled]
+}
+
+# ── Serverless NEGs ──────────────────────────────────────────────────────────
+#
+# A serverless network endpoint group is how a Cloud Run service joins a load
+# balancer: it is not a set of IP addresses, it is a pointer to the service by
+# name in a region. That is why nothing here mentions ports or health checks —
+# Cloud Run reports its own health, and a backend service in front of a
+# serverless NEG neither needs nor accepts one.
+
+resource "google_compute_region_network_endpoint_group" "api" {
+  name                  = "bib-api-neg"
+  project               = var.project_id
+  region                = var.region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {
+    service = google_cloud_run_v2_service.api.name
+  }
+}
+
+resource "google_compute_region_network_endpoint_group" "frontend" {
+  name                  = "bib-frontend-neg"
+  project               = var.project_id
+  region                = var.region
+  network_endpoint_type = "SERVERLESS"
+
+  cloud_run {
+    service = google_cloud_run_v2_service.frontend.name
+  }
+}
+
+# ── Backend services ─────────────────────────────────────────────────────────
+
+resource "google_compute_backend_service" "api" {
+  name                  = "bib-api-backend"
+  project               = var.project_id
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  protocol              = "HTTPS"
+
+  backend {
+    group = google_compute_region_network_endpoint_group.api.id
+  }
+
+  # NO CDN on the API, and this is a correctness setting rather than a cost one.
+  # Every interesting response this API gives is scoped to a session — the four
+  # scoping gates in CLAUDE.md are all per-caller — so a shared cache in front
+  # of it is a mechanism for handing one firm's data to another. Enabling it
+  # would also make BIB_TRUSTED_PROXY_HOPS = 1 wrong, because the CDN is a
+  # second hop and the rate limiter would start reading the attacker-written
+  # left of X-Forwarded-For.
+  enable_cdn = false
+
+  log_config {
+    enable      = true
+    sample_rate = 1.0
+  }
+
+  # Long enough for the slowest legitimate request, which matches the API
+  # service's own 300s timeout. A balancer timeout shorter than the backend's
+  # produces a 502 for a request that was going to succeed.
+  timeout_sec = 300
+}
+
+resource "google_compute_backend_service" "frontend" {
+  name                  = "bib-frontend-backend"
+  project               = var.project_id
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+  protocol              = "HTTPS"
+
+  backend {
+    group = google_compute_region_network_endpoint_group.frontend.id
+  }
+
+  # Also off, and for a narrower reason: the App Router serves authenticated
+  # pages from the same origin as static assets, and turning on a shared cache
+  # without a per-route policy is how one client's rendered portal page is
+  # served to the next visitor.
+  enable_cdn = false
+
+  log_config {
+    enable      = true
+    sample_rate = 1.0
+  }
+
+  timeout_sec = 60
+}
+
+# ── Routing ──────────────────────────────────────────────────────────────────
+
+resource "google_compute_url_map" "https" {
+  name            = "bib-https"
+  project         = var.project_id
+  default_service = google_compute_backend_service.frontend.id
+
+  host_rule {
+    hosts        = [var.api_domain]
+    path_matcher = "api"
+  }
+
+  path_matcher {
+    name            = "api"
+    default_service = google_compute_backend_service.api.id
+  }
+
+  host_rule {
+    hosts        = [var.app_domain]
+    path_matcher = "app"
+  }
+
+  path_matcher {
+    name            = "app"
+    default_service = google_compute_backend_service.frontend.id
+  }
+
+  # The DEFAULT is the frontend rather than the API, deliberately. A request
+  # arriving with an unexpected Host — a scanner, a stale DNS entry, somebody
+  # typing the load balancer's IP — should land on a web page, not on an API
+  # that will answer it with a JSON error describing its own shape.
+}
+
+resource "google_compute_managed_ssl_certificate" "bib" {
+  project = var.project_id
+
+  # The name carries a hash of the domains, and create_before_destroy goes with
+  # it. A managed certificate's domain list is immutable, so changing a domain
+  # replaces the certificate — and a plain replace would delete the certificate
+  # the live HTTPS proxy is still using before its successor exists, which is a
+  # TLS outage rather than a change. Encoding the domains in the name makes the
+  # replacement a new resource that can be created first.
+  name = "bib-cert-${substr(sha256(join(",", [var.api_domain, var.app_domain])), 0, 8)}"
+
+  managed {
+    domains = [var.api_domain, var.app_domain]
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+
+  # PROVISIONING TAKES UP TO ABOUT AN HOUR AND REQUIRES DNS TO ALREADY POINT AT
+  # THE ADDRESS ABOVE. Google validates a managed certificate by resolving each
+  # domain to this balancer, so the first apply finishes with a certificate in
+  # PROVISIONING and the site unreachable over HTTPS until the A records are in
+  # place and validation completes. That is expected and is written into the
+  # bootstrap order in README.md rather than discovered.
+}
+
+resource "google_compute_target_https_proxy" "bib" {
+  name             = "bib-https-proxy"
+  project          = var.project_id
+  url_map          = google_compute_url_map.https.id
+  ssl_certificates = [google_compute_managed_ssl_certificate.bib.id]
+
+  # TLS 1.2 and above, modern ciphers. The session cookie is Secure — the boot
+  # gate refuses to start production with BIB_SESSION_COOKIE_SECURE=false,
+  # because "without Secure the session cookie travels over plain http and
+  # anything on the path can read it and become that user" — and a policy that
+  # still negotiated TLS 1.0 would be the same argument with an extra step.
+  ssl_policy = google_compute_ssl_policy.modern.id
+}
+
+resource "google_compute_ssl_policy" "modern" {
+  name            = "bib-modern-tls"
+  project         = var.project_id
+  profile         = "MODERN"
+  min_tls_version = "TLS_1_2"
+}
+
+resource "google_compute_global_forwarding_rule" "https" {
+  name                  = "bib-https-rule"
+  project               = var.project_id
+  target                = google_compute_target_https_proxy.bib.id
+  ip_address            = google_compute_global_address.lb.id
+  port_range            = "443"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+}
+
+# ── Port 80 exists only to redirect ──────────────────────────────────────────
+#
+# Not for convenience. A session cookie marked Secure is never sent over plain
+# http, so a user who reaches the product on port 80 does not get a degraded
+# experience — they get one where signing in appears to succeed and then does
+# not persist. A 301 to https before anything else runs is the only honest
+# answer, and serving nothing at all on port 80 would leave that user with a
+# connection refused they would read as the product being down.
+
+resource "google_compute_url_map" "http_redirect" {
+  name    = "bib-http-redirect"
+  project = var.project_id
+
+  default_url_redirect {
+    https_redirect         = true
+    redirect_response_code = "MOVED_PERMANENTLY_DEFAULT"
+    strip_query            = false
+  }
+}
+
+resource "google_compute_target_http_proxy" "redirect" {
+  name    = "bib-http-proxy"
+  project = var.project_id
+  url_map = google_compute_url_map.http_redirect.id
+}
+
+resource "google_compute_global_forwarding_rule" "http" {
+  name                  = "bib-http-rule"
+  project               = var.project_id
+  target                = google_compute_target_http_proxy.redirect.id
+  ip_address            = google_compute_global_address.lb.id
+  port_range            = "80"
+  load_balancing_scheme = "EXTERNAL_MANAGED"
+}

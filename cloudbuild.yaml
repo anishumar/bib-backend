@@ -1,0 +1,239 @@
+# The deploy, as one file, in the one order that is safe.
+#
+#   gcloud builds submit --config cloudbuild.yaml \
+#     --substitutions=_COMMIT_SHA=$(git rev-parse HEAD)
+#
+# `.github/workflows/deploy.yml` runs exactly that line and nothing else, so
+# there is ONE definition of what a deploy does. Two of them — a Cloud Build
+# config and a set of gcloud steps in a workflow — is two implementations of
+# the same order, and the one that drifts is the one nobody runs from a laptop
+# until the afternoon GitHub is down.
+#
+# ── ONE IMAGE, THREE ENTRYPOINTS ─────────────────────────────────────────────
+#
+# `tsup` emits dist/cmd/server.js, dist/cmd/worker.js and dist/cmd/migrate.js
+# from one compile. They ship as ONE image, selected by the container's command,
+# because a migrate image built separately can be built from a different commit
+# than the code it is migrating for — and the failure that produces is a schema
+# that matches neither the old revision nor the new one.
+#
+# ── WHY MIGRATE RUNS FIRST, TO COMPLETION, AND KILLS THE DEPLOY IF IT FAILS ──
+#
+# Not a general principle. This codebase makes it specific, and the two halves
+# fail very differently:
+#
+# The BENIGN half is a new revision ahead of its migrations. `cmd/server.ts` and
+# `cmd/worker.ts` both run `assertTenantWall` and `assertLedgerAppendOnly` at
+# boot and `process.exit(1)` when either fails, so the api does not serve wrong
+# data — it crash-loops, Cloud Run keeps traffic on the previous revision, and
+# an operator sees a deploy that will not go green. Bad afternoon, no damage.
+#
+# The MALIGNANT half is the reverse order on a schema change. `bib_app` is
+# NOBYPASSRLS and 78 migrations have granted it exactly the privileges each
+# table needs, so code that reaches a table whose policy or grant has not been
+# created yet does not read empty — it raises an RLS violation that surfaces as
+# a 500. Several of this product's writes are at-least-once sweeps, so they
+# retry, at whatever cadence BIB_WORKER_*_CRON says, against a wall that is not
+# there yet.
+#
+# And there is no way back: migrations here are immutable once applied and fixed
+# forward with a new number (CLAUDE.md), so a half-deployed schema has no down
+# path. Running migrate first, alone, with the build dead if it fails, is the
+# only order where a bad migration costs one red pipeline instead of a rollback
+# that cannot be performed.
+#
+# Re-running it is safe by construction: `cmd/migrate.ts` applies one file per
+# transaction in lexicographic order and records each in
+# `tenancy.schema_migrations`, so a partially-applied deploy is not a state that
+# exists — a failed file rolls back and every file before it stays applied.
+#
+# ── WHAT THIS FILE DOES NOT TOUCH ────────────────────────────────────────────
+#
+# Environment variables and secrets. Every `gcloud run … deploy/update` below
+# passes `--image` and nothing else, so the service's configuration is whatever
+# Terraform last applied and a deploy cannot quietly change it. The consequence
+# for Terraform is real and belongs in its code rather than in a habit: the
+# image field must be exempt from drift detection, or the next `terraform apply`
+# will roll production back to whatever SHA is written in the .tf file.
+#
+# The FRONTEND is not built here either, and that is structural: `bib-frontend`
+# is a separate git repository, so its source is not in the tarball
+# `gcloud builds submit` uploads from this one. It deploys from its own
+# workflow; `docs/deploy/runbook.md` has the exact build and deploy commands,
+# including the build arg that must be right before `next build` runs.
+
+substitutions:
+  # No default, deliberately — see the first step. An image tagged from an
+  # unknown commit is one nobody can roll back to on purpose.
+  _COMMIT_SHA: ""
+  _REGION: asia-south1
+  _AR_REPOSITORY: bib
+  _IMAGE_NAME: bib-backend
+  _MIGRATE_JOB: bib-migrate
+  _API_SERVICE: bib-api
+  _WORKER_POOL: bib-worker
+
+options:
+  # A build running as a dedicated service account cannot write to the legacy
+  # logs bucket, and Cloud Build fails the build rather than the step when it
+  # tries. Logs go to Cloud Logging, which is where the runbook points anyway.
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+# Twenty minutes covers an npm ci, a full tsup build and a migration set that
+# has to take a lock. It is a ceiling on a WEDGED build, not a target: the
+# migrate step below has its own, much tighter, reason to finish.
+timeout: 1200s
+
+steps:
+  # ── 1. Refuse to build an untagged image ────────────────────────────────────
+  - id: require-commit-sha
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [ -z "${_COMMIT_SHA}" ]; then
+          echo "_COMMIT_SHA is empty. Every image this pipeline pushes is tagged with the" >&2
+          echo "commit it was built from, because 'which code is running in production' is" >&2
+          echo "answered by reading that tag off the live revision and by nothing else." >&2
+          echo "Pass it:" >&2
+          echo "  gcloud builds submit --config cloudbuild.yaml \\" >&2
+          echo "    --substitutions=_COMMIT_SHA=\$(git rev-parse HEAD)" >&2
+          exit 1
+        fi
+
+  # ── 2. Build ────────────────────────────────────────────────────────────────
+  # The Dockerfile is the container workstream's and lives beside this file. It
+  # must produce an image carrying dist/, migrations/ (cmd/migrate.ts resolves
+  # them relative to its own location) and production node_modules, with no
+  # ENTRYPOINT that fixes one of the three commands.
+  - id: build
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - --file=Dockerfile
+      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA}
+      - --build-arg=COMMIT_SHA=${_COMMIT_SHA}
+      - .
+
+  # ── 3. Push ─────────────────────────────────────────────────────────────────
+  # Pushed in its own step rather than through the top-level `images:` field,
+  # which pushes only AFTER every step has run — and the migrate job three steps
+  # down has to pull this image. ONE tag, and no `:latest`: a moving tag in a
+  # deployment record turns "what was running on the 14th" into a guess.
+  - id: push
+    name: gcr.io/cloud-builders/docker
+    args:
+      - push
+      - ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA}
+
+  # ── 4. Migrate, and prove it ────────────────────────────────────────────────
+  #
+  # `gcloud run jobs execute --wait` is documented to "wait until the execution
+  # has completed running before exiting" and says NOTHING about its exit code
+  # reflecting whether the execution succeeded. A pipeline that trusts it goes
+  # green over a failed migration and then rolls out the code that needs it —
+  # which is the malignant order in this file's header, reached by accident.
+  # So the execution is read back and the counts are checked.
+  #
+  # `--max-retries 0` is set on the same call that sets the image: the Cloud Run
+  # default is 3, and a migration that failed on a constraint violation will
+  # fail the same way three times, twenty minutes apart, burying the real error
+  # under two identical copies of itself.
+  - id: migrate
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+
+        gcloud run jobs update ${_MIGRATE_JOB} \
+          --region=${_REGION} \
+          --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA} \
+          --max-retries=0
+
+        # `--wait` is still passed: without it gcloud returns the moment the
+        # execution STARTS, and the checks below would read a job that has not
+        # done anything yet. It is the blocking that is wanted here, not the
+        # exit code.
+        execution=$$(gcloud run jobs execute ${_MIGRATE_JOB} \
+          --region=${_REGION} \
+          --wait \
+          --format='value(metadata.name)' || true)
+
+        # An execution that could not even be created leaves nothing to read, so
+        # fall back to the newest one for this job rather than reporting success
+        # by having nothing to check.
+        if [ -z "$$execution" ]; then
+          execution=$$(gcloud run jobs executions list \
+            --job=${_MIGRATE_JOB} \
+            --region=${_REGION} \
+            --sort-by=~metadata.creationTimestamp \
+            --limit=1 \
+            --format='value(metadata.name)')
+        fi
+        if [ -z "$$execution" ]; then
+          echo "The migrate job ${_MIGRATE_JOB} produced no execution at all in ${_REGION}." >&2
+          echo "That is a job that does not exist or could not start, not a migration that" >&2
+          echo "failed: check 'gcloud run jobs describe ${_MIGRATE_JOB} --region=${_REGION}'." >&2
+          exit 1
+        fi
+
+        succeeded=$$(gcloud run jobs executions describe "$$execution" \
+          --region=${_REGION} --format='value(status.succeededCount)')
+        failed=$$(gcloud run jobs executions describe "$$execution" \
+          --region=${_REGION} --format='value(status.failedCount)')
+        # gcloud prints an empty string for a count that is zero, so read the
+        # absent value as 0 rather than letting the comparison below fail on it.
+        succeeded=$${succeeded:-0}
+        failed=$${failed:-0}
+
+        if [ "$$failed" != "0" ] || [ "$$succeeded" != "1" ]; then
+          echo "Migration execution $$execution did not complete: succeeded=$$succeeded," >&2
+          echo "failed=$$failed, and exactly one succeeded task is what a one-task job owes." >&2
+          echo "The migration that threw is the last line the execution printed. Read it in" >&2
+          echo "Cloud Logging, filtered on resource.type=cloud_run_job and" >&2
+          echo "run.googleapis.com/execution_name=$$execution — or open the Logs tab of the" >&2
+          echo "${_MIGRATE_JOB} job in the console, which applies that filter for you." >&2
+          echo "Nothing has been rolled out. The previous revisions are still serving." >&2
+          exit 1
+        fi
+        echo "migrate ok: $$execution"
+
+  # ── 5. The api ──────────────────────────────────────────────────────────────
+  # `--image` alone. Cloud Run resolves the tag to a digest when the revision is
+  # created, so the revision is immutable even though the tag is a name.
+  - id: deploy-api
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - deploy
+      - ${_API_SERVICE}
+      - --region=${_REGION}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA}
+
+  # ── 6. The worker ───────────────────────────────────────────────────────────
+  #
+  # A worker pool rather than a service, because `cmd/worker.ts` is not a
+  # webhook and says so in its own header: it holds pg-boss and five internal
+  # cron schedules, has no URL and must not scale on requests.
+  #
+  # It rolls AFTER the api on purpose. Both processes pass the same boot gate,
+  # so both fail the same way on a bad configuration — but the api fails where
+  # somebody is watching a deploy, while a worker that crash-loops is silent
+  # until a sweep does not run. Learning it from the half that shouts is worth
+  # the thirty seconds.
+  - id: deploy-worker
+    name: gcr.io/google.com/cloudsdktool/cloud-sdk:slim
+    entrypoint: gcloud
+    args:
+      - run
+      - worker-pools
+      - deploy
+      - ${_WORKER_POOL}
+      - --region=${_REGION}
+      - --image=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA}

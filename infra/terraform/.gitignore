@@ -1,0 +1,21 @@
+# Downloaded providers. 240 MB, rebuilt by `terraform init` from
+# .terraform.lock.hcl, and specific to the machine's OS and architecture.
+.terraform/
+
+# SAVED PLANS. Not merely large: a plan is the RESOLVED configuration, so it
+# contains every variable value the run would apply — including anything read
+# from a secret. Never commit one.
+*.tfplan
+
+# State never lives here anyway (versions.tf configures a GCS backend), but a
+# local run with -backend=false writes these, and state is the one file that
+# holds real infrastructure values in plaintext.
+*.tfstate
+*.tfstate.*
+crash.log
+
+# Kept deliberately:
+#   .terraform.lock.hcl  — pins provider versions; committing it is the point
+#   qa.tfvars            — environment SHAPE (sizing, ingress, SameSite), no
+#                          credentials. Every secret is a Secret Manager
+#                          reference, never a value. See secrets.tf.

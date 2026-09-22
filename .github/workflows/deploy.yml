@@ -1,0 +1,174 @@
+name: deploy
+
+# Production, and only production. The user's decision: ONE environment, no qa,
+# no uat, no staging — so there is no environment input, no branch matrix and
+# nothing to pick wrong at 6pm on a Friday.
+#
+# ── WHY THIS IS A SEPARATE FILE FROM ci.yml ──────────────────────────────────
+#
+# ci.yml is the gate and runs on every push and every pull request. This runs on
+# main only and pushes images at a customer. Folding the second into the first
+# would mean either a deploy step that has to ask which event it is on, or a PR
+# workflow holding deploy credentials — and the whole point of the Workload
+# Identity Federation setup below is that the credential is minted for this
+# workflow, on this branch, and cannot be used from anywhere else.
+#
+# WHAT ci.yml SHOULD GAIN, and this file cannot add because it does not own it:
+#
+#   * `npm run test:integration`, against a `services: postgres:17` container
+#     with `npm run migrate` run first. Those are the tests that prove the
+#     tenant wall — bib_app is NOBYPASSRLS, RLS is on, the ledger is
+#     append-only, every tenant-scoped foreign key carries its tenant — and
+#     they have never run in CI. They cannot run in `npm run check` because
+#     they need a real database; they can run in a job beside it.
+#   * A `docker build` of the Dockerfile on pull requests, pushing nothing. A
+#     Dockerfile that stopped building is otherwise discovered by this workflow,
+#     on main, after merge.
+#
+# ── THE CREDENTIAL ───────────────────────────────────────────────────────────
+#
+# Workload Identity Federation, never a service-account key. google-github-
+# actions/auth recommends it, new GCP organizations disable key creation by
+# default (`iam.disableServiceAccountKeyCreation`), and the practical difference
+# is that a JSON key in a repository secret is a password that works from
+# anywhere forever, while the token minted below lasts an hour and is bound to
+# this repository and this workflow.
+#
+# Nothing here is a secret, which is why every value is a `vars` and not a
+# `secrets`. A workload identity provider resource name and a service account
+# email are public identifiers; what makes them usable is the trust policy on
+# the pool, and that lives in Terraform.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # One deploy at a time, and NEVER cancel one that is already running.
+  # `cancel-in-progress: true` is the usual setting and it is wrong here: a run
+  # cancelled between `gcloud run jobs execute` and the check that reads the
+  # execution back leaves a migration that is still applying, with nothing
+  # watching it and the next run starting behind it.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ── The gate, again, deliberately ──────────────────────────────────────────
+  #
+  # ci.yml already runs `npm run check` on this same push. GitHub starts the two
+  # workflows in parallel and orders them not at all, so a deploy that trusted
+  # ci.yml would be racing it — and would win on a fast check and a slow build
+  # about as often as it lost. Running it here costs three minutes and makes
+  # "the gate passed on the commit that was deployed" a fact rather than a
+  # likelihood.
+  gate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # 22, for ci.yml's reason: Node 20 left maintenance in April 2026 and
+          # pg-boss requires >=22.12. This must not drift from package.json
+          # engines, .nvmrc or tsup's `target: node22`.
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+
+  deploy:
+    needs: gate
+    runs-on: ubuntu-latest
+    # The GitHub environment carries the vars below and is where a required
+    # reviewer goes if this product ever wants one. It is not a second
+    # deployment target — there is one of those, and this is it.
+    environment: production
+    permissions:
+      contents: read
+      # The OIDC token google-github-actions/auth exchanges. Without it the
+      # auth step fails with a message about a missing ID token, which reads
+      # like a credential problem and is a permissions one.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      # ONE command, and everything it does is in cloudbuild.yaml: build, push,
+      # run the migrate job and check that it actually succeeded, then roll the
+      # api and the worker. The order — and the argument for it — lives there so
+      # that running the deploy by hand from a laptop runs the same order rather
+      # than a second copy of it that has to be kept in step.
+      #
+      # `--substitutions` passes the commit explicitly. Cloud Build populates
+      # $COMMIT_SHA only for builds started by its own repository triggers, and
+      # this one is started by `builds submit`, where it is empty — which is
+      # exactly the case the config's first step refuses.
+      - name: Build, migrate and deploy
+        env:
+          # `global` is Cloud Build's own name for the unregionalised build
+          # pool and is what an unset GCP_BUILD_REGION should mean — an empty
+          # --region is rejected by gcloud, and failing a deploy over a
+          # variable nobody has had a reason to set yet is a bad trade.
+          BUILD_REGION: ${{ vars.GCP_BUILD_REGION || 'global' }}
+          RUN_REGION: ${{ vars.GCP_REGION }}
+          AR_REPOSITORY: ${{ vars.GCP_ARTIFACT_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          # An UNSET repository variable must not become an EMPTY substitution.
+          # `--substitutions=_REGION=` overrides cloudbuild.yaml's default with
+          # nothing, and the image name that falls out of it is
+          # `-docker.pkg.dev/project//bib-backend:sha` — which fails at the push
+          # with a message about an invalid reference, several minutes and one
+          # whole build after the variable that was actually wrong. So the
+          # defaults live in cloudbuild.yaml, in one place, and only values that
+          # were actually set are passed here.
+          subs="_COMMIT_SHA=${{ github.sha }}"
+          if [ -n "$RUN_REGION" ]; then subs="$subs,_REGION=$RUN_REGION"; fi
+          if [ -n "$AR_REPOSITORY" ]; then subs="$subs,_AR_REPOSITORY=$AR_REPOSITORY"; fi
+          gcloud builds submit \
+            --config=cloudbuild.yaml \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --region="$BUILD_REGION" \
+            --substitutions="$subs"
+
+      # A revision Cloud Run accepted is not a revision that is serving: both
+      # processes run validateServer and the two boot checks and exit(1) on any
+      # of them, and a crash-looping new revision leaves the OLD one serving
+      # traffic while `gcloud run deploy` has already returned success. So the
+      # deploy reports what is actually receiving requests, by name and by
+      # image, and the runbook's boot-gate section is what to read when that
+      # image is not the one this run just pushed.
+      - name: Report what is serving
+        env:
+          RUN_REGION: ${{ vars.GCP_REGION }}
+        run: |
+          set -euo pipefail
+          echo "### Serving after this deploy" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$RUN_REGION" ]; then
+            echo "GCP_REGION is not set, so cloudbuild.yaml's default region was used and" \
+              "this step cannot name the revision. Set the variable." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          gcloud run services describe bib-api \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --region="$RUN_REGION" \
+            --format='value(status.traffic.revisionName, status.traffic.percent)' \
+            >> "$GITHUB_STEP_SUMMARY"
+          gcloud run services describe bib-api \
+            --project="${{ vars.GCP_PROJECT_ID }}" \
+            --region="$RUN_REGION" \
+            --format='value(spec.template.spec.containers[0].image)' \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

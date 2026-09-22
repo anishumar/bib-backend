@@ -1,0 +1,38 @@
+# An ALLOW-list, not a deny-list: exclude everything, then name the handful of
+# things the build actually reads.
+#
+# The two failure modes are not symmetric. A deny-list that forgets an entry
+# ships that entry — and what is sitting in this directory right now is a live
+# .env (real connection strings, real internal keys) and .data/, which holds
+# real customer documents the filesystem blob store wrote. Either one baked into
+# a layer is a disclosure that survives every later fix, because layers are
+# immutable and get pushed to a registry. An allow-list that forgets an entry
+# breaks the build, loudly, on the first push. Loud beats silent.
+#
+# .env deserves its own sentence. config.ts does `import "dotenv/config"`, so a
+# .env present in the image is not inert — dotenv fills in any key the
+# environment did not set. A deployment that forgot BIB_APP_DATABASE_URL would
+# not fail to boot; it would boot cleanly against whatever a developer's laptop
+# was pointed at.
+*
+
+# Build inputs, in the order the Dockerfile copies them.
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsup.config.ts
+!src
+
+# Runtime input. migrate reads these .up.sql files from disk when the job runs,
+# so unlike everything else under src/ they are not compiled into anything and
+# the image has to carry them. 1.1 MB, and the one large directory here that
+# has to survive.
+!migrations
+
+# Re-excluded from inside the allowed trees. `*` above only matches top-level
+# entries, so anything nested under src/ or migrations/ needs naming again.
+# Nothing secret lives there today; these are here so that nothing has to.
+**/.DS_Store
+**/node_modules
+**/.env
+**/.env.*

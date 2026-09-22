@@ -1,0 +1,6 @@
+# Copy to backend.hcl and pass with:  terraform init -backend-config=backend.hcl
+#
+# The bucket is NOT created by this configuration — a bucket that holds the
+# state cannot be created by the configuration whose state it holds. README.md
+# has the two gcloud commands that create it.
+bucket = "REPLACE-ME-bib-tfstate"

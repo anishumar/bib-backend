@@ -1,0 +1,39 @@
+# Copy to terraform.tfvars and fill in. NOTHING SECRET GOES IN THIS FILE — every
+# credential is a Secret Manager version written with gcloud (see README.md).
+# terraform.tfvars is gitignored for that reason and the reason is that a file
+# which is usually safe to commit is one somebody eventually commits.
+
+project_id = "REPLACE-ME"
+region     = "asia-south1"
+
+# The two domains. Both must be decided before the frontend image is built:
+# NEXT_PUBLIC_API_BASE_URL is baked in at build time, and the API's CORS origin
+# is exactly the frontend's. See the header of lb.tf.
+api_domain = "api.example.com"
+app_domain = "app.example.com"
+
+# Mail. The From address must be at a domain the firm's clients recognise — a
+# portal invite arrives unasked and reads as phishing otherwise.
+mail_from      = "no-reply@example.com"
+mail_from_name = "Example & Co"
+smtp_host      = "smtp.example.com"
+smtp_user      = "no-reply@example.com"
+smtp_port      = 587
+smtp_secure    = false
+
+# DocuSign. The account id and the two base URIs are addresses, not credentials;
+# the integration key, the user id and the private key are Secret Manager
+# entries.
+docusign_account_id     = "REPLACE-ME"
+docusign_oauth_base_uri = "https://account.docusign.com"
+
+# Where alerts go. A distribution list, not a person.
+alert_email = "ops@example.com"
+
+# Images. Leave these at their placeholder defaults for the FIRST apply — the
+# registry does not exist yet, so nothing has been pushed. The deploy pipeline
+# passes digests afterwards.
+# api_image      = "asia-south1-docker.pkg.dev/PROJECT/bib/api@sha256:..."
+# worker_image   = "asia-south1-docker.pkg.dev/PROJECT/bib/worker@sha256:..."
+# migrate_image  = "asia-south1-docker.pkg.dev/PROJECT/bib/migrate@sha256:..."
+# frontend_image = "asia-south1-docker.pkg.dev/PROJECT/bib/frontend@sha256:..."
