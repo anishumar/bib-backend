@@ -36,6 +36,10 @@ import type { KeyObject } from "node:crypto";
 import type { Clock } from "../../platform/clock";
 import { systemClock } from "../../platform/clock";
 import type { Logger } from "../../platform/log";
+// Every fault on the way to DocuSign is one named kind, so the API answers 502
+// with the provider's own words instead of 500 "internal error". Imports point
+// inward: infrastructure may name a domain error, and this is why.
+import { SignerUnavailable } from "../../domain/engagement/errors";
 import type {
   DocusignCustomField,
   DocusignEnvelope,
@@ -169,7 +173,7 @@ export class JwtGrantDocusign implements DocusignTransport {
     // says so; a throw here would surface as a 500 and tell them nothing.
     if (reply.status === 404) return null;
     if (reply.status !== 200) {
-      throw new Error(
+      throw new SignerUnavailable(
         `DocuSign refused to read envelope ${envelopeId} in account ${account.accountId}: ` +
           `HTTP ${reply.status}. ${detail(reply.body)} Check that BIB_DOCUSIGN_ACCOUNT_ID names ` +
           `the account the envelope was raised in, and that the user named by ` +
@@ -214,7 +218,7 @@ export class JwtGrantDocusign implements DocusignTransport {
     const payload = record(parseJson(reply.body, "the DocuSign token response"));
     const value = payload === null ? null : text(payload["access_token"]);
     if (value === null) {
-      throw new Error(
+      throw new SignerUnavailable(
         `DocuSign returned HTTP 200 from /oauth/token with no access_token in it. Body: ` +
           `${clip(reply.body)}`,
       );
@@ -280,7 +284,7 @@ export class JwtGrantDocusign implements DocusignTransport {
     const described = payload === null ? null : text(payload["error_description"]);
 
     if (code === "consent_required") {
-      return new Error(
+      return new SignerUnavailable(
         `DocuSign has not been granted consent to act as the user in ` +
           `BIB_DOCUSIGN_USER_ID=${this.connection.userId}. This is a one-off step and no ` +
           `configuration change will substitute for it: a DocuSign administrator must open ` +
@@ -289,7 +293,7 @@ export class JwtGrantDocusign implements DocusignTransport {
       );
     }
     if (code === "invalid_client") {
-      return new Error(
+      return new SignerUnavailable(
         `DocuSign does not recognise BIB_DOCUSIGN_INTEGRATION_KEY=` +
           `${this.connection.integrationKey} at ${this.connection.oauthBase}. An integration ` +
           `key exists in ONE environment: keys made in the developer sandbox work only against ` +
@@ -298,7 +302,7 @@ export class JwtGrantDocusign implements DocusignTransport {
       );
     }
     if (code === "invalid_grant") {
-      return new Error(
+      return new SignerUnavailable(
         `DocuSign rejected the JWT assertion (invalid_grant). The usual causes, in the order ` +
           `they happen: BIB_DOCUSIGN_USER_ID=${this.connection.userId} is an email address ` +
           `rather than the user's GUID; BIB_DOCUSIGN_PRIVATE_KEY is not the key whose public ` +
@@ -307,7 +311,7 @@ export class JwtGrantDocusign implements DocusignTransport {
           `${described ?? ""}`.trim(),
       );
     }
-    return new Error(
+    return new SignerUnavailable(
       `DocuSign refused to issue a token: HTTP ${reply.status}${code === null ? "" : ` ${code}`}. ` +
         `${described ?? clip(reply.body)} Check BIB_DOCUSIGN_OAUTH_BASE, ` +
         `BIB_DOCUSIGN_INTEGRATION_KEY, BIB_DOCUSIGN_USER_ID and BIB_DOCUSIGN_PRIVATE_KEY.`,
@@ -347,7 +351,7 @@ export class JwtGrantDocusign implements DocusignTransport {
       url: `${trimSlash(this.connection.oauthBase)}/oauth/userinfo`,
     });
     if (reply.status !== 200) {
-      throw new Error(
+      throw new SignerUnavailable(
         `DocuSign refused to describe the user in BIB_DOCUSIGN_USER_ID=` +
           `${this.connection.userId}: HTTP ${reply.status}. ${detail(reply.body)}`,
       );
@@ -364,7 +368,7 @@ export class JwtGrantDocusign implements DocusignTransport {
     });
 
     if (usable.length === 0) {
-      throw new Error(
+      throw new SignerUnavailable(
         `DocuSign reports no accounts for the user in BIB_DOCUSIGN_USER_ID=` +
           `${this.connection.userId}. Either the GUID names nobody, or that user has been ` +
           `removed from every account.`,
@@ -381,7 +385,7 @@ export class JwtGrantDocusign implements DocusignTransport {
         ? (usable.find((a) => a.isDefault) ?? usable[0])
         : usable.find((a) => a.accountId === wanted);
     if (chosen === undefined) {
-      throw new Error(
+      throw new SignerUnavailable(
         `BIB_DOCUSIGN_ACCOUNT_ID=${wanted ?? ""} is not an account the user in ` +
           `BIB_DOCUSIGN_USER_ID=${this.connection.userId} belongs to. Valid: ` +
           `${usable.map((a) => a.accountId).join(", ")}`,
@@ -444,7 +448,7 @@ function readPrivateKey(pem: string): KeyObject {
   try {
     return createPrivateKey(restored.trim());
   } catch (err) {
-    throw new Error(
+    throw new SignerUnavailable(
       `BIB_DOCUSIGN_PRIVATE_KEY is not a readable RSA private key: ` +
         `${err instanceof Error ? err.message : String(err)}. Valid: the PEM DocuSign generated ` +
         `with the integration key's RSA keypair, beginning "-----BEGIN RSA PRIVATE KEY-----" ` +
@@ -475,7 +479,7 @@ function parseJson(body: string, what: string): unknown {
   try {
     return JSON.parse(body);
   } catch {
-    throw new Error(
+    throw new SignerUnavailable(
       `DocuSign answered ${what} with something that is not JSON. First bytes: ${clip(body)}`,
     );
   }
@@ -484,11 +488,11 @@ function parseJson(body: string, what: string): unknown {
 function readEnvelope(payload: unknown, requestedId: string): DocusignEnvelope {
   const rec = record(payload);
   if (rec === null) {
-    throw new Error(`DocuSign answered the envelope ${requestedId} read with a non-object body`);
+    throw new SignerUnavailable(`DocuSign answered the envelope ${requestedId} read with a non-object body`);
   }
   const status = text(rec["status"]);
   if (status === null) {
-    throw new Error(
+    throw new SignerUnavailable(
       `DocuSign answered the envelope ${requestedId} read with no status on it, so there is ` +
         `nothing to decide from`,
     );

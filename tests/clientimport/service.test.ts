@@ -101,6 +101,7 @@ function harness(dir: FakeImportDirectory = directory()): Harness {
     portalMembers,
     ids: new FakeIds(),
     clock: new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)),
+    timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
     events,
   });
   return { service, store, dir, parties, assignments, letters, portalInvites, portalAccess, portalMembers, events };
@@ -471,5 +472,46 @@ describe("which clauses a migrated letter carries", () => {
     expect(clausesFor(clauses, "IN")).toEqual(["in", "any"]);
     expect(clausesFor(clauses, "US")).toEqual(["any", "us"]);
     expect(clausesFor(clauses, "AE")).toEqual(["any"]);
+  });
+});
+
+describe("the day an import is dated, and which signer takes its letters", () => {
+  it("signs every letter as MIGRATED, so a DocuSign firm can still bring its paper letters in", async () => {
+    const h = harness();
+    const staged = await stageAll(h);
+    await h.service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
+    const signatures = h.letters.of("sign").map((c) => c.input as { migrated?: boolean });
+    expect(signatures.length).toBeGreaterThan(0);
+    for (const s of signatures) expect(s.migrated).toBe(true);
+  });
+
+  it("dates 'Migrated on' by the firm's own calendar day, not the server's UTC day", async () => {
+    // 19:49 UTC on the 22nd is 01:19 on the 23rd in India. The first deployed
+    // import wrote the 22nd into every letter's reference.
+    const store = new FakeClientImportStore().withUser(ADMIN, "admin@firm.test", "Sid");
+    const letters = new RecordingLetterWriter();
+    const service = new ClientImportService({
+      store,
+      sheets: new FakeSheetReader(),
+      directory: directory(),
+      parties: new RecordingPartyWriter(),
+      assignments: new RecordingAssignmentWriter(),
+      letters,
+      portalInvites: new RecordingPortalInviteWriter(),
+      portalAccess: new RecordingPortalAccessGranter(),
+      portalMembers: new FakePortalMemberFinder(),
+      ids: new FakeIds(),
+      clock: new FakeClock(new Date("2026-09-22T19:49:00.000Z")),
+      timeZones: { timeZoneFor: () => Promise.resolve("Asia/Kolkata") },
+      events: new RecordingEventSink(),
+    });
+    const staged = await service.stage(
+      { tenantId: TENANT, stagedBy: ADMIN, clients: upload(CLIENTS, "clients.csv"), people: upload(PEOPLE, "people.csv"), engagements: upload(ENGAGEMENTS, "engagements.csv") },
+      ACTOR,
+    );
+    await service.confirm({ tenantId: TENANT, importId: staged.id, confirmedBy: ADMIN }, ACTOR);
+    const refs = letters.of("sign").map((c) => (c.input as { reference: string }).reference);
+    expect(refs.length).toBeGreaterThan(0);
+    for (const r of refs) expect(r.startsWith("Migrated on 2026-09-23")).toBe(true);
   });
 });

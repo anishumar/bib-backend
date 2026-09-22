@@ -754,6 +754,12 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DATE":
       case "QUOTE_JURISDICTION_UNCLEAR":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // The e-signature provider itself failed (token refused, account not
+      // discoverable, malformed answer). This server is healthy and the letter
+      // is fine, so it is neither VALIDATION nor INTERNAL — it is the same
+      // answer the document store gives when its bucket is unreachable.
+      case "SIGNER_UNAVAILABLE":
+        return { status: 502, code: "UPSTREAM_FAILURE", message: err.message, reason: err.code };
       case "LETTER_NOT_FOUND":
       case "LETTER_LINE_NOT_FOUND":
       case "CLAUSE_NOT_FOUND":

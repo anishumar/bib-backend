@@ -42,6 +42,7 @@ export type EngagementErrorCode =
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_NOT_ACTIVE"
   | "SIGNATURE_INCOMPLETE"
+  | "SIGNER_UNAVAILABLE"
   | "QUOTE_NOT_FOUND"
   | "QUOTE_NOT_ACCEPTED"
   | "QUOTE_HAS_NO_LINES"
@@ -360,6 +361,20 @@ export class SignatureIncomplete extends EngagementError {
       `A signature needs ${missing}. A letter recorded as signed with any of it missing is one ` +
         `nobody can verify, which is worse than an unsigned one because it claims otherwise.`,
     );
+  }
+}
+
+/**
+ * The e-signature provider could not be asked. Not a SignatureIncomplete: the
+ * person may have typed a perfectly good envelope id, and nothing about this
+ * letter is wrong. The system BEHIND this one (a token refused, an account
+ * that would not discover, a non-JSON answer) is what failed, and the caller
+ * is told that in the provider's own words rather than "internal error".
+ * The message is the detail verbatim; this class only names its kind.
+ */
+export class SignerUnavailable extends EngagementError {
+  constructor(detail: string) {
+    super("SIGNER_UNAVAILABLE", detail);
   }
 }
 

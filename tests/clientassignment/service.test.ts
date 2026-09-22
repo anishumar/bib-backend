@@ -51,7 +51,7 @@ const ACTOR = SYSTEM_ACTOR;
 
 const TODAY = "2026-08-30";
 
-function svc(): {
+function svc(clock = new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)), timeZone = "UTC"): {
   service: ClientAssignmentService;
   assignments: FakeClientAssignmentRepo;
   events: RecordingEventSink;
@@ -91,7 +91,8 @@ function svc(): {
       staff,
       axes,
       ids: new FakeIds(),
-      clock: new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)),
+      clock,
+      timeZones: { timeZoneFor: () => Promise.resolve(timeZone) },
       events,
     }),
     assignments,
@@ -696,5 +697,19 @@ describe("one person's book", () => {
     );
     await service.end({ tenantId: TENANT, assignmentId: row.id, validTo: "2026-06-01" }, ACTOR);
     expect(await service.clientsOf(TENANT, ANITA)).toHaveLength(0);
+  });
+});
+
+describe("'from today' is the firm's day", () => {
+  it("starts an assignment on the firm's calendar day, not the server's UTC day", async () => {
+    // 20:00 UTC is already tomorrow in India.
+    const { service } = svc(new FakeClock(new Date(`${TODAY}T20:00:00.000Z`)), "Asia/Kolkata");
+    const row = await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "key_manager", userId: ANITA },
+      ACTOR,
+    );
+    const next = new Date(`${TODAY}T00:00:00.000Z`);
+    next.setUTCDate(next.getUTCDate() + 1);
+    expect(row.validFrom).toBe(next.toISOString().slice(0, 10));
   });
 });

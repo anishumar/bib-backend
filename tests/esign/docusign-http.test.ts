@@ -23,6 +23,8 @@ import {
   json,
   refusal,
 } from "./fakes";
+import { SignerUnavailable } from "../../src/domain/engagement/errors";
+import { mapError } from "../../src/api/domainerr";
 
 // One keypair for the file. Generating RSA is the slowest thing in this suite
 // and nothing here depends on the key being fresh.
@@ -407,5 +409,22 @@ describe("the fetch adapter", () => {
     // The timeout is the whole reason this wrapper is not a bare `fetch`: this
     // runs inside a request somebody at the firm is waiting on.
     expect(new GlobalFetchHttp(5000)).toBeInstanceOf(GlobalFetchHttp);
+  });
+});
+
+describe("a fault on the way to DocuSign is named, not a 500", () => {
+  it("throws SignerUnavailable, which the API maps to 502 UPSTREAM_FAILURE with the provider's own words", async () => {
+    const http = new FakeHttp().withDefaults();
+    http.on("/oauth/token", () => json(503, { error: "server_error" }));
+    const t = transport(http);
+    const err = await t.docusign.envelope(ENVELOPE).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SignerUnavailable);
+    const mapped = mapError(err);
+    expect(mapped.status).toBe(502);
+    expect(mapped.code).toBe("UPSTREAM_FAILURE");
+    expect(mapped.message).toContain("503");
   });
 });

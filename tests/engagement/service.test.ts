@@ -1761,3 +1761,38 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
     await expect(h.service.send(TENANT, out.letter.id, ACTOR)).rejects.toBeInstanceOf(NoClauses);
   });
 });
+
+describe("a letter signed before the firm used this product", () => {
+  // The book import records letters the client signed on paper years ago. The
+  // configured provider may be DocuSign, which demands an envelope that never
+  // existed; `migrated` routes the signature to the attested signer instead,
+  // and the configured provider is not asked at all.
+  it("goes to the migration signer, and the configured provider is never asked", async () => {
+    const s = setup();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    s.esign.failNext = true; // would blow up if it were asked
+
+    const { letter, engagements } = await s.service.sign(
+      { tenantId: TENANT, letterId: id, signedByName: "Priya", reference: "Migrated on 2026-09-23", migrated: true },
+      ACTOR,
+    );
+    expect(letter.status).toBe("signed");
+    expect(engagements.length).toBeGreaterThan(0);
+    expect(s.migrationSigner.signed.map((x) => x.letterId)).toEqual([id]);
+    expect(s.esign.signed).toHaveLength(0);
+    expect(s.esign.failNext).toBe(true);
+    expect(letter.signatureMethod).toBe(s.migrationSigner.method);
+  });
+
+  it("is not the default: an ordinary signature still goes to the configured provider", async () => {
+    const s = setup();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.esign.signed.map((x) => x.letterId)).toEqual([id]);
+    expect(s.migrationSigner.signed).toHaveLength(0);
+  });
+});

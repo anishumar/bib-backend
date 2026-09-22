@@ -168,6 +168,7 @@ const service = new EngagementService({
   // about `crm.engagement_letter`.
   quotes: new FakeAcceptedQuotes(),
   esign: new AttestedSigner(),
+  migrationSigner: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
   ids: systemIds,
   clock: systemClock,

@@ -20,6 +20,7 @@
 // this went wrong" is the entire reason these rows are dated.
 import type { Clock } from "../../platform/clock";
 import type { IdGen } from "../../platform/ids";
+import { dayInZone } from "../../domain/scheduler/zone";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type {
@@ -67,6 +68,9 @@ export interface Deps {
   readonly axes: AssignableAxisDirectory;
   readonly ids: IdGen;
   readonly clock: Clock;
+  /** The firm's own zone: an assignment "from today" begins on the firm's
+   *  day, not the server's UTC day. Structural: `PostgresFirmTimeZone`. */
+  readonly timeZones: { timeZoneFor(tenantId: string): Promise<string> };
   readonly events: EventSink;
 }
 
@@ -117,7 +121,7 @@ export class ClientAssignmentService {
     clientPartyId: string,
     onDate?: string,
   ): Promise<AccountTeamView> {
-    const on = onDate ?? this.today();
+    const on = onDate ?? (await this.today(tenantId));
     if (!isIsoDate(on)) throw new InvalidAssignmentDates(on, null);
 
     // The client is resolved first so an unknown id is a 404 rather than an
@@ -152,7 +156,7 @@ export class ClientAssignmentService {
     userId: string,
     onDate?: string,
   ): Promise<readonly OwnedClient[]> {
-    const on = onDate ?? this.today();
+    const on = onDate ?? (await this.today(tenantId));
     if (!isIsoDate(on)) throw new InvalidAssignmentDates(on, null);
     return this.deps.assignments.listForUser(tenantId, userId, on);
   }
@@ -176,7 +180,7 @@ export class ClientAssignmentService {
     }
     const role: AssignmentRole = input.role;
 
-    const validFrom = input.validFrom ?? this.today();
+    const validFrom = input.validFrom ?? (await this.today(input.tenantId));
     if (!isValidDateRange(validFrom, null)) throw new InvalidAssignmentDates(validFrom, null);
 
     const client = await this.requireClient(input.tenantId, input.clientPartyId);
@@ -260,7 +264,7 @@ export class ClientAssignmentService {
     if (!existing) throw new AssignmentNotFound(input.assignmentId);
     if (existing.validTo !== null) throw new AssignmentAlreadyEnded(existing.validTo);
 
-    const validTo = input.validTo ?? this.today();
+    const validTo = input.validTo ?? (await this.today(input.tenantId));
     if (!isValidDateRange(existing.validFrom, validTo)) {
       throw new InvalidAssignmentDates(existing.validFrom, validTo);
     }
@@ -289,8 +293,10 @@ export class ClientAssignmentService {
 
   // ── internals ──────────────────────────────────────────────────────────────
 
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** The firm's calendar day, never the server's UTC day. */
+  private async today(tenantId: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
   }
 
   private async requireClient(

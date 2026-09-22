@@ -345,9 +345,23 @@ export interface LetterWriter {
       readonly letterId: string;
       readonly signedByName: string;
       readonly reference?: string | undefined;
+      /** Always true here: every letter the import signs was signed on paper
+       *  before this product existed, so it goes to the attested signer
+       *  whatever the firm's e-signature provider is. */
+      readonly migrated: true;
     },
     actor: Actor,
   ): Promise<{ readonly engagements: readonly { readonly engagement: { readonly id: string } }[] }>;
+}
+
+/**
+ * The firm's own time zone, so "today" in an import is the firm's calendar day
+ * and not the server's UTC day — which is yesterday in India until 05:30, and
+ * was written into "Migrated on <date>" on the first deployed import.
+ * Structural: satisfied by `PostgresFirmTimeZone`.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 // ── The portal — a THIRD kind of write, and deliberately not through a

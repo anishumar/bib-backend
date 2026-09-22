@@ -112,6 +112,15 @@ export interface Deps {
    *  the composition root. */
   readonly firm: FirmSignatory;
   readonly esign: ESignProvider;
+  /**
+   * The signer for a letter the client signed BEFORE this product existed —
+   * the book import's migrated letters (T6.12). Always the attested signer,
+   * whatever `esign` is: a paper letter in a Drive folder has no DocuSign
+   * envelope and never will, and the person confirming the import is
+   * attesting exactly what the attested signer records. It is reached only
+   * through `SignInput.migrated`, which only the import sets.
+   */
+  readonly migrationSigner: ESignProvider;
   /** The accepted quote a letter is written up from (T3.5b). Satisfied
    *  structurally by `ProposalService`, so neither use case imports the other. */
   readonly quotes: AcceptedQuoteDirectory;
@@ -261,6 +270,14 @@ export interface SignInput {
   readonly signedByTitle?: string | undefined;
   /** The provider's own reference, or the firm's for a paper copy. */
   readonly reference?: string | undefined;
+  /**
+   * True for a letter signed before the firm used this product, recorded now
+   * from the firm's own records. Routes the signature through
+   * `migrationSigner` (attested) rather than the configured provider, which
+   * would otherwise demand an envelope that never existed. Set by the book
+   * import only; the HTTP route does not expose it.
+   */
+  readonly migrated?: boolean | undefined;
 }
 
 export class EngagementService {
@@ -881,7 +898,8 @@ export class EngagementService {
     const contentHash = this.deps.hasher.hash(
       canonicalContent({ letter, lines, clauses }),
     );
-    const provider = await this.deps.esign.sign({
+    const signer = input.migrated === true ? this.deps.migrationSigner : this.deps.esign;
+    const provider = await signer.sign({
       tenantId: input.tenantId,
       letterId: input.letterId,
       signedByName: input.signedByName.trim(),
@@ -936,7 +954,7 @@ export class EngagementService {
         signedAt: at,
         signedByName: input.signedByName.trim(),
         signedByTitle: blankToNull(input.signedByTitle),
-        signatureMethod: this.deps.esign.method,
+        signatureMethod: signer.method,
         signatureReference: provider.reference,
         signedContentHash: contentHash,
       },
@@ -956,7 +974,7 @@ export class EngagementService {
         ref: letter.ref,
         partyId: letter.partyId,
         issuingEntityPartyId: letter.issuingEntityPartyId,
-        signatureMethod: this.deps.esign.method,
+        signatureMethod: signer.method,
         contentHash,
         engagementCount: result.engagements.length,
         advanceRequired: letter.advanceRequired,

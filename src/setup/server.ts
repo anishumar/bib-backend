@@ -709,6 +709,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     axes: serviceAxisRepository,
     ids: systemIds,
     clock: systemClock,
+    timeZones: new PostgresFirmTimeZone(pools.app),
     events: ledger,
   });
 
@@ -1010,6 +1011,13 @@ export function wire(cfg: Config, log: Logger): Wired {
     // actually quote" rather than two reads that can drift.
     quotes: proposal,
     esign: esignFor(cfg, log),
+    // Letters signed BEFORE the firm used this product arrive through the book
+    // import and are attested by the person confirming it. Always the attested
+    // signer, even when `esign` is DocuSign: a paper letter has no envelope.
+    // `validateServer` refuses `attested` as THE provider in production-like
+    // environments; this is the one deliberate exception, reached only via
+    // `SignInput.migrated`, which the HTTP route does not expose.
+    migrationSigner: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),
     ids: systemIds,
     clock: systemClock,
@@ -1029,6 +1037,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     parties: party,
     assignments: clientAssignments,
     letters: engagement,
+    timeZones: new PostgresFirmTimeZone(pools.app),
     portalInvites: portalInvite,
     portalAccess,
     portalMembers: portalMemberFinder,

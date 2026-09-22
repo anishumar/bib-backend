@@ -32,6 +32,8 @@ import type { Actor } from "../../domain/ledger/model";
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { EventSink } from "../ledger/ports";
+import { dayInZone } from "../../domain/scheduler/zone";
+import type { FirmTimeZone } from "./ports";
 import {
   CLIENT_SHEET_MARKER,
   ENGAGEMENT_SHEET_MARKER,
@@ -106,6 +108,7 @@ export interface Deps {
   readonly portalMembers: PortalMemberFinder;
   readonly ids: IdGen;
   readonly clock: Clock;
+  readonly timeZones: FirmTimeZone;
   readonly events: EventSink;
 }
 
@@ -236,7 +239,7 @@ export class ClientImportService {
   // ── What the firm already has, in one read ──────────────────────────────
 
   private async snapshot(tenantId: string, rows: ImportRows): Promise<ImportSnapshot> {
-    const today = this.today();
+    const today = await this.today(tenantId);
     const wantedIdentifiers = rows.clients.flatMap((c) =>
       c.identifiers.map((i) => ({ type: i.type, value: normalizeIdentifier(i.type, i.value) })),
     );
@@ -321,7 +324,7 @@ export class ClientImportService {
     actor: Actor,
     confirmedBy: string,
   ): Promise<ImportOutcome> {
-    const today = this.today();
+    const today = await this.today(tenantId);
     const firm = await this.deps.directory.firm(tenantId);
     const clauses = await this.deps.directory.clauses(tenantId);
     const outcomeRows: OutcomeRow[] = [];
@@ -698,6 +701,7 @@ export class ClientImportService {
           letterId: letter.id,
           signedByName: plan.signatory,
           reference: `Migrated on ${today}${basis.length > 0 ? `, ${basis.join("; ")}` : ""}`,
+          migrated: true,
         },
         actor,
       );
@@ -793,8 +797,10 @@ export class ClientImportService {
     }
   }
 
-  private today(): IsoDate {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** The firm's calendar day, never the server's UTC day. */
+  private async today(tenantId: string): Promise<IsoDate> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
   }
 }
 

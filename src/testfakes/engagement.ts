@@ -572,6 +572,7 @@ export function makeEngagementFakes(): Deps & {
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
   esign: FakeSigner;
+  migrationSigner: FakeSigner;
   /** The accepted quotes on file, so a test can put one there — the concrete
    *  type rather than the port, like `letters` and `library` above, because a
    *  test needs `add()` and a cast at every call site is a worse way to say so. */
@@ -599,6 +600,10 @@ export function makeEngagementFakes(): Deps & {
     firm: new FakeFirmSignatory(),
     quotes: new FakeAcceptedQuotes(),
     esign: new FakeSigner(),
+    // Migrated letters: the same attested fake, so a test that sets
+    // `migrated: true` sees the signature go through and can tell which
+    // signer took it by `method`.
+    migrationSigner: new FakeSigner(),
     hasher: new FakeHasher(),
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
