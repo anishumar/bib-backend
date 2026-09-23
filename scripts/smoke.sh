@@ -793,9 +793,12 @@ import sys, json
 k = json.load(sys.stdin).keys()
 print(",".join(sorted(f for f in ("partyId","leadId","fxRate","discountApprovedBy") if f in k)) or "none")')
 chk "the client sees none of the firm's insides" none "$INSIDES"
+# The count is SITTINGS, not requests (VIEW_DEDUPE_MINUTES): a second open
+# inside half an hour is a refresh or a link preview, and must not read to a
+# partner as the client coming back.
 curl -s -o /dev/null -XPOST $API/api/v1/proposals/shared -H "$H" -d "$GOODTOK"
 VIEWS=$(curl -s -b $J/partner.txt $API/api/v1/proposals/$PRID | python3 -c 'import sys,json;print(json.load(sys.stdin)["proposal"]["viewCount"])' 2>/dev/null || echo "?")
-chk "every open is counted"                2 "$VIEWS"
+chk "two opens in one sitting count once"  1 "$VIEWS"
 
 echo; echo "── 13. Engagement letters — the document that creates obligations ──"
 # Terms come from the clause library, the registry's fourth kind. A clause is

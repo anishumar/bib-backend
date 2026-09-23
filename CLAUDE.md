@@ -828,8 +828,9 @@ unknown and withdrawn all answer the same way so it cannot enumerate anything. A
 entry to that set needs a paragraph as good as this one — `tests/api/auth-coverage.test.ts`
 holds the build red until somebody writes it.
 
-A view is **a count and one event**: `view_count` rises on every open, `proposal.viewed` is
-recorded once. Per-view analytics does not belong in an append-only log.
+A view is **a count and one event**: `view_count` counts SITTINGS — an open inside
+`VIEW_DEDUPE_MINUTES` (30) of the last one does not advance it, because the link is public and
+refreshes and link previews are not a client reading — and `proposal.viewed` is recorded once. Per-view analytics does not belong in an append-only log.
 
 ## Engagement letters — the document that creates obligations (T2.3)
 
