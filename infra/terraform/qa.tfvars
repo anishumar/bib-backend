@@ -40,9 +40,13 @@ mail_from_name = "10xcrm"
 # The password is NOT here. It is a Secret Manager version (bib-smtp-password),
 # written with gcloud after the apply — this file is committed.
 
-# DocuSign boots and cannot sign — see secrets.tf. Engagement letters are
-# unsignable in this environment by design until the send path exists.
-docusign_account_id = "00000000-0000-0000-0000-000000000000"
+# DocuSign's DEVELOPER account (0080): letters are sent and signed for real,
+# on DocuSign's demo platform (envelopes are stamped "demonstration document").
+# The integration key, user id and RSA key are Secret Manager versions, written
+# with gcloud — never here. An integration key works against exactly one OAuth
+# host, so a demo key needs account-d.
+docusign_account_id     = "fc0bd293-3898-4778-97ef-883d89a79960"
+docusign_oauth_base_uri = "https://account-d.docusign.com"
 
 # A tainted Cloud Run resource cannot be replaced while this is on, and in a QA
 # environment a failed revision is something to recreate, not to protect.
