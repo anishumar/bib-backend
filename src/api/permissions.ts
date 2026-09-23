@@ -419,6 +419,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
 
   // THE DELIVERY ENGINE (T2.6). `party:read`, the same permission the pipeline

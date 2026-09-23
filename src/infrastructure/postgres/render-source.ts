@@ -24,6 +24,7 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
 import type { RenderableDocument, Section } from "../../domain/render/model";
+import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
 import { isoInstant, utcDayOf } from "./instant";
 
@@ -46,6 +47,7 @@ interface LetterRow {
   signed_by_name: string | null;
   signed_by_title: string | null;
   firm_signatory_title: string | null;
+  firm_signatory_name: string | null;
   created_on: string;
   client_name: string;
   entity_name: string;
@@ -178,11 +180,16 @@ export class PostgresRenderSource implements RenderSource {
                ${db.unsafe(utcDayOf("el.created_at", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
-               le.jurisdiction     AS entity_jurisdiction
+               le.jurisdiction     AS entity_jurisdiction,
+               -- The firm's signatory BY NAME, a read-time join like the
+               -- ledger's actor: the letter snapshots the account and the
+               -- capacity, and an erased account stops resolving.
+               signatory.display_name AS firm_signatory_name
         FROM crm.engagement_letter el
         JOIN core.party client ON client.id = el.party_id
         JOIN core.party entity ON entity.id = el.issuing_entity_party_id
         LEFT JOIN core.legal_entity le ON le.party_id = entity.id
+        LEFT JOIN tenancy.user_account signatory ON signatory.id = el.firm_signatory_user_id
         WHERE el.id = ${letterId}
       `;
       if (!row) return null;
@@ -278,6 +285,34 @@ export class PostgresRenderSource implements RenderSource {
         footer: row.signed_by_name === null
           ? row.entity_name
           : `${row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
+        // BOTH halves of the signature block. The firm's prints once the
+        // letter has gone out carrying it (0022 snapshots it at send); the
+        // client's always prints, with the anchors DocuSign places its fields
+        // on — invisible on paper, and harmless on a letter signed in ink.
+        signatures: [
+          ...(row.firm_signatory_title === null
+            ? []
+            : [
+                {
+                  heading: `For ${row.entity_name}`,
+                  lines: [row.firm_signatory_name ?? "", row.firm_signatory_title].filter(
+                    (l) => l.trim() !== "",
+                  ),
+                  signAnchor: null,
+                  dateAnchor: null,
+                },
+              ]),
+          {
+            heading: `Accepted for and on behalf of ${row.client_name}`,
+            lines: [
+              row.signed_by_name === null
+                ? "Name and capacity"
+                : `${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
+            ],
+            signAnchor: CLIENT_SIGN_ANCHOR,
+            dateAnchor: CLIENT_DATE_ANCHOR,
+          },
+        ],
         logo: await this.logo(db, tenantId, letterId, "engagement_letter"),
         issuedOn: row.issued_on ?? row.created_on,
       };

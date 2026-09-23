@@ -640,7 +640,10 @@ for c in governing-law-in confidentiality limitation termination; do
   CV=$(as partner "$API/api/v1/config/clause/$c" | pick "next(v['id'] for v in d['versions'] if v['version']==1)")
   asp partner "$API/api/v1/engagement-letters/$LETTER/clauses" -d "{\"clauseVersionId\":\"$CV\"}" | ok
 done
-asp partner "$API/api/v1/engagement-letters/$LETTER/send" | ok
+# The signer is asked for only when the deployment signs through DocuSign; the
+# demo runs `attested`, which ignores it.
+asp partner "$API/api/v1/engagement-letters/$LETTER/send" \
+  -d '{"signer":{"name":"Priya Menon","email":"priya.menon@example.com"}}' | ok
 asp partner "$API/api/v1/engagement-letters/$LETTER/signature" \
   -d "{\"signedByName\":\"Priya Menon\",\"signedByTitle\":\"Director\",\"signedOn\":\"$LAST_MONTH\"}" | ok
 step "signed a month ago — engagements fanned out, one per line"

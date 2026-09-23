@@ -692,7 +692,7 @@ export class ClientImportService {
       }
 
       step = "marking it sent";
-      await this.deps.letters.send(tenantId, letter.id, actor);
+      await this.deps.letters.send(tenantId, letter.id, actor, { migrated: true });
 
       step = "recording the signature";
       const signed = await this.deps.letters.sign(

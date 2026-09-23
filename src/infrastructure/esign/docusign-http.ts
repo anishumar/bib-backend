@@ -46,6 +46,7 @@ import type {
   DocusignRecipient,
   DocusignTransport,
 } from "./docusign-signer";
+import type { DocusignEnvelopeDefinition, DocusignSendTransport } from "./docusign-dispatch";
 
 /** What this adapter needs to reach DocuSign. Mirrors `DocusignConfig` in
  *  `config/config.ts` and is declared HERE on purpose: an adapter never imports
@@ -79,15 +80,21 @@ export interface DocusignConnection {
 // socket, and the branches are where all the judgement in this file lives.
 
 export interface HttpRequest {
-  readonly method: "GET" | "POST";
+  readonly method: "GET" | "POST" | "PUT";
   readonly url: string;
   readonly headers: Readonly<Record<string, string>>;
   readonly body?: string | undefined;
+  /** Read the reply as BYTES — a PDF decoded as text is a PDF destroyed. */
+  readonly binary?: boolean | undefined;
 }
 
 export interface HttpReply {
   readonly status: number;
+  /** The reply as text. For a binary request, the bytes decoded as UTF-8 —
+   *  only meaningful for an error body, which DocuSign sends as JSON. */
   readonly body: string;
+  /** The raw bytes, present when the request asked for `binary`. */
+  readonly bytes?: Uint8Array | undefined;
 }
 
 export interface Http {
@@ -117,6 +124,10 @@ export class GlobalFetchHttp implements Http {
       ...(request.body === undefined ? {} : { body: request.body }),
       signal: AbortSignal.timeout(this.timeoutMs),
     });
+    if (request.binary === true) {
+      const bytes = new Uint8Array(await response.arrayBuffer());
+      return { status: response.status, body: new TextDecoder().decode(bytes), bytes };
+    }
     return { status: response.status, body: await response.text() };
   }
 }
@@ -136,7 +147,7 @@ const ASSERTION_LIFETIME_SECONDS = 3600;
  *  fails in a way that names neither. */
 const SCOPE = "signature impersonation";
 
-export class JwtGrantDocusign implements DocusignTransport {
+export class JwtGrantDocusign implements DocusignTransport, DocusignSendTransport {
   private readonly key: KeyObject;
 
   /** The token and when to stop believing in it. */
@@ -182,6 +193,148 @@ export class JwtGrantDocusign implements DocusignTransport {
     }
 
     return readEnvelope(parseJson(reply.body, `the envelope ${envelopeId} read`), envelopeId);
+  }
+
+  // ── Sending (0080) ─────────────────────────────────────────────────────────
+
+  async createEnvelope(
+    definition: DocusignEnvelopeDefinition,
+  ): Promise<{ readonly envelopeId: string }> {
+    const account = await this.accountOf();
+    const body = {
+      emailSubject: definition.emailSubject,
+      emailBlurb: definition.emailBlurb,
+      // `sent`, not `created`: a created envelope is a draft in somebody's
+      // DocuSign folder that the client never hears about.
+      status: "sent",
+      documents: [
+        {
+          documentId: "1",
+          name: definition.document.name,
+          fileExtension: "pdf",
+          documentBase64: definition.document.base64,
+        },
+      ],
+      recipients: {
+        signers: [
+          {
+            recipientId: "1",
+            routingOrder: "1",
+            name: definition.signer.name,
+            email: definition.signer.email,
+            tabs: {
+              // `anchorIgnoreIfNotPresent: false` makes DocuSign REFUSE an
+              // envelope whose document has no anchor, rather than send one the
+              // client has nowhere to sign on.
+              signHereTabs: [anchorTab(definition.signAnchor, "-14")],
+              dateSignedTabs: [anchorTab(definition.dateAnchor, "-2")],
+            },
+          },
+        ],
+      },
+      customFields: {
+        textCustomFields: definition.customFields.map((f) => ({
+          name: f.name,
+          value: f.value,
+          show: "false",
+          required: "false",
+        })),
+      },
+    };
+    const reply = await this.authorized({
+      method: "POST",
+      url: `${this.accountUrl(account)}/envelopes`,
+      body: JSON.stringify(body),
+    });
+    if (reply.status !== 201 && reply.status !== 200) {
+      throw new SignerUnavailable(
+        `DocuSign refused to create the envelope for ${definition.signer.email}: HTTP ` +
+          `${reply.status}. ${detail(reply.body)}`,
+      );
+    }
+    const payload = record(parseJson(reply.body, "the envelope create"));
+    const envelopeId = payload === null ? null : text(payload["envelopeId"]);
+    if (envelopeId === null) {
+      throw new SignerUnavailable(
+        `DocuSign answered the envelope create with HTTP ${reply.status} and no envelopeId. ` +
+          `Body: ${clip(reply.body)}`,
+      );
+    }
+    return { envelopeId };
+  }
+
+  async envelopesWithField(
+    name: string,
+    value: string,
+    since: string,
+  ): Promise<readonly { readonly envelopeId: string; readonly status: string }[]> {
+    const account = await this.accountOf();
+    // DocuSign requires `from_date` on every status search, and matches a
+    // custom field given as `name=value` in one parameter.
+    const query = new URLSearchParams({
+      from_date: since,
+      custom_field: `${name}=${value}`,
+    }).toString();
+    const reply = await this.authorized({
+      method: "GET",
+      url: `${this.accountUrl(account)}/envelopes?${query}`,
+    });
+    if (reply.status !== 200) {
+      throw new SignerUnavailable(
+        `DocuSign refused to search for envelopes carrying ${name}=${value}: HTTP ` +
+          `${reply.status}. ${detail(reply.body)}`,
+      );
+    }
+    const payload = record(parseJson(reply.body, "the envelope search"));
+    return (payload === null ? [] : list(payload["envelopes"])).flatMap((raw) => {
+      const envelope = record(raw);
+      if (envelope === null) return [];
+      const envelopeId = text(envelope["envelopeId"]);
+      const status = text(envelope["status"]);
+      return envelopeId === null || status === null ? [] : [{ envelopeId, status }];
+    });
+  }
+
+  async envelopeDocument(
+    envelopeId: string,
+    which: "combined" | "certificate",
+  ): Promise<Uint8Array> {
+    const account = await this.accountOf();
+    // `combined` WITHOUT the certificate: the signed letter as the client holds
+    // it. The certificate is fetched on its own so the two can be filed with
+    // different visibility — the client's copy, and the firm's audit record.
+    const path = which === "combined" ? "combined?certificate=false" : "certificate";
+    const reply = await this.authorized({
+      method: "GET",
+      url: `${this.accountUrl(account)}/envelopes/${encodeURIComponent(envelopeId)}/documents/${path}`,
+      binary: true,
+    });
+    if (reply.status !== 200 || reply.bytes === undefined || reply.bytes.byteLength === 0) {
+      throw new SignerUnavailable(
+        `DocuSign would not hand over the ${which === "combined" ? "signed letter" : "certificate of completion"} ` +
+          `for envelope ${envelopeId}: HTTP ${reply.status}. ${detail(reply.body)}`,
+      );
+    }
+    return reply.bytes;
+  }
+
+  async voidEnvelope(envelopeId: string, reason: string): Promise<void> {
+    const account = await this.accountOf();
+    const reply = await this.authorized({
+      method: "PUT",
+      url: `${this.accountUrl(account)}/envelopes/${encodeURIComponent(envelopeId)}`,
+      body: JSON.stringify({ status: "voided", voidedReason: reason }),
+    });
+    if (reply.status !== 200) {
+      throw new SignerUnavailable(
+        `DocuSign refused to void envelope ${envelopeId}, so the client could still sign it: ` +
+          `HTTP ${reply.status}. ${detail(reply.body)} Nothing was withdrawn.`,
+      );
+    }
+  }
+
+  private accountUrl(account: { accountId: string; baseUri: string }): string {
+    return `${account.baseUri}/restapi/v2.1/accounts/${encodeURIComponent(account.accountId)}`;
   }
 
   // ── The token ──────────────────────────────────────────────────────────────
@@ -413,11 +566,18 @@ export class JwtGrantDocusign implements DocusignTransport {
    * with a freshly minted token distinguishes the two, and a second 401 is a
    * real refusal that must surface.
    */
-  private async authorized(request: { method: "GET"; url: string }): Promise<HttpReply> {
-    const first = await this.http.send({
-      ...request,
-      headers: { authorization: `Bearer ${await this.accessToken()}`, accept: "application/json" },
+  private async authorized(request: {
+    method: "GET" | "POST" | "PUT";
+    url: string;
+    body?: string;
+    binary?: boolean;
+  }): Promise<HttpReply> {
+    const headers = async (): Promise<Record<string, string>> => ({
+      authorization: `Bearer ${await this.accessToken()}`,
+      accept: request.binary === true ? "application/pdf" : "application/json",
+      ...(request.body === undefined ? {} : { "content-type": "application/json" }),
     });
+    const first = await this.http.send({ ...request, headers: await headers() });
     if (first.status !== 401) return first;
 
     this.log.warn(
@@ -425,11 +585,25 @@ export class JwtGrantDocusign implements DocusignTransport {
       "docusign rejected the access token — minting a new one and retrying once",
     );
     this.token = null;
-    return this.http.send({
-      ...request,
-      headers: { authorization: `Bearer ${await this.accessToken()}`, accept: "application/json" },
-    });
+    return this.http.send({ ...request, headers: await headers() });
   }
+}
+
+/** A tab DocuSign places on the first match of `anchor`, nudged up onto the
+ *  printed line. Offsets are strings because DocuSign's JSON says so.
+ *
+ *  `pixels`, and NOT `points`: DocuSign accepts pixels, inches, mms and cms
+ *  and refuses the envelope outright on anything else ("Invalid value for
+ *  'anchorStringUnit'" — found by the first real send). Its pixel is 1/72 in,
+ *  which is a PDF point, so the offsets mean what the renderer measured. */
+function anchorTab(anchor: string, yOffset: string): Record<string, string> {
+  return {
+    anchorString: anchor,
+    anchorUnits: "pixels",
+    anchorXOffset: "0",
+    anchorYOffset: yOffset,
+    anchorIgnoreIfNotPresent: "false",
+  };
 }
 
 /**

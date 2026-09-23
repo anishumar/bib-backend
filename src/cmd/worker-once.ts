@@ -252,6 +252,34 @@ async function main(): Promise<void> {
       console.log(`  told clients about ${String(told)} upcoming filing(s)`);
     }
     console.log();
+
+    // SIGNATURES (0080). Nothing to ask when the provider sends nothing, and
+    // the line says which of the two quiet answers this is.
+    const settled = await wired.engagement.settleSignatures();
+    for (const r of settled.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: signature sweep FAILED — ${r.failure ?? ""}`);
+    }
+    for (const r of settled) {
+      for (const f of r.failed) {
+        console.log(`  ! letter ${f.letterId}: not settled — ${f.reason}`);
+      }
+    }
+    const signedNow = settled.reduce((n, r) => n + r.signed, 0);
+    const pulledNow = settled.reduce((n, r) => n + r.withdrawn, 0);
+    const stillOut = settled.reduce((n, r) => n + r.stillOut, 0);
+    if (signedNow === 0 && pulledNow === 0) {
+      console.log(
+        stillOut === 0
+          ? "  no envelope is out for signature — or the e-sign provider sends none (attested)."
+          : `  ${String(stillOut)} envelope(s) out for signature, none finished yet`,
+      );
+    } else {
+      if (signedNow > 0) console.log(`  ${String(signedNow)} letter(s) signed by the client`);
+      if (pulledNow > 0) console.log(`  ${String(pulledNow)} letter(s) withdrawn — declined or voided`);
+    }
+    const copiesNow = settled.reduce((n, r) => n + r.copiesFiled, 0);
+    if (copiesNow > 0) console.log(`  filed the signed copy and certificate for ${String(copiesNow)} letter(s)`);
+    console.log();
   } finally {
     await wired.pools.close();
   }

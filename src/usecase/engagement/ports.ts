@@ -300,6 +300,17 @@ export interface LetterRecord {
 export interface LetterView extends Omit<LetterRecord, "engagements"> {
   readonly engagements: readonly EngagementRecord[];
   /**
+   * How this letter is being signed. `provider` is the deployment's, so a
+   * DRAFT's screen knows whether sending will ask for a signer; `request` is
+   * this letter's own, once it has been sent through a provider that sends.
+   */
+  readonly signing: {
+    readonly provider: string;
+    /** True when sending raises an envelope, and therefore needs a signer. */
+    readonly sends: boolean;
+    readonly request: SignatureRequest | null;
+  };
+  /**
    * The letter's own prose — its exclusions, commercial notes and team block
    * (G1.7).
    *
@@ -589,6 +600,195 @@ export interface ESignProvider {
     readonly contentHash: string;
     readonly reference?: string | undefined;
   }): Promise<{ readonly reference: string | null }>;
+}
+
+// ── ASKING FOR A SIGNATURE, AND LEARNING THE ANSWER (0080) ─────────────────
+//
+// `ESignProvider` above VERIFIES a signature that already exists. These ports
+// are the other half, which a provider like DocuSign needs and an attested
+// signature does not: raising an envelope when the letter is sent, and finding
+// out later whether the client signed it.
+//
+// The letter stays `sent` while its envelope is out (decided 2026-09-23 — no
+// fifth state). What the state alone cannot say — which provider asked, whom,
+// and whether the asking has happened yet — is a `SignatureRequest`, read
+// beside the letter.
+
+/** How a signature request ended. `completed` signs the letter; the other two
+ *  withdraw it. */
+export type SignatureOutcome = "completed" | "declined" | "voided";
+
+/** Who the provider asks to sign. Personal data: it lives in the request row
+ *  and never in the ledger. */
+export interface SignatureSigner {
+  readonly name: string;
+  readonly email: string;
+}
+
+export interface SignatureRequest {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly provider: string;
+  readonly signer: SignatureSigner;
+  readonly requestedBy: string | null;
+  /** Null until the provider accepts an envelope. */
+  readonly envelopeId: string | null;
+  readonly raisedAt: string | null;
+  /** The provider's own words for why the last attempt failed. Null once one
+   *  succeeds. */
+  readonly lastFailure: string | null;
+  readonly attempts: number;
+  readonly outcome: SignatureOutcome | null;
+  readonly settledAt: string | null;
+  /** When the provider's signed PDF and certificate were filed in bib's own
+   *  document store. Null on a completed request means still to fetch. */
+  readonly copiesFiledAt: string | null;
+  readonly createdAt: string;
+}
+
+export interface NewSignatureRequest {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly provider: string;
+  readonly signer: SignatureSigner;
+  readonly requestedBy: string | null;
+}
+
+export interface SignatureRequestRepository {
+  /**
+   * Record whom to ask. Written BEFORE the letter is marked sent, so a letter
+   * can never be `sent` through a provider with nobody on record to ask. A
+   * second call for the same letter replaces the signer while no envelope
+   * exists — a send that failed half way and is pressed again — and changes
+   * nothing once one does.
+   */
+  open(request: NewSignatureRequest): Promise<SignatureRequest>;
+  findForLetter(tenantId: string, letterId: string): Promise<SignatureRequest | null>;
+  /**
+   * Take the right to raise the envelope. Null when there is nothing to raise
+   * (already raised, or settled) or somebody else holds a claim newer than
+   * `staleBefore`. This is what stops a double-click and the retry route from
+   * sending the client two envelopes.
+   */
+  claim(
+    tenantId: string,
+    requestId: string,
+    at: string,
+    staleBefore: string,
+  ): Promise<SignatureRequest | null>;
+  recordRaised(
+    tenantId: string,
+    requestId: string,
+    envelopeId: string,
+    at: string,
+  ): Promise<SignatureRequest>;
+  /** Releases the claim and keeps the provider's words for the letter page. */
+  recordFailure(tenantId: string, requestId: string, failure: string): Promise<SignatureRequest>;
+  /** Every raised request still waiting on the client, for the sweep. */
+  listAwaiting(tenantId: string): Promise<readonly SignatureRequest[]>;
+  settle(
+    tenantId: string,
+    requestId: string,
+    outcome: SignatureOutcome,
+    at: string,
+  ): Promise<void>;
+  /** Completed requests whose signed copies are not yet in bib's store. */
+  listUnfiled(tenantId: string): Promise<readonly SignatureRequest[]>;
+  recordCopiesFiled(tenantId: string, requestId: string, at: string): Promise<void>;
+}
+
+/** Where an envelope has got to, reduced to the answers the sweep acts on.
+ *  `missing` is the provider holding no such envelope — most likely this
+ *  deployment pointed at the wrong account — and is never acted on by the
+ *  sweep. `detail` is the provider's own status word, for logs and reports. */
+export interface EnvelopeProgress {
+  readonly state: "out" | "completed" | "declined" | "voided" | "missing";
+  readonly detail: string;
+}
+
+/**
+ * The provider, asked to SEND.
+ *
+ * Null in `Deps` when the configured provider does not send anything — an
+ * attested signature is recorded by a person after the fact, so there is no
+ * envelope to raise and nothing for a sweep to watch.
+ */
+export interface SignatureDispatch {
+  /** Must equal the `method` of the `ESignProvider` that verifies what this
+   *  raised, and is what the request row records as its provider. */
+  readonly method: string;
+  /**
+   * The envelope already raised for this letter, if the provider holds one.
+   * Asked before raising, because the reply to a create can be lost after the
+   * provider acted on it — and a retry that did not ask would email the client
+   * a second copy of the same contract.
+   */
+  findForLetter(letterId: string, since: string): Promise<string | null>;
+  raise(input: {
+    readonly letterId: string;
+    readonly ref: string;
+    readonly title: string;
+    readonly contentHash: string;
+    readonly signer: SignatureSigner;
+    readonly document: LetterDocument;
+  }): Promise<{ readonly envelopeId: string }>;
+  progress(envelopeId: string): Promise<EnvelopeProgress>;
+  /** Cancel an envelope still out, so a client cannot go on to sign a letter
+   *  the firm has withdrawn. `reason` is shown to the client by the provider. */
+  void(envelopeId: string, reason: string): Promise<void>;
+  /**
+   * The COMPLETED envelope's own documents: the signed letter as the client
+   * holds it (signature, date, the provider's stamp) and the provider's
+   * certificate of completion — its record of who opened and signed, when,
+   * from where. Both are evidence bib cannot re-create, which is why they are
+   * fetched and filed rather than left in the provider's retention policy.
+   */
+  signedCopies(
+    envelopeId: string,
+  ): Promise<{ readonly signed: LetterDocument; readonly certificate: LetterDocument }>;
+}
+
+/**
+ * Where the signed copies are filed — bib's own document store, satisfied at
+ * the composition root by the file store, so this use case never learns what
+ * a blob is. Null where no store is composed.
+ */
+export interface SignedCopyFiler {
+  file(input: {
+    readonly tenantId: string;
+    readonly letterId: string;
+    /** The client the letter binds — whose documents these are. */
+    readonly partyId: string;
+    readonly title: string;
+    /** `signed` is the client's copy and client-visible; `certificate` is the
+     *  firm's audit record and is not. */
+    readonly which: "signed" | "certificate";
+    readonly document: LetterDocument;
+  }): Promise<void>;
+}
+
+/** The letter as the client will read it. */
+export interface LetterDocument {
+  readonly bytes: Uint8Array;
+  readonly filename: string;
+}
+
+/**
+ * The letter's PDF, rendered for the envelope. Its own port so this use case
+ * never learns what a renderer is — satisfied at the composition root by the
+ * render source and the renderer T3.8 built. Null in the worker, which settles
+ * envelopes and never raises one.
+ */
+export interface LetterPdf {
+  render(tenantId: string, letterId: string): Promise<LetterDocument>;
+}
+
+/** Every firm the sweep visits. The same one-method port the other sweeps
+ *  declare beside themselves. */
+export interface SignatureTenants {
+  activeTenantIds(): Promise<readonly string[]>;
 }
 
 /** Hashing the canonical rendering. Its own port so the domain stays free of

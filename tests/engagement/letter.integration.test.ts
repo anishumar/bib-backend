@@ -19,6 +19,9 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
+import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
+import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../src/domain/render/model";
+import { PostgresSignatureRequestRepository } from "../../src/infrastructure/postgres/signature-request-repository";
 import { PostgresServiceAxisRepository } from "../../src/infrastructure/postgres/service-axis-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
@@ -170,6 +173,13 @@ const service = new EngagementService({
   esign: new AttestedSigner(),
   migrationSigner: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
+  // Attested sends nothing, so there is no envelope to raise or watch; the
+  // request table is exercised by its own integration test.
+  signatures: new PostgresSignatureRequestRepository(app),
+  dispatch: null,
+  letterPdf: null,
+  signedCopies: null,
+  tenants: { activeTenantIds: () => Promise.resolve([]) },
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -1297,5 +1307,191 @@ describe("what a client can be BILLED for (T3.5b)", () => {
 
   it("is empty for a client with nothing signed — not an error", async () => {
     expect(await letters.listBillable(tenantA, partyBId)).toEqual([]);
+  });
+});
+
+describe("a letter's signature request, in the database (0080)", () => {
+  const requests = new PostgresSignatureRequestRepository(app);
+
+  /** A SENT letter at firm A — what a request hangs off. */
+  async function sentLetter(): Promise<string> {
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — out for signature",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: gstV1,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    return letter.id;
+  }
+
+  async function opened(letterId: string) {
+    return requests.open({
+      id: crypto.randomUUID(),
+      tenantId: tenantA,
+      letterId,
+      provider: "docusign",
+      signer: { name: "Priya Menon", email: "priya@acme.example" },
+      requestedBy: null,
+    });
+  }
+
+  it("keeps one request per letter: a second open replaces the signer until an envelope exists, then changes nothing", async () => {
+    const letterId = await sentLetter();
+    const first = await opened(letterId);
+
+    const renamed = await requests.open({
+      id: crypto.randomUUID(),
+      tenantId: tenantA,
+      letterId,
+      provider: "docusign",
+      signer: { name: "P. Menon", email: "p.menon@acme.example" },
+      requestedBy: null,
+    });
+    expect(renamed.id).toBe(first.id);
+    expect(renamed.signer.email).toBe("p.menon@acme.example");
+
+    await requests.recordRaised(tenantA, first.id, crypto.randomUUID(), new Date().toISOString());
+    const after = await opened(letterId);
+    expect(after.signer.email).toBe("p.menon@acme.example");
+  });
+
+  it("lets exactly one of two racing claims win, and a stale claim be taken again", async () => {
+    const request = await opened(await sentLetter());
+    const now = new Date();
+    const at = now.toISOString();
+    const staleBefore = new Date(now.getTime() - 120_000).toISOString();
+
+    const [a, b] = await Promise.all([
+      requests.claim(tenantA, request.id, at, staleBefore),
+      requests.claim(tenantA, request.id, at, staleBefore),
+    ]);
+    expect([a, b].filter((x) => x !== null)).toHaveLength(1);
+
+    // A claim newer than the lease is honoured; one older than it is presumed dead.
+    expect(await requests.claim(tenantA, request.id, at, staleBefore)).toBeNull();
+    const later = new Date(now.getTime() + 5 * 60_000);
+    const retaken = await requests.claim(
+      tenantA,
+      request.id,
+      later.toISOString(),
+      new Date(later.getTime() - 120_000).toISOString(),
+    );
+    expect(retaken?.attempts).toBe(2);
+  });
+
+  it("releases the claim on failure and keeps the provider's words, cleared by a success", async () => {
+    const request = await opened(await sentLetter());
+    const at = new Date().toISOString();
+    await requests.claim(tenantA, request.id, at, at);
+
+    const failed = await requests.recordFailure(tenantA, request.id, "HTTP 400 INVALID_EMAIL");
+    expect(failed.lastFailure).toBe("HTTP 400 INVALID_EMAIL");
+    expect(await requests.claim(tenantA, request.id, at, at)).not.toBeNull();
+
+    const raised = await requests.recordRaised(tenantA, request.id, crypto.randomUUID(), at);
+    expect(raised.lastFailure).toBeNull();
+    expect(raised.raisedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    expect(await requests.claim(tenantA, request.id, at, new Date(Date.now() + 1e6).toISOString())).toBeNull();
+  });
+
+  it("lists only raised, unsettled requests for the sweep, and settles each once", async () => {
+    const waiting = await opened(await sentLetter());
+    const notRaised = await opened(await sentLetter());
+    await requests.recordRaised(tenantA, waiting.id, crypto.randomUUID(), new Date().toISOString());
+
+    const ids = (await requests.listAwaiting(tenantA)).map((r) => r.id);
+    expect(ids).toContain(waiting.id);
+    expect(ids).not.toContain(notRaised.id);
+
+    await requests.settle(tenantA, waiting.id, "completed", new Date().toISOString());
+    await requests.settle(tenantA, waiting.id, "declined", new Date().toISOString());
+    expect((await requests.listAwaiting(tenantA)).map((r) => r.id)).not.toContain(waiting.id);
+    expect((await requests.findForLetter(tenantA, waiting.letterId))?.outcome).toBe("completed");
+  });
+
+  it("refuses to settle an envelope that never existed, and an address that is not one", async () => {
+    const request = await opened(await sentLetter());
+    await expect(
+      owner`UPDATE crm.letter_signature_request SET outcome = 'completed', settled_at = now()
+            WHERE id = ${request.id}`,
+    ).rejects.toThrow(/settles_a_raised_one/);
+    await expect(
+      owner`UPDATE crm.letter_signature_request SET signer_email = 'Priya Menon' WHERE id = ${request.id}`,
+    ).rejects.toThrow(/signer_email_check/);
+  });
+
+  it("lists a signed request until its copies are filed, and refuses copies on anything unsigned", async () => {
+    const request = await opened(await sentLetter());
+    await requests.recordRaised(tenantA, request.id, crypto.randomUUID(), new Date().toISOString());
+    await expect(
+      owner`UPDATE crm.letter_signature_request SET copies_filed_at = now() WHERE id = ${request.id}`,
+    ).rejects.toThrow(/copies_of_a_signature/);
+
+    await requests.settle(tenantA, request.id, "completed", new Date().toISOString());
+    expect((await requests.listUnfiled(tenantA)).map((r) => r.id)).toContain(request.id);
+
+    await requests.recordCopiesFiled(tenantA, request.id, new Date().toISOString());
+    expect((await requests.listUnfiled(tenantA)).map((r) => r.id)).not.toContain(request.id);
+    expect((await requests.findForLetter(tenantA, request.letterId))?.copiesFiledAt).toMatch(/Z$/);
+  });
+
+  it("is invisible to another firm, and cannot hang off another firm's letter", async () => {
+    const letterId = await sentLetter();
+    await opened(letterId);
+
+    expect(await requests.findForLetter(tenantB, letterId)).toBeNull();
+    expect(await requests.listAwaiting(tenantB)).toEqual([]);
+    await expect(
+      requests.open({
+        id: crypto.randomUUID(),
+        tenantId: tenantB,
+        letterId,
+        provider: "docusign",
+        signer: { name: "Mallory", email: "mallory@example.test" },
+        requestedBy: null,
+      }),
+    ).rejects.toThrow(/letter_signature_request_letter_fkey/);
+  });
+});
+
+describe("the signature blocks a letter PRINTS (0080)", () => {
+  // The render source's SQL, run: the firm's signatory is a join on a GLOBAL
+  // table, and a join nobody executed is how a PDF ships with a blank name.
+  const source = new PostgresRenderSource(app, () => Promise.resolve(null));
+
+  it("prints the firm's block by NAME once sent, and the client's block on the anchors DocuSign looks for", async () => {
+    await nameTheFirmSignatory();
+    const id = await signedLetter();
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+
+    expect(described?.document.signatures).toEqual([
+      { heading: "For EL Test A LLP", lines: ["Siddharth Jain", "Director"], signAnchor: null, dateAnchor: null },
+      {
+        heading: "Accepted for and on behalf of Acme Ltd",
+        lines: ["Priya Menon"],
+        signAnchor: CLIENT_SIGN_ANCHOR,
+        dateAnchor: CLIENT_DATE_ANCHOR,
+      },
+    ]);
   });
 });

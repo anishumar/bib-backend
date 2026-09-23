@@ -49,7 +49,7 @@
 import { PDFDocument, rgb } from "pdf-lib";
 import type { PDFPage } from "pdf-lib";
 import { FontSet } from "./font-set";
-import type { RenderableDocument, Section } from "../../domain/render/model";
+import type { RenderableDocument, Section, SignatureBlock } from "../../domain/render/model";
 import { wrapParagraph } from "../../domain/render/model";
 import { UnrenderableText } from "../../domain/render/errors";
 import type { DocumentRenderer } from "../../usecase/render/ports";
@@ -74,6 +74,9 @@ const LEADING = 1.45;
 const INK = rgb(0.11, 0.12, 0.14);
 const MUTED = rgb(0.42, 0.45, 0.5);
 const RULE = rgb(0.85, 0.87, 0.9);
+/** The page colour. Used for exactly one thing: the anchors a signature
+ *  provider searches for, which must be in the text and must not be seen. */
+const PAPER = rgb(1, 1, 1);
 
 interface Cursor {
   page: PDFPage;
@@ -152,6 +155,7 @@ export class PdfLibRenderer implements DocumentRenderer {
     for (const section of doc.sections) this.drawSection(cursor, section, body, bold, pdf);
     if (doc.table !== null) this.drawTable(cursor, doc, body, bold, pdf);
     if (doc.totals.length > 0) this.drawTotals(cursor, doc, body, bold, pdf);
+    for (const block of doc.signatures ?? []) this.drawSignature(cursor, block, body, bold, pdf);
     if (doc.footer !== null) this.drawFooter(pdf, doc, body);
 
     return pdf.save();
@@ -392,6 +396,46 @@ export class PdfLibRenderer implements DocumentRenderer {
     }
   }
 
+  /**
+   * One signature block: the heading, room to sign, a line, and what goes
+   * under it. Kept on ONE page — `advance` is asked for the whole height first
+   * — because a signature line stranded at the foot of a page with its name
+   * over the break is a block nobody can tell is complete.
+   */
+  private drawSignature(
+    cursor: Cursor,
+    block: SignatureBlock,
+    body: Face,
+    bold: Face,
+    pdf: PDFDocument,
+  ): void {
+    const lineWidth = 220;
+    const under = block.lines.length + (block.dateAnchor === null ? 0 : 1);
+    this.advance(pdf, cursor, 28 + 34 + under * SIZE_BODY * LEADING);
+    cursor.y += 34 + under * SIZE_BODY * LEADING;
+
+    this.text(cursor, block.heading, { size: SIZE_BODY, font: bold });
+    this.advance(pdf, cursor, 34);
+    if (block.signAnchor !== null) {
+      this.text(cursor, block.signAnchor, { x: MARGIN_X + 2, font: body, color: PAPER });
+    }
+    cursor.page.drawLine({
+      start: { x: MARGIN_X, y: cursor.y - 4 },
+      end: { x: MARGIN_X + lineWidth, y: cursor.y - 4 },
+      thickness: 0.75,
+      color: INK,
+    });
+    for (const line of block.lines) {
+      this.advance(pdf, cursor, SIZE_BODY * LEADING);
+      this.text(cursor, line, { font: body, color: MUTED });
+    }
+    if (block.dateAnchor !== null) {
+      this.advance(pdf, cursor, SIZE_BODY * LEADING);
+      this.text(cursor, "Date", { font: body, color: MUTED });
+      this.text(cursor, block.dateAnchor, { x: MARGIN_X + 40, font: body, color: PAPER });
+    }
+  }
+
   /** Footer on EVERY page, not just the last: a page of an engagement letter
    *  that arrives on its own must still say which document it belongs to. */
   private drawFooter(pdf: PDFDocument, doc: RenderableDocument, body: Face): void {
@@ -437,4 +481,10 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
   });
   doc.totals.forEach((t) => { check(`the "${t.label}" total`, t.value); });
   check("the footer", doc.footer);
+  doc.signatures?.forEach((b) => {
+    check("a signature block's heading", b.heading);
+    b.lines.forEach((l) => { check(`the signature block "${b.heading}"`, l); });
+    check("a signature anchor", b.signAnchor);
+    check("a signature anchor", b.dateAnchor);
+  });
 }

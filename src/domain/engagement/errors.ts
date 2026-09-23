@@ -43,6 +43,8 @@ export type EngagementErrorCode =
   | "ENGAGEMENT_NOT_ACTIVE"
   | "SIGNATURE_INCOMPLETE"
   | "SIGNER_UNAVAILABLE"
+  | "SIGNATURE_REQUEST_NOT_PENDING"
+  | "ENVELOPE_ALREADY_SIGNED"
   | "QUOTE_NOT_FOUND"
   | "QUOTE_NOT_ACCEPTED"
   | "QUOTE_HAS_NO_LINES"
@@ -375,6 +377,38 @@ export class SignatureIncomplete extends EngagementError {
 export class SignerUnavailable extends EngagementError {
   constructor(detail: string) {
     super("SIGNER_UNAVAILABLE", detail);
+  }
+}
+
+/**
+ * A retry of a signature request that has nothing left to retry: the letter
+ * was never sent through a provider, or its envelope is already out.
+ * A CONFLICT rather than a validation failure — the request is well formed and
+ * what refuses it is the state the letter is in.
+ */
+export class SignatureRequestNotPending extends EngagementError {
+  constructor(letterId: string, why: string) {
+    super(
+      "SIGNATURE_REQUEST_NOT_PENDING",
+      `Letter ${JSON.stringify(letterId)} has no signature request waiting to be raised: ${why}.`,
+    );
+  }
+}
+
+/**
+ * The firm pressed withdraw on a letter the client has, in fact, already
+ * signed through the provider — the sweep has not caught up yet. Withdrawing
+ * would throw away a real signature, and a signed letter is superseded, never
+ * withdrawn.
+ */
+export class EnvelopeAlreadySigned extends EngagementError {
+  constructor(envelopeId: string) {
+    super(
+      "ENVELOPE_ALREADY_SIGNED",
+      `The client has already finished signing envelope ${envelopeId}, so this letter cannot ` +
+        `be withdrawn. It will be recorded as signed on the next signature check. To change ` +
+        `the terms now, draft a letter that supersedes it.`,
+    );
   }
 }
 

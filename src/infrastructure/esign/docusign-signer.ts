@@ -47,17 +47,16 @@
 //
 // ── WHAT IT DELIBERATELY DOES NOT DO: SEND ───────────────────────────────────
 //
-// Nothing in this codebase creates a DocuSign envelope yet, and creating one
-// cannot live behind this port. An envelope must be raised when the terms
-// freeze — at `send()`, since `isEditable` is draft-only — and that needs a use
-// case that can reach the rendered PDF and the client's email address, neither
-// of which `EngagementService` has. It needs somewhere for the letter to sit
-// while it is out, which the four-state machine has no room for. And it needs
-// somewhere for completion to arrive, which means a Connect receiver and a
-// sixth public path. All of that is above this file. What this file can do is
-// own the two custom-field NAMES the binding depends on, exported below, so the
-// send path and the check agree by importing the same constants rather than by
-// two people typing the same string.
+// Sending lives in `docusign-dispatch.ts` (0080), and it is a separate class
+// on purpose: raising an envelope and recording a signature are two moments,
+// in two processes, and the mistake this file exists to prevent is collapsing
+// them. The envelope is raised when the letter is SENT — the terms freeze at
+// `send()`, since `isEditable` is draft-only — and the letter stays `sent`
+// while it is out. The worker's sweep learns it completed and only then calls
+// `EngagementService.sign`, which calls THIS, which checks everything again.
+// This file owns the two custom-field NAMES the binding depends on, exported
+// below, so the send path and the check agree by importing the same constants
+// rather than by two people typing the same string.
 import { SignatureIncomplete } from "../../domain/engagement/errors";
 import type { Logger } from "../../platform/log";
 import type { ESignProvider } from "../../usecase/engagement/ports";

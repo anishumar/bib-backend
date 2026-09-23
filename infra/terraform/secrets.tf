@@ -159,11 +159,18 @@ resource "google_secret_manager_secret" "bib" {
 # builds the signer through `esignFor(cfg, log)`, which names every missing
 # credential in one message rather than failing on the first.
 #
-# What has NOT changed is that a letter still cannot be signed in production.
-# `attested` is refused by validateServer, and `docusign` only VERIFIES an
-# envelope already stamped with bib_content_hash — and nothing in this codebase
-# creates one, because doing so needs a send path, a fifth letter state and a
-# Connect webhook. Setting esign_provider = "docusign" boots; it does not sign.
+# Since 0080 a letter CAN be signed in production through DocuSign. Sending a
+# letter raises an envelope (API), and the worker's signature sweep learns how
+# it ended and signs or withdraws the letter — so BOTH processes hold these
+# three secrets. The letter stays `sent` while its envelope is out; there is no
+# fifth state. A Connect webhook would make completion immediate instead of
+# within five minutes, and is not built.
+#
+# The values must be REAL for any of it to work: an integration key made in
+# DocuSign, the impersonated user's GUID, that key's RSA private key, and a
+# one-off consent to `signature impersonation`. A placeholder PEM boots (it
+# parses) and every envelope then fails with DocuSign's own refusal, shown on
+# the letter page.
 
 # ── Why the worker and the migrate job get a DIFFERENT internal-keys value ───
 #

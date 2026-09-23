@@ -884,6 +884,69 @@ difference makes everything here stricter than its proposal counterpart.
   advance is recorded. **Its honest limit:** a person attests the money arrived, because
   payments (T3.5) do not exist. The gate is enforced; its confirmation is an attestation.
 
+## Sending a letter for signature — DocuSign (0080)
+
+`ESignProvider` VERIFIES a signature that exists; `SignatureDispatch` ASKS for one. Under
+`BIB_ESIGN_PROVIDER=docusign`, `send()` records whom to ask (`crm.letter_signature_request`),
+marks the letter sent, renders its PDF and raises an envelope stamped with `bib_letter_id` and
+`bib_content_hash` — the two fields the verifier then checks. The worker's signature sweep asks
+DocuSign how each envelope still out has ended: `completed` → `sign()` (so the verifier, the hash,
+the fan-out and activation run exactly as for a person), `declined`/`voided` → withdrawn with
+`signatureOutcome` on the event. Under `attested` nothing is sent and the signer is ignored.
+
+**`sent` IS "out for signature" — there is no fifth state (decided 2026-09-23).** `sent` already
+means the terms are frozen and the client has been asked. What a state alone cannot say — which
+provider, whom, whether the asking has happened — is the request row, read beside the letter as
+`signing` on the letter view.
+
+**A letter is never signed because an envelope went out.** That was the whole reason the verifier
+refused to create envelopes itself: `signed` is terminal and frozen, and an adapter returning a
+freshly-sent envelope's id would have recorded every letter as executed the moment it was
+emailed. Raising and signing are two different moments, in two different processes.
+
+**A DocuSign fault never undoes a send.** The terms froze and the date was set whether or not
+DocuSign answered; the fault is kept on the request (`last_failure`), the letter page says so,
+and `POST …/signature-request` tries again. **A retry never mails the client a second contract**:
+the claim is one UPDATE with the whole condition in its WHERE, and before raising the dispatcher
+asks DocuSign for a live envelope already carrying this letter's id — the reply to a create can
+be lost after DocuSign acted on it.
+
+**Withdrawing asks DocuSign first.** An envelope still out is VOIDED before the letter moves, so
+the client cannot sign a letter the firm pulled; one the client has already completed is refused
+(`ENVELOPE_ALREADY_SIGNED`, 409) and left for the sweep, because withdrawing then would discard a
+real signature. A void DocuSign refuses withdraws nothing.
+
+**An envelope DocuSign does not hold is `missing`, never `voided`** — found by the first real
+run. The likeliest cause is the deployment pointed at the wrong account, and reading it as voided
+would withdraw every letter out for signature in one sweep, permanently. The sweep reports it and
+moves nothing; a person can still withdraw.
+
+**bib keeps its own copy of every signed contract.** When an envelope completes, the sweep
+fetches DocuSign's signed PDF and its certificate of completion and files both through the
+document store against the letter: the signed letter as `engagement_letter` (client-visible, in
+the portal library), the certificate as `other` (the firm's audit record). A provider's retention
+policy is not bib's evidence. It is a pass of its own (`copies_filed_at`), so a download fault
+never blocks or undoes a signature and is retried every sweep; both files are fetched before
+either is filed, so a half-way fault never files one twice.
+
+**The request is not a term, and is the second name in `NOT_TERMS`.** It is how the signature was
+OBTAINED, it moves after the freeze (the sweep settles it in the pass that signs), and the
+envelope id that IS evidence is copied onto the letter's frozen `signature_reference`.
+
+**The anchors are a shared constant.** DocuSign places fields by searching the PDF's text, so the
+renderer prints `CLIENT_SIGN_ANCHOR` / `CLIENT_DATE_ANCHOR` in the page colour on the client's
+signature block and the dispatcher searches for the same imported strings. `anchorIgnoreIfNotPresent`
+is false: a PDF without them is refused by DocuSign rather than sent with nowhere to sign.
+
+**The book import never raises an envelope** — `send(…, { migrated: true })` — for the reason
+`migrationSigner` exists: a paper letter from 2023 was signed on paper.
+
+**Both processes hold the DocuSign credential** (`setup/esign.ts` builds verifier and dispatcher
+over one transport) **and the bucket** (the worker files the signed copies). The worker is composed
+with `letterPdf: null` and never raises. Not built: a
+Connect webhook (the sixth public route — completion is within five minutes instead), and
+reminders or resends from bib.
+
 ## What a document SAYS — its prose, and whose law it names (G1.7, G1.8)
 
 Two things sit beside a document's priced lines, and neither is a clause.

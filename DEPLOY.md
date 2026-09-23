@@ -210,11 +210,13 @@ Expect **242 passed, 19 failed**. All 19 are documented in §7: 17 from signing,
 
 ## 7 · Known failures, so you do not chase them
 
-**Engagement letters cannot be signed.** `attested` is refused in production;
-`docusign` only *verifies* an envelope carrying `bib_content_hash`, and nothing
-in this codebase creates envelopes. In smoke this shows as 17 failures, all
-cascading from one line: `the client signs`. Shipping real signing needs a send
-path, a fifth letter state (migration + domain change) and a Connect webhook.
+**`the client signs`, and the 16 checks after it.** Smoke records the signature
+by hand with a paper reference, and under `docusign` the verifier refuses
+anything that is not a COMPLETED DocuSign envelope. That is correct: since 0080
+a letter is signed by the client in DocuSign, and a script cannot be the client.
+Smoke's `send` still raises a real envelope (to `client-<n>@example.com`) when
+DocuSign is configured; with placeholder credentials the raise fails and the
+letter page says why. See §9 to turn signing on.
 
 **`expected 57/10` India rules generating** — stale assertion. Pack-seeded rules
 are `unconfirmed` and do not generate until a firm confirms them, by design.
@@ -237,7 +239,46 @@ fix as broken. The worker uses `resource.labels.worker_pool_name`, *not*
 
 ---
 
-## 9 · Further reading
+## 9 · Turning on DocuSign signing
+
+Since 0080 sending a letter raises a DocuSign envelope to the client's signer,
+the letter stays `sent` while it is out, and the worker's signature sweep (every
+five minutes) signs the letter when DocuSign reports `completed`, or withdraws
+it on `declined` / `voided`. Withdrawing a letter voids its envelope first. The
+same sweep files DocuSign's signed PDF (client-visible) and certificate of
+completion (firm only) in bib's bucket, against the letter — so the worker needs
+the bucket as well as the DocuSign secrets.
+
+1. **A DocuSign account.** For QA, a free developer account; its OAuth host is
+   `https://account-d.docusign.com`, so set `docusign_oauth_base_uri` to that —
+   the default is production's `account.docusign.com`, and an integration key
+   works against exactly one of them.
+2. **An integration key** (Apps and Keys) with an **RSA keypair** generated
+   there. Note the key, the API user's **GUID** (not their email) and the
+   account id.
+3. **Consent, once**: open
+   `https://account-d.docusign.com/oauth/auth?response_type=code&scope=signature%20impersonation&client_id=<KEY>&redirect_uri=<a redirect URI registered on the key>`
+   as that user and approve. Until then every call answers `consent_required`,
+   and the letter page quotes that URL back.
+4. **Secret versions** for `bib-docusign-integration-key`, `bib-docusign-user-id`
+   and `bib-docusign-private-key` (the PEM, with its line breaks), and
+   `docusign_account_id` in the tfvars.
+5. **`terraform apply`** — the worker now reads the same three secrets as the API
+   (iam.tf says why). Then redeploy both, because Cloud Run resolves
+   `versions/latest` at revision start.
+
+Check it by sending a letter to an address you can open: the envelope arrives,
+the signature and date fields sit on the client's block, and within five
+minutes of signing the letter reads `signed` with DocuSign as its method and the
+envelope id as its reference.
+
+Not built: a **Connect webhook** (completion would be immediate rather than
+within five minutes — it is the sixth public route and needs its own argument),
+and **reminders or resends** from bib (DocuSign's own reminder settings apply).
+
+---
+
+## 10 · Further reading
 
 | | |
 |---|---|

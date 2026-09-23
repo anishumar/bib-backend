@@ -90,14 +90,22 @@ locals {
     "docusign-private-key/api"     = { secret = "docusign-private-key", sa = google_service_account.api.email }
 
     # The worker reads and writes every firm's data in turn, so it needs the app
-    # role. It gets NO smtp password and NO DocuSign key, because
-    # src/setup/worker.ts composes neither a Mailer nor an ESignProvider —
-    # CLAUDE.md states the rule the chaser and the nudge both follow, that they
-    # send nothing and no mailer is injected. If a transport is ever wired into
-    # the worker, this is the line that has to change with it.
-    "app-database-url/worker"      = { secret = "app-database-url", sa = google_service_account.worker.email }
-    "runtime-database-url/worker"  = { secret = "runtime-database-url", sa = google_service_account.worker.email }
-    "internal-keys-offline/worker" = { secret = "internal-keys-offline", sa = google_service_account.worker.email }
+    # role. It gets NO smtp password, because src/setup/worker.ts composes no
+    # Mailer — CLAUDE.md states the rule the chaser and the nudge both follow,
+    # that they send nothing and no mailer is injected.
+    #
+    # It DOES get the DocuSign credential (0080). The signature sweep runs here:
+    # it asks DocuSign how every envelope still out has ended and signs or
+    # withdraws the letter, and the verifier reads the envelope again before a
+    # letter is recorded as signed. Both need a token. It raises no envelope —
+    # the worker is composed with no letter renderer — so this is read access
+    # to envelopes the API created, exercised through the same credential.
+    "app-database-url/worker"         = { secret = "app-database-url", sa = google_service_account.worker.email }
+    "runtime-database-url/worker"     = { secret = "runtime-database-url", sa = google_service_account.worker.email }
+    "internal-keys-offline/worker"    = { secret = "internal-keys-offline", sa = google_service_account.worker.email }
+    "docusign-integration-key/worker" = { secret = "docusign-integration-key", sa = google_service_account.worker.email }
+    "docusign-user-id/worker"         = { secret = "docusign-user-id", sa = google_service_account.worker.email }
+    "docusign-private-key/worker"     = { secret = "docusign-private-key", sa = google_service_account.worker.email }
 
     # The migrate job needs the powerful URL to create roles and extensions, and
     # it ALSO needs the app URL — not to connect with, but because
@@ -130,13 +138,22 @@ resource "google_secret_manager_secret_iam_member" "readers" {
 # the ability to change the bucket's own IAM policy, which is the ability to
 # publish a firm's engagement letters.
 #
-# The API alone, because src/setup/worker.ts constructs no blob store. The
-# trigger for adding the worker is precise: the first worker sweep that renders
-# or stores a document.
+# The API, and since 0080 the worker. The trigger for adding the worker was
+# stated here in advance — "the first worker sweep that renders or stores a
+# document" — and the signature sweep is it: when a client signs in DocuSign,
+# the worker fetches the signed PDF and the certificate of completion and files
+# them through the document store, so bib holds its own copy of every signed
+# contract rather than relying on the provider's retention policy.
 resource "google_storage_bucket_iam_member" "api_objects" {
   bucket = google_storage_bucket.blobs.name
   role   = "roles/storage.objectAdmin"
   member = "serviceAccount:${google_service_account.api.email}"
+}
+
+resource "google_storage_bucket_iam_member" "worker_objects" {
+  bucket = google_storage_bucket.blobs.name
+  role   = "roles/storage.objectAdmin"
+  member = "serviceAccount:${google_service_account.worker.email}"
 }
 
 # ── What is deliberately NOT granted: roles/logging.logWriter ────────────────

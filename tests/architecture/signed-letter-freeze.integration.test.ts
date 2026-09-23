@@ -560,8 +560,17 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
    * The line is: what the letter SAYS is frozen (its lines, its clauses, its
    * prose); what the letter CAUSED has its own lifecycle. Adding a name to this
    * list is the thing that needs an argument.
+   *
+   * `crm.letter_signature_request` (0080) is the second, and it is the other
+   * side of the same line: not what the letter SAYS but how its signature was
+   * OBTAINED — whom DocuSign was asked to email, which envelope, and how that
+   * envelope ended. It must move after the letter freezes, because the sweep
+   * records `outcome = completed` in the pass that signs, one statement after
+   * the freeze lands. Nothing in it is evidence of the agreement: the envelope
+   * id that IS evidence is copied onto the letter's own frozen
+   * `signature_reference` at signature.
    */
-  const NOT_TERMS = ["crm.engagement"];
+  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request"];
 
   it("finds no child table of an engagement letter without the freeze trigger", async () => {
     const unguarded = await owner<{ table: string }[]>`

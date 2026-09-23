@@ -1,7 +1,7 @@
 // The renderer's pure rules, and the one property the engine was chosen for.
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { wrapParagraph } from "../../src/domain/render/model";
+import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR, wrapParagraph } from "../../src/domain/render/model";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
 import { RenderError } from "../../src/domain/render/errors";
 import type { RenderableDocument } from "../../src/domain/render/model";
@@ -151,5 +151,40 @@ describe("wrapping a paragraph", () => {
 
   it("preserves an empty line rather than collapsing it", () => {
     expect(wrapParagraph("a\n\nb", 10, measure)).toEqual(["a", "", "b"]);
+  });
+});
+
+describe("signature blocks (0080)", () => {
+  const blocks: RenderableDocument["signatures"] = [
+    { heading: "For The Firm LLP", lines: ["A. Partner", "Partner"], signAnchor: null, dateAnchor: null },
+    {
+      heading: "Accepted for and on behalf of Kaveri Foods Private Limited",
+      lines: ["Name and capacity"],
+      signAnchor: CLIENT_SIGN_ANCHOR,
+      dateAnchor: CLIENT_DATE_ANCHOR,
+    },
+  ];
+
+  it("are deterministic like everything else on the page", async () => {
+    const r = new PdfLibRenderer();
+    expect(sha(await r.render(doc({ signatures: blocks })))).toBe(
+      sha(await r.render(doc({ signatures: blocks }))),
+    );
+  });
+
+  it("move nothing on a document that has none — an invoice's bytes are what they were", async () => {
+    const r = new PdfLibRenderer();
+    const without = sha(await r.render(doc()));
+    expect(sha(await r.render(doc({ signatures: undefined })))).toBe(without);
+    expect(sha(await r.render(doc({ signatures: [] })))).toBe(without);
+    expect(sha(await r.render(doc({ signatures: blocks })))).not.toBe(without);
+  });
+
+  it("are checked against the font chain with everything else, by name", async () => {
+    await expect(
+      new PdfLibRenderer().render(
+        doc({ signatures: [{ heading: "For 株式会社", lines: [], signAnchor: null, dateAnchor: null }] }),
+      ),
+    ).rejects.toThrow(/signature block's heading/);
   });
 });

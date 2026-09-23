@@ -73,6 +73,41 @@ export interface RenderableImage {
   readonly mediaType: "image/png" | "image/jpeg";
 }
 
+/**
+ * Where an e-signature provider puts the client's signature and the date.
+ *
+ * DocuSign places a field by searching the PDF's TEXT for a string (an anchor),
+ * so the renderer prints these in the page colour where the signature goes.
+ * Invisible on paper, found by the provider. Declared here, in the one module
+ * both the letter's render source and the DocuSign adapter import, so the
+ * string printed and the string searched for are the same constant — a
+ * mismatch would send the client an envelope with nowhere to sign.
+ *
+ * Deliberately text no letter would ever contain: the provider places a field
+ * at EVERY match, and a real sentence matching would put a signature box in
+ * the middle of a clause.
+ */
+export const CLIENT_SIGN_ANCHOR = "/bib-client-sign/";
+export const CLIENT_DATE_ANCHOR = "/bib-client-date/";
+
+/**
+ * One party's signature block: who signs for whom, and what goes under the
+ * line. A letter carries the firm's (snapshotted when it was sent) and the
+ * client's.
+ */
+export interface SignatureBlock {
+  /** "For Cobalt Foods Private Limited". */
+  readonly heading: string;
+  /** Printed under the signature line — a name, a capacity. */
+  readonly lines: readonly string[];
+  /** Invisible text on the signature line, for a provider to find. Null on a
+   *  block nobody will sign electronically — the firm's, which it signed by
+   *  sending. */
+  readonly signAnchor: string | null;
+  /** The same, beside "Date". */
+  readonly dateAnchor: string | null;
+}
+
 export interface RenderableDocument {
   /** "Engagement Letter", "Tax Invoice" — what the page is headed. */
   readonly documentTitle: string;
@@ -87,6 +122,9 @@ export interface RenderableDocument {
   readonly table: LineTable | null;
   readonly totals: readonly TotalRow[];
   readonly footer: string | null;
+  /** Signature blocks after the totals. Absent on a document nobody signs —
+   *  an invoice — and then nothing is drawn, so its bytes do not move. */
+  readonly signatures?: readonly SignatureBlock[] | undefined;
   readonly logo: RenderableImage | null;
   /**
    * The instant the document was ISSUED, as an ISO date.

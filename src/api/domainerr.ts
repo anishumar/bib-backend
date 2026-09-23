@@ -788,6 +788,8 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
       case "ENGAGEMENT_NOT_ACTIVE":
+      case "ENVELOPE_ALREADY_SIGNED":
+      case "SIGNATURE_REQUEST_NOT_PENDING":
       case "LETTER_NOT_SUPERSEDABLE":
       case "ALREADY_SUPERSEDED":
       case "ISSUER_JURISDICTION_UNKNOWN":

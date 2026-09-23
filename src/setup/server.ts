@@ -89,10 +89,7 @@ import { PostgresEngagementRepository } from "../infrastructure/postgres/engagem
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
-import {
-  FilesystemBlobStore,
-  Sha256ByteDigest,
-} from "../infrastructure/storage/filesystem-blob-store";
+import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
 import { FileStoreService } from "../usecase/filestore/service";
 import { PdfLibRenderer } from "../infrastructure/render/pdf-renderer";
 import { PostgresRenderSource } from "../infrastructure/postgres/render-source";
@@ -115,12 +112,11 @@ import {
   PostgresStandardBlockRepository,
 } from "../infrastructure/postgres/block-repository";
 import { AttestedSigner } from "../infrastructure/esign/attested-signer";
-import { DocusignSigner } from "../infrastructure/esign/docusign-signer";
-import { GlobalFetchHttp, JwtGrantDocusign } from "../infrastructure/esign/docusign-http";
-import { GcsBlobStore } from "../infrastructure/storage/gcs-blob-store";
-import { googleCloudBucket } from "../infrastructure/storage/google-cloud-bucket";
-import type { BlobStore } from "../usecase/filestore/ports";
-import type { ESignProvider } from "../usecase/engagement/ports";
+import { PostgresSignatureRequestRepository } from "../infrastructure/postgres/signature-request-repository";
+import { esignFor } from "./esign";
+import { blobStoreFor } from "./blobs";
+import { signedCopyFiler } from "./signed-copies";
+import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
 import { LedgerService } from "../usecase/ledger/service";
@@ -469,6 +465,13 @@ export function wire(cfg: Config, log: Logger): Wired {
   // render source — the source needs it to fetch a firm's logo, and giving it
   // its own instance would mean two objects believing they own the same files.
   const blobs = blobStoreFor(cfg);
+  // pdf-lib, chosen for DETERMINISM rather than fidelity: a rendered
+  // document's content hash is evidence, and a headless browser's bytes are
+  // not stable across versions. See the renderer's own header. ONE instance of
+  // each, held by the document store and by the envelope a letter is sent in,
+  // so the PDF a client signs in DocuSign is the PDF the firm can download.
+  const renderer = new PdfLibRenderer();
+  const renderSource = new PostgresRenderSource(pools.app, (i) => blobs.get(i));
   const fileStore = new FileStoreService({
     documents: new PostgresDocumentStoreRepository(pools.app),
     blobs,
@@ -476,11 +479,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     ids: systemIds,
     events: ledger,
     maxUploadBytes: cfg.storage.maxUploadBytes,
-    // pdf-lib, chosen for DETERMINISM rather than fidelity: a rendered
-    // document's content hash is evidence, and a headless browser's bytes are
-    // not stable across versions. See the renderer's own header.
-    renderer: new PdfLibRenderer(),
-    renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
+    renderer,
+    renderSource,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one
@@ -994,6 +994,28 @@ export function wire(cfg: Config, log: Logger): Wired {
   // HONEST REGISTRY: `AttestedSigner` is the third stub in this codebase, and
   // `validateServer` has already refused this config in any production-like
   // environment by the time this line runs.
+  // THE LETTER AS THE CLIENT WILL SIGN IT — rendered for the envelope from
+  // the same source and renderer the document store uses. A closure rather
+  // than a call into `fileStore`: sending a letter for signature must not also
+  // file a document version and write its events as a side effect.
+  const letterPdf: LetterPdf = {
+    render: async (tenantId, letterId) => {
+      const described = await renderSource.describe({
+        tenantId,
+        kind: "engagement_letter",
+        subjectRef: letterId,
+      });
+      if (described === null) {
+        throw new Error(`engagement letter ${letterId} has nothing to render at tenant ${tenantId}`);
+      }
+      return {
+        bytes: await renderer.render(described.document),
+        filename: `${described.document.reference.replace(/[^A-Za-z0-9._-]+/g, "-")}.pdf`,
+      };
+    },
+  };
+  const esign = esignFor(cfg, log);
+
   const engagement = new EngagementService({
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
@@ -1010,7 +1032,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     // use case imports the other, and there is one answer to "what did we
     // actually quote" rather than two reads that can drift.
     quotes: proposal,
-    esign: esignFor(cfg, log),
+    esign: esign.signer,
     // Letters signed BEFORE the firm used this product arrive through the book
     // import and are attested by the person confirming it. Always the attested
     // signer, even when `esign` is DocuSign: a paper letter has no envelope.
@@ -1019,6 +1041,16 @@ export function wire(cfg: Config, log: Logger): Wired {
     // `SignInput.migrated`, which the HTTP route does not expose.
     migrationSigner: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),
+    // SENDING FOR SIGNATURE (0080). The API raises envelopes when a letter is
+    // sent; the worker's sweep learns how each one ended.
+    signatures: new PostgresSignatureRequestRepository(pools.app),
+    dispatch: esign.dispatch,
+    letterPdf,
+    // The API files nothing itself — the worker's sweep does — but a letter
+    // signed through the form with an envelope id is a completed request
+    // like any other, so the same filer is here for symmetry of the graph.
+    signedCopies: signedCopyFiler(fileStore),
+    tenants: new PostgresTenantDirectory(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -1147,63 +1179,6 @@ export function wire(cfg: Config, log: Logger): Wired {
  * variable. They are here because the TYPE says nullable and a non-null
  * assertion would be a claim this file cannot make on its own.
  */
-/**
- * The blob adapter, chosen once — the "one-line change" the T3.6 comment above
- * promised, now taken.
- *
- * UNLIKE `mailerFor`, THE THROW HERE IS REACHABLE. `validateServer` refuses
- * `filesystem` in a production-like environment, but it deliberately does NOT
- * demand a bucket, because the worker runs that same gate and must name a
- * non-stub backend to boot while constructing no blob store at all. So the
- * bucket is checked at the moment it is needed, by the process that needs it.
- */
-function blobStoreFor(cfg: Config): BlobStore {
-  if (cfg.storage.backend === "filesystem") return new FilesystemBlobStore(cfg.storage.root);
-  if (cfg.storage.bucket === null) {
-    throw new Error(
-      "BIB_STORAGE_BACKEND=gcs but BIB_GCS_BUCKET is unset, so the Cloud Storage adapter has " +
-        "no bucket to write to. Set BIB_GCS_BUCKET to the bucket name, or set " +
-        "BIB_STORAGE_BACKEND=filesystem for local development.",
-    );
-  }
-  return new GcsBlobStore(
-    googleCloudBucket({ bucket: cfg.storage.bucket, timeoutMs: cfg.storage.timeoutMs }),
-  );
-}
-
-/**
- * The e-sign adapter, chosen once, and reachable for the same reason: the
- * worker names a provider to satisfy validateServer and never signs anything.
- *
- * Every missing variable is named in ONE message rather than failing on the
- * first: whoever is configuring this is reading a secret manager, and finding
- * out about three gaps one redeploy at a time is three redeploys.
- */
-function esignFor(cfg: Config, log: Logger): ESignProvider {
-  if (cfg.auth.esignProvider === "attested") return new AttestedSigner();
-  const { oauthBase, integrationKey, userId, accountId, privateKeyPem } = cfg.docusign;
-  const missing = [
-    integrationKey === null ? "BIB_DOCUSIGN_INTEGRATION_KEY" : null,
-    userId === null ? "BIB_DOCUSIGN_USER_ID" : null,
-    privateKeyPem === null ? "BIB_DOCUSIGN_PRIVATE_KEY" : null,
-  ].filter((v): v is string => v !== null);
-  if (integrationKey === null || userId === null || privateKeyPem === null) {
-    throw new Error(
-      `BIB_ESIGN_PROVIDER=docusign but ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} ` +
-        "unset. DocuSign's JWT Grant needs the integration key, the impersonated user's id and " +
-        "the RSA private key. Set them, or set BIB_ESIGN_PROVIDER=attested for local development.",
-    );
-  }
-  return new DocusignSigner(
-    new JwtGrantDocusign(
-      { oauthBase, integrationKey, userId, accountId, privateKeyPem },
-      new GlobalFetchHttp(),
-      log,
-    ),
-    log,
-  );
-}
-
 function mailerFor(cfg: Config, log: Logger): Mailer {
   if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
   const { smtp, from, fromName } = cfg.mail;

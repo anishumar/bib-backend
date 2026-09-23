@@ -338,7 +338,14 @@ export interface LetterWriter {
     readonly pricingNote?: string | undefined;
   }): Promise<unknown>;
   addClause(tenantId: string, letterId: string, clauseVersionId: string): Promise<void>;
-  send(tenantId: string, letterId: string, actor: Actor): Promise<unknown>;
+  /** `migrated: true` always: the client signed on paper, so the provider
+   *  must not raise an envelope and email them the contract a second time. */
+  send(
+    tenantId: string,
+    letterId: string,
+    actor: Actor,
+    options: { readonly migrated: true },
+  ): Promise<unknown>;
   sign(
     input: {
       readonly tenantId: string;

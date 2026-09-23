@@ -81,9 +81,9 @@ locals {
     BIB_SMTP_HOST      = var.smtp_host
 
     # Same shape: the gate refuses `filesystem` and `attested`, so the values
-    # have to be the real ones, while the credentials behind them stay with the
-    # API. src/setup/worker.ts constructs neither a BlobStore nor an
-    # ESignProvider.
+    # have to be the real ones, and since 0080 both are USED here: the
+    # signature sweep holds the DocuSign credential (below) and files each
+    # signed copy in the bucket (iam.tf grants it, and says why).
     BIB_STORAGE_BACKEND     = var.storage_backend
     BIB_GCS_BUCKET          = google_storage_bucket.blobs.name
     BIB_ESIGN_PROVIDER      = var.esign_provider
@@ -95,9 +95,12 @@ locals {
   }
 
   worker_secret_env = {
-    BIB_APP_DATABASE_URL = "app-database-url"
-    BIB_DATABASE_URL     = "runtime-database-url"
-    BIB_INTERNAL_KEYS    = "internal-keys-offline"
+    BIB_APP_DATABASE_URL         = "app-database-url"
+    BIB_DATABASE_URL             = "runtime-database-url"
+    BIB_INTERNAL_KEYS            = "internal-keys-offline"
+    BIB_DOCUSIGN_INTEGRATION_KEY = "docusign-integration-key"
+    BIB_DOCUSIGN_USER_ID         = "docusign-user-id"
+    BIB_DOCUSIGN_PRIVATE_KEY     = "docusign-private-key"
   }
 }
 

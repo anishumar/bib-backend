@@ -35,6 +35,17 @@ import type {
   PinnedService,
   QuotedProposal,
   SignatureRecord,
+  EnvelopeProgress,
+  LetterDocument,
+  LetterPdf,
+  NewSignatureRequest,
+  SignatureDispatch,
+  SignatureOutcome,
+  SignatureRequest,
+  SignatureRequestRepository,
+  SignatureSigner,
+  SignatureTenants,
+  SignedCopyFiler,
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
@@ -568,6 +579,227 @@ export class FakeHasher implements ContentHasher {
   }
 }
 
+// ── Sending for signature (0080) ───────────────────────────────────────────
+
+/** The request table, in memory, with the claim modelled as the SQL states it:
+ *  no envelope, not settled, and no claim newer than `staleBefore`. */
+export class FakeSignatureRequestRepo implements SignatureRequestRepository {
+  readonly rows = new Map<string, SignatureRequest & { claimedAt: string | null }>();
+
+  private byLetter(tenantId: string, letterId: string) {
+    return [...this.rows.values()].find((r) => r.tenantId === tenantId && r.letterId === letterId);
+  }
+
+  private strip(r: SignatureRequest & { claimedAt: string | null }): SignatureRequest {
+    const { claimedAt: _claimedAt, ...rest } = r;
+    return rest;
+  }
+
+  open(request: NewSignatureRequest): Promise<SignatureRequest> {
+    const existing = this.byLetter(request.tenantId, request.letterId);
+    if (existing !== undefined) {
+      if (existing.envelopeId === null) {
+        const updated = { ...existing, signer: request.signer, requestedBy: request.requestedBy };
+        this.rows.set(existing.id, updated);
+        return Promise.resolve(this.strip(updated));
+      }
+      return Promise.resolve(this.strip(existing));
+    }
+    const row = {
+      id: request.id,
+      tenantId: request.tenantId,
+      letterId: request.letterId,
+      provider: request.provider,
+      signer: request.signer,
+      requestedBy: request.requestedBy,
+      envelopeId: null,
+      raisedAt: null,
+      lastFailure: null,
+      attempts: 0,
+      outcome: null,
+      settledAt: null,
+      copiesFiledAt: null,
+      createdAt: "2026-07-01T09:00:00.000Z",
+      claimedAt: null,
+    };
+    this.rows.set(row.id, row);
+    return Promise.resolve(this.strip(row));
+  }
+
+  findForLetter(tenantId: string, letterId: string): Promise<SignatureRequest | null> {
+    const row = this.byLetter(tenantId, letterId);
+    return Promise.resolve(row === undefined ? null : this.strip(row));
+  }
+
+  claim(
+    tenantId: string,
+    requestId: string,
+    at: string,
+    staleBefore: string,
+  ): Promise<SignatureRequest | null> {
+    const row = this.rows.get(requestId);
+    if (
+      row === undefined ||
+      row.tenantId !== tenantId ||
+      row.envelopeId !== null ||
+      row.outcome !== null ||
+      (row.claimedAt !== null && row.claimedAt >= staleBefore)
+    ) {
+      return Promise.resolve(null);
+    }
+    const claimed = { ...row, claimedAt: at, attempts: row.attempts + 1 };
+    this.rows.set(requestId, claimed);
+    return Promise.resolve(this.strip(claimed));
+  }
+
+  recordRaised(
+    _tenantId: string,
+    requestId: string,
+    envelopeId: string,
+    at: string,
+  ): Promise<SignatureRequest> {
+    const row = this.mustGet(requestId);
+    const raised = { ...row, envelopeId, raisedAt: at, claimedAt: null, lastFailure: null };
+    this.rows.set(requestId, raised);
+    return Promise.resolve(this.strip(raised));
+  }
+
+  recordFailure(_tenantId: string, requestId: string, failure: string): Promise<SignatureRequest> {
+    const row = this.mustGet(requestId);
+    const failed = { ...row, lastFailure: failure, claimedAt: null };
+    this.rows.set(requestId, failed);
+    return Promise.resolve(this.strip(failed));
+  }
+
+  listAwaiting(tenantId: string): Promise<readonly SignatureRequest[]> {
+    return Promise.resolve(
+      [...this.rows.values()]
+        .filter((r) => r.tenantId === tenantId && r.outcome === null && r.envelopeId !== null)
+        .map((r) => this.strip(r)),
+    );
+  }
+
+  settle(_tenantId: string, requestId: string, outcome: SignatureOutcome, at: string): Promise<void> {
+    const row = this.mustGet(requestId);
+    if (row.outcome === null) this.rows.set(requestId, { ...row, outcome, settledAt: at });
+    return Promise.resolve();
+  }
+
+  listUnfiled(tenantId: string): Promise<readonly SignatureRequest[]> {
+    return Promise.resolve(
+      [...this.rows.values()]
+        .filter((r) => r.tenantId === tenantId && r.outcome === "completed" && r.copiesFiledAt === null)
+        .map((r) => this.strip(r)),
+    );
+  }
+
+  recordCopiesFiled(_tenantId: string, requestId: string, at: string): Promise<void> {
+    const row = this.mustGet(requestId);
+    if (row.copiesFiledAt === null) this.rows.set(requestId, { ...row, copiesFiledAt: at });
+    return Promise.resolve();
+  }
+
+  private mustGet(requestId: string) {
+    const row = this.rows.get(requestId);
+    if (row === undefined) throw new Error(`fake: no signature request ${requestId}`);
+    return row;
+  }
+}
+
+/** A provider a test drives: it records what it was asked to send, reports
+ *  whatever state a test sets for an envelope, and can be made to fail. */
+export class FakeDispatch implements SignatureDispatch {
+  readonly method = "fake";
+  readonly raised: {
+    letterId: string;
+    contentHash: string;
+    signer: SignatureSigner;
+    document: LetterDocument;
+  }[] = [];
+  readonly voided: { envelopeId: string; reason: string }[] = [];
+  /** What `progress` answers, per envelope. Absent means still out. */
+  readonly states = new Map<string, EnvelopeProgress["state"]>();
+  /** An envelope the provider already holds for a letter, as `findForLetter`
+   *  would find after a lost reply. */
+  readonly existing = new Map<string, string>();
+  failRaise: string | null = null;
+  failProgress: string | null = null;
+
+  findForLetter(letterId: string): Promise<string | null> {
+    return Promise.resolve(this.existing.get(letterId) ?? null);
+  }
+
+  raise(input: {
+    readonly letterId: string;
+    readonly contentHash: string;
+    readonly signer: SignatureSigner;
+    readonly document: LetterDocument;
+  }): Promise<{ readonly envelopeId: string }> {
+    if (this.failRaise !== null) return Promise.reject(new Error(this.failRaise));
+    this.raised.push({
+      letterId: input.letterId,
+      contentHash: input.contentHash,
+      signer: input.signer,
+      document: input.document,
+    });
+    return Promise.resolve({ envelopeId: `env-${String(this.raised.length)}-${input.letterId}` });
+  }
+
+  failCopies: string | null = null;
+
+  signedCopies(
+    envelopeId: string,
+  ): Promise<{ readonly signed: LetterDocument; readonly certificate: LetterDocument }> {
+    if (this.failCopies !== null) return Promise.reject(new Error(this.failCopies));
+    return Promise.resolve({
+      signed: { bytes: new Uint8Array([1, 2, 3]), filename: `${envelopeId}-signed.pdf` },
+      certificate: { bytes: new Uint8Array([4, 5, 6]), filename: `${envelopeId}-certificate.pdf` },
+    });
+  }
+
+  progress(envelopeId: string): Promise<EnvelopeProgress> {
+    if (this.failProgress !== null) return Promise.reject(new Error(this.failProgress));
+    const state = this.states.get(envelopeId) ?? "out";
+    return Promise.resolve({ state, detail: state });
+  }
+
+  void(envelopeId: string, reason: string): Promise<void> {
+    this.voided.push({ envelopeId, reason });
+    this.states.set(envelopeId, "voided");
+    return Promise.resolve();
+  }
+}
+
+/** The document store, as the signed-copy port sees it: what was filed. */
+export class FakeSignedCopyFiler implements SignedCopyFiler {
+  readonly filed: { letterId: string; partyId: string; title: string; which: string; filename: string }[] = [];
+  file(input: Parameters<SignedCopyFiler["file"]>[0]): Promise<void> {
+    this.filed.push({
+      letterId: input.letterId,
+      partyId: input.partyId,
+      title: input.title,
+      which: input.which,
+      filename: input.document.filename,
+    });
+    return Promise.resolve();
+  }
+}
+
+export class FakeLetterPdf implements LetterPdf {
+  readonly rendered: string[] = [];
+  render(_tenantId: string, letterId: string): Promise<LetterDocument> {
+    this.rendered.push(letterId);
+    return Promise.resolve({ bytes: new Uint8Array([37, 80, 68, 70]), filename: `${letterId}.pdf` });
+  }
+}
+
+export class FakeSignatureTenants implements SignatureTenants {
+  constructor(readonly ids: readonly string[] = []) {}
+  activeTenantIds(): Promise<readonly string[]> {
+    return Promise.resolve(this.ids);
+  }
+}
+
 export function makeEngagementFakes(): Deps & {
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
@@ -582,6 +814,7 @@ export function makeEngagementFakes(): Deps & {
   /** Who binds the firm, so a test can name one — or leave nobody. */
   firm: FakeFirmSignatory;
   events: RecordingEventSink;
+  signatures: FakeSignatureRequestRepo;
 } {
   // The REAL DocumentService over in-memory ports — see the note in
   // testfakes/proposal.ts. The two documents share one seam on purpose, so they
@@ -605,6 +838,14 @@ export function makeEngagementFakes(): Deps & {
     // signer took it by `method`.
     migrationSigner: new FakeSigner(),
     hasher: new FakeHasher(),
+    // Sending for signature is OFF by default — the attested shape every test
+    // before 0080 was written against. A test that exercises DocuSign's path
+    // sets `dispatch` and `letterPdf` (see `withDispatch`).
+    signatures: new FakeSignatureRequestRepo(),
+    dispatch: null,
+    letterPdf: null,
+    signedCopies: null,
+    tenants: new FakeSignatureTenants(),
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
     events: new RecordingEventSink(),

@@ -829,7 +829,11 @@ ENT2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H
 ELDRAFT='{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - FY26 engagement","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true,"advanceAmount":"10000"}'
 EL=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d "$ELDRAFT" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 chk "an advance with no amount is refused"  400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"x","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28","advanceRequired":true}')"
-chk "an empty letter cannot go out"          409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+# WHO THE PROVIDER SHOULD ASK (0080). Required when the deployment signs
+# through DocuSign, which raises an envelope at send; ignored under `attested`,
+# which asks nobody. Sent either way so the walk is the same on both.
+SIGNER='{"signer":{"name":"A Director","email":"client-'$S'@example.com"}}'
+chk "an empty letter cannot go out"          409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 
 ELLINE='{"entityPartyId":"'$ENT1'","serviceVersionId":"'$SVCV1'","description":"GST monthly filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"0"}'
 ELLINE2='{"entityPartyId":"'$ENT2'","serviceVersionId":"'$SVCV1'","description":"GST monthly filing, Logistics","quantity":"12","unitAmount":"1500","discountPercent":"0"}'
@@ -837,10 +841,10 @@ NOENT='{"serviceVersionId":"'$SVCV1'","description":"whose company?","quantity":
 chk "a letter line must name an entity"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$NOENT")"
 chk "agree a service"                        201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
 chk "…and one for the sister company"      201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE2")"
-chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 chk "a UAE clause on an Indian letter"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$AEV'"}')"
 chk "the right clause goes on"               204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}')"
-chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H")"
+chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 
 SIGNED=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-001"}')
 chk "the client signs"                       signed "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["letter"]["status"])')"
@@ -1123,7 +1127,7 @@ BOOKV=$BKV1
 EL2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/lines -H "$H" -d '{"entityPartyId":"'$ENT1'","serviceVersionId":"'$BOOKV'","description":"Monthly bookkeeping","quantity":"12","unitAmount":"18000","discountPercent":"0"}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}'
-curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/send -H "$H"
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/send -H "$H" -d "$SIGNER"
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-002"}'
 (cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)
 

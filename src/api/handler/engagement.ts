@@ -348,6 +348,37 @@ const EngagementSchema = z
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
 
+/**
+ * How this letter is being signed (0080). `sends` is the deployment's answer —
+ * whether sending raises an envelope and therefore needs a signer — so a
+ * DRAFT's screen knows what to ask for before anybody presses send.
+ *
+ * The signer's NAME and ADDRESS are on the wire because the firm typed them and
+ * needs to see where the envelope went. They are not redacted by the fee axis:
+ * they are not money.
+ */
+const SigningSchema = z
+  .object({
+    provider: z.string(),
+    sends: z.boolean(),
+    request: z
+      .object({
+        signerName: z.string(),
+        signerEmail: z.string(),
+        /** Null until the provider accepts an envelope. */
+        envelopeId: z.string().nullable(),
+        raisedAt: z.string().nullable(),
+        /** The provider's own words for why the last attempt failed — what the
+         *  screen shows beside "Try again". Null once an attempt succeeds. */
+        lastFailure: z.string().nullable(),
+        attempts: z.number().int(),
+        outcome: z.enum(["completed", "declined", "voided"]).nullable(),
+        settledAt: z.string().nullable(),
+      })
+      .nullable(),
+  })
+  .openapi("EngagementLetterSigning");
+
 /** A letter identified the way a person identifies one: by its reference. */
 const DocumentRefSchema = z.object({ id: z.string().uuid(), ref: z.string() });
 
@@ -382,6 +413,7 @@ const LetterRecordSchema = z
     blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
     engagements: z.array(EngagementSchema),
+    signing: SigningSchema,
   })
   .openapi("EngagementLetterRecord");
 
@@ -777,18 +809,59 @@ const addClauseRoute = createRoute({
   },
 });
 
+const SendRequest = z
+  .object({
+    signer: z
+      .object({
+        name: z.string().min(1),
+        email: z.string().min(3),
+      })
+      .optional(),
+  })
+  .openapi("SendEngagementLetterRequest");
+
 const sendRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/send",
   tags: ["engagement-letters"],
   summary: "Send it for signature",
-  request: { params: z.object({ letterId: z.string().uuid() }) },
+  description:
+    "Freezes the terms and dates the letter. When the deployment signs through a provider " +
+    "that SENDS (`signing.sends` on the letter — DocuSign), `signer` is required and an " +
+    "envelope is raised for them at once; if the provider refuses, the letter is still sent " +
+    "and `signing.request.lastFailure` says why — retry with `…/signature-request`. When it " +
+    "does not send, `signer` is ignored.",
+  request: {
+    params: z.object({ letterId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: SendRequest } }, required: false },
+  },
   responses: {
     200: { description: "Sent", content: { "application/json": { schema: LetterSchema } } },
+    400: errorResponse("DocuSign is the provider and no usable signer was given"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such letter at this firm"),
     409: errorResponse("Not a draft, no lines, or no clauses"),
+  },
+});
+
+const retrySignatureRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/signature-request",
+  tags: ["engagement-letters"],
+  summary: "Raise the envelope again after the provider refused",
+  description:
+    "For a SENT letter whose envelope was never raised. Answers with the provider's own " +
+    "fault (502) if it refuses again. A letter whose envelope is already with the client is " +
+    "refused — ask the client to find DocuSign's email, or withdraw and send a new letter.",
+  request: { params: z.object({ letterId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Raised", content: { "application/json": { schema: SigningSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("Nothing waiting to be raised"),
+    502: errorResponse("The e-signature provider refused"),
   },
 });
 
@@ -895,6 +968,29 @@ function toLetterBody(
     firmSignatoryUserId: letter.firmSignatoryUserId,
     firmSignatoryTitle: letter.firmSignatoryTitle,
     firmSignedAt: letter.firmSignedAt,
+  };
+}
+
+/** Field by field, never the port object forwarded — the request carries
+ *  ids and a claim time this wire has no business with. */
+function toSigningBody(signing: LetterView["signing"]): z.infer<typeof SigningSchema> {
+  const r = signing.request;
+  return {
+    provider: signing.provider,
+    sends: signing.sends,
+    request:
+      r === null
+        ? null
+        : {
+            signerName: r.signer.name,
+            signerEmail: r.signer.email,
+            envelopeId: r.envelopeId,
+            raisedAt: r.raisedAt,
+            lastFailure: r.lastFailure,
+            attempts: r.attempts,
+            outcome: r.outcome,
+            settledAt: r.settledAt,
+          },
   };
 }
 
@@ -1025,6 +1121,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       unpricedLineCount: record.totals.unpricedLineCount,
     },
     engagements: record.engagements.map(toEngagementBody),
+    signing: toSigningBody(record.signing),
   };
 }
 
@@ -1189,8 +1286,20 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { letterId } = c.req.valid("param");
-    const sent = await deps.service.send(s.tenantId, letterId, s.actor);
+    const body = c.req.valid("json");
+    const sent = await deps.service.send(s.tenantId, letterId, s.actor, {
+      signer: body?.signer,
+    });
     return c.json(toLetterBody(sent, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(retrySignatureRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    await deps.service.retrySignatureRequest(s.tenantId, letterId, s.actor);
+    const view = await deps.service.describe(s.tenantId, letterId);
+    return c.json(toSigningBody(view.signing), 200);
   });
 
   app.openapi(withdrawRoute, async (c) => {

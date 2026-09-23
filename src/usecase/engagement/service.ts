@@ -18,6 +18,7 @@
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
+import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type {
   Engagement,
@@ -78,6 +79,8 @@ import {
   NotAClause,
   ServiceNotQuotable,
   SignatureIncomplete,
+  SignatureRequestNotPending,
+  EnvelopeAlreadySigned,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
 } from "../../domain/engagement/errors";
@@ -95,8 +98,16 @@ import type {
   FirmSignatureRecord,
   LetterFilters,
   LetterSummary,
+  LetterPdf,
   LetterView,
   NewEngagement,
+  SignatureDispatch,
+  SignatureOutcome,
+  SignatureRequest,
+  SignatureRequestRepository,
+  SignatureSigner,
+  SignatureTenants,
+  SignedCopyFiler,
 } from "./ports";
 
 export interface Deps {
@@ -125,9 +136,64 @@ export interface Deps {
    *  structurally by `ProposalService`, so neither use case imports the other. */
   readonly quotes: AcceptedQuoteDirectory;
   readonly hasher: ContentHasher;
+  /** Whom a provider was asked to have sign, and which envelope (0080). */
+  readonly signatures: SignatureRequestRepository;
+  /**
+   * The provider, asked to SEND. Null when it sends nothing — the attested
+   * signer records a signature a person obtained elsewhere, so there is no
+   * envelope to raise and nothing for the sweep to watch.
+   */
+  readonly dispatch: SignatureDispatch | null;
+  /** The letter's PDF for the envelope. Null in the worker, which settles
+   *  envelopes and never raises one. */
+  readonly letterPdf: LetterPdf | null;
+  /** Where the provider's signed PDF and certificate are filed once an
+   *  envelope completes. Null where no document store is composed. */
+  readonly signedCopies: SignedCopyFiler | null;
+  readonly tenants: SignatureTenants;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+}
+
+/** How long a claim to raise an envelope is honoured before another caller may
+ *  take it. Longer than one render plus two provider calls on a bad day; short
+ *  enough that a crashed attempt is retried on the next try, not tomorrow. */
+const RAISE_LEASE_MS = 2 * 60_000;
+
+/** A plausible address, and nothing cleverer: the provider is the authority on
+ *  whether it delivers, and this exists to catch a name typed into the email
+ *  box. The database CHECK (0080) says the same thing. */
+const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+export interface SendOptions {
+  /**
+   * Whom the provider should ask to sign. Required when the provider SENDS
+   * (DocuSign); ignored when it does not (attested), because nobody is asked.
+   */
+  readonly signer?: SignatureSigner | undefined;
+  /**
+   * A letter signed before the firm used this product, marked sent on its way
+   * to a migrated signature (T6.12). Never raises an envelope: the client
+   * signed on paper years ago, and emailing them the contract again would be
+   * the product inventing a second signing. Set by the book import only.
+   */
+  readonly migrated?: boolean | undefined;
+}
+
+/** What one pass of the signature sweep did at one firm. */
+export interface SignatureSweepReport {
+  readonly tenantId: string;
+  readonly signed: number;
+  readonly withdrawn: number;
+  readonly stillOut: number;
+  /** Signed letters whose provider copies were filed in bib's store this pass. */
+  readonly copiesFiled: number;
+  /** Requests the sweep could not settle this pass, with the reason — a
+   *  provider fault, or a completed envelope the verifier refused. */
+  readonly failed: readonly { readonly letterId: string; readonly reason: string }[];
+  /** Set when the whole firm could not be visited. */
+  readonly failure?: string | undefined;
 }
 
 export interface DraftLetterInput {
@@ -799,7 +865,17 @@ export class EngagementService {
       kind: "engagement_letter",
       id: letterId,
     });
-    return { ...record, engagements: this.withState(record.engagements), blocks };
+    const request = await this.deps.signatures.findForLetter(tenantId, letterId);
+    return {
+      ...record,
+      engagements: this.withState(record.engagements),
+      blocks,
+      signing: {
+        provider: this.deps.esign.method,
+        sends: this.deps.dispatch !== null,
+        request,
+      },
+    };
   }
 
   async list(tenantId: string, filters: LetterFilters): Promise<readonly LetterSummary[]> {
@@ -823,12 +899,35 @@ export class EngagementService {
    * firm out of a flow they use now, and that is a product decision nobody has
    * made. It is recorded as an open question rather than assumed here.
    */
-  async send(tenantId: string, letterId: string, actor: Actor): Promise<EngagementLetter> {
+  async send(
+    tenantId: string,
+    letterId: string,
+    actor: Actor,
+    options: SendOptions = {},
+  ): Promise<EngagementLetter> {
     // `editableOrThrow` is the whole gate: a letter is editable only while it is
     // a draft, and a draft's only forward move is `sent`. A second
     // `canTransition` check here would be unreachable.
     const letter = await this.editableOrThrow(tenantId, letterId);
     await this.requireCompleteTerms(tenantId, letterId);
+
+    // WHOM TO ASK, recorded BEFORE the letter is marked sent. The other order
+    // could leave a letter `sent` through DocuSign with nobody on record to
+    // ask, and nothing could ever raise its envelope. This order can at worst
+    // leave a request row beside a DRAFT, which the sweep never reads (it asks
+    // only about raised envelopes) and the next send overwrites.
+    const dispatch = options.migrated === true ? null : this.deps.dispatch;
+    const request =
+      dispatch === null
+        ? null
+        : await this.deps.signatures.open({
+            id: this.deps.ids.newId(),
+            tenantId,
+            letterId: letter.id,
+            provider: dispatch.method,
+            signer: signerOrThrow(options.signer),
+            requestedBy: actor.type === "human" ? actor.id : null,
+          });
 
     const now = this.deps.clock.now();
     const at = now.toISOString();
@@ -853,23 +952,376 @@ export class EngagementService {
         issuedOn: sent.issuedOn,
         firmSignatoryUserId: sent.firmSignatoryUserId,
         firmSignatoryTitle: sent.firmSignatoryTitle,
+        // Which provider will ask for the signature, or null when a person
+        // records it afterwards. The provider's NAME, never the signer's.
+        signatureProvider: request === null ? null : request.provider,
       },
     });
+
+    // THE ENVELOPE, raised now so the client hears about it now. A provider
+    // fault does NOT undo the send: the letter's terms are frozen and its date
+    // is set whether or not DocuSign answered, and pretending otherwise would
+    // mean a letter that is `sent` in every respect but one. The fault is kept
+    // on the request, the letter page says so, and `retrySignatureRequest`
+    // tries again.
+    if (request !== null) await this.raise(request, actor).catch(() => undefined);
     return sent;
   }
 
+  /**
+   * Raise the envelope for a sent letter whose first attempt failed.
+   *
+   * Throws the provider's fault this time rather than keeping it quiet: the
+   * person pressed a button to find out, and "it failed again, here is why" is
+   * the answer. The fault is also kept on the request, as on the first try.
+   */
+  async retrySignatureRequest(
+    tenantId: string,
+    letterId: string,
+    actor: Actor,
+  ): Promise<SignatureRequest> {
+    const letter = await this.findOrThrow(tenantId, letterId);
+    const request = await this.deps.signatures.findForLetter(tenantId, letterId);
+    if (request === null) {
+      throw new SignatureRequestNotPending(
+        letterId,
+        "it was never sent through a provider that asks for signatures",
+      );
+    }
+    if (letter.status !== "sent") {
+      throw new SignatureRequestNotPending(letterId, `the letter is ${letter.status}`);
+    }
+    if (request.envelopeId !== null) {
+      throw new SignatureRequestNotPending(
+        letterId,
+        `envelope ${request.envelopeId} is already with the client`,
+      );
+    }
+    return this.raise(request, actor);
+  }
+
+  /**
+   * One attempt at the envelope, under a claim so two callers cannot both send
+   * the client one. Resolves with the request as it now stands; rejects with
+   * the fault after recording it.
+   */
+  private async raise(request: SignatureRequest, actor: Actor): Promise<SignatureRequest> {
+    const dispatch = this.deps.dispatch;
+    const pdf = this.deps.letterPdf;
+    if (dispatch === null || pdf === null) {
+      // Not a fault anybody can fix from a screen: the process was composed
+      // without a way to send. The worker is composed that way on purpose,
+      // and nothing in it calls this.
+      throw new Error(
+        "EngagementService.raise was called in a process composed with no signature dispatch " +
+          "or no letter renderer. The API wires both when BIB_ESIGN_PROVIDER sends; the worker " +
+          "wires neither and must never raise an envelope.",
+      );
+    }
+    const now = this.deps.clock.now();
+    const claimed = await this.deps.signatures.claim(
+      request.tenantId,
+      request.id,
+      now.toISOString(),
+      new Date(now.getTime() - RAISE_LEASE_MS).toISOString(),
+    );
+    if (claimed === null) {
+      // Raised already, or somebody else is raising it this minute. Either way
+      // the answer is whatever the row says now.
+      return (await this.deps.signatures.findForLetter(request.tenantId, request.letterId)) ?? request;
+    }
+
+    try {
+      const letter = await this.findOrThrow(claimed.tenantId, claimed.letterId);
+      if (letter.status !== "sent") {
+        throw new SignatureRequestNotPending(letter.id, `the letter is ${letter.status}`);
+      }
+      // THE SAME HASH `sign()` will compute, over the same frozen terms. That
+      // is the binding: the verifier refuses an envelope whose stamped hash is
+      // not the letter's, so the two must be one function of one state.
+      const contentHash = await this.contentHashOf(letter);
+      const envelopeId =
+        (await dispatch.findForLetter(letter.id, claimed.createdAt)) ??
+        (
+          await dispatch.raise({
+            letterId: letter.id,
+            ref: letter.ref,
+            title: letter.title,
+            contentHash,
+            signer: claimed.signer,
+            document: await pdf.render(letter.tenantId, letter.id),
+          })
+        ).envelopeId;
+
+      const raised = await this.deps.signatures.recordRaised(
+        claimed.tenantId,
+        claimed.id,
+        envelopeId,
+        this.deps.clock.now().toISOString(),
+      );
+      await this.deps.events.recordEvent({
+        tenantId: letter.tenantId,
+        verb: "engagement_letter.signature_requested",
+        objectId: letter.id,
+        actor,
+        payload: { provider: dispatch.method, envelopeId },
+      });
+      return raised;
+    } catch (err) {
+      await this.deps.signatures.recordFailure(
+        claimed.tenantId,
+        claimed.id,
+        err instanceof Error ? err.message : String(err),
+      );
+      throw err;
+    }
+  }
+
+  /**
+   * THE SIGNATURE SWEEP. Asks the provider about every envelope still out, and
+   * acts on the three answers that end one: completed signs the letter,
+   * declined and voided withdraw it. Anything else — sent, delivered, partly
+   * signed — waits for the next pass.
+   *
+   * THE SIGNATURE ITSELF STILL GOES THROUGH `sign()`, and so through the
+   * verifier: status, content hash, letter id and a recipient who signed are
+   * all checked again. The sweep is how the product LEARNS an envelope
+   * finished; it is never a second way to record a signature.
+   *
+   * Per firm, and one firm's fault never stops the others — the rule every
+   * sweep here follows since T3.1.
+   */
+  async settleSignatures(): Promise<readonly SignatureSweepReport[]> {
+    if (this.deps.dispatch === null) return [];
+    const reports: SignatureSweepReport[] = [];
+    for (const tenantId of await this.deps.tenants.activeTenantIds()) {
+      try {
+        reports.push(await this.settleTenant(tenantId, this.deps.dispatch));
+      } catch (err) {
+        reports.push({
+          tenantId,
+          signed: 0,
+          withdrawn: 0,
+          stillOut: 0,
+          copiesFiled: 0,
+          failed: [],
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return reports;
+  }
+
+  private async settleTenant(
+    tenantId: string,
+    dispatch: SignatureDispatch,
+  ): Promise<SignatureSweepReport> {
+    let signed = 0;
+    let withdrawn = 0;
+    let stillOut = 0;
+    const failed: { letterId: string; reason: string }[] = [];
+
+    for (const request of await this.deps.signatures.listAwaiting(tenantId)) {
+      // `listAwaiting` returns only raised requests; the guard is for the type.
+      if (request.envelopeId === null) continue;
+      try {
+        const letter = await this.findOrThrow(tenantId, request.letterId);
+        // Settled by hand while the envelope was out — withdrawn by a person,
+        // or signed through the form with this envelope's id. The request
+        // records what happened to the LETTER, so it stops being asked about.
+        if (letter.status !== "sent") {
+          await this.deps.signatures.settle(
+            tenantId,
+            request.id,
+            letter.status === "signed" ? "completed" : "voided",
+            this.deps.clock.now().toISOString(),
+          );
+          continue;
+        }
+
+        const progress = await dispatch.progress(request.envelopeId);
+        if (progress.state === "out") {
+          stillOut += 1;
+          continue;
+        }
+        // Reported and left alone: a wrong account must not withdraw every
+        // letter out for signature. A person withdraws it if it truly is gone.
+        if (progress.state === "missing") {
+          failed.push({
+            letterId: letter.id,
+            reason:
+              `${dispatch.method} holds no envelope ${request.envelopeId} in the account this ` +
+              `server signs in to, so the letter was left as it is. If the account or key ` +
+              `changed since it was sent, point them back; if the envelope was purged, withdraw ` +
+              `the letter by hand.`,
+          });
+          continue;
+        }
+        if (progress.state === "completed") {
+          await this.sign(
+            {
+              tenantId,
+              letterId: letter.id,
+              // The person the provider asked is the person who signed — the
+              // provider refuses to complete an envelope otherwise.
+              signedByName: request.signer.name,
+              reference: request.envelopeId,
+            },
+            SYSTEM_ACTOR,
+          );
+          signed += 1;
+        } else {
+          await this.withdrawFor(letter, progress.state, SYSTEM_ACTOR);
+          withdrawn += 1;
+        }
+        await this.deps.signatures.settle(
+          tenantId,
+          request.id,
+          progress.state,
+          this.deps.clock.now().toISOString(),
+        );
+      } catch (err) {
+        failed.push({
+          letterId: request.letterId,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    // THE SIGNED COPIES, in a pass of their own rather than inside the one
+    // above: a letter signed through the form with an envelope id, or one
+    // whose copies failed to file last time, is found here too, and a fault
+    // fetching a PDF must never be able to stop a signature being recorded.
+    const copiesFiled = await this.fileSignedCopies(tenantId, dispatch, failed);
+    return { tenantId, signed, withdrawn, stillOut, copiesFiled, failed };
+  }
+
+  /**
+   * Fetch the provider's signed PDF and certificate for every signed letter
+   * whose copies bib does not yet hold, and file them. BOTH are fetched before
+   * EITHER is filed, so a provider fault half way leaves nothing filed and the
+   * next pass starts clean rather than filing the letter twice.
+   */
+  private async fileSignedCopies(
+    tenantId: string,
+    dispatch: SignatureDispatch,
+    failed: { letterId: string; reason: string }[],
+  ): Promise<number> {
+    const filer = this.deps.signedCopies;
+    if (filer === null) return 0;
+    let filed = 0;
+    for (const request of await this.deps.signatures.listUnfiled(tenantId)) {
+      if (request.envelopeId === null) continue;
+      try {
+        const letter = await this.findOrThrow(tenantId, request.letterId);
+        const copies = await dispatch.signedCopies(request.envelopeId);
+        await filer.file({
+          tenantId,
+          letterId: letter.id,
+          partyId: letter.partyId,
+          title: `${letter.ref} — signed by ${request.signer.name}`,
+          which: "signed",
+          document: copies.signed,
+        });
+        await filer.file({
+          tenantId,
+          letterId: letter.id,
+          partyId: letter.partyId,
+          title: `${letter.ref} — ${dispatch.method} certificate of completion`,
+          which: "certificate",
+          document: copies.certificate,
+        });
+        await this.deps.signatures.recordCopiesFiled(
+          tenantId,
+          request.id,
+          this.deps.clock.now().toISOString(),
+        );
+        filed += 1;
+      } catch (err) {
+        failed.push({
+          letterId: request.letterId,
+          reason:
+            `signed, but the signed copy is not filed yet: ` +
+            (err instanceof Error ? err.message : String(err)),
+        });
+      }
+    }
+    return filed;
+  }
+
+  private async contentHashOf(letter: EngagementLetter): Promise<string> {
+    const [lines, clauses] = await this.requireCompleteTerms(letter.tenantId, letter.id);
+    return this.deps.hasher.hash(canonicalContent({ letter, lines, clauses }));
+  }
+
+  /**
+   * Pull it before signature.
+   *
+   * WITH AN ENVELOPE OUT, THE PROVIDER IS ASKED FIRST. The client may have
+   * finished signing a minute ago and the sweep not yet noticed — withdrawing
+   * then would discard a real signature, so it is refused and the sweep records
+   * it. Otherwise the envelope is voided BEFORE the letter moves: a withdrawn
+   * letter whose envelope the client can still sign is a contract the firm
+   * thinks it pulled. If the void fails, nothing is withdrawn and the provider's
+   * fault is the answer.
+   */
   async withdraw(tenantId: string, letterId: string, actor: Actor): Promise<EngagementLetter> {
     const letter = await this.findOrThrow(tenantId, letterId);
+    const request = await this.deps.signatures.findForLetter(tenantId, letterId);
+    const dispatch = this.deps.dispatch;
+    if (
+      dispatch === null ||
+      request === null ||
+      request.envelopeId === null ||
+      request.outcome !== null ||
+      letter.status !== "sent"
+    ) {
+      return this.withdrawFor(letter, null, actor);
+    }
+
+    const progress = await dispatch.progress(request.envelopeId);
+    if (progress.state === "completed") throw new EnvelopeAlreadySigned(request.envelopeId);
+    if (progress.state === "out") {
+      await dispatch.void(request.envelopeId, `${letter.ref} was withdrawn by the firm`);
+    }
+    // A person pulling the letter: `out` was just voided and `missing` has
+    // nothing left to void, so both are the firm's decision, not the client's.
+    const byTheFirm = progress.state === "out" || progress.state === "missing";
+    const withdrawn = await this.withdrawFor(
+      letter,
+      byTheFirm ? null : progress.state,
+      actor,
+    );
+    await this.deps.signatures.settle(
+      tenantId,
+      request.id,
+      byTheFirm ? "voided" : progress.state,
+      this.deps.clock.now().toISOString(),
+    );
+    return withdrawn;
+  }
+
+  /** Withdrawing, by a person or because the client's envelope ended without a
+   *  signature. `signatureOutcome` is the provider's reason, and it is on the
+   *  event so "why was this pulled" is answerable without the request row. */
+  private async withdrawFor(
+    letter: EngagementLetter,
+    signatureOutcome: Exclude<SignatureOutcome, "completed"> | null,
+    actor: Actor,
+  ): Promise<EngagementLetter> {
     if (!canTransition(letter.status, "withdrawn")) {
       throw new InvalidLetterTransition(letter.status, "withdrawn");
     }
     const withdrawn = await this.moveTo(letter, "withdrawn");
     await this.deps.events.recordEvent({
-      tenantId,
+      tenantId: letter.tenantId,
       verb: "engagement_letter.withdrawn",
       objectId: letter.id,
       actor,
-      payload: { partyId: letter.partyId, wasStatus: letter.status },
+      payload: {
+        partyId: letter.partyId,
+        wasStatus: letter.status,
+        ...(signatureOutcome === null ? {} : { signatureOutcome }),
+      },
     });
     return withdrawn;
   }
@@ -1193,6 +1645,27 @@ export class EngagementService {
  * because trailing whitespace in a document that gets hashed is a difference
  * nobody can see and every signature would commit to.
  */
+/** The signer a provider will email, or a refusal that says what is missing.
+ *  Trimmed, and the address lower-cased, because it is compared by the
+ *  provider and stored for the letter page — never re-typed. */
+function signerOrThrow(signer: SignatureSigner | undefined): SignatureSigner {
+  const name = signer?.name.trim() ?? "";
+  const email = signer?.email.trim().toLowerCase() ?? "";
+  if (name === "") {
+    throw new SignatureIncomplete(
+      "the name of the person DocuSign should ask to sign, in signer.name — the client's " +
+        "signatory, as the envelope will address them",
+    );
+  }
+  if (!EMAIL.test(email)) {
+    throw new SignatureIncomplete(
+      `an email address DocuSign can send the envelope to, in signer.email, and ` +
+        `${JSON.stringify(signer?.email ?? "")} is not one`,
+    );
+  }
+  return { name, email };
+}
+
 function blankToNull(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed === "" ? null : trimmed;

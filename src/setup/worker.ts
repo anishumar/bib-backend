@@ -80,6 +80,28 @@ import {
   PostgresNudgeRepository,
   PostgresNudgeTenants,
 } from "../infrastructure/postgres/nudge-repository";
+import { EngagementService } from "../usecase/engagement/service";
+import { DocumentService } from "../usecase/document/service";
+import { ProposalService } from "../usecase/proposal/service";
+import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
+import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
+import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
+import {
+  PostgresDocumentBlockRepository,
+  PostgresStandardBlockRepository,
+} from "../infrastructure/postgres/block-repository";
+import { PostgresTenantRepository } from "../infrastructure/postgres/tenant-repository";
+import { PostgresSignatureRequestRepository } from "../infrastructure/postgres/signature-request-repository";
+import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
+import { AttestedSigner } from "../infrastructure/esign/attested-signer";
+import { esignFor } from "./esign";
+import { blobStoreFor } from "./blobs";
+import { signedCopyFiler } from "./signed-copies";
+import { FileStoreService } from "../usecase/filestore/service";
+import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
+import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
+import { PdfLibRenderer } from "../infrastructure/render/pdf-renderer";
+import { PostgresRenderSource } from "../infrastructure/postgres/render-source";
 import type { JobQueue } from "../usecase/scheduler/ports";
 
 /** The queue the spawn sweep runs on. A name, because pg-boss keys a schedule
@@ -144,6 +166,18 @@ export const NUDGE_QUEUE = "delivery.nudge";
  */
 export const CREDENTIAL_SWEEP_QUEUE = "platform.credential-sweep";
 
+/**
+ * The queue the signature sweep runs on (0080): asks the e-sign provider how
+ * every envelope still out has ended, and signs or withdraws the letter.
+ *
+ * On the ORCHESTRATOR's five-minute cron rather than a knob of its own. A
+ * client who signs expects the firm to see it within minutes, not tomorrow,
+ * and five minutes of polling per open envelope is well inside DocuSign's
+ * rate limits for the volume a firm sends. A Connect webhook would make it
+ * immediate; it is the sixth public route, and waits for its own argument.
+ */
+export const SIGNATURE_QUEUE = "commercial.signatures";
+
 export interface WiredWorker {
   readonly pools: Pools;
   readonly queue: JobQueue;
@@ -154,6 +188,7 @@ export interface WiredWorker {
   readonly escalations: EscalationService;
   readonly chaser: ChaserService;
   readonly nudges: NudgeService;
+  readonly engagement: EngagementService;
   /** Register the queues and their cadences. Split from `wireWorker` so a test
    *  can build the graph without starting anything. */
   run(): Promise<void>;
@@ -411,6 +446,80 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // THE SIGNATURE SWEEP (0080). The same use case the API signs through, so
+  // a letter the client signed in DocuSign is signed by exactly the code a
+  // person recording it would run — verifier, hash, fan-out, activation.
+  //
+  // It is composed with NO renderer: this process settles envelopes and never
+  // raises one (`letterPdf: null`). The drafting-side ports are the real
+  // adapters rather than stand-ins, because a stand-in that threw would be a
+  // stub waiting for somebody to call it; they cost a constructor each.
+  const esign = esignFor(cfg, log);
+  const documentRepository = new PostgresDocumentRepository(pools.app);
+  const documents = new DocumentService({
+    preferences: documentRepository,
+    refs: documentRepository,
+    standardBlocks: new PostgresStandardBlockRepository(pools.app),
+    blocks: new PostgresDocumentBlockRepository(pools.app),
+    ids: systemIds,
+    events: ledger,
+  });
+  // THE DOCUMENT STORE, for the signed copies the sweep files (0080) — the
+  // first worker task that stores a document, which is the trigger iam.tf
+  // named for giving this process the bucket. The same adapters the API
+  // composes, so a signed copy filed here is the document the API serves.
+  const blobs = blobStoreFor(cfg);
+  const fileStore = new FileStoreService({
+    documents: new PostgresDocumentStoreRepository(pools.app),
+    blobs,
+    digest: new Sha256ByteDigest(),
+    ids: systemIds,
+    events: ledger,
+    maxUploadBytes: cfg.storage.maxUploadBytes,
+    renderer: new PdfLibRenderer(),
+    renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
+  });
+  const tenantRepository = new PostgresTenantRepository(pools.app);
+  const engagement = new EngagementService({
+    letters: new PostgresEngagementRepository(pools.app),
+    library: configRepository,
+    documents,
+    // Only `send` asks who binds the firm, and this process never sends. Read
+    // from the tenant row directly — the same two columns TenancyService reads
+    // — because TenancyService's own graph (seeders for roles, grades,
+    // vocabularies and rule packs) is a firm-provisioning concern this process
+    // has no business composing.
+    firm: {
+      firmSignatory: async (tenantId) => {
+        const tenant = await tenantRepository.findById(tenantId);
+        return tenant?.firmSignatoryUserId && tenant.firmSignatoryTitle
+          ? { userId: tenant.firmSignatoryUserId, title: tenant.firmSignatoryTitle }
+          : null;
+      },
+    },
+    quotes: new ProposalService({
+      proposals: new PostgresProposalRepository(pools.app),
+      catalogue: configRepository,
+      policies: configRepository,
+      documents,
+      shareTokens: new RandomTokenFactory(),
+      ids: systemIds,
+      clock: systemClock,
+      events: ledger,
+    }),
+    esign: esign.signer,
+    migrationSigner: new AttestedSigner(),
+    hasher: new Sha256ContentHasher(),
+    signatures: new PostgresSignatureRequestRepository(pools.app),
+    dispatch: esign.dispatch,
+    letterPdf: null,
+    signedCopies: signedCopyFiler(fileStore),
+    tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
   const queue = new BossJobQueue({ connectionString: cfg.db.appUrl, log });
 
   return {
@@ -423,6 +532,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     escalations,
     chaser,
     nudges,
+    engagement,
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
@@ -484,6 +594,32 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(ORCHESTRATOR_QUEUE, cfg.worker.orchestratorCron);
+
+      await queue.register(SIGNATURE_QUEUE, async () => {
+        for (const r of await engagement.settleSignatures()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "signature sweep could not visit firm");
+            continue;
+          }
+          // One line per letter that could not be settled, because each is a
+          // letter somebody will ask about: signed in DocuSign and not here.
+          for (const f of r.failed) {
+            log.warn({ tenantId: r.tenantId, letterId: f.letterId, reason: f.reason }, "signature not settled");
+          }
+          if (r.signed === 0 && r.withdrawn === 0 && r.copiesFiled === 0) continue;
+          log.info(
+            {
+              tenantId: r.tenantId,
+              signed: r.signed,
+              withdrawn: r.withdrawn,
+              stillOut: r.stillOut,
+              copiesFiled: r.copiesFiled,
+            },
+            "signature sweep",
+          );
+        }
+      });
+      await queue.schedule(SIGNATURE_QUEUE, cfg.worker.orchestratorCron);
 
       await queue.register(OBLIGATION_QUEUE, async () => {
         const reports = await obligations.sweep();
