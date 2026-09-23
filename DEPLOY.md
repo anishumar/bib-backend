@@ -204,7 +204,7 @@ CRED_KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
 API=<api> npm run smoke
 ```
 
-Expect **241 passing**. The known failures are documented in §7.
+Expect **242 passed, 19 failed** (measured 2026-09-23). All 19 are documented in §7.
 
 ---
 
@@ -212,7 +212,7 @@ Expect **241 passing**. The known failures are documented in §7.
 
 **Engagement letters cannot be signed.** `attested` is refused in production;
 `docusign` only *verifies* an envelope carrying `bib_content_hash`, and nothing
-in this codebase creates envelopes. In smoke this shows as ~17 failures, all
+in this codebase creates envelopes. In smoke this shows as 17 failures, all
 cascading from one line: `the client signs`. Shipping real signing needs a send
 path, a fifth letter state (migration + domain change) and a Connect webhook.
 
