@@ -204,7 +204,7 @@ CRED_KEY=$(gcloud secrets versions access latest --secret=bib-internal-keys \
 API=<api> npm run smoke
 ```
 
-Expect **242 passed, 19 failed** (measured 2026-09-23). All 19 are documented in §7.
+Expect **242 passed, 19 failed**. All 19 are documented in §7: 17 from signing, the India pack count, and the localhost origin.
 
 ---
 
