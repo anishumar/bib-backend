@@ -33,6 +33,7 @@ const ACTOR = { type: "human", id: "00000000-0000-4000-8000-0000000000aa" } as c
 const CLIENT = "00000000-0000-4000-8000-0000000000c1";
 const ENTITY = "00000000-0000-4000-8000-0000000000e1";
 const ENGAGEMENT = "00000000-0000-4000-8000-0000000000f1";
+const ENGAGEMENT_2 = "00000000-0000-4000-8000-0000000000f2";
 const JOB = "00000000-0000-4000-8000-0000000000j1".replace("j", "b");
 const FRC = "00000000-0000-4000-8000-0000000000a1";
 const PRIYA = "00000000-0000-4000-8000-0000000000d1";
@@ -193,22 +194,26 @@ describe("THE ACCEPTANCE LINE — a filing arrives pre-assigned to the client's 
     expect(h.recorded().at(-1)?.payload).toMatchObject({ how: "spoc", userId: PRIYA });
   });
 
-  it("leaves it UNASSIGNED with a reason when the Dept has two SPOCs", async () => {
-    // G3.2 allows more than one per Dept, so there is nothing to pick from
-    // without inventing a rule the firm never gave. The note is what makes the
-    // unassigned queue a thing somebody can act on.
+  it("takes turns between two SPOCs on the same Dept", async () => {
+    // G3.2 allows more than one per Dept. Since 2026-09-25 the router shares
+    // the work between them off the rows themselves: whoever has had the
+    // fewest of this client's tasks gets the next one, so two alternate.
     const h = await harness();
     h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
     h.spocs.add(CLIENT, FRC, { userId: ANAND, displayName: "Anand", email: "anand@10x.test" });
     h.engagements.rows.push(engagementWork());
 
     await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(PRIYA);
+    expect(h.items.rows[0]?.assignmentNote).toBeNull();
+    // The router did it, and the trail says so.
+    expect(h.verbs()).toEqual(["work_item.created", "work_item.assigned"]);
 
-    expect(h.items.rows[0]?.assigneeUserId).toBeNull();
-    expect(h.items.rows[0]?.assignmentNote).toContain("2 SPOCs");
-    // No `work_item.assigned` — nothing was assigned, and an event saying
-    // otherwise would make the trail lie.
-    expect(h.verbs()).toEqual(["work_item.created"]);
+    // Priya's desk now holds one of this client's tasks; the next goes to Anand.
+    h.spocs.bump(CLIENT, PRIYA);
+    h.engagements.rows.push({ ...engagementWork(), engagementId: ENGAGEMENT_2 });
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT_2], ACTOR);
+    expect(h.items.rows[1]?.assigneeUserId).toBe(ANAND);
   });
 
   it("leaves it unassigned when the client has no SPOC for that Dept", async () => {

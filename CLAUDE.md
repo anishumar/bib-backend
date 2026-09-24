@@ -1588,11 +1588,19 @@ it true would put every piece of advisory work on the statutory priority and mak
 meaningless the day it matters. T3.2's obligations set it, from the law.
 
 **Routing refuses to guess, and the refusal is a SENTENCE.** One SPOC for the service's Dept →
-assigned. None, or more than one (G3.2 allows several) → UNASSIGNED with `assignment_note`
-saying which. Falling back to the Key Manager and taking the first SPOC are both rules the
-firm never gave, and **a wrong assignee is worse than none**: it sits on a desk whose owner
-believes it is not theirs, while unassigned work is visible in a queue that gets chased. The
-note is what makes that queue clearable rather than a pile.
+assigned. None → UNASSIGNED with `assignment_note` saying so. Falling back to the Key Manager
+is a rule the firm never gave, and **a wrong assignee is worse than none**: it sits on a desk
+whose owner believes it is not theirs, while unassigned work is visible in a queue that gets
+chased. The note is what makes that queue clearable rather than a pile.
+
+**MORE THAN ONE SPOC TAKES TURNS (Shrestha, 2026-09-25).** From 2026-08-30 that case was also
+left unassigned, because "take the first" was a rule nobody gave. The firm has now given one:
+the work is shared. `SpocCandidate.routed` counts how many of THIS client's tasks the router has
+ever put on each desk, `resolveAssignee` picks the fewest, and the tie-break is the
+longer-standing assignment. Two alternate, three rotate, and nothing is stored: the counter is
+read off `delivery.work_item` each time, so a SPOC back from leave catches up on their own. A
+job's steps follow the same rule through `PostgresJobDeskResolver`, so they land on the desk the
+month's task did.
 
 **`slaDays` is PINNED and the Dept is LIVE, on the same row.** A catalogue revision must not
 make finished work retroactively late (G2.3), so the SLA is snapshotted from the version the
