@@ -580,7 +580,23 @@ export class ProposalService {
         payload: { via: "share_link" },
       });
     }
-    return { ...shared, status: shared.status };
+    // The document's own prose, from the module that owns it — the same seam
+    // `describe` uses. Only the words travel: a recipient is not told which
+    // lines are house wording and which were written for them.
+    const blocks = await this.deps.documents.listBlocks(parsed.tenantId, {
+      kind: "proposal",
+      id: shared.id,
+    });
+    return {
+      ...shared,
+      status: shared.status,
+      blocks: blocks.map((b) => ({
+        kind: b.kind,
+        body: b.body,
+        isHeading: b.isHeading,
+        sortOrder: b.sortOrder,
+      })),
+    };
   }
 
   /**

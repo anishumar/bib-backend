@@ -291,8 +291,11 @@ export interface ProposalFilters {
  * are all on `ProposalRecord`, which is why this is its own type rather than
  * the same one with fields nulled — a field added to the staff model then
  * cannot reach a client's screen by default.
+ *
+ * This is what the REPOSITORY returns. `SharedProposal` below adds the
+ * document's own prose, which the proposal table does not own.
  */
-export interface SharedProposal {
+export interface SharedProposalRecord {
   readonly id: string;
   /** The number the recipient quotes back. The whole reason it exists is this
    *  screen and the phone call that follows it. */
@@ -322,9 +325,10 @@ export interface SharedProposal {
      * the whole point of the field: a client looking at a blank price has to be
      * told it is deliberate.
      *
-     * The four scope blocks deliberately do NOT travel here. This is the fourth
-     * PUBLIC path and widening what an unauthenticated link exposes is its own
-     * decision, not a side effect of G1.6.
+     * The four scope blocks (a line's own scope wording, G1.6) still do NOT
+     * travel here. This is a PUBLIC path and widening what an unauthenticated
+     * link exposes is its own decision. The document's PROSE blocks do travel,
+     * on `SharedProposal.blocks` — that decision was taken on 2026-09-24.
      */
     readonly pricingNote: string | null;
     /** How often the client will be invoiced for this line. */
@@ -334,6 +338,35 @@ export interface SharedProposal {
     readonly oopEstimate: OutOfPocketEstimate | null;
   }[];
   readonly totals: ProposalTotals;
+}
+
+/**
+ * One line of the document's own prose as the RECIPIENT reads it. No ids, no
+ * `sourceId`, no `isEdited`: whether a line is the firm's house wording or was
+ * written for this client is the firm's business, not the reader's.
+ */
+export interface SharedProposalBlock {
+  readonly kind: DocumentBlock["kind"];
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+}
+
+/**
+ * What the recipient sees, WITH the exclusions, commercial notes and team
+ * block the document carries (G1.7).
+ *
+ * Decided 2026-09-24: the staff screen says "this quote is sent, so its
+ * wording is the record of what the client was shown", and until now the
+ * client was shown the prices and none of the wording. An exclusion the client
+ * never read is not an exclusion. The team block goes too — a proposal names
+ * who will do the work.
+ *
+ * Composed in the use case, not the repository, for the same reason
+ * `ProposalView` is: the proposal adapter does not own `crm.document_block`.
+ */
+export interface SharedProposal extends SharedProposalRecord {
+  readonly blocks: readonly SharedProposalBlock[];
 }
 
 /**
@@ -387,7 +420,7 @@ export interface ProposalRepository {
 
   /** Resolve a share link, inside the tenant the token named. Returns the
    *  recipient's view, not the staff one. */
-  findShared(tenantId: string, digest: string): Promise<SharedProposal | null>;
+  findShared(tenantId: string, digest: string): Promise<SharedProposalRecord | null>;
 
   /**
    * Record an open. Returns true when it was the FIRST — the caller records

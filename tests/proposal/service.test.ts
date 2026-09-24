@@ -1009,6 +1009,48 @@ describe("the share link", () => {
     expect(JSON.stringify(shared)).not.toContain(GST_VERSION);
   });
 
+  it("shows the recipient the document's own prose, and only the words", async () => {
+    // Decided 2026-09-24: the staff screen says a sent quote's wording is the
+    // record of what the client was shown, so the client has to be shown it.
+    // An exclusion the client never read is not an exclusion.
+    const s = setup();
+    const { id, token } = await sent(s);
+    await s.prose.addBlock({
+      tenantId: TENANT,
+      owner: { kind: "proposal", id },
+      kind: "exclusion",
+      body: "Statutory fees, late fees, interest and penalties are not included.",
+      sortOrder: 1,
+    });
+    await s.prose.addBlock({
+      tenantId: TENANT,
+      owner: { kind: "proposal", id },
+      kind: "team",
+      body: "Engagement Partner",
+      isHeading: true,
+      sortOrder: 1,
+    });
+
+    const shared = await s.service.viewShared(token, { type: "system", id: null });
+    expect(shared.blocks).toEqual([
+      {
+        kind: "exclusion",
+        body: "Statutory fees, late fees, interest and penalties are not included.",
+        isHeading: false,
+        sortOrder: 1,
+      },
+      { kind: "team", body: "Engagement Partner", isHeading: true, sortOrder: 1 },
+    ]);
+    // The words and nothing about their provenance: which lines are the
+    // firm's house wording and which were written for this client is the
+    // firm's business, not the reader's.
+    for (const block of shared.blocks) {
+      expect(Object.keys(block)).not.toContain("id");
+      expect(Object.keys(block)).not.toContain("sourceId");
+      expect(Object.keys(block)).not.toContain("isEdited");
+    }
+  });
+
   it("counts SITTINGS, not requests, and records only the first", async () => {
     // The count is commercial signal; the event is a state transition. A client
     // refreshing a page is not fifty facts about the business — and it is not
