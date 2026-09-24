@@ -141,6 +141,11 @@ const LinkSchema = z
     }),
     role: z.string().nullable(),
     createdAt: z.string(),
+    withdrawnAt: z.string().nullable().openapi({
+      description:
+        "When the document was taken OFF this subject, or null while it is still attached. A " +
+        "withdrawn link is kept and shown as history rather than deleted (0302).",
+    }),
   })
   .openapi("DocumentLink");
 
@@ -200,6 +205,7 @@ function linkToWire(r: DocumentLinkRecord): z.infer<typeof LinkSchema> {
     subjectLabel: r.subjectLabel,
     role: r.link.role,
     createdAt: r.link.createdAt,
+    withdrawnAt: r.link.withdrawnAt,
   };
 }
 
@@ -262,6 +268,13 @@ const AttachRequest = z
     role: z.string().nullable().optional(),
   })
   .openapi("AttachDocumentRequest");
+
+const WithdrawRequest = z
+  .object({
+    subjectKind: z.enum(SUBJECT_KINDS as unknown as [string, ...string[]]),
+    subjectRef: z.string().uuid(),
+  })
+  .openapi("WithdrawDocumentRequest");
 
 const SetBrandAssetRequest = z
   .object({ documentVersionId: z.string().uuid() })
@@ -491,6 +504,28 @@ const attachRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such document at this firm"),
     409: errorResponse("Already attached to that subject"),
+  },
+});
+
+const withdrawRoute = createRoute({
+  method: "post",
+  path: "/api/v1/documents/{documentId}/links/withdraw",
+  tags: ["documents"],
+  summary: "Take a document off something it was attached to",
+  description:
+    "Withdrawn, never deleted: the link stays as history, marked with when and by whom, and " +
+    "the document leaves that subject's file list. The bytes and every other attachment are " +
+    "untouched. Attaching it again afterwards is an ordinary attach.",
+  request: {
+    params: DocumentParam,
+    body: { content: { "application/json": { schema: WithdrawRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Withdrawn", content: { "application/json": { schema: LinkSchema } } },
+    400: errorResponse("Unknown subject kind"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write"),
+    404: errorResponse("No such document at this firm, or it is not attached to that subject"),
   },
 });
 
@@ -767,6 +802,21 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     return c.json(linkToWire(link), 201);
   });
 
+  app.openapi(withdrawRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { documentId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const link = await deps.service.withdraw({
+      tenantId: s.tenantId,
+      documentId,
+      subjectKind: body.subjectKind,
+      subjectRef: body.subjectRef,
+      actor: s.actor,
+    });
+    return c.json(linkToWire({ link, subjectLabel: null }), 200);
+  });
+
   app.openapi(linksRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -823,6 +873,7 @@ export const fileStoreRoutes = {
   versions: versionsRoute,
   addVersion: addVersionRoute,
   attach: attachRoute,
+  withdraw: withdrawRoute,
   links: linksRoute,
   subjectDocuments: subjectDocumentsRoute,
   brandAssets: brandAssetsRoute,

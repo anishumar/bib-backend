@@ -206,6 +206,12 @@ export interface DocumentLink {
   readonly role: string | null;
   readonly createdBy: string | null;
   readonly createdAt: string;
+  /** When this document was taken OFF the subject, or null while it is still
+   *  attached (0302). A withdrawn link stays readable as history: "what was
+   *  filed against this engagement" has to be able to say "this, for a
+   *  fortnight, in error". Attaching again is a NEW link. */
+  readonly withdrawnAt: string | null;
+  readonly withdrawnBy: string | null;
 }
 
 export interface BrandAsset {

@@ -739,6 +739,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   ],
   [routeKey("GET", "/api/v1/documents/{documentId}/links"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents/{documentId}/links"), "party:write" as const],
+  [routeKey("POST", "/api/v1/documents/{documentId}/links/withdraw"), "party:write" as const],
   [routeKey("GET", "/api/v1/subjects/{subjectKind}/{subjectRef}/documents"), "party:read" as const],
 
   // Brand assets are `tenant:admin` to WRITE, unlike the documents themselves.

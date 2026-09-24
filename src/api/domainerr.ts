@@ -875,6 +875,7 @@ export function mapError(err: unknown): MappedError {
       case "DOCUMENT_NOT_FOUND":
       case "VERSION_NOT_FOUND":
       case "BRAND_ASSET_NOT_FOUND":
+      case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

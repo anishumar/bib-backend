@@ -8,6 +8,7 @@ import type { EventSink } from "../ledger/ports";
 import type {
   BrandAssetKind,
   DocumentKind,
+  DocumentLink,
   DocumentVersion,
   SubjectKind,
 } from "../../domain/filestore/model";
@@ -20,6 +21,7 @@ import {
 } from "../../domain/filestore/model";
 import {
   AlreadyAttached,
+  LinkNotFound,
   BrandAssetNotFound,
   BytesMissing,
   ContentTooLarge,
@@ -100,6 +102,14 @@ export interface AttachInput {
   readonly subjectKind: string;
   readonly subjectRef: string;
   readonly role: string | null;
+  readonly actor: Actor;
+}
+
+export interface WithdrawInput {
+  readonly tenantId: string;
+  readonly documentId: string;
+  readonly subjectKind: string;
+  readonly subjectRef: string;
   readonly actor: Actor;
 }
 
@@ -281,7 +291,10 @@ export class FileStoreService {
     const already = await this.deps.documents.linksOf(input.tenantId, input.documentId);
     if (
       already.some(
-        (l) => l.link.subjectKind === subjectKind && l.link.subjectRef === input.subjectRef,
+        (l) =>
+          l.link.withdrawnAt === null &&
+          l.link.subjectKind === subjectKind &&
+          l.link.subjectRef === input.subjectRef,
       )
     ) {
       throw new AlreadyAttached(subjectKind, input.subjectRef);
@@ -401,6 +414,37 @@ export class FileStoreService {
   async linksOf(tenantId: string, documentId: string): Promise<readonly DocumentLinkRecord[]> {
     await this.get(tenantId, documentId);
     return this.deps.documents.linksOf(tenantId, documentId);
+  }
+
+  /**
+   * Take a document OFF something it was attached to (0302, decided
+   * 2026-09-25). Withdrawn, never deleted: the link row stays and says when
+   * and by whom, because "what was filed against this engagement" has to be
+   * able to answer "this, in error, for a fortnight". The bytes are untouched
+   * and every other attachment stands. Putting it back is `attach` again.
+   */
+  async withdraw(input: WithdrawInput): Promise<DocumentLink> {
+    const subjectKind = this.requireSubjectKind(input.subjectKind);
+    await this.get(input.tenantId, input.documentId);
+
+    const withdrawn = await this.deps.documents.withdraw({
+      tenantId: input.tenantId,
+      documentId: input.documentId,
+      subjectKind,
+      subjectRef: input.subjectRef,
+      // The instant is the database's, as `created_at` is on the same row.
+      withdrawnBy: input.actor.type === "human" ? input.actor.id : null,
+    });
+    if (withdrawn === null) throw new LinkNotFound(subjectKind, input.subjectRef);
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "document.link_withdrawn",
+      objectId: input.documentId,
+      actor: input.actor,
+      payload: { subjectKind, subjectRef: input.subjectRef, role: withdrawn.role },
+    });
+    return withdrawn;
   }
 
   /**

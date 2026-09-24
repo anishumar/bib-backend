@@ -83,6 +83,8 @@ interface LinkRow {
   role: string | null;
   created_by: string | null;
   created_at: string;
+  withdrawn_at: string | null;
+  withdrawn_by: string | null;
 }
 
 interface BrandAssetRow {
@@ -189,6 +191,8 @@ function toLink(r: LinkRow): DocumentLink {
     role: r.role,
     createdBy: r.created_by,
     createdAt: r.created_at,
+    withdrawnAt: r.withdrawn_at,
+    withdrawnBy: r.withdrawn_by,
   };
 }
 
@@ -345,6 +349,8 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
           WHERE l.document_id = d.id
             AND l.subject_kind = ${input.subjectKind}
             AND l.subject_ref = ${input.subjectRef}
+            -- A withdrawn link is history, not an attachment (0302).
+            AND l.withdrawn_at IS NULL
         )
         ORDER BY d.created_at DESC
       `;
@@ -401,7 +407,7 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         VALUES (${link.id}, ${link.tenantId}, ${link.documentId}, ${link.subjectKind},
                 ${link.subjectRef}, ${link.role}, ${link.createdBy})
         RETURNING id, tenant_id, document_id, subject_kind, subject_ref, role,
-                  created_by, created_at
+                  created_by, created_at, withdrawn_at, withdrawn_by
       `;
       if (!row) {
         throw new Error(
@@ -410,6 +416,31 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         );
       }
       return toLink(row);
+    });
+  }
+
+  async withdraw(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly subjectKind: SubjectKind;
+    readonly subjectRef: string;
+    readonly withdrawnBy: string | null;
+  }): Promise<DocumentLink | null> {
+    return withTenant(this.app, input.tenantId, async (db) => {
+      // The WHERE is the lock: two people withdrawing at once produce one
+      // updated row and one null, never two events. Only the two withdrawal
+      // columns are written, which is all the grant allows (0302).
+      const [row] = await db<LinkRow[]>`
+        UPDATE files.document_link
+           SET withdrawn_at = now(), withdrawn_by = ${input.withdrawnBy}
+         WHERE document_id = ${input.documentId}
+           AND subject_kind = ${input.subjectKind}
+           AND subject_ref = ${input.subjectRef}
+           AND withdrawn_at IS NULL
+        RETURNING id, tenant_id, document_id, subject_kind, subject_ref, role,
+                  created_by, created_at, withdrawn_at, withdrawn_by
+      `;
+      return row === undefined ? null : toLink(row);
     });
   }
 
@@ -425,7 +456,7 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
       // shows it as unresolved instead of rendering a blank row.
       const rows = await db<(LinkRow & { subject_label: string | null })[]>`
         SELECT l.id, l.tenant_id, l.document_id, l.subject_kind, l.subject_ref,
-               l.role, l.created_by, l.created_at,
+               l.role, l.created_by, l.created_at, l.withdrawn_at, l.withdrawn_by,
                COALESCE(p.display_name, ld.title, pr.ref, el.ref,
                         eng_p.display_name, i.number, j.source_kind,
                         wi.title) AS subject_label

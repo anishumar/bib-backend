@@ -1088,8 +1088,12 @@ INSERT and nothing else, the same arrangement the `ledger` schema has. A trigger
 table carries; a missing grant is a permission the role does not hold, and an import or an
 agent walks past the first and not the second. `document_link` has no UPDATE either — changing
 what a document is attached to, in place, rewrites "what was filed against this engagement"
-with no trace. **Detaching is deliberately not implemented**: whether an attachment made in
-error should vanish or remain visible as withdrawn is a question for a firm, not a guess.
+with no trace. **Detaching is WITHDRAWING (0302, decided 2026-09-25)**: it was left unbuilt
+because whether an attachment made in error should vanish or remain visible was a question for
+a firm, and the firm answered "remain visible". So `withdrawn_at` / `withdrawn_by` are the ONLY
+two columns `bib_app` may UPDATE, a trigger freezes a withdrawn row, the unique key moved to a
+partial index over LIVE links so the document can go back on, and `document.link_withdrawn` is
+the verb. `listForSubject` hides withdrawn links; `linksOf` shows them, marked.
 
 **Storage is content-addressed, and the cost is the interesting half.** The key derives from
 the sha256, so a client re-sending a file stores one blob. The consequence is that **two
