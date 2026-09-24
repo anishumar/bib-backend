@@ -178,6 +178,24 @@ const MemberSchema = z
 
 const MembersResponse = z.object({ members: z.array(MemberSchema) }).openapi("MembersResponse");
 
+/** A colleague as a PICKER needs them: no email, no membership id, no
+ *  revoked people. See `TenancyService.listColleagues`. */
+const ColleagueSchema = z
+  .object({
+    userId: z.string().uuid(),
+    displayName: z.string().nullable().openapi({
+      description: "Null when nobody has named the account. Show the role instead.",
+    }),
+    role: z.string(),
+    gradeName: z.string().nullable(),
+    gradeRank: z.number().int().nullable(),
+  })
+  .openapi("Colleague");
+
+const ColleaguesResponse = z
+  .object({ colleagues: z.array(ColleagueSchema) })
+  .openapi("ColleaguesResponse");
+
 // ── Request schemas (DTOs) ──────────────────────────────────────────────────
 
 // `reportingCurrency` is required, with no default here or at any layer below.
@@ -431,6 +449,25 @@ const listMembersRoute = createRoute({
     200: { description: "Members", content: { "application/json": { schema: MembersResponse } } },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+  },
+});
+
+const listColleaguesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/tenancy/colleagues",
+  tags: ["tenancy"],
+  summary: "Active staff, by name: whom work can be handed to",
+  description:
+    "The picker behind 'whose desk', 'who owns this lead' and 'who is the SPOC'. Active " +
+    "STAFF members only, by name, role and grade, and WITHOUT email addresses; the roster " +
+    "at /tenancy/members stays tenant:admin. Readable by anybody who can read a client.",
+  responses: {
+    200: {
+      description: "Colleagues",
+      content: { "application/json": { schema: ColleaguesResponse } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
   },
 });
 
@@ -707,6 +744,24 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
     if (!s.ok) return c.json(s.deny, s.status);
     const members = await deps.service.listMembers(s.tenantId);
     return c.json({ members: [...members] }, 200);
+  });
+
+  app.openapi(listColleaguesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const colleagues = await deps.service.listColleagues(s.tenantId);
+    return c.json(
+      {
+        colleagues: colleagues.map((p) => ({
+          userId: p.userId,
+          displayName: p.displayName,
+          role: p.role,
+          gradeName: p.gradeName,
+          gradeRank: p.gradeRank,
+        })),
+      },
+      200,
+    );
   });
 
   app.openapi(inviteMemberRoute, async (c) => {

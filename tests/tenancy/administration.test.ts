@@ -86,6 +86,29 @@ describe("the roster", () => {
   });
 });
 
+describe("the colleagues picker", () => {
+  it("names active staff and never carries an email", async () => {
+    const { service, tenant } = await firm();
+    const leaver = await service.inviteMember(
+      { tenantId: tenant.id, email: "leaver@harbour.example", audience: "STAFF", role: "associate", commercialVisibility: false },
+      ACTOR,
+    );
+    await service.setMemberActive({ tenantId: tenant.id, membershipId: leaver.id, isActive: false }, ACTOR);
+    await service.inviteMember(
+      { tenantId: tenant.id, email: "cfo@client.example", audience: "CLIENT_PORTAL", role: "client_contact", commercialVisibility: false },
+      ACTOR,
+    );
+
+    const picker = await service.listColleagues(tenant.id);
+    // The partner, and neither the person let go nor the client contact.
+    expect(picker.map((p) => p.displayName)).toEqual(["Anita Rao"]);
+    expect(picker[0]?.role).toBe("partner");
+    // The roster's email is the reason it is tenant:admin; the picker must not
+    // reintroduce it under a wider permission.
+    expect(JSON.stringify(picker)).not.toContain("@");
+  });
+});
+
 describe("giving somebody access", () => {
   it("creates the account and the membership, and records the grant", async () => {
     const { service, f, tenant } = await firm();
