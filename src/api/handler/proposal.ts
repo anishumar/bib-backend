@@ -355,6 +355,18 @@ const SentProposalSchema = z
  *  nulled, so a field added for colleagues cannot reach a client's screen by
  *  default — no party id, no lead, no exchange rate, no approver, and no
  *  catalogue version. */
+/** One line of prose as the RECIPIENT reads it — see `SharedProposal.blocks`. */
+const SharedBlockSchema = z
+  .object({
+    kind: z.enum(["exclusion", "commercial", "team"]),
+    body: z.string(),
+    /** A section title inside the block (the team block is a list with
+     *  headings in it), not an item. */
+    isHeading: z.boolean(),
+    sortOrder: z.number().int(),
+  })
+  .openapi("SharedProposalBlock");
+
 const SharedProposalSchema = z
   .object({
     id: z.string().uuid(),
@@ -399,6 +411,11 @@ const SharedProposalSchema = z
        *  "as mutually agreed" lines is the worst place for this to go wrong. */
       unpricedLineCount: z.number().int(),
     }),
+    /** The document's own exclusions, commercial notes and team block (G1.7),
+     *  in print order. The words only: no ids, and nothing that says which
+     *  lines are the firm's standard wording and which were written for this
+     *  client. Empty when the document carries none. */
+    blocks: z.array(SharedBlockSchema),
   })
   .openapi("SharedProposal");
 
@@ -980,6 +997,12 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
           oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
         })),
         totals: { ...shared.totals },
+        blocks: shared.blocks.map((b) => ({
+          kind: b.kind,
+          body: b.body,
+          isHeading: b.isHeading,
+          sortOrder: b.sortOrder,
+        })),
       },
       200,
     );

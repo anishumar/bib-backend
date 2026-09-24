@@ -26,7 +26,7 @@ import type {
   ProposalRecord,
   ProposalRepository,
   ProposalSummary,
-  SharedProposal,
+  SharedProposalRecord,
 } from "../../usecase/proposal/ports";
 
 interface ProposalRow {
@@ -510,7 +510,7 @@ export class PostgresProposalRepository implements ProposalRepository {
    * tenant in the token (0014). Looking a digest up across every firm would
    * need a query RLS does not scope, on a table that holds money.
    */
-  async findShared(tenantId: string, digest: string): Promise<SharedProposal | null> {
+  async findShared(tenantId: string, digest: string): Promise<SharedProposalRecord | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [head] = await db<
         {
@@ -566,7 +566,8 @@ export class PostgresProposalRepository implements ProposalRepository {
                -- they will be invoiced, and what they are told to expect to
                -- reimburse. The four scope blocks are deliberately not here:
                -- this route is a PUBLIC path and widening what an
-               -- unauthenticated link exposes is its own decision.
+               -- unauthenticated link exposes is its own decision. The
+               -- document's PROSE blocks are added by the use case.
                l.pricing_note, l.billing_frequency,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency
         FROM crm.proposal_line l

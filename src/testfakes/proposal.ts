@@ -29,13 +29,14 @@ import type {
   ProposalRepository,
   ProposalSummary,
   ServiceCatalogue,
-  SharedProposal,
+  SharedProposalRecord,
 } from "../usecase/proposal/ports";
 import type { Deps } from "../usecase/proposal/service";
 import { FakeIds } from "./ids";
 import { FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
 import { makeDocumentIdentity } from "./document";
+import type { DocumentService } from "../usecase/document/service";
 import type { FakePreferenceRepo } from "./document";
 
 export class FakeProposalRepo implements ProposalRepository {
@@ -171,7 +172,7 @@ export class FakeProposalRepo implements ProposalRepository {
     return Promise.resolve();
   }
 
-  async findShared(tenantId: string, digest: string): Promise<SharedProposal | null> {
+  async findShared(tenantId: string, digest: string): Promise<SharedProposalRecord | null> {
     const proposalId = this.shareDigests.get(digest);
     if (proposalId === undefined) return null;
     const proposal = await this.findById(tenantId, proposalId);
@@ -390,6 +391,10 @@ export function makeProposalFakes(): Deps & {
    *  without a movable clock there is no way to write a second reading. */
   clock: FakeClock;
   events: RecordingEventSink;
+  /** The same DocumentService `documents` is, as the SERVICE rather than the
+   *  narrow port — so a test can write a document's own prose and then read it
+   *  back through the proposal's share link. */
+  prose: DocumentService;
 } {
   // The REAL DocumentService over in-memory ports: quoting must fail here if
   // the rule that picks an issuing entity stops working, and a stub that
@@ -406,6 +411,7 @@ export function makeProposalFakes(): Deps & {
     catalogue,
     policies: new FakePolicyDirectory(),
     documents: identity.documents,
+    prose: identity.documents,
     firmEntities: identity.firmEntities,
     // The identity fake, reused: both ports want the same guarantee, and a
     // second predictable-token fake would be the same class with a new name.
