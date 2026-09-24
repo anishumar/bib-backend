@@ -76,6 +76,7 @@ interface LetterRow {
   effective_from: Date | null;
   firm_signatory_user_id: string | null;
   firm_signatory_title: string | null;
+  firm_signature_version_id: string | null;
   firm_signed_at: Date | null;
 }
 
@@ -178,6 +179,7 @@ function toLetter(r: LetterRow): EngagementLetter {
     effectiveFrom: r.effective_from === null ? null : toDay(r.effective_from),
     firmSignatoryUserId: r.firm_signatory_user_id,
     firmSignatoryTitle: r.firm_signatory_title,
+    firmSignatureVersionId: r.firm_signature_version_id,
     firmSignedAt: r.firm_signed_at?.toISOString() ?? null,
   };
 }
@@ -291,7 +293,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                   signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
       `;
       if (!row) throw new Error("engagement letter insert returned no row");
       return toLetter(row);
@@ -306,7 +309,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
         FROM crm.engagement_letter WHERE id = ${letterId}
       `;
       return row ? toLetter(row) : null;
@@ -334,7 +338,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
-               l.firm_signed_at,
+               l.firm_signed_at, l.firm_signature_version_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                addressee.display_name AS addressee_display_name,
@@ -553,7 +557,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
-               l.firm_signed_at,
+               l.firm_signed_at, l.firm_signature_version_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
@@ -717,7 +721,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                   signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
       `;
       if (!row) throw new Error(`engagement letter ${letterId} vanished mid-transition`);
       return toLetter(row);
@@ -752,14 +757,20 @@ export class PostgresEngagementRepository implements EngagementRepository {
                issued_on = coalesce(issued_on, ${issuedOnFallback}::date),
                firm_signatory_user_id = ${firm?.userId ?? null},
                firm_signatory_title   = ${firm?.title ?? null},
-               firm_signed_at         = ${firm?.signedAt ?? null}::timestamptz
+               firm_signed_at         = ${firm?.signedAt ?? null}::timestamptz,
+               -- THE MARK, PINNED (0081). Written in the same statement as the
+               -- three columns above so a letter can never go out with a
+               -- signatory recorded and the image resolved a moment later from
+               -- a brand asset somebody replaced in between.
+               firm_signature_version_id = ${firm?.signatureVersionId ?? null}
          WHERE id = ${letterId} AND status = 'draft'
         RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
                   jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                   signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
       `;
       // `AND status = 'draft'` makes the transition its own lock, the same
       // trick the signature uses: two people sending one draft cannot both find
@@ -790,7 +801,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                signature_method, signature_reference, signed_content_hash, signed_by_title,
                withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-               effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+               effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
         FROM crm.engagement_letter
         WHERE supersedes_id = ${letterId} AND status <> 'withdrawn'
       `;
@@ -826,7 +838,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                   signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
       `;
       // `AND status = 'sent'` makes the transition itself the lock: two
       // concurrent signatures cannot both find the row in that state, so the
@@ -874,7 +887,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                   advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
                   signature_method, signature_reference, signed_content_hash, signed_by_title,
                   withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at
+                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
+                  firm_signature_version_id
       `;
       // Same trick as the signature: `advance_recorded_at IS NULL` is the lock,
       // so two clicks cannot both release the engagements.

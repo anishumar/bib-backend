@@ -95,6 +95,7 @@ import type {
   EngagementRecord,
   EngagementRepository,
   FirmSignatory,
+  FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
   LetterSummary,
@@ -122,6 +123,10 @@ export interface Deps {
    *  row on the tenant so a successor is an UPDATE — tenancy satisfies this at
    *  the composition root. */
   readonly firm: FirmSignatory;
+  /** The signature IMAGE for the issuing entity, pinned at send (0081). Its own
+   *  port because the mark is per ENTITY while the signatory is per firm, and
+   *  because the document store owns brand assets. */
+  readonly firmSignatureImage: FirmSignatureImage;
   readonly esign: ESignProvider;
   /**
    * The signer for a letter the client signed BEFORE this product existed —
@@ -932,8 +937,22 @@ export class EngagementService {
     const now = this.deps.clock.now();
     const at = now.toISOString();
     const standing = await this.deps.firm.firmSignatory(tenantId);
+    // THE MARK IS RESOLVED HERE AND PINNED, never looked up when the PDF is
+    // drawn (0081). Only when there IS a signatory: the firm's block prints on
+    // the strength of the signatory row, so with no signatory there is no block
+    // to draw a mark on and the lookup would answer a question nobody asked.
     const firm: FirmSignatureRecord | null =
-      standing === null ? null : { userId: standing.userId, title: standing.title, signedAt: at };
+      standing === null
+        ? null
+        : {
+            userId: standing.userId,
+            title: standing.title,
+            signedAt: at,
+            signatureVersionId: await this.deps.firmSignatureImage.activeSignatureVersion(
+              tenantId,
+              letter.issuingEntityPartyId,
+            ),
+          };
 
     const sent = await this.deps.letters.markSent(tenantId, letter.id, at, utcDay(now), firm);
     await this.deps.events.recordEvent({

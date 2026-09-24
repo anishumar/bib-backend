@@ -206,6 +206,20 @@ export interface EngagementLetter {
   readonly firmSignatoryUserId: string | null;
   readonly firmSignatoryTitle: string | null;
   readonly firmSignedAt: string | null;
+  /**
+   * The firm's signature IMAGE as it stood when this letter went out (0081).
+   *
+   * A `files.document_version` id, pinned by `markSent` beside the three columns
+   * above and for the same reason: replacing the firm's signature must not
+   * restate a letter already issued. Resolving it live would mean a successor's
+   * mark appearing over a predecessor's printed name the next time an old letter
+   * was re-rendered.
+   *
+   * Deliberately NOT part of `canonicalContent`, alongside `firmSignedAt`: it is
+   * presentation of an authority the letter records elsewhere, not a term. The
+   * same agreement drawn with a re-scanned signature is the same agreement.
+   */
+  readonly firmSignatureVersionId: string | null;
 }
 
 export interface LetterLine {

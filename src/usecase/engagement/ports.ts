@@ -102,6 +102,26 @@ export interface FirmSignatory {
   ): Promise<{ readonly userId: string; readonly title: string } | null>;
 }
 
+/**
+ * The signature IMAGE in force for one of the firm's own entities (0081).
+ *
+ * PER ENTITY, not per firm, even though the SIGNATORY is firm-wide: the mark
+ * lives in `files.brand_asset`, which G1.2 keys on the issuing entity so a firm
+ * signing on two letterheads does not print the Indian mark on a letter its US
+ * entity issued. One signatory, whichever entity issues; that entity's own mark.
+ *
+ * Returns the `document_version` id to PIN, resolved once at send. Nothing reads
+ * this at render time — see 0081 for why that distinction is the whole point.
+ *
+ * The document store satisfies it at the composition root, so neither module
+ * imports the other — the seam `FirmSignatory` and `DocumentIdentity` already
+ * are. Null is ordinary: a firm that has uploaded no signature still sends
+ * letters, and the block prints a bare rule.
+ */
+export interface FirmSignatureImage {
+  activeSignatureVersion(tenantId: string, entityPartyId: string): Promise<string | null>;
+}
+
 export interface NewLetter {
   readonly id: string;
   readonly tenantId: string;
@@ -191,6 +211,18 @@ export interface FirmSignatureRecord {
   readonly userId: string;
   readonly title: string;
   readonly signedAt: string;
+  /**
+   * The signature IMAGE to pin (0081) — a `files.document_version` id, or null
+   * when the issuing entity has none.
+   *
+   * OUTSIDE the all-or-nothing rule the other three obey, and that asymmetry is
+   * the point: `el_firm_signature_is_whole_chk` is about who bound the firm and
+   * on what authority, which is evidence. The image is how that authority is
+   * DRAWN, and a firm that has named a signatory but uploaded no mark has a
+   * complete signature block and a bare rule — which is exactly what it had
+   * before this existed.
+   */
+  readonly signatureVersionId: string | null;
 }
 
 /** One engagement to create at signature — one per live line. */

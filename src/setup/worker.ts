@@ -469,8 +469,10 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // named for giving this process the bucket. The same adapters the API
   // composes, so a signed copy filed here is the document the API serves.
   const blobs = blobStoreFor(cfg);
+  // ONE instance, shared with the engagement service's brand-asset lookup (0081).
+  const documentStore = new PostgresDocumentStoreRepository(pools.app);
   const fileStore = new FileStoreService({
-    documents: new PostgresDocumentStoreRepository(pools.app),
+    documents: documentStore,
     blobs,
     digest: new Sha256ByteDigest(),
     ids: systemIds,
@@ -495,6 +497,15 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         return tenant?.firmSignatoryUserId && tenant.firmSignatoryTitle
           ? { userId: tenant.firmSignatoryUserId, title: tenant.firmSignatoryTitle }
           : null;
+      },
+    },
+    // Never called here — this process does not send — but wired to the real
+    // store rather than to a stub returning null, which would be a quiet lie
+    // about which signature is in force the day something else calls `send`.
+    firmSignatureImage: {
+      activeSignatureVersion: async (tenantId, entityPartyId) => {
+        const assets = await documentStore.activeBrandAssets(tenantId, entityPartyId);
+        return assets.find((a) => a.asset.kind === "signature")?.version.id ?? null;
       },
     },
     quotes: new ProposalService({

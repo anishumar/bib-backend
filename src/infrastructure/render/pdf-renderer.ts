@@ -70,6 +70,10 @@ const SIZE_HEADING = 11;
 const SIZE_BODY = 9.5;
 const SIZE_SMALL = 8;
 const LEADING = 1.45;
+/** How tall a signature mark may be drawn. A real signature on paper is about
+ *  the height of two lines of text; letting the uploaded file decide would put a
+ *  1000px scan across half the page. */
+const SIGNATURE_MAX_HEIGHT = 30;
 
 const INK = rgb(0.11, 0.12, 0.14);
 const MUTED = rgb(0.42, 0.45, 0.5);
@@ -155,7 +159,13 @@ export class PdfLibRenderer implements DocumentRenderer {
     for (const section of doc.sections) this.drawSection(cursor, section, body, bold, pdf);
     if (doc.table !== null) this.drawTable(cursor, doc, body, bold, pdf);
     if (doc.totals.length > 0) this.drawTotals(cursor, doc, body, bold, pdf);
-    for (const block of doc.signatures ?? []) this.drawSignature(cursor, block, body, bold, pdf);
+    // THE TERMS, after the commercials and before the signatures — where an
+    // engagement letter has always put them, and where the client is reading
+    // when they reach the line they sign on.
+    for (const term of doc.terms ?? []) this.drawSection(cursor, term, body, bold, pdf);
+    for (const block of doc.signatures ?? []) {
+      await this.drawSignature(cursor, block, body, bold, pdf);
+    }
     if (doc.footer !== null) this.drawFooter(pdf, doc, body);
 
     return pdf.save();
@@ -402,22 +412,52 @@ export class PdfLibRenderer implements DocumentRenderer {
    * — because a signature line stranded at the foot of a page with its name
    * over the break is a block nobody can tell is complete.
    */
-  private drawSignature(
+  private async drawSignature(
     cursor: Cursor,
     block: SignatureBlock,
     body: Face,
     bold: Face,
     pdf: PDFDocument,
-  ): void {
+  ): Promise<void> {
     const lineWidth = 220;
+    // The mark, embedded BEFORE any space is reserved: its height decides how
+    // much room the block needs, and asking for that room afterwards is what
+    // would let a tall signature overrun the page the block was kept on.
+    const image =
+      block.image === null || block.image === undefined
+        ? null
+        : block.image.mediaType === "image/png"
+          ? await pdf.embedPng(block.image.bytes)
+          : await pdf.embedJpg(block.image.bytes);
+    // Scaled to sit ON the rule rather than to fill it — a signature wider than
+    // the line it is written over reads as a graphic pasted on the page. Capped
+    // on both axes and never enlarged, the logo's arrangement exactly.
+    const scale =
+      image === null ? 0 : Math.min(SIGNATURE_MAX_HEIGHT / image.height, (lineWidth - 8) / image.width, 1);
+    const markHeight = image === null ? 0 : image.height * scale;
+
     const under = block.lines.length + (block.dateAnchor === null ? 0 : 1);
-    this.advance(pdf, cursor, 28 + 34 + under * SIZE_BODY * LEADING);
-    cursor.y += 34 + under * SIZE_BODY * LEADING;
+    // The gap between the heading and the rule is the greater of the standing
+    // 34pt and what the mark actually needs, so a tall signature pushes the rule
+    // down instead of being drawn through the heading above it.
+    const gap = Math.max(34, markHeight + 8);
+    this.advance(pdf, cursor, 28 + gap + under * SIZE_BODY * LEADING);
+    cursor.y += gap + under * SIZE_BODY * LEADING;
 
     this.text(cursor, block.heading, { size: SIZE_BODY, font: bold });
-    this.advance(pdf, cursor, 34);
+    this.advance(pdf, cursor, gap);
     if (block.signAnchor !== null) {
       this.text(cursor, block.signAnchor, { x: MARGIN_X + 2, font: body, color: PAPER });
+    }
+    // ON the rule: `cursor.y - 4` is the rule, so the mark sits just above it,
+    // the way a signature sits on a printed line.
+    if (image !== null) {
+      cursor.page.drawImage(image, {
+        x: MARGIN_X + 4,
+        y: cursor.y - 2,
+        width: image.width * scale,
+        height: markHeight,
+      });
     }
     cursor.page.drawLine({
       start: { x: MARGIN_X, y: cursor.y - 4 },
@@ -475,6 +515,10 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
   doc.sections.forEach((s) => {
     check("a section heading", s.heading);
     s.paragraphs.forEach((p, i) => { check(`a paragraph of "${s.heading ?? "the document"}" (${String(i + 1)})`, p); });
+  });
+  doc.terms?.forEach((t) => {
+    check("a term's heading", t.heading);
+    t.paragraphs.forEach((p, i) => { check(`a paragraph of the term "${t.heading ?? ""}" (${String(i + 1)})`, p); });
   });
   doc.table?.rows.forEach((row, i) => {
     row.forEach((cell) => { check(`row ${String(i + 1)} of the table`, cell); });

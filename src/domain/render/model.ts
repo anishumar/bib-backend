@@ -74,6 +74,26 @@ export interface RenderableImage {
 }
 
 /**
+ * What the renderer can actually embed, as a list rather than as two string
+ * comparisons repeated in three files.
+ *
+ * Exported because the DOOR needs it: a logo or a signature is refused at upload
+ * against this, so the person who chose the file is the one told about it. Keep
+ * it and `RenderableImage["mediaType"]` in step — the type is what the renderer
+ * is held to, and this is the same statement in a form a caller can check.
+ */
+export const DRAWABLE_IMAGE_MEDIA_TYPES: readonly RenderableImage["mediaType"][] = [
+  "image/png",
+  "image/jpeg",
+];
+
+/** Whether the renderer could draw bytes of this type — the guard the upload
+ *  path and the render source both ask, so they cannot drift apart. */
+export function isDrawableImage(mediaType: string): mediaType is RenderableImage["mediaType"] {
+  return (DRAWABLE_IMAGE_MEDIA_TYPES as readonly string[]).includes(mediaType);
+}
+
+/**
  * Where an e-signature provider puts the client's signature and the date.
  *
  * DocuSign places a field by searching the PDF's TEXT for a string (an anchor),
@@ -100,6 +120,20 @@ export interface SignatureBlock {
   readonly heading: string;
   /** Printed under the signature line — a name, a capacity. */
   readonly lines: readonly string[];
+  /**
+   * The mark drawn ON the signature line — the firm's signature image.
+   *
+   * ON THE BLOCK AND NOT ON THE DOCUMENT, deliberately. A document-level
+   * `signature` field beside `logo` would be reachable from either block, and
+   * the block it must never reach is the CLIENT's: drawing a mark on the line a
+   * client has not signed is forgery, and the provider stamps that line itself.
+   * Here the type says which half may carry one, so the answer cannot be got
+   * wrong by a later edit to the render source.
+   *
+   * Null is ordinary — a firm that has uploaded no signature, and every letter
+   * issued before the mark was pinned, get the bare rule they already had.
+   */
+  readonly image?: RenderableImage | null | undefined;
   /** Invisible text on the signature line, for a provider to find. Null on a
    *  block nobody will sign electronically — the firm's, which it signed by
    *  sending. */
@@ -121,6 +155,19 @@ export interface RenderableDocument {
   readonly sections: readonly Section[];
   readonly table: LineTable | null;
   readonly totals: readonly TotalRow[];
+  /**
+   * The agreement's TERMS — an engagement letter's pinned clauses.
+   *
+   * Separate from `sections` and not merged into it, because they print in a
+   * different PLACE: `sections` is the firm's prose about the work and runs
+   * before the fee table, and terms are what both sides are bound to, which on
+   * every engagement letter ever written comes after the commercials and
+   * immediately before the signatures. One array could not say both.
+   *
+   * Optional, so a document with no terms — an invoice — draws nothing here and
+   * its bytes do not move.
+   */
+  readonly terms?: readonly Section[] | undefined;
   readonly footer: string | null;
   /** Signature blocks after the totals. Absent on a document nobody signs —
    *  an invoice — and then nothing is drawn, so its bytes do not move. */

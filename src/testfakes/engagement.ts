@@ -24,6 +24,7 @@ import type {
   ESignProvider,
   EngagementRepository,
   FirmSignatory,
+  FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
   LetterRecord,
@@ -123,6 +124,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       effectiveFrom: l.effectiveFrom,
       firmSignatoryUserId: null,
       firmSignatoryTitle: null,
+      firmSignatureVersionId: null,
       firmSignedAt: null,
     };
     this.letters.push(row);
@@ -227,6 +229,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         issuedOn: l.issuedOn ?? issuedOnFallback,
         firmSignatoryUserId: firm?.userId ?? null,
         firmSignatoryTitle: firm?.title ?? null,
+        firmSignatureVersionId: firm?.signatureVersionId ?? null,
         firmSignedAt: firm?.signedAt ?? null,
       })),
     );
@@ -548,6 +551,20 @@ export class FakeFirmSignatory implements FirmSignatory {
   }
 }
 
+/** The signature IMAGE in force for an entity (0081). Per entity, because the
+ *  mark is — one signatory for the firm, that entity's own mark on its paper. */
+export class FakeFirmSignatureImage implements FirmSignatureImage {
+  private readonly byEntity = new Map<string, string>();
+
+  set(entityPartyId: string, versionId: string): void {
+    this.byEntity.set(entityPartyId, versionId);
+  }
+
+  activeSignatureVersion(_tenantId: string, entityPartyId: string): Promise<string | null> {
+    return Promise.resolve(this.byEntity.get(entityPartyId) ?? null);
+  }
+}
+
 /** A signer a test can make fail — because "the provider was down" must not
  *  leave a letter recorded as signed. */
 export class FakeSigner implements ESignProvider {
@@ -831,6 +848,7 @@ export function makeEngagementFakes(): Deps & {
     documents: identity.documents,
     firmEntities: identity.firmEntities,
     firm: new FakeFirmSignatory(),
+    firmSignatureImage: new FakeFirmSignatureImage(),
     quotes: new FakeAcceptedQuotes(),
     esign: new FakeSigner(),
     // Migrated letters: the same attested fake, so a test that sets

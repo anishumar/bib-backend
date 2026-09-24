@@ -315,9 +315,26 @@ describe("attaching", () => {
 describe("brand assets", () => {
   it("puts a mark in force and supersedes the previous one", async () => {
     const { service, events } = makeService();
-    const first = await service.store(upload({ title: "Logo 2025", kind: "brand_asset" }));
+    // PNG, because a logo is DRAWN and the renderer embeds PNG and JPEG only.
+    // This read `application/pdf` while `setBrandAsset` accepted anything, which
+    // is the state that let a `.webp` logo store cleanly and then disappear from
+    // every document it was supposed to be at the head of.
+    const first = await service.store(
+      upload({
+        title: "Logo 2025",
+        kind: "brand_asset",
+        filename: "logo-2025.png",
+        mediaType: "image/png",
+      }),
+    );
     const second = await service.store(
-      upload({ title: "Logo 2026", kind: "brand_asset", bytes: bytes("a newer logo") }),
+      upload({
+        title: "Logo 2026",
+        kind: "brand_asset",
+        filename: "logo-2026.png",
+        mediaType: "image/png",
+        bytes: bytes("a newer logo"),
+      }),
     );
 
     await service.setBrandAsset({
@@ -339,6 +356,57 @@ describe("brand assets", () => {
     expect(active).toHaveLength(1);
     expect(active[0]?.asset.documentVersionId).toBe(second.latestVersion.id);
     expect(events.recorded.filter((e) => e.verb === "brand_asset.set")).toHaveLength(2);
+  });
+
+  it("refuses a logo the renderer cannot draw, at the upload rather than at render time", async () => {
+    const { service } = makeService();
+    // A `.webp` is exactly what the brand screen's `accept="image/*"` invited
+    // and what the render source then dropped in silence, leaving a firm looking
+    // at letters with no letterhead and nothing anywhere saying why.
+    const webp = await service.store(
+      upload({ title: "Logo", kind: "brand_asset", filename: "logo.webp", mediaType: "image/webp" }),
+    );
+    await expect(
+      service.setBrandAsset({
+        tenantId: TENANT,
+        entityPartyId: PARTY,
+        kind: "logo",
+        documentVersionId: webp.latestVersion.id,
+        actor,
+      }),
+    ).rejects.toThrow(/can only draw PNG and JPEG/);
+  });
+
+  it("refuses a signature the renderer cannot draw", async () => {
+    const { service } = makeService();
+    const webp = await service.store(
+      upload({ title: "Sign", kind: "brand_asset", filename: "sign.webp", mediaType: "image/webp" }),
+    );
+    await expect(
+      service.setBrandAsset({
+        tenantId: TENANT,
+        entityPartyId: PARTY,
+        kind: "signature",
+        documentVersionId: webp.latestVersion.id,
+        actor,
+      }),
+    ).rejects.toThrow(/A signature needs a transparent background/);
+  });
+
+  it("takes a PDF letterhead, which nothing draws as an image", async () => {
+    const { service } = makeService();
+    // The exemption, and it is not an oversight: a letterhead is the full
+    // stationery a firm prints on, the renderer never embeds it, so the drawable
+    // formats are not its rule. Refusing it here would break a real use.
+    const pdf = await service.store(upload({ title: "Letterhead", kind: "brand_asset" }));
+    const asset = await service.setBrandAsset({
+      tenantId: TENANT,
+      entityPartyId: PARTY,
+      kind: "letterhead",
+      documentVersionId: pdf.latestVersion.id,
+      actor,
+    });
+    expect(asset.asset.kind).toBe("letterhead");
   });
 
   it("refuses a version that does not exist", async () => {

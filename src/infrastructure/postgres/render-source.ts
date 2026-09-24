@@ -20,10 +20,12 @@
 // Dubai or Delaware by somebody for whom a bare symbol is ambiguous or simply
 // unfamiliar. A three-letter ISO code is unambiguous everywhere, and a firm that
 // wants the symbol can now have it by changing this one function.
+import { readClauseBody } from "../../domain/config/model";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
-import type { RenderableDocument, Section } from "../../domain/render/model";
+import type { RenderableDocument, RenderableImage, Section } from "../../domain/render/model";
+import { isDrawableImage } from "../../domain/render/model";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
 import { isoInstant, utcDayOf } from "./instant";
@@ -48,6 +50,7 @@ interface LetterRow {
   signed_by_title: string | null;
   firm_signatory_title: string | null;
   firm_signatory_name: string | null;
+  firm_signature_version_id: string | null;
   created_on: string;
   client_name: string;
   entity_name: string;
@@ -68,6 +71,13 @@ interface BlockRow {
   kind: string;
   body: string;
   is_heading: boolean;
+}
+
+interface ClauseRow {
+  /** The body AS PINNED — the wording the client agreed to, never the library's
+   *  wording today. Read through `readClauseBody`, which is the one function
+   *  allowed to say what a clause body's shape is. */
+  body: Record<string, unknown>;
 }
 
 interface InvoiceRow {
@@ -177,6 +187,7 @@ export class PostgresRenderSource implements RenderSource {
                el.issued_on::text, el.effective_from::text,
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
+               el.firm_signature_version_id,
                ${db.unsafe(utcDayOf("el.created_at", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
@@ -212,6 +223,27 @@ export class PostgresRenderSource implements RenderSource {
         ORDER BY sort_order
       `;
 
+      // THE TERMS, AS PINNED. This join is what puts a contract's actual terms on
+      // the contract: until it existed the renderer read `crm.document_block`
+      // and nothing else, so Confidentiality, Client responsibilities and every
+      // other clause were shown on the firm's screen, frozen into the content
+      // hash, checked against the issuing entity's law by `addClause` — and
+      // absent from the PDF the client was sent and signed. `crm.engagement_letter`
+      // refuses to go out without clauses precisely because "a signed contract
+      // with no terms is enforceable as whatever a court reads into it", and
+      // that refusal was guarding a document that then printed none of them.
+      //
+      // Through `config.version`, exactly as `EngagementRepository` reads them,
+      // because a signed letter must show what was AGREED and not what the
+      // library says today.
+      const clauses = await db<ClauseRow[]>`
+        SELECT v.body
+        FROM crm.engagement_letter_clause c
+        JOIN config.version v ON v.id = c.clause_version_id
+        WHERE c.engagement_letter_id = ${letterId}
+        ORDER BY c.position
+      `;
+
       const sections: Section[] = [];
       if (row.background !== null && row.background.trim() !== "") {
         sections.push({ heading: "Background", paragraphs: [row.background] });
@@ -219,20 +251,36 @@ export class PostgresRenderSource implements RenderSource {
       // The firm's own prose, grouped by kind and in the firm's own order. A
       // heading block starts a section rather than becoming a paragraph — that
       // is what `is_heading` is for (G1.7).
-      const byKind = new Map<string, string[]>();
+      //
+      // A CHANGE OF KIND ALSO STARTS ONE, and leaving that out was a real bug.
+      // This walked the map's keys and took the LAST one inserted, consulting
+      // `BLOCK_HEADINGS` only while the map was still EMPTY — so the kind chose
+      // a heading for the first section and never again. Every block after the
+      // first heading landed under it whatever its kind, which on the firm's own
+      // letter printed "Invoices are payable within 15 days of issue" — a
+      // commercial term — under the heading "Engagement Partner". The document
+      // was not wrong about its words, it was wrong about what they were about.
+      const built: { heading: string; kind: string; paragraphs: string[] }[] = [];
+      let open: { heading: string; kind: string; paragraphs: string[] } | null = null;
       for (const b of blocks) {
-        const label = b.is_heading ? b.body : null;
-        if (label !== null) {
-          byKind.set(label, []);
+        // The firm's own heading wins over the derived one, and it stays open
+        // for every block of ITS kind that follows — the team block is a table
+        // with headings, which is what `is_heading` was built for.
+        if (b.is_heading) {
+          open = { heading: b.body, kind: b.kind, paragraphs: [] };
+          built.push(open);
           continue;
         }
-        const current = [...byKind.keys()].pop() ?? BLOCK_HEADINGS[b.kind] ?? "Terms";
-        const list = byKind.get(current) ?? [];
-        list.push(b.body);
-        byKind.set(current, list);
+        if (open === null || open.kind !== b.kind) {
+          open = { heading: BLOCK_HEADINGS[b.kind] ?? "Terms", kind: b.kind, paragraphs: [] };
+          built.push(open);
+        }
+        open.paragraphs.push(b.body);
       }
-      for (const [heading, paragraphs] of byKind) {
-        if (paragraphs.length > 0) sections.push({ heading, paragraphs });
+      for (const section of built) {
+        if (section.paragraphs.length > 0) {
+          sections.push({ heading: section.heading, paragraphs: section.paragraphs });
+        }
       }
 
       const priced = lines.some((l) => l.line_total !== null);
@@ -257,6 +305,14 @@ export class PostgresRenderSource implements RenderSource {
           { label: "Governing law", value: row.jurisdiction },
         ],
         sections,
+        // Heading + body, the same shape the firm's prose takes, so the renderer
+        // draws a term exactly as it draws an exclusion. The TITLE is the
+        // heading: a clause whose words print with no name is one nobody can
+        // refer to in the conversation where it matters.
+        terms: clauses.map((c) => {
+          const clause = readClauseBody(c.body);
+          return { heading: clause.title, paragraphs: [clause.text] };
+        }),
         table:
           lines.length === 0
             ? null
@@ -298,6 +354,12 @@ export class PostgresRenderSource implements RenderSource {
                   lines: [row.firm_signatory_name ?? "", row.firm_signatory_title].filter(
                     (l) => l.trim() !== "",
                   ),
+                  // THE MARK THIS LETTER WAS ISSUED UNDER (0081), read from the
+                  // version PINNED at send and never from whatever is active
+                  // now. On the firm's block only: the client's is signed by
+                  // the provider, and drawing anything on a line the client has
+                  // not signed would be a forgery this product produced itself.
+                  image: await this.signature(db, tenantId, row.firm_signature_version_id),
                   signAnchor: null,
                   dateAnchor: null,
                 },
@@ -402,6 +464,40 @@ export class PostgresRenderSource implements RenderSource {
    * ordinary answer — a firm that has uploaded nothing still gets a usable
    * document, which is why this never throws.
    */
+  /**
+   * The firm's signature image for ONE letter, by the version it pinned (0081).
+   *
+   * By VERSION ID and with no `is_active` anywhere: that flag is what makes the
+   * logo's lookup answer "the mark in force today", which is the right question
+   * for a document being drafted and the wrong one for a document already
+   * issued. Re-rendering a 2026 letter after a partner succeeded another must
+   * not stamp the successor's signature over the predecessor's printed name.
+   *
+   * Null is ordinary — no pin, no upload, or a media type the renderer cannot
+   * draw — and the block then prints the bare rule it printed before.
+   */
+  private async signature(
+    db: Db,
+    tenantId: string,
+    versionId: string | null,
+  ): Promise<RenderableImage | null> {
+    if (versionId === null) return null;
+    const [row] = await db<LogoRow[]>`
+      SELECT v.media_type, v.storage_key
+      FROM files.document_version v
+      WHERE v.id = ${versionId}
+    `;
+    if (!row) return null;
+    // Refused at upload since the brand screen learnt to (`BrandAssetNotDrawable`),
+    // so this is the older assets' path rather than the ordinary one — and it
+    // stays, because a letter pinned before that guard existed may point at any
+    // media type at all.
+    if (!isDrawableImage(row.media_type)) return null;
+    const bytes = await this.readBlob({ tenantId, storageKey: row.storage_key });
+    if (bytes === null) return null;
+    return { bytes, mediaType: row.media_type };
+  }
+
   private async logo(
     db: Db,
     tenantId: string,

@@ -862,6 +862,7 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "EMPTY_CONTENT":
       case "UNSUPPORTED_MEDIA_TYPE":
+      case "BRAND_ASSET_NOT_DRAWABLE":
       case "INVALID_FILENAME":
       case "INVALID_TITLE":
       case "UNKNOWN_SUBJECT_KIND":

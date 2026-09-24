@@ -24,6 +24,7 @@ export type FileStoreErrorCode =
   | "EMPTY_CONTENT"
   | "CONTENT_TOO_LARGE"
   | "UNSUPPORTED_MEDIA_TYPE"
+  | "BRAND_ASSET_NOT_DRAWABLE"
   | "INVALID_FILENAME"
   | "INVALID_TITLE"
   | "UNKNOWN_SUBJECT_KIND"
@@ -140,6 +141,32 @@ export class BytesMissing extends FileStoreError {
       `The storage backend has no object at ${JSON.stringify(storageKey)}, but a version row ` +
         `says it should. The document's metadata is intact and its bytes are not — this is a ` +
         `storage fault, not a missing document.`,
+    );
+  }
+}
+
+/**
+ * A logo or signature in a format the renderer cannot draw.
+ *
+ * REFUSED AT THE UPLOAD, which is the whole point of it. `RenderableImage` has
+ * always said "anything else is refused by the caller rather than silently
+ * dropped" and the render source did the opposite: a `.webp` logo stored
+ * perfectly, passed the brand screen's `accept="image/*"`, and then vanished on
+ * every document with nothing anywhere saying why. The person who can fix that
+ * is standing on the brand screen at the moment of upload; by render time they
+ * are a client looking at a letter with no letterhead.
+ *
+ * A LETTERHEAD IS NOT REFUSED. It is legitimately a PDF — the full stationery a
+ * firm prints on — and nothing draws it as an image, so the drawable formats are
+ * not its rule.
+ */
+export class BrandAssetNotDrawable extends FileStoreError {
+  constructor(kind: string, mediaType: string) {
+    super(
+      "BRAND_ASSET_NOT_DRAWABLE",
+      `A ${kind} is drawn onto every document this entity issues, and the renderer can only ` +
+        `draw PNG and JPEG — ${JSON.stringify(mediaType)} cannot be. Upload a .png or .jpg. ` +
+        `A signature needs a transparent background, so PNG is the one to use for that.`,
     );
   }
 }

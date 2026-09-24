@@ -2,6 +2,12 @@ node_modules/
 dist/
 coverage/
 .env
+# Every .env VARIANT, not just the bare name. A `.env.bak` or `.env.local` is
+# the same secrets under a name the single-entry rule did not match — and
+# `gcloud builds submit` uploads whatever git does not ignore, so a miss here
+# puts real connection strings in a build staging bucket.
+.env.*
+!.env.example
 *.log
 .DS_Store
 .vitest/

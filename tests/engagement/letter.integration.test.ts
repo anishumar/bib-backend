@@ -165,6 +165,10 @@ const service = new EngagementService({
   library: configRepository,
   documents,
   firm: tenancy,
+  // No brand asset is uploaded in this file, so the mark is always absent — the
+  // state every letter sent before 0081 is in, and the one that must go on
+  // rendering a bare rule.
+  firmSignatureImage: { activeSignatureVersion: () => Promise.resolve(null) },
   // This file exercises the SQL behind a letter, not the quote it may have come
   // from, so the seam answers "no such proposal" for everything. A real
   // `ProposalService` here would drag the whole commercial module into a test
@@ -1485,7 +1489,16 @@ describe("the signature blocks a letter PRINTS (0080)", () => {
     const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
 
     expect(described?.document.signatures).toEqual([
-      { heading: "For EL Test A LLP", lines: ["Siddharth Jain", "Director"], signAnchor: null, dateAnchor: null },
+      {
+        heading: "For EL Test A LLP",
+        lines: ["Siddharth Jain", "Director"],
+        signAnchor: null,
+        dateAnchor: null,
+        // No brand asset was uploaded, so nothing was pinned at send and the
+        // block prints a bare rule (0081). Asserted rather than left off: null
+        // here is the state every letter issued before the pin existed is in.
+        image: null,
+      },
       {
         heading: "Accepted for and on behalf of Acme Ltd",
         lines: ["Priya Menon"],
@@ -1493,5 +1506,35 @@ describe("the signature blocks a letter PRINTS (0080)", () => {
         dateAnchor: CLIENT_DATE_ANCHOR,
       },
     ]);
+  });
+
+  // THE CLIENT'S BLOCK NEVER CARRIES A MARK, whatever the firm has uploaded.
+  // Drawing on a line the client has not signed would be a forgery this product
+  // produced itself; the provider stamps that line, and the type is what keeps
+  // it that way.
+  it("never puts a mark on the client's block", async () => {
+    await nameTheFirmSignatory();
+    const id = await signedLetter();
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+
+    expect(described?.document.signatures?.[1]).not.toHaveProperty("image");
+  });
+
+  // The clauses the letter PINNED reach the page. Until 0081 the render source
+  // read `crm.document_block` and nothing else, so a contract's actual terms
+  // were on the firm's screen, inside the content hash, and absent from the PDF
+  // the client signed.
+  it("prints the TERMS the letter was assembled from", async () => {
+    await nameTheFirmSignatory();
+    const id = await signedLetter();
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+
+    expect(described?.document.terms?.length ?? 0).toBeGreaterThan(0);
+    for (const term of described?.document.terms ?? []) {
+      expect(term.heading).toBeTruthy();
+      expect(term.paragraphs.join("").trim()).not.toBe("");
+    }
   });
 });

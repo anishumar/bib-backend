@@ -472,8 +472,11 @@ export function wire(cfg: Config, log: Logger): Wired {
   // so the PDF a client signs in DocuSign is the PDF the firm can download.
   const renderer = new PdfLibRenderer();
   const renderSource = new PostgresRenderSource(pools.app, (i) => blobs.get(i));
+  // ONE instance, because engagement letters read brand assets through it too
+  // (0081) and two would be two answers to "which signature is in force".
+  const documentStore = new PostgresDocumentStoreRepository(pools.app);
   const fileStore = new FileStoreService({
-    documents: new PostgresDocumentStoreRepository(pools.app),
+    documents: documentStore,
     blobs,
     digest: new Sha256ByteDigest(),
     ids: systemIds,
@@ -1027,6 +1030,15 @@ export function wire(cfg: Config, log: Logger): Wired {
     // this port structurally, so neither module imports the other — the same
     // seam the catalogue and the reference series arrive through.
     firm: tenancy,
+    // THE MARK, resolved at send and pinned to the letter (0081). A closure over
+    // the document store rather than the store itself: this use case needs one
+    // answer about brand assets and must not be handed the whole file cabinet.
+    firmSignatureImage: {
+      activeSignatureVersion: async (tenantId, entityPartyId) => {
+        const assets = await documentStore.activeBrandAssets(tenantId, entityPartyId);
+        return assets.find((a) => a.asset.kind === "signature")?.version.id ?? null;
+      },
+    },
     // THE QUOTE A LETTER IS WRITTEN UP FROM (T3.5b). The SAME instance the
     // proposal routes hold, satisfied structurally by `findQuote` — so neither
     // use case imports the other, and there is one answer to "what did we

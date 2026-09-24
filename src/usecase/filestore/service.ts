@@ -2,6 +2,7 @@
 // them to things. No I/O, no SQL, no HTTP: everything outside arrives as an
 // injected port, so this reads as a description of what the business does and is
 // testable with in-memory fakes and zero infrastructure.
+import { isDrawableImage } from "../../domain/render/model";
 import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
@@ -28,6 +29,7 @@ import {
   InvalidFilename,
   InvalidTitle,
   UnknownSubjectKind,
+  BrandAssetNotDrawable,
   UnsupportedMediaType,
   VersionNotFound,
 } from "../../domain/filestore/errors";
@@ -572,6 +574,15 @@ export class FileStoreService {
   }): Promise<BrandAssetRecord> {
     const version = await this.deps.documents.findVersion(input.tenantId, input.documentVersionId);
     if (!version) throw new VersionNotFound(input.documentVersionId, null);
+
+    // REFUSED HERE, not dropped at render time. A logo and a signature are DRAWN
+    // onto every document the entity issues, and the renderer can embed PNG and
+    // JPEG only; anything else stored fine and then disappeared from every
+    // letter and invoice with nothing saying so. The letterhead is exempt on
+    // purpose — it is legitimately a PDF and nothing draws it as an image.
+    if ((input.kind === "logo" || input.kind === "signature") && !isDrawableImage(version.mediaType)) {
+      throw new BrandAssetNotDrawable(input.kind, version.mediaType);
+    }
 
     const asset = await this.deps.documents.setBrandAsset({
       id: this.deps.ids.newId(),

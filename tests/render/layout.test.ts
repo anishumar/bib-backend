@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR, wrapParagraph } from "../../src/domain/render/model";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
 import { RenderError } from "../../src/domain/render/errors";
-import type { RenderableDocument } from "../../src/domain/render/model";
+import type { RenderableDocument, RenderableImage } from "../../src/domain/render/model";
 
 function doc(overrides: Partial<RenderableDocument> = {}): RenderableDocument {
   return {
@@ -186,5 +186,68 @@ describe("signature blocks (0080)", () => {
         doc({ signatures: [{ heading: "For 株式会社", lines: [], signAnchor: null, dateAnchor: null }] }),
       ),
     ).rejects.toThrow(/signature block's heading/);
+  });
+});
+
+describe("the firm's signature image (0081)", () => {
+  /** A 1×1 PNG. Real bytes, because `embedPng` parses them. */
+  const MARK = {
+    bytes: Uint8Array.from(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64",
+      ),
+    ),
+    mediaType: "image/png" as const,
+  };
+
+  const firmBlock = (
+    image: RenderableImage | null | undefined,
+  ): RenderableDocument["signatures"] => [
+    { heading: "For The Firm LLP", lines: ["A. Partner", "Partner"], signAnchor: null, dateAnchor: null, image },
+  ];
+
+  it("is drawn — the whole point, and the thing that was missing", async () => {
+    const r = new PdfLibRenderer();
+    const bare = sha(await r.render(doc({ signatures: firmBlock(null) })));
+    expect(sha(await r.render(doc({ signatures: firmBlock(MARK) })))).not.toBe(bare);
+  });
+
+  it("stays deterministic with a mark on the page", async () => {
+    const r = new PdfLibRenderer();
+    expect(sha(await r.render(doc({ signatures: firmBlock(MARK) })))).toBe(
+      sha(await r.render(doc({ signatures: firmBlock(MARK) }))),
+    );
+  });
+
+  it("moves nothing when absent, so every letter issued before it re-renders byte-identical", async () => {
+    const r = new PdfLibRenderer();
+    const bare = sha(await r.render(doc({ signatures: firmBlock(null) })));
+    expect(sha(await r.render(doc({ signatures: firmBlock(undefined) })))).toBe(bare);
+  });
+});
+
+describe("the terms — a contract's actual clauses", () => {
+  const terms = [
+    { heading: "Confidentiality", paragraphs: ["Each party keeps the other in confidence."] },
+    { heading: "Client responsibilities", paragraphs: ["The client provides complete records."] },
+  ];
+
+  it("reach the page — until this they were pinned, hashed, and absent from the PDF", async () => {
+    const r = new PdfLibRenderer();
+    expect(sha(await r.render(doc({ terms })))).not.toBe(sha(await r.render(doc())));
+  });
+
+  it("move nothing on a document that has none — an invoice's bytes are what they were", async () => {
+    const r = new PdfLibRenderer();
+    const without = sha(await r.render(doc()));
+    expect(sha(await r.render(doc({ terms: undefined })))).toBe(without);
+    expect(sha(await r.render(doc({ terms: [] })))).toBe(without);
+  });
+
+  it("are checked against the font chain by name, like the firm's own prose", async () => {
+    await expect(
+      new PdfLibRenderer().render(doc({ terms: [{ heading: "Governing law", paragraphs: ["株式会社"] }] })),
+    ).rejects.toThrow(/the term "Governing law"/);
   });
 });
