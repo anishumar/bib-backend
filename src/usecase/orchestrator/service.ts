@@ -47,6 +47,7 @@ import {
   NothingProposed,
   ProposalUndecided,
   StepNotFound,
+  StepNoLongerNeeded,
   StepNotWaiting,
   TemplateUnreadable,
 } from "../../domain/orchestrator/errors";
@@ -460,6 +461,10 @@ export class OrchestratorService {
     // `blocked` is precisely the state that means "waiting for somebody". A
     // second completion would overwrite who did it and when, which is the one
     // fact this row exists to hold.
+    // A step withdrawn because its rule stopped applying (0304) gets its own
+    // sentence. "skipped, not waiting for anybody" is true and tells somebody
+    // whose step just vanished from their desk nothing about why.
+    if (step.status === "skipped") throw new StepNoLongerNeeded(step.stepKey, step.outcomeNote);
     if (step.status !== "blocked") throw new StepNotWaiting(step.stepKey, step.status);
 
     // EVERY blocked step is a person's to finish, and T2.8 is what made that
@@ -1201,10 +1206,18 @@ export class OrchestratorService {
       });
     }
 
+    skipped += await this.withdrawOpenedSteps(tenantId, job, template, subject, steps, actor);
+
     if (skipped === 0) return 0;
 
     // The other half of a branch. Without it, everything downstream of a skipped
     // step waits forever on something that will never be `done`.
+    //
+    // `cascadeSkips` still takes only PENDING steps, and after 0304 that is still
+    // complete rather than a gap: a dependent cannot open before everything it
+    // depends on has settled, a settled step is never skipped afterwards, and a
+    // step withdrawn below was by definition not settled — so whatever depends on
+    // it has not opened either.
     const after = await this.deps.steps.listForJob(tenantId, job.id);
     const afterByKey = new Map(after.map((s) => [s.stepKey, s]));
     for (const key of cascadeSkips(template.steps, after)) {
@@ -1226,6 +1239,90 @@ export class OrchestratorService {
       });
     }
     return skipped;
+  }
+
+  /**
+   * A step that has OPENED is judged again, and withdrawn if its rule no longer
+   * holds and nobody has done anything on it yet (0304).
+   *
+   * ── WHY THE JUDGEMENT IS NOT ONLY AT THE START ─────────────────────────────
+   *
+   * The facts a condition reads are not frozen when the step opens. The
+   * recurrence comes from the service, read LIVE; the jurisdiction from the
+   * entity's registration, which a firm corrects. A step judged once at the
+   * start could sit on a desk for weeks after the firm's own rule stopped
+   * applying to it, and the only way off that desk was to tick it done — a
+   * record of work nobody did, which is worse than the step waiting.
+   *
+   * ── WHAT IS NEVER WITHDRAWN ───────────────────────────────────────────────
+   *
+   * Anything with work on it. A step somebody has ticked and sent for checking
+   * carries `performed_by`; a step a machine answered carries an undecided
+   * proposal. Either way the work EXISTS, and silently discarding it because a
+   * catalogue field changed is the failure this engine is built to avoid. It
+   * goes on to be checked or decided the ordinary way.
+   *
+   * And an UNKNOWN fact never withdraws anything — `evaluateCondition`'s rule,
+   * unchanged: a blank field keeps the step. Only a definite "no" moves it.
+   *
+   * ── WHAT THE PERSON SEES, AND WHAT THE LEDGER KEEPS ───────────────────────
+   *
+   * The step leaves their desk (it is no longer open) and stays on the job's
+   * page, dimmed, with its start time kept and a note saying it had opened and
+   * why it no longer applies. `assignee_user_id` is left as it was: whose desk
+   * it was on is part of that history. The ledger gets the same
+   * `job.step_skipped` a skip at the start gets — the fact, the operator, the
+   * values — plus `from`, `afterStart` and the assignee's id, so "how often do
+   * steps get pulled off somebody's desk" is a query rather than a guess.
+   */
+  private async withdrawOpenedSteps(
+    tenantId: string,
+    job: Job,
+    template: ResolvedTemplate,
+    subject: JobSubject | null,
+    steps: readonly JobStep[],
+    actor: Actor,
+  ): Promise<number> {
+    const defs = new Map(template.steps.map((s) => [s.key, s]));
+    let withdrawn = 0;
+
+    for (const step of steps) {
+      if (step.status !== "blocked" && step.status !== "running") continue;
+      const def = defs.get(step.stepKey);
+      if (!def?.condition) continue;
+
+      const verdict = evaluateCondition(def.condition, subject);
+      if (verdict.holds) continue;
+
+      // Work recorded on it: leave it to finish the ordinary way.
+      if (step.performedBy !== null) continue;
+      if (await this.deps.runs.openForStep(tenantId, step.id)) continue;
+
+      const moved = await this.deps.steps.transition(tenantId, step.id, step.status, {
+        status: "skipped",
+        at: this.deps.clock.now().toISOString(),
+        outcomeNote: `This step had already opened and no longer applies: ${verdict.why}.`,
+      });
+      if (!moved) continue;
+      withdrawn += 1;
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "job.step_skipped",
+        objectId: job.id,
+        actor,
+        payload: {
+          stepKey: step.stepKey,
+          fact: def.condition.fact,
+          op: def.condition.op,
+          expected: def.condition.value,
+          actual: verdict.actual,
+          from: step.status,
+          afterStart: true,
+          assigneeUserId: step.assigneeUserId,
+        },
+      });
+    }
+    return withdrawn;
   }
 
   /** Start every step that can start: agents run, people's steps wait. */

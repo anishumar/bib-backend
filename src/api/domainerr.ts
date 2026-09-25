@@ -175,6 +175,7 @@ export function mapError(err: unknown): MappedError {
       // conflicts for the same reason: the request said something true a moment
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
+      case "STEP_NO_LONGER_NEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Whose desk a step is on (0301). All conflicts: the request is well
       // formed and what refuses it is the state of the step or the firm's own

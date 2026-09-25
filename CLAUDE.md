@@ -1327,6 +1327,23 @@ the prose: a sentence does not `GROUP BY`, and this log cannot be erased.
 quietly lose a review because a field was blank. An extra review costs an hour; a missing one
 costs a filing. Read `evaluateCondition` before "simplifying" it into an else.
 
+**A CONDITION IS JUDGED AGAIN AFTER THE STEP OPENS (0304, 2026-09-25).** It was judged once,
+at the moment the step would start — but the facts are read LIVE (the service's recurrence, the
+entity's jurisdiction), so a step could sit on a desk for weeks after the firm's own rule
+stopped applying, and the only way off was to tick it done on work nobody did. Every walk now
+re-judges a `blocked` or `running` step (`withdrawOpenedSteps`) and skips it when the condition
+DEFINITELY fails and **no work is recorded on it** — `performed_by` null (so nothing was sent for
+checking) and no undecided machine proposal. Work that exists is never discarded because a
+catalogue field changed; it finishes the ordinary way. An unknown fact still keeps the step.
+The row keeps `started_at` (0304 relaxed the timestamp CHECK for exactly this: a skipped step
+may carry the day it OPENED, never a finish time) and its `assignee_user_id`; the note says it
+had opened and why it no longer applies; the step leaves the desk because it is no longer open;
+`job.step_skipped` adds `from`, `afterStart` and the assignee's id. Ticking it late answers
+`STEP_NO_LONGER_NEEDED` (409) with the reason, not "not waiting for anybody". **`cascadeSkips`
+still takes only pending steps and that is complete, not a gap**: a dependent cannot open
+before everything it depends on has settled, a settled step is never skipped later, and a
+withdrawn step was not settled — so nothing downstream of it has opened.
+
 **`listRunnable` includes `blocked`**, and leaving it out was the second real bug here: a job
 waiting on a person vanished from the work board AND from the sweep, so nothing would ever look
 at it again. Only `done` and `cancelled` are excluded — those never move.

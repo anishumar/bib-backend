@@ -173,7 +173,11 @@ export class PostgresJobStepRepository implements JobStepRepository {
           started_at   = ${
             starts || finishes
               ? db.unsafe(`COALESCE(started_at, '${to.at}'::timestamptz)`)
-              : null
+              : to.status === "skipped"
+                ? // KEPT on a skip (0304): null for a step skipped before it
+                  // opened, the day it opened for one withdrawn afterwards.
+                  db.unsafe("started_at")
+                : null
           },
           finished_at  = ${finishes ? to.at : null}
         WHERE id = ${stepId} AND status = ${expect}
