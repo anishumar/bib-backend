@@ -42,6 +42,7 @@ interface CheckRow extends ApprovalRow {
   step_label: string;
   submitted_by_name: string | null;
   submitted_by_email: string | null;
+  template_version_id: string | null;
 }
 
 const COLUMNS =
@@ -92,6 +93,9 @@ function toCheck(r: CheckRow): PendingCheck {
     // two rows can legitimately be pinned to different versions of the same
     // rule.
     policyLabel: null,
+    // The job's pinned process (T6.15), so the use case can say which review
+    // points each row has without reading the job behind every row.
+    templateVersionId: r.template_version_id,
   };
 }
 
@@ -187,9 +191,11 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
                a.policy_version_id, a.policy_key, a.decision, a.notes,
                a.decided_by, a.decided_at,
                s.step_key, s.label AS step_label,
-               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email
+               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email,
+               j.template_version_id
         FROM delivery.step_approval a
         JOIN delivery.job_step s ON s.id = a.job_step_id
+        JOIN delivery.job j ON j.id = a.job_id
         LEFT JOIN tenancy.user_account u ON u.id = a.submitted_by
         WHERE a.decision = 'pending'
         ORDER BY a.submitted_at
@@ -209,9 +215,11 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
                a.policy_version_id, a.policy_key, a.decision, a.notes,
                a.decided_by, a.decided_at,
                s.step_key, s.label AS step_label,
-               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email
+               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email,
+               j.template_version_id
         FROM delivery.step_approval a
         JOIN delivery.job_step s ON s.id = a.job_step_id
+        JOIN delivery.job j ON j.id = a.job_id
         LEFT JOIN tenancy.user_account u ON u.id = a.submitted_by
         WHERE a.job_id = ${jobId}
         ORDER BY a.submitted_at

@@ -697,6 +697,12 @@ function toResolvedTemplate(
       condition: s.condition,
       verificationPolicyKey: s.verificationPolicyKey,
       performer: s.performer,
+      // Both lists, field by field like the rest (T6.15). `readWorkflowTemplate`
+      // has already turned an absent list into an empty one, so a version
+      // published before the fields existed reaches the orchestrator as a step
+      // with no sub-steps and no review points: exactly what it meant.
+      checklist: s.checklist.map((l) => ({ key: l.key, label: l.label })),
+      reviewPoints: s.reviewPoints.map((l) => ({ key: l.key, label: l.label })),
     })),
   };
 

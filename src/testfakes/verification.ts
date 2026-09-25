@@ -27,6 +27,7 @@ import type {
   VerificationPolicySource,
 } from "../usecase/verification/ports";
 import type { FakeJobStepRepo } from "./orchestrator";
+import type { Job } from "../domain/scheduler/model";
 import type { Permission } from "../domain/authz/model";
 import type { PermissionSource, StoredRole } from "../usecase/authz/ports";
 
@@ -36,6 +37,11 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
   /** The steps behind the approvals, so `submitted_by` can be derived the way
    *  the trigger derives it. Set by the test that wires both. */
   steps: FakeJobStepRepo | null = null;
+
+  /** The jobs behind them, so a row carries its job's pinned process the way
+   *  the adapter's join does (T6.15). Unwired, every row reads as pinned to
+   *  nothing, and its review points as none. */
+  jobs: { readonly rows: readonly Job[] } | null = null;
 
   constructor(private readonly now: () => string = () => "2026-08-30T09:00:00.000Z") {}
 
@@ -131,6 +137,7 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
       stepLabel: step?.label ?? "(unknown)",
       submittedByName: r.submittedBy,
       policyLabel: null,
+      templateVersionId: this.jobs?.rows.find((j) => j.id === r.jobId)?.templateVersionId ?? null,
     };
   }
 }

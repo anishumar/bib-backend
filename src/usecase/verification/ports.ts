@@ -51,6 +51,11 @@ export interface PendingCheck {
   /** The policy's own label, pinned with it, so a queue can say "Manager
    *  review" without resolving a config version per row. */
   readonly policyLabel: string | null;
+  /** The process version the check's JOB is pinned to (T6.15), joined in the
+   *  same query, so the queue can say which review points each check has
+   *  without reading the job behind every row. Null for a job that has not
+   *  pinned one, which a job with a check cannot be. */
+  readonly templateVersionId: string | null;
 }
 
 export interface StepApprovalRepository {

@@ -465,6 +465,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // completing a step, deliberately — a firm that trusts somebody to say "this
   // filing is done" trusts them to say "the machine got it right".
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/decide"), "work:write" as const],
+  // Ticking one of a step's sub-steps (T6.15) is doing part of the step, so it
+  // takes what doing the step takes. The desk and the grade band are the
+  // service's; this is the floor under them.
+  [routeKey("PUT", "/api/v1/jobs/{jobId}/steps/{stepKey}/sub-steps/{itemKey}"), "work:write" as const],
 
   // THE VERIFICATION QUEUE (T2.9).
   //
@@ -489,6 +493,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // anywhere lets somebody approve their own work — that is a CHECK constraint,
   // not a grant.
   [routeKey("POST", "/api/v1/checks/{approvalId}/decide"), "work:write" as const],
+  // Ticking a check's review points (T6.15) is part of deciding it, so the same
+  // floor, and the same firm's rule on top of it (`eligibilityOf`).
+  [routeKey("PUT", "/api/v1/checks/{approvalId}/review-points/{itemKey}"), "work:write" as const],
 
   // WORK ITEMS (T3.1) — the row on somebody's desk.
   //

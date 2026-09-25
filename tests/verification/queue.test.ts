@@ -18,6 +18,7 @@ import {
   FakeTemplateSource,
   FakeTierSource,
   FakeStepDeskResolver,
+  FakeStepCheckRepo,
 } from "../../src/testfakes/orchestrator";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
@@ -63,6 +64,8 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
     condition: null,
     verificationPolicyKey: null,
     performer: null,
+    checklist: [],
+    reviewPoints: [],
     ...over,
   };
 }
@@ -125,6 +128,7 @@ async function world(policy: VerificationPolicy | null = MANAGER_OR_ABOVE) {
     desks: new FakeStepDeskResolver(),
     jobs,
     steps,
+    stepChecks: new FakeStepCheckRepo(steps),
     templates,
     subjects,
     agents: new FakeAgentRuntime(),

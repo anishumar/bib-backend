@@ -57,6 +57,7 @@ import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagem
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
+import { PostgresStepCheckRepository } from "../infrastructure/postgres/step-check-repository";
 import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import {
@@ -372,6 +373,10 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // and one of what a role carries, because eligibility to check somebody's
     // work must not be able to disagree with either.
     checks: new PostgresStepApprovalRepository(pools.app),
+    // The ticks on a step's sub-steps and a check's review points (T6.15). In
+    // BOTH processes: the worker's walk reads them too, because a step with a
+    // ticked sub-step is work recorded and is never withdrawn (0304's rule).
+    stepChecks: new PostgresStepCheckRepository(pools.app),
     policies: configRepository,
     checkers: memberships,
     desks: new PostgresJobDeskResolver(pools.app),

@@ -12,6 +12,7 @@ import {
   FakeStepDeskResolver,
   FakeTemplateSource,
   FakeTierSource,
+  FakeStepCheckRepo,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -40,7 +41,7 @@ const JUNIOR = { minGradeRank: 1, minGradeCode: "analyst", maxGradeRank: 4, maxG
 const MANAGER_UP = { minGradeRank: 7, minGradeCode: "manager", maxGradeRank: null, maxGradeCode: null };
 
 function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
-  return { label: over.key, executor: "human", dependsOn: [], condition: null, verificationPolicyKey: null, performer: null, ...over };
+  return { label: over.key, executor: "human", dependsOn: [], condition: null, verificationPolicyKey: null, performer: null, checklist: [], reviewPoints: [], ...over };
 }
 const template = (steps: readonly TemplateStep[]): ResolvedTemplate => ({ versionId: "v1", label: "Monthly close", steps });
 
@@ -64,7 +65,7 @@ async function world(steps: readonly TemplateStep[], spoc: string | null) {
   templates.publish(TENANT, "close", template(steps));
   const service = new OrchestratorService({
     timeZones: new FakeFirmTimeZone(),
-    desks, jobs, steps: stepRepo, templates, subjects,
+    desks, jobs, steps: stepRepo, stepChecks: new FakeStepCheckRepo(stepRepo), templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),
     runs: new FakeAgentRunRepo(),
     agents: new FakeAgentRuntime(),

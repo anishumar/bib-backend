@@ -1,7 +1,7 @@
 // In-memory port fakes for the orchestrator (T2.7). Each `implements` the port
 // its Postgres counterpart does, so a compile error here is the same compile
 // error production would get.
-import type { JobStep, StepStatus } from "../domain/orchestrator/model";
+import type { JobStep, StepCheckMark, StepStatus } from "../domain/orchestrator/model";
 import type { ConfidenceTiers } from "../domain/agent/model";
 import type {
   StepDeskResolver,
@@ -20,6 +20,9 @@ import type {
   ResolvedTemplate,
   StepTransition,
   TemplateSource,
+  NewStepCheckMark,
+  StepCheckLineRef,
+  StepCheckRepository,
 } from "../usecase/orchestrator/ports";
 
 /**
@@ -366,5 +369,103 @@ export class FakeStepDeskResolver implements StepDeskResolver {
 
   spocFor(_tenantId: string, _jobId: string, _onDate: string): Promise<string | null> {
     return Promise.resolve(this.spoc);
+  }
+}
+
+/**
+ * The marks on a step's sub-steps and a check's review points (T6.15), in
+ * memory.
+ *
+ * It reproduces what 0307 enforces rather than only its shape, for
+ * `FakeAgentRunRepo`'s reason: the two partial unique keys (one mark per line
+ * per step, one per line per CHECK, which is what makes a second round start
+ * empty), the pairing (a review mark names its check, a sub-step mark names
+ * none), a tick names somebody, and a "not applicable" says why. A fake that
+ * accepted a reasonless N/A would let the service's own refusal go untested
+ * against a world that refuses it too.
+ *
+ * `listForJob` finds the job through the STEP, as the adapter's join does, so
+ * the step repository is required. Names come from the roster when one is
+ * wired, standing in for the adapter's join on the account.
+ */
+export class FakeStepCheckRepo implements StepCheckRepository {
+  readonly rows: StepCheckMark[] = [];
+  /** The roster names are read from: a `FakeCheckerDirectory`, stated
+   *  structurally because the verification fakes already import this file. */
+  directory: { readonly rows: readonly { readonly userId: string; readonly displayName: string }[] } | null = null;
+
+  constructor(private readonly steps: FakeJobStepRepo) {}
+
+  private nameOf(userId: string | null): string | null {
+    if (userId === null) return null;
+    return this.directory?.rows.find((r) => r.userId === userId)?.displayName ?? userId;
+  }
+
+  private sameLine(r: StepCheckMark, ref: StepCheckLineRef): boolean {
+    if (r.tenantId !== ref.tenantId || r.list !== ref.list || r.itemKey !== ref.itemKey) return false;
+    return ref.list === "checklist" ? r.jobStepId === ref.jobStepId : r.stepApprovalId === ref.stepApprovalId;
+  }
+
+  listForJob(tenantId: string, jobId: string): Promise<readonly StepCheckMark[]> {
+    const onJob = new Set(this.steps.rows.filter((s) => s.tenantId === tenantId && s.jobId === jobId).map((s) => s.id));
+    return Promise.resolve(this.rows.filter((r) => r.tenantId === tenantId && onJob.has(r.jobStepId)));
+  }
+
+  listForApprovals(tenantId: string, approvalIds: readonly string[]): Promise<readonly StepCheckMark[]> {
+    const ids = new Set(approvalIds);
+    return Promise.resolve(
+      this.rows.filter((r) => r.tenantId === tenantId && r.list === "review" && r.stepApprovalId !== null && ids.has(r.stepApprovalId)),
+    );
+  }
+
+  upsert(mark: NewStepCheckMark): Promise<StepCheckMark> {
+    // The CHECKs in 0307, reproduced.
+    if ((mark.list === "review") !== (mark.stepApprovalId !== null)) {
+      throw new Error("job_step_check_review_rows_name_their_check: a review mark names its check, a sub-step mark none");
+    }
+    const reasoned = mark.note !== null && mark.note.trim() !== "";
+    if ((mark.outcome === "not_applicable") !== reasoned) {
+      throw new Error("job_step_check_not_applicable_says_why: a reason on not_applicable and nowhere else");
+    }
+    const ref: StepCheckLineRef = {
+      tenantId: mark.tenantId,
+      list: mark.list,
+      jobStepId: mark.jobStepId,
+      stepApprovalId: mark.stepApprovalId,
+      itemKey: mark.itemKey,
+    };
+    const i = this.rows.findIndex((r) => this.sameLine(r, ref));
+    const current = this.rows[i];
+    // The same answer again changes nothing, including who and when: the
+    // adapter's `WHERE ... IS DISTINCT FROM`.
+    if (current && current.outcome === mark.outcome && current.note === mark.note) {
+      return Promise.resolve(current);
+    }
+    const row: StepCheckMark = {
+      id: current?.id ?? mark.id,
+      tenantId: mark.tenantId,
+      jobStepId: mark.jobStepId,
+      stepApprovalId: mark.stepApprovalId,
+      list: mark.list,
+      itemKey: mark.itemKey,
+      label: mark.label,
+      outcome: mark.outcome,
+      note: mark.note,
+      markedByUserId: mark.markedByUserId,
+      markedByName: this.nameOf(mark.markedByUserId),
+      markedAt: mark.markedAt,
+    };
+    if (current) this.rows[i] = row;
+    else this.rows.push(row);
+    return Promise.resolve(row);
+  }
+
+  clear(ref: StepCheckLineRef): Promise<void> {
+    const i = this.rows.findIndex((r) => this.sameLine(r, ref));
+    const current = this.rows[i];
+    if (current) {
+      this.rows[i] = { ...current, outcome: null, note: null, markedByUserId: null, markedByName: null, markedAt: null };
+    }
+    return Promise.resolve();
   }
 }

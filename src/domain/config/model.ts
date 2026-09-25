@@ -2426,6 +2426,35 @@ export interface StepPerformer {
   readonly maxGradeCode: string | null;
 }
 
+/**
+ * ONE LINE OF A STEP'S OWN LIST (T6.15, 2026-09-25): a sub-step the doer ticks,
+ * or a review point the checker ticks.
+ *
+ * The firm's first real process has bullets under every step ("Collect:
+ * bank statements, sales data, purchase data ...", "Identify: unreconciled
+ * transactions, bank charges ...", and on the manager's review "Check: P&L
+ * movements, balance sheet movements ..."), and a `WorkflowStep` had nowhere to
+ * put them. The firm asked for a proper checkbox per line and for the step to
+ * stay shut until every line is ticked or marked not applicable.
+ *
+ * A KEY and a label, for `WorkflowStep.key`'s reason: a tick is stored against
+ * the key, so renaming a line in a later version never re-labels a tick
+ * somebody made against the old wording, and a position would silently move
+ * every tick when a firm inserts a line.
+ */
+export interface ChecklistLine {
+  readonly key: string;
+  readonly label: string;
+}
+
+/** At most this many lines in one list. The firm's longest bullet list is
+ *  eight; forty is a step nobody could hold in their head, and past it the
+ *  answer is two steps rather than a longer list. */
+export const MAX_CHECKLIST_LINES = 40;
+
+/** A line's label, trimmed, is at most this long. It is read on a checkbox. */
+export const MAX_CHECKLIST_LABEL = 200;
+
 export interface WorkflowStep {
   /**
    * The step's own key — `collect`, `reconcile`, `review`. Recorded on every
@@ -2461,6 +2490,33 @@ export interface WorkflowStep {
   readonly verificationPolicyKey: string | null;
   /** Who is expected to do it — see `StepPerformer`. Null means anybody. */
   readonly performer: StepPerformer | null;
+  /**
+   * The step's SUB-STEPS (T6.15): ticked, or marked not applicable with a
+   * reason, by whoever does the step, and all of them before it can be marked
+   * done. Empty means the step is ticked as a whole, which is what every step
+   * of every process published before this field meant.
+   *
+   * Refused on an `agent` step. Nobody would ever tick them there, so a machine
+   * acting on its own would finish the step with its list still open, which is
+   * a gate with a hole in it. `agent_with_approval` may carry them: the person
+   * accepting the machine's answer is the one saying the work is done, and the
+   * orchestrator holds them to the list at that moment.
+   */
+  readonly checklist: readonly ChecklistLine[];
+  /**
+   * The step's REVIEW POINTS (T6.15): ticked by whoever CHECKS the step, and
+   * all of them before it can be approved. Sending it back is never held up by
+   * them, because the checker may find the problem at point three.
+   *
+   * A separate list rather than more sub-steps, and that was decided with the
+   * firm (2026-09-25): on its manager review step the process says "Check: P&L
+   * movements, balance sheet movements ...", and the person DOING that step is
+   * the associate whose work is being reviewed. On the doer's list, the
+   * associate would tick "P&L movements reviewed", and the record would say the
+   * wrong person checked it. So these follow the check, and a step that names no
+   * check may carry none.
+   */
+  readonly reviewPoints: readonly ChecklistLine[];
 }
 
 export interface WorkflowTemplateBody {
@@ -2477,8 +2533,83 @@ const WORKFLOW_STEP_FIELDS = [
   "condition",
   "verificationPolicyKey",
   "performer",
+  "checklist",
+  "reviewPoints",
 ];
 const PERFORMER_FIELDS = ["minGradeRank", "minGradeCode", "maxGradeRank", "maxGradeCode"];
+const CHECKLIST_LINE_FIELDS = ["key", "label"];
+
+/**
+ * One of a step's two lists (T6.15), validated in isolation. Returns the
+ * complaint or null.
+ *
+ * ABSENT AND NULL ARE BOTH "NO LINES", and that is forced rather than chosen:
+ * every template published before this field has neither list, a published
+ * version is FROZEN, and a body that stopped parsing would take the jobs pinned
+ * to it along with it. The process editor always writes both as arrays.
+ *
+ * Keys are unique within ONE list and may repeat across the two, because the
+ * two are different lists ticked by different people, and a tick is stored
+ * against its list as well as its key.
+ */
+function validateChecklistLines(
+  at: string,
+  field: "checklist" | "reviewPoints",
+  raw: unknown,
+): string | null {
+  if (raw === null || raw === undefined) return null;
+  const what = field === "checklist" ? "sub-steps" : "review points";
+  if (!Array.isArray(raw)) {
+    return `${at}.${field} must be a list of ${what}, each { key, label }, or left out for none. Got ${describe(raw)}`;
+  }
+  if (raw.length > MAX_CHECKLIST_LINES) {
+    return (
+      `${at}.${field} has ${String(raw.length)} ${what}, and one step holds at most ` +
+      `${String(MAX_CHECKLIST_LINES)}. Split the step in two instead: a list that long is ` +
+      `a step nobody can hold in their head.`
+    );
+  }
+  const seen = new Set<string>();
+  for (const [index, line] of raw.entries()) {
+    const here = `${at}.${field}[${String(index)}]`;
+    if (typeof line !== "object" || line === null || Array.isArray(line)) {
+      return `${here} must be { key, label }. Got ${describe(line)}`;
+    }
+    const l = line as Record<string, unknown>;
+    const unknown = unknownFields(l, CHECKLIST_LINE_FIELDS);
+    if (unknown) return `${here}: ${unknown}`;
+    const key = l["key"];
+    if (typeof key !== "string" || !isValidStepKey(key)) {
+      return (
+        `${here}.key must be a lowercase handle (2 to 40 characters: letters, digits, "-" or "_"), ` +
+        `like "s1" or "bank_statements". A tick is stored against it. Got ${describe(key)}`
+      );
+    }
+    if (seen.has(key)) {
+      return `${here}.key ${JSON.stringify(key)} appears twice in this step's ${what}. Each line needs its own key.`;
+    }
+    seen.add(key);
+    const label = l["label"];
+    if (typeof label !== "string" || label.trim() === "" || label.trim().length > MAX_CHECKLIST_LABEL) {
+      return (
+        `${here}.label must be 1 to ${String(MAX_CHECKLIST_LABEL)} characters once spaces are ` +
+        `trimmed; somebody reads it beside a checkbox. Got ${describe(label)}`
+      );
+    }
+  }
+  return null;
+}
+
+/** A stored list, read back. Absent or unreadable reads as NO lines, like every
+ *  optional step field before it; the label is trimmed so a tick copies what
+ *  the screen shows. */
+function readChecklistLines(raw: unknown): readonly ChecklistLine[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((l): l is Record<string, unknown> => typeof l === "object" && l !== null)
+    .filter((l) => typeof l["key"] === "string" && typeof l["label"] === "string")
+    .map((l) => ({ key: l["key"] as string, label: (l["label"] as string).trim() }));
+}
 
 /** The band, validated in isolation. Returns the complaint or null. */
 function validateStepPerformer(at: string, p: unknown): string | null {
@@ -2684,6 +2815,38 @@ function validateWorkflowTemplateBody(body: Record<string, unknown>): string | n
 
     const performerProblem = validateStepPerformer(at, step["performer"]);
     if (performerProblem) return performerProblem;
+
+    // The two lists (T6.15): each well formed on its own, then the two rules
+    // that are about the STEP rather than the list.
+    const checklistProblem = validateChecklistLines(at, "checklist", step["checklist"]);
+    if (checklistProblem) return checklistProblem;
+    const reviewProblem = validateChecklistLines(at, "reviewPoints", step["reviewPoints"]);
+    if (reviewProblem) return reviewProblem;
+
+    // A machine acting on its own never ticks anything, so a step it finishes
+    // unattended would close with its sub-steps still open. Refused at the
+    // write, where a partner can fix it, rather than left as a gate with a hole
+    // in it. `agent_with_approval` is fine: a person accepts the answer, and is
+    // held to the list when they do.
+    const hasChecklist = Array.isArray(step["checklist"]) && step["checklist"].length > 0;
+    if (hasChecklist && executor === "agent") {
+      return (
+        `${at} (step ${JSON.stringify(key)}): sub-steps are ticked by a person, and this step is ` +
+        `done by a machine on its own. Choose 'A person' or 'Automatically, then a person ` +
+        `approves'.`
+      );
+    }
+
+    // Review points are ticked by whoever CHECKS the step. A step that names no
+    // check has nobody to tick them, and the lines would sit there looking like
+    // a control while gating nothing.
+    const hasReviewPoints = Array.isArray(step["reviewPoints"]) && step["reviewPoints"].length > 0;
+    if (hasReviewPoints && (policyKey === null || policyKey === undefined)) {
+      return (
+        `${at} (step ${JSON.stringify(key)}): review points are ticked by whoever checks this ` +
+        `step, and this step names no check. Choose who checks it, or move these to the sub-steps.`
+      );
+    }
   }
 
   // Every dependency must name a step this template HAS. A typo would otherwise
@@ -2799,6 +2962,11 @@ export function readWorkflowTemplate(
       verificationPolicyKey:
         typeof s["verificationPolicyKey"] === "string" ? s["verificationPolicyKey"] : null,
       performer: readStepPerformer(s["performer"]),
+      // Absent reads as NO lines, and must: every template published before
+      // T6.15 has neither list, a published version is frozen, and a job
+      // pinned to one of them behaves exactly as it did before.
+      checklist: readChecklistLines(s["checklist"]),
+      reviewPoints: readChecklistLines(s["reviewPoints"]),
     }),
   );
   return { label: body["label"] as string, steps };

@@ -265,3 +265,117 @@ export function waitsForAPerson(executor: string): boolean {
 export function runsAMachine(executor: string): boolean {
   return executor === "agent" || executor === "agent_with_approval";
 }
+
+// ── a step's own lists: sub-steps and review points (T6.15, 0307) ─────────────
+
+/**
+ * Which of a step's two lists a mark belongs to.
+ *
+ *   checklist   the SUB-STEPS, ticked by whoever does the step, and all of
+ *               them before it can be marked done
+ *   review      the REVIEW POINTS, ticked by whoever checks it, and all of them
+ *               before it can be approved (never before it can be sent back)
+ *
+ * The storage words, matching the CHECK in 0307; the screens say "sub-steps"
+ * and "review points".
+ */
+export type CheckListKind = "checklist" | "review";
+
+/** How a line was settled. `not_applicable` always carries a reason: the
+ *  firm's own lists say "payroll information WHERE INCLUDED", and without a
+ *  way to say it did not apply an associate must tick something that did not
+ *  happen, and the record lies. */
+export type MarkOutcome = "done" | "not_applicable";
+
+export const MARK_OUTCOMES: readonly MarkOutcome[] = ["done", "not_applicable"];
+
+export function isMarkOutcome(v: string): v is MarkOutcome {
+  return (MARK_OUTCOMES as readonly string[]).includes(v);
+}
+
+/** The longest reason a "not applicable" may carry, trimmed. The CHECK in 0307
+ *  holds the same number. */
+export const NOT_APPLICABLE_NOTE_MAX = 500;
+
+/**
+ * One mark on one line, as stored (`delivery.job_step_check`).
+ *
+ * A REVIEW mark carries the check it was made under (`stepApprovalId`), so the
+ * second round after a send-back starts with every review point open, and
+ * "this took two goes" keeps what each round's checker ticked. A sub-step mark
+ * carries none: the doer's ticks survive a send-back, because the work behind
+ * them is still the work, and the doer changes them if the reason for sending
+ * it back touches one.
+ */
+export interface StepCheckMark {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly jobStepId: string;
+  readonly stepApprovalId: string | null;
+  readonly list: CheckListKind;
+  readonly itemKey: string;
+  /** Copied from the pinned template when the mark was made, so the row reads
+   *  on its own. */
+  readonly label: string;
+  /** Null when the line was ticked and then unticked. */
+  readonly outcome: MarkOutcome | null;
+  /** The reason, on `not_applicable` only. */
+  readonly note: string | null;
+  readonly markedByUserId: string | null;
+  /** The marker's name as the account reads NOW (a read-time join, like every
+   *  other name on a read model here). */
+  readonly markedByName: string | null;
+  readonly markedAt: string | null;
+}
+
+/** How a list stands, for the transition events: counts, and never a label or a
+ *  reason, because the log cannot be erased and both are prose about a
+ *  client's work. */
+export interface ListTally {
+  readonly total: number;
+  readonly done: number;
+  readonly notApplicable: number;
+}
+
+/**
+ * The lines of a list that nobody has settled, in the list's own order.
+ *
+ * Driven by the TEMPLATE's lines, never by the marks: a line with no row is
+ * open, and a row whose key the pinned template does not name (which cannot
+ * happen, the version is frozen) is simply not a line of this list.
+ */
+export function openLines(
+  lines: readonly { readonly key: string; readonly label: string }[],
+  marks: ReadonlyMap<string, MarkOutcome | null>,
+): readonly { readonly key: string; readonly label: string }[] {
+  return lines.filter((l) => (marks.get(l.key) ?? null) === null);
+}
+
+export function tallyOf(
+  lines: readonly { readonly key: string }[],
+  marks: ReadonlyMap<string, MarkOutcome | null>,
+): ListTally {
+  let done = 0;
+  let notApplicable = 0;
+  for (const l of lines) {
+    const outcome = marks.get(l.key) ?? null;
+    if (outcome === "done") done += 1;
+    if (outcome === "not_applicable") notApplicable += 1;
+  }
+  return { total: lines.length, done, notApplicable };
+}
+
+/**
+ * The open lines named in a sentence, capped: "bank statements, sales data and
+ * payroll information", or the first five and "and 3 more". A refusal that
+ * names every open line of a forty-line list is a paragraph nobody reads; one
+ * that names none makes the person hunt for them.
+ */
+export function namedList(labels: readonly string[], cap = 5): string {
+  if (labels.length === 0) return "";
+  if (labels.length <= cap) {
+    if (labels.length === 1) return labels[0] ?? "";
+    return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1] ?? ""}`;
+  }
+  return `${labels.slice(0, cap).join(", ")} and ${String(labels.length - cap)} more`;
+}

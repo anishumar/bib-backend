@@ -205,6 +205,17 @@ export function mapError(err: unknown): MappedError {
       // and the fix is to reload the job, not to resend.
       case "AWAITING_CHECK":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A step's own list (T6.15). A line the pinned process does not have is
+      // a 404, like a step it does not have. Sub-steps still open is the STATE
+      // of the step, not the shape of the request: 409, and the message names
+      // what is left. A "not applicable" with no reason IS the shape of the
+      // request: 400, and the message says what to send.
+      case "SUB_STEP_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "SUB_STEPS_OPEN":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      case "NOT_APPLICABLE_NEEDS_A_REASON":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -237,6 +248,13 @@ export function mapError(err: unknown): MappedError {
       case "REPORTS_TO_NOT_A_COLLEAGUE":
       case "REPORTS_TO_CYCLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // Review points (T6.15), on the same reasoning as their sub-step twins
+      // in the orchestrator family: a line the pinned step does not have is a
+      // 404, and points still open when somebody presses Approve is a 409.
+      case "REVIEW_POINT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "REVIEW_POINTS_OPEN":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

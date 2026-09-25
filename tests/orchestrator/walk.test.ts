@@ -16,6 +16,7 @@ import {
   FakeTemplateSource,
   FakeTierSource,
   FakeStepDeskResolver,
+  FakeStepCheckRepo,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -55,6 +56,8 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
     condition: null,
     verificationPolicyKey: null,
     performer: null,
+    checklist: [],
+    reviewPoints: [],
     ...over,
   };
 }
@@ -115,6 +118,7 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
     desks: new FakeStepDeskResolver(),
     jobs,
     steps,
+    stepChecks: new FakeStepCheckRepo(steps),
     templates,
     subjects,
     tiers,
