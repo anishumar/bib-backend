@@ -743,6 +743,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     });
 
   const portalAccess = new PortalAccessService({
+    // A portal session's grants are resolved on the FIRM's day (F-07-1).
+    timeZones: new PostgresFirmTimeZone(pools.app),
     grants: portalAccessRepository,
     memberships: portalAccessRepository,
     clients: portalAccessRepository,
@@ -785,8 +787,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // fail — at compile time, in one place, which is what the port bought.
   const portalHome = new PortalHomeService({
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     // The ONE adapter in this product that uses `withPortal`. Everything else
     // reaches tenant data through `withTenant`, which sets the firm and nothing
@@ -809,8 +810,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // symptom would be a file the firm can open and the client cannot.
   const portalLibrary = new PortalLibraryService({
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     timeZones: new PostgresFirmTimeZone(pools.app),
     library: new PostgresPortalLibraryRepository(pools.app),
@@ -841,8 +841,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     asks: new PostgresClientAskRepository(pools.app),
     portal: new PostgresPortalAskRepository(pools.app),
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     blobs,
     digest: new Sha256ByteDigest(),
@@ -868,11 +867,11 @@ export function wire(cfg: Config, log: Logger): Wired {
   // implementation serves all three portal use cases without any of them
   // importing another's ports.
   const clientRequests = new ClientRequestService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     requests: new PostgresClientRequestRepository(pools.app),
     portal: new PostgresPortalRequestRepository(pools.app),
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     routing: new PostgresRequestRoutingRepository(pools.app),
     // ── THE KEY MANAGER, THROUGH THE SERVICE THAT OWNS THAT TABLE ────────

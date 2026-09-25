@@ -149,6 +149,22 @@ the re-grant after it. **CREATING one that way is still refused, by the service*
 force on no day is a typo at the moment of granting, while ending one is a decision somebody took
 twenty seconds later. The database allows the shape; the service allows only the act.
 
+**AND "NOW" IS THE FIRM'S DAY, NEVER A DAY THE PORTAL CALLER SENDS (F-07-1, fixed 2026-09-25).**
+The portal routes took `?asOf=` so the browser's day could decide which filings are "upcoming" — a
+DISPLAY question — and the same value was handed to `scopedClientsForUser`, which decided which
+companies the login may SEE. So a contact removed today read everything again with
+`?asOf=yesterday`, and a grant dated to start next month was readable today. The audit's one High.
+`scopedClientsForUser(tenantId, userId)` now takes NO day and resolves on the firm's own
+(`dayInZone`, the tenant's zone); `grant` and `end` default to that same day, so both ends of
+"remove means now" use one clock. The four portal scope ports lost their day parameter, so no
+caller's day can reach the grant set by construction. `asOf` survives only on `/portal/home`, where
+it cuts the display, and it must be a real calendar day (F-07-4); the library, ask and request
+routes dropped it, because picking grants was all it ever did there. The request service reads the
+Key Manager on the firm's day for the same reason. `scopeFor(…, on)` keeps its day: it is the
+STAFF "who could see this in March" read, behind `portal:grant`.
+`tests/portal/grants-firm-day.integration.test.ts` asks as yesterday and as tomorrow and was
+watched go red with the grant check pinned to yesterday.
+
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
 by 0059 because it is the one business table carrying `client_party_id` directly, and
 `delivery.obligation_instance` by 0062 — on `entity_party_id`, because that is the column THAT

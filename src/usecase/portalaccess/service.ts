@@ -35,6 +35,7 @@ import type {
   PortalScope,
 } from "../../domain/portalaccess/model";
 import { isInForceOn, scopeOn } from "../../domain/portalaccess/model";
+import { dayInZone } from "../../domain/scheduler/zone";
 import {
   InvalidPortalDates,
   PortalClientArchived,
@@ -47,6 +48,7 @@ import {
   PortalMembershipNotFound,
 } from "../../domain/portalaccess/errors";
 import type {
+  FirmTimeZone,
   NewPortalAccess,
   PortalAccessRepository,
   PortalClientDirectory,
@@ -60,6 +62,8 @@ interface Deps {
   readonly events: EventSink;
   readonly ids: IdGen;
   readonly clock: Clock;
+  /** The firm's zone: whose "today" a grant is in force on (F-07-1). */
+  readonly timeZones: FirmTimeZone;
 }
 
 export interface GrantPortalAccessInput {
@@ -100,12 +104,12 @@ export class PortalAccessService {
   }
 
   /**
-   * What one portal session may read — the value `withPortal` takes.
+   * What one membership could read on a day — the STAFF question ("who could
+   * see this in March"), asked on the firm's screen with `portal:grant`.
    *
-   * `on` is the CALLER's calendar day and defaults to the server's only when
-   * nobody said. That fallback is honest for an API caller and wrong for a
-   * browser: a firm in India is a day ahead of a UTC server every morning until
-   * half past five, and a grant starting today would not be in force yet.
+   * `on` is the staff caller's day and defaults to the FIRM's. This is never
+   * the portal session's own scope: that is `scopedClientsForUser`, which takes
+   * no day at all (F-07-1).
    *
    * AN EMPTY LIST IS A REAL ANSWER and is returned as one. Every portal login
    * is in that state between being invited and being granted anything, and the
@@ -114,7 +118,7 @@ export class PortalAccessService {
    * available.
    */
   async scopeFor(tenantId: string, membershipId: string, on?: string): Promise<PortalScope> {
-    const day = on ?? this.today();
+    const day = on ?? (await this.today(tenantId));
     const grants = await this.deps.grants.listGrants(tenantId, membershipId);
     return scopeOn(membershipId, grants, day);
   }
@@ -131,13 +135,23 @@ export class PortalAccessService {
    * Empty is a real answer, and the portal must render it as one: a contact who
    * has been invited and granted nothing sees a screen that says so, never a
    * blank one and never everything.
+   *
+   * ── IT TAKES NO DAY, AND THAT IS THE FIX FOR F-07-1 ──────────────────────
+   *
+   * It took the caller's `asOf`, because the browser's day was meant to decide
+   * which filings are "upcoming" — a DISPLAY question. The same value then
+   * decided which companies the login may SEE — an AUTHORISATION question — so
+   * a contact removed yesterday (0061: "remove means now") read everything
+   * again with `?asOf=yesterday`, and a grant dated to start next month was
+   * readable today with `?asOf=` that day. Access is now resolved on the
+   * FIRM's own day, computed here and nowhere else; a portal screen may still
+   * send its day for what it DISPLAYS, and it can no longer reach this.
    */
   async scopedClientsForUser(
     tenantId: string,
     userId: string,
-    on?: string,
   ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]> {
-    const day = on ?? this.today();
+    const day = await this.today(tenantId);
     const held = await this.deps.grants.listForPortalUser(tenantId, userId);
     const seen = new Map<string, string>();
     for (const row of held) {
@@ -159,7 +173,7 @@ export class PortalAccessService {
    * answers.
    */
   async grant(input: GrantPortalAccessInput, actor: Actor): Promise<PortalAccess> {
-    const validFrom = input.validFrom ?? this.today();
+    const validFrom = input.validFrom ?? (await this.today(input.tenantId));
     const validTo = input.validTo ?? null;
     // Half-open, so equal dates describe a grant in force on no day at all —
     // which reads as "granted" on every screen and lets nobody in.
@@ -251,7 +265,7 @@ export class PortalAccessService {
     if (!grant) throw new PortalGrantNotFound(input.grantId);
     if (grant.validTo !== null) throw new PortalGrantAlreadyEnded(grant.id, grant.validTo);
 
-    const validTo = input.validTo ?? this.today();
+    const validTo = input.validTo ?? (await this.today(input.tenantId));
     // `<` and not `<=`: equal dates are the immediate-revocation case. Earlier
     // than the day it started is not a short grant, it is a wrong one.
     if (validTo < grant.validFrom) throw new InvalidPortalDates(grant.validFrom, validTo);
@@ -274,15 +288,19 @@ export class PortalAccessService {
   // ── internals ────────────────────────────────────────────────────────────
 
   /**
-   * The server's calendar day — the fallback, never the answer when a caller
-   * has one.
+   * The FIRM's calendar day (0071) — never the server's, and never a portal
+   * caller's.
    *
-   * The same note `WorkItemService.today()` carries, and it matters more here:
-   * this decides what a client can see. A browser sends its own day; this is
-   * the honest fallback for an API caller that did not say.
+   * It decides what a client can see, so ONE answer has to serve both ends of
+   * a grant: `end` defaults its `validTo` to this day and the session's scope
+   * is resolved on it, so "remove means now" holds whichever zone the partner
+   * pressing Remove or the client reading is in. It was the UTC day, which is
+   * yesterday in India until 05:30 — a grant starting "today" was not yet in
+   * force for the first five and a half hours of it.
    */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  private async today(tenantId: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
   }
 
 }

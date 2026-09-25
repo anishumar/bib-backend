@@ -131,7 +131,6 @@ export interface AnswerInput {
   readonly askId: string;
   readonly answerText: string;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 export interface DecideInput {
@@ -143,7 +142,6 @@ export interface DecideInput {
    *  comes with one and refusing to carry it would send the firm back to email. */
   readonly note: string | null;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 export interface UploadInput {
@@ -155,7 +153,6 @@ export interface UploadInput {
   readonly bytes: Uint8Array;
   readonly note: string | null;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 /** What the action centre renders. Split here rather than in the query, so the
@@ -163,7 +160,6 @@ export interface UploadInput {
 export interface PortalActionCentre {
   readonly awaitingYou: readonly PortalAskRow[];
   readonly withTheFirm: readonly PortalAskRow[];
-  readonly asOf: string;
 }
 
 export class ClientAskService {
@@ -298,15 +294,10 @@ export class ClientAskService {
 
   /** Everything waiting on this login, split into what still wants something
    *  and what is back with the firm. */
-  async actionCentre(
-    tenantId: string,
-    userId: string,
-    asOf?: string,
-  ): Promise<PortalActionCentre> {
-    const day = asOf ?? this.today();
-    const parties = await this.scopedParties(tenantId, userId, day);
+  async actionCentre(tenantId: string, userId: string): Promise<PortalActionCentre> {
+    const parties = await this.scopedParties(tenantId, userId);
     const rows = await this.deps.portal.list(tenantId, parties);
-    return { ...splitByAwaiting(rows), asOf: day };
+    return splitByAwaiting(rows);
   }
 
   /** An answer in words — to a question, or to a request for a document the
@@ -314,7 +305,7 @@ export class ClientAskService {
   async answer(input: AnswerInput): Promise<PortalAskRow> {
     const text = input.answerText.trim();
     if (text.length === 0) throw new AskAnswerEmpty();
-    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId, input.asOf);
+    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId);
 
     const row = await this.deps.portal.respond(input.tenantId, parties, {
       id: this.deps.ids.newId(),
@@ -332,7 +323,7 @@ export class ClientAskService {
    *  argument: the firm's maker-checker is a statement about the quality of the
    *  work, and this is an instruction from the client. */
   async decide(input: DecideInput): Promise<PortalAskRow> {
-    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId, input.asOf);
+    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId);
     if (!decisionFits(ask.askKind)) throw new AskDecisionNotWanted(ask.askKind);
 
     const note = input.note?.trim() ?? "";
@@ -391,7 +382,7 @@ export class ClientAskService {
       throw new ContentTooLarge(input.bytes.byteLength, this.deps.maxUploadBytes);
     }
 
-    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId, input.asOf);
+    const { parties, ask } = await this.reachableAsk(input.tenantId, input.userId, input.askId);
 
     // What the file gets FILED as comes from the ask, never from the upload. A
     // client choosing the kind would be a client choosing where in the firm's
@@ -485,9 +476,8 @@ export class ClientAskService {
     tenantId: string,
     userId: string,
     askId: string,
-    asOf: string | undefined,
   ): Promise<{ parties: readonly string[]; ask: PortalAskRow }> {
-    const parties = await this.scopedParties(tenantId, userId, asOf ?? this.today());
+    const parties = await this.scopedParties(tenantId, userId);
     const ask = await this.deps.portal.findById(tenantId, parties, askId);
     // "No such ask" and "an ask belonging to a company you were not granted" are
     // the same answer, and there is nothing here that could tell them apart —
@@ -497,9 +487,11 @@ export class ClientAskService {
     return { parties, ask };
   }
 
-  private scopedParties(tenantId: string, userId: string, day: string): Promise<string[]> {
+  /** The grants, resolved by the grant module on the FIRM's day — never on a
+   *  day the portal caller sends (F-07-1). */
+  private scopedParties(tenantId: string, userId: string): Promise<string[]> {
     return this.deps.scope
-      .scopedCompanies(tenantId, userId, day)
+      .scopedCompanies(tenantId, userId)
       .then((companies) => companies.map((c) => c.clientPartyId));
   }
 

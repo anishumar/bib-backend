@@ -246,6 +246,7 @@ function requestService(): ClientRequestService {
     ids: new FakeIds(),
     events: new RecordingEventSink(),
     clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
+    timeZones: new FakeFirmTimeZone(),
   });
 }
 
@@ -483,6 +484,7 @@ function deps(): RouterDeps {
         clients: new FakePortalClients(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+        timeZones: new FakeFirmTimeZone(),
         events: new RecordingEventSink(),
       }),
     },
@@ -596,6 +598,7 @@ function deps(): RouterDeps {
         clients: new FakePortalClients(),
         ids: new FakeIds(),
         clock: new FakeClock(new Date("2026-09-01T00:00:00.000Z")),
+        timeZones: new FakeFirmTimeZone(),
         events: new RecordingEventSink(),
       }),
       cookieName: "bib_session",

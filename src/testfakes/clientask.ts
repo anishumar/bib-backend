@@ -302,7 +302,6 @@ export class FakeAskScope implements PortalScopeSource {
   scopedCompanies(
     _tenantId: string,
     userId: string,
-    _on: string,
   ): Promise<readonly { clientPartyId: string; clientName: string }[]> {
     // An EMPTY array for a user with no grants, never a throw and never a
     // shortcut: "invited and granted nothing" is a real answer the service has

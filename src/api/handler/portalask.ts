@@ -45,7 +45,6 @@ export interface PortalAskDeps {
   readonly service: ClientAskService;
 }
 
-const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const AskParam = z.object({ askId: z.string().uuid() });
 
 const ResponseSchema = z
@@ -126,7 +125,6 @@ const CentreSchema = z
         "wrong file is answered with 'that was not it' rather than a second request that " +
         "reads as a fresh one.",
     }),
-    asOf: IsoDate,
   })
   .openapi("PortalActionCentre");
 
@@ -159,19 +157,8 @@ const listRoute = createRoute({
     "CLIENT_PORTAL sessions only. Needs no permission — being invited and granted a company " +
     "IS the authorisation to read that company's records, which is why a read-only contact " +
     "sees all of this and can answer none of it.",
-  request: {
-    query: z.object({
-      asOf: IsoDate.optional().openapi({
-        description:
-          "The day to answer for, in the CALLER's calendar — it decides which grants are in " +
-          "force. Defaults to the server's own day, which is not the reader's: a UTC server " +
-          "is a day behind a firm in India every morning.",
-      }),
-    }),
-  },
   responses: {
     200: { description: "The action centre", content: { "application/json": { schema: CentreSchema } } },
-    400: errorResponse("asOf is not an ISO date"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or this is not a client-portal session"),
   },
@@ -257,13 +244,13 @@ export function registerPortalAskRoutes(app: OpenAPIHono<AppEnv>, deps: PortalAs
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { asOf } = c.req.valid("query");
-    const centre = await deps.service.actionCentre(s.tenantId, s.userId, asOf);
+    // No `asOf` (F-07-1): which companies this login may see is resolved on
+    // the firm's own day by the grant module, never on a day the caller sends.
+    const centre = await deps.service.actionCentre(s.tenantId, s.userId);
     return c.json(
       {
         awaitingYou: centre.awaitingYou.map(toWire),
         withTheFirm: centre.withTheFirm.map(toWire),
-        asOf: centre.asOf,
       },
       200,
     );

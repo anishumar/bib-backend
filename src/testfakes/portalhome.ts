@@ -23,19 +23,12 @@ import type {
 } from "../usecase/portalhome/ports";
 
 export class FakePortalScope implements PortalScopeSource {
-  /** `${tenantId}:${userId}` → the companies granted, ignoring the day. Tests
-   *  that care about the day set different users. */
+  /** `${tenantId}:${userId}` → the companies granted. There is no day here on
+   *  purpose: the grant module resolves the scope on the firm's own day, and no
+   *  caller's day may reach it (F-07-1). */
   readonly granted = new Map<string, readonly PortalCompany[]>();
-  /** The day the service asked about, so a test can prove the caller's own
-   *  calendar day is what reaches the grant table rather than the server's. */
-  askedOn: string | null = null;
 
-  scopedCompanies(
-    tenantId: string,
-    userId: string,
-    on: string,
-  ): Promise<readonly PortalCompany[]> {
-    this.askedOn = on;
+  scopedCompanies(tenantId: string, userId: string): Promise<readonly PortalCompany[]> {
     return Promise.resolve(this.granted.get(`${tenantId}:${userId}`) ?? []);
   }
 }

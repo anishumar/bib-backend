@@ -90,21 +90,18 @@ describe("the status home", () => {
     expect(rows.calls[0]?.scope).toEqual([COBALT]);
   });
 
-  it("asks the grant table about the CALLER's day, not the server's", async () => {
-    // The server is on 2026-08-31 at this instant and the caller is on the 1st.
-    // A grant that starts today is not in force yet on the server's day, so a
-    // client in Delhi signing in before half past five would be told the firm
-    // has given them nothing.
-    const { scope, rows, service } = world();
+  it("uses the CALLER's day for what it DISPLAYS, and never for who may see it (F-07-1)", async () => {
+    // The caller's day cuts which filings are upcoming. It no longer reaches
+    // the grant module at all: `scopedCompanies` takes no day, so a contact
+    // removed yesterday cannot read everything again with ?asOf=yesterday.
+    const { rows, service } = world();
     await service.home(FIRM, MEERA, "2026-09-01");
-    expect(scope.askedOn).toBe("2026-09-01");
     expect(rows.calls[0]?.asOf).toBe("2026-09-01");
   });
 
-  it("falls back to the server's day only when the caller did not say", async () => {
-    const { scope, service } = world();
+  it("falls back to the server's day for the display only when the caller did not say", async () => {
+    const { service } = world();
     const home = await service.home(FIRM, MEERA);
-    expect(scope.askedOn).toBe("2026-08-31");
     // Echoed back, so a screen can show which day the answer was computed for
     // rather than leaving a reader to wonder why a filing due today is missing.
     expect(home.asOf).toBe("2026-08-31");

@@ -51,17 +51,18 @@ export class PortalHomeService {
   /**
    * Everything the status home shows, for the session identified by `userId`.
    *
-   * `asOf` is the CALLER'S calendar day and the server's is only the fallback —
-   * G3.2's rule, and this module is the one where getting it wrong is most
-   * visible: a grant that starts today is not in force yet on a UTC server at
-   * 04:11 in Delhi, so the client would sign in and be told the firm has given
-   * them nothing. The browser sends its own day.
+   * `asOf` is the CALLER'S calendar day, and it decides what is DISPLAYED —
+   * which filings count as upcoming, which work is recent. It does NOT decide
+   * which companies this login may see: that is resolved by the grant module
+   * on the firm's own day (F-07-1). Until 2026-09-25 the same value did both,
+   * and a contact removed yesterday read everything again with
+   * `?asOf=yesterday`.
    */
   async home(tenantId: string, userId: string, asOf?: string): Promise<PortalStatusHome> {
     const day = asOf ?? this.today();
     // Resolved ONCE per request, here, rather than per query. Two resolutions
     // could disagree across a day boundary and the second one is the wall.
-    const companies = await this.deps.scope.scopedCompanies(tenantId, userId, day);
+    const companies = await this.deps.scope.scopedCompanies(tenantId, userId);
     const rows = await this.deps.rows.read(
       tenantId,
       companies.map((c) => c.clientPartyId),

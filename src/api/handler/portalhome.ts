@@ -181,13 +181,22 @@ const homeRoute = createRoute({
     "a filter in the query.",
   request: {
     query: z.object({
-      asOf: IsoDate.optional().openapi({
-        description:
-          "The day to answer for, in the CALLER's calendar. Defaults to the server's own " +
-          "day, which is not the reader's: a server in UTC is a day behind a firm in India " +
-          "every morning, and this value decides both what a grant is in force on and which " +
-          "filings count as upcoming. A browser sends its local date.",
-      }),
+      // A REAL calendar day (F-07-4): `2026-13-45` passed the regex and
+      // reached `::date`, answering 500. Refused here as a 400 instead.
+      asOf: IsoDate.refine(
+        (v) => {
+          const at = new Date(`${v}T00:00:00.000Z`);
+          return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === v;
+        },
+        { message: "asOf is not a calendar day" },
+      )
+        .optional()
+        .openapi({
+          description:
+            "The day to DISPLAY for, in the CALLER's calendar: which filings count as upcoming " +
+            "and which work as recent. A browser sends its local date. It does NOT decide which " +
+            "companies you may see: that is resolved on the firm's own day (F-07-1).",
+        }),
     }),
   },
   responses: {
@@ -195,7 +204,7 @@ const homeRoute = createRoute({
       description: "The status home",
       content: { "application/json": { schema: HomeSchema } },
     },
-    400: errorResponse("asOf is not an ISO date"),
+    400: errorResponse("asOf is not a calendar day"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or this is not a client-portal session"),
   },

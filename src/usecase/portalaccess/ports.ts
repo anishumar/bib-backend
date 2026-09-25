@@ -14,6 +14,15 @@ export interface NewPortalAccess {
   readonly grantedBy: string;
 }
 
+/**
+ * Which zone the firm keeps its calendar in (0071). A portal session's grants
+ * are resolved on the FIRM's day, never on a day the caller sends (F-07-1).
+ * Structural: satisfied by `PostgresFirmTimeZone` and `FakeFirmTimeZone`.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 export interface PortalAccessRepository {
   /**
    * Every grant this login has ever held, live and historic, with the names
