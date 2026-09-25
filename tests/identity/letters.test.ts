@@ -196,6 +196,74 @@ describe("the staff welcome — unasked-for too, and it must not sell a password
   });
 });
 
+describe("the password reset — the one letter whose 'ignore this' is load-bearing", () => {
+  const RESET = "https://app.example.com/auth/reset-password?token=abc123";
+
+  function reset(): Letter {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPasswordReset("meera@cobaltfoods.in", RESET, EXPIRES);
+    return only(t);
+  }
+
+  it("carries the link in both bodies, and names the act in the subject", () => {
+    const letter = reset();
+    expect(letter.to).toBe("meera@cobaltfoods.in");
+    expect(letter.subject).toMatch(/[Rr]eset your .* password/);
+    expect(letter.text).toContain(RESET);
+    expect(letter.html).toContain(RESET);
+  });
+
+  it("tells somebody who did NOT ask that their password has not changed", () => {
+    // THE SENTENCE THIS WHOLE METHOD EXISTS FOR, and it is the one the sign-in
+    // link must NOT be copied for. That letter closes with "nothing has
+    // happened and you can ignore this message", which is true of a link that
+    // opens a session and false of one that REPLACES a credential. A reader who
+    // did not ask for this needs both halves: the password still works, and it
+    // goes on working as long as the link is left alone.
+    const letter = reset();
+    expect(letter.text).toMatch(/your password has NOT changed/i);
+    expect(letter.text).toMatch(/leave this link alone/i);
+    expect(letter.html).toMatch(/your password has not changed/i);
+  });
+
+  it("says the link works ONCE and that asking again cancels it", () => {
+    // Both facts, because both are true and the second is the answer to the
+    // thing people actually do — press the button again, then open the first
+    // letter because it is higher up the inbox.
+    const letter = reset();
+    expect(letter.text).toMatch(/works ONCE/);
+    expect(letter.text).toMatch(/cancels this/i);
+  });
+
+  it("NAMES THE ZONE on the expiry, like every other letter here", () => {
+    expect(reset().text).toContain("2 September 2026, 14:05 UTC");
+  });
+
+  it("names NO firm, unlike the three unasked-for letters", () => {
+    // The account is GLOBAL (ADR-02) — one login, however many firms — so there
+    // is no single firm this letter could name without telling the reader
+    // something false about which password is being reset. It does not need the
+    // anti-phishing sentence the others carry for the same reason it does not
+    // need a firm: it was asked for seconds ago.
+    const letter = reset();
+    expect(letter.text).not.toMatch(/check with your contact/i);
+    expect(letter.subject).not.toMatch(/has (invited|added|given)/);
+  });
+
+  it("is a DIFFERENT letter from the sign-in link, which is why it is a fifth method", () => {
+    const a = new Captured();
+    void new SmtpMailer(a).sendMagicLink("meera@cobaltfoods.in", RESET, EXPIRES);
+    const b = new Captured();
+    void new SmtpMailer(b).sendPasswordReset("meera@cobaltfoods.in", RESET, EXPIRES);
+
+    expect(only(a).subject).not.toBe(only(b).subject);
+    // The sign-in letter's closing line is exactly the one that would be wrong
+    // here, so a copy-paste of it fails this.
+    expect(only(a).text).toMatch(/nothing has happened/);
+    expect(only(b).text).not.toMatch(/nothing has happened/);
+  });
+});
+
 describe("a firm's name is data, and reaches a header and a document", () => {
   it("cannot inject a header — a newline in the name would end the Subject", () => {
     // A header ends at a newline, so a name carrying one could append headers

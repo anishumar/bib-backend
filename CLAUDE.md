@@ -628,9 +628,10 @@ exist yet.
   refuses it sharing a key with anything else in a production-like environment. Services
   record these writes as the **system** actor, with the caller's name in the payload —
   "system did it" cannot be traced to a system.
-- **`/api/v1/*`** — the product. Requires a session. The only exceptions are the three
-  routes that exist to *obtain* one, listed by exact path in `PUBLIC_PATHS`. Adding to that
-  set needs a reason as good as theirs.
+- **`/api/v1/*`** — the product. Requires a session. The only exceptions are the routes
+  that exist to *obtain* one, listed by exact path in `PUBLIC_PATHS`. Adding to that
+  set needs a reason as good as theirs, and `tests/api/auth-coverage.test.ts` pins the list
+  so that a new entry is a decision somebody argues for rather than a line somebody slips in.
 - **Audience (gate 2) is denied by default on that surface.** A `CLIENT_PORTAL` session
   reaches only `PORTAL_PATHS`; everything else is the STAFF workspace and answers 403.
   This product is B2B2C — a firm's staff *and* its clients log in here — so an
@@ -742,6 +743,87 @@ mailer that never mattered because a send could not fail. With a relay it can �
 in an address, a quota — and the contact is then created, granted, and permanently uninvitable.
 It needs the question behind it answered first (*did they lose the link, or has somebody else
 taken over that mailbox?*), so it is written down rather than guessed at.
+
+## Passwords — setting, changing and forgetting one (0082)
+
+Until 0082 **nothing in the product could write a credential.** The only route that ever had
+was `PUT /internal/v1/users/{userId}/password`, behind the platform key, and its own
+description promised *"self-service password change arrives with the portal."* The portal
+arrived; this did not. That left two different holes in the same wall, and they are worth
+stating separately because they belong to different people:
+
+- **A CLIENT CONTACT** sets a password once, on the `invite` link, and that link is spent.
+  Forgetting it was final. `resendPortalInvite` refuses them **by design** once a credential
+  exists — re-issuing would be the firm resetting its own client's password, which is exactly
+  what the invite flow exists to prevent — and the sign-in link gets them IN without fixing
+  anything, so the same wall is there the next visit and every visit after it.
+- **A COLLEAGUE** usually has no password at all: `welcomeStaff` hands over a session and
+  nothing else. So staff could not set a first one, and anybody the platform HAD seeded a
+  password for could not rotate it without asking the platform.
+
+There are now three routes, and the split between them is the whole design.
+
+**`POST /api/v1/auth/password-reset` is `requestMagicLink` line for line**, deliberately:
+same silence, same per-address budget, same `MAGIC_LINK_FLOOR_MS` constant-time floor, same
+swallowed send. It is reachable by exactly the same strangers, and a firm's client list is
+exactly as confidential — so an unknown address, a deactivated account, a spent budget and a
+dead relay all answer 202 in the same number of milliseconds. It does **not** check whether a
+password exists, twice over on purpose: refusing would be the enumeration oracle in a subtler
+dress (*which of your staff have passwords?*), and setting a FIRST one through this route is
+the whole answer for staff.
+
+**`reset` is a FOURTH magic-link purpose and not one of the three.** `login` and `welcome`
+open a session (`SESSION_OPENING_PURPOSES`) and this one must not: whoever holds it has proved
+only that they can read a mailbox, and a reset redeemed at the sign-in route would hand out a
+session while leaving the forgotten password exactly as it was. `invite` is closest and still
+wrong at both ends — it lives seven days, because a client who lets one expire must go back to
+the firm, while a reset is PULLED by somebody watching their inbox; and `resendPortalInvite`
+refuses to issue one once a credential exists, which is precisely the population this is for.
+`PASSWORD_RESET_TTL_MINUTES` is 30 rather than the sign-in link's 15 because the other end of
+it is a form where a person has to CHOOSE something, and an expiry that lands mid-decision is
+how people end up picking what they can type quickly.
+
+**Issuing one SPENDS every live one** (`consumeUnusedFor`). The invitation is issued once by
+construction; this button is pressed by the person themselves, repeatedly, and without that
+line an impatient reader leaves three live password setters in a mailbox — the two they did
+not use still good after the one they did use has put things right.
+
+**`POST /api/v1/auth/password` requires the CURRENT password, and the session does not stand
+in for it.** This is the rule to not weaken. The caller is already authenticated, so the check
+is not about who they are; it is about what a stolen session may BECOME. Sessions here are
+server-side precisely so revoking one ends access on the next request, and a session that
+could mint a password would survive every revocation the firm has — while the person it was
+taken from, who at most firms has no password of their own, would have nothing to notice had
+changed. So **an account with no password is refused here** (`NoPasswordSet`) and sets its
+first through the emailed link, where reading the mailbox is what stands in.
+
+**The two paths disagree about re-using the old password, and that asymmetry is deliberate.**
+`changePassword` refuses it (`PasswordUnchanged`): somebody who has just typed their current
+password and asked for a different one is usually doing it because they think it has been
+seen, and a green tick that changed nothing is worse than the refusal. `resetPassword` accepts
+it, because the person holding a reset link is by definition the one who does not know what
+the old value was, and asking them for something other than it is a riddle.
+
+**Both paths revoke every session, and both hand back a new one.** For the reset that is the
+point — the commonest honest reason to reset is a suspicion somebody else is in there. For the
+change it would also sign the person out of the tab they are standing in, one click after
+being told it worked, so `reopenSession` opens a fresh session and points it back at the firm
+they were already acting as, re-checking the membership and the firm's standing rather than
+trusting the old session's claim. The token rotates as a consequence, which is what anybody
+would want here anyway.
+
+**The letter is a FIFTH method on `Mailer`, for one paragraph.** `sendMagicLink`'s closing
+line is *"if you did not ask for this, nothing has happened and you can ignore this message"* —
+true of a link that opens a session, false of one that REPLACES a credential. A reader who did
+not ask for a reset needs both halves: the password still works, and it goes on working as
+long as the link is left alone. It names no firm, unlike the three unasked-for letters, because
+it was asked for seconds ago and the account is GLOBAL (ADR-02) — naming one firm would say
+something false about which password is being reset.
+
+**`/auth/me` carries `hasPassword`** so the account screen offers the form that will work. It
+is the same rule the permissions list follows: most colleagues have never had a password, and
+showing all of them a change form whose only outcome is a 409 is the product discovering its
+own state from a refusal.
 
 ## CORS — the frontend is a separate origin
 

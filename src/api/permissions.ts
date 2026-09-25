@@ -47,6 +47,14 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   routeKey("GET", "/api/v1/auth/me"),
   routeKey("POST", "/api/v1/auth/switch-tenant"),
   routeKey("POST", "/api/v1/auth/logout"),
+  // Changing your own password. On this list for the reason the sentence above
+  // gives about being locked out by a misconfigured role — but more simply than
+  // that: there is no role anywhere in this product that should be able to stop
+  // somebody rotating their own credential, so a permission here could only
+  // ever be one that every role holds, which is the definition of one that
+  // decides nothing. Gate 3 is not the control on this route; the CURRENT
+  // PASSWORD is.
+  routeKey("POST", "/api/v1/auth/password"),
   routeKey("GET", "/api/v1/tenancy/me/memberships"),
   routeKey("GET", "/api/v1/portal/home"),
   // The action centre's LIST, for the same reason as the home above it, and it

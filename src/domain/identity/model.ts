@@ -32,8 +32,11 @@ export interface Session {
  *   `welcome` pushed to a new colleague, lives days, opens a session (0072).
  *   `invite`  the client portal's; redeems ONLY by setting a password, and
  *             never opens a session on its own.
+ *   `reset`   the forgotten-password link (0082); pulled like `login`, lives
+ *             half an hour, and redeems ONLY by replacing the password. A
+ *             session comes out of THAT, never out of the link by itself.
  */
-export type MagicLinkPurpose = "login" | "invite" | "welcome";
+export type MagicLinkPurpose = "login" | "invite" | "welcome" | "reset";
 
 export interface MagicLink {
   readonly id: string;
@@ -162,6 +165,14 @@ export function isUsableMagicLink(link: MagicLink, now: Date, purpose: MagicLink
  * line. `invite` is deliberately absent: redeeming it without setting a password
  * would leave a portal contact with no way back in once it was spent, which is
  * the bug the `purpose` column was first read to prevent.
+ *
+ * `reset` (0082) is absent for the mirror-image reason, and it is the sharper
+ * of the two. Whoever holds a reset link has proved only that they can read a
+ * mailbox, and the act that link authorises is REPLACING the credential. A
+ * reset spent at the sign-in route would hand out a session while leaving the
+ * forgotten password exactly as it was — the person is in, has not fixed
+ * anything, and meets the same wall tomorrow. The session they get comes out of
+ * the password being set, never out of the link on its own.
  */
 export const SESSION_OPENING_PURPOSES: readonly MagicLinkPurpose[] = ["login", "welcome"];
 
@@ -217,4 +228,40 @@ export const STAFF_WELCOME_TTL_HOURS = 72;
 
 export function staffWelcomeExpiryFrom(now: Date, ttlHours = STAFF_WELCOME_TTL_HOURS): string {
   return new Date(now.getTime() + ttlHours * 60 * 60 * 1000).toISOString();
+}
+
+/**
+ * How long a forgotten-password link stands.
+ *
+ * ── WHY IT IS NEARER THE SIGN-IN LINK THAN THE INVITATION ─────────────────
+ *
+ * Both of the other password-setting links in this product are PUSHED, and
+ * that is what buys them their long lives: a portal invitation gets a week
+ * because a client who lets it expire has to go back to the firm and ask a
+ * human, and a colleague's welcome gets 72 hours because it may be read on
+ * Monday. A reset is PULLED. Somebody typed their address into a form and is
+ * watching their inbox for it, exactly like `MAGIC_LINK_TTL_MINUTES`.
+ *
+ * ── AND WHY IT IS STILL TWICE THE SIGN-IN LINK'S FIFTEEN MINUTES ──────────
+ *
+ * Because of what is on the other end of it. A sign-in link is clicked and
+ * finished; this one opens a form where a person has to CHOOSE something, and
+ * the ones who choose well open a password manager, generate, save, and come
+ * back. Fifteen minutes is enough to click a link and not always enough to do
+ * that, and an expiry that lands mid-decision sends somebody round the whole
+ * loop again — which is how people end up picking something they can type
+ * quickly instead.
+ *
+ * Half an hour, and not more: this is a bearer credential sitting in an inbox
+ * that replaces a password, so the window it is stealable in is the thing being
+ * bought down. Issuing a new one spends every live one
+ * (`consumeUnusedFor`), so the cost of an expired link is one button.
+ */
+export const PASSWORD_RESET_TTL_MINUTES = 30;
+
+export function passwordResetExpiryFrom(
+  now: Date,
+  ttlMinutes = PASSWORD_RESET_TTL_MINUTES,
+): string {
+  return new Date(now.getTime() + ttlMinutes * 60 * 1000).toISOString();
 }

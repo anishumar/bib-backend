@@ -267,6 +267,18 @@ export class FakeMailer implements Mailer {
     this.portalWelcomes.push({ to, url, expiresAt, firmName });
     return Promise.resolve();
   }
+
+  /** And a fifth. Kept apart from `sent` for the reason the others are: a reset
+   *  and a sign-in link go to the same address with the same shape, and a test
+   *  that could not tell them apart would pass on the one bug that matters
+   *  here — a reset link issued as a `login` one, which opens a session and
+   *  leaves the forgotten password exactly where it was. */
+  readonly resets: { to: string; url: string; expiresAt: string }[] = [];
+
+  sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void> {
+    this.resets.push({ to, url, expiresAt });
+    return Promise.resolve();
+  }
 }
 
 /**
@@ -289,8 +301,13 @@ export class UnreachableMailer implements Mailer {
    *  "the code never called the mailer". */
   readonly attempted: {
     to: string;
-    kind: "magic-link" | "invite" | "welcome" | "portal-welcome";
+    kind: "magic-link" | "invite" | "welcome" | "portal-welcome" | "password-reset";
   }[] = [];
+
+  sendPasswordReset(to: string): Promise<void> {
+    this.attempted.push({ to, kind: "password-reset" });
+    return Promise.reject(new Error("smtp: connection refused"));
+  }
 
   sendMagicLink(to: string): Promise<void> {
     this.attempted.push({ to, kind: "magic-link" });

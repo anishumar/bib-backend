@@ -67,4 +67,17 @@ export class LoggingMailer implements Mailer {
     );
     return Promise.resolve();
   }
+
+  sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void> {
+    this.log.warn(
+      { to, url, expiresAt },
+      "password reset NOT emailed — the logging mailer is registered. Open the url above to " +
+        "choose a new password. NOTE: whoever opens it BECOMES that person — this link " +
+        "replaces the credential, so a log this one lands in is a log that hands out " +
+        "accounts. It is the third of the four that is never acceptable in public, and " +
+        "`validateServer` refuses to boot a production-like environment with this mailer " +
+        "wired for exactly that reason.",
+    );
+    return Promise.resolve();
+  }
 }

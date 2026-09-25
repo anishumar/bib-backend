@@ -960,6 +960,18 @@ export function mapError(err: unknown): MappedError {
       // Not a 403: nothing about the caller's access is wrong.
       case "INVITATION_ALREADY_ACCEPTED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 400 rather than the 409 above it, and the two are worth telling apart:
+      // the invitation case is the STATE refusing a well-formed request, while
+      // this one is the request itself — the value in the field is the wrong
+      // value, and the fix is to type a different one into the same form.
+      case "PASSWORD_UNCHANGED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 409 and not 400: the body is perfectly well formed, and nothing the
+      // caller could type into it would make this route work. It is the account
+      // that is in the wrong state — no credential to swap — and the fix is a
+      // different flow, which the message names.
+      case "NO_PASSWORD_SET":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 404, and it only ever reaches a provisioning caller — see the error's
       // own note for why naming it is safe there. It answered 500 before, from
       // an unmapped foreign-key violation two layers down.

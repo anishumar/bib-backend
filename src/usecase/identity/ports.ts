@@ -227,4 +227,29 @@ export interface Mailer {
     expiresAt: string,
     firmName: string | null,
   ): Promise<void>;
+
+  /**
+   * Sends somebody the link that replaces a password they have forgotten.
+   *
+   * ── WHY IT IS A FIFTH METHOD AND NOT `sendMagicLink` WITH ANOTHER URL ────
+   *
+   * Because the letter has to say what the link DOES, and these two do opposite
+   * things. A sign-in link's letter closes with *"if you did not ask for this,
+   * nothing has happened and you can ignore this message"* — true, and exactly
+   * the wrong thing to tell somebody holding a link that REPLACES their
+   * credential. A reader who has been sent an unrequested reset needs to know
+   * that the password still works until the link is used, and that ignoring the
+   * letter is what keeps it that way.
+   *
+   * ── AND WHY IT TAKES NO `firmName` WHEN THREE OF ITS NEIGHBOURS DO ───────
+   *
+   * The other three arrive UNASKED, from a firm the reader may not be expecting
+   * mail from, so naming that firm is what stops them reading as phishing. This
+   * one is pulled: somebody typed their address into a form seconds ago and is
+   * watching for it. And the account is GLOBAL (ADR-02) — one login, however
+   * many firms — so there is no single firm this letter could honestly name,
+   * and picking one of them would tell the reader something false about which
+   * password they are resetting.
+   */
+  sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void>;
 }
