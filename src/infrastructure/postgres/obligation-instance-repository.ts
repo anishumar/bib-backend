@@ -125,7 +125,11 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AS r(id uuid, "tenantId" uuid, "templateId" uuid, "entityPartyId" uuid,
                "engagementId" uuid, "periodStart" text, "periodEnd" text, "periodLabel" text,
                "statutoryDueOn" text, "internalTargetOn" text, "stateId" uuid)
-        ON CONFLICT (tenant_id, template_id, entity_party_id, period_start) DO NOTHING
+        -- THE LINEAGE, not the template (0303). The template key is implied by
+        -- it, and it also refuses a period an EARLIER rule in the chain already
+        -- holds — the row a supersession could not hand over because somebody
+        -- had started it.
+        ON CONFLICT (tenant_id, lineage_id, entity_party_id, period_start) DO NOTHING
         RETURNING id, template_id, entity_party_id, period_label,
                   statutory_due_on::text, internal_target_on::text
       `;

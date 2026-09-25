@@ -43,6 +43,10 @@ function harness() {
   // The instance fake reads the FLAGS off the state list, exactly as the sweep
   // does, so a test that renames a state proves the rule still holds.
   instances.states = states.rows;
+  // One world, as one database is: the handover moves calendar rows, and the
+  // calendar keys on the rule's lineage (0303).
+  templates.instances = instances;
+  instances.templates = templates;
   const compliancePolicy = new FakeCompliancePolicySource();
   const calendarSource = new FakeCalendarSource();
   const services = new FakeObligationServices();
@@ -981,19 +985,13 @@ describe("superseding a rule — the law changed, from a day", () => {
   });
 
   it("does NOT restate a period that now belongs to the successor", async () => {
-    // The reach-back may already have materialised periods past the cutover on
-    // the predecessor's formula. They are not its periods any more, so editing
-    // the predecessor leaves them alone — and the rows are kept rather than
-    // deleted, because `bib_app` holds no DELETE grant and a filing somebody
-    // may have started is not this operation's to remove.
+    // The predecessor's own edits reach only its own periods. September was
+    // handed over, so a lead-time change on the OLD rule leaves it alone.
     const rule = await firmWithGst(h);
     await h.service.generate(FIRM, { from: "2026-07-01", to: "2026-10-31" }, ACTOR);
-    const septBefore = h.instances.rows.find((r) => r.periodLabel === "Sep 2026")?.statutoryDueOn;
 
-    const { effect } = await supersede(h, rule.id);
-    // Reported rather than hidden: the partner is told how many rows the
-    // predecessor produced past its own cutover.
-    expect(effect.locked).toBeGreaterThan(0);
+    await supersede(h, rule.id);
+    const septAfterHandover = h.instances.rows.find((r) => r.periodLabel === "Sep 2026");
 
     const { effect: edit } = await h.service.updateRule(
       FIRM,
@@ -1004,8 +1002,130 @@ describe("superseding a rule — the law changed, from a day", () => {
     // July and August moved; September did not, because it is not this rule's.
     expect(edit.restated).toBe(2);
     expect(h.instances.rows.find((r) => r.periodLabel === "Sep 2026")?.statutoryDueOn).toBe(
-      septBefore,
+      septAfterHandover?.statutoryDueOn,
     );
+  });
+
+  describe("AFTER the calendar already holds the successor's periods (0303)", () => {
+    // THE ACCEPTANCE LINE. The nightly sweep materialises a year ahead, so on
+    // the day a partner records an amendment the OLD rule has already produced
+    // every period past the cutover. Before 0303 those rows stayed on the old
+    // rule and the successor generated the same periods again: every return
+    // from the cutover on appeared twice.
+    //
+    // So each test starts from the calendar the real sweep would have left —
+    // its own window, ninety days back and a year ahead of TODAY.
+    const SWEEP = { from: "2026-06-01", to: "2027-08-30" };
+
+    const at = (h: H, label: string) => h.instances.rows.filter((r) => r.periodLabel === label);
+    const pastCutover = (h: H) => h.instances.rows.filter((r) => r.periodStart >= CUTOVER);
+
+    it("keeps periods before the cutover on the old rule, moves the rest, and makes nothing twice", async () => {
+      const rule = await firmWithGst(h);
+      await h.service.generate(FIRM, SWEEP, ACTOR);
+      const before = h.instances.rows.length;
+      const ids = new Map(h.instances.rows.map((r) => [r.periodLabel, r.id]));
+      const moving = pastCutover(h).length;
+      expect(moving).toBeGreaterThan(6);
+
+      const { rule: successor, effect } = await supersede(h, rule.id);
+
+      // NOTHING TWICE: the same number of filings, one per month.
+      const labels = h.instances.rows.map((r) => r.periodLabel);
+      expect(labels).toHaveLength(before);
+      expect(new Set(labels).size).toBe(before);
+
+      // Before D: the old rule, the old date (the 20th).
+      expect(at(h, "Jul 2026")[0]?.templateId).toBe(rule.id);
+      expect(at(h, "Aug 2026")[0]?.templateId).toBe(rule.id);
+      expect(at(h, "Aug 2026")[0]?.statutoryDueOn).toBe("2026-09-20");
+      // From D: the new rule and the new date (the 11th), on the SAME row, so
+      // anything that already named that filing still names it.
+      expect(at(h, "Sep 2026")[0]?.templateId).toBe(successor.id);
+      expect(at(h, "Sep 2026")[0]?.statutoryDueOn).toBe("2026-10-11");
+      expect(at(h, "Sep 2026")[0]?.id).toBe(ids.get("Sep 2026"));
+      expect(pastCutover(h).every((r) => r.templateId === successor.id)).toBe(true);
+
+      // Told as it is: every one past the cutover moved to a new date, none
+      // was left behind, and the successor had nothing of its own to add.
+      expect(effect).toEqual({ restated: moving, locked: 0, spawned: 0 });
+
+      // And the next sweep changes nothing.
+      const again = await h.service.generate(FIRM, SWEEP, ACTOR);
+      expect(again.created).toBe(0);
+      expect(h.instances.rows).toHaveLength(before);
+    });
+
+    it("leaves a filing somebody STARTED on the old rule, and does not generate it again", async () => {
+      // A task on a desk keeps the date its owner is working to, the rule every
+      // correction already follows. The successor must then NOT produce a
+      // second September beside it, which only the lineage key can stop: the
+      // two rows would have different template ids.
+      const rule = await firmWithGst(h);
+      await h.service.generate(FIRM, SWEEP, ACTOR);
+      const before = h.instances.rows.length;
+      const moving = pastCutover(h).length;
+      const sept = at(h, "Sep 2026")[0];
+      if (!sept) throw new Error("expected September");
+      h.instances.rows[h.instances.rows.indexOf(sept)] = {
+        ...sept,
+        workItemId: "00000000-0000-4000-8000-00000000a001",
+      };
+
+      const { rule: successor, effect } = await supersede(h, rule.id);
+
+      expect(at(h, "Sep 2026")).toHaveLength(1);
+      expect(at(h, "Sep 2026")[0]?.templateId).toBe(rule.id);
+      expect(at(h, "Sep 2026")[0]?.statutoryDueOn).toBe("2026-10-20");
+      // October was untouched, so it moved.
+      expect(at(h, "Oct 2026")[0]?.templateId).toBe(successor.id);
+      expect(effect).toEqual({ restated: moving - 1, locked: 1, spawned: 0 });
+      expect(h.instances.rows).toHaveLength(before);
+
+      const again = await h.service.generate(FIRM, SWEEP, ACTOR);
+      expect(again.created).toBe(0);
+    });
+
+    it("hands rows to a successor that is still waiting on a fact, keeping their dates", async () => {
+      // "We do not know the new date yet" is not "this is no longer due". The
+      // rows change hands and keep the date they had, so the successor's first
+      // formula restates them as its own.
+      const rule = await firmWithGst(h);
+      await h.service.generate(FIRM, SWEEP, ACTOR);
+      const before = h.instances.rows.length;
+      const moving = pastCutover(h).length;
+
+      const { rule: successor, effect } = await supersede(h, rule.id, {
+        dueRule: null,
+        unresolvedReason: "The notification names a date we have not been sent yet.",
+      });
+      expect(effect).toEqual({ restated: 0, locked: 0, spawned: 0 });
+      expect(at(h, "Oct 2026")[0]?.templateId).toBe(successor.id);
+      expect(at(h, "Oct 2026")[0]?.statutoryDueOn).toBe("2026-11-20");
+
+      const { effect: answered } = await h.service.updateRule(
+        FIRM,
+        successor.id,
+        {
+          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null },
+          unresolvedReason: null,
+        },
+        ACTOR,
+      );
+      expect(answered.restated).toBe(moving);
+      expect(answered.spawned).toBe(0);
+      expect(at(h, "Oct 2026")[0]?.statutoryDueOn).toBe("2026-11-11");
+      expect(h.instances.rows).toHaveLength(before);
+    });
+
+    it("records what the handover moved on the ledger, as counts", async () => {
+      const rule = await firmWithGst(h);
+      await h.service.generate(FIRM, SWEEP, ACTOR);
+      const moving = pastCutover(h).length;
+      await supersede(h, rule.id);
+      const event = h.events.recorded.find((e) => e.verb === "obligation_rule.superseded");
+      expect(event?.payload).toMatchObject({ handedOver: moving, restated: moving, kept: 0 });
+    });
   });
 });
 

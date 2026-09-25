@@ -1914,11 +1914,10 @@ everything derived from it — from "the law changed from a date" — a new reco
 explaining what it explained. Everything here ships `unconfirmed` precisely because nobody has
 checked it against the statute, so an edit there is a CORRECTION and restates in place. A
 period-specific legal change is an EXCEPTION, which is what a CBDT or GST extension actually is
-and which 0052 already built. **Effective-dated supersession is NOT built**, and the blocker is
-concrete rather than a preference: the generation window is `today−90 … today+365` for every
-generating rule, so a superseding row would immediately re-generate periods the retired one
-already produced — different `template_id`, so the re-run key does not catch it, and the calendar
-would show each filing twice. It needs an `effective_from` on the template.
+and which 0052 already built. **Effective-dated supersession IS built** — the window in 0057 and
+the handover in 0303, both below. The blocker this paragraph used to name was concrete: the
+generation window is `today−90 … today+365`, so a superseding row re-generated periods the old
+one had already produced, under a different `template_id` the re-run key could not see.
 
 **AN EXCEPTION IS A DATE CHANGE TOO, and adding one moves rows that already exist.** March's TDS
 is generated eleven months before anybody writes the carve-out saying March is due on 30 April.
@@ -1973,6 +1972,32 @@ generating at all, including for periods before the cutover that the ninety-day 
 not materialised yet, so a client onboarded last month would silently lose the period it was
 engaged for. A window says WHICH PERIODS a row governs; `is_active` says whether it is switched
 on. Different questions.
+
+**AND THE WINDOW ALONE LEFT EVERY RETURN TWICE — 0303 IS THE HANDOVER (2026-09-25).** The window
+stops a rule PROPOSING a period it does not govern. It could not stop what had already happened:
+the nightly sweep materialises a year ahead, so on the day a partner records "from 1 October the
+law says the 11th", the old rule has ALREADY produced October onward for every client — and the
+successor's own spawn produced them again. The 2026-08-31 walk read clean only because its rule
+was created and superseded before any sweep ran. Two halves, and each needs the other:
+
+- **The handover.** `supersede` takes the predecessor's rows past the cutover that nobody has
+  started (`work_item_id`, `filed_on` and `resolved_at` all null — the WHERE repeats it, the read
+  is a snapshot) and, in the SAME transaction, re-pins them to the successor with the successor's
+  dates from `scheduleFor`. Same row, same id — anything already naming that filing still names
+  it. A successor still waiting on a fact takes the rows with the dates they had, which is what
+  `restateUnstarted` already does when a formula is removed; its first answer restates them. A
+  started, filed or decided row STAYS on the rule it was worked under, with its date, and is
+  counted: `RuleEffect` is `restated` (moved to a new date) / `locked` (kept) / `spawned`, and the
+  screen's existing sentences fit it word for word.
+- **The wall.** `lineage_id` names a rule's chain — its own id, inherited through
+  `supersedes_id` — DERIVED by trigger on insert and refused on update, so no caller supplies it
+  and every hand-written INSERT keeps working. The calendar row carries it too (filled by trigger,
+  held to its template's by a composite foreign key over `(template_id, lineage_id, tenant_id)`,
+  0067's pattern for a denormalised column) and **`obligation_instance_lineage_key` is `(tenant,
+  lineage, entity, period_start)`**: one filing per entity, per period, per chain. The
+  generator's `ON CONFLICT` targets it, so a period a KEPT row still holds is skipped rather than
+  produced beside it. `supersede.integration.test.ts` proves the handover guard with ids it must
+  refuse, the key through the sweep's own insert and by hand, and the frozen chain.
 
 **`restate`'s SQL is executed by an integration test, not a fake.** It uses the same
 `jsonb_to_recordset(…::text::jsonb)` construction as the batch insert, whose double cast exists

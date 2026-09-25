@@ -31,6 +31,8 @@ import type {
   ObligationTemplateRepository,
   ResolutionOptionPatch,
   ResolutionOptionRepository,
+  RestatedInstance,
+  SupersedeResult,
   TemplatePatch,
   TemplateRecord,
 } from "../../usecase/obligation/ports";
@@ -201,7 +203,8 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
     tenantId: string,
     predecessorId: string,
     t: NewObligationTemplate,
-  ): Promise<ObligationTemplate> {
+    handover: readonly RestatedInstance[],
+  ): Promise<SupersedeResult> {
     return withTenant(this.app, tenantId, async (db) => {
       // ONE TRANSACTION, and `withTenant` is already one — see the port for why
       // each half alone is a broken calendar. The cutover day is the successor's
@@ -238,7 +241,47 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       // violation rolls the whole transaction back, which is the correct
       // outcome, and the service turns it into a sentence.
       if (!row) throw new Error("obligation_template successor insert returned nothing");
-      return toTemplate(row);
+
+      // THE HANDOVER, in the same transaction (0303). Rows the predecessor
+      // produced for periods it no longer governs move to the successor with
+      // the successor's dates. The guard repeats the unstarted test rather than
+      // trusting the ids: a task picked up since the service read them keeps
+      // the rule and the date its owner is working to. A row a partner has
+      // already DECIDED about (`resolved_at`) is not moved either — the
+      // decision was taken against the rule it names. Same double cast as the
+      // batch insert, for the same reason.
+      const moved =
+        handover.length === 0
+          ? []
+          : await db<{ id: string }[]>`
+              UPDATE delivery.obligation_instance AS o
+              SET template_id        = ${t.id},
+                  statutory_due_on   = r."statutoryDueOn"::date,
+                  internal_target_on = r."internalTargetOn"::date
+              FROM jsonb_to_recordset(${JSON.stringify(handover)}::text::jsonb)
+                AS r(id uuid, "statutoryDueOn" text, "internalTargetOn" text)
+              WHERE o.id = r.id
+                AND o.template_id = ${predecessorId}
+                AND o.period_start >= ${t.effectiveFrom}::date
+                AND o.work_item_id IS NULL
+                AND o.filed_on IS NULL
+                AND o.resolved_at IS NULL
+              RETURNING o.id
+            `;
+
+      // What stayed behind past the cutover: started, filed or decided. Counted
+      // after the move, so the number is what is actually true now.
+      const [kept] = await db<{ n: string }[]>`
+        SELECT count(*)::text AS n FROM delivery.obligation_instance
+        WHERE template_id = ${predecessorId}
+          AND period_start >= ${t.effectiveFrom}::date
+      `;
+
+      return {
+        rule: toTemplate(row),
+        handedOver: moved.map((m) => m.id),
+        kept: Number(kept?.n ?? 0),
+      };
     });
   }
 

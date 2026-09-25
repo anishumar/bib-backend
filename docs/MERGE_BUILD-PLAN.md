@@ -3250,6 +3250,19 @@ Phases 2–5, not now). This phase is the **client-facing portal (U1)** and cros
   > 400 with their sentences. The rows were then deleted, scoped by `tenant_id` this time.
   > **The screen was walked too** — see T6.1's note, which records the whole pass and the five
   > faults it found.
+  >
+  > ── **THE HANDOVER (0303, 2026-09-25) — and why the walk above read clean** ──
+  >
+  > The walk's rule was created and superseded before any sweep ran, so the old rule had produced
+  > nothing past the cutover. On a real firm it always has: the sweep materialises a year ahead,
+  > and the successor's spawn then produced every period from the cutover a SECOND time under a
+  > different template id. `supersede` now re-pins the old rule's unstarted rows past the cutover
+  > to the successor, re-dated, in the same transaction; a started, filed or decided row stays on
+  > the old rule and is reported as kept. `lineage_id` (a rule's chain, derived by trigger) is on
+  > both tables and `obligation_instance_lineage_key` makes one filing per entity per period per
+  > chain a database fact. *Acceptance met: supersede at D, periods before D stay on the old rule,
+  > periods from D are the new rule's, and nothing is generated twice* — unit tests over the
+  > sweep's own window, and `supersede.integration.test.ts` against Postgres.
 
 ### U1 · Client portal (client) — the real Phase 6 work, and **all of it is `(B)`'s**
 
