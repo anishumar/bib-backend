@@ -145,6 +145,7 @@ const identity = new IdentityService({
     sendPortalInvite: () => Promise.resolve(),
     sendStaffWelcome: () => Promise.resolve(),
     sendPortalWelcome: () => Promise.resolve(),
+    sendPasswordReset: () => Promise.resolve(),
   },
   ids: systemIds,
   clock: systemClock,

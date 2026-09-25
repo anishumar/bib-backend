@@ -28,6 +28,7 @@ import {
   isUsableSession,
   shouldTouch,
   magicLinkExpiryFrom,
+  passwordResetExpiryFrom,
   portalInviteExpiryFrom,
   sessionExpiryFrom,
   staffWelcomeExpiryFrom,
@@ -36,7 +37,10 @@ import {
   InvalidCredentials,
   InvalidMagicLink,
   InvitationAlreadyAccepted,
+  NoPasswordSet,
+  PasswordUnchanged,
   retryIn,
+  SessionInvalid,
   TooManyAttempts,
   NoActiveMembership,
   NotAMember,
@@ -143,6 +147,48 @@ export const MAGIC_LINK_WINDOW_SECONDS = 3600;
  */
 export const PORTAL_INVITE_RESENDS_PER_WINDOW = 3;
 export const PORTAL_INVITE_RESEND_WINDOW_SECONDS = 3600;
+
+/**
+ * Forgotten-password links to one ADDRESS, per hour.
+ *
+ * The same three-an-hour `requestMagicLink` gets, and for the same reason: the
+ * cost of an unlimited one lands on somebody who did not ask for it, because
+ * anybody on the internet can type any address into this form. And like that
+ * one it is REFUSED QUIETLY — the route answers 202 whatever happened, so a 429
+ * would be the one response that confirmed the address has an account.
+ *
+ * Three is generous for the real case. Issuing a link spends every live one, so
+ * pressing the button again is what somebody does when the first letter has not
+ * arrived yet, and the second and third are the ones that go when it turns out
+ * to be slow rather than lost.
+ */
+export const PASSWORD_RESETS_PER_WINDOW = 3;
+export const PASSWORD_RESET_WINDOW_SECONDS = 3600;
+
+/**
+ * Attempts at the CURRENT password on the change route, per account, per hour.
+ *
+ * ── WHAT IT IS ACTUALLY DEFENDING ─────────────────────────────────────────
+ *
+ * Not the account — the caller is already inside it, and holding the session is
+ * enough to do everything the session can do. It is defending the PASSWORD as a
+ * string, which is a different asset: people reuse them, so a session lifted
+ * from a shared machine that could be made to confirm "is it `Monsoon2026`?"
+ * fifty thousand times would be an offline cracking rig with a network hop in
+ * it, aimed at the person's bank rather than at this product.
+ *
+ * Ten an hour leaves that worthless and is far past what a person who is
+ * *changing* a password they just typed on the way in will ever need. Cleared
+ * on success, like the login budgets, so somebody who fumbles it twice and then
+ * gets it right is not left throttled.
+ *
+ * Keyed on the ACCOUNT and not on the caller, which is the opposite of
+ * `login`'s tight budget — and the lockout worry that shaped that one does not
+ * arise here, because a stranger cannot reach this route at all. Getting to it
+ * requires a live session for the very account being throttled.
+ */
+export const PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW = 10;
+export const PASSWORD_CHANGE_WINDOW_SECONDS = 3600;
 
 export interface Deps {
   readonly users: UserDirectory;
@@ -395,6 +441,102 @@ export class IdentityService {
       );
     } catch {
       // Deliberately empty. See above: the adapter has already logged it.
+    }
+  }
+
+  /**
+   * Email somebody the link that replaces a password they have forgotten.
+   *
+   * ── WHY THE PRODUCT NEEDED THIS AND DID NOT HAVE IT (0082) ──────────────
+   *
+   * Nothing in this product could write a credential except
+   * `PUT /internal/v1/users/{userId}/password`, behind the platform key. So a
+   * client contact who forgot the password they chose on their invitation was
+   * finished: the invite link is spent, `resendPortalInvite` refuses them once a
+   * credential exists — deliberately, because re-issuing it would be the firm
+   * resetting its own client's password — and the sign-in link gets them in
+   * without fixing anything, so they meet the same wall next time. And a
+   * colleague, who usually has no password at all, had no way to set a first
+   * one.
+   *
+   * ── IT IS `requestMagicLink`, LINE FOR LINE, AND THAT IS DELIBERATE ──────
+   *
+   * Same silence, same per-address budget, same constant-time floor, same
+   * swallowed send. Everything that endpoint does to avoid telling an anonymous
+   * caller whether an address has an account applies here unchanged — this one
+   * is reachable by exactly the same strangers, and a firm's client list is
+   * exactly as confidential. The one thing it adds is `consumeUnusedFor`: a
+   * reset link REPLACES a credential, so two live ones are two password setters
+   * in one inbox and the second is the one nobody remembers is there.
+   *
+   * ── AND IT DOES NOT CHECK WHETHER A PASSWORD EXISTS ─────────────────────
+   *
+   * On purpose, twice over. Refusing an account that has none would be the
+   * enumeration oracle again, in a subtler dress — "which of your staff have
+   * passwords" is not a question this route may answer. And setting a FIRST
+   * password is a thing people legitimately want to do here: most colleagues
+   * have never had one, and this is the flow `NoPasswordSet` sends them to.
+   */
+  async requestPasswordReset(email: string): Promise<void> {
+    // The same wrapper `requestMagicLink` has, for the same reason: every exit
+    // below says nothing, and an exit that says nothing FASTER is an
+    // enumeration oracle built out of a stopwatch.
+    const startedAt = this.deps.clock.now().getTime();
+    try {
+      await this.issuePasswordReset(email);
+    } finally {
+      const spent = this.deps.clock.now().getTime() - startedAt;
+      if (spent < MAGIC_LINK_FLOOR_MS) {
+        await this.deps.sleeper?.sleep(MAGIC_LINK_FLOOR_MS - spent);
+      }
+    }
+  }
+
+  private async issuePasswordReset(email: string): Promise<void> {
+    const normalized = normalizeEmail(email);
+
+    // Quietly, never as a 429 — see PASSWORD_RESETS_PER_WINDOW. A distinct
+    // answer here would tell the caller the address exists, which is the one
+    // thing the whole method is arranged not to do.
+    const budget = await this.deps.attempts.check(
+      `password-reset:${normalized}`,
+      PASSWORD_RESETS_PER_WINDOW,
+      PASSWORD_RESET_WINDOW_SECONDS,
+    );
+    if (!budget.allowed) return;
+
+    const user = await this.deps.users.findByEmail(normalized);
+    if (!user || user.status !== "active") return;
+
+    const now = this.deps.clock.now();
+    // THE LIVE ONES DIE FIRST. `resendPortalInvite`'s argument applies with
+    // more force here, because this button is pressed by the person themselves
+    // and is pressed repeatedly: without this, somebody who asks three times in
+    // five minutes leaves three thirty-minute password setters in a mailbox,
+    // and the two they did not use are the ones that matter — they are still
+    // live after the one they did use has put things right.
+    await this.deps.magicLinks.consumeUnusedFor(user.id, "reset", now.toISOString());
+
+    const token = this.deps.tokens.newToken();
+    const expiresAt = passwordResetExpiryFrom(now);
+    await this.deps.magicLinks.create({
+      id: this.deps.ids.newId(),
+      userId: user.id,
+      tokenHash: this.deps.tokens.hash(token),
+      purpose: "reset",
+      expiresAt,
+    });
+    try {
+      await this.deps.mailer.sendPasswordReset(
+        user.email,
+        `${this.deps.magicLinkBaseUrl}/auth/reset-password?token=${encodeURIComponent(token)}`,
+        expiresAt,
+      );
+    } catch {
+      // Deliberately empty, and it is the same security decision as
+      // `issueMagicLink`'s: a thrown send would answer 202 for an address with
+      // no account and 500 for one with an account whose letter would not go.
+      // The adapter has already shouted about the underlying failure.
     }
   }
 
@@ -668,6 +810,144 @@ export class IdentityService {
     return this.openSession(user);
   }
 
+  /**
+   * Redeem a forgotten-password link: replace the password, and sign in.
+   *
+   * ── IT IS `acceptPortalInvite`, AND THE SHAPE IS THE ARGUMENT ────────────
+   *
+   * One call, because the two halves must not be separable — the same reason
+   * given there. A route that only set the password would leave somebody
+   * holding a spent token and a login screen, and a route that only signed them
+   * in is `redeemMagicLink`, which is precisely the flow that leaves the
+   * forgotten password in place. The link is CHECKED for strength before it is
+   * spent, so a password typed too short can be typed again on the same link.
+   *
+   * ── AND EVERY SESSION THEY HOLD ENDS ────────────────────────────────────
+   *
+   * `setPassword` revokes them all, which is not a side effect here but the
+   * point. The commonest honest reason to reset a password is a suspicion that
+   * somebody else has it, and a reset that leaves the other person's session
+   * open answers the wrong question. The session this returns is a NEW one,
+   * issued after the revocation, so the person doing the reset stays signed in
+   * and everybody else is out.
+   */
+  async resetPassword(token: string, password: string): Promise<SignInResult> {
+    const link = await this.deps.magicLinks.findByTokenHash(this.deps.tokens.hash(token));
+    // "reset" by name, so a sign-in link, a welcome and a portal invitation are
+    // all simply unusable here — and unknown, expired, spent and wrong-purpose
+    // are one indistinguishable answer, which is what stops this route being
+    // asked which addresses have accounts.
+    if (!link || !isUsableMagicLink(link, this.deps.clock.now(), "reset")) {
+      throw new InvalidMagicLink();
+    }
+    const user = await this.deps.users.findById(link.userId);
+    if (!user || user.status !== "active") throw new InvalidMagicLink();
+
+    if (!isAcceptablePassword(password)) {
+      throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);
+    }
+    const won = await this.deps.magicLinks.consume(link.id, this.deps.clock.now().toISOString());
+    if (!won) throw new InvalidMagicLink();
+
+    // NOT refused when it matches the old password, and `PasswordUnchanged`
+    // says why: the person holding this link is the one who does not know what
+    // the old one was, so asking them for something different would be a
+    // riddle. The change route, whose caller has just typed the old one, does
+    // refuse it.
+    await this.setPassword(user.id, password);
+    return this.openSession(user);
+  }
+
+  /**
+   * Change the password of the person making the request.
+   *
+   * ── THE CURRENT PASSWORD IS REQUIRED, AND A SESSION IS NOT ENOUGH ────────
+   *
+   * The caller is already authenticated, so this check is not about who they
+   * are. It is about what a stolen session may BECOME. Sessions in this product
+   * are server-side precisely so that revoking one ends access on the next
+   * request; a session that could mint a new password would survive every
+   * revocation the firm has, and the person it was taken from — who at most
+   * firms has no password of their own — would have nothing to notice had
+   * changed. So the old password is the thing being proved, and an account with
+   * none is sent to the emailed link instead (`NoPasswordSet`), where reading
+   * the mailbox is what stands in for it.
+   *
+   * ── AND A NEW SESSION COMES BACK, POINTED AT THE SAME FIRM ───────────────
+   *
+   * `setPassword` revokes every session including this one, which is right —
+   * the whole point of changing a password is that anything else holding the
+   * old one stops. But it would also sign the person out of the tab they are
+   * standing in, one click after they were told it worked. So a fresh session
+   * is opened and pointed back at the firm they were already acting as, and the
+   * handler puts the new token in the cookie. The token ROTATES as a
+   * consequence, which is the behaviour anybody would want here anyway.
+   */
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+    /** The firm the caller was acting as, so the new session lands back in it
+     *  rather than on the org switcher. Null when they had not chosen one. */
+    activeTenantId: string | null,
+  ): Promise<SignInResult> {
+    const bucket = `password-change:${userId}`;
+    const budget = await this.deps.attempts.check(
+      bucket,
+      PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW,
+      PASSWORD_CHANGE_WINDOW_SECONDS,
+    );
+    if (!budget.allowed) throw new TooManyAttempts(budget.retryAfterSeconds);
+
+    const user = await this.deps.users.findById(userId);
+    // Unreachable through the guard, which resolved a session for this id a
+    // moment ago — but a deactivated account with a live session is a real
+    // state, and "sign in again" is the honest thing to tell it rather than a
+    // 500 from a credential write against a user who is no longer there.
+    if (!user || user.status !== "active") throw new SessionInvalid();
+
+    const stored = await this.deps.credentials.findByUserId(userId);
+    if (!stored) throw new NoPasswordSet();
+
+    // Spent before anything is written and read on the failure, like login's
+    // budgets. `InvalidCredentials` rather than a sentence of its own: the
+    // caller knows perfectly well which field they got wrong, and the family's
+    // one word for "that is not the password" is already this.
+    if (!(await this.deps.passwords.verify(currentPassword, stored.passwordHash))) {
+      throw new InvalidCredentials();
+    }
+    if (!isAcceptablePassword(newPassword)) {
+      throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);
+    }
+    if (await this.deps.passwords.verify(newPassword, stored.passwordHash)) {
+      throw new PasswordUnchanged();
+    }
+
+    await this.setPassword(userId, newPassword);
+    // Somebody who has just produced their own password is the best evidence
+    // there is that the failures before it were theirs — the same reasoning
+    // `login` clears its buckets on.
+    await this.deps.attempts.reset(bucket);
+    return this.reopenSession(user, activeTenantId);
+  }
+
+  /**
+   * Does this account have a password at all?
+   *
+   * Read by `/auth/me` so the account screen can offer the form that will work.
+   * Most colleagues have never had one — `welcomeStaff` hands over a session and
+   * nothing else — so a screen that assumed otherwise would show every one of
+   * them a change form whose only possible outcome is `NoPasswordSet`, which is
+   * the product discovering its own state from a refusal.
+   *
+   * It is a boolean and never the hash, the algorithm, or when it was set: the
+   * question a screen has is yes-or-no, and the rest is nobody's business
+   * including this layer's.
+   */
+  async hasPassword(userId: string): Promise<boolean> {
+    return (await this.deps.credentials.findByUserId(userId)) !== null;
+  }
+
   /** Redeem a magic link for a session. Single use, enforced by the repository's
    *  conditional update — two simultaneous clicks cannot both open a session.
    *  A session-opening link only — `login` or a colleague's `welcome` (0072).
@@ -857,6 +1137,44 @@ export class IdentityService {
     // become active HERE.
     if (only) await this.recordSessionStarted(only.tenantId, user.id);
     return { token, session, principal: toPrincipal(session, only), memberships };
+  }
+
+  /**
+   * Open a session and put it back where the last one was.
+   *
+   * `openSession` chooses a tenant only when there is exactly one, which is
+   * right for a sign-in: somebody who belongs to two firms must SAY which one
+   * they are acting as. It is wrong for a password change, where they already
+   * said — an hour ago, on the org switcher — and being asked again in the
+   * middle of an unrelated task reads as having been signed out.
+   *
+   * Every refusal `switchTenant` makes is made again here rather than trusted,
+   * because the old session's tenant is a claim about the past: the membership
+   * is re-read (`openSession` has already filtered to the active ones) and the
+   * firm is re-checked for suspension. A tenant that no longer passes is simply
+   * not restored, and the caller lands on the org switcher — which is the
+   * correct place for somebody whose firm has gone away underneath them.
+   */
+  private async reopenSession(
+    user: UserAccount,
+    preferredTenantId: string | null,
+  ): Promise<SignInResult> {
+    const opened = await this.openSession(user);
+    // Nothing to restore, or it already landed there by itself — the single
+    // membership case, which is most people.
+    if (preferredTenantId === null || opened.principal.tenantId !== null) return opened;
+
+    const membership = opened.memberships.find((m) => m.tenantId === preferredTenantId);
+    if (!membership) return opened;
+    if (!(await this.deps.tenants.isOpen(preferredTenantId))) return opened;
+
+    const session = await this.deps.sessions.setActiveContext(
+      opened.session.id,
+      preferredTenantId,
+      membership.audience,
+    );
+    await this.recordSessionStarted(preferredTenantId, user.id);
+    return { ...opened, session, principal: toPrincipal(session, membership) };
   }
 }
 

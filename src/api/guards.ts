@@ -116,6 +116,43 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   // `tests/api/auth-coverage.test.ts` holds the build red until somebody writes
   // one.
   "/api/v1/portal-invites/accept",
+  // ── THE SIXTH AND SEVENTH, AND THEY ARE ONE ARGUMENT (0082) ──────────────
+  //
+  // The forgotten-password pair. They are here because of what the product
+  // looked like without them, which is the only justification worth reading:
+  //
+  //   a CLIENT CONTACT chose their password once, on an invitation link that is
+  //   now spent. Forgetting it was final — `resendPortalInvite` refuses them
+  //   deliberately once a credential exists, because re-issuing would be the
+  //   firm resetting its own client's password, and the sign-in link lets them
+  //   in without fixing anything, so the same wall is there the next time.
+  //
+  //   a COLLEAGUE usually has no password at all, and no way to set a first
+  //   one: the only route that has ever written a credential is on /internal,
+  //   behind the platform key.
+  //
+  // Neither can hold a session at the moment they need this, which is the same
+  // shape every other entry on this list has — these two exist to OBTAIN one.
+  //
+  // What makes them safe is the invitation's list of properties, unchanged:
+  // 256-bit token, SHA-256 digest at rest, single use, thirty-minute life, in
+  // the BODY rather than the path, and bound to a PURPOSE so that a sign-in
+  // link cannot be spent here and a reset cannot be spent at the sign-in route.
+  // Unknown, expired, already-used and wrong-purpose answer identically, so
+  // neither can be asked which addresses have accounts — and the REQUEST route
+  // goes further, holding every answer to a constant time and a fixed 202, so
+  // it cannot be asked with a stopwatch either.
+  //
+  // What they ADD to the invitation's argument is that issuing one SPENDS every
+  // live link for that account. The invitation is issued once by construction;
+  // this button is pressed by the person themselves, repeatedly, and without
+  // that line an impatient reader leaves three live password setters in a
+  // mailbox — two of them still good after the one they used has put things
+  // right. An eighth entry needs an argument at least this good, and
+  // `tests/api/auth-coverage.test.ts` holds the build red until somebody
+  // writes one.
+  "/api/v1/auth/password-reset",
+  "/api/v1/auth/password-reset/confirm",
 ]);
 
 /**
@@ -158,6 +195,15 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   "/api/v1/auth/me",
   "/api/v1/auth/switch-tenant",
   "/api/v1/auth/logout",
+  // Managing your own credential is session management, like the three above
+  // it, and it is the one route on this list that a client contact needs MORE
+  // than a colleague does: a portal login is the only kind in this product that
+  // reliably HAS a password, because it is set on the invitation. Leaving it
+  // off would have meant the audience that owns a password is the one audience
+  // that cannot change it. It reads and writes nothing but the caller's own
+  // credential — there is no id in the path and none in the body — so gate 4
+  // has nothing to scope and the record-scope question does not arise.
+  "/api/v1/auth/password",
   // The org switcher's data. Without it a portal user could CALL switch-tenant
   // and have no way to learn what to switch to — reachable and useless. It
   // returns only the caller's own memberships, so a portal session sees exactly

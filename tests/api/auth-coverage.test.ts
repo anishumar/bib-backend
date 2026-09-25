@@ -769,10 +769,25 @@ describe("every route is accounted for", () => {
     // It is also the FIRST public path that WRITES — it sets a password — which
     // is exactly the act holding the link is meant to authorise, and exactly why
     // it needed the argument. A sixth needs one at least as good.
+    //
+    // THE SIXTH AND SEVENTH ARE THE FORGOTTEN-PASSWORD PAIR (0082), and they
+    // were added with their own paragraph — read it on PUBLIC_PATHS. In short:
+    // a client contact who forgot the password they chose on their invitation
+    // had NO route back to one, because the invitation is spent and re-issuing
+    // it is refused by design; a colleague usually has no password at all and
+    // no way to set a first. Neither holds a session at the moment they need
+    // this, which is what every entry on this list has in common. They carry
+    // the invitation's whole property list — single use, digest at rest,
+    // thirty-minute life, token in the BODY, bound to a PURPOSE, one answer
+    // for unknown / expired / used / wrong-purpose — and the REQUEST route
+    // adds a constant-time floor, so it cannot be enumerated with a stopwatch
+    // either. An eighth needs an argument at least this good.
     expect([...PUBLIC_PATHS].sort()).toEqual([
       "/api/v1/auth/login",
       "/api/v1/auth/magic-link",
       "/api/v1/auth/magic-link/redeem",
+      "/api/v1/auth/password-reset",
+      "/api/v1/auth/password-reset/confirm",
       "/api/v1/portal-invites/accept",
       "/api/v1/proposals/shared",
     ]);
@@ -977,6 +992,15 @@ describe("gate 2 — audience", () => {
     expect([...PORTAL_PATHS].sort()).toEqual([
       "/api/v1/auth/logout",
       "/api/v1/auth/me",
+      // Changing your own password (0082), and the audience that needs it most
+      // is this one: a portal login is the only kind in this product that
+      // reliably HAS a password, because it is set on the invitation. Off this
+      // list, the one audience that owns a password would be the one audience
+      // unable to change it. It touches nothing but the caller's own
+      // credential — no id in the path, none in the body — so gate 4 has
+      // nothing to scope, and the control on it is the CURRENT PASSWORD rather
+      // than either gate.
+      "/api/v1/auth/password",
       "/api/v1/auth/switch-tenant",
       // T6.5's status home — the first route here that returns a business
       // record. Every table behind it carries its own RESTRICTIVE policy

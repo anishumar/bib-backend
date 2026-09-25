@@ -29,6 +29,8 @@ export type IdentityErrorCode =
   | "WEAK_PASSWORD"
   | "TOO_MANY_ATTEMPTS"
   | "INVITATION_ALREADY_ACCEPTED"
+  | "PASSWORD_UNCHANGED"
+  | "NO_PASSWORD_SET"
   | "USER_NOT_FOUND";
 
 export class InvalidCredentials extends IdentityError {
@@ -39,7 +41,12 @@ export class InvalidCredentials extends IdentityError {
 
 export class InvalidMagicLink extends IdentityError {
   constructor() {
-    super("INVALID_MAGIC_LINK", "This sign-in link is not valid, has expired, or has been used");
+    // "This link", not "this sign-in link": the same refusal answers the sign-in,
+    // invitation and password-reset routes, and naming the wrong kind of link on
+    // the reset page sent somebody looking for a sign-in problem they did not
+    // have. Found by walking it. Still one sentence for every cause, so it says
+    // nothing about which addresses have accounts.
+    super("INVALID_MAGIC_LINK", "This link is not valid, has expired, or has been used");
   }
 }
 
@@ -172,6 +179,73 @@ export class WeakPassword extends IdentityError {
       "WEAK_PASSWORD",
       `Password must be between ${String(min)} and ${String(max)} characters. ` +
         `Length is the only rule — a long passphrase beats a short one with symbols.`,
+    );
+  }
+}
+
+/**
+ * The "new" password is the one already on the account.
+ *
+ * ── WHY THIS IS REFUSED ON THE CHANGE ROUTE AND NOT ON THE RESET ──────────
+ *
+ * They are two different sentences from the person typing.
+ *
+ *   `changePassword` is somebody who KNOWS their password — they have just
+ *   typed it into the field above — saying they want a different one. The
+ *   commonest reason anybody does that is that they think somebody else has
+ *   seen it. Accepting the same string back would answer that with a green
+ *   tick and change nothing, and the person would walk away believing they had
+ *   rotated a credential they had not. That is worse than the refusal.
+ *
+ *   `resetPassword` is somebody who does NOT know it — that is the whole
+ *   premise of holding a reset link — and asking them for something other than
+ *   the value they cannot see is a riddle. So the reset path accepts any
+ *   acceptable password, including, unknowably to both sides, the old one.
+ *
+ * It leaks nothing in either direction: the change route's caller has already
+ * proved they hold the current password, and the reset route never asks.
+ */
+export class PasswordUnchanged extends IdentityError {
+  constructor() {
+    super(
+      "PASSWORD_UNCHANGED",
+      `That is the password already on this account, so nothing would change. ` +
+        `Pick a different one — if you are changing it because somebody may have seen it, ` +
+        `re-setting the same value leaves them exactly where they were.`,
+    );
+  }
+}
+
+/**
+ * There is no current password to check, so this route cannot be the one that
+ * sets the first.
+ *
+ * ── WHY A SIGNED-IN PERSON IS SENT TO THEIR INBOX FOR THIS ────────────────
+ *
+ * Most colleagues at a firm have never had a password: `welcomeStaff` hands
+ * over a session and nothing else, and they have signed in with emailed links
+ * ever since. So "set a password for the first time" is the COMMON case here,
+ * not an edge, and the obvious thing to do — let a signed-in caller set one
+ * without proving anything — is the one thing that must not happen.
+ *
+ * A session is a bearer credential. Today, somebody holding a stolen one loses
+ * everything the moment it is revoked, which is the property server-side
+ * sessions exist for. Letting that session MINT a password would turn a
+ * fortnight's stolen cookie into permanent ownership of the account, surviving
+ * every revocation the firm has — and the person it was taken from would never
+ * have a password of their own to notice had changed.
+ *
+ * So the first password is set through the emailed link, where reading the
+ * mailbox is the thing being proved, and `changePassword` stays what its name
+ * says: a swap, by somebody who can produce the old one.
+ */
+export class NoPasswordSet extends IdentityError {
+  constructor() {
+    super(
+      "NO_PASSWORD_SET",
+      `This account has no password yet, so there is none to change. Ask the sign-in page ` +
+        `to email you a link — setting the first one that way proves you can read the ` +
+        `mailbox, which is the only thing standing in for the password you do not have.`,
     );
   }
 }

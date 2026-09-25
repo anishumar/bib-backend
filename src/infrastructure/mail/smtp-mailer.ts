@@ -306,6 +306,67 @@ export class SmtpMailer implements Mailer {
       ]),
     });
   }
+
+  /**
+   * The letter that replaces a forgotten password.
+   *
+   * ── WHY IT IS NOT THE SIGN-IN LETTER WITH A DIFFERENT URL ────────────────
+   *
+   * Because of its last paragraph, which has to say the opposite of the
+   * sign-in link's. That one closes with *"if you did not ask for this, nothing
+   * has happened and you can ignore this message"* — true there, and the wrong
+   * thing to tell somebody holding a link that REPLACES their credential. A
+   * reader who did not ask for this needs two facts in order to do nothing
+   * safely: their password still works, and it goes on working for as long as
+   * the link is left alone. That is the whole difference, and it is the reason
+   * for the method.
+   *
+   * ── AND IT NAMES NO FIRM, WHERE THREE OF ITS NEIGHBOURS DO ───────────────
+   *
+   * The unasked-for letters name the firm because that is what stops them
+   * reading as phishing. This one was asked for seconds ago, and the account it
+   * belongs to is GLOBAL (ADR-02) — one login, however many firms — so there is
+   * no single firm it could name without telling the reader something false
+   * about which password is being reset.
+   */
+  sendPasswordReset(to: string, url: string, expiresAt: string): Promise<void> {
+    const when = readableInstant(expiresAt);
+    const text = [
+      `Someone asked to reset the ${PRODUCT} password for this email address.`,
+      ``,
+      `Choose a new password here:`,
+      url,
+      ``,
+      `The link works ONCE and stops working at ${when}. Asking for another one`,
+      `cancels this.`,
+      ``,
+      `If you did not ask for this, your password has NOT changed and nothing`,
+      `will happen as long as you leave this link alone — simply ignore this`,
+      `message. Nobody can read the link but you.`,
+    ].join("\n");
+
+    return this.transport.send({
+      to,
+      subject: `Reset your ${PRODUCT} password`,
+      text,
+      html: page([
+        paragraph(
+          `Someone asked to reset the ${esc(PRODUCT)} password for this email address.`,
+        ),
+        button(url, "Choose a new password"),
+        paragraph(
+          `The link works <strong>once</strong> and stops working at ${esc(when)}. Asking ` +
+            `for another one cancels this.`,
+        ),
+        paragraph(
+          `If you did not ask for this, <strong>your password has not changed</strong> and ` +
+            `nothing will happen as long as you leave this link alone — simply ignore this ` +
+            `message. Nobody can read the link but you.`,
+        ),
+        fallback(url),
+      ]),
+    });
+  }
 }
 
 /**

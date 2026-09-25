@@ -108,6 +108,17 @@ const PrincipalSchema = z
      *  What it HOLDS, never the vocabulary it does not — the full set is
      *  GET /api/v1/config/permissions, behind config:read. */
     permissions: z.array(z.string()),
+    hasPassword: z.boolean().openapi({
+      description:
+        "Whether this account has a password at all — NOT what it is, when it was set, or " +
+        "how. False is the ordinary state for most colleagues at a firm: adding somebody " +
+        "sends them a welcome link and never a password, and they have signed in with " +
+        "emailed links ever since. The account screen reads this to decide which of two " +
+        "things to offer, because the change form refuses an account with no password to " +
+        "change (the first one is set through the emailed reset link, where reading the " +
+        "mailbox stands in for the password that does not exist yet) and a screen that " +
+        "guessed would be discovering its own state from a 409.",
+    }),
   })
   .openapi("Principal");
 
@@ -168,6 +179,38 @@ const SwitchTenantBody = z
 const SetPasswordBody = z
   .object({ password: z.string().min(1).max(MAX_PASSWORD_LENGTH) })
   .openapi("SetPasswordRequest");
+
+/**
+ * `.max(MAX_PASSWORD_LENGTH)` on every password field below, for the reason
+ * spelled out on `LoginBody`: three of these four routes are reachable by an
+ * anonymous caller, scrypt is memory-hard on purpose, and an unbounded string
+ * fed to it is a way to make the server do unbounded work. Refusing at the
+ * schema happens before the hasher is asked for anything.
+ */
+const PasswordResetBody = z
+  .object({ email: z.string().email().max(MAX_EMAIL_LENGTH) })
+  .openapi("PasswordResetRequest");
+
+const PasswordResetConfirmBody = z
+  .object({
+    token: z.string().min(1).max(MAX_TOKEN_LENGTH),
+    password: z.string().min(1).max(MAX_PASSWORD_LENGTH),
+  })
+  .openapi("PasswordResetConfirmRequest");
+
+const ChangePasswordBody = z
+  .object({
+    currentPassword: z.string().min(1).max(MAX_PASSWORD_LENGTH).openapi({
+      description:
+        "The password on the account NOW, and it is required rather than inferred from the " +
+        "session. A session is a bearer credential: one that could mint a new password " +
+        "would outlive every revocation the firm has, which is the one property " +
+        "server-side sessions exist to provide. An account with no password yet is " +
+        "refused here and sets its first through the emailed reset link.",
+    }),
+    password: z.string().min(1).max(MAX_PASSWORD_LENGTH),
+  })
+  .openapi("ChangePasswordRequest");
 
 // ── Routes ───────────────────────────────────────────────────────────────────
 
@@ -255,15 +298,109 @@ const logoutRoute = createRoute({
   responses: { 204: { description: "Signed out" } },
 });
 
+const passwordResetRoute = createRoute({
+  method: "post",
+  path: "/api/v1/auth/password-reset",
+  tags: ["auth"],
+  summary: "Email a link that replaces a forgotten password",
+  description:
+    "Always answers 202, whether or not the address has an account, whether or not that " +
+    "account already has a password, and whether or not the letter actually went — the " +
+    "endpoint must not reveal who banks with the firm, and a 500 on the send path would be " +
+    "an enumeration oracle built out of an error. Issuing a link SPENDS every live one for " +
+    "that account, so nobody is ever left with two password setters in one inbox. The link " +
+    "is single-use, expires in thirty minutes, is stored only as a digest, and cannot be " +
+    "spent at the sign-in route: redeeming it opens a session only as a consequence of the " +
+    "password being replaced, never on its own.",
+  request: {
+    body: { content: { "application/json": { schema: PasswordResetBody } }, required: true },
+  },
+  responses: {
+    202: {
+      description: "Accepted; a link is sent if the address has an active account",
+      content: { "application/json": { schema: z.object({ status: z.literal("accepted") }) } },
+    },
+    400: errorResponse("Request failed validation"),
+  },
+});
+
+const passwordResetConfirmRoute = createRoute({
+  method: "post",
+  path: "/api/v1/auth/password-reset/confirm",
+  tags: ["auth"],
+  summary: "Set a new password from a reset link, and sign in",
+  description:
+    "PUBLIC, because somebody who has forgotten their password has no session and this is " +
+    "how they get one back. The token travels in the BODY, not the path — a path lands in " +
+    "access logs and Referer headers, and this one is a credential until it is spent. " +
+    "Replacing the password and opening the session are ONE call for the reason the " +
+    "invitation route gives: a route that only set the password would leave somebody " +
+    "holding a spent token and a login screen. Every session the account held is revoked " +
+    "first, so a reset prompted by 'somebody else has my password' actually ends that " +
+    "person's access. Malformed, unknown, expired, already-used and wrong-purpose all " +
+    "answer identically.",
+  request: {
+    body: {
+      content: { "application/json": { schema: PasswordResetConfirmBody } },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "The password is replaced and a new session is open",
+      content: { "application/json": { schema: SignInSchema } },
+    },
+    400: errorResponse("The password is too short or too long"),
+    401: errorResponse("The link is unknown, expired, already used, or not a reset link"),
+    403: errorResponse("No active membership"),
+  },
+});
+
+const changePasswordRoute = createRoute({
+  method: "post",
+  path: "/api/v1/auth/password",
+  tags: ["auth"],
+  summary: "Change your own password",
+  description:
+    "The CURRENT password is required and the session does not stand in for it: a session " +
+    "that could mint a new password would survive every revocation the firm has, which is " +
+    "the one property server-side sessions exist to provide. An account that has no " +
+    "password yet — the ordinary state for most colleagues, who were added with a welcome " +
+    "link and have signed in with emailed links ever since — is answered 409 and sets its " +
+    "first through POST /api/v1/auth/password-reset, where reading the mailbox is what " +
+    "stands in. Setting the same password back is refused; the reset route does not refuse " +
+    "it, because the person holding a reset link is by definition the one who does not " +
+    "know what the old one was. On success every other session of this account is revoked " +
+    "and a NEW cookie is issued, pointed back at the same firm, so the tab making the " +
+    "request stays signed in and nothing else does.",
+  request: {
+    body: { content: { "application/json": { schema: ChangePasswordBody } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "The password is changed; the cookie carries the replacement session",
+      content: { "application/json": { schema: SignInSchema } },
+    },
+    400: errorResponse("The new password fails the length policy, or is the current one"),
+    401: errorResponse("No authenticated session, or the current password is wrong"),
+    409: errorResponse("This account has no password yet — use the emailed reset link"),
+    429: errorResponse("Too many attempts at the current password — wait, and try again"),
+  },
+});
+
 const setPasswordRoute = createRoute({
   method: "put",
   path: "/internal/v1/users/{userId}/password",
   tags: ["auth"],
   summary: "Set a user's password (platform surface)",
   description:
-    "Provisioning, not app-facing: it is how a login is seeded today, and it requires the " +
-    "platform key like everything under /internal. Every existing session of that user is " +
-    "revoked. Self-service password change arrives with the portal.",
+    "Provisioning, not app-facing: it requires the platform key like everything under " +
+    "/internal, and every existing session of that user is revoked. It is no longer the " +
+    "only way a credential is written — since 0082 a person sets their own through " +
+    "POST /api/v1/auth/password-reset (forgotten, proved by the mailbox) or " +
+    "POST /api/v1/auth/password (known, proved by the old one). This one remains for " +
+    "PROVISIONING, where the platform is standing up an account rather than a person " +
+    "changing their own.",
   request: {
     params: z.object({ userId: z.string().uuid() }),
     body: { content: { "application/json": { schema: SetPasswordBody } }, required: true },
@@ -311,7 +448,11 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
     // A staff session is not scoped this way at all, and paying a query per
     // screen load for a null would be the per-request cost this response is
     // careful about everywhere else.
-    const [names, account, portalScope] = await Promise.all([
+    // `hasPassword` joins the fan-out rather than adding a fifth round trip: it
+    // is one primary-key read on a small table, and it is asked on EVERY
+    // principal response because the account screen reads it from the same
+    // place every other screen reads its identity from.
+    const [names, account, portalScope, hasPassword] = await Promise.all([
       principal.tenantId === null
         ? Promise.resolve(null)
         : deps.tenancy.tenantNames([principal.tenantId]),
@@ -319,6 +460,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       principal.tenantId !== null && principal.audience === "CLIENT_PORTAL"
         ? deps.portalAccess.scopedClientsForUser(principal.tenantId, principal.userId)
         : Promise.resolve(null),
+      deps.service.hasPassword(principal.userId),
     ]);
     return {
       userId: principal.userId,
@@ -335,6 +477,7 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       // Null and [] mean different things — see the schema. Spread because the
       // service returns a readonly list and the wire type is mutable.
       portalScope: portalScope === null ? null : [...portalScope],
+      hasPassword,
     };
   };
 
@@ -414,6 +557,42 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
       maxAge: 0,
     });
     return c.body(null, 204);
+  });
+
+  app.openapi(passwordResetRoute, async (c) => {
+    const { email } = c.req.valid("json");
+    // Nothing is inspected and nothing is branched on: the service swallows an
+    // unknown address, a deactivated account, a spent budget and a failed send
+    // alike, and this route answers the one thing it is allowed to answer.
+    await deps.service.requestPasswordReset(email);
+    return c.json({ status: "accepted" as const }, 202);
+  });
+
+  app.openapi(passwordResetConfirmRoute, async (c) => {
+    const { token, password } = c.req.valid("json");
+    const result = await deps.service.resetPassword(token, password);
+    // Every session the account held was revoked a moment ago inside
+    // `setPassword`; this is the replacement, and it leaves in the cookie like
+    // every other session this file issues.
+    issue(c, result);
+    return c.json(await signInBody(result), 200);
+  });
+
+  app.openapi(changePasswordRoute, async (c) => {
+    const principal = c.get("principal");
+    if (!principal) return c.json(unauthorized("no authenticated session"), 401);
+    const { currentPassword, password } = c.req.valid("json");
+    const result = await deps.service.changePassword(
+      principal.userId,
+      currentPassword,
+      password,
+      // So the new session lands back at the firm this one was acting as
+      // instead of on the org switcher. The service re-checks the membership
+      // and the firm's standing rather than trusting this.
+      principal.tenantId,
+    );
+    issue(c, result);
+    return c.json(await signInBody(result), 200);
   });
 
   app.openapi(setPasswordRoute, async (c) => {
