@@ -717,12 +717,26 @@ export function registerOrchestratorRoutes(
     return new Map((await deps.grades.listGrades(tenantId)).map((g) => [g.code, g.name]));
   }
 
-  /** One step, described for the session's viewer, after a write moved it — on the wire. */
+  /**
+   * One step, described for the session's viewer, after a write moved it — on the wire.
+   *
+   * WITH ITS UNDECIDED PROPOSAL, read the way the list route reads it. This
+   * answered `proposal: null` for every step until T6.15's review, and the job
+   * page swaps the whole step for this answer: ticking a sub-step (or handing
+   * the step to somebody) on a step holding a machine's answer took the answer,
+   * and Accept, Correct and Reject with it, off the screen, and offered a Done
+   * the API then refused as PROPOSAL_UNDECIDED. The answer is the described
+   * step, whole, or it is not the described step.
+   */
   async function describeOne(tenantId: string, jobId: string, stepId: string, viewer: string) {
-    const [all, ladder] = await Promise.all([deps.service.describeSteps(tenantId, jobId, viewer), ladderOf(tenantId)]);
+    const [all, proposals, ladder] = await Promise.all([
+      deps.service.describeSteps(tenantId, jobId, viewer),
+      deps.service.proposalsFor(tenantId, jobId),
+      ladderOf(tenantId),
+    ]);
     const d = all.find((x) => x.step.id === stepId);
     if (!d) throw new Error(`step ${stepId} vanished after the write`);
-    return toWire(d, ladder);
+    return toWire(d, ladder, proposals.get(stepId));
   }
 
   app.openapi(assignStepRoute, async (c) => {
