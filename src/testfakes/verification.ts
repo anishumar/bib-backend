@@ -27,6 +27,8 @@ import type {
   VerificationPolicySource,
 } from "../usecase/verification/ports";
 import type { FakeJobStepRepo } from "./orchestrator";
+import { allMarked } from "./orchestrator";
+import type { StepCheckMark } from "../domain/orchestrator/model";
 import type { Job } from "../domain/scheduler/model";
 import type { Permission } from "../domain/authz/model";
 import type { PermissionSource, StoredRole } from "../usecase/authz/ports";
@@ -43,9 +45,24 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
    *  nothing, and its review points as none. */
   jobs: { readonly rows: readonly Job[] } | null = null;
 
+  /** The marks on the steps' lists (T6.15), so the guarded open and the
+   *  guarded Approve read the same rows the adapter's lock-then-read would. A
+   *  `FakeStepCheckRepo`. Unwired, every listed line reads as open, which
+   *  refuses rather than lets through. */
+  marks: { readonly rows: readonly StepCheckMark[] } | null = null;
+
   constructor(private readonly now: () => string = () => "2026-08-30T09:00:00.000Z") {}
 
-  openIfAbsent(approval: NewStepApproval): Promise<StepApproval | null> {
+  openIfAbsent(approval: NewStepApproval, subStepKeys: readonly string[] = []): Promise<StepApproval | null> {
+    const step = this.steps?.rows.find((s) => s.id === approval.jobStepId) ?? null;
+    // The sub-step guard (T6.15): the step still waiting, and every listed line
+    // marked, at the moment of the insert.
+    if (
+      subStepKeys.length > 0 &&
+      (step?.status !== "blocked" || !allMarked(this.marks?.rows ?? [], "checklist", approval.jobStepId, subStepKeys))
+    ) {
+      return Promise.resolve(null);
+    }
     // The unique partial index, modelled: one OPEN check per step. A decided one
     // does not block a second attempt, because a step sent back and redone opens
     // a second row on purpose.
@@ -54,7 +71,6 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
     );
     if (open) return Promise.resolve(null);
 
-    const step = this.steps?.rows.find((s) => s.id === approval.jobStepId) ?? null;
     const row: StepApproval = {
       id: approval.id,
       tenantId: approval.tenantId,
@@ -92,6 +108,7 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
     tenantId: string,
     approvalId: string,
     write: ApprovalDecisionWrite,
+    settled?: { readonly reviewPointKeys: readonly string[]; readonly subStepKeys: readonly string[] },
   ): Promise<StepApproval | null> {
     const index = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === approvalId);
     const current = this.rows[index];
@@ -99,6 +116,16 @@ export class FakeStepApprovalRepo implements StepApprovalRepository {
     // makes the second of two people clicking at once lose, and a fake that
     // ignored it would make every concurrency test pass by construction.
     if (!current || current.decision !== "pending") return Promise.resolve(null);
+    // The list guard on Approve (T6.15), at the moment of the decision.
+    if (settled !== undefined) {
+      const marks = this.marks?.rows ?? [];
+      if (
+        !allMarked(marks, "review", approvalId, settled.reviewPointKeys) ||
+        !allMarked(marks, "checklist", current.jobStepId, settled.subStepKeys)
+      ) {
+        return Promise.resolve(null);
+      }
+    }
     const next: StepApproval = {
       ...current,
       decision: write.decision,

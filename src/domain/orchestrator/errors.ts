@@ -252,19 +252,29 @@ export class SubStepNotFound extends OrchestratorError {
  * "not everything is ticked" on a list of eight is a hunt.
  *
  * Carries the labels so the screen could show them; the message already does.
+ *
+ * `told` is who reads it. The DOER is told to tick; a CHECKER pressing Approve
+ * on work whose sub-steps are open cannot tick somebody else's list, so they
+ * are told the one thing they can do. The service's own locks keep that case
+ * from arising (a step's sub-steps are closed to marks while it is checked);
+ * it is reachable only through a write that went round the service, and the
+ * checker must still get a sentence they can act on.
  */
 export class SubStepsOpen extends OrchestratorError {
   constructor(
     readonly stepKey: string,
     stepLabel: string,
     readonly openLabels: readonly string[],
+    told: "doer" | "checker" = "doer",
   ) {
     const n = openLabels.length;
     super(
       "SUB_STEPS_OPEN",
       `${String(n)} ${n === 1 ? "sub-step" : "sub-steps"} of '${stepLabel}' ` +
         `${n === 1 ? "is" : "are"} not ticked yet: ${namedList(openLabels)}. ` +
-        `${n === 1 ? "Tick it" : "Tick each one"}, or mark it not applicable with a reason.`,
+        (told === "doer"
+          ? `${n === 1 ? "Tick it" : "Tick each one"}, or mark it not applicable with a reason.`
+          : `They are ticked by whoever did the step, so send the work back for them to finish it.`),
     );
   }
 }

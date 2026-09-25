@@ -2,6 +2,7 @@
 // its Postgres counterpart does, so a compile error here is the same compile
 // error production would get.
 import type { JobStep, StepCheckMark, StepStatus } from "../domain/orchestrator/model";
+import type { StepApproval } from "../domain/verification/model";
 import type { ConfidenceTiers } from "../domain/agent/model";
 import type {
   StepDeskResolver,
@@ -32,9 +33,16 @@ import type {
  * pedantry: it is the only guard against two workers both starting the same
  * step, and a fake that ignored `expect` would make every concurrency test pass
  * by construction.
+ *
+ * So is the sub-step guard (T6.15): a move given `subStepKeys` is made only if
+ * every one is marked in `marks` at the moment of the move, which is what the
+ * adapter's lock-then-read amounts to in a world with one thread. `marks` is
+ * wired by `FakeStepCheckRepo`'s constructor; unwired, every line reads as open,
+ * which refuses the move rather than letting it through.
  */
 export class FakeJobStepRepo implements JobStepRepository {
   readonly rows: JobStep[] = [];
+  marks: { readonly rows: readonly StepCheckMark[] } | null = null;
 
   createAllIfAbsent(
     steps: readonly NewJobStep[],
@@ -112,6 +120,7 @@ export class FakeJobStepRepo implements JobStepRepository {
     stepId: string,
     expect: StepStatus,
     to: StepTransition,
+    subStepKeys: readonly string[] = [],
   ): Promise<JobStep | null> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === stepId);
     const current = this.rows[i];
@@ -119,6 +128,7 @@ export class FakeJobStepRepo implements JobStepRepository {
     // The guard. Somebody else moved it first; the caller reads null as "lost
     // the race", which is ordinary rather than an error.
     if (current.status !== expect) return Promise.resolve(null);
+    if (!allMarked(this.marks?.rows ?? [], "checklist", stepId, subStepKeys)) return Promise.resolve(null);
 
     const starts = to.status === "running" || to.status === "blocked";
     const finishes = to.status === "done" || to.status === "failed";
@@ -373,28 +383,67 @@ export class FakeStepDeskResolver implements StepDeskResolver {
 }
 
 /**
+ * Whether every one of these lines of one list is marked (done or not
+ * applicable) in `rows`: the adapter's `openSubSteps` / `openReviewPoints`, for
+ * the fakes that guard a move on a list. `ownerId` is the STEP for a sub-step
+ * and the CHECK for a review point.
+ */
+export function allMarked(
+  rows: readonly StepCheckMark[],
+  list: "checklist" | "review",
+  ownerId: string,
+  keys: readonly string[],
+): boolean {
+  return keys.every((k) =>
+    rows.some(
+      (r) =>
+        r.list === list &&
+        r.itemKey === k &&
+        r.outcome !== null &&
+        (list === "checklist" ? r.jobStepId === ownerId : r.stepApprovalId === ownerId),
+    ),
+  );
+}
+
+/**
  * The marks on a step's sub-steps and a check's review points (T6.15), in
  * memory.
  *
- * It reproduces what 0307 enforces rather than only its shape, for
+ * It reproduces what 0307 and 0308 enforce rather than only their shape, for
  * `FakeAgentRunRepo`'s reason: the two partial unique keys (one mark per line
  * per step, one per line per CHECK, which is what makes a second round start
  * empty), the pairing (a review mark names its check, a sub-step mark names
- * none), a tick names somebody, and a "not applicable" says why. A fake that
- * accepted a reasonless N/A would let the service's own refusal go untested
- * against a world that refuses it too.
+ * none, and the check is one of the SAME step), a tick names somebody, a label
+ * is text, and a "not applicable" says why in at most 500 characters. A fake
+ * that accepted a reasonless N/A would let the service's own refusal go
+ * untested against a world that refuses it too.
+ *
+ * And the adapter's precondition: a mark is written only while its list is
+ * open to marks (`mayMark` there). A sub-step's step must be `blocked` with no
+ * check pending or approved on it; a review point's check must be pending.
+ * Null, or false, and nothing written, otherwise.
  *
  * `listForJob` finds the job through the STEP, as the adapter's join does, so
- * the step repository is required. Names come from the roster when one is
- * wired, standing in for the adapter's join on the account.
+ * the step repository is required; the constructor also hands it these marks,
+ * so a guarded step move reads the same rows. The checks are `approvals`, set
+ * by a test that wires both. Unwired, a sub-step reads as having no check and
+ * a review point's check as pending, and the same-step key is not tested:
+ * that is the divergence, stated, of every test that has no checks in it.
+ * Names come from the roster when one is wired, standing in for the adapter's
+ * join on the account.
  */
 export class FakeStepCheckRepo implements StepCheckRepository {
   readonly rows: StepCheckMark[] = [];
   /** The roster names are read from: a `FakeCheckerDirectory`, stated
    *  structurally because the verification fakes already import this file. */
   directory: { readonly rows: readonly { readonly userId: string; readonly displayName: string }[] } | null = null;
+  /** The checks: a `FakeStepApprovalRepo`, stated structurally for the same
+   *  reason. */
+  approvals: { readonly rows: readonly StepApproval[] } | null = null;
 
-  constructor(private readonly steps: FakeJobStepRepo) {}
+  constructor(private readonly steps: FakeJobStepRepo) {
+    steps.marks = this;
+  }
 
   private nameOf(userId: string | null): string | null {
     if (userId === null) return null;
@@ -404,6 +453,20 @@ export class FakeStepCheckRepo implements StepCheckRepository {
   private sameLine(r: StepCheckMark, ref: StepCheckLineRef): boolean {
     if (r.tenantId !== ref.tenantId || r.list !== ref.list || r.itemKey !== ref.itemKey) return false;
     return ref.list === "checklist" ? r.jobStepId === ref.jobStepId : r.stepApprovalId === ref.stepApprovalId;
+  }
+
+  /** The adapter's `mayMark`, at the moment of the write. */
+  private mayMark(ref: StepCheckLineRef): boolean {
+    if (ref.list === "checklist") {
+      const step = this.steps.rows.find((s) => s.id === ref.jobStepId);
+      if (step?.status !== "blocked") return false;
+      return !(this.approvals?.rows ?? []).some(
+        (a) => a.jobStepId === ref.jobStepId && (a.decision === "pending" || a.decision === "approved"),
+      );
+    }
+    if (this.approvals === null) return true;
+    const check = this.approvals.rows.find((a) => a.id === ref.stepApprovalId);
+    return check?.decision === "pending";
   }
 
   listForJob(tenantId: string, jobId: string): Promise<readonly StepCheckMark[]> {
@@ -418,14 +481,25 @@ export class FakeStepCheckRepo implements StepCheckRepository {
     );
   }
 
-  upsert(mark: NewStepCheckMark): Promise<StepCheckMark> {
-    // The CHECKs in 0307, reproduced.
+  upsert(mark: NewStepCheckMark): Promise<StepCheckMark | null> {
+    // The CHECKs in 0307 and 0308, reproduced. `trim()` strips the same
+    // whitespace 0308's pattern names, so "blank" means one thing on both sides.
     if ((mark.list === "review") !== (mark.stepApprovalId !== null)) {
       throw new Error("job_step_check_review_rows_name_their_check: a review mark names its check, a sub-step mark none");
     }
-    const reasoned = mark.note !== null && mark.note.trim() !== "";
+    if (mark.label.trim() === "") {
+      throw new Error("job_step_check_label_is_text: a line's label is words");
+    }
+    const reasoned = mark.note !== null && mark.note.trim() !== "" && mark.note.length <= 500;
     if ((mark.outcome === "not_applicable") !== reasoned) {
-      throw new Error("job_step_check_not_applicable_says_why: a reason on not_applicable and nowhere else");
+      throw new Error("job_step_check_not_applicable_says_why: a reason of at most 500 on not_applicable and nowhere else");
+    }
+    // The composite foreign key: a review mark's check is a check of THIS step.
+    if (mark.stepApprovalId !== null && this.approvals !== null) {
+      const check = this.approvals.rows.find((a) => a.id === mark.stepApprovalId);
+      if (check?.jobStepId !== mark.jobStepId) {
+        throw new Error("job_step_check_approval_step_tenant_fkey: the check is not one of this step's");
+      }
     }
     const ref: StepCheckLineRef = {
       tenantId: mark.tenantId,
@@ -434,6 +508,7 @@ export class FakeStepCheckRepo implements StepCheckRepository {
       stepApprovalId: mark.stepApprovalId,
       itemKey: mark.itemKey,
     };
+    if (!this.mayMark(ref)) return Promise.resolve(null);
     const i = this.rows.findIndex((r) => this.sameLine(r, ref));
     const current = this.rows[i];
     // The same answer again changes nothing, including who and when: the
@@ -460,12 +535,13 @@ export class FakeStepCheckRepo implements StepCheckRepository {
     return Promise.resolve(row);
   }
 
-  clear(ref: StepCheckLineRef): Promise<void> {
+  clear(ref: StepCheckLineRef): Promise<boolean> {
+    if (!this.mayMark(ref)) return Promise.resolve(false);
     const i = this.rows.findIndex((r) => this.sameLine(r, ref));
     const current = this.rows[i];
     if (current) {
       this.rows[i] = { ...current, outcome: null, note: null, markedByUserId: null, markedByName: null, markedAt: null };
     }
-    return Promise.resolve();
+    return Promise.resolve(true);
   }
 }

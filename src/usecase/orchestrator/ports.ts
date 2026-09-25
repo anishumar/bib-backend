@@ -76,12 +76,22 @@ export interface JobStepRepository {
    * start it and the second would overwrite the first's actor and timestamps.
    * Returns null when the row had already moved, which the caller reads as
    * "somebody else got there" and not as an error.
+   *
+   * `subStepKeys` (T6.15): the move is made only if every one of these
+   * sub-steps is marked, done or not applicable, AS READ AFTER THE STEP'S ROW
+   * IS LOCKED, and null comes back otherwise. The caller's own read of the
+   * marks is for the sentence it shows; this is the one the move stands on,
+   * because a tick taken back between that read and this write would otherwise
+   * finish a step with a line open. Every mark write takes the same row lock
+   * (`StepCheckRepository`), so the two cannot interleave. Empty means no
+   * guard, and costs nothing.
    */
   transition(
     tenantId: string,
     stepId: string,
     expect: StepStatus,
     to: StepTransition,
+    subStepKeys?: readonly string[],
   ): Promise<JobStep | null>;
 
   /** Move a step to somebody's desk, or off everybody's (null). Refused in
@@ -412,6 +422,19 @@ export interface StepCheckLineRef {
  * There is no delete, and `bib_app` holds no DELETE grant on the table:
  * unticking is a row whose outcome is null again, never a row removed, the
  * arrangement every other record of who-did-what in this schema has.
+ *
+ * ── A WRITE CARRIES ITS OWN PRECONDITION ────────────────────────────────────
+ *
+ * The service checks that a list is open to marks (the step waiting, nothing
+ * waiting to be checked; the check still pending) and then writes, in a later
+ * transaction. Between the two, somebody can press Done, or Approve, and a
+ * mark landing after that would change a list somebody else has already
+ * judged. So both writes check again, in their own transaction, under a row
+ * lock: a SUB-STEP mark locks its step's row, and a REVIEW mark locks its
+ * check's row, which are the rows the moves that read those lists lock too
+ * (`JobStepRepository.transition`, `StepApprovalRepository.openIfAbsent` and
+ * `decide`). A write that finds the list closed writes nothing and says so,
+ * and the service then says why in words.
  */
 export interface StepCheckRepository {
   /** Every mark on every step of one job, both lists, every round of every
@@ -426,9 +449,14 @@ export interface StepCheckRepository {
    * IDEMPOTENT: writing the outcome and the reason the line already has
    * changes nothing, including who marked it and when. A second click must not
    * move the record of who ticked it to whoever clicked last.
+   *
+   * Null when the list is no longer open to marks: a sub-step whose step is
+   * not waiting any more or is waiting to be checked (or has just been
+   * approved), a review point whose check is decided. Nothing was written.
    */
-  upsert(mark: NewStepCheckMark): Promise<StepCheckMark>;
+  upsert(mark: NewStepCheckMark): Promise<StepCheckMark | null>;
   /** Untick a line: outcome, reason, marker and time all back to null. A line
-   *  with no row, or one already open, is left as it is. */
-  clear(ref: StepCheckLineRef): Promise<void>;
+   *  with no row, or one already open, is left as it is. False, with nothing
+   *  written, on the same closed lists `upsert` answers null for. */
+  clear(ref: StepCheckLineRef): Promise<boolean>;
 }

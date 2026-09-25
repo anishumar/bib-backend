@@ -18,6 +18,11 @@
 //      "if you add SQL, run it"), and the upsert is idempotent in SQL.
 //   8. 0307's down and up both run, inside a transaction that is rolled back,
 //      so this file never leaves the table missing.
+//   9. The row locks the reviewers' races needed (T6.15 review): a mark is
+//      written only while its list is open, and Done, the check opening and
+//      Approve read the list only after taking the lock a mark takes, each
+//      proven by holding the other side's transaction open and watching the
+//      database park the write behind it.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -30,13 +35,19 @@ import { withTenant } from "../../src/db/tenant";
 import { PostgresStepCheckRepository } from "../../src/infrastructure/postgres/step-check-repository";
 import { PostgresStepApprovalRepository } from "../../src/infrastructure/postgres/step-approval-repository";
 import { PostgresConfigRepository } from "../../src/infrastructure/postgres/config-repository";
+import { PostgresJobStepRepository } from "../../src/infrastructure/postgres/job-step-repository";
 
 const cfg = load();
 // Notices silenced: the only ones this file provokes are the "does not exist,
 // skipping" of the SECOND down, which is the no-op being proven.
 const owner = postgres(cfg.db.ownerUrl, { max: 1, onnotice: () => undefined });
 const app = postgres(cfg.db.appUrl, { max: 2 });
+// A second owner connection, to watch pg_stat_activity while `owner` holds a
+// transaction open for one side of a race.
+const watch = postgres(cfg.db.ownerUrl, { max: 1, onnotice: () => undefined });
 const repo = new PostgresStepCheckRepository(app);
+const steps = new PostgresJobStepRepository(app);
+const approvals = new PostgresStepApprovalRepository(app);
 
 const stamp = Date.now().toString(36);
 const ref = (): string => randomUUID();
@@ -74,6 +85,7 @@ async function mark(over: {
   key?: string;
   outcome?: string | null;
   note?: string | null;
+  label?: string;
   by?: string | null;
   at?: "now" | null;
   tenant?: string;
@@ -89,7 +101,7 @@ async function mark(over: {
     VALUES (
       ${id}, ${over.tenant ?? f.tenant}, ${over.step ?? f.step},
       ${over.approval === undefined ? (list === "review" ? f.approval : null) : over.approval},
-      ${list}, ${over.key ?? `k-${randomUUID().slice(0, 8)}`}, 'Bank statements',
+      ${list}, ${over.key ?? `k-${randomUUID().slice(0, 8)}`}, ${over.label ?? "Bank statements"},
       ${outcome}, ${over.note ?? null}, ${by}, ${at === "now" ? owner`now()` : null}
     )
   `;
@@ -143,7 +155,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await Promise.all([owner.end({ timeout: 5 }), app.end({ timeout: 5 })]);
+  await Promise.all([owner.end({ timeout: 5 }), app.end({ timeout: 5 }), watch.end({ timeout: 5 })]);
 });
 
 describe("'not applicable' says why, and nothing else carries a reason", () => {
@@ -285,6 +297,7 @@ describe("the adapter's SQL, executed", () => {
       itemKey: "s1", label: "Bank statements", outcome: "done", note: null,
       markedByUserId: f.priya, markedAt: "2026-09-25T09:00:00.000Z",
     });
+    if (!first) throw new Error("the first tick was refused, on a step open to marks");
     expect(first).toMatchObject({ outcome: "done", markedByUserId: f.priya, markedByName: "Priya Shah", markedAt: "2026-09-25T09:00:00.000Z" });
 
     // The same answer again, by somebody else, later: nothing moves.
@@ -382,7 +395,6 @@ describe("the reads the lists ride on, executed", () => {
     const step = await newStep(f.tenant, job, f.priya);
     const approval = ref();
     await owner`INSERT INTO delivery.step_approval (id, tenant_id, job_id, job_step_id) VALUES (${approval}, ${f.tenant}, ${job}, ${step})`;
-    const approvals = new PostgresStepApprovalRepository(app);
     const [onJob] = await approvals.listForJob(f.tenant, job);
     expect(onJob?.templateVersionId).toBe(version.id);
     const queued = (await approvals.listPending(f.tenant)).find((c) => c.approval.id === approval);
@@ -421,5 +433,244 @@ describe("0307 runs both ways", () => {
     // And the rollback left the real table where it was.
     const [still] = await owner<{ table: boolean }[]>`SELECT to_regclass('delivery.job_step_check') IS NOT NULL AS table`;
     expect(still?.table).toBe(true);
+  });
+});
+
+// ── the locks (the reviewers' races) ─────────────────────────────────────────
+//
+// Each race is made deterministic by holding one side's transaction open as
+// the OWNER, starting the other side, waiting until the database says that side
+// is parked on a lock, and only then committing. So what these prove is the
+// ORDER the database imposes, not a timing that happened to work.
+
+/** Resolve once an application connection is waiting on a lock: the other half
+ *  of a race is parked behind the transaction the test is holding open. */
+async function someoneWaits(): Promise<void> {
+  for (let i = 0; i < 100; i++) {
+    const [row] = await watch<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_stat_activity
+      WHERE datname = current_database() AND usename = 'bib_app' AND wait_event_type = 'Lock'
+    `;
+    if ((row?.n ?? 0) > 0) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error("nothing ever waited: the write under test did not take the lock the other side holds");
+}
+
+/** Hold `hold` open as the owner while `meanwhile` runs, commit once it is
+ *  parked, and hand back what it answered (or threw). */
+async function whileHeld<T>(
+  hold: (tx: postgres.TransactionSql) => Promise<unknown>,
+  meanwhile: () => Promise<T>,
+): Promise<T> {
+  let settled: Promise<{ ok: true; value: T } | { ok: false; error: unknown }> | null = null;
+  await owner.begin(async (tx) => {
+    await hold(tx);
+    settled = meanwhile().then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    await someoneWaits();
+  });
+  if (settled === null) throw new Error("the other side never started");
+  const out = await (settled as Promise<{ ok: true; value: T } | { ok: false; error: unknown }>);
+  if (!out.ok) throw out.error;
+  return out.value;
+}
+
+const markOf = (over: { step: string; approval?: string | null; key: string; by?: string }) => ({
+  id: ref(),
+  tenantId: f.tenant,
+  jobStepId: over.step,
+  stepApprovalId: over.approval ?? null,
+  list: over.approval ? ("review" as const) : ("checklist" as const),
+  itemKey: over.key,
+  label: "Bank statements",
+  outcome: "done" as const,
+  note: null,
+  markedByUserId: over.by ?? f.priya,
+  markedAt: "2026-09-26T09:00:00.000Z",
+});
+
+async function newApproval(step: string): Promise<string> {
+  const id = ref();
+  await owner`INSERT INTO delivery.step_approval (id, tenant_id, job_id, job_step_id) VALUES (${id}, ${f.tenant}, ${f.job}, ${step})`;
+  return id;
+}
+
+describe("a mark is written only while its list is open, under a row lock", () => {
+  it("answers both of two first ticks of one line at once, and leaves one row", async () => {
+    // The reviewer's probe: before the second statement, one of every such
+    // pair came back a 500 ("neither written nor found").
+    const step = await newStep(f.tenant, f.job, null);
+    for (let i = 0; i < 20; i++) {
+      const key = `pair-${String(i)}`;
+      const both = await Promise.allSettled([
+        repo.upsert(markOf({ step, key })),
+        repo.upsert(markOf({ step, key, by: f.anand })),
+      ]);
+      expect(both.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+      for (const r of both) if (r.status === "fulfilled") expect(r.value?.outcome).toBe("done");
+    }
+    const [rows] = await owner<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM delivery.job_step_check WHERE job_step_id = ${step}
+    `;
+    expect(rows?.n).toBe(20);
+  });
+
+  it("answers a first tick that met another request's uncommitted tick of the same line with that row", async () => {
+    // Deterministic form of the same race: the other request (here an insert
+    // that went round the adapter) has written the line and not committed, so
+    // the upsert waits on it, and then finds it by a statement of its own.
+    const step = await newStep(f.tenant, f.job, null);
+    const kept = await whileHeld(
+      (tx) => tx`
+        INSERT INTO delivery.job_step_check
+          (tenant_id, job_step_id, list, item_key, label, outcome, marked_by_user_id, marked_at)
+        VALUES (${f.tenant}, ${step}, 'checklist', 'held', 'Bank statements', 'done', ${f.priya}, now())
+      `,
+      () => repo.upsert(markOf({ step, key: "held", by: f.anand })),
+    );
+    expect(kept).toMatchObject({ itemKey: "held", outcome: "done", markedByUserId: f.priya });
+  });
+
+  it("makes a tick wait for Done, and refuses it once the step is done", async () => {
+    const step = await newStep(f.tenant, f.job, null);
+    const answer = await whileHeld(
+      async (tx) => {
+        await tx`SELECT id FROM delivery.job_step WHERE id = ${step} FOR NO KEY UPDATE`;
+        await tx`UPDATE delivery.job_step SET status = 'done', finished_at = now(), performed_by = ${f.priya} WHERE id = ${step}`;
+      },
+      () => repo.upsert(markOf({ step, key: "late" })),
+    );
+    expect(answer).toBeNull();
+    expect(await repo.clear({ tenantId: f.tenant, list: "checklist", jobStepId: step, stepApprovalId: null, itemKey: "late" })).toBe(false);
+    const rows = await owner`SELECT 1 FROM delivery.job_step_check WHERE job_step_id = ${step}`;
+    expect(rows).toHaveLength(0);
+  });
+
+  it("refuses a sub-step mark while the step waits to be checked, and takes one again after a send-back", async () => {
+    const step = await newStep(f.tenant, f.job, f.priya);
+    await expect(repo.upsert(markOf({ step, key: "s1" }))).resolves.toMatchObject({ outcome: "done" });
+    const approval = await newApproval(step);
+    expect(await repo.upsert(markOf({ step, key: "s2" }))).toBeNull();
+    expect(await repo.clear({ tenantId: f.tenant, list: "checklist", jobStepId: step, stepApprovalId: null, itemKey: "s1" })).toBe(false);
+    await owner`
+      UPDATE delivery.step_approval
+         SET decision = 'rejected', decided_by = ${f.anand}, decided_at = now(), notes = 'does not tie'
+       WHERE id = ${approval}
+    `;
+    await expect(repo.upsert(markOf({ step, key: "s2" }))).resolves.toMatchObject({ outcome: "done" });
+    expect(await repo.clear({ tenantId: f.tenant, list: "checklist", jobStepId: step, stepApprovalId: null, itemKey: "s1" })).toBe(true);
+  });
+
+  it("refuses a review mark on a check that is decided", async () => {
+    const step = await newStep(f.tenant, f.job, f.priya);
+    const approval = await newApproval(step);
+    await expect(repo.upsert(markOf({ step, approval, key: "r1", by: f.anand }))).resolves.toMatchObject({ list: "review" });
+    await owner`
+      UPDATE delivery.step_approval
+         SET decision = 'approved', decided_by = ${f.anand}, decided_at = now()
+       WHERE id = ${approval}
+    `;
+    expect(await repo.upsert(markOf({ step, approval, key: "r2", by: f.anand }))).toBeNull();
+    expect(await repo.clear({ tenantId: f.tenant, list: "review", jobStepId: step, stepApprovalId: approval, itemKey: "r1" })).toBe(false);
+    const [r1] = await repo.listForApprovals(f.tenant, [approval]);
+    expect(r1?.outcome).toBe("done");
+  });
+});
+
+describe("a move that reads a list reads it after taking the lock", () => {
+  /** A tick taken back by another request that holds the step's lock, the way
+   *  the adapter's clear does, and has not committed. */
+  const untickHolding = (step: string, key: string) => async (tx: postgres.TransactionSql) => {
+    await tx`SELECT id FROM delivery.job_step WHERE id = ${step} FOR NO KEY UPDATE`;
+    await tx`
+      UPDATE delivery.job_step_check SET outcome = NULL, note = NULL, marked_by_user_id = NULL, marked_at = NULL
+      WHERE list = 'checklist' AND job_step_id = ${step} AND item_key = ${key}
+    `;
+  };
+
+  it("keeps Done waiting for a tick being taken back, and then refuses to finish the step", async () => {
+    const step = await newStep(f.tenant, f.job, null);
+    await repo.upsert(markOf({ step, key: "s1" }));
+    const moved = await whileHeld(untickHolding(step, "s1"), () =>
+      steps.transition(f.tenant, step, "blocked", { status: "done", at: new Date().toISOString(), performedBy: f.priya }, ["s1"]),
+    );
+    expect(moved).toBeNull();
+    const [row] = await owner<{ status: string }[]>`SELECT status FROM delivery.job_step WHERE id = ${step}`;
+    expect(row?.status).toBe("blocked");
+  });
+
+  it("keeps a check from opening while a tick is being taken back, and then opens none", async () => {
+    const step = await newStep(f.tenant, f.job, f.priya);
+    await repo.upsert(markOf({ step, key: "s1" }));
+    const opened = await whileHeld(untickHolding(step, "s1"), () =>
+      approvals.openIfAbsent(
+        { id: ref(), tenantId: f.tenant, jobId: f.job, jobStepId: step, policyVersionId: null, policyKey: "manager_review" },
+        ["s1"],
+      ),
+    );
+    expect(opened).toBeNull();
+    const rows = await owner`SELECT 1 FROM delivery.step_approval WHERE job_step_id = ${step}`;
+    expect(rows).toHaveLength(0);
+  });
+
+  it("keeps Approve waiting for a point being taken back, and then decides nothing", async () => {
+    const step = await newStep(f.tenant, f.job, f.priya);
+    const approval = await newApproval(step);
+    await repo.upsert(markOf({ step, approval, key: "r1", by: f.anand }));
+    const decided = await whileHeld(
+      async (tx) => {
+        await tx`SELECT id FROM delivery.step_approval WHERE id = ${approval} FOR NO KEY UPDATE`;
+        await tx`
+          UPDATE delivery.job_step_check SET outcome = NULL, note = NULL, marked_by_user_id = NULL, marked_at = NULL
+          WHERE list = 'review' AND step_approval_id = ${approval} AND item_key = 'r1'
+        `;
+      },
+      () =>
+        approvals.decide(
+          f.tenant,
+          approval,
+          { decision: "approved", notes: null, decidedBy: f.anand, decidedAt: new Date().toISOString() },
+          { reviewPointKeys: ["r1"], subStepKeys: [] },
+        ),
+    );
+    expect(decided).toBeNull();
+    const [row] = await owner<{ decision: string }[]>`SELECT decision FROM delivery.step_approval WHERE id = ${approval}`;
+    expect(row?.decision).toBe("pending");
+  });
+
+  it("makes every guarded move once the lines are settled, empty key lists included", async () => {
+    const step = await newStep(f.tenant, f.job, f.priya);
+    await repo.upsert(markOf({ step, key: "s1" }));
+    const approval = await approvals.openIfAbsent(
+      { id: ref(), tenantId: f.tenant, jobId: f.job, jobStepId: step, policyVersionId: null, policyKey: "manager_review" },
+      ["s1"],
+    );
+    if (!approval) throw new Error("the check did not open over a settled list");
+    await repo.upsert(markOf({ step, approval: approval.id, key: "r1", by: f.anand }));
+    const decided = await approvals.decide(
+      f.tenant,
+      approval.id,
+      { decision: "approved", notes: null, decidedBy: f.anand, decidedAt: new Date().toISOString() },
+      { reviewPointKeys: ["r1"], subStepKeys: ["s1"] },
+    );
+    expect(decided?.decision).toBe("approved");
+    const done = await steps.transition(
+      f.tenant, step, "blocked", { status: "done", at: new Date().toISOString(), performedBy: f.priya }, ["s1"],
+    );
+    expect(done?.status).toBe("done");
+    // A guard over no review points still locks and decides: the empty array
+    // reaches the database as an empty array.
+    const other = await newStep(f.tenant, f.job, f.priya);
+    const second = await newApproval(other);
+    await expect(
+      approvals.decide(
+        f.tenant, second,
+        { decision: "approved", notes: null, decidedBy: f.anand, decidedAt: new Date().toISOString() },
+        { reviewPointKeys: [], subStepKeys: ["never-marked"] },
+      ),
+    ).resolves.toBeNull();
   });
 });

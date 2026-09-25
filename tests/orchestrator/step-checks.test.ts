@@ -47,8 +47,10 @@ import {
   StepNotWaiting,
   SubStepNotFound,
   SubStepsOpen,
+  TemplateUnreadable,
 } from "../../src/domain/orchestrator/errors";
 import {
+  ApprovalAlreadyDecided,
   NotEligibleToCheck,
   ReviewPointNotFound,
   ReviewPointsOpen,
@@ -127,6 +129,11 @@ async function world(
   checks.jobs = jobs;
   const stepChecks = new FakeStepCheckRepo(stepRepo);
   stepChecks.directory = checkers;
+  // Both directions, as one database would have them: a mark reads the checks
+  // (is the list still open to marks?), and a guarded check opening or Approve
+  // reads the marks.
+  stepChecks.approvals = checks;
+  checks.marks = stepChecks;
   const policies = new FakeVerificationPolicySource().publish({
     versionId: POLICY_VERSION,
     key: POLICY_KEY,
@@ -183,7 +190,7 @@ async function world(
   };
   const board = async () => Object.fromEntries((await stepRepo.listForJob(TENANT, JOB)).map((r) => [r.stepKey, r.status]));
 
-  return { service, stepRepo, stepChecks, checks, events, runs, subjects, clock, tick, complete, describeFor, openCheck, point, decide, toReview, board };
+  return { service, stepRepo, stepChecks, checks, events, runs, subjects, templates, clock, tick, complete, describeFor, openCheck, point, decide, toReview, board };
 }
 
 describe("the doer's sub-steps", () => {
@@ -565,5 +572,207 @@ describe("what the ledger is told", () => {
       expect(p).not.toHaveProperty("subSteps");
       expect(p).not.toHaveProperty("reviewPoints");
     }
+  });
+});
+
+/**
+ * Run `during` once, in the middle of one call to `target[method]`: the call
+ * reads first, `during` then happens, and the call answers with what it read.
+ * That is a second request committing between a read and the write that
+ * follows it, which is the one interleaving a single-threaded test cannot
+ * otherwise reach. The fakes model the adapters' locks as "checked at the
+ * moment of the write", so what this proves is that the service writes
+ * through a guard rather than trusting its own read.
+ */
+function raceDuring<T extends object, K extends keyof T>(target: T, method: K, during: () => Promise<unknown>): void {
+  const original = target[method] as unknown as (...args: unknown[]) => Promise<unknown>;
+  let fired = false;
+  (target as Record<K, unknown>)[method] = async (...args: unknown[]) => {
+    const read = await original.apply(target, args);
+    if (!fired) {
+      fired = true;
+      await during();
+    }
+    return read;
+  };
+}
+
+describe("two requests at once (the reviewers' races, T6.15)", () => {
+  it("keeps a step open when a tick is taken back while Done is reading the list", async () => {
+    const w = await world();
+    for (const l of COLLECT_LINES) await w.tick("collect", l.key, "done");
+    raceDuring(w.stepChecks, "listForJob", () => w.tick("collect", "s2", null));
+    const err = await w.complete("collect").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SubStepsOpen);
+    expect((err as SubStepsOpen).openLabels).toEqual(["Sales data"]);
+    expect((await w.board())["collect"]).toBe("blocked");
+    expect(w.events.recorded.filter((e) => e.verb === "job.step_advanced" && e.payload["to"] === "done")).toEqual([]);
+  });
+
+  it("opens no check, and puts the maker back, when a tick is taken back while Done is reading it", async () => {
+    const w = await world();
+    for (const l of COLLECT_LINES) await w.tick("collect", l.key, "done");
+    await w.complete("collect");
+    await w.tick("review", "s1", "done");
+    raceDuring(w.stepChecks, "listForJob", () => w.tick("review", "s1", null));
+    await expect(w.complete("review")).rejects.toBeInstanceOf(SubStepsOpen);
+    expect(await w.checks.listPending(TENANT)).toEqual([]);
+    const review = w.stepRepo.rows.find((r) => r.stepKey === "review");
+    expect(review?.status).toBe("blocked");
+    expect(review?.performedBy).toBeNull();
+    // And the doer can simply tick it again and send it.
+    await w.tick("review", "s1", "done");
+    await expect(w.complete("review")).resolves.toMatchObject({ status: "blocked" });
+    expect(await w.checks.listPending(TENANT)).toHaveLength(1);
+  });
+
+  it("refuses a tick that lands after Done has sent the step to be checked", async () => {
+    const w = await world();
+    for (const l of COLLECT_LINES) await w.tick("collect", l.key, "done");
+    await w.complete("collect");
+    await w.tick("review", "s1", "done");
+    // The untick reads "no check open", and then Done opens one before it writes.
+    raceDuring(w.checks, "findOpenForStep", () => w.complete("review"));
+    await expect(w.tick("review", "s1", null)).rejects.toBeInstanceOf(AwaitingCheck);
+    const mark = w.stepChecks.rows.find((r) => r.list === "checklist" && r.itemKey === "s1" && r.label === "Close pack assembled");
+    expect(mark?.outcome).toBe("done");
+  });
+
+  it("refuses Approve when a second checker takes a point back while it is being read", async () => {
+    const w = await world();
+    const id = await w.toReview();
+    await w.point(id, "r1", "done");
+    await w.point(id, "r2", "done");
+    raceDuring(w.stepChecks, "listForJob", () => w.point(id, "r2", null, RAJAT));
+    const err = await w.decide(id, "approved").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ReviewPointsOpen);
+    expect((err as ReviewPointsOpen).openLabels).toEqual(["Balance sheet movements"]);
+    expect((await w.checks.findById(TENANT, id))?.decision).toBe("pending");
+    expect((await w.board())["review"]).toBe("blocked");
+  });
+
+  it("refuses a point ticked after the check was decided", async () => {
+    const w = await world();
+    const id = await w.toReview();
+    await w.point(id, "r1", "done");
+    await w.point(id, "r2", "done");
+    // Rajat's untick reads the check as pending, and Anand approves it before
+    // the untick writes.
+    raceDuring(w.stepRepo, "findById", () => w.decide(id, "approved"));
+    const err = await w.point(id, "r2", null, RAJAT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApprovalAlreadyDecided);
+    expect((err as Error).message).toContain("already approved");
+    const r2 = w.stepChecks.rows.find((r) => r.list === "review" && r.itemKey === "r2");
+    expect(r2?.outcome).toBe("done");
+  });
+
+  it("refuses Approve on work whose sub-steps are open, and still allows Send back", async () => {
+    // Reachable only by a write that went round the service: the service's own
+    // marks refuse a step with a check pending. The checker is told what they
+    // can do, which is not ticking somebody else's list.
+    const w = await world();
+    const id = await w.toReview();
+    const i = w.stepChecks.rows.findIndex((r) => r.list === "checklist" && r.label === "Close pack assembled");
+    const row = w.stepChecks.rows[i];
+    if (!row) throw new Error("the review step's sub-step was not marked");
+    w.stepChecks.rows[i] = { ...row, outcome: null, note: null, markedByUserId: null, markedByName: null, markedAt: null };
+    await w.point(id, "r1", "done");
+    await w.point(id, "r2", "done");
+    const err = await w.decide(id, "approved").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(SubStepsOpen);
+    expect((err as Error).message).toBe(
+      "1 sub-step of 'Manager review' is not ticked yet: Close pack assembled. They are ticked by whoever did " +
+        "the step, so send the work back for them to finish it.",
+    );
+    await expect(w.decide(id, "rejected", ANAND, "The close pack line was taken back.")).resolves.toMatchObject({
+      status: "blocked",
+    });
+  });
+});
+
+describe("the gates the first round of tests left unwatched", () => {
+  it("refuses a review point on a check that is already decided, and leaves the row alone", async () => {
+    const w = await world();
+    const id = await w.toReview();
+    await w.point(id, "r1", "done");
+    await w.point(id, "r2", "done");
+    await w.decide(id, "approved");
+    const before = w.stepChecks.rows.find((r) => r.list === "review" && r.itemKey === "r1");
+    await expect(w.point(id, "r1", null)).rejects.toBeInstanceOf(ApprovalAlreadyDecided);
+    expect(w.stepChecks.rows.find((r) => r.list === "review" && r.itemKey === "r1")).toEqual(before);
+  });
+
+  it("holds a CORRECTED machine answer to the sub-steps, as it holds an accepted one", async () => {
+    const agents = new FakeAgentRuntime().armWith("draft", 0.99, { total: "1200.00" });
+    const w = await world(
+      [step({ key: "draft", label: "Draft the reconciliation", executor: "agent_with_approval", checklist: COLLECT_LINES.slice(0, 1) })],
+      { agents },
+    );
+    const correct = () =>
+      w.service.decideProposal(
+        { tenantId: TENANT, jobId: JOB, stepKey: "draft", outcome: "corrected", applied: { total: "1250.00" }, rejectedReason: null },
+        ACTOR,
+        KAVYA,
+      );
+    await expect(correct()).rejects.toBeInstanceOf(SubStepsOpen);
+    expect(w.runs.rows[0]?.outcome).toBeNull();
+    await w.tick("draft", "s1", "done");
+    await expect(correct()).resolves.toMatchObject({ status: "done" });
+    expect(w.runs.rows[0]?.outcome).toBe("corrected");
+  });
+
+  it("never lets a list hold a step whose pinned process no longer reads", async () => {
+    // The config row went bad after the job pinned it. `pinnedStepDef`'s rule:
+    // a job must never be stranded by that, so no band, no check and no list,
+    // and neither Approve with its review points open nor Done with every
+    // sub-step open is refused on them. What reports the bad row is the walk's
+    // own TEMPLATE_UNREADABLE when it tries to open the next step, as it always
+    // has (T2.7): after the step has moved, never instead of it.
+    const w = await world();
+    const id = await w.toReview();
+    w.templates.pinnedTemplate = () => Promise.resolve(null);
+    await expect(w.decide(id, "approved")).rejects.toBeInstanceOf(TemplateUnreadable);
+    expect((await w.board())["review"]).toBe("done");
+
+    const fresh = await world();
+    fresh.templates.pinnedTemplate = () => Promise.resolve(null);
+    await expect(fresh.complete("collect")).rejects.toBeInstanceOf(TemplateUnreadable);
+    expect((await fresh.board())["collect"]).toBe("done");
+    expect(fresh.stepChecks.rows).toEqual([]);
+  });
+});
+
+describe("the fake agrees with the database (0307, 0308)", () => {
+  const base = {
+    id: "00000000-0000-4000-8000-00000000c001",
+    tenantId: TENANT,
+    list: "checklist" as const,
+    stepApprovalId: null,
+    itemKey: "s1",
+    label: "Bank statements",
+    outcome: "done" as const,
+    note: null,
+    markedByUserId: KAVYA,
+    markedAt: "2026-09-25T09:00:00.000Z",
+  };
+
+  it("refuses a blank label, a reason of only whitespace, a reason over 500, and a check of another step", async () => {
+    const w = await world();
+    const collect = w.stepRepo.rows.find((r) => r.stepKey === "collect");
+    if (!collect) throw new Error("collect was not written");
+    const on = { ...base, jobStepId: collect.id };
+    // The fake refuses as the adapter's statement does, synchronously in its
+    // case: a constraint violation, not a refusal the service is meant to read.
+    expect(() => w.stepChecks.upsert({ ...on, label: " \t" })).toThrow(/job_step_check_label_is_text/);
+    expect(() => w.stepChecks.upsert({ ...on, outcome: "not_applicable", note: "\n\t\u00a0" })).toThrow(
+      /job_step_check_not_applicable_says_why/,
+    );
+    expect(() => w.stepChecks.upsert({ ...on, outcome: "not_applicable", note: "x".repeat(501) })).toThrow(
+      /job_step_check_not_applicable_says_why/,
+    );
+    const id = await w.toReview();
+    expect(() => w.stepChecks.upsert({ ...on, list: "review", stepApprovalId: id, itemKey: "r1" })).toThrow(
+      /job_step_check_approval_step_tenant_fkey/,
+    );
   });
 });

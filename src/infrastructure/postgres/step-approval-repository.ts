@@ -18,6 +18,7 @@ import type {
   PendingCheck,
   StepApprovalRepository,
 } from "../../usecase/verification/ports";
+import { lockStepWithSubStepsSettled, openReviewPoints, openSubSteps } from "./step-lines";
 
 interface ApprovalRow {
   id: string;
@@ -112,9 +113,21 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
    *
    * Returns null when nothing was inserted, which the caller reads as "already
    * waiting" and not as an error.
+   *
+   * WITH `subStepKeys` (T6.15) the STEP's row is locked first and the check
+   * opens only if the step is still waiting and every listed sub-step is
+   * marked, read after the lock (`step-lines.ts`). The step was moved to
+   * "submitted" by its own transition a moment earlier, and this is the write
+   * that closes the list to marks, so this is where the list has to be true.
    */
-  async openIfAbsent(approval: NewStepApproval): Promise<StepApproval | null> {
+  async openIfAbsent(approval: NewStepApproval, subStepKeys: readonly string[] = []): Promise<StepApproval | null> {
     return withTenant(this.app, approval.tenantId, async (db) => {
+      if (
+        subStepKeys.length > 0 &&
+        !(await lockStepWithSubStepsSettled(db, approval.jobStepId, "blocked", subStepKeys))
+      ) {
+        return null;
+      }
       const [row] = await db<ApprovalRow[]>`
         INSERT INTO delivery.step_approval
           (id, tenant_id, job_id, job_step_id, policy_version_id, policy_key)
@@ -157,13 +170,33 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
    * first's answer, and that answer is part of an audit record.
    *
    * Null means somebody got there first. Not an error — their decision stands.
+   *
+   * WITH `settled` (T6.15, Approve only) the CHECK's row is locked first, the
+   * lock every review mark takes, and it is decided only if every listed
+   * review point of this check and every listed sub-step of its step is
+   * marked, read after the lock. The sub-steps cannot move while the check is
+   * pending (their marks refuse a step with one), so that half is a wall under
+   * a wall, for a mark written by something other than the service.
    */
   async decide(
     tenantId: string,
     approvalId: string,
     write: ApprovalDecisionWrite,
+    settled?: { readonly reviewPointKeys: readonly string[]; readonly subStepKeys: readonly string[] },
   ): Promise<StepApproval | null> {
     return withTenant(this.app, tenantId, async (db) => {
+      if (settled !== undefined && settled.reviewPointKeys.length + settled.subStepKeys.length > 0) {
+        const [held] = await db<{ job_step_id: string }[]>`
+          SELECT job_step_id FROM delivery.step_approval
+          WHERE id = ${approvalId} AND decision = 'pending'
+          FOR NO KEY UPDATE
+        `;
+        if (!held) return null;
+        const open =
+          (await openReviewPoints(db, approvalId, settled.reviewPointKeys)) +
+          (await openSubSteps(db, held.job_step_id, settled.subStepKeys));
+        if (open > 0) return null;
+      }
       const [row] = await db<ApprovalRow[]>`
         UPDATE delivery.step_approval SET
           decision   = ${write.decision},

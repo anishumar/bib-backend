@@ -11,6 +11,12 @@
 // THE MARKER'S NAME IS A JOIN, in the same statement as the marks, for the
 // rule every read model here follows: a screen must never fetch a person per
 // row, and a tick made by somebody who has since left still says who made it.
+//
+// EVERY WRITE LOCKS FIRST. A sub-step mark locks its step's row and a review
+// mark its check's row, and checks under that lock that the list is still open
+// to marks (`mayMark`). The moves that read a list lock the same rows, so a
+// tick can never land between Done's read of the list and Done's move, nor
+// after it. Why a lock and not a predicate in the write: `step-lines.ts`.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { CheckListKind, StepCheckMark } from "../../domain/orchestrator/model";
@@ -112,24 +118,32 @@ export class PostgresStepCheckRepository implements StepCheckRepository {
    * point, which is what makes the second round after a send-back a fresh set
    * of rows rather than an overwrite of the first round's.
    *
+   * FIRST, THE LIST MUST STILL BE OPEN TO MARKS, checked under a row lock in
+   * this transaction (`mayMark`); null, with nothing written, when it is not.
+   *
    * IDEMPOTENT IN SQL: the `DO UPDATE ... WHERE ... IS DISTINCT FROM` leaves a
    * line that already carries this outcome and this reason untouched, so a
-   * second click does not move who ticked it or when. Nothing is returned by
-   * the CTE then, and the second arm reads the row as it stands; both arms see
-   * the snapshot from before the statement, which is exactly the row that was
-   * left alone.
+   * second click does not move who ticked it or when. The statement then
+   * returns nothing, and the row as it stands is read by a SECOND statement.
+   * It has to be a second one. A conflicting row another request inserted and
+   * committed while this statement waited on it is locked and left alone by
+   * the `DO UPDATE`, but it is invisible to any read in the same statement,
+   * which runs on the snapshot taken before the wait. The first draft read it
+   * with a `UNION ALL` arm of the same statement, and two first ticks of one
+   * line at once answered one of the two with a 500: a reviewer's probe threw
+   * on 40 of 80. Under READ COMMITTED the next statement's snapshot is new and
+   * sees the row. (The lock in `mayMark` now makes the two requests queue in
+   * the first place; the second statement is what makes this method correct
+   * without leaning on that.)
    */
-  async upsert(mark: NewStepCheckMark): Promise<StepCheckMark> {
+  async upsert(mark: NewStepCheckMark): Promise<StepCheckMark | null> {
     return withTenant(this.app, mark.tenantId, async (db) => {
+      if (!(await mayMark(db, mark))) return null;
       const target =
         mark.list === "checklist"
           ? db`(tenant_id, job_step_id, item_key) WHERE list = 'checklist'`
           : db`(tenant_id, step_approval_id, item_key) WHERE list = 'review'`;
-      const sameLine =
-        mark.list === "checklist"
-          ? db`c.job_step_id = ${mark.jobStepId}`
-          : db`c.step_approval_id = ${mark.stepApprovalId}`;
-      const [row] = await db<MarkRow[]>`
+      const [written] = await db<MarkRow[]>`
         WITH up AS (
           INSERT INTO delivery.job_step_check AS c
             (id, tenant_id, job_step_id, step_approval_id, list, item_key, label,
@@ -152,28 +166,36 @@ export class PostgresStepCheckRepository implements StepCheckRepository {
         SELECT ${db.unsafe(COLUMNS)}
         FROM up c
         LEFT JOIN tenancy.user_account u ON u.id = c.marked_by_user_id
-        UNION ALL
+      `;
+      if (written) return toMark(written);
+
+      const sameLine =
+        mark.list === "checklist"
+          ? db`c.job_step_id = ${mark.jobStepId}`
+          : db`c.step_approval_id = ${mark.stepApprovalId}`;
+      const [kept] = await db<MarkRow[]>`
         SELECT ${db.unsafe(COLUMNS)}
         FROM delivery.job_step_check c
         LEFT JOIN tenancy.user_account u ON u.id = c.marked_by_user_id
         WHERE c.list = ${mark.list} AND c.item_key = ${mark.itemKey} AND ${sameLine}
-          AND NOT EXISTS (SELECT 1 FROM up)
       `;
-      if (!row) {
+      if (!kept) {
         throw new Error(
           `job_step_check: the mark on ${mark.list} line ${JSON.stringify(mark.itemKey)} was neither ` +
-            `written nor found. The statement inserts, updates or reads that line, so this means the ` +
-            `row is outside this firm's reach.`,
+            `written nor found. The insert met a row on that line and left it as it was, and a fresh ` +
+            `read of the line then found nothing, which only a row outside this firm's reach explains.`,
         );
       }
-      return toMark(row);
+      return toMark(kept);
     });
   }
 
   /** Untick a line. Only a row that is actually ticked is touched, so taking
-   *  back a tick nobody made writes nothing, and never inserts a row for it. */
-  async clear(ref: StepCheckLineRef): Promise<void> {
-    await withTenant(this.app, ref.tenantId, async (db) => {
+   *  back a tick nobody made writes nothing, and never inserts a row for it.
+   *  False, with nothing written, when the list is closed to marks. */
+  async clear(ref: StepCheckLineRef): Promise<boolean> {
+    return withTenant(this.app, ref.tenantId, async (db) => {
+      if (!(await mayMark(db, ref))) return false;
       const sameLine =
         ref.list === "checklist"
           ? db`job_step_id = ${ref.jobStepId}`
@@ -184,6 +206,45 @@ export class PostgresStepCheckRepository implements StepCheckRepository {
         WHERE list = ${ref.list} AND item_key = ${ref.itemKey} AND ${sameLine}
           AND outcome IS NOT NULL
       `;
+      return true;
     });
   }
+}
+
+/**
+ * Whether this line's list is open to marks NOW, decided under the row lock the
+ * moves that read the list take too (`step-lines.ts`), so the answer holds
+ * until this transaction commits.
+ *
+ * A SUB-STEP: its step is `blocked`, and has no check that is pending or
+ * approved. Pending is work somebody else is looking at; approved is the
+ * moment between Approve and the step's own move to done, when the list that
+ * was approved must not change either. A rejected check is no lock at all:
+ * after a send-back the doer changes their ticks again.
+ *
+ * A REVIEW POINT: its check is still pending. Only the check's row is locked,
+ * because only Approve and Send back close a checker's list, and both write
+ * that row.
+ */
+async function mayMark(db: Db, ref: StepCheckLineRef): Promise<boolean> {
+  if (ref.list === "checklist") {
+    const [step] = await db<{ status: string }[]>`
+      SELECT status FROM delivery.job_step WHERE id = ${ref.jobStepId}
+      FOR NO KEY UPDATE
+    `;
+    if (step?.status !== "blocked") return false;
+    const [check] = await db<{ id: string }[]>`
+      SELECT id FROM delivery.step_approval
+      WHERE job_step_id = ${ref.jobStepId} AND decision IN ('pending', 'approved')
+      LIMIT 1
+    `;
+    return check === undefined;
+  }
+  if (ref.stepApprovalId === null) return false;
+  const [check] = await db<{ decision: string }[]>`
+    SELECT decision FROM delivery.step_approval
+    WHERE id = ${ref.stepApprovalId} AND job_step_id = ${ref.jobStepId}
+    FOR NO KEY UPDATE
+  `;
+  return check?.decision === "pending";
 }
