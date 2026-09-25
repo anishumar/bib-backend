@@ -239,4 +239,10 @@ export interface ProspectDirectory {
     type: IdentifierType,
     value: string,
   ): Promise<PartyIdentifier | null>;
+  /** The party a capture matched, archived or not — so a match on a client the
+   *  firm put away is refused by name rather than quietly given a lead (0305). */
+  findParty(
+    tenantId: string,
+    partyId: string,
+  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
 }

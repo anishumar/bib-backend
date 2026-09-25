@@ -165,6 +165,7 @@ const service = new EngagementService({
   library: configRepository,
   documents,
   firm: tenancy,
+  parties: new PostgresPartyRepository(app),
   // This file exercises the SQL behind a letter, not the quote it may have come
   // from, so the seam answers "no such proposal" for everything. A real
   // `ProposalService` here would drag the whole commercial module into a test

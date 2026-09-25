@@ -51,6 +51,7 @@ import {
   LostReasonRequired,
   NoContactDetail,
   InvalidLeadJurisdiction,
+  LeadPartyArchived,
   OwnerNotStaff,
   SameStage,
 } from "../../domain/lead/errors";
@@ -254,6 +255,19 @@ export class LeadService {
     if (isAmbiguous(match)) throw new AmbiguousMatch(match.parties);
 
     const existingPartyId = matchedParty(match);
+
+    // AN ARCHIVED CLIENT IS REFUSED, NOT RESTORED (0305, Shrestha 2026-09-25).
+    // Before anything is written: a web enquiry carrying an archived client's
+    // PAN used to attach a fresh lead to a party the firm had put away, and
+    // quietly un-archiving would let a form undo a person's decision unseen.
+    // Restoring is its own act, on the client page, with its own ledger row.
+    if (existingPartyId !== null) {
+      const existing = await this.deps.prospects.findParty(input.tenantId, existingPartyId);
+      if (existing !== null && existing.archivedAt !== null) {
+        throw new LeadPartyArchived(existing.displayName);
+      }
+    }
+
     const partyId = existingPartyId ?? (await this.createProspect(input, actor));
 
     // Only the identifiers nobody has yet. Re-adding one would be refused by

@@ -86,6 +86,7 @@ const service = new ProposalService({
   proposals,
   catalogue: configRepository,
   policies: configRepository,
+  parties: new PostgresPartyRepository(app),
   documents,
   shareTokens: new RandomTokenFactory(),
   ids: systemIds,

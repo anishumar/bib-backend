@@ -974,6 +974,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     proposals: new PostgresProposalRepository(pools.app),
     catalogue: configRepository,
     policies: configRepository,
+    // An archived client is refused by name before a new proposal names it
+    // (0305). The repository's read-one-by-id never hides the archive.
+    parties: partyRepository,
     // The reference series and the issuing-entity rule, behind quoting's own
     // narrow port. `DocumentService` satisfies it structurally, so neither
     // module imports the other — the same seam the catalogue arrives through.
@@ -1027,6 +1030,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     // this port structurally, so neither module imports the other — the same
     // seam the catalogue and the reference series arrive through.
     firm: tenancy,
+    parties: partyRepository,
     // THE QUOTE A LETTER IS WRITTEN UP FROM (T3.5b). The SAME instance the
     // proposal routes hold, satisfied structurally by `findQuote` — so neither
     // use case imports the other, and there is one answer to "what did we

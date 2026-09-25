@@ -480,10 +480,12 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
   });
   const tenantRepository = new PostgresTenantRepository(pools.app);
+  const workerParties = new PostgresPartyRepository(pools.app);
   const engagement = new EngagementService({
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
     documents,
+    parties: workerParties,
     // Only `send` asks who binds the firm, and this process never sends. Read
     // from the tenant row directly — the same two columns TenancyService reads
     // — because TenancyService's own graph (seeders for roles, grades,
@@ -501,6 +503,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       proposals: new PostgresProposalRepository(pools.app),
       catalogue: configRepository,
       policies: configRepository,
+      parties: workerParties,
       documents,
       shareTokens: new RandomTokenFactory(),
       ids: systemIds,

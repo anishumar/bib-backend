@@ -38,7 +38,22 @@ export type ProposalErrorCode =
   | "INVALID_OOP_ESTIMATE"
   | "INVALID_DISCOUNT"
   | "INVALID_FX_RATE"
-  | "INVALID_CURRENCY";
+  | "INVALID_CURRENCY"
+  | "PARTY_ARCHIVED";
+
+/** The client, or the company a line is for, was archived (0305). Restore it
+ *  first; a new document may not name a party the firm put away. */
+export class ProposalPartyArchived extends ProposalError {
+  constructor(displayName: string, as: "client" | "entity") {
+    super(
+      "PARTY_ARCHIVED",
+      `${displayName} is archived, so ${as === "client" ? "a new proposal cannot be drafted for them" : "a proposal line cannot be for them"}. ` +
+        `If the firm is working with them again, restore them from their client page first: ` +
+        `restoring is its own step, so that putting a client away is never undone without ` +
+        `somebody seeing it.`,
+    );
+  }
+}
 
 export class ProposalNotFound extends ProposalError {
   constructor(id: string) {

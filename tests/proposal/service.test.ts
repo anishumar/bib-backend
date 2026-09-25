@@ -34,6 +34,7 @@ import {
   ServiceNotPublished,
 } from "../../src/domain/proposal/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
+import { ProposalPartyArchived } from "../../src/domain/proposal/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -72,6 +73,39 @@ async function draftWith(
   );
   return p.id;
 }
+
+describe("a client the firm has ARCHIVED (0305)", () => {
+  // A new document may not name a party the firm put away. Refused with the
+  // client's name and where to restore them; the database refuses the same row
+  // underneath for any writer that is not this service.
+  it("refuses a new proposal for them, before a reference number is spent", async () => {
+    const s = setup();
+    s.parties.archive(PARTY, "Acme Industries Private Limited");
+    const err = await draftWith(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProposalPartyArchived);
+    expect((err as Error).message).toMatch(/Acme Industries Private Limited is archived/);
+    expect(s.proposals.rows).toHaveLength(0);
+    expect(s.events.recorded).toHaveLength(0);
+  });
+
+  it("refuses a line whose company was archived after the proposal was drafted", async () => {
+    const s = setup();
+    const id = await draftWith(s);
+    s.parties.archive(US_ENTITY, "Acme Inc.");
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        proposalId: id,
+        entityPartyId: US_ENTITY,
+        serviceVersionId: GST_VERSION,
+        description: "GST filing, 12 months",
+        quantity: "12",
+        unitAmount: "2000",
+        discountPercent: "0",
+      }),
+    ).rejects.toThrow(/Acme Inc\. is archived, so a proposal line cannot be for them/);
+  });
+});
 
 describe("drafting", () => {
   it("gives the document a number a client can quote back", async () => {

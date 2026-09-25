@@ -75,6 +75,7 @@ import {
   LetterNotEditable,
   LetterNotFound,
   LetterNotSupersedable,
+  LetterPartyArchived,
   NoClauses,
   NotAClause,
   ServiceNotQuotable,
@@ -101,6 +102,7 @@ import type {
   LetterPdf,
   LetterView,
   NewEngagement,
+  PartyStanding,
   SignatureDispatch,
   SignatureOutcome,
   SignatureRequest,
@@ -122,6 +124,8 @@ export interface Deps {
    *  row on the tenant so a successor is an UPDATE — tenancy satisfies this at
    *  the composition root. */
   readonly firm: FirmSignatory;
+  /** Whether a client or an entity has been archived (0305). */
+  readonly parties: PartyStanding;
   readonly esign: ESignProvider;
   /**
    * The signer for a letter the client signed BEFORE this product existed —
@@ -387,6 +391,10 @@ export class EngagementService {
       await this.requireSupersedable(input.tenantId, input.supersedesId);
     }
 
+    // An archived client gets no new letter (0305) - refused before the
+    // reference number is drawn.
+    await this.refuseArchived(input.tenantId, input.partyId, "client");
+
     // WHO is contracting. The letter already states WHERE the work is, so that
     // is the key the firm's rule is looked up on — "jahan ka client hota hai,
     // wahan ki entity" — and a country the firm has no entity in lands on the
@@ -529,6 +537,14 @@ export class EngagementService {
       (line) => this.entityFor(line, input.defaultEntityPartyId) !== null,
     );
     if (usable.length === 0) throw new QuoteNamesNoEntity(quote.ref, found.lines.length);
+    // Every company the letter would name, BEFORE the letter exists (0305). A
+    // quote line may name an entity archived since it was quoted, and finding
+    // that out line by line would leave a half-written letter holding a spent
+    // reference number.
+    const entities = new Set(
+      usable.map((line) => this.entityFor(line, input.defaultEntityPartyId)).filter((e) => e !== null),
+    );
+    for (const entity of entities) await this.refuseArchived(input.tenantId, entity, "entity");
 
     const letter = await this.draft(
       {
@@ -656,8 +672,23 @@ export class EngagementService {
     return only;
   }
 
+  /** A client or an entity the firm put away is not written onto a new
+   *  document (0305). A party that does not exist at all is left to the
+   *  foreign key, as it always was. */
+  private async refuseArchived(
+    tenantId: string,
+    partyId: string,
+    as: "client" | "entity",
+  ): Promise<void> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party !== null && party.archivedAt !== null) {
+      throw new LetterPartyArchived(party.displayName, as);
+    }
+  }
+
   async addLine(input: AddLetterLineInput): Promise<LetterLine> {
     const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
 
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidAmount("quantity", input.quantity);

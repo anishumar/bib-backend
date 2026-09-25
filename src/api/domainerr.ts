@@ -668,10 +668,14 @@ export function mapError(err: unknown): MappedError {
       // and none is a malformed request. AMBIGUOUS_MATCH in particular is a
       // conflict in the firm's own data — the same counterparty stored twice —
       // which the caller resolves by merging those parties, not by resending.
+      // PARTY_ARCHIVED (0305) joins them: the party is there and the request
+      // is well formed; what refuses it is that the firm put this client away,
+      // and it is answered by restoring them.
       case "AMBIGUOUS_MATCH":
       case "LEAD_CLOSED":
       case "SAME_STAGE":
       case "OWNER_NOT_STAFF":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -719,6 +723,7 @@ export function mapError(err: unknown): MappedError {
       case "DISCOUNT_NEEDS_APPROVAL":
       case "APPROVAL_NOT_NEEDED":
       case "ALREADY_APPROVED":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -797,6 +802,7 @@ export function mapError(err: unknown): MappedError {
       case "QUOTE_NOT_ACCEPTED":
       case "QUOTE_HAS_NO_LINES":
       case "QUOTE_NAMES_NO_ENTITY":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

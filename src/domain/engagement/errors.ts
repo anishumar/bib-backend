@@ -49,7 +49,22 @@ export type EngagementErrorCode =
   | "QUOTE_NOT_ACCEPTED"
   | "QUOTE_HAS_NO_LINES"
   | "QUOTE_JURISDICTION_UNCLEAR"
-  | "QUOTE_NAMES_NO_ENTITY";
+  | "QUOTE_NAMES_NO_ENTITY"
+  | "PARTY_ARCHIVED";
+
+/** The client, or the company a line is for, was archived (0305). A letter
+ *  may not name a party the firm put away; restore it first. */
+export class LetterPartyArchived extends EngagementError {
+  constructor(displayName: string, as: "client" | "entity") {
+    super(
+      "PARTY_ARCHIVED",
+      `${displayName} is archived, so ${as === "client" ? "a new engagement letter cannot be drafted for them" : "a letter line cannot be for them"}. ` +
+        `If the firm is working with them again, restore them from their client page first: ` +
+        `restoring is its own step, so that putting a client away is never undone without ` +
+        `somebody seeing it.`,
+    );
+  }
+}
 
 export class LetterNotFound extends EngagementError {
   constructor(id: string) {

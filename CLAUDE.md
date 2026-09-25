@@ -396,11 +396,24 @@ still points at the party, and the refusal names them. A trigger rather than a s
 because an import or an agent walks straight past a service, and it costs nothing on ordinary
 writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
 a rename fires nothing. **Read that guard as "you cannot put away a client you are still working
-with", not as "an archived party is unreferenced"** — it is checked at the moment of archiving and
-is not an invariant afterwards. Nothing stops a NEW reference being made to an archived party, and
-lead capture in particular resolves by identifier without consulting `archived_at`, so a capture
-carrying an archived party's PAN attaches to it. Making that the stronger invariant is a decision
-nobody has taken; it is on the board as an open item, not an oversight.
+with"** — it is checked at the moment of archiving.
+
+**AND AN ARCHIVED CLIENT GAINS NO NEW REFERENCE (0305, decided 2026-09-25).** The other direction
+was open until then: lead capture resolved a party by PAN without consulting `archived_at`, so a web
+enquiry attached a fresh lead to a client the firm had put away, and a proposal or letter could be
+drafted against one by id. **Refused, never quietly restored** — putting a client away was a
+person's decision and a form must not undo it unseen; restoring is its own act (the client page's
+Restore, `POST /parties/{id}/unarchive`). The services refuse first, BY NAME and pointing at the
+restore (`PARTY_ARCHIVED`, 409, in the lead, proposal and engagement families: capture, drafting a
+proposal or a letter, adding a line whose company is archived, and `draftFromQuote` before any
+letter exists so no reference number is spent). The wall under them is
+`core.refuse_reference_to_archived_party()`, a BEFORE INSERT / UPDATE-OF-the-column trigger on the
+six commercial references — lead, proposal, proposal line entity, letter, letter line entity and
+both of the engagement's — which fires only when the reference itself is new or changed, and names
+the party by id, never by name, because it reaches a server log. NOT covered, deliberately: the
+firm's own issuing entity, a letter's care-of person, and the delivery tables, which are produced
+from an engagement that already cannot exist for an archived party. The client import already
+refused an archived company ("Unarchive it first").
 
 ## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
 

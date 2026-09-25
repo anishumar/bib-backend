@@ -203,6 +203,28 @@ export class FakePartyRepo implements PartyRepository {
   }
 }
 
+/** Which parties are archived, for the use cases that refuse to name one on a
+ *  new document (0305). A party it has not been told about is not archived —
+ *  and a real read would find it live, which is the ordinary case. */
+export class FakePartyStanding {
+  readonly archived = new Map<string, string>();
+
+  archive(partyId: string, displayName: string): this {
+    this.archived.set(partyId, displayName);
+    return this;
+  }
+
+  findParty(
+    _tenantId: string,
+    partyId: string,
+  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null> {
+    const name = this.archived.get(partyId);
+    return Promise.resolve(
+      name === undefined ? null : { displayName: name, archivedAt: "2026-09-01T00:00:00.000Z" },
+    );
+  }
+}
+
 export class FakeIdentifierRepo implements IdentifierRepository {
   readonly rows: PartyIdentifier[] = [];
 

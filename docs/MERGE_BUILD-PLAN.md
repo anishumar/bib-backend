@@ -4625,6 +4625,12 @@ has to re-derive whether it was forgotten. Each needs a yes or a no rather than 
   holds is *"nothing pointed at it at the instant it was archived"*, which is weaker than the
   `CLAUDE.md` paragraph reads. Decide later whether capture should refuse an archived party or
   quietly unarchive it — both are defensible and neither should be guessed.
+  **DECIDED AND BUILT 2026-09-25 (Shrestha): refuse; restoring is an explicit act.** Migration
+  **0305** puts a trigger on the six commercial references (lead, proposal, proposal line entity,
+  letter, letter line entity, engagement) refusing a NEW or CHANGED reference to an archived
+  party; lead capture, proposal and letter drafting, and adding a line refuse first with
+  `PARTY_ARCHIVED` (409) naming the client and the Restore button. Proven in
+  `tests/party/archive.integration.test.ts` as the app role and as the owner.
 - ~~**G3.4** — pull `membership.party_id` forward from U1, or make `(B)`'s escalation wait.~~
   **Answered by events (2026-08-30): neither.** T2.9 built the reporting line on `membership`
   itself (`reports_to_user_id`, 0048) and escalation resolves through it today. What is left of

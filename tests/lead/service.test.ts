@@ -29,6 +29,7 @@ import {
   LeadClosed,
   LeadNotFound,
   LostReasonNotApplicable,
+  LeadPartyArchived,
   LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
@@ -241,6 +242,53 @@ describe("a prospect who comes back", () => {
     expect(second.matchedExistingParty).toBe(true);
     expect(second.lead.partyId).toBe(first.lead.partyId);
     expect(leads.rows).toHaveLength(2);
+  });
+});
+
+describe("a client the firm has ARCHIVED (0305)", () => {
+  // A web enquiry carrying an archived client's PAN used to attach a fresh lead
+  // to a party the firm had put away. Refused rather than quietly restored:
+  // restoring is its own act on the client page (Shrestha, 2026-09-25).
+  async function archivedMeridian() {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF);
+    const org = await fakes.party.createOrganization(
+      { tenantId: TENANT, legalName: "Meridian Textiles Private Limited" },
+      ACTOR,
+    );
+    await fakes.party.addIdentifier(
+      { tenantId: TENANT, partyId: org.partyId, type: "pan", value: PAN, validFrom: "2026-01-01" },
+      ACTOR,
+    );
+    await fakes.party.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    return { fakes, service: new LeadService(fakes), partyId: org.partyId };
+  }
+
+  it("refuses the capture, naming the client and where to restore them", async () => {
+    const { service } = await archivedMeridian();
+    const err = await service.capture(capture(), ACTOR).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LeadPartyArchived);
+    expect((err as LeadPartyArchived).code).toBe("PARTY_ARCHIVED");
+    expect((err as Error).message).toMatch(/Meridian Textiles Private Limited is archived/);
+    expect((err as Error).message).toMatch(/restore them from their client page/);
+  });
+
+  it("writes nothing: no lead, no new contact detail, no event", async () => {
+    const { fakes, service } = await archivedMeridian();
+    const before = fakes.events.recorded.length;
+    await service.capture(capture(), ACTOR).catch(() => undefined);
+    expect(fakes.leads.rows).toEqual([]);
+    // The email on the capture was NOT attached to the archived party.
+    expect(await fakes.prospects.findByIdentifier(TENANT, "email", EMAIL)).toBeNull();
+    expect(fakes.events.recorded).toHaveLength(before);
+  });
+
+  it("captures normally once the firm has restored the client", async () => {
+    const { fakes, service, partyId } = await archivedMeridian();
+    await fakes.party.unarchiveParty({ tenantId: TENANT, partyId }, ACTOR);
+    const result = await service.capture(capture(), ACTOR);
+    expect(result.lead.partyId).toBe(partyId);
+    expect(result.matchedExistingParty).toBe(true);
   });
 });
 

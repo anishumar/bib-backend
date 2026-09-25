@@ -37,6 +37,7 @@ import {
   InvalidOutOfPocketEstimate,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  LetterPartyArchived,
 } from "../../src/domain/engagement/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
 import type { BillingFrequency } from "../../src/domain/document/model";
@@ -1465,6 +1466,26 @@ describe("G1.8 — a letter cannot print another country's law", () => {
 });
 
 
+describe("a client the firm has ARCHIVED (0305)", () => {
+  it("refuses a new letter for them", async () => {
+    const s = setup();
+    s.parties.archive(PARTY, "Acme Industries Private Limited");
+    const err = await draft(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LetterPartyArchived);
+    expect((err as Error).message).toMatch(/Acme Industries Private Limited is archived/);
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
+  it("refuses a line whose company was archived", async () => {
+    const s = setup();
+    const id = await draft(s);
+    s.parties.archive(ENTITY_A, "Acme Foods Private Limited");
+    await expect(completeTerms(s, id)).rejects.toThrow(
+      /Acme Foods Private Limited is archived, so a letter line cannot be for them/,
+    );
+  });
+});
+
 describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
   const QUOTE = "00000000-0000-0000-0000-0000000000q1";
 
@@ -1522,6 +1543,15 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
     proposalId: QUOTE,
     advanceRequired: false,
     ...over,
+  });
+
+  it("REFUSES a quote naming an archived company BEFORE any letter exists (0305)", async () => {
+    // Found line by line, the refusal would leave a half-written letter holding
+    // a spent reference number.
+    const h = withQuote(quoted([quoteLine()]));
+    h.parties.archive(ENTITY_A, "Acme Foods Private Limited");
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(LetterPartyArchived);
+    expect(h.letters.letters).toHaveLength(0);
   });
 
   it("CARRIES THE PRICE ACROSS — the whole point, and what a walk found missing", async () => {
