@@ -152,6 +152,18 @@ export class DocumentService {
   }
 
   /**
+   * Whether a party is one of the firm's own companies — asked before any
+   * document names it as the issuer, or before an invoice bills it (F-10-1).
+   *
+   * Asked HERE, of the module that owns the issuing-entity rule, because the
+   * answer is that rule's list plus the firm itself: a company that issues
+   * nothing for any country is not one a new document should be issued by.
+   */
+  async isFirmEntity(tenantId: string, partyId: string): Promise<boolean> {
+    return this.deps.preferences.isFirmEntity(tenantId, partyId);
+  }
+
+  /**
    * Where the entity issuing a document is REGISTERED — G1.8's other half.
    *
    * The engagement module holds an issuing entity's id (it stored one at

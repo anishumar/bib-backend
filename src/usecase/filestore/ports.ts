@@ -174,7 +174,22 @@ export interface DocumentStoreRepository {
 
   attach(link: NewDocumentLink): Promise<DocumentLink>;
 
-  /** Everything this document is attached to, subjects resolved to labels. */
+  /**
+   * Take the document off one subject: stamps the LIVE link withdrawn and
+   * returns it, or null when there is no live link to withdraw. The row
+   * stays, so `linksOf` still lists it, marked; `listForSubject` no longer
+   * does. Attaching again afterwards makes a new row (0302).
+   */
+  withdraw(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly subjectKind: SubjectKind;
+    readonly subjectRef: string;
+    readonly withdrawnBy: string | null;
+  }): Promise<DocumentLink | null>;
+
+  /** Everything this document is attached to, subjects resolved to labels,
+   *  withdrawn links included and marked. */
   linksOf(tenantId: string, documentId: string): Promise<readonly DocumentLinkRecord[]>;
 
   /**

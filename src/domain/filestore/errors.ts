@@ -30,7 +30,8 @@ export type FileStoreErrorCode =
   | "UNKNOWN_SUBJECT_KIND"
   | "ALREADY_ATTACHED"
   | "BYTES_MISSING"
-  | "BRAND_ASSET_NOT_FOUND";
+  | "BRAND_ASSET_NOT_FOUND"
+  | "LINK_NOT_FOUND";
 
 export class DocumentNotFound extends FileStoreError {
   constructor(id: string) {
@@ -126,6 +127,16 @@ export class AlreadyAttached extends FileStoreError {
       "ALREADY_ATTACHED",
       `This document is already attached to ${subjectKind} ${JSON.stringify(subjectRef)}. ` +
         `Attaching the same file to the same thing twice is a double-click, not a second fact.`,
+    );
+  }
+}
+
+export class LinkNotFound extends FileStoreError {
+  constructor(subjectKind: string, subjectRef: string) {
+    super(
+      "LINK_NOT_FOUND",
+      `This document is not attached to ${subjectKind} ${JSON.stringify(subjectRef)}, so ` +
+        `there is nothing to take off. It may already have been withdrawn.`,
     );
   }
 }

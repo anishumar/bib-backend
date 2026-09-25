@@ -505,6 +505,13 @@ export class PartyService {
     return this.deps.parties.listParties(tenantId, includeArchived);
   }
 
+  /** One party by id, archived or not — the read that never hides the archive,
+   *  because a caller asking about ONE party is usually asking whether it may
+   *  still be used (0305). */
+  async findParty(tenantId: string, partyId: string): Promise<Party | null> {
+    return this.deps.parties.findParty(tenantId, partyId);
+  }
+
   /** The dedup entry point (phone + PAN + email): find the party holding an
    *  identifier, matching on its normalised value. */
   async findByIdentifier(

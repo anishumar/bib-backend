@@ -23,6 +23,7 @@ const ACTOR = { type: "human" as const, id: "00000000-0000-0000-0000-0000000000c
 
 function setup(): { service: InvoiceService } & ReturnType<typeof makeInvoiceFakes> {
   const fakes = makeInvoiceFakes();
+  fakes.firmEntities.add(ENTITY);
   return { ...fakes, service: new InvoiceService(fakes) };
 }
 

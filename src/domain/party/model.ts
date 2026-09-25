@@ -114,6 +114,49 @@ export interface PartyRelationship {
   readonly attributes: Record<string, unknown>;
 }
 
+// ── A client's structure (F-10-1) ─────────────────────────────────────────
+
+/**
+ * Who a document for ONE client may name, on one day.
+ *
+ * `entities` are the companies work for this client can be FOR: the client
+ * itself, every company recorded under it (`parent_of`, any depth), and every
+ * company the client holds a stake or a seat in (`shareholder_of`,
+ * `director_of`) together with the companies under those. `people` are the
+ * persons who hold a role in any of those entities (`CONTACT_ROLES`) — who a
+ * letter may be addressed to, care of the client — and the client itself when
+ * the client is a person.
+ *
+ * Decided by Shrestha on 2026-09-25: a line for another client's company, or a
+ * letter addressed to another client's director, is refused, and the answer to
+ * a refusal is to record the link on the client's page. Archived parties are
+ * left out: nothing new names them (0305).
+ *
+ * A READ MODEL rather than a yes/no, because the same answer fills the
+ * letter's pickers — so the screen offers exactly what the API accepts.
+ */
+export interface ClientStructure {
+  readonly entities: readonly StructureMember[];
+  readonly people: readonly StructureMember[];
+}
+
+export interface StructureMember {
+  readonly id: string;
+  readonly displayName: string;
+}
+
+/** The relationships FROM a client that bring a company into its structure
+ *  besides ownership (`parent_of`, which is followed to any depth). */
+export const STRUCTURE_HOLDINGS = ["shareholder_of", "director_of"] as const;
+
+/** The roles that make a person somebody a letter may be addressed to. */
+export const CONTACT_ROLES = [
+  "director_of",
+  "authorised_signatory_of",
+  "employee_of",
+  "shareholder_of",
+] as const;
+
 // ── Pure rules ────────────────────────────────────────────────────────────
 
 /** Normalise an identifier before storage/lookup so dedup is exact: emails

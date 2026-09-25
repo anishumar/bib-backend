@@ -19,10 +19,11 @@ import type {
  * implementation satisfies all three without any of them knowing.
  */
 export interface PortalScopeSource {
+  /** Resolved on the FIRM's day by the grant module itself — no caller's day
+   *  reaches it (F-07-1). */
   scopedCompanies(
     tenantId: string,
     userId: string,
-    on: string,
   ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]>;
 }
 

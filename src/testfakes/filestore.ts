@@ -144,6 +144,7 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
         .filter(
           (l) =>
             l.tenantId === input.tenantId &&
+            l.withdrawnAt === null &&
             l.subjectKind === input.subjectKind &&
             l.subjectRef === input.subjectRef,
         )
@@ -178,9 +179,31 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
   }
 
   attach(link: NewDocumentLink): Promise<DocumentLink> {
-    const row: DocumentLink = { ...link, createdAt: this.now() };
+    const row: DocumentLink = { ...link, createdAt: this.now(), withdrawnAt: null, withdrawnBy: null };
     this.links.push(row);
     return Promise.resolve(row);
+  }
+
+  withdraw(input: {
+    readonly tenantId: string;
+    readonly documentId: string;
+    readonly subjectKind: SubjectKind;
+    readonly subjectRef: string;
+    readonly withdrawnBy: string | null;
+  }): Promise<DocumentLink | null> {
+    const i = this.links.findIndex(
+      (l) =>
+        l.tenantId === input.tenantId &&
+        l.documentId === input.documentId &&
+        l.subjectKind === input.subjectKind &&
+        l.subjectRef === input.subjectRef &&
+        l.withdrawnAt === null,
+    );
+    const live = this.links[i];
+    if (live === undefined) return Promise.resolve(null);
+    const gone: DocumentLink = { ...live, withdrawnAt: this.now(), withdrawnBy: input.withdrawnBy };
+    this.links[i] = gone;
+    return Promise.resolve(gone);
   }
 
   linksOf(tenantId: string, documentId: string): Promise<readonly DocumentLinkRecord[]> {

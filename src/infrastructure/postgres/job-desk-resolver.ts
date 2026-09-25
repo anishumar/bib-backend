@@ -6,9 +6,10 @@
 // item use case), read here directly from the rows rather than through that
 // service, because the two use cases must not import each other and because
 // this question is narrower: ONE user id or nothing. "Two SPOCs on a Dept" is
-// a real state (leave cover, a handover fortnight) and the answer to "whose
-// desk by default" is then NOBODY'S — a person has to choose, which the job
-// page lets them do — rather than the first row the planner returned.
+// a real state (leave cover, a handover fortnight); since 2026-09-25 the
+// answer is the same TURN-TAKING rule `resolveAssignee` applies to the
+// month's task — whoever has had the fewest of this client's tasks — so a
+// job's steps land on the desk its umbrella task did, not on nobody's.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { StepDeskResolver } from "../../usecase/orchestrator/ports";
@@ -21,7 +22,7 @@ export class PostgresJobDeskResolver implements StepDeskResolver {
       // Half-open on the assignment's window, like every effective-dated row
       // in `crm`: `valid_to` is the first day NOT in force.
       const rows = await db<{ user_id: string }[]>`
-        SELECT DISTINCT ca.user_id
+        SELECT ca.user_id
         FROM delivery.job j
         JOIN delivery.job_engagement je
           ON je.job_id = j.id AND je.tenant_id = j.tenant_id
@@ -39,8 +40,17 @@ export class PostgresJobDeskResolver implements StepDeskResolver {
          AND ca.valid_from <= ${onDate}::date
          AND (ca.valid_to IS NULL OR ca.valid_to > ${onDate}::date)
         WHERE j.id = ${jobId}
+        GROUP BY ca.tenant_id, ca.user_id, e.party_id
+        -- Fewest of this client's tasks first: the turn-taking counter, the
+        -- same one spocsFor computes for the umbrella task.
+        ORDER BY (SELECT count(*) FROM delivery.work_item w
+                   WHERE w.tenant_id = ca.tenant_id
+                     AND w.client_party_id = e.party_id
+                     AND w.assignee_user_id = ca.user_id),
+                 min(ca.valid_from), ca.user_id
+        LIMIT 1
       `;
-      return rows.length === 1 ? (rows[0]?.user_id ?? null) : null;
+      return rows[0]?.user_id ?? null;
     });
   }
 }

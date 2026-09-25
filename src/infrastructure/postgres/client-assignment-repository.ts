@@ -336,10 +336,20 @@ export class PostgresClientAssignmentRepository
     onDate: string,
   ): Promise<readonly SpocCandidate[]> {
     return withTenant(this.app, tenantId, async (db) => {
+      // `routed` is the turn-taking counter (2026-09-25): how many of this
+      // client's tasks already sit, or sat, on each candidate's desk. Counted
+      // over ALL of the client's work items rather than open ones, so the
+      // rotation is even over time and a desk that just finished something is
+      // not immediately handed the next thing. Ordered longest-standing
+      // assignment first, which is the tie-break the domain rule relies on.
       const rows = await db<
-        { user_id: string; display_name: string | null; email: string }[]
+        { user_id: string; display_name: string | null; email: string; routed: number }[]
       >`
-        SELECT a.user_id, u.display_name, u.email::text AS email
+        SELECT a.user_id, u.display_name, u.email::text AS email,
+               (SELECT count(*)::int FROM delivery.work_item w
+                 WHERE w.tenant_id = a.tenant_id
+                   AND w.client_party_id = a.client_party_id
+                   AND w.assignee_user_id = a.user_id) AS routed
         FROM crm.client_assignment a
         JOIN tenancy.user_account u ON u.id = a.user_id
         WHERE a.client_party_id = ${clientPartyId}
@@ -347,12 +357,13 @@ export class PostgresClientAssignmentRepository
           AND a.axis_id = ${axisId}
           AND a.valid_from <= ${onDate}::date
           AND (a.valid_to IS NULL OR a.valid_to > ${onDate}::date)
-        ORDER BY u.display_name, u.email
+        ORDER BY a.valid_from, u.display_name, u.email
       `;
       return rows.map((r) => ({
         userId: r.user_id,
         displayName: r.display_name,
         email: r.email,
+        routed: r.routed,
       }));
     });
   }

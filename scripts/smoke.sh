@@ -839,6 +839,14 @@ ELLINE='{"entityPartyId":"'$ENT1'","serviceVersionId":"'$SVCV1'","description":"
 ELLINE2='{"entityPartyId":"'$ENT2'","serviceVersionId":"'$SVCV1'","description":"GST monthly filing, Logistics","quantity":"12","unitAmount":"1500","discountPercent":"0"}'
 NOENT='{"serviceVersionId":"'$SVCV1'","description":"whose company?","quantity":"1","unitAmount":"1","discountPercent":"0"}'
 chk "a letter line must name an entity"      400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$NOENT")"
+# …AND ONE OF THE CLIENT'S OWN (F-10-1). Any party of the firm used to pass, so
+# another client's company could be put on this client's letter and its work
+# would land in this client's portal. Recorded under the client — the way the
+# client page and the import record a group — the same line goes through.
+chk "…and one the client is recorded as holding" 409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
+for E in $ENT1 $ENT2; do
+  curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/parties/relationships -H "$H" -d '{"fromPartyId":"'$PID'","toPartyId":"'$E'","type":"parent_of","validFrom":"2020-04-01"}'
+done
 chk "agree a service"                        201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
 chk "…and one for the sister company"      201 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE2")"
 chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"

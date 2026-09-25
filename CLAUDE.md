@@ -149,6 +149,22 @@ the re-grant after it. **CREATING one that way is still refused, by the service*
 force on no day is a typo at the moment of granting, while ending one is a decision somebody took
 twenty seconds later. The database allows the shape; the service allows only the act.
 
+**AND "NOW" IS THE FIRM'S DAY, NEVER A DAY THE PORTAL CALLER SENDS (F-07-1, fixed 2026-09-25).**
+The portal routes took `?asOf=` so the browser's day could decide which filings are "upcoming" — a
+DISPLAY question — and the same value was handed to `scopedClientsForUser`, which decided which
+companies the login may SEE. So a contact removed today read everything again with
+`?asOf=yesterday`, and a grant dated to start next month was readable today. The audit's one High.
+`scopedClientsForUser(tenantId, userId)` now takes NO day and resolves on the firm's own
+(`dayInZone`, the tenant's zone); `grant` and `end` default to that same day, so both ends of
+"remove means now" use one clock. The four portal scope ports lost their day parameter, so no
+caller's day can reach the grant set by construction. `asOf` survives only on `/portal/home`, where
+it cuts the display, and it must be a real calendar day (F-07-4); the library, ask and request
+routes dropped it, because picking grants was all it ever did there. The request service reads the
+Key Manager on the firm's day for the same reason. `scopeFor(…, on)` keeps its day: it is the
+STAFF "who could see this in March" read, behind `portal:grant`.
+`tests/portal/grants-firm-day.integration.test.ts` asks as yesterday and as tomorrow and was
+watched go red with the grant check pinned to yesterday.
+
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
 by 0059 because it is the one business table carrying `client_party_id` directly, and
 `delivery.obligation_instance` by 0062 — on `entity_party_id`, because that is the column THAT
@@ -396,11 +412,24 @@ still points at the party, and the refusal names them. A trigger rather than a s
 because an import or an agent walks straight past a service, and it costs nothing on ordinary
 writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
 a rename fires nothing. **Read that guard as "you cannot put away a client you are still working
-with", not as "an archived party is unreferenced"** — it is checked at the moment of archiving and
-is not an invariant afterwards. Nothing stops a NEW reference being made to an archived party, and
-lead capture in particular resolves by identifier without consulting `archived_at`, so a capture
-carrying an archived party's PAN attaches to it. Making that the stronger invariant is a decision
-nobody has taken; it is on the board as an open item, not an oversight.
+with"** — it is checked at the moment of archiving.
+
+**AND AN ARCHIVED CLIENT GAINS NO NEW REFERENCE (0305, decided 2026-09-25).** The other direction
+was open until then: lead capture resolved a party by PAN without consulting `archived_at`, so a web
+enquiry attached a fresh lead to a client the firm had put away, and a proposal or letter could be
+drafted against one by id. **Refused, never quietly restored** — putting a client away was a
+person's decision and a form must not undo it unseen; restoring is its own act (the client page's
+Restore, `POST /parties/{id}/unarchive`). The services refuse first, BY NAME and pointing at the
+restore (`PARTY_ARCHIVED`, 409, in the lead, proposal and engagement families: capture, drafting a
+proposal or a letter, adding a line whose company is archived, and `draftFromQuote` before any
+letter exists so no reference number is spent). The wall under them is
+`core.refuse_reference_to_archived_party()`, a BEFORE INSERT / UPDATE-OF-the-column trigger on the
+six commercial references — lead, proposal, proposal line entity, letter, letter line entity and
+both of the engagement's — which fires only when the reference itself is new or changed, and names
+the party by id, never by name, because it reaches a server log. NOT covered, deliberately: the
+firm's own issuing entity, a letter's care-of person, and the delivery tables, which are produced
+from an engagement that already cannot exist for an archived party. The client import already
+refused an archived company ("Unarchive it first").
 
 ## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
 
@@ -1125,6 +1154,44 @@ without it the numbers always reconcile and *why* money came off does not — an
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
 
+## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
+
+The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The
+2026-09-23 audit found what that left open, and every hole was one a picker made easy: an
+invoice's `entity_party_id` could name a CLIENT (and open a gapless GST series in its name, which
+cannot be renumbered), its `party_id` could name the firm itself, a line's `engagement_id` could
+bill another client's engagement (its scope of work then reaching this client's portal in the
+PDF), a letter's `proposal_id` could cite a quote to another client, a letter or quote could be
+"issued by" a client, a letter line could be for another client's company, and a letter could be
+addressed to another client's director. All refused now, before any number is drawn:
+
+- **One of the firm's own companies** is `crm.is_firm_entity` (0306): the firm itself
+  (`is_firm_self`) or an issuer a `firm_entity_preference` row names — the very list the "Charged
+  by" picker shows. `DocumentService.isFirmEntity` asks the function rather than restating it,
+  and invoicing, proposals and letters all ask `DocumentService`. The issuer must be one; the
+  billed party must not (inter-company billing refused — Shrestha, 2026-09-25).
+- **The client's structure** is `RelationshipRepository.structureOf` — the client, every company
+  under it by `parent_of` to any depth, every company it is a `shareholder_of` or `director_of`
+  (and what is under those), and the people holding a `director_of` / `authorised_signatory_of` /
+  `employee_of` / `shareholder_of` role in any of them; in force on the FIRM's day, archived
+  parties left out, a recorded loop ending the walk. A letter line must be for one of those
+  companies and an addressee must be one of those people (and a person). **The same read is
+  `GET /parties/{id}/structure`**, so the letter's pickers and its refusals are one definition.
+  The answer to either refusal is to record the relationship on the client's page (409, like
+  `QUOTE_NAMES_NO_ENTITY`: the fact is missing from the firm's own records).
+- **An invoice's engagement is the billed client's** (`engagement.party_id = invoice.party_id`),
+  exactly what `billable-engagements` offers; **a letter's quote is its own client's**; **an
+  archived client gains no new invoice** (0305's rule, reaching the document it did not list).
+
+**The invariant ones are also WALLS (0306)**, for the writers that are not the services: the
+invoice's issuer and billed party, its series, its line's engagement and the letter's quote.
+Each trigger is NAMED to sort after the freeze on its table, because BEFORE triggers fire in
+name order and a change to a signed letter or an issued invoice must be refused as that.
+**The structure is deliberately not a trigger**: relationships are effective-dated and get
+ended and back-dated as a firm learns of them, so a wall would judge a signed letter by a
+structure that changed after it was signed. Nor is a quote's or letter's issuer walled: ten
+integration fixtures write them by hand, and only the invoice's issuer opens a legal series.
+
 ## Chasing a receivable — and the one rung a machine may not climb (T3.5)
 
 The dunning ladder is **config**, the registry's fifth kind: D+3, D+7, D+15 are the firm's
@@ -1170,8 +1237,12 @@ INSERT and nothing else, the same arrangement the `ledger` schema has. A trigger
 table carries; a missing grant is a permission the role does not hold, and an import or an
 agent walks past the first and not the second. `document_link` has no UPDATE either — changing
 what a document is attached to, in place, rewrites "what was filed against this engagement"
-with no trace. **Detaching is deliberately not implemented**: whether an attachment made in
-error should vanish or remain visible as withdrawn is a question for a firm, not a guess.
+with no trace. **Detaching is WITHDRAWING (0302, decided 2026-09-25)**: it was left unbuilt
+because whether an attachment made in error should vanish or remain visible was a question for
+a firm, and the firm answered "remain visible". So `withdrawn_at` / `withdrawn_by` are the ONLY
+two columns `bib_app` may UPDATE, a trigger freezes a withdrawn row, the unique key moved to a
+partial index over LIVE links so the document can go back on, and `document.link_withdrawn` is
+the verb. `listForSubject` hides withdrawn links; `linksOf` shows them, marked.
 
 **Storage is content-addressed, and the cost is the interesting half.** The key derives from
 the sha256, so a client re-sending a file stores one blob. The consequence is that **two
@@ -1246,16 +1317,28 @@ every morning, and opening the screen at 04:11 in Delhi found both halves of it:
 "as of 29-08" on the thirtieth, and then a client assigned from that form was missing from its
 holder's own book because `CURRENT_DATE` on a UTC server had not reached it. So `GET
 /api/v1/my-clients` takes `asOf`, `listOpenForClient` takes the date, `CURRENT_DATE` appears
-nowhere in this module's SQL, and the browser sends its LOCAL calendar day. **The defaults still
-use the server's day**, which is the honest fallback for a caller that did not say — and the
-same one-liner is still the convention in `invoice`, `dunning` and `lead`, which have the same
-bug and their own task to fix it in.
+nowhere in this module's SQL, and the browser sends its LOCAL calendar day. The defaults are the
+FIRM's day (`dayInZone`, since the 2026-09-23 fix), never the server's.
+
+**`invoice`, `dunning` and `lead` follow it since 2026-09-25.** Dunning's sweep had already moved
+to the firm's day in T6.14 and needed nothing more. `invoice` (the date a tax invoice is issued
+on, the year an undated one's series belongs to, a credit note's date) and `lead` (the day the
+contact details a capture attaches are in force from) now take `?asOf=` — the browser's local day
+— and default to the firm's. **A caller's `asOf` on a WRITE is held to the firm's day or one
+either side** (`isCallersToday` in `domain/scheduler/zone.ts`, refused as `NOT_CALLERS_TODAY`):
+every inhabited zone is within a day of every other, so that bound takes away no real today, and
+without it a route that stamps "today" on a numbered tax invoice would be a way to backdate one —
+the 2026-09-23 audit's High was a caller-supplied day deciding a recorded fact. A record that
+legitimately belongs to another day has its own field (`seriesDate`, a credit note's `issuedOn`).
+The one server-side `CURRENT_DATE` left in an adapter is the dashboard's "invoiced in the last N
+days", not part of this.
 
 `party:read` to see an account team, `party:write` to change one — not `tenant:admin`. Naming a
-Key Manager grants nobody anything; it is a fact about a client, like its identifiers. Its
-honest limit is on the SCREEN: the assign form needs the roster and the Dept list, both
-`tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
-`/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
+Key Manager grants nobody anything; it is a fact about a client, like its identifiers. The
+SCREEN's limit is closed since 2026-09-25: the assign form's two pickers read
+`/tenancy/colleagues` and `/tenancy/axes` (the ACTIVE Depts and teams), both `party:read`, where
+they were the admin roster and the admin `/tenancy/structure` — so a manager who may assign is
+now shown the form. The full structure, retired rows and the split axis stay `tenant:admin`.
 
 ## Rendering a document — and why the engine is pdf-lib (T3.8)
 
@@ -1404,6 +1487,23 @@ the prose: a sentence does not `GROUP BY`, and this log cannot be erased.
 **AN UNRESOLVED FACT KEEPS THE STEP.** A service that never stated its recurrence must not
 quietly lose a review because a field was blank. An extra review costs an hour; a missing one
 costs a filing. Read `evaluateCondition` before "simplifying" it into an else.
+
+**A CONDITION IS JUDGED AGAIN AFTER THE STEP OPENS (0304, 2026-09-25).** It was judged once,
+at the moment the step would start — but the facts are read LIVE (the service's recurrence, the
+entity's jurisdiction), so a step could sit on a desk for weeks after the firm's own rule
+stopped applying, and the only way off was to tick it done on work nobody did. Every walk now
+re-judges a `blocked` or `running` step (`withdrawOpenedSteps`) and skips it when the condition
+DEFINITELY fails and **no work is recorded on it** — `performed_by` null (so nothing was sent for
+checking) and no undecided machine proposal. Work that exists is never discarded because a
+catalogue field changed; it finishes the ordinary way. An unknown fact still keeps the step.
+The row keeps `started_at` (0304 relaxed the timestamp CHECK for exactly this: a skipped step
+may carry the day it OPENED, never a finish time) and its `assignee_user_id`; the note says it
+had opened and why it no longer applies; the step leaves the desk because it is no longer open;
+`job.step_skipped` adds `from`, `afterStart` and the assignee's id. Ticking it late answers
+`STEP_NO_LONGER_NEEDED` (409) with the reason, not "not waiting for anybody". **`cascadeSkips`
+still takes only pending steps and that is complete, not a gap**: a dependent cannot open
+before everything it depends on has settled, a settled step is never skipped later, and a
+withdrawn step was not settled — so nothing downstream of it has opened.
 
 **`listRunnable` includes `blocked`**, and leaving it out was the second real bug here: a job
 waiting on a person vanished from the work board AND from the sweep, so nothing would ever look
@@ -1670,11 +1770,19 @@ it true would put every piece of advisory work on the statutory priority and mak
 meaningless the day it matters. T3.2's obligations set it, from the law.
 
 **Routing refuses to guess, and the refusal is a SENTENCE.** One SPOC for the service's Dept →
-assigned. None, or more than one (G3.2 allows several) → UNASSIGNED with `assignment_note`
-saying which. Falling back to the Key Manager and taking the first SPOC are both rules the
-firm never gave, and **a wrong assignee is worse than none**: it sits on a desk whose owner
-believes it is not theirs, while unassigned work is visible in a queue that gets chased. The
-note is what makes that queue clearable rather than a pile.
+assigned. None → UNASSIGNED with `assignment_note` saying so. Falling back to the Key Manager
+is a rule the firm never gave, and **a wrong assignee is worse than none**: it sits on a desk
+whose owner believes it is not theirs, while unassigned work is visible in a queue that gets
+chased. The note is what makes that queue clearable rather than a pile.
+
+**MORE THAN ONE SPOC TAKES TURNS (Shrestha, 2026-09-25).** From 2026-08-30 that case was also
+left unassigned, because "take the first" was a rule nobody gave. The firm has now given one:
+the work is shared. `SpocCandidate.routed` counts how many of THIS client's tasks the router has
+ever put on each desk, `resolveAssignee` picks the fewest, and the tie-break is the
+longer-standing assignment. Two alternate, three rotate, and nothing is stored: the counter is
+read off `delivery.work_item` each time, so a SPOC back from leave catches up on their own. A
+job's steps follow the same rule through `PostgresJobDeskResolver`, so they land on the desk the
+month's task did.
 
 **`slaDays` is PINNED and the Dept is LIVE, on the same row.** A catalogue revision must not
 make finished work retroactively late (G2.3), so the SLA is snapshotted from the version the
@@ -1867,8 +1975,9 @@ abandon" stays answerable without a verb of its own.
 **`filed_on` is the UTC day, DECIDED rather than defaulted (Shrestha, 2026-08-30).** East of
 Greenwich a filing made after midnight local records the previous day, which is exactly the
 on-time/late boundary. It is survivable only because `work_item.completed_at` keeps the instant, so
-`filed_on` is a projection and the truth is not lost. The general fix is still open and still shared
-with `invoice`, `dunning` and `lead`.
+`filed_on` is a projection and the truth is not lost. `invoice`, `dunning` and `lead` no longer
+share it — they take the caller's or the firm's day since 2026-09-25 (see the client-assignment
+section) — so this is now the one deliberate UTC day left.
 
 **A boolean query parameter is NEVER `z.coerce.boolean()`.** Coercion is `Boolean(value)`, a query
 string carries TEXT, and `Boolean("false")` is `true` — so `?includeSettled=false` meant "include
@@ -1984,11 +2093,10 @@ everything derived from it — from "the law changed from a date" — a new reco
 explaining what it explained. Everything here ships `unconfirmed` precisely because nobody has
 checked it against the statute, so an edit there is a CORRECTION and restates in place. A
 period-specific legal change is an EXCEPTION, which is what a CBDT or GST extension actually is
-and which 0052 already built. **Effective-dated supersession is NOT built**, and the blocker is
-concrete rather than a preference: the generation window is `today−90 … today+365` for every
-generating rule, so a superseding row would immediately re-generate periods the retired one
-already produced — different `template_id`, so the re-run key does not catch it, and the calendar
-would show each filing twice. It needs an `effective_from` on the template.
+and which 0052 already built. **Effective-dated supersession IS built** — the window in 0057 and
+the handover in 0303, both below. The blocker this paragraph used to name was concrete: the
+generation window is `today−90 … today+365`, so a superseding row re-generated periods the old
+one had already produced, under a different `template_id` the re-run key could not see.
 
 **AN EXCEPTION IS A DATE CHANGE TOO, and adding one moves rows that already exist.** March's TDS
 is generated eleven months before anybody writes the carve-out saying March is due on 30 April.
@@ -2043,6 +2151,32 @@ generating at all, including for periods before the cutover that the ninety-day 
 not materialised yet, so a client onboarded last month would silently lose the period it was
 engaged for. A window says WHICH PERIODS a row governs; `is_active` says whether it is switched
 on. Different questions.
+
+**AND THE WINDOW ALONE LEFT EVERY RETURN TWICE — 0303 IS THE HANDOVER (2026-09-25).** The window
+stops a rule PROPOSING a period it does not govern. It could not stop what had already happened:
+the nightly sweep materialises a year ahead, so on the day a partner records "from 1 October the
+law says the 11th", the old rule has ALREADY produced October onward for every client — and the
+successor's own spawn produced them again. The 2026-08-31 walk read clean only because its rule
+was created and superseded before any sweep ran. Two halves, and each needs the other:
+
+- **The handover.** `supersede` takes the predecessor's rows past the cutover that nobody has
+  started (`work_item_id`, `filed_on` and `resolved_at` all null — the WHERE repeats it, the read
+  is a snapshot) and, in the SAME transaction, re-pins them to the successor with the successor's
+  dates from `scheduleFor`. Same row, same id — anything already naming that filing still names
+  it. A successor still waiting on a fact takes the rows with the dates they had, which is what
+  `restateUnstarted` already does when a formula is removed; its first answer restates them. A
+  started, filed or decided row STAYS on the rule it was worked under, with its date, and is
+  counted: `RuleEffect` is `restated` (moved to a new date) / `locked` (kept) / `spawned`, and the
+  screen's existing sentences fit it word for word.
+- **The wall.** `lineage_id` names a rule's chain — its own id, inherited through
+  `supersedes_id` — DERIVED by trigger on insert and refused on update, so no caller supplies it
+  and every hand-written INSERT keeps working. The calendar row carries it too (filled by trigger,
+  held to its template's by a composite foreign key over `(template_id, lineage_id, tenant_id)`,
+  0067's pattern for a denormalised column) and **`obligation_instance_lineage_key` is `(tenant,
+  lineage, entity, period_start)`**: one filing per entity, per period, per chain. The
+  generator's `ON CONFLICT` targets it, so a period a KEPT row still holds is skipped rather than
+  produced beside it. `supersede.integration.test.ts` proves the handover guard with ids it must
+  refuse, the key through the sweep's own insert and by hand, and the frozen chain.
 
 **`restate`'s SQL is executed by an integration test, not a fake.** It uses the same
 `jsonb_to_recordset(…::text::jsonb)` construction as the batch insert, whose double cast exists

@@ -54,6 +54,7 @@ import type {
   RoleRegistrySeeder,
   TenantRepository,
   UserRepository,
+  Colleague,
 } from "./ports";
 
 export interface Deps {
@@ -466,6 +467,37 @@ export class TenancyService {
   /** The roster: everyone with a membership here, deactivated people included. */
   async listMembers(tenantId: string): Promise<readonly MemberRecord[]> {
     return this.deps.memberships.listMembers(tenantId);
+  }
+
+  /**
+   * Who at this firm work can be handed to: active STAFF only, by name and
+   * rung, and WITHOUT the email address.
+   *
+   * The roster (`listMembers`) is `tenant:admin` because it names colleagues'
+   * email addresses and says who has been let go; that stays so. But three
+   * screens that only need a PICKER (whose desk a task sits on, who owns a
+   * lead, who is a client's SPOC) were reading the roster and therefore
+   * showing no picker at all to a manager who holds the permission to assign.
+   * "A manager may assign but cannot see whom to" is the gap CLAUDE.md
+   * recorded on G3.2 and left consistent rather than fixed; this is the fix,
+   * decided 2026-09-25: every member of staff may see their colleagues' names.
+   *
+   * No email, deliberately, so the wider decision (a staff directory) is not
+   * taken here by accident. A revoked membership is left out, because offering
+   * it produces the assign route's refusal, and a portal contact is left out
+   * because work is never handed to a client.
+   */
+  async listColleagues(tenantId: string): Promise<readonly Colleague[]> {
+    const roster = await this.deps.memberships.listMembers(tenantId);
+    return roster
+      .filter((m) => m.membership.isActive && m.membership.audience === "STAFF")
+      .map((m) => ({
+        userId: m.membership.userId,
+        displayName: m.displayName,
+        role: m.membership.role,
+        gradeName: m.grade?.name ?? null,
+        gradeRank: m.grade?.rank ?? null,
+      }));
   }
 
   /**

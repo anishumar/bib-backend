@@ -599,14 +599,25 @@ export class FakeSpocDirectory implements SpocDirectory {
     spoc: SpocCandidate;
   }[] = [];
 
+  /** Tasks the fake has seen routed, per (client, user): the turn-taking
+   *  counter the real adapter reads off `delivery.work_item`. A test that
+   *  wants a desk to look busy bumps it directly. */
+  readonly routed = new Map<string, number>();
+
   add(
     clientPartyId: string,
     axisId: string,
-    spoc: SpocCandidate,
+    spoc: Omit<SpocCandidate, "routed">,
     validFrom = "2000-01-01",
     validTo: string | null = null,
   ): void {
-    this.rows.push({ clientPartyId, axisId, validFrom, validTo, spoc });
+    this.rows.push({ clientPartyId, axisId, validFrom, validTo, spoc: { ...spoc, routed: 0 } });
+  }
+
+  /** Record that a task landed on somebody's desk, as the real table would. */
+  bump(clientPartyId: string, userId: string): void {
+    const key = `${clientPartyId}:${userId}`;
+    this.routed.set(key, (this.routed.get(key) ?? 0) + 1);
   }
 
   spocsFor(
@@ -626,7 +637,10 @@ export class FakeSpocDirectory implements SpocDirectory {
             r.validFrom <= onDate &&
             (r.validTo === null || onDate < r.validTo),
         )
-        .map((r) => r.spoc),
+        .map((r) => ({
+          ...r.spoc,
+          routed: this.routed.get(`${clientPartyId}:${r.spoc.userId}`) ?? 0,
+        })),
     );
   }
 }

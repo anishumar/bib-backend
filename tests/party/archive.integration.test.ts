@@ -327,19 +327,106 @@ describe("the guard is narrow, deliberately", () => {
     expect(party.party.displayName).toBe(`Renamed Twice ${stamp}`);
   });
 
-  it("un-archiving is never refused, even once something points at the party", async () => {
-    // Archive first (nothing refers to it yet), then create the reference, then
-    // restore. Bringing a party back cannot orphan anything, so the guard has
-    // no business firing here.
+  it("un-archiving is never refused, and is what lets a new reference be made", async () => {
+    // Until 0305 this test made its reference to the ARCHIVED party and then
+    // restored it. That reference is now refused (see the block below), so the
+    // order is the one the product asks for: restore, then work with them.
     const partyId = await newParty(`Restored Under Reference ${stamp}`);
     await service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
+
+    const restored = await service.unarchiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
+    expect(restored.archivedAt).toBeNull();
     await withTenant(app, tenant, (db) =>
       db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
          VALUES (${tenant}, ${partyId}, 'inbound', 'new', 'Unarchive probe')`,
     );
+  });
+});
 
-    const restored = await service.unarchiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
-    expect(restored.archivedAt).toBeNull();
+describe("a NEW reference to an archived party is refused (0305)", () => {
+  // 0035 refused ARCHIVING while something pointed at a party. Nothing stopped
+  // the other direction: lead capture matched an archived client's PAN and
+  // attached a fresh lead to it. The services now refuse by name; these prove
+  // the wall under them, for the writers that are not those services.
+  async function archived(name: string): Promise<string> {
+    const partyId = await newParty(`${name} ${stamp}`);
+    await service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
+    return partyId;
+  }
+
+  it("refuses a lead naming it, as the app role — the import and agent path", async () => {
+    const partyId = await archived("Archived Lead Target");
+    await expect(
+      withTenant(app, tenant, (db) =>
+        db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+           VALUES (${tenant}, ${partyId}, 'inbound', 'new', 'Web enquiry')`,
+      ),
+    ).rejects.toThrow(/is archived, so a new crm\.lead may not name it/);
+  });
+
+  it("refuses it as the OWNER role too — the psql path", async () => {
+    const partyId = await archived("Archived Owner Target");
+    await expect(
+      owner`INSERT INTO crm.lead (tenant_id, party_id, source, stage, title)
+            VALUES (${tenant}, ${partyId}, 'inbound', 'new', 'psql')`,
+    ).rejects.toThrow(/is archived/);
+  });
+
+  it("refuses a proposal naming it", async () => {
+    const partyId = await archived("Archived Proposal Target");
+    const issuer = await newParty(`Issuer ${stamp}`);
+    await expect(
+      withTenant(app, tenant, (db) =>
+        db`INSERT INTO crm.proposal
+             (tenant_id, party_id, title, currency, fx_rate, fx_rate_date, ref,
+              issuing_entity_party_id)
+           VALUES (${tenant}, ${partyId}, 'FY27', 'INR', 1, '2026-09-25',
+                   ${`PR-2026-${stamp.slice(-4)}`}, ${issuer})`,
+      ),
+    ).rejects.toThrow(/is archived, so a new crm\.proposal may not name it/);
+  });
+
+  it("leaves an EXISTING row alone, and refuses only a new line naming the company", async () => {
+    // The subsidiary is archived FIRST, the proposal is about a live client,
+    // and an ordinary edit of an existing line must pass while re-pointing it
+    // at the archived company — a new reference — must not.
+    const client = await newParty(`Live Client ${stamp}`);
+    const subsidiary = await archived("Archived Subsidiary");
+    const lineId = await withTenant(app, tenant, async (db) => {
+      const [entry] = await db<{ id: string }[]>`
+        INSERT INTO config.entry (tenant_id, kind, key)
+        VALUES (${tenant}, 'service', ${`gst-0305-${stamp}`}) RETURNING id
+      `;
+      const [version] = await db<{ id: string }[]>`
+        INSERT INTO config.version (tenant_id, entry_id, version, status, body)
+        VALUES (${tenant}, ${entry?.id ?? ""}, 1, 'draft', '{}'::jsonb) RETURNING id
+      `;
+      const [proposal] = await db<{ id: string }[]>`
+        INSERT INTO crm.proposal
+          (tenant_id, party_id, title, currency, fx_rate, fx_rate_date, ref,
+           issuing_entity_party_id)
+        VALUES (${tenant}, ${client}, 'Group FY27', 'INR', 1, '2026-09-25',
+                ${`PR-2027-${stamp.slice(-4)}`}, ${client}) RETURNING id
+      `;
+      // A line for the live client itself goes in, and can be edited freely.
+      const [line] = await db<{ id: string }[]>`
+        INSERT INTO crm.proposal_line
+          (tenant_id, proposal_id, service_version_id, description, position,
+           quantity, unit_amount, currency, entity_party_id)
+        VALUES (${tenant}, ${proposal?.id ?? ""}, ${version?.id ?? ""}, 'GST filing', 1,
+                1, '15000.0000', 'INR', ${client}) RETURNING id
+      `;
+      await db`UPDATE crm.proposal_line SET description = 'GST filing, monthly'
+               WHERE id = ${line?.id ?? ""}`;
+      return line?.id ?? "";
+    });
+    // Pointing it at the archived subsidiary is a NEW reference: refused. Its
+    // own transaction, because a refused statement aborts the one it is in.
+    await expect(
+      withTenant(app, tenant, (db) =>
+        db`UPDATE crm.proposal_line SET entity_party_id = ${subsidiary} WHERE id = ${lineId}`,
+      ),
+    ).rejects.toThrow(/is archived, so a new crm\.proposal_line may not name it/);
   });
 });
 

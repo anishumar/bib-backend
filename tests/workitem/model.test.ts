@@ -51,7 +51,7 @@ function priority(over: Partial<WorkItemPriority> & { id: string }): WorkItemPri
 }
 
 function spoc(userId: string, displayName: string | null = null): SpocCandidate {
-  return { userId, displayName, email: `${userId}@example.test` };
+  return { userId, displayName, email: `${userId}@example.test`, routed: 0 };
 }
 
 describe("the starting state", () => {
@@ -176,22 +176,35 @@ describe("routing a filing to the client's Dept SPOC", () => {
     expect(out.note).toContain("No SPOC");
   });
 
-  it("leaves it unassigned when there are TWO, and names them", () => {
-    // G3.2 deliberately allows more than one per Dept — leave cover, a joint
-    // SPOC, a fortnight's parallel handover — so "take the first" is a rule
-    // nobody gave. A WRONG assignee is worse than none: it sits on a desk whose
-    // owner believes it is not theirs, whereas unassigned work is visible in a
-    // queue that gets chased. Shrestha's call, 2026-08-30.
-    const out = resolveAssignee([spoc("priya", "Priya"), spoc("anand", "Anand")], "FRC");
-    expect(out.userId).toBeNull();
-    expect(out.note).toContain("Priya");
-    expect(out.note).toContain("Anand");
-    expect(out.note).toContain("2 SPOCs");
+  it("takes turns when there are TWO: whoever has had the fewest of this client's tasks", () => {
+    // G3.2 deliberately allows more than one per Dept. Until 2026-09-25 this
+    // was left unassigned with a note ("take the first" is a rule nobody
+    // gave); the firm has since said the work is SHARED. So the rule is
+    // turn-taking off the rows: fewest routed so far wins, no state kept.
+    const priya = spoc("priya", "Priya");
+    const anand = spoc("anand", "Anand");
+    expect(resolveAssignee([{ ...priya, routed: 0 }, { ...anand, routed: 0 }], "FRC").userId).toBe("priya");
+    expect(resolveAssignee([{ ...priya, routed: 1 }, { ...anand, routed: 0 }], "FRC").userId).toBe("anand");
+    expect(resolveAssignee([{ ...priya, routed: 1 }, { ...anand, routed: 1 }], "FRC").userId).toBe("priya");
+    expect(resolveAssignee([{ ...priya, routed: 3 }, { ...anand, routed: 1 }], "FRC").userId).toBe("anand");
   });
 
-  it("names people by email when the firm has recorded no display name", () => {
+  it("assigns rather than annotates when it takes a turn", () => {
+    // The note is what UNASSIGNED work says about itself, and the schema
+    // refuses one beside a name (`work_item_note_only_when_unassigned`).
     const out = resolveAssignee([spoc("priya"), spoc("anand")], "TRC");
-    expect(out.note).toContain("priya@example.test");
+    expect(out.userId).not.toBeNull();
+    expect(out.note).toBeNull();
+  });
+
+  it("breaks a tie by the directory's order, which is the longer-standing assignment", () => {
+    // Three rotate: the counter rises on whoever was picked, so the next call
+    // lands on the next name, and a fourth task comes back round.
+    const a = { ...spoc("a"), routed: 1 };
+    const b = { ...spoc("b"), routed: 1 };
+    const c = { ...spoc("c"), routed: 0 };
+    expect(resolveAssignee([a, b, c], "RAA").userId).toBe("c");
+    expect(resolveAssignee([a, b, { ...c, routed: 1 }], "RAA").userId).toBe("a");
   });
 
   it("says something useful even when the service names no Dept at all", () => {

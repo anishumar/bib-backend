@@ -124,7 +124,12 @@ export class FakeJobStepRepo implements JobStepRepository {
       status: to.status,
       outcomeNote: to.outcomeNote ?? null,
       performedBy: to.performedBy ?? null,
-      startedAt: starts || finishes ? (current.startedAt ?? to.at) : null,
+      startedAt:
+        starts || finishes
+          ? (current.startedAt ?? to.at)
+          : to.status === "skipped"
+            ? current.startedAt
+            : null,
       finishedAt: finishes ? to.at : null,
     };
     this.rows[i] = next;

@@ -34,6 +34,7 @@ import type { ResolvedTemplate, TemplateStep } from "../../src/usecase/orchestra
 import {
   NoTemplatePublished,
   NothingProposed,
+  StepNoLongerNeeded,
   StepNotWaiting,
   TemplateUnreadable,
 } from "../../src/domain/orchestrator/errors";
@@ -327,6 +328,166 @@ describe("branch — a step whose condition does not hold is skipped, and the re
     // A blank field in the catalogue must not quietly remove a step from a
     // process. An extra review costs an hour; a missing one costs a filing.
     expect((await board(w))["annual_summary"]).toBe("blocked");
+  });
+});
+
+// ── A RULE THAT STOPS APPLYING AFTER THE STEP OPENED (0304) ─────────────────
+
+describe("a step whose condition stops holding AFTER it opened", () => {
+  // The facts are read live: the service's recurrence can be republished and an
+  // entity's jurisdiction corrected while a step already sits on a desk. Judged
+  // only at the start, that step stayed there until somebody ticked it "done"
+  // on work nobody did.
+  const branching = template([
+    step({ key: "collect" }),
+    step({
+      key: "annual_summary",
+      dependsOn: ["collect"],
+      condition: { fact: "recurrence", op: "equals", value: "annually" },
+    }),
+    step({ key: "annual_review", dependsOn: ["annual_summary"] }),
+    step({ key: "file", dependsOn: ["collect"] }),
+  ]);
+
+  async function opened(): Promise<World> {
+    const w = await world({ recurrence: "annually" });
+    w.templates.publish(TENANT, TEMPLATE_KEY, branching);
+    await w.service.advance(TENANT, w.job, ACTOR);
+    await w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "collect" }, ACTOR, PRIYA);
+    expect((await board(w))["annual_summary"]).toBe("blocked");
+    return w;
+  }
+
+  function moveTo(w: World, recurrence: string | null): void {
+    w.subjects.set(JOB, { workflowTemplateKey: TEMPLATE_KEY, recurrence, jurisdiction: "IN" });
+  }
+
+  const row = (w: World, key: string) => w.steps.rows.find((r) => r.stepKey === key);
+
+  it("withdraws it on the next walk, keeps when it opened, and says why", async () => {
+    const w = await opened();
+    const openedAt = row(w, "annual_summary")?.startedAt;
+    expect(openedAt).not.toBeNull();
+
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+
+    const summary = row(w, "annual_summary");
+    expect(summary?.status).toBe("skipped");
+    // The day it opened survives: "why was this on my list and then gone" is
+    // answered by exactly this.
+    expect(summary?.startedAt).toBe(openedAt);
+    expect(summary?.finishedAt).toBeNull();
+    // Nobody performs a skip.
+    expect(summary?.performedBy).toBeNull();
+    expect(summary?.outcomeNote).toMatch(/had already opened and no longer applies/);
+    expect(summary?.outcomeNote).toMatch(/"monthly"/);
+  });
+
+  it("takes what depended on it with it, and the job carries on", async () => {
+    const w = await opened();
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+
+    expect(await board(w)).toEqual({
+      collect: "done",
+      annual_summary: "skipped",
+      annual_review: "skipped",
+      file: "blocked",
+    });
+    await w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "file" }, ACTOR, PRIYA);
+    expect(await jobStatus(w)).toBe("done");
+  });
+
+  it("records the fact, where it was, and whose desk, never the note", async () => {
+    const w = await opened();
+    // On Anand's desk, as the SPOC default or a hand-over would have left it.
+    const open = row(w, "annual_summary");
+    if (!open) throw new Error("expected the step");
+    w.steps.rows[w.steps.rows.indexOf(open)] = { ...open, assigneeUserId: ANAND };
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+
+    const skip = w.events.recorded.find(
+      (e) => e.verb === "job.step_skipped" && e.payload["stepKey"] === "annual_summary",
+    );
+    expect(skip?.payload).toEqual({
+      stepKey: "annual_summary",
+      fact: "recurrence",
+      op: "equals",
+      expected: "annually",
+      actual: "monthly",
+      from: "blocked",
+      afterStart: true,
+      assigneeUserId: ANAND,
+    });
+    // Whose desk it was on stays on the row: that is history, not a live desk.
+    expect(row(w, "annual_summary")?.assigneeUserId).toBe(ANAND);
+  });
+
+  it("KEEPS it when the fact becomes unknown, not merely different", async () => {
+    const w = await opened();
+    moveTo(w, null);
+    await w.service.advance(TENANT, w.job, ACTOR);
+    expect((await board(w))["annual_summary"]).toBe("blocked");
+  });
+
+  it("KEEPS it once somebody has done the work on it", async () => {
+    // Ticked and sent for checking: `performed_by` is written and the step
+    // stays blocked on its check. The work exists, and a catalogue change is
+    // no reason to throw it away.
+    const w = await opened();
+    const summary = row(w, "annual_summary");
+    if (!summary) throw new Error("expected the step");
+    w.steps.rows[w.steps.rows.indexOf(summary)] = { ...summary, performedBy: PRIYA };
+
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+    expect((await board(w))["annual_summary"]).toBe("blocked");
+  });
+
+  it("KEEPS it while a machine's answer is waiting on a person", async () => {
+    const w = await world({ recurrence: "annually" });
+    w.agents.arm("draft");
+    w.templates.publish(
+      TENANT,
+      TEMPLATE_KEY,
+      template([
+        step({
+          key: "draft",
+          executor: "agent_with_approval",
+          condition: { fact: "recurrence", op: "equals", value: "annually" },
+        }),
+      ]),
+    );
+    await w.service.advance(TENANT, w.job, ACTOR);
+    expect(await board(w)).toEqual({ draft: "blocked" });
+
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+    expect(await board(w)).toEqual({ draft: "blocked" });
+  });
+
+  it("answers a late tick with WHY there is nothing to tick", async () => {
+    const w = await opened();
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+
+    await expect(
+      w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "annual_summary" }, ACTOR, PRIYA),
+    ).rejects.toThrow(StepNoLongerNeeded);
+    await expect(
+      w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "annual_summary" }, ACTOR, PRIYA),
+    ).rejects.toThrow(/no longer needed.*had already opened/);
+  });
+
+  it("does nothing on a second walk", async () => {
+    const w = await opened();
+    moveTo(w, "monthly");
+    await w.service.advance(TENANT, w.job, ACTOR);
+    const before = w.events.recorded.filter((e) => e.verb === "job.step_skipped").length;
+    await w.service.advance(TENANT, w.job, ACTOR);
+    expect(w.events.recorded.filter((e) => e.verb === "job.step_skipped")).toHaveLength(before);
   });
 });
 

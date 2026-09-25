@@ -75,6 +75,7 @@ import {
   LetterNotEditable,
   LetterNotFound,
   LetterNotSupersedable,
+  LetterPartyArchived,
   NoClauses,
   NotAClause,
   ServiceNotQuotable,
@@ -83,8 +84,15 @@ import {
   EnvelopeAlreadySigned,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  AddresseeNotAPerson,
+  AddresseeNotLinked,
+  EntityOutsideClient,
+  IssuerNotAFirmEntity,
+  QuoteOfAnotherClient,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
+import type { ClientStructure } from "../../domain/party/model";
+import { dayInZone } from "../../domain/scheduler/zone";
 import type {
   ClauseLibrary,
   ContentHasher,
@@ -92,6 +100,8 @@ import type {
   ESignProvider,
   AcceptedQuoteDirectory,
   BillableEngagement,
+  ClientStructureDirectory,
+  FirmTimeZone,
   EngagementRecord,
   EngagementRepository,
   FirmSignatory,
@@ -102,6 +112,7 @@ import type {
   LetterPdf,
   LetterView,
   NewEngagement,
+  PartyStanding,
   SignatureDispatch,
   SignatureOutcome,
   SignatureRequest,
@@ -127,6 +138,8 @@ export interface Deps {
    *  port because the mark is per ENTITY while the signatory is per firm, and
    *  because the document store owns brand assets. */
   readonly firmSignatureImage: FirmSignatureImage;
+  /** Whether a client or an entity has been archived (0305). */
+  readonly parties: PartyStanding;
   readonly esign: ESignProvider;
   /**
    * The signer for a letter the client signed BEFORE this product existed —
@@ -140,6 +153,11 @@ export interface Deps {
   /** The accepted quote a letter is written up from (T3.5b). Satisfied
    *  structurally by `ProposalService`, so neither use case imports the other. */
   readonly quotes: AcceptedQuoteDirectory;
+  /** The client's structure: which companies a letter's lines may be for, and
+   *  whom it may be addressed to (F-10-1). */
+  readonly structure: ClientStructureDirectory;
+  /** The firm's zone, for the day that structure is read on. */
+  readonly timeZones: FirmTimeZone;
   readonly hasher: ContentHasher;
   /** Whom a provider was asked to have sign, and which envelope (0080). */
   readonly signatures: SignatureRequestRepository;
@@ -392,6 +410,24 @@ export class EngagementService {
       await this.requireSupersedable(input.tenantId, input.supersedesId);
     }
 
+    // An archived client gets no new letter (0305) - refused before the
+    // reference number is drawn.
+    await this.refuseArchived(input.tenantId, input.partyId, "client");
+
+    // WHO ELSE the letter names, also before the number is drawn (F-10-1).
+    // Each of these was checked for the FIRM only, so a client's company as
+    // the issuer, a quote made to another client, or another client's director
+    // as the addressee could all be written onto this letter.
+    if (input.issuingEntityPartyId !== undefined) {
+      await this.requireFirmEntity(input.tenantId, input.issuingEntityPartyId);
+    }
+    if (input.proposalId !== undefined) {
+      await this.requireQuoteOf(input.tenantId, input.proposalId, input.partyId);
+    }
+    if (input.addressedToPartyId !== undefined) {
+      await this.requireContact(input.tenantId, input.partyId, input.addressedToPartyId);
+    }
+
     // WHO is contracting. The letter already states WHERE the work is, so that
     // is the key the firm's rule is looked up on — "jahan ka client hota hai,
     // wahan ki entity" — and a country the firm has no entity in lands on the
@@ -534,6 +570,21 @@ export class EngagementService {
       (line) => this.entityFor(line, input.defaultEntityPartyId) !== null,
     );
     if (usable.length === 0) throw new QuoteNamesNoEntity(quote.ref, found.lines.length);
+    // Every company the letter would name, BEFORE the letter exists (0305). A
+    // quote line may name an entity archived since it was quoted, and finding
+    // that out line by line would leave a half-written letter holding a spent
+    // reference number.
+    const entities = new Set(
+      usable.map((line) => this.entityFor(line, input.defaultEntityPartyId)).filter((e) => e !== null),
+    );
+    for (const entity of entities) await this.refuseArchived(input.tenantId, entity, "entity");
+    // And every one of them the CLIENT'S (F-10-1), for the same reason: a quote
+    // line may name any company of the firm, and finding that out at the
+    // fourth line would leave a half-written letter holding a spent number.
+    const structure = await this.structureFor(input.tenantId, quote.partyId);
+    for (const entity of entities) {
+      await this.requireInStructure(input.tenantId, quote.partyId, entity, structure);
+    }
 
     const letter = await this.draft(
       {
@@ -661,8 +712,103 @@ export class EngagementService {
     return only;
   }
 
+  /**
+   * The client's structure on the FIRM's day (F-10-1): the companies work for
+   * this client may be for, and the people a letter to it may be addressed to.
+   *
+   * The read behind `GET /parties/{partyId}/structure` AND the rule the checks
+   * below apply, so the letter's pickers offer exactly what drafting accepts.
+   * The firm's day and not the server's: a directorship that starts today in
+   * Delhi must count from the morning, not from 05:30.
+   */
+  async structureFor(tenantId: string, clientPartyId: string): Promise<ClientStructure> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const today = dayInZone(this.deps.clock.now().toISOString(), zone);
+    return this.deps.structure.structureOf(tenantId, clientPartyId, today);
+  }
+
+  /** A party's name for a refusal, or its id when it has none on file. */
+  private async nameOf(tenantId: string, partyId: string): Promise<string> {
+    return (await this.deps.parties.findParty(tenantId, partyId))?.displayName ?? partyId;
+  }
+
+  /** The letter's issuer must be one of the firm's own companies (F-10-1). */
+  private async requireFirmEntity(tenantId: string, partyId: string): Promise<void> {
+    if (await this.deps.documents.isFirmEntity(tenantId, partyId)) return;
+    throw new IssuerNotAFirmEntity(await this.nameOf(tenantId, partyId));
+  }
+
+  /** A letter drafted "from" a quote names a quote made to THIS client. */
+  private async requireQuoteOf(
+    tenantId: string,
+    proposalId: string,
+    clientPartyId: string,
+  ): Promise<void> {
+    const found = await this.deps.quotes.findQuote(tenantId, proposalId);
+    if (found === null) throw new QuoteNotFound(proposalId);
+    if (found.proposal.partyId === clientPartyId) return;
+    throw new QuoteOfAnotherClient(
+      found.proposal.ref,
+      await this.nameOf(tenantId, found.proposal.partyId),
+      await this.nameOf(tenantId, clientPartyId),
+    );
+  }
+
+  /** The addressee is a PERSON with a recorded role in the client's structure. */
+  private async requireContact(
+    tenantId: string,
+    clientPartyId: string,
+    personPartyId: string,
+  ): Promise<void> {
+    const person = await this.deps.parties.findParty(tenantId, personPartyId);
+    if (person !== null && person.kind !== "person") {
+      throw new AddresseeNotAPerson(person.displayName);
+    }
+    const structure = await this.structureFor(tenantId, clientPartyId);
+    if (structure.people.some((p) => p.id === personPartyId)) return;
+    throw new AddresseeNotLinked(
+      person?.displayName ?? personPartyId,
+      await this.nameOf(tenantId, clientPartyId),
+    );
+  }
+
+  /** A line's company is the client, or recorded as one of its companies. */
+  private async requireInStructure(
+    tenantId: string,
+    clientPartyId: string,
+    entityPartyId: string,
+    known?: ClientStructure,
+  ): Promise<void> {
+    const structure = known ?? (await this.structureFor(tenantId, clientPartyId));
+    if (structure.entities.some((e) => e.id === entityPartyId)) return;
+    throw new EntityOutsideClient(
+      await this.nameOf(tenantId, entityPartyId),
+      await this.nameOf(tenantId, clientPartyId),
+    );
+  }
+
+  /** A client or an entity the firm put away is not written onto a new
+   *  document (0305). A party that does not exist at all is left to the
+   *  foreign key, as it always was. */
+  private async refuseArchived(
+    tenantId: string,
+    partyId: string,
+    as: "client" | "entity",
+  ): Promise<void> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party !== null && party.archivedAt !== null) {
+      throw new LetterPartyArchived(party.displayName, as);
+    }
+  }
+
   async addLine(input: AddLetterLineInput): Promise<LetterLine> {
     const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
+    // The company the work is FOR must be the client's (F-10-1). Signing fans
+    // this line out into an engagement, and the engagement's work lands in the
+    // LETTER's client's portal, so another client's company here shows one
+    // client work done for somebody else.
+    await this.requireInStructure(input.tenantId, letter.partyId, input.entityPartyId);
 
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidAmount("quantity", input.quantity);

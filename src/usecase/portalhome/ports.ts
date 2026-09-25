@@ -16,7 +16,9 @@ import type { PortalCompany, PortalFilingRow, PortalWorkRow } from "../../domain
  * up — the per-row join this codebase has been caught by six times.
  */
 export interface PortalScopeSource {
-  scopedCompanies(tenantId: string, userId: string, on: string): Promise<readonly PortalCompany[]>;
+  /** Resolved on the FIRM's day by the grant module itself — no caller's day
+   *  reaches it (F-07-1). */
+  scopedCompanies(tenantId: string, userId: string): Promise<readonly PortalCompany[]>;
 }
 
 /** What one read of the status home returns from the database. */

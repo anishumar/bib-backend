@@ -95,6 +95,21 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
     return Promise.resolve(row);
   }
 
+  /**
+   * The firm itself — `is_firm_self` — which stays one of the firm's own
+   * companies even once no preference row names it.
+   */
+  firmSelfPartyId: string = SEEDED_FIRM_ENTITY;
+
+  /** `crm.is_firm_entity` (0306): the firm itself, or any issuer a preference
+   *  row names — the same two sources, read the same way. */
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean> {
+    return Promise.resolve(
+      partyId === this.firmSelfPartyId ||
+        this.rowsFor(tenantId).some((r) => r.firmEntityPartyId === partyId),
+    );
+  }
+
   findEntity(_tenantId: string, partyId: string): Promise<FirmEntity | null> {
     const name = this.partyNames.get(partyId);
     return Promise.resolve(name === undefined ? null : this.entityOf(partyId));

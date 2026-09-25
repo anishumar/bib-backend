@@ -11,7 +11,8 @@ broken. Two people adding schema at the same time collide on the next number, an
 migration is immutable once applied anywhere — so a collision is not a rename, it is one of
 us redoing the work under a new number.
 
-**`(A)` holds 0080+. `(B)` holds 0057+.** The board (`docs/MERGE_BUILD-PLAN.md`) is where that
+**`(A)` holds 0080–0299. `(B)` holds 0300–0400** (settled 2026-09-16: `(B)` ran out at 0079,
+and an open-ended `0080+` would have included `(B)`'s new block). The board (`docs/MERGE_BUILD-PLAN.md`) is where that
 split is agreed; revisit when either range runs low.
 
 **The first split ran out, which is the thing to learn from.** `(A)` originally held 0018–0039

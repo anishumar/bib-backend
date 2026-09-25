@@ -124,8 +124,39 @@ const AxisParam = z.object({ axisId: z.string().uuid() });
 //
 // All five are `tenant:admin`, the READ included, and for the same reason the
 // roster and the grade ladder are: this is a firm describing itself, and the
-// choice made here decides how every future engagement is cut up. Anything that
-// needs the lists to render a picker is on the admin surface already.
+// choice made here decides how every future engagement is cut up.
+//
+// THE SIXTH IS NOT, and it is the picker's read (2026-09-25). "Anything that
+// needs the lists to render a picker is on the admin surface already" was true
+// until a picker lived somewhere else: the client page's account team is
+// `party:write`, and a manager who may name a SPOC was shown no form because
+// the Dept list behind it answered 403 — the colleagues read's gap, found again
+// by walking it. `/tenancy/axes` is the ACTIVE rows' names and codes and
+// nothing else, on `party:read`; the account team table already prints those
+// names to anybody who can read the client. The split axis stays admin-only.
+
+const listActiveAxesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/tenancy/axes",
+  tags: ["tenancy"],
+  summary: "The Depts and delivery teams new work can be filed under",
+  description:
+    "Active rows only, in the firm's own order — what a picker offers, such as the Dept a " +
+    "client's SPOC covers. Readable by anybody who can read a client; the full structure, " +
+    "retired rows and the work split stay at /tenancy/structure, behind tenant:admin.",
+  responses: {
+    200: {
+      description: "The active Depts and teams",
+      content: {
+        "application/json": {
+          schema: z.object({ axes: z.array(ServiceAxisSchema) }).openapi("ActiveAxesResponse"),
+        },
+      },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
+  },
+});
 
 const getStructureRoute = createRoute({
   method: "get",
@@ -263,6 +294,13 @@ export function registerServiceAxisRoutes(
 ): void {
   // The tenant comes from the SESSION on every one of these, so an admin can
   // only ever describe the firm they are acting for.
+  app.openapi(listActiveAxesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const axes = await deps.service.listActive(s.tenantId);
+    return c.json({ axes: axes.map(toWire) }, 200);
+  });
+
   app.openapi(getStructureRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);

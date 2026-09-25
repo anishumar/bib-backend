@@ -66,9 +66,9 @@ export class PortalLibraryService {
   async documents(
     tenantId: string,
     userId: string,
-    filter: { readonly kind?: string | undefined; readonly asOf?: string | undefined } = {},
+    filter: { readonly kind?: string | undefined } = {},
   ): Promise<readonly PortalDocumentRow[]> {
-    const parties = await this.partiesFor(tenantId, userId, filter.asOf);
+    const parties = await this.partiesFor(tenantId, userId);
     return this.deps.library.documents(tenantId, parties, {
       kind: filter.kind,
       limit: LIBRARY_PAGE,
@@ -78,9 +78,8 @@ export class PortalLibraryService {
   async invoices(
     tenantId: string,
     userId: string,
-    asOf?: string,
   ): Promise<readonly PortalInvoiceRow[]> {
-    const parties = await this.partiesFor(tenantId, userId, asOf);
+    const parties = await this.partiesFor(tenantId, userId);
     return this.deps.library.invoices(tenantId, parties);
   }
 
@@ -95,10 +94,9 @@ export class PortalLibraryService {
     tenantId: string,
     userId: string,
     month: string,
-    asOf?: string,
   ): Promise<PortalDigest> {
     if (!isMonth(month)) throw new InvalidMonth(month);
-    const parties = await this.partiesFor(tenantId, userId, asOf);
+    const parties = await this.partiesFor(tenantId, userId);
     // The FIRM's zone, not the reader's and not the server's — a digest is a
     // statement by the firm about a month, so the boundary has to be one
     // boundary. Resolved BEFORE the portal transaction opens, because
@@ -134,9 +132,8 @@ export class PortalLibraryService {
     tenantId: string,
     userId: string,
     documentId: string,
-    asOf?: string,
   ): Promise<{ readonly version: DocumentVersion; readonly bytes: Uint8Array }> {
-    const parties = await this.partiesFor(tenantId, userId, asOf);
+    const parties = await this.partiesFor(tenantId, userId);
     const version = await this.deps.library.findVersion(tenantId, parties, documentId);
     if (version === null) throw new DocumentNotFound(documentId);
 
@@ -152,22 +149,14 @@ export class PortalLibraryService {
    * the second one is the wall. `PortalHomeService` takes the same care and says
    * the same thing.
    */
-  private async partiesFor(
-    tenantId: string,
-    userId: string,
-    asOf?: string,
-  ): Promise<readonly string[]> {
-    const day = asOf ?? this.today();
-    const companies = await this.deps.scope.scopedCompanies(tenantId, userId, day);
+  private async partiesFor(tenantId: string, userId: string): Promise<readonly string[]> {
+    // No day from the caller reaches this (F-07-1): the grant module resolves
+    // the scope on the firm's own day.
+    const companies = await this.deps.scope.scopedCompanies(tenantId, userId);
     // An EMPTY list is passed on as an empty list. See `PortalLibraryRepository`
     // — skipping the call because there is nothing to scope by would leave
     // `app.portal` unset, which means STAFF.
     return companies.map((c) => c.clientPartyId);
   }
 
-  /** The server's calendar day — the honest fallback for a caller that did not
-   *  say which day it is on, and never the answer when one did. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
-  }
 }

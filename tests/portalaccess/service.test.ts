@@ -6,6 +6,7 @@
 // the DATABASE cannot make — a composite foreign key proves the membership and
 // the party belong to this firm and says nothing about whether the login is a
 // client's, still works, or names a client the firm has archived.
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { beforeEach, describe, expect, it } from "vitest";
 import { PortalAccessService } from "../../src/usecase/portalaccess/service";
 import {
@@ -63,6 +64,7 @@ function world() {
     clients,
     ids: new FakeIds(),
     clock: new FakeClock(NOW),
+    timeZones: new FakeFirmTimeZone(),
     events,
   });
   return { service, grants, memberships, clients, events };

@@ -190,6 +190,15 @@ export interface NewTerritoryRule {
   readonly note: string | null;
 }
 
+/**
+ * Which zone the firm keeps its calendar in (0071): "today" for a contact
+ * detail a capture attaches, when the caller did not say. Structural:
+ * satisfied by `PostgresFirmTimeZone` and `FakeFirmTimeZone`.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 // ── The party seam ───────────────────────────────────────────────────────────
 
 export interface ProspectOrganization {
@@ -239,4 +248,10 @@ export interface ProspectDirectory {
     type: IdentifierType,
     value: string,
   ): Promise<PartyIdentifier | null>;
+  /** The party a capture matched, archived or not — so a match on a client the
+   *  firm put away is refused by name rather than quietly given a lead (0305). */
+  findParty(
+    tenantId: string,
+    partyId: string,
+  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
 }

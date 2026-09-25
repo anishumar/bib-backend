@@ -29,7 +29,82 @@ export type InvoiceErrorCode =
   | "CREDIT_EXCEEDS_INVOICE"
   | "DUNNING_ACTION_NOT_FOUND"
   | "DUNNING_NOT_AWAITING_APPROVAL"
-  | "DUNNING_ALREADY_DECIDED";
+  | "DUNNING_ALREADY_DECIDED"
+  | "NOT_CALLERS_TODAY"
+  | "ISSUER_NOT_A_FIRM_ENTITY"
+  | "BILLS_THE_FIRM"
+  | "PARTY_ARCHIVED"
+  | "ENGAGEMENT_NOT_FOUND"
+  | "ENGAGEMENT_OF_ANOTHER_CLIENT";
+
+/** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
+ *  A document that genuinely belongs to another day has its own field. */
+export class NotCallersToday extends InvoiceError {
+  constructor(given: string, firmDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
+        `day is ${firmDay}, and anywhere in the world today is that day or the one either side. ` +
+        `To put an invoice in another year's books use seriesDate; a credit note takes issuedOn.`,
+    );
+  }
+}
+
+// ── Who an invoice names (F-10-1) ──────────────────────────────────────────
+//
+// Each of these was checked for the FIRM only. An invoice's issuer opens a
+// numbered GST series in its own name, so naming a client there cannot be
+// undone; the other three put the wrong client on a tax document.
+
+/** "Charged by" must be one of the firm's own companies. */
+export class InvoiceIssuerNotAFirmEntity extends InvoiceError {
+  constructor(displayName: string) {
+    super(
+      "ISSUER_NOT_A_FIRM_ENTITY",
+      `${displayName} is not one of the firm's own companies, so it cannot issue an invoice. ` +
+        `Under "Charged by", choose the firm's company that is charging.`,
+    );
+  }
+}
+
+/** "Bill to" must not be one of the firm's own companies. */
+export class InvoiceBillsTheFirm extends InvoiceError {
+  constructor(displayName: string) {
+    super(
+      "BILLS_THE_FIRM",
+      `${displayName} is one of the firm's own companies, so an invoice cannot bill it. ` +
+        `Under "Bill to", choose the client.`,
+    );
+  }
+}
+
+/** An archived client gains no new invoice, as it gains no new letter (0305). */
+export class InvoicePartyArchived extends InvoiceError {
+  constructor(displayName: string) {
+    super(
+      "PARTY_ARCHIVED",
+      `${displayName} is archived, so a new invoice cannot be raised for them. If the firm is ` +
+        `working with them again, restore them from their client page first.`,
+    );
+  }
+}
+
+export class InvoiceEngagementNotFound extends InvoiceError {
+  constructor(id: string) {
+    super("ENGAGEMENT_NOT_FOUND", `No engagement ${JSON.stringify(id)} at this firm.`);
+  }
+}
+
+/** A line bills an engagement of the client the invoice is for, never another's. */
+export class EngagementOfAnotherClient extends InvoiceError {
+  constructor(engagementClient: string, invoiceClient: string) {
+    super(
+      "ENGAGEMENT_OF_ANOTHER_CLIENT",
+      `That engagement is ${engagementClient}'s work, and this invoice bills ${invoiceClient}. ` +
+        `A line can only bill an engagement of the client the invoice is for.`,
+    );
+  }
+}
 
 export class InvoiceNotFound extends InvoiceError {
   constructor(id: string) {

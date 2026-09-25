@@ -26,6 +26,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
+import { PostgresClientAssignmentRepository } from "../../src/infrastructure/postgres/client-assignment-repository";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
@@ -160,6 +161,8 @@ afterAll(async () => {
   await owner`DELETE FROM delivery.work_item_dependency WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM delivery.checklist_item WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM delivery.work_item WHERE tenant_id IN ${owner(t)}`;
+  await owner`DELETE FROM crm.client_assignment WHERE tenant_id IN ${owner(t)}`;
+  await owner`DELETE FROM tenancy.service_axis WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM delivery.work_item_state WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM delivery.work_item_priority WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM core.party WHERE tenant_id IN ${owner(t)}`;
@@ -657,5 +660,42 @@ describe("what may be removed, and what may not", () => {
         `;
       }),
     ).rejects.toThrow(/blocker_tenant_fkey|foreign key/i);
+  });
+});
+
+describe("two SPOCs on one Dept take turns (2026-09-25)", () => {
+  // `SpocDirectory.spocsFor` now carries `routed`: how many of this client's
+  // tasks already sit on each candidate's desk. The unit tests prove the rule
+  // over that number; this proves the NUMBER, which only the real table can.
+  it("counts what each desk already holds for the client, longest-standing first", async () => {
+    const [dept] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.service_axis (tenant_id, axis, code, name)
+      VALUES (${ids.tenantA}, 'dept', 'FRC', 'Financial Reporting') RETURNING id
+    `;
+    if (!dept) throw new Error("no dept");
+    await asTenant(ids.tenantA, async (tx) => {
+      await tx`
+        INSERT INTO crm.client_assignment
+          (tenant_id, client_party_id, role, axis_id, user_id, valid_from)
+        VALUES (${ids.tenantA}, ${ids.clientA}, 'spoc', ${dept.id}, ${ids.priya}, '2026-01-01'),
+               (${ids.tenantA}, ${ids.clientA}, 'spoc', ${dept.id}, ${ids.anand}, '2026-03-01')
+      `;
+    });
+    const directory = new PostgresClientAssignmentRepository(app);
+    // Earlier cases in this file already put tasks on Priya's desk, so the
+    // assertion is on the DELTA rather than an absolute.
+    const before = await directory.spocsFor(ids.tenantA, ids.clientA, dept.id, "2026-09-25");
+    const was = new Map(before.map((s) => [s.userId, s.routed]));
+
+    // Two more of this client's tasks on Priya's desk, none on Anand's; one of
+    // ANOTHER client's on Anand's, which must not count.
+    await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
+    await raise(ids.tenantA, vocabA, { assigneeUserId: ids.priya });
+    await raise(ids.tenantB, vocabB, { assigneeUserId: ids.anand });
+
+    const spocs = await directory.spocsFor(ids.tenantA, ids.clientA, dept.id, "2026-09-25");
+    expect(spocs.map((s) => s.userId)).toEqual([ids.priya, ids.anand]);
+    expect(spocs[0]?.routed).toBe((was.get(ids.priya) ?? 0) + 2);
+    expect(spocs[1]?.routed).toBe(was.get(ids.anand) ?? 0);
   });
 });

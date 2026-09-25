@@ -215,11 +215,18 @@ export interface AssignableStaffDirectory {
  * two modules end up in one blast radius. TypeScript is structural; one
  * implementation satisfies all three without any of them knowing.
  */
+/** Which zone the firm keeps its calendar in (0071). Structural: satisfied by
+ *  `PostgresFirmTimeZone` and `FakeFirmTimeZone`. */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 export interface PortalScopeSource {
+  /** Resolved on the FIRM's day by the grant module itself — no caller's day
+   *  reaches it (F-07-1). */
   scopedCompanies(
     tenantId: string,
     userId: string,
-    on: string,
   ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]>;
 }
 

@@ -175,6 +175,7 @@ export function mapError(err: unknown): MappedError {
       // conflicts for the same reason: the request said something true a moment
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
+      case "STEP_NO_LONGER_NEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Whose desk a step is on (0301). All conflicts: the request is well
       // formed and what refuses it is the state of the step or the firm's own
@@ -658,6 +659,7 @@ export function mapError(err: unknown): MappedError {
       case "NO_CONTACT_DETAIL":
       case "BLANK_TITLE":
       case "INVALID_LEAD_JURISDICTION":
+      case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
@@ -667,10 +669,14 @@ export function mapError(err: unknown): MappedError {
       // and none is a malformed request. AMBIGUOUS_MATCH in particular is a
       // conflict in the firm's own data — the same counterparty stored twice —
       // which the caller resolves by merging those parties, not by resending.
+      // PARTY_ARCHIVED (0305) joins them: the party is there and the request
+      // is well formed; what refuses it is that the firm put this client away,
+      // and it is answered by restoring them.
       case "AMBIGUOUS_MATCH":
       case "LEAD_CLOSED":
       case "SAME_STAGE":
       case "OWNER_NOT_STAFF":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -698,6 +704,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DECISION":
       case "NOT_A_SERVICE":
       case "SERVICE_NOT_PUBLISHED":
+      case "ISSUER_NOT_A_FIRM_ENTITY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // SHARE_LINK_UNKNOWN sits with these on purpose: a link that is
       // malformed, one that is unknown, and one whose proposal has gone all
@@ -718,6 +725,7 @@ export function mapError(err: unknown): MappedError {
       case "DISCOUNT_NEEDS_APPROVAL":
       case "APPROVAL_NOT_NEEDED":
       case "ALREADY_APPROVED":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -734,7 +742,9 @@ export function mapError(err: unknown): MappedError {
       // because it is the same kind of answer — this clause, on this letter,
       // no — and the caller fixes it by naming a different clause.
       // QUOTE_JURISDICTION_UNCLEAR (T3.5b) is a FIELD the caller did not send,
-      // and the message names the choice. Its sibling QUOTE_NAMES_NO_ENTITY is
+      // and the message names the choice. F-10-1's three 400s named the wrong
+      // KIND of party and are fixed by naming another: an issuer that is the
+      // firm's, a quote to this client, a person rather than a company. Its sibling QUOTE_NAMES_NO_ENTITY is
       // deliberately NOT here: nothing about that request is wrong — the quote
       // is for a prospect holding no entity, which is a fact in the firm's own
       // records and is fixed there.
@@ -753,6 +763,9 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_AMOUNT_REQUIRED":
       case "INVALID_DATE":
       case "QUOTE_JURISDICTION_UNCLEAR":
+      case "ISSUER_NOT_A_FIRM_ENTITY":
+      case "QUOTE_OF_ANOTHER_CLIENT":
+      case "ADDRESSEE_NOT_A_PERSON":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -780,6 +793,9 @@ export function mapError(err: unknown): MappedError {
       // same shape: a quote in the wrong state, with nothing on it, or naming
       // no company to deliver to. Each is answered somewhere else — by
       // recording the acceptance, by adding lines, or by naming the entity.
+      // F-10-1's two here are answered in the firm's OWN RECORDS the same way:
+      // the company or the person may really be the client's, and what is
+      // missing is the relationship on the client's page that says so.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -796,6 +812,9 @@ export function mapError(err: unknown): MappedError {
       case "QUOTE_NOT_ACCEPTED":
       case "QUOTE_HAS_NO_LINES":
       case "QUOTE_NAMES_NO_ENTITY":
+      case "PARTY_ARCHIVED":
+      case "ADDRESSEE_NOT_LINKED":
+      case "ENTITY_OUTSIDE_CLIENT":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -807,12 +826,17 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_INVOICE_AMOUNT":
       case "INVALID_SERIES_PREFIX":
       case "INVALID_INVOICE_DATE":
+      case "NOT_CALLERS_TODAY":
       case "INVALID_PAYMENT_METHOD":
       case "INVALID_CREDIT_REASON":
+      case "ISSUER_NOT_A_FIRM_ENTITY":
+      case "BILLS_THE_FIRM":
+      case "ENGAGEMENT_OF_ANOTHER_CLIENT":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":
       case "DUNNING_ACTION_NOT_FOUND":
+      case "ENGAGEMENT_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The invoice is not in the state this call assumed", and none of them is
       // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by
@@ -826,6 +850,7 @@ export function mapError(err: unknown): MappedError {
       case "CREDIT_EXCEEDS_INVOICE":
       case "DUNNING_NOT_AWAITING_APPROVAL":
       case "DUNNING_ALREADY_DECIDED":
+      case "PARTY_ARCHIVED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -876,6 +901,7 @@ export function mapError(err: unknown): MappedError {
       case "DOCUMENT_NOT_FOUND":
       case "VERSION_NOT_FOUND":
       case "BRAND_ASSET_NOT_FOUND":
+      case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

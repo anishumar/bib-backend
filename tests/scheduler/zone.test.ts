@@ -6,7 +6,7 @@
 // other side of Greenwich; the DST case is the one a single-pass offset
 // calculation gets wrong once a year, silently.
 import { describe, expect, it } from "vitest";
-import { dayInZone, startOfDayInZone } from "../../src/domain/scheduler/zone";
+import { dayInZone, isCallersToday, startOfDayInZone } from "../../src/domain/scheduler/zone";
 
 describe("the instant a firm's day begins", () => {
   it("is the previous evening in UTC for a firm east of Greenwich", () => {
@@ -58,5 +58,29 @@ describe("the day an instant falls on, for a firm", () => {
   it("refuses a value that is not an instant", () => {
     expect(() => dayInZone("2026-10-01", "UTC")).not.toThrow();
     expect(() => dayInZone("not a moment", "UTC")).toThrow(RangeError);
+  });
+});
+
+describe("a caller's today, against the firm's", () => {
+  // Every inhabited zone is within a day of every other, so a browser's today
+  // is the firm's day or one either side — and anything else is a CHOSEN date.
+  it("takes the firm's day and the day either side", () => {
+    expect(isCallersToday("2026-09-25", "2026-09-25")).toBe(true);
+    expect(isCallersToday("2026-09-24", "2026-09-25")).toBe(true);
+    expect(isCallersToday("2026-09-26", "2026-09-25")).toBe(true);
+    // Across a month and a year boundary, by the calendar, not the string.
+    expect(isCallersToday("2026-09-30", "2026-10-01")).toBe(true);
+    expect(isCallersToday("2027-01-01", "2026-12-31")).toBe(true);
+  });
+
+  it("refuses a day further away: that is a date chosen, not today", () => {
+    expect(isCallersToday("2026-09-23", "2026-09-25")).toBe(false);
+    expect(isCallersToday("2025-09-25", "2026-09-25")).toBe(false);
+  });
+
+  it("refuses what is not a real calendar day", () => {
+    expect(isCallersToday("2026-02-30", "2026-03-01")).toBe(false);
+    expect(isCallersToday("25-09-2026", "2026-09-25")).toBe(false);
+    expect(isCallersToday("", "2026-09-25")).toBe(false);
   });
 });

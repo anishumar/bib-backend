@@ -296,6 +296,38 @@ describe("attaching", () => {
     expect(await service.linksOf(TENANT, record.document.id)).toHaveLength(2);
   });
 
+  it("withdraws a link and keeps it as history, off the subject's list", async () => {
+    // Decided 2026-09-25: an attachment made in error stays visible as
+    // WITHDRAWN rather than vanishing. The row is kept, the subject's file
+    // list no longer shows the document, and attaching again is a new link.
+    const { service, events } = makeService();
+    const record = await service.store(upload());
+    const link = {
+      tenantId: TENANT,
+      documentId: record.document.id,
+      subjectKind: "engagement",
+      subjectRef: ENGAGEMENT,
+      role: "evidence",
+      actor,
+    };
+    await service.attach(link);
+
+    const gone = await service.withdraw(link);
+    expect(gone.withdrawnAt).not.toBeNull();
+    expect(gone.withdrawnBy).toBe(USER);
+    expect(events.recorded.map((e) => e.verb)).toContain("document.link_withdrawn");
+
+    const links = await service.linksOf(TENANT, record.document.id);
+    expect(links).toHaveLength(1);
+    expect(links[0]?.link.withdrawnAt).not.toBeNull();
+
+    // Nothing live to withdraw a second time.
+    await expect(service.withdraw(link)).rejects.toThrow(/not attached/);
+    // And it can go back on: a NEW link, beside the withdrawn one.
+    await service.attach(link);
+    expect(await service.linksOf(TENANT, record.document.id)).toHaveLength(2);
+  });
+
   it("names the valid set when the subject kind is unknown", async () => {
     const { service } = makeService();
     const record = await service.store(upload());

@@ -86,6 +86,21 @@ export interface NewMembership {
  * row — N+1 lookups for a list whose whole purpose is to show people. Same shape
  * as `PublishedEntry` in the config registry, for the same reason.
  */
+/**
+ * A colleague as a PICKER shows them (G3.2's gap, closed 2026-09-25): enough to
+ * choose a desk and to say why a step is outside somebody's band, and no
+ * email. See `TenancyService.listColleagues`.
+ */
+export interface Colleague {
+  readonly userId: string;
+  /** Null when nobody has named the account; a screen then falls back to the
+   *  role, never to the email, which this shape does not carry. */
+  readonly displayName: string | null;
+  readonly role: string;
+  readonly gradeName: string | null;
+  readonly gradeRank: number | null;
+}
+
 export interface MemberRecord {
   readonly membership: Membership;
   readonly email: string;

@@ -94,6 +94,7 @@ import type {
   CoverageGap,
   DecisionRow,
   NewObligationInstance,
+  NewObligationTemplate,
   ObligationExceptionRepository,
   ObligationInstanceRepository,
   ObligationStateRepository,
@@ -698,7 +699,7 @@ export class ObligationService {
     // shape. A successor that changed the name would be a different obligation,
     // and one that changed the recurrence would orphan the predecessor's rows
     // the same way editing it in place would.
-    const successor = await this.deps.templates.supersede(tenantId, predecessorId, {
+    const next: NewObligationTemplate = {
       id: this.deps.ids.newId(),
       tenantId,
       jurisdiction: current.jurisdiction,
@@ -718,7 +719,52 @@ export class ObligationService {
       effectiveTo: null,
       // An amendment is the firm's own act, like a rule it writes.
       status: "confirmed",
+    };
+
+    // ── WHAT THE PREDECESSOR ALREADY PRODUCED PAST THE CUTOVER ─────────────
+    //
+    // The reach-back materialises a year ahead, so the old rule has usually
+    // put every period from the cutover on the calendar already — and those
+    // are the successor's periods now. Leaving them where they were and letting
+    // the successor generate its own was the gap 0303 closes: every return
+    // from the cutover on appeared twice. So they move, in the same
+    // transaction as the handover itself: same row, same id, the successor's
+    // rule and the successor's date. Only rows nobody has started, by the same
+    // test a correction uses; a filing on somebody's desk keeps the date its
+    // owner is working to, stays on the rule it was raised under, and is
+    // counted and reported.
+    //
+    // A successor still WAITING ON A FACT (no formula) takes the rows over
+    // with the dates they already carry — the same thing `restateUnstarted`
+    // does when a formula is removed, because "we do not know the new date yet"
+    // is not "this is no longer due". The day the formula is answered,
+    // `updateRule` restates them as the successor's own.
+    const future = (await this.deps.instances.listUnstarted(tenantId, predecessorId)).filter(
+      (r) => r.periodStart >= input.effectiveFrom,
+    );
+    const asTemplate: ObligationTemplate = { ...next, isActive: true };
+    const redated = new Set<string>();
+    const handover: RestatedInstance[] = future.map((row) => {
+      const schedule = scheduleFor(asTemplate, [], {
+        start: row.periodStart,
+        end: row.periodEnd,
+        label: row.periodLabel,
+      });
+      const statutoryDueOn = schedule?.statutoryDueOn ?? row.statutoryDueOn;
+      const internalTargetOn = schedule?.internalTargetOn ?? row.internalTargetOn;
+      if (statutoryDueOn !== row.statutoryDueOn || internalTargetOn !== row.internalTargetOn) {
+        redated.add(row.id);
+      }
+      return { id: row.id, statutoryDueOn, internalTargetOn };
     });
+
+    const { rule: successor, handedOver, kept } = await this.deps.templates.supersede(
+      tenantId,
+      predecessorId,
+      next,
+      handover,
+    );
+    const restated = handedOver.filter((id) => redated.has(id)).length;
 
     await this.deps.events.recordEvent({
       tenantId,
@@ -733,27 +779,22 @@ export class ObligationService {
         rulePackTo: successor.rulePack,
         dueRuleFrom: current.dueRule,
         dueRuleTo: successor.dueRule,
+        // Counts only — which filings moved is on each row, and a list of ids
+        // in a log nobody can erase would outlive the rows it names.
+        handedOver: handedOver.length,
+        restated,
+        kept,
       },
     });
 
-    // WHAT THE PREDECESSOR ALREADY PRODUCED PAST THE CUTOVER.
-    //
-    // The reach-back may have materialised periods that now belong to the
-    // successor, so they are still on the predecessor's formula. Restating
-    // under the predecessor deliberately SKIPS them — they are not its periods
-    // any more — and the successor generates its own. The old rows are left
-    // where they are rather than deleted: `bib_app` holds no DELETE grant, and
-    // a filing somebody may already have started is not this operation's to
-    // remove. Reported so the partner knows.
-    const stranded = (await this.deps.instances.listUnstarted(tenantId, predecessorId)).filter(
-      (r) => r.periodStart >= input.effectiveFrom,
-    ).length;
-
+    // Whatever the predecessor never reached — a later period, an entity it
+    // had no row for. The lineage key refuses any period a row it KEPT still
+    // holds, so a started filing is never generated a second time beside it.
     const spawned = generatesDates(successor)
       ? await this.spawnFor(tenantId, successor.id, actor)
       : 0;
 
-    return { rule: successor, effect: { restated: 0, locked: stranded, spawned } };
+    return { rule: successor, effect: { restated, locked: kept, spawned } };
   }
 
   async updateRule(

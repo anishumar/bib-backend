@@ -38,6 +38,7 @@ import type {
   RestatedInstance,
   ServiceDirectory,
   SpawnedInstance,
+  SupersedeResult,
   TemplatePatch,
   TemplateRecord,
   TenantDirectory,
@@ -50,6 +51,9 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
   /** The exception store, shared with `FakeObligationExceptionRepo` so the two
    *  see one world — as the real adapters do, sharing one database. */
   exceptions?: FakeObligationExceptionRepo;
+  /** The calendar, for the handover `supersede` makes in the same transaction
+   *  (0303). Unset, a supersession hands nothing over. */
+  instances?: FakeObligationInstanceRepo;
 
   create(t: NewObligationTemplate): Promise<ObligationTemplate> {
     return this.createIfAbsent(t).then((r) => {
@@ -77,7 +81,8 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     tenantId: string,
     predecessorId: string,
     t: NewObligationTemplate,
-  ): Promise<ObligationTemplate> {
+    handover: readonly RestatedInstance[],
+  ): Promise<SupersedeResult> {
     // BOTH HALVES OR NEITHER, the same as the SQL. The fake models the
     // atomicity rather than only the happy path: a test that could observe a
     // closed predecessor with no successor would be exercising a state the real
@@ -101,7 +106,44 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     };
     this.rows[i] = { ...predecessor, effectiveTo: t.effectiveFrom };
     this.rows.push(successor);
-    return Promise.resolve(successor);
+
+    // The handover, with the SQL's guard: only rows still on the predecessor,
+    // past the cutover, and untouched by anybody.
+    const calendar = this.instances?.rows ?? [];
+    const cutover = t.effectiveFrom ?? "";
+    const handedOver: string[] = [];
+    for (const next of handover) {
+      const at = calendar.findIndex((r) => r.id === next.id && r.tenantId === tenantId);
+      const held = calendar[at];
+      if (at < 0 || !held) continue;
+      if (held.templateId !== predecessorId || held.periodStart < cutover) continue;
+      if (held.workItemId !== null || held.filedOn !== null || held.resolvedAt !== null) continue;
+      calendar[at] = {
+        ...held,
+        templateId: t.id,
+        statutoryDueOn: next.statutoryDueOn,
+        internalTargetOn: next.internalTargetOn,
+      };
+      handedOver.push(held.id);
+    }
+    const kept = calendar.filter(
+      (r) => r.templateId === predecessorId && r.periodStart >= cutover,
+    ).length;
+    return Promise.resolve({ rule: successor, handedOver, kept });
+  }
+
+  /** The chain a rule belongs to, as 0303's trigger derives it: the first rule
+   *  it replaces, walking `supersedesId` back. */
+  lineageOf(templateId: string): string {
+    let at = this.rows.find((r) => r.id === templateId);
+    let seen = 0;
+    while (at?.supersedesId && seen < 100) {
+      const up = this.rows.find((r) => r.id === at?.supersedesId);
+      if (!up) break;
+      at = up;
+      seen += 1;
+    }
+    return at?.id ?? templateId;
   }
 
   findById(tenantId: string, templateId: string): Promise<ObligationTemplate | null> {
@@ -337,17 +379,26 @@ export class FakeCompliancePolicySource implements CompliancePolicySource {
 
 export class FakeObligationInstanceRepo implements ObligationInstanceRepository {
   readonly rows: ObligationInstance[] = [];
+  /** The rules, so this store can key on the LINEAGE as 0303 does. Unset, a
+   *  rule is its own lineage — true of every rule nobody superseded. */
+  templates?: FakeObligationTemplateRepo;
+
+  private lineage(templateId: string): string {
+    return this.templates?.lineageOf(templateId) ?? templateId;
+  }
 
   createIfAbsent(rows: readonly NewObligationInstance[]): Promise<readonly SpawnedInstance[]> {
     const made: SpawnedInstance[] = [];
     for (const r of rows) {
       // THE RE-RUN KEY, and the whole point of this fake being a store: the
-      // second proposal of the same (template, entity, period) must produce
-      // nothing at all.
+      // second proposal of the same (lineage, entity, period) must produce
+      // nothing at all — including a period an earlier rule in the chain
+      // already holds.
+      const lineage = this.lineage(r.templateId);
       const held = this.rows.some(
         (x) =>
           x.tenantId === r.tenantId &&
-          x.templateId === r.templateId &&
+          this.lineage(x.templateId) === lineage &&
           x.entityPartyId === r.entityPartyId &&
           x.periodStart === r.periodStart,
       );

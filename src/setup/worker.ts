@@ -36,6 +36,7 @@ import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-res
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
+import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
 import { PostgresServiceAxisRepository } from "../infrastructure/postgres/service-axis-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
@@ -482,10 +483,12 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
   });
   const tenantRepository = new PostgresTenantRepository(pools.app);
+  const workerParties = new PostgresPartyRepository(pools.app);
   const engagement = new EngagementService({
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
     documents,
+    parties: workerParties,
     // Only `send` asks who binds the firm, and this process never sends. Read
     // from the tenant row directly — the same two columns TenancyService reads
     // — because TenancyService's own graph (seeders for roles, grades,
@@ -512,12 +515,17 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       proposals: new PostgresProposalRepository(pools.app),
       catalogue: configRepository,
       policies: configRepository,
+      parties: workerParties,
       documents,
       shareTokens: new RandomTokenFactory(),
       ids: systemIds,
       clock: systemClock,
       events: ledger,
     }),
+    // Drafting is the API's; the worker settles envelopes and never drafts. The
+    // same adapters anyway, so the graph is the one the API composes.
+    structure: new PostgresRelationshipRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     esign: esign.signer,
     migrationSigner: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),

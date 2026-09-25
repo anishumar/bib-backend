@@ -483,6 +483,11 @@ export interface SpocCandidate {
   readonly userId: string;
   readonly displayName: string | null;
   readonly email: string;
+  /** How many of THIS client's tasks the router has already put on this
+   *  desk, ever. The turn-taking counter: with several SPOCs on a Dept the
+   *  next task goes to whoever has had the fewest, so two SPOCs alternate and
+   *  three rotate, with no state beyond the rows themselves. */
+  readonly routed: number;
 }
 
 /**
@@ -498,12 +503,16 @@ export interface SpocCandidate {
  *   it would hide the real problem (nobody has recorded a SPOC) behind a
  *   plausible answer that somebody would then have to un-do.
  *
- *   MORE THAN ONE — unassigned, with a note naming them. G3.2 deliberately
+ *   MORE THAN ONE — TURN-TAKING (Shrestha, 2026-09-25). G3.2 deliberately
  *   allows several per Dept (leave cover, a joint SPOC on a group, a
- *   fortnight's parallel handover), so "take the first" is also a rule nobody
- *   gave. And a WRONG assignee is worse than none: it sits on a desk whose
- *   owner believes it is not theirs, whereas unassigned work is visible in a
- *   queue that gets chased. Shrestha's call, 2026-08-30.
+ *   fortnight's parallel handover). From 2026-08-30 to 2026-09-25 this case
+ *   was left unassigned with a note, on the ground that "take the first" is
+ *   a rule nobody gave. The firm has now given one: share the work. So the
+ *   task goes to whichever of them has had the FEWEST of this client's tasks
+ *   so far (`routed`), ties broken by the order the directory returns (the
+ *   longer-standing assignment first). Two SPOCs alternate; three rotate. No
+ *   state is kept: the count is read off the rows every time, so a SPOC who
+ *   returns from leave simply catches up.
  *
  * The note names PEOPLE, which is why it is prose on an erasable row and never
  * in a ledger payload.
@@ -523,13 +532,10 @@ export function resolveAssignee(
     };
   }
   if (spocs.length === 1) return { userId: first.userId, note: null };
-  const names = spocs.map((s) => s.displayName ?? s.email).join(", ");
-  return {
-    userId: null,
-    note:
-      `${where} has ${spocs.length} SPOCs right now (${names}), so this was left unassigned ` +
-      `rather than guessing. Pick one, or end the assignment that has finished.`,
-  };
+  // Whoever has had the fewest of this client's tasks. `reduce` keeps the
+  // EARLIER candidate on a tie, so the directory's order is the tie-break.
+  const next = spocs.reduce((best, s) => (s.routed < best.routed ? s : best), first);
+  return { userId: next.userId, note: null };
 }
 
 /**

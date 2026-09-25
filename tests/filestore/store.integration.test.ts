@@ -300,3 +300,69 @@ describe("nothing is destroyed", () => {
     expect(rows.filter((r) => r.can)).toEqual([]);
   });
 });
+
+describe("a link is withdrawn, never deleted (0302)", () => {
+  async function attach(): Promise<string> {
+    const [row] = await asTenant(
+      ids.tenantA,
+      (tx) => tx<{ id: string }[]>`
+        INSERT INTO files.document_link (tenant_id, document_id, subject_kind, subject_ref)
+        VALUES (${ids.tenantA}, ${ids.docA}, 'party', ${ids.partyA}) RETURNING id
+      `,
+    );
+    if (!row) throw new Error("link insert returned no row");
+    return row.id;
+  }
+
+  it("the app role may write ONLY the two withdrawal columns", async () => {
+    const cols = await app<{ column_name: string }[]>`
+      SELECT column_name FROM information_schema.column_privileges
+      WHERE grantee = 'bib_app' AND table_schema = 'files' AND table_name = 'document_link'
+        AND privilege_type = 'UPDATE'
+      ORDER BY column_name
+    `;
+    expect(cols.map((c) => c.column_name)).toEqual(["withdrawn_at", "withdrawn_by"]);
+    const [tbl] = await app<{ can: boolean }[]>`
+      SELECT has_table_privilege('bib_app', 'files.document_link', 'UPDATE') AS can
+    `;
+    // Column-level only: the table-wide privilege is still absent.
+    expect(tbl?.can).toBe(false);
+  });
+
+  it("withdraws, refuses a second attempt, and lets the document go back on as a NEW link", async () => {
+    const first = await attach();
+    // A second live link for the same pair is still refused: the unique key
+    // moved to a partial index, it did not go away.
+    await expect(attach()).rejects.toThrow(/document_link_once|duplicate key/i);
+
+    const withdrawn = await asTenant(
+      ids.tenantA,
+      (tx) => tx<{ id: string }[]>`
+        UPDATE files.document_link SET withdrawn_at = now()
+        WHERE id = ${first} AND withdrawn_at IS NULL RETURNING id
+      `,
+    );
+    expect(withdrawn).toHaveLength(1);
+
+    // Frozen once withdrawn: the trigger, not the grant, is what refuses.
+    await expect(
+      asTenant(
+        ids.tenantA,
+        (tx) => tx`UPDATE files.document_link SET withdrawn_at = NULL WHERE id = ${first}`,
+      ),
+    ).rejects.toThrow(/was withdrawn at/i);
+
+    // And the document can be attached again: history keeps both rows.
+    const second = await attach();
+    expect(second).not.toBe(first);
+    const rows = await asTenant(
+      ids.tenantA,
+      (tx) => tx<{ id: string; withdrawn: boolean }[]>`
+        SELECT id, withdrawn_at IS NOT NULL AS withdrawn FROM files.document_link
+        WHERE document_id = ${ids.docA} AND subject_kind = 'party' AND subject_ref = ${ids.partyA}
+        ORDER BY created_at
+      `,
+    );
+    expect(rows.map((r) => r.withdrawn)).toEqual([true, false]);
+  });
+});

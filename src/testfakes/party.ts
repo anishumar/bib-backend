@@ -3,13 +3,16 @@
 // infrastructure. They do NOT enforce RLS — tenant isolation is a database
 // property, proven separately against real Postgres, not here.
 import type {
+  ClientStructure,
   LegalEntity,
   Organization,
   Party,
   PartyIdentifier,
   PartyRelationship,
   Person,
+  StructureMember,
 } from "../domain/party/model";
+import { CONTACT_ROLES, STRUCTURE_HOLDINGS, isInForceOn } from "../domain/party/model";
 import {
   PartyAlreadyArchived,
   PartyHasReferences,
@@ -203,6 +206,86 @@ export class FakePartyRepo implements PartyRepository {
   }
 }
 
+/** Which parties are archived, for the use cases that refuse to name one on a
+ *  new document (0305). A party it has not been told about is not archived —
+ *  and a real read would find it live, which is the ordinary case. */
+export class FakePartyStanding {
+  readonly archived = new Map<string, string>();
+  /** Live parties a test has named, with what they are (F-10-1: a letter is
+   *  addressed to a PERSON, and refusals name the party). */
+  readonly known = new Map<string, { displayName: string; kind: Party["kind"] }>();
+
+  archive(partyId: string, displayName: string): this {
+    this.archived.set(partyId, displayName);
+    return this;
+  }
+
+  know(partyId: string, displayName: string, kind: Party["kind"] = "organization"): this {
+    this.known.set(partyId, { displayName, kind });
+    return this;
+  }
+
+  findParty(
+    _tenantId: string,
+    partyId: string,
+  ): Promise<{
+    readonly displayName: string;
+    readonly archivedAt: string | null;
+    readonly kind: Party["kind"];
+  } | null> {
+    const name = this.archived.get(partyId);
+    if (name !== undefined) {
+      return Promise.resolve({
+        displayName: name,
+        archivedAt: "2026-09-01T00:00:00.000Z",
+        kind: this.known.get(partyId)?.kind ?? "organization",
+      });
+    }
+    const live = this.known.get(partyId);
+    return Promise.resolve(live === undefined ? null : { ...live, archivedAt: null });
+  }
+}
+
+/**
+ * A client's structure, for the use cases that check a letter against it
+ * (F-10-1).
+ *
+ * A client nobody recorded has the structure a real client with no
+ * relationships has: itself, and nobody to address. A test gives a client its
+ * companies and people with `record()`. `days` keeps every day it was asked
+ * about, so a test can prove the FIRM's day was the one used.
+ */
+export class FakeClientStructure {
+  private readonly recorded = new Map<
+    string,
+    { entities: readonly string[]; people: readonly string[] }
+  >();
+  readonly names = new Map<string, string>();
+  readonly days: string[] = [];
+
+  record(
+    clientPartyId: string,
+    structure: { entities?: readonly string[]; people?: readonly string[] },
+  ): this {
+    this.recorded.set(clientPartyId, {
+      entities: structure.entities ?? [],
+      people: structure.people ?? [],
+    });
+    return this;
+  }
+
+  structureOf(_tenantId: string, clientPartyId: string, onDay: string): Promise<ClientStructure> {
+    this.days.push(onDay);
+    const r = this.recorded.get(clientPartyId);
+    const member = (id: string): StructureMember => ({ id, displayName: this.names.get(id) ?? id });
+    const entities = [clientPartyId, ...(r?.entities ?? []).filter((e) => e !== clientPartyId)];
+    return Promise.resolve({
+      entities: entities.map(member),
+      people: (r?.people ?? []).map(member),
+    });
+  }
+}
+
 export class FakeIdentifierRepo implements IdentifierRepository {
   readonly rows: PartyIdentifier[] = [];
 
@@ -294,6 +377,56 @@ export class FakeRelationshipRepo implements RelationshipRepository {
    *  fake resolves the same names the database would; without it a test would
    *  pass on a read model the product cannot actually produce. */
   parties: FakePartyRepo | null = null;
+
+  /**
+   * The same walk the adapter's recursive CTE makes, over the rows in memory:
+   * the client, what it holds a stake or a seat in, and everything under those
+   * by `parent_of`; then the people with a contact role in any of them. Names,
+   * kinds and archiving come from `parties` when set.
+   */
+  structureOf(tenantId: string, clientPartyId: string, onDay: string): Promise<ClientStructure> {
+    const live = this.rows.filter((r) => r.tenantId === tenantId && isInForceOn(r, onDay));
+    const party = (id: string): Party | undefined => this.parties?.parties.find((p) => p.id === id);
+    const holdings: readonly string[] = STRUCTURE_HOLDINGS;
+    const roles: readonly string[] = CONTACT_ROLES;
+
+    const held = new Set<string>([clientPartyId]);
+    for (const r of live) {
+      if (r.fromPartyId === clientPartyId && holdings.includes(r.type)) held.add(r.toPartyId);
+    }
+    let grew = true;
+    while (grew) {
+      grew = false;
+      for (const r of live) {
+        if (r.type === "parent_of" && held.has(r.fromPartyId) && !held.has(r.toPartyId)) {
+          held.add(r.toPartyId);
+          grew = true;
+        }
+      }
+    }
+    const isLive = (id: string): boolean => (party(id)?.archivedAt ?? null) === null;
+    const member = (id: string): StructureMember => ({
+      id,
+      displayName: party(id)?.displayName ?? id,
+    });
+    const entities = [...held].filter(isLive);
+    const people = new Set<string>();
+    if (party(clientPartyId)?.kind === "person" && isLive(clientPartyId)) people.add(clientPartyId);
+    for (const r of live) {
+      if (
+        roles.includes(r.type) &&
+        held.has(r.toPartyId) &&
+        party(r.fromPartyId)?.kind === "person" &&
+        isLive(r.fromPartyId)
+      ) {
+        people.add(r.fromPartyId);
+      }
+    }
+    return Promise.resolve({
+      entities: entities.map(member),
+      people: [...people].map(member),
+    });
+  }
 
   listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]> {
     const mine = this.rows.filter(

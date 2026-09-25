@@ -32,7 +32,20 @@ export type OrchestratorErrorCode =
   | "NOT_YOUR_STEP"
   | "PERFORMER_OUT_OF_BAND"
   | "STEP_SETTLED"
-  | "NOT_STAFF_HERE";
+  | "NOT_STAFF_HERE"
+  | "STEP_NO_LONGER_NEEDED";
+
+/** The step was withdrawn because the firm's own rule for it stopped applying
+ *  after it had opened (0304). Nothing to tick: the note says why. */
+export class StepNoLongerNeeded extends OrchestratorError {
+  constructor(stepKey: string, why: string | null) {
+    super(
+      "STEP_NO_LONGER_NEEDED",
+      `Step ${JSON.stringify(stepKey)} is no longer needed, so there is nothing to mark done. ` +
+        (why ?? "Its condition stopped holding after it opened."),
+    );
+  }
+}
 
 /** The step sits on somebody else's desk. Take it first — which is one click
  *  and a ledger row — rather than tick it from underneath them. */

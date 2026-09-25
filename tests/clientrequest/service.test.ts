@@ -6,6 +6,7 @@
 // the same outcome as `client_request_portal_scope` by a different mechanism.
 // Gate 4 is proven against real Postgres in
 // `tests/portal/client-request.integration.test.ts`, by dropping the policy.
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { beforeEach, describe, expect, it } from "vitest";
 import { ClientRequestService } from "../../src/usecase/clientrequest/service";
 import {
@@ -64,6 +65,7 @@ function build() {
     ids: new FakeIds(),
     events,
     clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
+    timeZones: new FakeFirmTimeZone(),
   });
   return { service, store, events, scope, routing, keyManagers, staff };
 }
@@ -576,6 +578,7 @@ describe("whose desk it lands on", () => {
       ids: new FakeIds(),
       events: ctx.events,
       clock: new FakeClock(new Date("2026-09-02T00:00:00.000Z")),
+      timeZones: new FakeFirmTimeZone(),
     });
     await service.raise({
       tenantId: TENANT,
@@ -748,6 +751,9 @@ describe("what this service may not do", () => {
       "ids",
       "events",
       "clock",
+      // The firm's calendar (F-07-1: which Key Manager is in force today).
+      // A zone lookup, not a transport.
+      "timeZones",
     ];
     const { service } = build();
     const actual = Object.keys(

@@ -284,6 +284,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // the same reason: between them these two surfaces decide what every role
   // means AND who holds it, which is the whole of access control at a firm.
   [routeKey("GET", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  // The PICKER, not the roster: names and rungs of active staff, no emails.
+  // `party:read`: whoever may look at a client may see which colleague to
+  // hand its work to. Decided 2026-09-25; see `TenancyService.listColleagues`.
+  [routeKey("GET", "/api/v1/tenancy/colleagues"), "party:read" as const],
   [routeKey("POST", "/api/v1/tenancy/members"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/role"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/members/{membershipId}/active"), "tenant:admin" as const],
@@ -313,6 +317,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // describing itself, and the split axis chosen here decides how every future
   // engagement is cut into jobs.
   [routeKey("GET", "/api/v1/tenancy/structure"), "tenant:admin" as const],
+  // The ACTIVE Depts and teams, for a picker (2026-09-25): the account team's
+  // SPOC form is `party:write`, and a manager allowed to use it was shown no
+  // form because the list behind it was the admin read above. Names and codes
+  // only, which the account team table already prints to any client reader.
+  [routeKey("GET", "/api/v1/tenancy/axes"), "party:read" as const],
   [routeKey("POST", "/api/v1/tenancy/structure/axes"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}"), "tenant:admin" as const],
   [routeKey("PUT", "/api/v1/tenancy/structure/axes/{axisId}/active"), "tenant:admin" as const],
@@ -407,6 +416,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     routeKey("GET", "/api/v1/parties/{partyId}/billable-engagements"),
     "party:read" as const,
   ],
+  // Who a letter for this client may name (F-10-1). `party:read`: it is the
+  // client's own record of companies and people, the same read the client
+  // page already gives anybody who may see the client.
+  [routeKey("GET", "/api/v1/parties/{partyId}/structure"), "party:read" as const],
   [routeKey("GET", "/api/v1/engagement-letters/{letterId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/engagement-letters"), "party:write" as const],
 
@@ -743,6 +756,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   ],
   [routeKey("GET", "/api/v1/documents/{documentId}/links"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents/{documentId}/links"), "party:write" as const],
+  [routeKey("POST", "/api/v1/documents/{documentId}/links/withdraw"), "party:write" as const],
   [routeKey("GET", "/api/v1/subjects/{subjectKind}/{subjectRef}/documents"), "party:read" as const],
 
   // Brand assets are `tenant:admin` to WRITE, unlike the documents themselves.

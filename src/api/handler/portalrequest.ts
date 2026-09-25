@@ -49,7 +49,6 @@ export interface PortalRequestDeps {
   readonly service: ClientRequestService;
 }
 
-const IsoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const RequestParam = z.object({ requestId: z.string().uuid() });
 
 const ReplySchema = z
@@ -135,7 +134,6 @@ const listRoute = createRoute({
     "Everything you have raised, including the finished ones — 'did I already ask for this' " +
     "is the question that stops the second phone call. Split into what the firm has not come " +
     "back on, what it has, and what is done.",
-  request: { query: z.object({ asOf: IsoDate.optional() }) },
   responses: {
     200: {
       description: "Your requests",
@@ -145,7 +143,6 @@ const listRoute = createRoute({
             awaitingFirm: z.array(RequestSchema),
             replied: z.array(RequestSchema),
             settled: z.array(RequestSchema),
-            asOf: z.string(),
           }),
         },
       },
@@ -166,7 +163,6 @@ const raiseRoute = createRoute({
     "tasks and it may never become one — that is the firm's decision after it reads this.",
   request: {
     body: { content: { "application/json": { schema: RaiseRequest } }, required: true },
-    query: z.object({ asOf: IsoDate.optional() }),
   },
   responses: {
     201: { description: "Raised", content: { "application/json": { schema: RequestSchema } } },
@@ -188,7 +184,6 @@ const replyRoute = createRoute({
   request: {
     params: RequestParam,
     body: { content: { "application/json": { schema: ReplyRequest } }, required: true },
-    query: z.object({ asOf: IsoDate.optional() }),
   },
   responses: {
     201: { description: "Sent", content: { "application/json": { schema: RequestSchema } } },
@@ -208,7 +203,7 @@ const withdrawRoute = createRoute({
   description:
     "Yours to do, and the firm cannot do it for you: 'we decided you did not need this' is a " +
     "refusal, and the firm has to close it with a reply saying so instead.",
-  request: { params: RequestParam, query: z.object({ asOf: IsoDate.optional() }) },
+  request: { params: RequestParam },
   responses: {
     200: { description: "Withdrawn", content: { "application/json": { schema: RequestSchema } } },
     401: errorResponse("No authenticated session"),
@@ -227,14 +222,14 @@ export function registerPortalRequestRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { asOf } = c.req.valid("query");
-    const list = await deps.service.mine(s.tenantId, s.userId, asOf);
+    // No `asOf` on any portal request route (F-07-1): the grants are resolved
+    // on the firm's own day by the grant module.
+    const list = await deps.service.mine(s.tenantId, s.userId);
     return c.json(
       {
         awaitingFirm: list.awaitingFirm.map(toWire),
         replied: list.replied.map(toWire),
         settled: list.settled.map(toWire),
-        asOf: list.asOf,
       },
       200,
     );
@@ -245,7 +240,6 @@ export function registerPortalRequestRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { asOf } = c.req.valid("query");
     const { clientPartyId, subject, body } = c.req.valid("json");
     const row = await deps.service.raise({
       tenantId: s.tenantId,
@@ -254,7 +248,6 @@ export function registerPortalRequestRoutes(
       subject,
       body,
       actor: s.actor,
-      asOf,
     });
     return c.json(toWire(row), 201);
   });
@@ -265,7 +258,6 @@ export function registerPortalRequestRoutes(
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
     const { requestId } = c.req.valid("param");
-    const { asOf } = c.req.valid("query");
     const { body } = c.req.valid("json");
     const row = await deps.service.replyAsClient({
       tenantId: s.tenantId,
@@ -273,7 +265,6 @@ export function registerPortalRequestRoutes(
       requestId,
       body,
       actor: s.actor,
-      asOf,
     });
     return c.json(toWire(row), 201);
   });
@@ -284,13 +275,11 @@ export function registerPortalRequestRoutes(
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
     const { requestId } = c.req.valid("param");
-    const { asOf } = c.req.valid("query");
     const row = await deps.service.withdraw({
       tenantId: s.tenantId,
       userId: s.userId,
       requestId,
       actor: s.actor,
-      asOf,
     });
     return c.json(toWire(row), 200);
   });

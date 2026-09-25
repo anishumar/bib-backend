@@ -373,7 +373,6 @@ export class FakeRequestScope implements PortalScopeSource {
   scopedCompanies(
     _tenantId: string,
     userId: string,
-    _on: string,
   ): Promise<readonly { readonly clientPartyId: string; readonly clientName: string }[]> {
     return Promise.resolve(this.byUser.get(userId) ?? []);
   }

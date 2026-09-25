@@ -4,7 +4,13 @@
 // strings; attributes is jsonb, written as a JSON string cast to ::jsonb.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { Party, PartyRelationship } from "../../domain/party/model";
+import {
+  CONTACT_ROLES,
+  STRUCTURE_HOLDINGS,
+  type ClientStructure,
+  type Party,
+  type PartyRelationship,
+} from "../../domain/party/model";
 import type {
   NewRelationship,
   RelationshipRecord,
@@ -171,6 +177,84 @@ export class PostgresRelationshipRepository implements RelationshipRepository {
         // which end it is standing at.
         direction: r.from_party_id === partyId ? ("outgoing" as const) : ("incoming" as const),
       }));
+    });
+  }
+
+  /**
+   * The client's structure on `onDay` (F-10-1) — who a letter for it may name.
+   *
+   * TWO statements in one transaction rather than one clever one: the first
+   * walks the companies (a recursive CTE, because a group is a tree of any
+   * depth and "the client's subsidiaries" is not one join), the second finds
+   * the people holding a role in any of them. `UNION`, not `UNION ALL`, in the
+   * walk: a structure recorded with a loop in it — A parent of B parent of A —
+   * is a mistake a firm can make, and it must end the walk, not the process.
+   *
+   * Half-open on the dates, the way `isInForceOn` reads them: `valid_to` is the
+   * first day the relationship is NOT in force.
+   */
+  async structureOf(
+    tenantId: string,
+    clientPartyId: string,
+    onDay: string,
+  ): Promise<ClientStructure> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const entities = await db<
+        { id: string; display_name: string; kind: Party["kind"] }[]
+      >`
+        WITH RECURSIVE held(party_id) AS (
+          SELECT seed.party_id FROM (
+            SELECT ${clientPartyId}::uuid AS party_id
+            UNION
+            SELECT r.to_party_id
+              FROM core.party_relationship r
+             WHERE r.from_party_id = ${clientPartyId}
+               AND r.type = ANY(${db.array([...STRUCTURE_HOLDINGS])}::text[])
+               AND r.valid_from <= ${onDay}::date
+               AND (r.valid_to IS NULL OR r.valid_to > ${onDay}::date)
+          ) seed
+          UNION
+          SELECT r.to_party_id
+            FROM core.party_relationship r
+            JOIN held h ON r.from_party_id = h.party_id
+           WHERE r.type = 'parent_of'
+             AND r.valid_from <= ${onDay}::date
+             AND (r.valid_to IS NULL OR r.valid_to > ${onDay}::date)
+        )
+        SELECT p.id, p.display_name, p.kind
+          FROM held
+          JOIN core.party p ON p.id = held.party_id
+         WHERE p.archived_at IS NULL
+         -- The client first, then by name: the first option a picker offers is
+         -- the client itself, which is the ordinary case.
+         ORDER BY (p.id = ${clientPartyId}::uuid) DESC, p.display_name ASC
+      `;
+      const ids = entities.map((e) => e.id);
+      const people =
+        ids.length === 0
+          ? []
+          : await db<{ id: string; display_name: string }[]>`
+              SELECT DISTINCT p.id, p.display_name
+                FROM core.party_relationship r
+                JOIN core.party p ON p.id = r.from_party_id
+               WHERE r.to_party_id = ANY(${db.array(ids)}::uuid[])
+                 AND r.type = ANY(${db.array([...CONTACT_ROLES])}::text[])
+                 AND r.valid_from <= ${onDay}::date
+                 AND (r.valid_to IS NULL OR r.valid_to > ${onDay}::date)
+                 AND p.kind = 'person'
+                 AND p.archived_at IS NULL
+               ORDER BY p.display_name ASC
+            `;
+      // A person who IS the client is somebody a letter to them may name.
+      const self = entities.find((e) => e.id === clientPartyId && e.kind === "person");
+      const named = people.map((p) => ({ id: p.id, displayName: p.display_name }));
+      return {
+        entities: entities.map((e) => ({ id: e.id, displayName: e.display_name })),
+        people:
+          self === undefined || named.some((p) => p.id === self.id)
+            ? named
+            : [{ id: self.id, displayName: self.display_name }, ...named],
+      };
     });
   }
 }

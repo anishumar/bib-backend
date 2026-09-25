@@ -9,7 +9,8 @@ import { describe, expect, it } from "vitest";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import { FakeTenantDirectory } from "../../src/testfakes/scheduler";
-import { FakeInvoiceRepo } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, FakeInvoiceRepo } from "../../src/testfakes/invoice";
+import { FakePartyStanding } from "../../src/testfakes/party";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { FakeIds } from "../../src/testfakes/ids";
 import { FakeClock } from "../../src/testfakes/clock";
@@ -53,7 +54,15 @@ function setup(): {
   const invoices = new FakeInvoiceRepo();
   const events = new RecordingEventSink();
   const clock = new FakeClock(TODAY);
-  const billing = new InvoiceService({ invoices, ids: new FakeIds(), clock, events });
+  const billing = new InvoiceService({
+    invoices,
+    timeZones: new FakeFirmTimeZone(),
+    firmEntities: new FakeFirmEntities().add(ENTITY),
+    parties: new FakePartyStanding(),
+    ids: new FakeIds(),
+    clock,
+    events,
+  });
   const service = new DunningService({
     timeZones: new FakeFirmTimeZone(),
     dunning,

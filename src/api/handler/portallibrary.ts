@@ -174,11 +174,6 @@ const documentsRoute = createRoute({
         .enum(DOCUMENT_KINDS as unknown as [string, ...string[]])
         .optional()
         .openapi({ description: "Narrow to one kind. Nothing widens the list." }),
-      asOf: IsoDate.optional().openapi({
-        description:
-          "The day to answer for, in the CALLER's calendar — it decides which grants are in " +
-          "force. Defaults to the server's own day, which is not the reader's.",
-      }),
     }),
   },
   responses: {
@@ -186,7 +181,7 @@ const documentsRoute = createRoute({
       description: "The library",
       content: { "application/json": { schema: z.object({ documents: z.array(DocumentSchema) }) } },
     },
-    400: errorResponse("asOf is not an ISO date, or kind is not a known document kind"),
+    400: errorResponse("kind is not a known document kind"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or this is not a client-portal session"),
   },
@@ -212,7 +207,7 @@ const contentRoute = createRoute({
     "that minted it is checked by a storage vendor rather than by this product, so it answers " +
     "to none of the scoping rules that decide what you may read. Every byte leaves through " +
     "this route, having passed them.",
-  request: { params: DocumentParam, query: z.object({ asOf: IsoDate.optional() }) },
+  request: { params: DocumentParam },
   responses: {
     200: binaryResponse,
     401: errorResponse("No authenticated session"),
@@ -235,13 +230,11 @@ const invoicesRoute = createRoute({
   description:
     "CLIENT_PORTAL sessions only, and no permission. Drafts are not here — see the `status` " +
     "field. Amounts are decimal STRINGS, never numbers.",
-  request: { query: z.object({ asOf: IsoDate.optional() }) },
   responses: {
     200: {
       description: "The invoices",
       content: { "application/json": { schema: z.object({ invoices: z.array(InvoiceSchema) }) } },
     },
-    400: errorResponse("asOf is not an ISO date"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or this is not a client-portal session"),
   },
@@ -263,7 +256,6 @@ const digestRoute = createRoute({
   request: {
     query: z.object({
       month: Month.openapi({ description: "YYYY-MM. Refused rather than coerced if it is not." }),
-      asOf: IsoDate.optional(),
     }),
   },
   responses: {
@@ -283,8 +275,8 @@ export function registerPortalLibraryRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { kind, asOf } = c.req.valid("query");
-    const documents = await deps.service.documents(s.tenantId, s.userId, { kind, asOf });
+    const { kind } = c.req.valid("query");
+    const documents = await deps.service.documents(s.tenantId, s.userId, { kind });
     return c.json({ documents: documents.map(toDocumentWire) }, 200);
   });
 
@@ -294,8 +286,7 @@ export function registerPortalLibraryRoutes(
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
     const { documentId } = c.req.valid("param");
-    const { asOf } = c.req.valid("query");
-    const { bytes, version } = await deps.service.download(s.tenantId, s.userId, documentId, asOf);
+    const { bytes, version } = await deps.service.download(s.tenantId, s.userId, documentId);
     return bytesResponse(bytes, version);
   });
 
@@ -304,8 +295,7 @@ export function registerPortalLibraryRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { asOf } = c.req.valid("query");
-    const invoices = await deps.service.invoices(s.tenantId, s.userId, asOf);
+    const invoices = await deps.service.invoices(s.tenantId, s.userId);
     return c.json({ invoices: invoices.map(toInvoiceWire) }, 200);
   });
 
@@ -314,8 +304,8 @@ export function registerPortalLibraryRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const staff = refuseStaff(c.get("principal")?.audience);
     if (staff) return c.json(staff, 403);
-    const { month, asOf } = c.req.valid("query");
-    return c.json(toDigestWire(await deps.service.digest(s.tenantId, s.userId, month, asOf)), 200);
+    const { month } = c.req.valid("query");
+    return c.json(toDigestWire(await deps.service.digest(s.tenantId, s.userId, month)), 200);
   });
 }
 

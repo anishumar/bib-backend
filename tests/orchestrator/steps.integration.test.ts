@@ -8,10 +8,11 @@
 //   2. `UNIQUE (job_id, step_key)` refuses the second copy of a step, which is
 //      what makes the orchestrator's at-least-once step creation safe.
 //   3. The timestamp CHECK holds against the OWNER role, which is what a
-//      migration or a psql session runs as. `skipped` having NEITHER timestamp
-//      is the interesting one: a skip that wrote a finish time would make "when
-//      did this job's work end" answer with the moment somebody skipped
-//      something.
+//      migration or a psql session runs as. `skipped` never having a FINISH
+//      time is the interesting one: a skip that wrote one would make "when did
+//      this job's work end" answer with the moment somebody skipped something.
+//      Since 0304 it may keep the time it OPENED, when it was withdrawn after
+//      opening — and the real `transition` keeps it.
 //   4. A skip and a failure must carry a reason, and nothing else may.
 //   5. The compare-and-set in `transition` really is atomic — two concurrent
 //      claims of the same step, and exactly one wins. This is the property that
@@ -178,15 +179,27 @@ describe("the schema refuses states the orchestrator must never produce", () => 
     ).rejects.toThrow(/timestamps_follow_status/i);
   });
 
-  // A skip did not start and did not finish. Writing a finish time on one would
-  // make "when did this job's work actually end" answer with the moment
-  // somebody skipped something.
-  it("refuses a SKIPPED step that carries timestamps", async () => {
+  // A skip never FINISHED. Writing a finish time on one would make "when did
+  // this job's work actually end" answer with the moment somebody skipped
+  // something. (Since 0304 it may carry a START time: see the transition test.)
+  it("refuses a SKIPPED step that carries a finish time", async () => {
     await expect(
       owner`
         INSERT INTO delivery.job_step
-          (tenant_id, job_id, step_key, label, executor, status, outcome_note, started_at)
-        VALUES (${ids.tenantA}, ${ids.jobA}, 'bad-skip', 'X', 'human', 'skipped', 'why', now())
+          (tenant_id, job_id, step_key, label, executor, status, outcome_note,
+           started_at, finished_at)
+        VALUES (${ids.tenantA}, ${ids.jobA}, 'bad-skip', 'X', 'human', 'skipped', 'why',
+                now(), now())
+      `,
+    ).rejects.toThrow(/timestamps_follow_status/i);
+  });
+
+  it("still refuses a PENDING step that carries a start time", async () => {
+    await expect(
+      owner`
+        INSERT INTO delivery.job_step
+          (tenant_id, job_id, step_key, label, executor, status, started_at)
+        VALUES (${ids.tenantA}, ${ids.jobA}, 'bad-pending', 'X', 'human', 'pending', now())
       `,
     ).rejects.toThrow(/timestamps_follow_status/i);
   });
@@ -283,6 +296,39 @@ describe("two workers claiming the same step", () => {
     // question, and overwriting it would make every step look instantaneous.
     expect(done?.startedAt).toBe(started);
     expect(done?.finishedAt).toBe(finished);
+  });
+
+  it("keeps the day a step OPENED when it is withdrawn afterwards (0304)", async () => {
+    const key = `withdrawn-${stamp}`;
+    const created = await steps.createAllIfAbsent([newStep(ids.tenantA, ids.jobA, key)]);
+    const step = created.steps[0];
+    if (!step) throw new Error("the withdrawn step was not created");
+
+    const opened = "2026-08-29T09:00:00.000Z";
+    await steps.transition(ids.tenantA, step.id, "pending", { status: "blocked", at: opened });
+    const skipped = await steps.transition(ids.tenantA, step.id, "blocked", {
+      status: "skipped",
+      at: "2026-09-02T10:00:00.000Z",
+      outcomeNote: "This step had already opened and no longer applies.",
+    });
+    expect(skipped?.status).toBe("skipped");
+    expect(skipped?.startedAt).toBe(opened);
+    expect(skipped?.finishedAt).toBeNull();
+  });
+
+  it("still gives a step skipped BEFORE it opened no start time", async () => {
+    const key = `never-${stamp}`;
+    const created = await steps.createAllIfAbsent([newStep(ids.tenantA, ids.jobA, key)]);
+    const step = created.steps[0];
+    if (!step) throw new Error("the never-opened step was not created");
+
+    const skipped = await steps.transition(ids.tenantA, step.id, "pending", {
+      status: "skipped",
+      at: "2026-09-02T10:00:00.000Z",
+      outcomeNote: "recurrence is \"monthly\", and this step applies only when it is \"annually\"",
+    });
+    expect(skipped?.startedAt).toBeNull();
+    expect(skipped?.finishedAt).toBeNull();
   });
 });
 

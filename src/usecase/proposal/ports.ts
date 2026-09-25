@@ -32,8 +32,26 @@ import type {
  * drafting, and "we do not know where they are" resolves through the same
  * fallback as "we are not there".
  */
+/**
+ * Whether a party is one the firm has put away (0305).
+ *
+ * Satisfied structurally by the party repository's own read-one-by-id, which
+ * never filters on `archived_at` — so an archived party is FOUND, and this use
+ * case can refuse it with its name rather than as "no such party". The
+ * database refuses the same reference underneath (0305's triggers); this is
+ * what a person is told first.
+ */
+export interface PartyStanding {
+  findParty(
+    tenantId: string,
+    partyId: string,
+  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
+}
+
 export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  /** Whether a party is one of the firm's own companies (F-10-1). */
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
   /**
    * COPY the firm's standard prose onto this new document (G1.7).

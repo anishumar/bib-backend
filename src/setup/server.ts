@@ -451,6 +451,14 @@ export function wire(cfg: Config, log: Logger): Wired {
   // caller, because a failure between the two spends the number. See the file.
   const invoiceRepository = new PostgresInvoiceRepository(pools.app);
   const invoices = new InvoiceService({
+    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
+    // companies and the billed party is not. `DocumentService` owns that list
+    // (it is the issuing-entity rule's), so the "Charged by" picker and this
+    // refusal are one definition. Names and archiving come from the party read.
+    firmEntities: documents,
+    parties: partyRepository,
     invoices: invoiceRepository,
     ids: systemIds,
     clock: systemClock,
@@ -744,6 +752,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     });
 
   const portalAccess = new PortalAccessService({
+    // A portal session's grants are resolved on the FIRM's day (F-07-1).
+    timeZones: new PostgresFirmTimeZone(pools.app),
     grants: portalAccessRepository,
     memberships: portalAccessRepository,
     clients: portalAccessRepository,
@@ -786,8 +796,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // fail — at compile time, in one place, which is what the port bought.
   const portalHome = new PortalHomeService({
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     // The ONE adapter in this product that uses `withPortal`. Everything else
     // reaches tenant data through `withTenant`, which sets the firm and nothing
@@ -810,8 +819,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   // symptom would be a file the firm can open and the client cannot.
   const portalLibrary = new PortalLibraryService({
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     timeZones: new PostgresFirmTimeZone(pools.app),
     library: new PostgresPortalLibraryRepository(pools.app),
@@ -842,8 +850,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     asks: new PostgresClientAskRepository(pools.app),
     portal: new PostgresPortalAskRepository(pools.app),
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     blobs,
     digest: new Sha256ByteDigest(),
@@ -869,11 +876,11 @@ export function wire(cfg: Config, log: Logger): Wired {
   // implementation serves all three portal use cases without any of them
   // importing another's ports.
   const clientRequests = new ClientRequestService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
     requests: new PostgresClientRequestRepository(pools.app),
     portal: new PostgresPortalRequestRepository(pools.app),
     scope: {
-      scopedCompanies: (tenantId, userId, on) =>
-        portalAccess.scopedClientsForUser(tenantId, userId, on),
+      scopedCompanies: (tenantId, userId) => portalAccess.scopedClientsForUser(tenantId, userId),
     },
     routing: new PostgresRequestRoutingRepository(pools.app),
     // ── THE KEY MANAGER, THROUGH THE SERVICE THAT OWNS THAT TABLE ────────
@@ -963,6 +970,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       new PostgresRoundRobinAssignment(pools.app),
     ]),
     territories: new PostgresTerritoryRules(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -977,6 +985,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     proposals: new PostgresProposalRepository(pools.app),
     catalogue: configRepository,
     policies: configRepository,
+    // An archived client is refused by name before a new proposal names it
+    // (0305). The repository's read-one-by-id never hides the archive.
+    parties: partyRepository,
     // The reference series and the issuing-entity rule, behind quoting's own
     // narrow port. `DocumentService` satisfies it structurally, so neither
     // module imports the other — the same seam the catalogue arrives through.
@@ -1039,11 +1050,17 @@ export function wire(cfg: Config, log: Logger): Wired {
         return assets.find((a) => a.asset.kind === "signature")?.version.id ?? null;
       },
     },
+    parties: partyRepository,
     // THE QUOTE A LETTER IS WRITTEN UP FROM (T3.5b). The SAME instance the
     // proposal routes hold, satisfied structurally by `findQuote` — so neither
     // use case imports the other, and there is one answer to "what did we
     // actually quote" rather than two reads that can drift.
     quotes: proposal,
+    // THE CLIENT'S STRUCTURE (F-10-1): which companies a letter's lines may be
+    // for, and whom it may be addressed to, read on the firm's day. The party
+    // module's relationship adapter satisfies it structurally.
+    structure: new PostgresRelationshipRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     esign: esign.signer,
     // Letters signed BEFORE the firm used this product arrive through the book
     // import and are attested by the person confirming it. Always the attested

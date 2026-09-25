@@ -196,6 +196,22 @@ describe("changing a row", () => {
     expect(list.map((r) => [r.code, r.isActive])).toEqual([["RAA", false]]);
   });
 
+  it("offers a picker only what new work may still be filed under", async () => {
+    // `listActive` is the read behind /tenancy/axes, which a manager's account
+    // team form uses: a retired Dept would be an option the write then refuses.
+    const { service } = svc();
+    const kept = await service.createAxis(
+      { tenantId: TENANT, axis: "dept", code: "FRC", name: "FRC", sortOrder: 0 },
+      ACTOR,
+    );
+    const retired = await service.createAxis(
+      { tenantId: TENANT, axis: "dept", code: "OLD", name: "Old Dept", sortOrder: 1 },
+      ACTOR,
+    );
+    await service.setAxisActive({ tenantId: TENANT, id: retired.id, isActive: false }, ACTOR);
+    expect((await service.listActive(TENANT)).map((a) => a.id)).toEqual([kept.id]);
+  });
+
   it("is a no-op when the flag already says that, and records nothing", async () => {
     const { service, events } = svc();
     const row = await service.createAxis(

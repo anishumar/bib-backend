@@ -698,6 +698,49 @@ const billableRoute = createRoute({
   },
 });
 
+const StructureMemberSchema = z
+  .object({ id: z.string().uuid(), displayName: z.string() })
+  .openapi("StructureMember");
+
+const ClientStructureResponse = z
+  .object({
+    entities: z.array(StructureMemberSchema).openapi({
+      description:
+        "The companies a letter for this client may cover: the client itself first, then " +
+        "every company recorded under it (subsidiaries at any depth) and every company it " +
+        "holds shares in or is a director of. Archived parties are left out.",
+    }),
+    people: z.array(StructureMemberSchema).openapi({
+      description:
+        "The people a letter for this client may be addressed to: anyone recorded as a " +
+        "director, authorised signatory, employee or shareholder of one of those companies, " +
+        "and the client itself when the client is a person.",
+    }),
+  })
+  .openapi("ClientStructureResponse");
+
+const structureRoute = createRoute({
+  method: "get",
+  path: "/api/v1/parties/{partyId}/structure",
+  tags: ["engagement-letters"],
+  summary: "Which companies and people a letter for this client may name",
+  description:
+    "F-10-1. A letter's lines and its addressee were checked for the FIRM only, so another " +
+    "client's company or director could be written onto it. Drafting now refuses both, and " +
+    "this is the same answer as a read, on the firm's today, so a picker offers exactly what " +
+    "drafting accepts. A company or person missing here is fixed by recording the " +
+    "relationship on the client's page.",
+  request: { params: z.object({ partyId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "The client's companies and contacts, today",
+      content: { "application/json": { schema: ClientStructureResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
 const draftRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters",
@@ -1171,6 +1214,20 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
         skipped: out.skipped.map((sk) => ({ ...sk })),
       },
       201,
+    );
+  });
+
+  app.openapi(structureRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const structure = await deps.service.structureFor(s.tenantId, partyId);
+    return c.json(
+      {
+        entities: structure.entities.map((e) => ({ id: e.id, displayName: e.displayName })),
+        people: structure.people.map((p) => ({ id: p.id, displayName: p.displayName })),
+      },
+      200,
     );
   });
 

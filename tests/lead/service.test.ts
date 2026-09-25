@@ -29,6 +29,7 @@ import {
   LeadClosed,
   LeadNotFound,
   LostReasonNotApplicable,
+  LeadPartyArchived,
   LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
@@ -241,6 +242,53 @@ describe("a prospect who comes back", () => {
     expect(second.matchedExistingParty).toBe(true);
     expect(second.lead.partyId).toBe(first.lead.partyId);
     expect(leads.rows).toHaveLength(2);
+  });
+});
+
+describe("a client the firm has ARCHIVED (0305)", () => {
+  // A web enquiry carrying an archived client's PAN used to attach a fresh lead
+  // to a party the firm had put away. Refused rather than quietly restored:
+  // restoring is its own act on the client page (Shrestha, 2026-09-25).
+  async function archivedMeridian() {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF);
+    const org = await fakes.party.createOrganization(
+      { tenantId: TENANT, legalName: "Meridian Textiles Private Limited" },
+      ACTOR,
+    );
+    await fakes.party.addIdentifier(
+      { tenantId: TENANT, partyId: org.partyId, type: "pan", value: PAN, validFrom: "2026-01-01" },
+      ACTOR,
+    );
+    await fakes.party.archiveParty({ tenantId: TENANT, partyId: org.partyId }, ACTOR);
+    return { fakes, service: new LeadService(fakes), partyId: org.partyId };
+  }
+
+  it("refuses the capture, naming the client and where to restore them", async () => {
+    const { service } = await archivedMeridian();
+    const err = await service.capture(capture(), ACTOR).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LeadPartyArchived);
+    expect((err as LeadPartyArchived).code).toBe("PARTY_ARCHIVED");
+    expect((err as Error).message).toMatch(/Meridian Textiles Private Limited is archived/);
+    expect((err as Error).message).toMatch(/restore them from their client page/);
+  });
+
+  it("writes nothing: no lead, no new contact detail, no event", async () => {
+    const { fakes, service } = await archivedMeridian();
+    const before = fakes.events.recorded.length;
+    await service.capture(capture(), ACTOR).catch(() => undefined);
+    expect(fakes.leads.rows).toEqual([]);
+    // The email on the capture was NOT attached to the archived party.
+    expect(await fakes.prospects.findByIdentifier(TENANT, "email", EMAIL)).toBeNull();
+    expect(fakes.events.recorded).toHaveLength(before);
+  });
+
+  it("captures normally once the firm has restored the client", async () => {
+    const { fakes, service, partyId } = await archivedMeridian();
+    await fakes.party.unarchiveParty({ tenantId: TENANT, partyId }, ACTOR);
+    const result = await service.capture(capture(), ACTOR);
+    expect(result.lead.partyId).toBe(partyId);
+    expect(result.matchedExistingParty).toBe(true);
   });
 });
 
@@ -1230,5 +1278,40 @@ describe("T2.1b — a territory rule overrides the rotation", () => {
         ACTOR,
       ),
     ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
+  });
+});
+
+describe("the day a captured contact detail is in force from (item 4, 2026-09-25)", () => {
+  // It was the server's UTC day: a PAN captured at 02:00 in Delhi was "in
+  // force from" the day before the firm learned it.
+  it("is the FIRM's day, not the server's", async () => {
+    const fakes = makeLeadFakes();
+    fakes.timeZones.set("Asia/Kolkata");
+    fakes.clock.set("2026-03-01T20:30:00.000Z");
+    const service = new LeadService(fakes);
+    const { lead } = await service.capture(capture(), ACTOR);
+    const pan = await fakes.party.findByIdentifier(TENANT, "pan", PAN);
+    expect(pan?.partyId).toBe(lead.partyId);
+    expect(pan?.validFrom).toBe("2026-03-02");
+  });
+
+  it("is the caller's own day when it sends one", async () => {
+    const fakes = makeLeadFakes();
+    fakes.timeZones.set("Asia/Kolkata");
+    fakes.clock.set("2026-03-01T20:30:00.000Z");
+    const service = new LeadService(fakes);
+    await service.capture(capture({ asOf: "2026-03-01" }), ACTOR);
+    const pan = await fakes.party.findByIdentifier(TENANT, "pan", PAN);
+    expect(pan?.validFrom).toBe("2026-03-01");
+  });
+
+  it("REFUSES an asOf that is not today anywhere, before writing anything", async () => {
+    const fakes = makeLeadFakes();
+    const service = new LeadService(fakes);
+    await expect(service.capture(capture({ asOf: "2025-01-01" }), ACTOR)).rejects.toMatchObject({
+      code: "NOT_CALLERS_TODAY",
+    });
+    expect(fakes.leads.rows).toEqual([]);
+    expect(await fakes.party.findByIdentifier(TENANT, "pan", PAN)).toBeNull();
   });
 });

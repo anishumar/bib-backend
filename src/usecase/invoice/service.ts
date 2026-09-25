@@ -59,18 +59,34 @@ import {
   InvalidPaymentMethod,
   CreditExceedsInvoice,
   IrnAlreadyRegistered,
+  NotCallersToday,
+  EngagementOfAnotherClient,
+  InvoiceBillsTheFirm,
+  InvoiceEngagementNotFound,
+  InvoiceIssuerNotAFirmEntity,
+  InvoicePartyArchived,
 } from "../../domain/invoice/errors";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
+  FirmEntities,
+  FirmTimeZone,
   InvoiceFilters,
   InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  PartyStanding,
   ReceivableRecord,
 } from "./ports";
 
 export interface Deps {
   readonly invoices: InvoiceRepository;
+  /** The firm's zone, for "today" when the caller does not send its own. */
+  readonly timeZones: FirmTimeZone;
+  /** Which parties are the firm's own companies (F-10-1). */
+  readonly firmEntities: FirmEntities;
+  /** Names for refusals, and whether a client was archived (0305). */
+  readonly parties: PartyStanding;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -88,6 +104,8 @@ export interface RaiseInvoiceInput {
   /** Which year's books this belongs to. Defaults to today, and a firm raising
    *  an invoice on 2 April for March's work overrides it. */
   readonly seriesDate?: string | undefined;
+  /** The caller's today (see `isCallersToday`); the firm's day when absent. */
+  readonly asOf?: string | undefined;
 }
 
 export interface AddInvoiceLineInput {
@@ -127,9 +145,21 @@ export class InvoiceService {
       throw new InvalidInvoiceAmount("fxRate", input.fxRate);
     }
     this.dateOrThrow("fxRateDate", input.fxRateDate);
-    const seriesDate = input.seriesDate ?? this.today();
+    const seriesDate = input.seriesDate ?? (await this.today(input.tenantId, input.asOf));
     this.dateOrThrow("seriesDate", seriesDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
+
+    // WHO issues it and WHO it bills, before a number is taken (F-10-1). The
+    // number is allocated in the issuer's own gapless series, so a client named
+    // as the issuer would open a GST series in that client's name for good.
+    await this.requireIssuer(input.tenantId, input.entityPartyId);
+    const billed = await this.deps.parties.findParty(input.tenantId, input.partyId);
+    if (billed !== null && billed.archivedAt !== null) {
+      throw new InvoicePartyArchived(billed.displayName);
+    }
+    if (await this.deps.firmEntities.isFirmEntity(input.tenantId, input.partyId)) {
+      throw new InvoiceBillsTheFirm(billed?.displayName ?? input.partyId);
+    }
 
     const invoice = await this.deps.invoices.create({
       id: this.deps.ids.newId(),
@@ -185,6 +215,20 @@ export class InvoiceService {
       throw new InvalidInvoiceAmount("taxPercent", tax);
     }
 
+    // The engagement is the BILLED client's (F-10-1). The invoice PDF goes to
+    // that client's portal, and a line billing another client's engagement
+    // would carry somebody else's scope of work into it.
+    if (input.engagementId !== undefined) {
+      const engagement = await this.deps.invoices.engagementOf(input.tenantId, input.engagementId);
+      if (engagement === null) throw new InvoiceEngagementNotFound(input.engagementId);
+      if (engagement.partyId !== invoice.partyId) {
+        throw new EngagementOfAnotherClient(
+          await this.nameOf(input.tenantId, engagement.partyId),
+          await this.nameOf(input.tenantId, invoice.partyId),
+        );
+      }
+    }
+
     await this.deps.invoices.addLine({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -213,7 +257,7 @@ export class InvoiceService {
    * Send it. An invoice with no lines is refused — it asks the client for
    * nothing, and a document that does that is a mistake somebody will chase.
    */
-  async issue(tenantId: string, invoiceId: string, actor: Actor): Promise<Invoice> {
+  async issue(tenantId: string, invoiceId: string, actor: Actor, asOf?: string): Promise<Invoice> {
     const invoice = await this.mustFind(tenantId, invoiceId);
     if (!canTransition(invoice.status, "issued")) {
       throw new InvalidInvoiceTransition(invoice.status, "issued");
@@ -221,7 +265,11 @@ export class InvoiceService {
     const lines = await this.deps.invoices.listLines(tenantId, invoiceId);
     if (lines.length === 0) throw new EmptyInvoice(invoiceId);
 
-    const issued = await this.deps.invoices.issue(tenantId, invoiceId, this.today());
+    // The DATE ON THE TAX INVOICE. The caller's today, or the firm's: never
+    // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
+    // before it was issued.
+    const issuedOn = await this.today(tenantId, asOf);
+    const issued = await this.deps.invoices.issue(tenantId, invoiceId, issuedOn);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
@@ -324,6 +372,8 @@ export class InvoiceService {
     actor: Actor,
   ): Promise<void> {
     if (!isSeriesPrefix(prefix)) throw new InvalidSeriesPrefix(prefix);
+    // A series belongs to a company that issues invoices (F-10-1).
+    await this.requireIssuer(tenantId, entityPartyId);
     await this.deps.invoices.setSeriesPrefix(tenantId, entityPartyId, prefix);
     await this.deps.events.recordEvent({
       tenantId,
@@ -332,6 +382,17 @@ export class InvoiceService {
       actor,
       payload: { entityPartyId, prefix },
     });
+  }
+
+  /** The issuer is one of the firm's own companies (F-10-1). */
+  private async requireIssuer(tenantId: string, entityPartyId: string): Promise<void> {
+    if (await this.deps.firmEntities.isFirmEntity(tenantId, entityPartyId)) return;
+    throw new InvoiceIssuerNotAFirmEntity(await this.nameOf(tenantId, entityPartyId));
+  }
+
+  /** A party's name for a refusal, or its id when it has none on file. */
+  private async nameOf(tenantId: string, partyId: string): Promise<string> {
+    return (await this.deps.parties.findParty(tenantId, partyId))?.displayName ?? partyId;
   }
 
   /** Which financial year a date belongs to — exposed so a caller can show the
@@ -442,6 +503,7 @@ export class InvoiceService {
       readonly reason: string;
       readonly note?: string | undefined;
       readonly issuedOn?: string | undefined;
+      readonly asOf?: string | undefined;
     },
     actor: Actor,
   ): Promise<CreditNote> {
@@ -452,7 +514,7 @@ export class InvoiceService {
     if (!isCreditReason(input.reason)) {
       throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
     }
-    const issuedOn = input.issuedOn ?? this.today();
+    const issuedOn = input.issuedOn ?? (await this.today(input.tenantId, input.asOf));
     this.dateOrThrow("issuedOn", issuedOn);
 
     // A firm cannot credit more than it billed. Checked here rather than in a
@@ -558,9 +620,21 @@ export class InvoiceService {
     if (!ISO_DATE.test(value)) throw new InvalidInvoiceDate(field, value);
   }
 
-  /** Today as an ISO DATE, not an instant. An invoice date is a calendar fact
-   *  in a jurisdiction — the same rule the scheduler's arithmetic follows. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /**
+   * Today as an ISO DATE, not an instant. An invoice date is a calendar fact
+   * in a jurisdiction — the same rule the scheduler's arithmetic follows.
+   *
+   * WHOSE today: the caller's, when it says (`asOf`, the browser's local day),
+   * and otherwise the FIRM's (0071) — never the server's. It was
+   * `toISOString().slice(0, 10)`, the UTC day, which is yesterday in India
+   * until 05:30. A caller's `asOf` is held to the firm's day or one either
+   * side (`isCallersToday`): it says what day it is, it does not choose one.
+   */
+  private async today(tenantId: string, asOf?: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const firmDay = dayInZone(this.deps.clock.now().toISOString(), zone);
+    if (asOf === undefined) return firmDay;
+    if (!isCallersToday(asOf, firmDay)) throw new NotCallersToday(asOf, firmDay);
+    return asOf;
   }
 }

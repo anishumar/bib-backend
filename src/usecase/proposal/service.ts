@@ -74,12 +74,15 @@ import {
   NotAService,
   ProposalExpired,
   ProposalNotFound,
+  ProposalPartyArchived,
   ServiceNotFound,
   ShareLinkUnknown,
   ServiceNotPublished,
+  ProposalIssuerNotAFirmEntity,
 } from "../../domain/proposal/errors";
 import type {
   DocumentIdentity,
+  PartyStanding,
   PolicyDirectory,
   ProposalFilters,
   ProposalRepository,
@@ -99,6 +102,8 @@ export interface Deps {
    *  entities is offering. Both are shared with engagement letters, so both
    *  live behind one seam rather than being answered twice. */
   readonly documents: DocumentIdentity;
+  /** Whether a client or an entity has been archived (0305). */
+  readonly parties: PartyStanding;
   /** Mints the share link and hashes it. Only the digest is ever stored. */
   readonly shareTokens: ShareLinkTokens;
   readonly ids: IdGen;
@@ -213,10 +218,21 @@ export class ProposalService {
     if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
       throw new InvalidFxRate(input.fxRate);
     }
+    // Before the reference is drawn, so a refusal spends no number (0305).
+    await this.refuseArchived(input.tenantId, input.partyId, "client");
 
     // WHO is offering, before anything is written. Named by the caller, or
     // resolved from the firm's own rule — never guessed here, and never left
     // out: a document that cannot say who is contracting is not a document.
+    // A caller's choice is one of the FIRM's companies (F-10-1); the rule's
+    // own answer always is.
+    if (
+      input.issuingEntityPartyId !== undefined &&
+      !(await this.deps.documents.isFirmEntity(input.tenantId, input.issuingEntityPartyId))
+    ) {
+      const named = await this.deps.parties.findParty(input.tenantId, input.issuingEntityPartyId);
+      throw new ProposalIssuerNotAFirmEntity(named?.displayName ?? input.issuingEntityPartyId);
+    }
     const issuingEntityPartyId =
       input.issuingEntityPartyId ??
       (await this.deps.documents.issuerFor(input.tenantId, input.clientJurisdiction ?? null));
@@ -283,8 +299,25 @@ export class ProposalService {
   }
 
   /** Quote one thing, from one frozen catalogue version. */
+  /** A client or an entity the firm put away is not written onto a new
+   *  document (0305). A party that does not exist at all is left to the
+   *  foreign key, as it always was. */
+  private async refuseArchived(
+    tenantId: string,
+    partyId: string,
+    as: "client" | "entity",
+  ): Promise<void> {
+    const party = await this.deps.parties.findParty(tenantId, partyId);
+    if (party !== null && party.archivedAt !== null) {
+      throw new ProposalPartyArchived(party.displayName, as);
+    }
+  }
+
   async addLine(input: AddLineInput): Promise<ProposalLine> {
     const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
+    if (input.entityPartyId !== undefined) {
+      await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
+    }
 
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidQuantity(input.quantity);

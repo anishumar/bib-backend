@@ -138,12 +138,27 @@ export interface ObligationTemplateRepository {
    * The successor carries `supersedes_id`, which is the chain that lets a
    * filing made in 2026 still explain its own date after the law changed in
    * 2027.
+   *
+   * ── AND THE PERIODS IT NO LONGER GOVERNS GO WITH IT (0303) ────────────────
+   *
+   * The reach-back has already put a year of the predecessor's periods on the
+   * calendar, and every one from the cutover on now belongs to the successor.
+   * `handover` names those rows (nobody has started them) with the dates the
+   * SUCCESSOR gives them, and the same transaction re-pins them: same row,
+   * same id, new rule, new date. The WHERE clause repeats the unstarted test,
+   * so a row somebody picked up since the read stays on the rule its owner is
+   * working to — and `kept` counts every row past the cutover still on the
+   * predecessor afterwards, which is the number the partner is told.
+   *
+   * Nothing is created twice either way: `obligation_instance_lineage_key` is
+   * one filing per entity, per period, per chain of rules.
    */
   supersede(
     tenantId: string,
     predecessorId: string,
     successor: NewObligationTemplate,
-  ): Promise<ObligationTemplate>;
+    handover: readonly RestatedInstance[],
+  ): Promise<SupersedeResult>;
   /** Every rule at the firm, retired ones included — the rules screen shows
    *  them, because a retired rule still explains an old filing's date. */
   list(tenantId: string): Promise<readonly TemplateRecord[]>;
@@ -162,6 +177,16 @@ export interface NewException {
   readonly templateId: string;
   readonly periodEndMonth: number;
   readonly dueRule: DueRuleException;
+}
+
+/** What one supersession did: the new rule, which calendar rows it took over
+ *  (ids, so the caller can tell a re-dated row from one that only changed
+ *  hands), and how many rows past the cutover stayed with the old rule because
+ *  somebody had already started them. */
+export interface SupersedeResult {
+  readonly rule: ObligationTemplate;
+  readonly handedOver: readonly string[];
+  readonly kept: number;
 }
 
 export interface ObligationExceptionRepository {
@@ -518,8 +543,10 @@ export interface ObligationInstanceRepository {
   /**
    * Propose a batch and return the rows that were actually NEW.
    *
-   * `ON CONFLICT DO NOTHING` against `(tenant, template, entity, period_start)`,
-   * never a read-then-write: this runs every night forever and can run
+   * `ON CONFLICT DO NOTHING` against `(tenant, lineage, entity, period_start)`
+   * (0303) — the lineage being the rule and every successor it has, so a
+   * period an earlier rule in the chain already holds is not proposed twice
+   * under a later one. Never a read-then-write: this runs every night forever and can run
    * concurrently with itself after a redelivery, and only the database can
    * arbitrate that correctly. This is the acceptance line "re-running the
    * generator changes nothing", and it holds structurally.

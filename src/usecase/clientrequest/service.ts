@@ -60,6 +60,7 @@ import {
   RequestSubjectEmpty,
 } from "../../domain/clientrequest/errors";
 import type {
+  FirmTimeZone,
   AssignableStaffDirectory,
   KeyManagerDirectory,
   PortalRequestRepository,
@@ -67,6 +68,7 @@ import type {
   RequestRepository,
   RequestRoutingSource,
 } from "./ports";
+import { dayInZone } from "../../domain/scheduler/zone";
 
 export interface Deps {
   readonly requests: RequestRepository;
@@ -82,6 +84,9 @@ export interface Deps {
   readonly ids: IdGen;
   readonly events: EventSink;
   readonly clock: Clock;
+  /** The firm's zone — whose "today" decides which Key Manager a new request
+   *  is routed to, now that no portal caller's day reaches the service. */
+  readonly timeZones: FirmTimeZone;
 }
 
 /**
@@ -106,7 +111,6 @@ export interface RaiseRequestInput {
   readonly subject: string;
   readonly body: string;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 export interface PortalReplyInput {
@@ -115,7 +119,6 @@ export interface PortalReplyInput {
   readonly requestId: string;
   readonly body: string;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 export interface WithdrawInput {
@@ -123,7 +126,6 @@ export interface WithdrawInput {
   readonly userId: string;
   readonly requestId: string;
   readonly actor: Actor;
-  readonly asOf?: string | undefined;
 }
 
 export interface FirmReplyInput {
@@ -159,7 +161,6 @@ export interface PortalRequestList {
   readonly awaitingFirm: readonly PortalRequestRow[];
   readonly replied: readonly PortalRequestRow[];
   readonly settled: readonly PortalRequestRow[];
-  readonly asOf: string;
 }
 
 export class ClientRequestService {
@@ -389,16 +390,14 @@ export class ClientRequestService {
    * history is theirs to read and it is short, and "did I already ask for this"
    * is the question that stops the second phone call.
    */
-  async mine(tenantId: string, userId: string, asOf?: string): Promise<PortalRequestList> {
-    const day = asOf ?? this.today();
-    const parties = await this.scopedParties(tenantId, userId, day);
+  async mine(tenantId: string, userId: string): Promise<PortalRequestList> {
+    const parties = await this.scopedParties(tenantId, userId);
     const rows = await this.deps.portal.list(tenantId, parties);
     const live = splitByReplied(rows);
     return {
       awaitingFirm: live.awaitingFirm,
       replied: live.replied,
       settled: rows.filter((r) => r.status === "closed" || r.status === "withdrawn"),
-      asOf: day,
     };
   }
 
@@ -412,8 +411,7 @@ export class ClientRequestService {
     const body = input.body.trim();
     if (body.length === 0) throw new RequestBodyEmpty();
 
-    const day = input.asOf ?? this.today();
-    const parties = await this.scopedParties(input.tenantId, input.userId, day);
+    const parties = await this.scopedParties(input.tenantId, input.userId);
 
     // ── THIS CHECK IS A SENTENCE, NOT THE WALL ──────────────────────────
     //
@@ -444,7 +442,11 @@ export class ClientRequestService {
     const keyManager =
       routing === "none"
         ? null
-        : await this.deps.keyManagers.keyManagerFor(input.tenantId, input.clientPartyId, day);
+        : await this.deps.keyManagers.keyManagerFor(
+            input.tenantId,
+            input.clientPartyId,
+            await this.firmDay(input.tenantId),
+          );
     const routed = routeRequest(routing, keyManager);
 
     const row = await this.deps.portal.raise(input.tenantId, parties, {
@@ -510,7 +512,6 @@ export class ClientRequestService {
       input.tenantId,
       input.userId,
       input.requestId,
-      input.asOf,
     );
     if (!acceptsReply(row.status)) {
       throw new RequestAlreadySettled(input.requestId, row.status);
@@ -553,7 +554,6 @@ export class ClientRequestService {
       input.tenantId,
       input.userId,
       input.requestId,
-      input.asOf,
     );
 
     const next = await this.deps.portal.withdraw(input.tenantId, parties, {
@@ -586,21 +586,17 @@ export class ClientRequestService {
     tenantId: string,
     userId: string,
     requestId: string,
-    asOf?: string,
   ): Promise<{ parties: readonly string[]; row: PortalRequestRow }> {
-    const day = asOf ?? this.today();
-    const parties = await this.scopedParties(tenantId, userId, day);
+    const parties = await this.scopedParties(tenantId, userId);
     const row = await this.deps.portal.findById(tenantId, parties, requestId);
     if (row === null) throw new RequestNotFound(requestId);
     return { parties, row };
   }
 
-  private async scopedParties(
-    tenantId: string,
-    userId: string,
-    on: string,
-  ): Promise<readonly string[]> {
-    const companies = await this.deps.scope.scopedCompanies(tenantId, userId, on);
+  /** The grants, resolved by the grant module on the FIRM's day — never on a
+   *  day the portal caller sends (F-07-1). */
+  private async scopedParties(tenantId: string, userId: string): Promise<readonly string[]> {
+    const companies = await this.deps.scope.scopedCompanies(tenantId, userId);
     return companies.map((c) => c.clientPartyId);
   }
 
@@ -632,10 +628,11 @@ export class ClientRequestService {
     return id;
   }
 
-  /** The server's calendar day — the honest fallback for a caller that did not
-   *  say which day it is on, and never the answer when one did. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** The FIRM's calendar day (0071): which Key Manager is in force when a
+   *  client raises a request. Never a portal caller's day (F-07-1), never the
+   *  server's UTC day. */
+  private async firmDay(tenantId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 }
 

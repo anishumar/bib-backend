@@ -14,6 +14,7 @@
 //   RLS, the one-line-per-position index, and the composite key that holds a
 //   line to its proposal's currency. All database properties, proven against
 //   real Postgres.
+import { FakePartyStanding } from "./party";
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
 import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
@@ -380,6 +381,8 @@ export class FakePolicyDirectory implements PolicyDirectory {
 }
 
 export function makeProposalFakes(): Deps & {
+  /** Which parties are archived; empty unless a test archives one (0305). */
+  parties: FakePartyStanding;
   proposals: FakeProposalRepo;
   catalogue: FakeServiceCatalogue;
   policies: FakePolicyDirectory;
@@ -410,6 +413,7 @@ export function makeProposalFakes(): Deps & {
     proposals,
     catalogue,
     policies: new FakePolicyDirectory(),
+    parties: new FakePartyStanding(),
     documents: identity.documents,
     prose: identity.documents,
     firmEntities: identity.firmEntities,
