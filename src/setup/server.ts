@@ -453,6 +453,12 @@ export function wire(cfg: Config, log: Logger): Wired {
   const invoices = new InvoiceService({
     // "Today" on an invoice nobody dated is the firm's day, or the caller's.
     timeZones: new PostgresFirmTimeZone(pools.app),
+    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
+    // companies and the billed party is not. `DocumentService` owns that list
+    // (it is the issuing-entity rule's), so the "Charged by" picker and this
+    // refusal are one definition. Names and archiving come from the party read.
+    firmEntities: documents,
+    parties: partyRepository,
     invoices: invoiceRepository,
     ids: systemIds,
     clock: systemClock,
@@ -1038,6 +1044,11 @@ export function wire(cfg: Config, log: Logger): Wired {
     // use case imports the other, and there is one answer to "what did we
     // actually quote" rather than two reads that can drift.
     quotes: proposal,
+    // THE CLIENT'S STRUCTURE (F-10-1): which companies a letter's lines may be
+    // for, and whom it may be addressed to, read on the firm's day. The party
+    // module's relationship adapter satisfies it structurally.
+    structure: new PostgresRelationshipRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     esign: esign.signer,
     // Letters signed BEFORE the firm used this product arrive through the book
     // import and are attested by the person confirming it. Always the attested

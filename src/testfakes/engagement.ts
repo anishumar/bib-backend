@@ -6,7 +6,8 @@
 // 0017, proven against real Postgres in
 // tests/engagement/letter.integration.test.ts. A fake that simulated them would
 // be asserting its own behaviour.
-import { FakePartyStanding } from "./party";
+import { FakeClientStructure, FakePartyStanding } from "./party";
+import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
 import type {
   Engagement,
@@ -804,6 +805,12 @@ export class FakeSignatureTenants implements SignatureTenants {
 export function makeEngagementFakes(): Deps & {
   /** Which parties are archived; empty unless a test archives one (0305). */
   parties: FakePartyStanding;
+  /** Each client's companies and people; a client nobody recorded is only
+   *  itself, as a real client with no relationships is (F-10-1). */
+  structure: FakeClientStructure;
+  /** UTC unless a test sets the firm's zone. */
+  timeZones: FakeFirmTimeZone;
+  clock: FakeClock;
   letters: FakeEngagementRepo;
   library: FakeClauseLibrary;
   esign: FakeSigner;
@@ -833,6 +840,8 @@ export function makeEngagementFakes(): Deps & {
     library,
     documents: identity.documents,
     parties: new FakePartyStanding(),
+    structure: new FakeClientStructure(),
+    timeZones: new FakeFirmTimeZone(),
     firmEntities: identity.firmEntities,
     firm: new FakeFirmSignatory(),
     quotes: new FakeAcceptedQuotes(),

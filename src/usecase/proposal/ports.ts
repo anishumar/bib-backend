@@ -50,6 +50,8 @@ export interface PartyStanding {
 
 export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  /** Whether a party is one of the firm's own companies (F-10-1). */
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
   /**
    * COPY the firm's standard prose onto this new document (G1.7).

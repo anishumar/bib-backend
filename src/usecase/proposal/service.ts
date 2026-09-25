@@ -78,6 +78,7 @@ import {
   ServiceNotFound,
   ShareLinkUnknown,
   ServiceNotPublished,
+  ProposalIssuerNotAFirmEntity,
 } from "../../domain/proposal/errors";
 import type {
   DocumentIdentity,
@@ -223,6 +224,15 @@ export class ProposalService {
     // WHO is offering, before anything is written. Named by the caller, or
     // resolved from the firm's own rule — never guessed here, and never left
     // out: a document that cannot say who is contracting is not a document.
+    // A caller's choice is one of the FIRM's companies (F-10-1); the rule's
+    // own answer always is.
+    if (
+      input.issuingEntityPartyId !== undefined &&
+      !(await this.deps.documents.isFirmEntity(input.tenantId, input.issuingEntityPartyId))
+    ) {
+      const named = await this.deps.parties.findParty(input.tenantId, input.issuingEntityPartyId);
+      throw new ProposalIssuerNotAFirmEntity(named?.displayName ?? input.issuingEntityPartyId);
+    }
     const issuingEntityPartyId =
       input.issuingEntityPartyId ??
       (await this.deps.documents.issuerFor(input.tenantId, input.clientJurisdiction ?? null));

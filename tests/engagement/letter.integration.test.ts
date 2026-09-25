@@ -19,6 +19,7 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresEngagementRepository } from "../../src/infrastructure/postgres/engagement-repository";
+import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/invoice-repository";
 import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../src/domain/render/model";
 import { PostgresSignatureRequestRepository } from "../../src/infrastructure/postgres/signature-request-repository";
@@ -32,6 +33,7 @@ import {
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/membership-repository";
 import { PostgresTenantRepository } from "../../src/infrastructure/postgres/tenant-repository";
 import { PostgresUserRepository } from "../../src/infrastructure/postgres/user-repository";
@@ -171,6 +173,11 @@ const service = new EngagementService({
   // `ProposalService` here would drag the whole commercial module into a test
   // about `crm.engagement_letter`.
   quotes: new FakeAcceptedQuotes(),
+  // The client's structure (F-10-1), read from the real relationships the
+  // setup records below: a letter's lines and its addressee are checked
+  // against it.
+  structure: new PostgresRelationshipRepository(app),
+  timeZones: new PostgresFirmTimeZone(app),
   esign: new AttestedSigner(),
   migrationSigner: new AttestedSigner(),
   hasher: new Sha256ContentHasher(),
@@ -240,6 +247,21 @@ beforeAll(async () => {
   contactA = (
     await party.createPerson({ tenantId: tenantA, fullName: "R Sharma" }, SYSTEM_ACTOR)
   ).partyId;
+
+  // THE CLIENT'S STRUCTURE (F-10-1). Both companies are Acme's and R Sharma
+  // sits on its board, so a letter to Acme may cover the one and be addressed
+  // to the other. Without these the letter would be refused, which is the
+  // point: another client's company is not something a letter can name.
+  for (const company of [entityA1, entityA2]) {
+    await party.addRelationship(
+      { tenantId: tenantA, fromPartyId: partyA, toPartyId: company, type: "parent_of", validFrom: "2020-04-01" },
+      SYSTEM_ACTOR,
+    );
+  }
+  await party.addRelationship(
+    { tenantId: tenantA, fromPartyId: contactA, toPartyId: partyA, type: "director_of", validFrom: "2020-04-01" },
+    SYSTEM_ACTOR,
+  );
 
   const service1 = await config.define(
     {
@@ -1494,5 +1516,190 @@ describe("the signature blocks a letter PRINTS (0080)", () => {
         dateAnchor: CLIENT_DATE_ANCHOR,
       },
     ]);
+  });
+});
+
+describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () => {
+  // The composite keys prove a reference is THIS FIRM's and nothing more. These
+  // prove the rest: that a line is for the client's own company, that the
+  // addressee holds a role there, and — as walls a script or a psql session
+  // meets — that an invoice is issued by the firm and bills the right client's
+  // engagement, and that a letter cites a quote to its own client.
+  const relationships = new PostgresRelationshipRepository(app);
+  const invoices = new PostgresInvoiceRepository(app);
+  const DAY = "2026-09-25";
+
+  async function org(name: string): Promise<string> {
+    return (await party.createOrganization({ tenantId: tenantA, legalName: `${name} ${stamp}` }, SYSTEM_ACTOR))
+      .partyId;
+  }
+  async function person(name: string): Promise<string> {
+    return (await party.createPerson({ tenantId: tenantA, fullName: `${name} ${stamp}` }, SYSTEM_ACTOR)).partyId;
+  }
+  async function relate(from: string, to: string, type: string, validFrom = "2020-04-01", validTo?: string) {
+    await party.addRelationship(
+      { tenantId: tenantA, fromPartyId: from, toPartyId: to, type, validFrom, ...(validTo ? { validTo } : {}) },
+      SYSTEM_ACTOR,
+    );
+  }
+  async function draftForA(over: { addressedToPartyId?: string } = {}) {
+    return service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — structure",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        ...over,
+      },
+      SYSTEM_ACTOR,
+    );
+  }
+  const codeOf = (e: unknown): string | undefined => (e as { code?: string }).code;
+
+  it("walks ownership to any depth, follows a stake, and survives a loop", async () => {
+    const grandchild = await org("Acme Foods Exports");
+    await relate(entityA1, grandchild, "parent_of");
+    // A mistake a firm can make: the grandchild recorded as the group's parent.
+    await relate(grandchild, partyA, "parent_of");
+    const associate = await org("Acme Associate");
+    await relate(partyA, associate, "shareholder_of");
+
+    const s = await relationships.structureOf(tenantA, partyA, DAY);
+    const ids = s.entities.map((e) => e.id);
+    expect(ids[0]).toBe(partyA);
+    expect(ids).toEqual(expect.arrayContaining([entityA1, entityA2, grandchild, associate]));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("counts a relationship only on the days it is in force", async () => {
+    const former = await person("Former Director");
+    await relate(former, partyA, "director_of", "2019-04-01", "2021-04-01");
+    const incoming = await person("Incoming Director");
+    await relate(incoming, partyA, "director_of", "2027-04-01");
+    const ended = await org("Sold Subsidiary");
+    await relate(partyA, ended, "parent_of", "2019-04-01", "2022-04-01");
+
+    const s = await relationships.structureOf(tenantA, partyA, DAY);
+    expect(s.people.map((p) => p.id)).not.toContain(former);
+    expect(s.people.map((p) => p.id)).not.toContain(incoming);
+    expect(s.entities.map((e) => e.id)).not.toContain(ended);
+    // And on a day inside the old window, the same rows answer the other way.
+    const then = await relationships.structureOf(tenantA, partyA, "2020-06-30");
+    expect(then.people.map((p) => p.id)).toContain(former);
+    expect(then.entities.map((e) => e.id)).toContain(ended);
+  });
+
+  it("names the people with a role anywhere in the structure, and nobody else", async () => {
+    const subsidiaryCfo = await person("Subsidiary CFO");
+    await relate(subsidiaryCfo, entityA2, "employee_of");
+    const outsider = await person("Somebody Else");
+    const s = await relationships.structureOf(tenantA, partyA, DAY);
+    const people = s.people.map((p) => p.id);
+    expect(people).toEqual(expect.arrayContaining([contactA, subsidiaryCfo]));
+    expect(people).not.toContain(outsider);
+  });
+
+  it("refuses a line for a company outside the client, and takes it once the link is recorded", async () => {
+    const stray = await org("Unrelated Traders");
+    const letter = await draftForA();
+    const line = () =>
+      service.addLine({
+        tenantId: tenantA,
+        letterId: letter.id,
+        entityPartyId: stray,
+        serviceVersionId: gstV1,
+        description: "GST filing",
+        quantity: "12",
+        unitAmount: "2000",
+        discountPercent: "0",
+      });
+    expect(codeOf(await line().catch((e: unknown) => e))).toBe("ENTITY_OUTSIDE_CLIENT");
+    await relate(partyA, stray, "parent_of");
+    await expect(line()).resolves.toMatchObject({ entityPartyId: stray });
+  });
+
+  it("refuses an addressee whose only role has ended", async () => {
+    const retired = await person("Retired Signatory");
+    await relate(retired, partyA, "authorised_signatory_of", "2018-04-01", "2020-04-01");
+    const err = await draftForA({ addressedToPartyId: retired }).catch((e: unknown) => e);
+    expect(codeOf(err)).toBe("ADDRESSEE_NOT_LINKED");
+  });
+
+  it("walls an invoice issued by a client, or billing the firm, even past the service", async () => {
+    const draft = {
+      tenantId: tenantA,
+      currency: "INR",
+      fxRate: "1",
+      fxRateDate: "2026-07-01",
+      dueOn: null,
+      notes: null,
+      seriesDate: "2026-07-01",
+    };
+    const issuedByClient = await invoices
+      .create({ ...draft, id: systemIds.newId(), partyId: entityA1, entityPartyId: partyA })
+      .catch((e: unknown) => e);
+    expect(codeOf(issuedByClient)).toBe("23514");
+    const billsTheFirm = await invoices
+      .create({ ...draft, id: systemIds.newId(), partyId: firmEntityA, entityPartyId: firmEntityA })
+      .catch((e: unknown) => e);
+    expect(codeOf(billsTheFirm)).toBe("23514");
+  });
+
+  it("walls an invoice line billing another client's engagement", async () => {
+    const letterId = await signedLetter();
+    const [engagement] = await letters.listEngagements(tenantA, letterId);
+    if (!engagement) throw new Error("the letter fanned out into nothing");
+    const otherClient = await org("Other Client");
+    const base = {
+      tenantId: tenantA,
+      currency: "INR",
+      fxRate: "1",
+      fxRateDate: "2026-07-01",
+      dueOn: null,
+      notes: null,
+      seriesDate: "2026-07-01",
+      entityPartyId: firmEntityA,
+    };
+    const acmes = await invoices.create({ ...base, id: systemIds.newId(), partyId: partyA });
+    const others = await invoices.create({ ...base, id: systemIds.newId(), partyId: otherClient });
+    const line = (invoiceId: string) =>
+      invoices.addLine({
+        id: systemIds.newId(),
+        tenantId: tenantA,
+        invoiceId,
+        engagementId: engagement.id,
+        description: "GST filing, July",
+        quantity: "1",
+        unitAmount: "2000",
+        currency: "INR",
+        discountPercent: "0",
+        taxPercent: "0",
+      });
+    await expect(line(acmes.id)).resolves.toMatchObject({ engagementId: engagement.id });
+    expect(codeOf(await line(others.id).catch((e: unknown) => e))).toBe("23514");
+  });
+
+  it("walls a letter citing a quote made to another client", async () => {
+    const otherClient = await org("Quoted Elsewhere");
+    const [quote] = await owner<{ id: string }[]>`
+      INSERT INTO crm.proposal
+        (tenant_id, ref, party_id, issuing_entity_party_id, title, currency, fx_rate, fx_rate_date)
+      VALUES (${tenantA}, 'PR-2026-9101', ${otherClient}, ${firmEntityA}, 'Raw probe', 'INR', 1, '2026-06-01')
+      RETURNING id
+    `;
+    if (!quote) throw new Error("could not create the quote");
+    const insert = (client: string, ref: string): Promise<unknown> => owner`
+      INSERT INTO crm.engagement_letter
+        (tenant_id, ref, party_id, issuing_entity_party_id, proposal_id, jurisdiction, title,
+         currency, fx_rate, fx_rate_date)
+      VALUES (${tenantA}, ${ref}, ${client}, ${firmEntityA}, ${quote.id},
+              'IN', 'Raw probe', 'INR', 1, '2026-06-01')
+    `;
+    expect(codeOf(await insert(partyA, "EL-2026-9101").catch((e: unknown) => e))).toBe("23514");
+    await expect(insert(otherClient, "EL-2026-9102")).resolves.toBeDefined();
   });
 });

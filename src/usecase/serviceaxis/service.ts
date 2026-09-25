@@ -92,6 +92,15 @@ export class ServiceAxisService {
     return axisOrder(await this.deps.axes.listAll(tenantId));
   }
 
+  /**
+   * The Depts and teams new work may still be filed under — the list a PICKER
+   * offers (an account team's SPOC, for one). Retired rows are left out
+   * because the write refuses them; the admin screen reads `listAll`.
+   */
+  async listActive(tenantId: string): Promise<readonly ServiceAxis[]> {
+    return (await this.listAll(tenantId)).filter((a) => a.isActive);
+  }
+
   async getAxis(tenantId: string, id: string): Promise<ServiceAxis> {
     const row = await this.deps.axes.findById(tenantId, id);
     if (!row) throw new AxisNotFound(id);

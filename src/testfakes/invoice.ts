@@ -38,6 +38,7 @@ import type {
 import type { Deps } from "../usecase/invoice/service";
 import { FakeIds } from "./ids";
 import { FakeFirmTimeZone } from "./tenancy";
+import { FakePartyStanding } from "./party";
 import { FakeClock } from "./clock";
 import { RecordingEventSink } from "./ledger";
 
@@ -56,6 +57,13 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   readonly lines: (InvoiceLine & { removed: boolean })[] = [];
   /** Display names, so a joined read returns something a screen could render. */
   readonly partyNames = new Map<string, string>();
+  /** Engagement id to the client it bills (F-10-1); unknown ids are absent. */
+  readonly engagementParties = new Map<string, string>();
+
+  engagementOf(_tenantId: string, engagementId: string): Promise<{ readonly partyId: string } | null> {
+    const partyId = this.engagementParties.get(engagementId);
+    return Promise.resolve(partyId === undefined ? null : { partyId });
+  }
   private readonly series = new Map<string, { last: number; prefix: string }>();
 
   create(i: NewInvoice): Promise<Invoice> {
@@ -351,16 +359,38 @@ function tax(l: InvoiceLine): string {
   return unscaled(scaledTax(l));
 }
 
+/**
+ * Which parties are the firm's own companies (F-10-1). EMPTY until a test names
+ * them: a firm's companies are configuration, and a fake that assumed some
+ * would let a test raise an invoice from a party the real check refuses.
+ */
+export class FakeFirmEntities {
+  readonly ids = new Set<string>();
+
+  add(...partyIds: string[]): this {
+    for (const id of partyIds) this.ids.add(id);
+    return this;
+  }
+
+  isFirmEntity(_tenantId: string, partyId: string): Promise<boolean> {
+    return Promise.resolve(this.ids.has(partyId));
+  }
+}
+
 export function makeInvoiceFakes(): Deps & {
   invoices: FakeInvoiceRepo;
   /** UTC unless a test sets the firm's zone. */
   timeZones: FakeFirmTimeZone;
+  firmEntities: FakeFirmEntities;
+  parties: FakePartyStanding;
   clock: FakeClock;
   events: RecordingEventSink;
 } {
   return {
     invoices: new FakeInvoiceRepo(),
     timeZones: new FakeFirmTimeZone(),
+    firmEntities: new FakeFirmEntities(),
+    parties: new FakePartyStanding(),
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
     events: new RecordingEventSink(),

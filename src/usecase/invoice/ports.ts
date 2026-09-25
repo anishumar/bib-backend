@@ -110,6 +110,27 @@ export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
 }
 
+/**
+ * Which parties are the firm's OWN companies (F-10-1): the issuer must be one,
+ * the billed party must not. Satisfied structurally by `DocumentService`, which
+ * owns the issuing-entity rule, so the "Charged by" list and this check are one
+ * definition (`crm.is_firm_entity`, 0306).
+ */
+export interface FirmEntities {
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
+}
+
+/**
+ * A party's name, and whether the firm put it away (0305). Satisfied by the
+ * party repository's read-one-by-id, which never hides an archived party.
+ */
+export interface PartyStanding {
+  findParty(
+    tenantId: string,
+    partyId: string,
+  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
+}
+
 export interface InvoiceRepository {
   /**
    * Create the invoice AND take its number, in ONE transaction.
@@ -132,6 +153,9 @@ export interface InvoiceRepository {
   addLine(l: NewInvoiceLine): Promise<InvoiceLine>;
   removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void>;
   listLines(tenantId: string, invoiceId: string): Promise<readonly InvoiceLine[]>;
+  /** Whose engagement this is — the client it bills (F-10-1). Null when there
+   *  is no such engagement at this firm. */
+  engagementOf(tenantId: string, engagementId: string): Promise<{ readonly partyId: string } | null>;
 
   /** Issue it: the status and the date it carries, in one statement. */
   issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;

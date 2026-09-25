@@ -2,6 +2,7 @@
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { ClientStructure } from "../../domain/party/model";
 import type {
   BillingBasis,
   JurisdictionalTerm,
@@ -51,11 +52,38 @@ export interface PartyStanding {
   findParty(
     tenantId: string,
     partyId: string,
-  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
+  ): Promise<{
+    readonly displayName: string;
+    readonly archivedAt: string | null;
+    /** A letter is addressed to a PERSON (F-10-1). */
+    readonly kind: "organization" | "person";
+  } | null>;
+}
+
+/**
+ * The client's structure on a day — who a letter for them may name (F-10-1).
+ *
+ * Satisfied structurally by the relationship repository, so neither module
+ * imports the other. The SAME read fills the letter's pickers (through
+ * `EngagementService.structureFor`) and decides the refusal, which is what
+ * keeps the screen from offering a company the API then refuses.
+ */
+export interface ClientStructureDirectory {
+  structureOf(tenantId: string, clientPartyId: string, onDay: string): Promise<ClientStructure>;
+}
+
+/**
+ * Which zone the firm keeps its calendar in — "today", for the day a client's
+ * structure is read on. Structural: `PostgresFirmTimeZone` satisfies it.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 export interface DocumentIdentity {
   issuerFor(tenantId: string, clientJurisdiction: string | null): Promise<string>;
+  /** Whether a party is one of the firm's own companies (F-10-1). */
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
   nextRef(tenantId: string, type: DocumentType, now: Date): Promise<string>;
   /**
    * Where the issuing entity is REGISTERED — G1.8's mismatch check.

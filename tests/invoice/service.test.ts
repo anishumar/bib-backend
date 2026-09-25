@@ -14,6 +14,11 @@ import {
   InvoiceNotEditable,
   InvoiceNotFound,
   IrnAlreadyRegistered,
+  EngagementOfAnotherClient,
+  InvoiceBillsTheFirm,
+  InvoiceEngagementNotFound,
+  InvoiceIssuerNotAFirmEntity,
+  InvoicePartyArchived,
 } from "../../src/domain/invoice/errors";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -27,6 +32,8 @@ function setup(): { service: InvoiceService } & ReturnType<typeof makeInvoiceFak
   fakes.invoices.partyNames.set(CLIENT, "Meridian Textiles Private Limited");
   fakes.invoices.partyNames.set(ENTITY, "10x Global Advisory Private Limited");
   fakes.invoices.partyNames.set(OTHER_ENTITY, "10x Global Inc.");
+  // The firm's own two companies (F-10-1); the client is not one of them.
+  fakes.firmEntities.add(ENTITY, OTHER_ENTITY);
   return { ...fakes, service: new InvoiceService(fakes) };
 }
 
@@ -501,5 +508,83 @@ describe("the day on the invoice is the firm's, or the caller's — never the se
       ACTOR,
     );
     expect(credit.issuedOn).toBe("2026-07-02");
+  });
+});
+
+describe("who an invoice names (F-10-1)", () => {
+  // Checked for the FIRM only until now. The issuer opens a numbered GST series
+  // in its own name, so a client named there could never be taken back.
+  const OTHER_CLIENT = "00000000-0000-0000-0000-0000000000b9";
+  const ENGAGEMENT = "00000000-0000-0000-0000-0000000000e1";
+  const THEIR_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e2";
+
+  function named() {
+    const s = setup();
+    s.parties
+      .know(CLIENT, "Meridian Textiles Private Limited")
+      .know(OTHER_CLIENT, "Lakeview Foods Private Limited")
+      .know(ENTITY, "10x Global Advisory Private Limited");
+    s.invoices.engagementParties.set(ENGAGEMENT, CLIENT);
+    s.invoices.engagementParties.set(THEIR_ENGAGEMENT, OTHER_CLIENT);
+    return s;
+  }
+
+  it("refuses a client as the issuer, by name, and opens no series for it", async () => {
+    const s = named();
+    const refused = s.service.raise(raise({ entityPartyId: OTHER_CLIENT }), ACTOR);
+    await expect(refused).rejects.toBeInstanceOf(InvoiceIssuerNotAFirmEntity);
+    await expect(refused).rejects.toThrow(
+      /Lakeview Foods Private Limited is not one of the firm's own companies/,
+    );
+    expect(s.invoices.invoices).toHaveLength(0);
+    // The firm's own series starts at 1 regardless.
+    expect((await s.service.raise(raise(), ACTOR)).number).toBe("INV/2026-27/0001");
+  });
+
+  it("refuses to bill one of the firm's own companies", async () => {
+    const s = named();
+    await expect(s.service.raise(raise({ partyId: OTHER_ENTITY }), ACTOR)).rejects.toBeInstanceOf(
+      InvoiceBillsTheFirm,
+    );
+    expect(s.invoices.invoices).toHaveLength(0);
+  });
+
+  it("refuses an archived client, as a letter does (0305)", async () => {
+    const s = named();
+    s.parties.archive(CLIENT, "Meridian Textiles Private Limited");
+    await expect(s.service.raise(raise(), ACTOR)).rejects.toBeInstanceOf(InvoicePartyArchived);
+    expect(s.invoices.invoices).toHaveLength(0);
+  });
+
+  it("bills the client's own engagement, and refuses another client's", async () => {
+    const s = named();
+    const invoice = await s.service.raise(raise(), ACTOR);
+    const line = (engagementId: string) =>
+      s.service.addLine({
+        tenantId: TENANT,
+        invoiceId: invoice.id,
+        engagementId,
+        description: "GST filing, July",
+        quantity: "1",
+        unitAmount: "6000",
+      });
+    await expect(line(ENGAGEMENT)).resolves.toBeUndefined();
+    const refused = line(THEIR_ENGAGEMENT);
+    await expect(refused).rejects.toBeInstanceOf(EngagementOfAnotherClient);
+    await expect(refused).rejects.toThrow(
+      "That engagement is Lakeview Foods Private Limited's work, and this invoice bills Meridian Textiles Private Limited.",
+    );
+    await expect(line("00000000-0000-0000-0000-0000000000e9")).rejects.toBeInstanceOf(
+      InvoiceEngagementNotFound,
+    );
+    expect(await s.invoices.listLines(TENANT, invoice.id)).toHaveLength(1);
+  });
+
+  it("names a series only for one of the firm's own companies", async () => {
+    const s = named();
+    await expect(
+      s.service.setSeriesPrefix(TENANT, OTHER_CLIENT, "LV", ACTOR),
+    ).rejects.toBeInstanceOf(InvoiceIssuerNotAFirmEntity);
+    expect(s.events.recorded).toHaveLength(0);
   });
 });

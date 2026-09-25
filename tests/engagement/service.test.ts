@@ -40,6 +40,13 @@ import {
   LetterPartyArchived,
 } from "../../src/domain/engagement/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
+import {
+  AddresseeNotAPerson,
+  AddresseeNotLinked,
+  EntityOutsideClient,
+  IssuerNotAFirmEntity,
+  QuoteOfAnotherClient,
+} from "../../src/domain/engagement/errors";
 import type { BillingFrequency } from "../../src/domain/document/model";
 import {
   canonicalContent,
@@ -84,6 +91,10 @@ const FORUM_SG = "00000000-0000-0000-0000-0000000000e6";
 
 function setup(): ReturnType<typeof makeEngagementFakes> & { service: EngagementService } {
   const fakes = makeEngagementFakes();
+  // THE CLIENT'S STRUCTURE (F-10-1): both companies are the client's and the
+  // contact holds a role there, so a letter may cover the one and be
+  // addressed to the other. The refusals have their own describe block.
+  fakes.structure.record(PARTY, { entities: [ENTITY_A, ENTITY_B], people: [CONTACT] });
   fakes.library.publishService(GST, "gst-filing", {
     name: "GST monthly filing",
     billingBasis: "fixed",
@@ -1824,5 +1835,211 @@ describe("a letter signed before the firm used this product", () => {
     await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
     expect(s.esign.signed.map((x) => x.letterId)).toEqual([id]);
     expect(s.migrationSigner.signed).toHaveLength(0);
+  });
+});
+
+describe("who a letter names beside the client (F-10-1)", () => {
+  // Every one of these was checked for the FIRM only: any party of the firm
+  // could be written onto a letter, another client's included. Each refusal
+  // comes before the reference number is drawn, so a refused draft spends none.
+  const OTHER_CLIENT = "00000000-0000-0000-0000-0000000000b9";
+  const OTHER_COMPANY = "00000000-0000-0000-0000-0000000000ba";
+  const STRANGER = "00000000-0000-0000-0000-0000000000bd";
+  const QUOTE = "00000000-0000-0000-0000-0000000000q2";
+
+  function named() {
+    const s = setup();
+    s.parties
+      .know(PARTY, "Acme Holdings Private Limited")
+      .know(OTHER_CLIENT, "Lakeview Foods Private Limited")
+      .know(OTHER_COMPANY, "Lakeview Logistics Private Limited")
+      .know(STRANGER, "R Iyer", "person")
+      .know(CONTACT, "R Sharma", "person");
+    return s;
+  }
+
+  /** The number the NEXT letter gets — how a test sees none was spent. */
+  async function nextRef(s: ReturnType<typeof setup>): Promise<string | undefined> {
+    const id = await draft(s);
+    return (await s.letters.findLetter(TENANT, id))?.ref;
+  }
+
+  it("refuses a client's company as the issuer, by name, and spends no number", async () => {
+    const s = named();
+    const refused = s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        jurisdiction: "IN",
+        title: "x",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+        issuingEntityPartyId: OTHER_CLIENT,
+      },
+      ACTOR,
+    );
+    await expect(refused).rejects.toBeInstanceOf(IssuerNotAFirmEntity);
+    await expect(refused).rejects.toThrow(
+      /Lakeview Foods Private Limited is not one of the firm's own companies/,
+    );
+    expect(await nextRef(s)).toBe("EL-2026-0001");
+  });
+
+  it("refuses a quote made to another client, and a quote that is not there", async () => {
+    const s = named();
+    s.quotes.add({
+      proposal: {
+        id: QUOTE,
+        ref: "PR-2026-0009",
+        partyId: OTHER_CLIENT,
+        issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+        title: "Lakeview retainer",
+        status: "accepted",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+      },
+      lines: [],
+    });
+    const ask = (proposalId: string) =>
+      s.service.draft(
+        {
+          tenantId: TENANT,
+          partyId: PARTY,
+          proposalId,
+          jurisdiction: "IN",
+          title: "x",
+          currency: "INR",
+          fxRate: "1",
+          fxRateDate: "2026-07-01",
+          advanceRequired: false,
+        },
+        ACTOR,
+      );
+    await expect(ask(QUOTE)).rejects.toBeInstanceOf(QuoteOfAnotherClient);
+    await expect(ask(QUOTE)).rejects.toThrow(
+      "PR-2026-0009 is a quote to Lakeview Foods Private Limited, and this letter is for Acme Holdings Private Limited.",
+    );
+    await expect(ask("00000000-0000-0000-0000-0000000000q3")).rejects.toBeInstanceOf(QuoteNotFound);
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
+  it("addresses a letter to a PERSON, never a company", async () => {
+    const s = named();
+    await expect(draft(s, { addressedToPartyId: OTHER_COMPANY })).rejects.toBeInstanceOf(
+      AddresseeNotAPerson,
+    );
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
+  it("refuses a person with no role at the client, and says how to fix it", async () => {
+    // R Iyer may be real and may even be Acme's accountant; until the firm
+    // records that, the letter cannot say it is addressed to them.
+    const s = named();
+    const refused = draft(s, { addressedToPartyId: STRANGER });
+    await expect(refused).rejects.toBeInstanceOf(AddresseeNotLinked);
+    await expect(refused).rejects.toThrow(
+      /R Iyer has no recorded role at Acme Holdings Private Limited or any of its companies/,
+    );
+    expect(s.letters.letters).toHaveLength(0);
+
+    // Recorded, the same letter goes through.
+    s.structure.record(PARTY, { entities: [ENTITY_A, ENTITY_B], people: [CONTACT, STRANGER] });
+    await expect(draft(s, { addressedToPartyId: STRANGER })).resolves.toBeTypeOf("string");
+  });
+
+  it("refuses a line for another client's company, by name", async () => {
+    const s = named();
+    const id = await draft(s);
+    const refused = s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: OTHER_COMPANY,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await expect(refused).rejects.toBeInstanceOf(EntityOutsideClient);
+    await expect(refused).rejects.toThrow(
+      /Lakeview Logistics Private Limited is not Acme Holdings Private Limited and is not recorded as one of its companies/,
+    );
+    expect(await s.letters.listLines(TENANT, id)).toHaveLength(0);
+  });
+
+  it("always lets a line be for the client itself", async () => {
+    // A single-company client records no structure at all, and is the
+    // ordinary case: nothing here may ask it to.
+    const s = named();
+    const id = await draft(s);
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        letterId: id,
+        entityPartyId: PARTY,
+        serviceVersionId: GST,
+        description: "GST filing",
+        quantity: "12",
+        unitAmount: "2000",
+        discountPercent: "0",
+      }),
+    ).resolves.toMatchObject({ entityPartyId: PARTY });
+  });
+
+  it("refuses a quote naming another client's company BEFORE any letter exists", async () => {
+    const s = named();
+    s.quotes.add({
+      proposal: {
+        id: QUOTE,
+        ref: "PR-2026-0010",
+        partyId: PARTY,
+        issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+        title: "Group retainer",
+        status: "accepted",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+      },
+      lines: [
+        {
+          id: "line-1",
+          entityPartyId: OTHER_COMPANY,
+          serviceVersionId: GST,
+          description: "GST monthly filing",
+          quantity: "12",
+          unitAmount: "6000.00",
+          discountPercent: "0",
+          jurisdiction: "IN",
+          billingFrequency: null,
+          scopeOverride: null,
+          clientObligationsOverride: null,
+          volumeLimitsOverride: null,
+          exclusionsOverride: null,
+          oopEstimate: null,
+          pricingNote: null,
+        },
+      ],
+    });
+    await expect(
+      s.service.draftFromQuote(
+        { tenantId: TENANT, proposalId: QUOTE, advanceRequired: false },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(EntityOutsideClient);
+    expect(s.letters.letters).toHaveLength(0);
+    expect(await nextRef(s)).toBe("EL-2026-0001");
+  });
+
+  it("reads the structure on the FIRM's day, not the server's", async () => {
+    // 20:00 UTC on 1 July is 01:30 on 2 July in Delhi. A directorship that
+    // starts on 2 July must already count.
+    const s = named();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set(new Date("2026-07-01T20:00:00Z"));
+    await s.service.structureFor(TENANT, PARTY);
+    expect(s.structure.days).toEqual(["2026-07-02"]);
   });
 });

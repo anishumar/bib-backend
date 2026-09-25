@@ -34,7 +34,7 @@ import {
   ServiceNotPublished,
 } from "../../src/domain/proposal/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
-import { ProposalPartyArchived } from "../../src/domain/proposal/errors";
+import { ProposalIssuerNotAFirmEntity, ProposalPartyArchived } from "../../src/domain/proposal/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -151,6 +151,27 @@ describe("drafting", () => {
       ref: "PR-2026-0001",
       issuingEntityPartyId: SEEDED_FIRM_ENTITY,
     });
+  });
+
+  it("refuses a party that is not one of the firm's own as the issuer (F-10-1)", async () => {
+    // Any party of the firm could be named, a client included, and the quote
+    // then said the CLIENT was offering the firm's services.
+    const s = setup();
+    await expect(
+      s.service.draft(
+        {
+          tenantId: TENANT,
+          partyId: PARTY,
+          issuingEntityPartyId: PARTY,
+          title: "Acme — FY26",
+          currency: "INR",
+          fxRate: "1",
+          fxRateDate: "2026-06-01",
+        },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(ProposalIssuerNotAFirmEntity);
+    expect(s.events.recorded).toHaveLength(0);
   });
 
   it("lets a partner name the entity for this document only", async () => {

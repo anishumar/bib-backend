@@ -25,6 +25,8 @@ import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repo
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
+import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -42,6 +44,8 @@ const invoices = new PostgresInvoiceRepository(app);
 const service = new InvoiceService({
   invoices,
   timeZones: new PostgresFirmTimeZone(app),
+  firmEntities: new PostgresDocumentRepository(app),
+  parties: new PostgresPartyRepository(app),
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -83,6 +87,13 @@ beforeAll(async () => {
   secondEntity = await makeParty(tenant, "10x Global Inc.");
   rivalClient = await makeParty(rival, "Somebody Else Ltd");
   rivalEntity = await makeParty(rival, "Their Firm LLP");
+  // Each issuer is one of its firm's own companies (0306): the firm's rule
+  // names it for a country, as a firm with two companies does.
+  await owner`
+    INSERT INTO crm.firm_entity_preference (tenant_id, client_jurisdiction, firm_entity_party_id)
+    VALUES (${tenant}, '*', ${entity}), (${tenant}, 'US', ${secondEntity}),
+           (${rival}, '*', ${rivalEntity})
+  `;
 });
 
 afterAll(async () => {
@@ -317,10 +328,30 @@ describe("the tenant wall", () => {
   });
 
   it("refuses an invoice issued by another firm's entity", async () => {
+    // Refused by NAME first (F-10-1): RLS hides the rival's company, so it is
+    // not one of this firm's own and the service says so.
     const err = await service
       .raise(draft({ entityPartyId: rivalEntity }), SYSTEM_ACTOR)
       .catch((e: unknown) => e);
-    expect((err as { code?: string }).code).toBe("23503");
+    expect((err as { code?: string }).code).toBe("ISSUER_NOT_A_FIRM_ENTITY");
+
+    // And the write underneath is unrepresentable on its own. 0306's trigger
+    // speaks before the composite key gets to: it is not this firm's company.
+    const wall = await invoices
+      .create({
+        id: systemIds.newId(),
+        tenantId: tenant,
+        partyId: client,
+        entityPartyId: rivalEntity,
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        dueOn: null,
+        notes: null,
+        seriesDate: "2026-07-01",
+      })
+      .catch((e: unknown) => e);
+    expect((wall as { code?: string }).code).toBe("23514"); // check_violation
   });
 });
 

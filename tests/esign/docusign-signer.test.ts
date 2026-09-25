@@ -235,6 +235,8 @@ async function sentLetter(docs: FakeDocusignTransport): Promise<{
   hashes: string[];
 }> {
   const fakes = makeEngagementFakes();
+  // The line's company is the client's (F-10-1).
+  fakes.structure.record(PARTY, { entities: [ENTITY] });
   fakes.library.publishService(GST, "gst-filing", {
     name: "GST monthly filing",
     billingBasis: "fixed",

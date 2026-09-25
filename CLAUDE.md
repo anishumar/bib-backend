@@ -1072,6 +1072,44 @@ without it the numbers always reconcile and *why* money came off does not — an
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
 
+## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
+
+The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The
+2026-09-23 audit found what that left open, and every hole was one a picker made easy: an
+invoice's `entity_party_id` could name a CLIENT (and open a gapless GST series in its name, which
+cannot be renumbered), its `party_id` could name the firm itself, a line's `engagement_id` could
+bill another client's engagement (its scope of work then reaching this client's portal in the
+PDF), a letter's `proposal_id` could cite a quote to another client, a letter or quote could be
+"issued by" a client, a letter line could be for another client's company, and a letter could be
+addressed to another client's director. All refused now, before any number is drawn:
+
+- **One of the firm's own companies** is `crm.is_firm_entity` (0306): the firm itself
+  (`is_firm_self`) or an issuer a `firm_entity_preference` row names — the very list the "Charged
+  by" picker shows. `DocumentService.isFirmEntity` asks the function rather than restating it,
+  and invoicing, proposals and letters all ask `DocumentService`. The issuer must be one; the
+  billed party must not (inter-company billing refused — Shrestha, 2026-09-25).
+- **The client's structure** is `RelationshipRepository.structureOf` — the client, every company
+  under it by `parent_of` to any depth, every company it is a `shareholder_of` or `director_of`
+  (and what is under those), and the people holding a `director_of` / `authorised_signatory_of` /
+  `employee_of` / `shareholder_of` role in any of them; in force on the FIRM's day, archived
+  parties left out, a recorded loop ending the walk. A letter line must be for one of those
+  companies and an addressee must be one of those people (and a person). **The same read is
+  `GET /parties/{id}/structure`**, so the letter's pickers and its refusals are one definition.
+  The answer to either refusal is to record the relationship on the client's page (409, like
+  `QUOTE_NAMES_NO_ENTITY`: the fact is missing from the firm's own records).
+- **An invoice's engagement is the billed client's** (`engagement.party_id = invoice.party_id`),
+  exactly what `billable-engagements` offers; **a letter's quote is its own client's**; **an
+  archived client gains no new invoice** (0305's rule, reaching the document it did not list).
+
+**The invariant ones are also WALLS (0306)**, for the writers that are not the services: the
+invoice's issuer and billed party, its series, its line's engagement and the letter's quote.
+Each trigger is NAMED to sort after the freeze on its table, because BEFORE triggers fire in
+name order and a change to a signed letter or an issued invoice must be refused as that.
+**The structure is deliberately not a trigger**: relationships are effective-dated and get
+ended and back-dated as a firm learns of them, so a wall would judge a signed letter by a
+structure that changed after it was signed. Nor is a quote's or letter's issuer walled: ten
+integration fixtures write them by hand, and only the invoice's issuer opens a legal series.
+
 ## Chasing a receivable — and the one rung a machine may not climb (T3.5)
 
 The dunning ladder is **config**, the registry's fifth kind: D+3, D+7, D+15 are the firm's
@@ -1214,10 +1252,11 @@ The one server-side `CURRENT_DATE` left in an adapter is the dashboard's "invoic
 days", not part of this.
 
 `party:read` to see an account team, `party:write` to change one — not `tenant:admin`. Naming a
-Key Manager grants nobody anything; it is a fact about a client, like its identifiers. Its
-honest limit is on the SCREEN: the assign form needs the roster and the Dept list, both
-`tenant:admin` reads, so a manager who may assign is shown no form — exactly the shape
-`/leads`'s owner dropdown already has, left consistent with it rather than fixed on a whim.
+Key Manager grants nobody anything; it is a fact about a client, like its identifiers. The
+SCREEN's limit is closed since 2026-09-25: the assign form's two pickers read
+`/tenancy/colleagues` and `/tenancy/axes` (the ACTIVE Depts and teams), both `party:read`, where
+they were the admin roster and the admin `/tenancy/structure` — so a manager who may assign is
+now shown the form. The full structure, retired rows and the split axis stay `tenant:admin`.
 
 ## Rendering a document — and why the engine is pdf-lib (T3.8)
 

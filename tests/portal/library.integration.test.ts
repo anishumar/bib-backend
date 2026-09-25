@@ -143,6 +143,12 @@ beforeAll(async () => {
   // fail if somebody ever "tidied" the policy to `OR party_id IS NULL`.
   firmDoc = await document(null, "letterhead", "brand_asset", true);
 
+  // The issuer is one of the firm's own companies (0306): the firm's rule names
+  // it, as every tenant's seeded entity is.
+  await owner`
+    INSERT INTO crm.firm_entity_preference (tenant_id, client_jurisdiction, firm_entity_party_id)
+    VALUES (${tenantId}, '*', ${firmEntity})
+  `;
   const [series] = await owner<{ financial_year: number }[]>`
     INSERT INTO crm.invoice_series (tenant_id, entity_party_id, financial_year, last_number, prefix)
     VALUES (${tenantId}, ${firmEntity}, 2026, 0, 'INV')
@@ -237,6 +243,7 @@ afterAll(async () => {
   await owner`ALTER TABLE crm.invoice_line ENABLE TRIGGER trg_invoice_line_freeze`;
   await owner`ALTER TABLE crm.credit_note ENABLE TRIGGER trg_credit_note_freeze`;
   await owner`DELETE FROM crm.invoice_series WHERE tenant_id = ${tenantId}`;
+  await owner`DELETE FROM crm.firm_entity_preference WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM files.document_version WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM files.document WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM core.party WHERE tenant_id = ${tenantId}`;

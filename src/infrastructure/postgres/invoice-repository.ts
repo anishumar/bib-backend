@@ -411,6 +411,18 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     );
   }
 
+  async engagementOf(
+    tenantId: string,
+    engagementId: string,
+  ): Promise<{ readonly partyId: string } | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ party_id: string }[]>`
+        SELECT party_id FROM crm.engagement WHERE id = ${engagementId}
+      `;
+      return row ? { partyId: row.party_id } : null;
+    });
+  }
+
   async listLines(tenantId: string, invoiceId: string): Promise<readonly InvoiceLine[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<InvoiceLineRow[]>`

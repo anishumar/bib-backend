@@ -22,6 +22,8 @@ import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repo
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
+import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
+import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -35,6 +37,8 @@ const repo = new PostgresInvoiceRepository(app);
 const service = new InvoiceService({
   invoices: repo,
   timeZones: new PostgresFirmTimeZone(app),
+  firmEntities: new PostgresDocumentRepository(app),
+  parties: new PostgresPartyRepository(app),
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -63,6 +67,12 @@ beforeAll(async () => {
   if (!c || !e) throw new Error("could not create the parties");
   client = c.id;
   entity = e.id;
+  // The issuer is one of the firm's own companies (0306): named by the firm's
+  // rule, as every tenant's seeded entity is.
+  await owner`
+    INSERT INTO crm.firm_entity_preference (tenant_id, client_jurisdiction, firm_entity_party_id)
+    VALUES (${tenant}, '*', ${entity})
+  `;
 });
 
 afterAll(async () => {

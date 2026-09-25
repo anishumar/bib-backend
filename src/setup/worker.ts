@@ -36,6 +36,7 @@ import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-res
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
+import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
 import { PostgresServiceAxisRepository } from "../infrastructure/postgres/service-axis-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
 import { PostgresWorkVocabularyRepository } from "../infrastructure/postgres/work-vocabulary-repository";
@@ -510,6 +511,10 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       clock: systemClock,
       events: ledger,
     }),
+    // Drafting is the API's; the worker settles envelopes and never drafts. The
+    // same adapters anyway, so the graph is the one the API composes.
+    structure: new PostgresRelationshipRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     esign: esign.signer,
     migrationSigner: new AttestedSigner(),
     hasher: new Sha256ContentHasher(),

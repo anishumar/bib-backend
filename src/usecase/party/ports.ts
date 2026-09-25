@@ -3,6 +3,7 @@
 // infrastructure/ implement them. Every tenant-scoped write/read is expected to
 // run under the RLS context (withTenant) inside the adapter.
 import type {
+  ClientStructure,
   IdentifierType,
   LegalEntity,
   Organization,
@@ -207,4 +208,10 @@ export interface RelationshipRepository {
   /** Every relationship the party is on either side of, each with the party at
    *  the other end — one query, not one per row. */
   listForParty(tenantId: string, partyId: string): Promise<RelationshipRecord[]>;
+  /**
+   * The client's structure on `onDay` (F-10-1) — see `ClientStructure`. One
+   * SQL definition, read both by the letter's pickers and by the refusal a
+   * letter gets, so the two cannot disagree.
+   */
+  structureOf(tenantId: string, clientPartyId: string, onDay: string): Promise<ClientStructure>;
 }

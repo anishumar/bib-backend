@@ -38,6 +38,8 @@ const SIGNER = { name: "Priya Menon", email: "Priya@Meridian.example" };
 
 function setup(options: { sends?: boolean } = {}) {
   const fakes = makeEngagementFakes();
+  // The line's company is the client's (F-10-1).
+  fakes.structure.record(PARTY, { entities: [ENTITY] });
   fakes.library.publishService(GST, "gst-filing", { name: "GST monthly filing", billingBasis: "fixed" });
   fakes.library.publishClause(SCOPE, "scope", {
     title: "Scope of work",

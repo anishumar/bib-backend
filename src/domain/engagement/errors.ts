@@ -50,7 +50,12 @@ export type EngagementErrorCode =
   | "QUOTE_HAS_NO_LINES"
   | "QUOTE_JURISDICTION_UNCLEAR"
   | "QUOTE_NAMES_NO_ENTITY"
-  | "PARTY_ARCHIVED";
+  | "PARTY_ARCHIVED"
+  | "ISSUER_NOT_A_FIRM_ENTITY"
+  | "QUOTE_OF_ANOTHER_CLIENT"
+  | "ADDRESSEE_NOT_A_PERSON"
+  | "ADDRESSEE_NOT_LINKED"
+  | "ENTITY_OUTSIDE_CLIENT";
 
 /** The client, or the company a line is for, was archived (0305). A letter
  *  may not name a party the firm put away; restore it first. */
@@ -62,6 +67,71 @@ export class LetterPartyArchived extends EngagementError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+// ── Who a letter names, beside the client (F-10-1) ─────────────────────────
+//
+// Every reference below was checked for the FIRM only: any party of the firm
+// could be named, including another client's company. Each refusal says what
+// to do instead, because the fix is usually a fact to record, not a retry.
+
+/** The company named as issuing the letter is not one of the firm's own. */
+export class IssuerNotAFirmEntity extends EngagementError {
+  constructor(displayName: string) {
+    super(
+      "ISSUER_NOT_A_FIRM_ENTITY",
+      `${displayName} is not one of the firm's own companies, so it cannot issue this letter. ` +
+        `Choose one of the firm's companies, or leave "Issued by" blank and the firm's rule ` +
+        `for the letter's country picks it.`,
+    );
+  }
+}
+
+/** The quote named as the letter's origin was made to a different client. */
+export class QuoteOfAnotherClient extends EngagementError {
+  constructor(ref: string, quotedTo: string, letterFor: string) {
+    super(
+      "QUOTE_OF_ANOTHER_CLIENT",
+      `${ref} is a quote to ${quotedTo}, and this letter is for ${letterFor}. A letter can only ` +
+        `say it was drafted from a quote made to the same client.`,
+    );
+  }
+}
+
+/** A letter is addressed to a PERSON, care of the client. */
+export class AddresseeNotAPerson extends EngagementError {
+  constructor(displayName: string) {
+    super(
+      "ADDRESSEE_NOT_A_PERSON",
+      `${displayName} is a company, and a letter is addressed to a person at the client. ` +
+        `Leave "Addressed to" blank to address the letter to the company itself.`,
+    );
+  }
+}
+
+/** The person holds no recorded role at the client or any company under it. */
+export class AddresseeNotLinked extends EngagementError {
+  constructor(person: string, client: string) {
+    super(
+      "ADDRESSEE_NOT_LINKED",
+      `${person} has no recorded role at ${client} or any of its companies, so the letter ` +
+        `cannot be addressed to them. Record them on ${client}'s client page as a director, ` +
+        `authorised signatory, employee or shareholder first, or choose somebody who is.`,
+    );
+  }
+}
+
+/** A line's company is not the client, and not recorded as one of its companies. */
+export class EntityOutsideClient extends EngagementError {
+  constructor(entity: string, client: string) {
+    super(
+      "ENTITY_OUTSIDE_CLIENT",
+      `${entity} is not ${client} and is not recorded as one of its companies, so this letter ` +
+        `cannot cover work for it. Record the link on ${client}'s client page first (a ` +
+        `subsidiary, or a company ${client} holds shares in or is a director of), or put this ` +
+        `work on a letter to ${entity}'s own client.`,
     );
   }
 }

@@ -68,6 +68,14 @@ export interface FirmEntityPreferenceRepository {
    *  id is a 404 naming the id rather than a foreign-key violation surfacing as
    *  a 500. */
   findEntity(tenantId: string, partyId: string): Promise<FirmEntity | null>;
+  /**
+   * Whether this party is one of the firm's OWN companies (F-10-1): the firm
+   * itself, or a company some preference row names as the issuer for a
+   * country. Answered by `crm.is_firm_entity` (0306), the same function the
+   * invoice triggers call, so the invoice screen's "Charged by" list, the
+   * refusal a service gives and the wall under both are one definition.
+   */
+  isFirmEntity(tenantId: string, partyId: string): Promise<boolean>;
 }
 
 /**

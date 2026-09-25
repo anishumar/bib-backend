@@ -60,15 +60,22 @@ import {
   CreditExceedsInvoice,
   IrnAlreadyRegistered,
   NotCallersToday,
+  EngagementOfAnotherClient,
+  InvoiceBillsTheFirm,
+  InvoiceEngagementNotFound,
+  InvoiceIssuerNotAFirmEntity,
+  InvoicePartyArchived,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
+  FirmEntities,
   FirmTimeZone,
   InvoiceFilters,
   InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  PartyStanding,
   ReceivableRecord,
 } from "./ports";
 
@@ -76,6 +83,10 @@ export interface Deps {
   readonly invoices: InvoiceRepository;
   /** The firm's zone, for "today" when the caller does not send its own. */
   readonly timeZones: FirmTimeZone;
+  /** Which parties are the firm's own companies (F-10-1). */
+  readonly firmEntities: FirmEntities;
+  /** Names for refusals, and whether a client was archived (0305). */
+  readonly parties: PartyStanding;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -138,6 +149,18 @@ export class InvoiceService {
     this.dateOrThrow("seriesDate", seriesDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
+    // WHO issues it and WHO it bills, before a number is taken (F-10-1). The
+    // number is allocated in the issuer's own gapless series, so a client named
+    // as the issuer would open a GST series in that client's name for good.
+    await this.requireIssuer(input.tenantId, input.entityPartyId);
+    const billed = await this.deps.parties.findParty(input.tenantId, input.partyId);
+    if (billed !== null && billed.archivedAt !== null) {
+      throw new InvoicePartyArchived(billed.displayName);
+    }
+    if (await this.deps.firmEntities.isFirmEntity(input.tenantId, input.partyId)) {
+      throw new InvoiceBillsTheFirm(billed?.displayName ?? input.partyId);
+    }
+
     const invoice = await this.deps.invoices.create({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -190,6 +213,20 @@ export class InvoiceService {
     const tax = input.taxPercent ?? "0";
     if (!isAmount(tax) || Number(tax) < 0 || Number(tax) > 100) {
       throw new InvalidInvoiceAmount("taxPercent", tax);
+    }
+
+    // The engagement is the BILLED client's (F-10-1). The invoice PDF goes to
+    // that client's portal, and a line billing another client's engagement
+    // would carry somebody else's scope of work into it.
+    if (input.engagementId !== undefined) {
+      const engagement = await this.deps.invoices.engagementOf(input.tenantId, input.engagementId);
+      if (engagement === null) throw new InvoiceEngagementNotFound(input.engagementId);
+      if (engagement.partyId !== invoice.partyId) {
+        throw new EngagementOfAnotherClient(
+          await this.nameOf(input.tenantId, engagement.partyId),
+          await this.nameOf(input.tenantId, invoice.partyId),
+        );
+      }
     }
 
     await this.deps.invoices.addLine({
@@ -335,6 +372,8 @@ export class InvoiceService {
     actor: Actor,
   ): Promise<void> {
     if (!isSeriesPrefix(prefix)) throw new InvalidSeriesPrefix(prefix);
+    // A series belongs to a company that issues invoices (F-10-1).
+    await this.requireIssuer(tenantId, entityPartyId);
     await this.deps.invoices.setSeriesPrefix(tenantId, entityPartyId, prefix);
     await this.deps.events.recordEvent({
       tenantId,
@@ -343,6 +382,17 @@ export class InvoiceService {
       actor,
       payload: { entityPartyId, prefix },
     });
+  }
+
+  /** The issuer is one of the firm's own companies (F-10-1). */
+  private async requireIssuer(tenantId: string, entityPartyId: string): Promise<void> {
+    if (await this.deps.firmEntities.isFirmEntity(tenantId, entityPartyId)) return;
+    throw new InvoiceIssuerNotAFirmEntity(await this.nameOf(tenantId, entityPartyId));
+  }
+
+  /** A party's name for a refusal, or its id when it has none on file. */
+  private async nameOf(tenantId: string, partyId: string): Promise<string> {
+    return (await this.deps.parties.findParty(tenantId, partyId))?.displayName ?? partyId;
   }
 
   /** Which financial year a date belongs to — exposed so a caller can show the

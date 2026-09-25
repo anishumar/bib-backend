@@ -39,7 +39,8 @@ export type ProposalErrorCode =
   | "INVALID_DISCOUNT"
   | "INVALID_FX_RATE"
   | "INVALID_CURRENCY"
-  | "PARTY_ARCHIVED";
+  | "PARTY_ARCHIVED"
+  | "ISSUER_NOT_A_FIRM_ENTITY";
 
 /** The client, or the company a line is for, was archived (0305). Restore it
  *  first; a new document may not name a party the firm put away. */
@@ -51,6 +52,19 @@ export class ProposalPartyArchived extends ProposalError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+/** The company named as offering the quote is not one of the firm's own
+ *  (F-10-1): any party of the firm could be named, a client included. */
+export class ProposalIssuerNotAFirmEntity extends ProposalError {
+  constructor(displayName: string) {
+    super(
+      "ISSUER_NOT_A_FIRM_ENTITY",
+      `${displayName} is not one of the firm's own companies, so it cannot offer this quote. ` +
+        `Choose one of the firm's companies, or leave it out and the firm's rule for the ` +
+        `client's country picks it.`,
     );
   }
 }

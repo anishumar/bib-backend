@@ -161,6 +161,17 @@ export class PostgresDocumentRepository
     });
   }
 
+  async isFirmEntity(tenantId: string, partyId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The migration's function, not a restatement of it: "which companies
+      // are the firm's" has one answer, and the invoice triggers ask it too.
+      const [row] = await db<{ yes: boolean }[]>`
+        SELECT crm.is_firm_entity(${tenantId}, ${partyId}) AS yes
+      `;
+      return row?.yes === true;
+    });
+  }
+
   /**
    * A new firm's own entity, and the fallback row naming it — in one
    * transaction, because a firm with one and not the other is worse than a firm
