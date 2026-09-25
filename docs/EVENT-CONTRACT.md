@@ -299,7 +299,7 @@ version is exactly what gets asked about afterwards.
 | `job.scope_extended` | job | Work joined a job that was ALREADY OPEN — the second line of an engagement letter, whose advance arrived after the first. Its own verb rather than a second `job.spawned`, because "why did this job gain a service on the 14th" is a question somebody asks and a spawn event cannot answer it. The payload carries only the engagements that actually joined. |
 | `job.template_pinned` | job | A job resolved the firm's published process and PINNED the version it will walk. Everything the job does afterwards is explained by this row: editing the process later never moves a job already walking it. |
 | `job.started` | job | A job's steps were written from its pinned template and the work began. One event, not one per step. |
-| `job.step_advanced` | job | A job's step moved — set aside for a person, taken by an agent, or finished. The payload carries both sides and who was expected to do it. |
+| `job.step_advanced` | job | A job's step moved — set aside for a person, taken by an agent, or finished. The payload carries both sides and who was expected to do it. When the step has sub-steps (T6.15) and it is finished or sent for checking, `subSteps: { total, done, notApplicable }`: counts only, never a line's label or a "not applicable" reason. There is no event per tick; the row says who and when. |
 | `job.step_assigned` | job | A job's step was put on somebody's desk or taken off it (0301). `how`: `spoc` (the router, at job start), `taken`, `handover`, `released`. User ids only. |
 | `job.step_skipped` | job | A step will not happen: its condition did not hold (at the start, or after it had opened and before any work was recorded on it: `afterStart`, `from`, `assigneeUserId`, 0304), or something it depends on was skipped. NOT the same as done, and recorded as loudly. The payload carries the FACT and its values, never the prose note — a sentence does not GROUP BY, and this log cannot be erased. |
 | `job.step_failed` | job | An agent could not complete a step. Terminal for the step; the job blocks. |
@@ -355,8 +355,8 @@ version is exactly what gets asked about afterwards.
 | `agent_run.completed` | agent_run | An agent produced an output; confidence in the payload. |
 | `agent_run.escalated` | agent_run | An agent refused to act and handed the work to a human. Its output is KEPT and offered as material rather than as an answer — throwing away a usable draft every time the machine is unsure is how a firm ends up redoing the work by hand anyway. |
 | `agent_run.decided` | agent_run | A person accepted, corrected or rejected what a machine proposed. The payload carries WHICH of the three and never the values: accepted-vs-corrected is the entire accuracy signal and belongs in the log, while an agent's output can hold a client's own data, which may not enter a log that cannot be erased. |
-| `output.approved` | verification | A checker approved an output. Never the actor that produced it. |
-| `output.rejected` | verification | Sent back. |
+| `output.approved` | verification | A checker approved an output. Never the actor that produced it. When the step has review points (T6.15), `reviewPoints: { total, done, notApplicable }` for THIS check: counts only. |
+| `output.rejected` | verification | Sent back. Carries `reviewPoints` counts as `output.approved` does, because "sent back with two of six points ticked" is worth a GROUP BY; which two is prose that stays on the rows. |
 
 > **One rename from the build plan.** T2.4 describes its trigger as a `contract.active`
 > event. Registered here as **`contract.activated`** — every verb is past tense, and a

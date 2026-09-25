@@ -1471,6 +1471,75 @@ one ledger row) and a performer outside the band (`PerformerOutOfBand`). `descri
 `viewer.mayComplete` where the refusal is, so the button and the 409 cannot disagree; `my-steps`
 is the desk. `tests/orchestrator/desk.test.ts`.
 
+**A STEP'S OWN LISTS: SUB-STEPS AND REVIEW POINTS (T6.15, 0307, 2026-09-25).** The firm's first
+process has bullets under every step ("Collect: bank statements, sales data ...", "Identify:
+unreconciled transactions ...", and on the manager's review "Check: P&L movements ...") and asked
+for a checkbox per line with the step shut until every line is settled. So a template step carries
+two lists of `{ key, label }`, and they are TWO because two different people tick them:
+
+- **`checklist` is the SUB-STEPS, ticked by whoever does the step**, and all of them before Done.
+- **`reviewPoints` are ticked by whoever CHECKS it**, and all of them before Approve. Decided
+  2026-09-18 and not to be re-decided: step 8's band is Analyst to Senior Associate and the
+  manager's part is the `manager_review` policy, so "Check: P&L movements" is the MANAGER's. On
+  the doer's list the associate would tick "P&L reviewed" and the record would name the wrong
+  person. The validator therefore refuses review points on a step that names no check.
+
+**Absent reads as `[]`, and must**: a published body is FROZEN, so every job pinned to a version
+written before T6.15 has no lists and behaves exactly as before; the editor always writes both.
+Keys follow the step-key rule, are unique within ONE list (the two may reuse one), at most 40 lines,
+labels 1 to 200 characters trimmed. **Sub-steps are refused on an `agent` step**: nothing would
+ever tick them, so a machine closing the step unattended would close it with the list open. The
+engine's second wall: a step with sub-steps is never committed unattended whatever the confidence
+(`approvalRequired` is set for it in `takeReadySteps`), and a person accepting the machine's answer
+is held to the list in `decideProposal`.
+
+**"NOT APPLICABLE" IS ALLOWED, AND NEEDS A REASON** (the user, 2026-09-25). The firm's own lists
+say "payroll information WHERE INCLUDED" and "accruals WHERE APPLICABLE"; without the option an
+associate must tick something that did not happen. Trimmed, at most 500 characters, refused by the
+service (`NOT_APPLICABLE_NEEDS_A_REASON`, 400) and by a CHECK. A reason sent with a plain tick is
+dropped: the column means "why this did not apply" and nothing else.
+
+**The marks are `delivery.job_step_check`**, one row per (list, line), an absent row is open,
+unticking sets `outcome` back to NULL, and `bib_app` holds no DELETE grant. A SUB-STEP mark is keyed
+on the step and survives a send-back (the work behind it is still the work; the doer changes it if
+the reason touches it). A REVIEW mark is keyed on the APPROVAL, so the check that opens after a
+send-back starts with every point open and "this took two goes" keeps each round's ticks. The
+review mark's step must be its check's step, and that is a WALL: 0307 added `UNIQUE (id,
+job_step_id, tenant_id)` to `step_approval` so a composite foreign key can say it (0063's move for
+`client_ask`). The label is copied onto the row at mark time so the row reads on its own; screens
+read the pinned template's label and order.
+
+**The gates**: `completeStep` and `decideProposal` (accept and correct, never reject) refuse
+`SUB_STEPS_OPEN` (409), naming what is left, five and then "and N more", checked after the desk
+rules and before anything is written. `decideCheck` refuses APPROVE with `REVIEW_POINTS_OPEN`
+(409) and **never refuses Send back**: the checker may find the problem at point three. Ticks are
+LOCKED while a check is open (`AWAITING_CHECK`) and once the step is done (`STEP_NOT_WAITING`), so
+an approval cannot find a sub-step open and needs no sub-step gate of its own. Who may tick: a
+sub-step, anybody who could tick the step (`assertMayDo`, the desk and band rules shared with
+`completeStep`); a review point, anybody `eligibilityOf` lets check it, so the maker can never tick
+their own. A job whose pinned version names no list, or no longer reads, is never gated
+(`pinnedStepDef`'s reason: a bad config row must not strand a job).
+
+**A TICKED SUB-STEP IS WORK RECORDED.** `withdrawOpenedSteps` (0304) now keeps a step with any
+sub-step marked, done or not applicable, for the rule it already had: work that exists is never
+discarded because a catalogue field changed.
+
+**No ledger event per tick**, 0051's decision for the task checklist, for its reason: the row says
+who and when, and ten events per step would bury the transitions. Instead `job.step_advanced`
+carries `subSteps: { total, done, notApplicable }` when the step has any, and `output.approved` /
+`output.rejected` carry `reviewPoints` the same way. Counts only, never a label or a reason.
+
+Reads: `JobStep.subSteps` + `subStepsOpen` (the count the 409 uses, so the Done button and the
+refusal cannot disagree; `viewer.mayComplete` keeps meaning WHO), and `StepCheck.reviewPoints` +
+`reviewPointsOpen` on the job's checks and the firm's queue. The marker's name is joined in the
+same query as the marks, and the queue's rows carry their job's pinned version from the same query
+that reads them, so neither read looks anything up per row. Routes: `PUT
+/api/v1/jobs/{jobId}/steps/{stepKey}/sub-steps/{itemKey}` and `PUT
+/api/v1/checks/{approvalId}/review-points/{itemKey}`, body `{ outcome: "done" | "not_applicable" |
+null, note? }`, both `work:write`, the marker always the session's user.
+`tests/orchestrator/step-checks.test.ts`, `step-checks.integration.test.ts`,
+`tests/config/step-checklist.test.ts`.
+
 **`work:write` (migration 0045) is what a person needs to say a step is done.** Its own
 permission, because the row it gates is the record of who did the work.
 
