@@ -742,6 +742,43 @@ describe("the gates the first round of tests left unwatched", () => {
   });
 });
 
+describe("a machine's committed answer on a checked step (0048, found by T6.15's review)", () => {
+  it("is still checked: the step waits with a check open and no maker, and its review points gate Approve", async () => {
+    const agents = new FakeAgentRuntime().armWith("draft", 0.99);
+    const w = await world(
+      [
+        step({ key: "draft", label: "Draft the MIS", executor: "agent", verificationPolicyKey: POLICY_KEY, reviewPoints: REVIEW_LINES }),
+        step({ key: "issue", dependsOn: ["draft"] }),
+      ],
+      { agents },
+    );
+    // The firm's published tiers (0.95) would commit a 0.99 answer, and do.
+    expect(w.runs.rows[0]?.decision).toBe("committed");
+    expect(await w.board()).toMatchObject({ draft: "blocked", issue: "pending" });
+    const [check] = await w.checks.listPending(TENANT);
+    expect(check?.approval.submittedBy).toBeNull();
+    const opened = w.events.recorded.find((e) => e.verb === "job.step_advanced" && e.payload["awaitingCheck"] === true);
+    expect(opened?.payload).toMatchObject({ stepKey: "draft", from: "running", to: "blocked", policyKey: POLICY_KEY });
+    const completed = w.events.recorded.find((e) => e.verb === "agent_run.completed");
+    expect(completed?.payload).toMatchObject({ decision: "committed", from: "running", to: "blocked", awaitingCheck: true });
+
+    const id = await w.openCheck();
+    await expect(w.decide(id, "approved")).rejects.toBeInstanceOf(ReviewPointsOpen);
+    // A machine has no self to be the same as: anybody eligible may check it.
+    await w.point(id, "r1", "done");
+    await w.point(id, "r2", "done");
+    await w.decide(id, "approved");
+    expect(await w.board()).toMatchObject({ draft: "done", issue: "blocked" });
+  });
+
+  it("still finishes a committed answer on a step nobody checks, as it always did", async () => {
+    const agents = new FakeAgentRuntime().armWith("draft", 0.99);
+    const w = await world([step({ key: "draft", executor: "agent" }), step({ key: "issue", dependsOn: ["draft"] })], { agents });
+    expect(await w.board()).toMatchObject({ draft: "done", issue: "blocked" });
+    expect(await w.checks.listPending(TENANT)).toEqual([]);
+  });
+});
+
 describe("the fake agrees with the database (0307, 0308)", () => {
   const base = {
     id: "00000000-0000-4000-8000-00000000c001",

@@ -1967,13 +1967,26 @@ export class OrchestratorService {
       // and a person accepting the answer is held to the list in
       // `decideProposal`. Recorded on the run as `approval_required`, which is
       // what it is: the step needs somebody to say it is done.
-      const hasSubSteps = (template.steps.find((s) => s.key === step.stepKey)?.checklist.length ?? 0) > 0;
+      const def = template.steps.find((s) => s.key === step.stepKey);
+      const hasSubSteps = (def?.checklist.length ?? 0) > 0;
       const approvalRequired = step.executor === "agent_with_approval" || hasSubSteps;
       const decision = decideFor(outcome.confidence, tiers, approvalRequired);
 
       const committing = decision === "committed";
+      // A COMMITTED ANSWER ON A CHECKED STEP IS STILL CHECKED. 0048 wrote this
+      // down on the day checks existed: `submitted_by` is nullable for "a step
+      // an agent COMMITTED unattended", and "anybody eligible may check it". The
+      // engine never did it, and moved such a step straight to done, so a firm
+      // saying "a Manager reviews this" was not reviewed whenever a machine
+      // happened to be sure. T6.15 made the hole visible: review points on such
+      // a step could never be ticked, because no check ever opened to tick
+      // them on. So the step waits `blocked` with a check open and no maker,
+      // exactly as 0048 describes; approving it finishes it and advances the
+      // job, sending it back leaves it for a person to redo, as for any check.
+      const policyKey = def?.verificationPolicyKey ?? null;
+      const checked = committing && policyKey !== null;
       const settled = await this.deps.steps.transition(tenantId, running.id, "running", {
-        status: committing ? "done" : "blocked",
+        status: committing && !checked ? "done" : "blocked",
         at,
       });
       if (!settled) continue;
@@ -2000,7 +2013,7 @@ export class OrchestratorService {
       });
 
       advanced += 1;
-      if (!committing) awaitingPeople += 1;
+      if (!committing || checked) awaitingPeople += 1;
       // `agent_run.completed` and `agent_run.escalated` have been in the verb
       // registry since the ledger was written and NOTHING has ever emitted
       // them — the "registered feature with no writer" shape this codebase keeps
@@ -2023,9 +2036,45 @@ export class OrchestratorService {
           reviewAt: tiers.reviewAt,
           model,
           promptVersion,
-          ...(committing ? { from: "running", to: "done" } : {}),
+          ...(committing ? { from: "running", to: checked ? "blocked" : "done" } : {}),
+          ...(checked ? { awaitingCheck: true } : {}),
         },
       });
+
+      if (checked) {
+        // The check opens the way `finishOrSendForChecking` opens one, against
+        // the policy in force now, and with no maker: `performed_by` is null
+        // because no person made this, so the database derives a null
+        // `submitted_by` and maker != checker has nobody to compare. No
+        // sub-step guard, because a machine's step has no sub-steps (the
+        // validator refuses them, and a step with any is never committed).
+        const resolved = await this.deps.policies.publishedPolicy(tenantId, policyKey);
+        const approval = await this.deps.checks.openIfAbsent({
+          id: this.deps.ids.newId(),
+          tenantId,
+          jobId: job.id,
+          jobStepId: settled.id,
+          policyVersionId: resolved?.versionId ?? null,
+          policyKey,
+        });
+        if (approval !== null) {
+          await this.deps.events.recordEvent({
+            tenantId,
+            verb: "job.step_advanced",
+            objectId: job.id,
+            actor,
+            payload: {
+              stepKey: step.stepKey,
+              from: "running",
+              to: "blocked",
+              executor: step.executor,
+              awaitingCheck: true,
+              policyKey,
+              policyResolved: resolved !== null,
+            },
+          });
+        }
+      }
     }
     return { advanced, awaitingPeople };
   }
