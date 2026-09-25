@@ -23,6 +23,8 @@
 //      Approve read the list only after taking the lock a mark takes, each
 //      proven by holding the other side's transaction open and watching the
 //      database park the write behind it.
+//  10. 0308: a reason or a label of only whitespace is blank, by exactly the
+//      whitespace `String.prototype.trim` strips, and 0308 runs both ways.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -672,5 +674,64 @@ describe("a move that reads a list reads it after taking the lock", () => {
         { reviewPointKeys: [], subStepKeys: ["never-marked"] },
       ),
     ).resolves.toBeNull();
+  });
+});
+
+// ── 0308: "blank" is whitespace, the service's own definition ────────────────
+
+describe("0308: a reason or a label of only whitespace is blank, whatever the whitespace", () => {
+  const nbsp = String.fromCharCode(0xa0);
+
+  it("refuses a reason of a newline and a tab, or of no-break spaces, and a label of a tab", async () => {
+    await expect(mark({ outcome: "not_applicable", note: "\n\t" })).rejects.toThrow(/job_step_check_not_applicable_says_why/);
+    await expect(mark({ outcome: "not_applicable", note: nbsp + nbsp })).rejects.toThrow(/job_step_check_not_applicable_says_why/);
+    await expect(mark({ label: "\t" })).rejects.toThrow(/job_step_check_label_is_text/);
+    await expect(mark({ outcome: "not_applicable", note: `${nbsp}Not this month${nbsp}` })).resolves.toBeTruthy();
+  });
+
+  it("agrees with String.prototype.trim, code point by code point", async () => {
+    // Every character trim() strips, and the nearest ones it does not
+    // (next line, zero-width space, the word joiner): the CHECK must refuse a
+    // reason made of exactly the first set and accept one of the second.
+    const points = [
+      0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x20, 0xa0, 0x1680, 0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005,
+      0x2006, 0x2007, 0x2008, 0x2009, 0x200a, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff,
+      0x85, 0x200b, 0x2060, 0x61,
+    ];
+    for (const cp of points) {
+      const note = String.fromCodePoint(cp);
+      const blankToJs = note.trim() === "";
+      const accepted = await mark({ outcome: "not_applicable", note }).then(
+        () => true,
+        () => false,
+      );
+      expect({ cp: cp.toString(16), accepted }).toEqual({ cp: cp.toString(16), accepted: !blankToJs });
+    }
+  });
+
+  it("runs both ways, inside a transaction that is rolled back", async () => {
+    const dir = join(process.cwd(), "migrations");
+    const down = await readFile(join(dir, "0308_job_step_check_blank_is_whitespace.down.sql"), "utf8");
+    const up = await readFile(join(dir, "0308_job_step_check_blank_is_whitespace.up.sql"), "utf8");
+    const ROLLBACK = new Error("roll back the round trip");
+    const seen: string[] = [];
+    const def = (tx: postgres.TransactionSql) => tx<{ d: string }[]>`
+      SELECT pg_get_constraintdef(oid) AS d FROM pg_constraint WHERE conname = 'job_step_check_not_applicable_says_why'
+    `;
+    await owner
+      .begin(async (tx) => {
+        await tx.unsafe(down);
+        await tx.unsafe(down);
+        seen.push((await def(tx))[0]?.d ?? "");
+        await tx.unsafe(up);
+        seen.push((await def(tx))[0]?.d ?? "");
+        throw ROLLBACK;
+      })
+      .catch((e: unknown) => {
+        if (e !== ROLLBACK) throw e;
+      });
+    expect(seen[0]).toMatch(/btrim/);
+    expect(seen[1]).not.toMatch(/btrim/);
+    expect(seen[1]).toMatch(/~/);
   });
 });
