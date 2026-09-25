@@ -1497,7 +1497,12 @@ is held to the list in `decideProposal`.
 say "payroll information WHERE INCLUDED" and "accruals WHERE APPLICABLE"; without the option an
 associate must tick something that did not happen. Trimmed, at most 500 characters, refused by the
 service (`NOT_APPLICABLE_NEEDS_A_REASON`, 400) and by a CHECK. A reason sent with a plain tick is
-dropped: the column means "why this did not apply" and nothing else.
+dropped: the column means "why this did not apply" and nothing else. **"Blank" is the whitespace
+JavaScript's `trim()` strips (0308)**: 0307's `btrim` stripped spaces only, so a reason of a
+newline and a tab passed the wall the service refused. The pattern names the code points rather
+than `[[:space:]]`, whose meaning is the locale's; the integration test holds the two ends of the
+definition to each other character by character. 0307 was fixed forward because it is applied with
+marks in it, and a down of it destroys them.
 
 **The marks are `delivery.job_step_check`**, one row per (list, line), an absent row is open,
 unticking sets `outcome` back to NULL, and `bib_app` holds no DELETE grant. A SUB-STEP mark is keyed
@@ -1510,15 +1515,65 @@ job_step_id, tenant_id)` to `step_approval` so a composite foreign key can say i
 read the pinned template's label and order.
 
 **The gates**: `completeStep` and `decideProposal` (accept and correct, never reject) refuse
-`SUB_STEPS_OPEN` (409), naming what is left, five and then "and N more", checked after the desk
-rules and before anything is written. `decideCheck` refuses APPROVE with `REVIEW_POINTS_OPEN`
-(409) and **never refuses Send back**: the checker may find the problem at point three. Ticks are
-LOCKED while a check is open (`AWAITING_CHECK`) and once the step is done (`STEP_NOT_WAITING`), so
-an approval cannot find a sub-step open and needs no sub-step gate of its own. Who may tick: a
-sub-step, anybody who could tick the step (`assertMayDo`, the desk and band rules shared with
-`completeStep`); a review point, anybody `eligibilityOf` lets check it, so the maker can never tick
-their own. A job whose pinned version names no list, or no longer reads, is never gated
-(`pinnedStepDef`'s reason: a bad config row must not strand a job).
+`SUB_STEPS_OPEN` (409), naming what is left, five and then "and N more". `completeStep` checks it
+after the desk and band rules; **`decideProposal` applies no desk or band rule at all**, as it never
+has (T2.8), and checks it before the verdict is written, so somebody who may not tick a step's
+sub-steps can still accept the machine's answer once the desk holder has ticked them. `decideCheck`
+refuses APPROVE with `REVIEW_POINTS_OPEN` (409) and **never refuses Send back**: the checker may
+find the problem at point three. It also refuses Approve with a sub-step open, with a sentence for
+the CHECKER (send it back; the lines are the doer's): unreachable through the service, whose
+marks refuse a step with a check pending, so it is a wall under a wall for a write that went round
+it. Ticks are LOCKED while a check is open (`AWAITING_CHECK`) and once the step is done
+(`STEP_NOT_WAITING`). Who may tick: a sub-step, anybody who could tick the step (`assertMayDo`,
+the desk and band rules shared with `completeStep`); a review point, anybody `eligibilityOf` lets
+check it, so the MAKER, the person who pressed Done, can never tick their own. A job whose pinned
+version names no list, or no longer reads, is never gated (`pinnedStepDef`'s reason: a bad config
+row must not strand a job).
+
+**EVERY GATE IS ALSO A LOCK, because a gate that reads and then moves in a later call is
+check-then-act (found in review, 2026-09-26).** The service reads the list, then moves the step in
+another transaction; two tabs, or two people on a step on nobody's desk, were enough to finish a
+step with a line open, to change a list under a checker, or to approve a check whose point had
+just been taken back. So the write carries its own precondition, under ONE row lock per list,
+taken first in its own transaction and read AFTER (`infrastructure/postgres/step-lines.ts`):
+a sub-step mark, a guarded step move (`transition(…, subStepKeys)`) and a guarded check opening
+(`openIfAbsent(…, subStepKeys)`) lock the STEP's row; a review mark and a guarded Approve
+(`decide(…, settled)`) lock the CHECK's row. `FOR NO KEY UPDATE`, the lock an UPDATE takes itself.
+**A subquery in the UPDATE would not do**: a statement that waits on a row re-checks that row and
+reads every other table from the snapshot it started with, so it would not see the tick taken back
+while it waited. A mark refused under the lock answers null (or false), and the service says which
+refusal in words (`whySubStepsLocked`, `whyNotFinished`, `whyNotDecided`). A sub-step is closed
+while its step has a check pending OR APPROVED (the instant between Approve and done); a rejected
+check closes nothing. The sub-step guard rides on the check OPENING, not on the blocked-to-blocked
+transition before it, because the list is still open after that transition and it is the opening
+that closes it; a refused opening puts `performed_by` back. **One gap is left and stated**: a tick
+taken back in the instant between `decideProposal`'s verdict and its move refuses the move after
+the verdict is written, leaving the answer accepted on an ordinary open step, finished with Done.
+The transition events' counts are read AFTER the move, when the list can no longer change.
+`step-checks.integration.test.ts` proves each lock by holding the other side's transaction open
+and watching the database park the write behind it; every one of those tests fails against the
+adapters as first written.
+
+**A MACHINE'S COMMITTED ANSWER ON A CHECKED STEP IS STILL CHECKED (0048's intent, built
+2026-09-26).** 0048 made `submitted_by` nullable for "a step an agent COMMITTED unattended … anybody
+eligible may check it", and the engine never opened that check: a sure machine moved a step the
+firm said a Manager reviews straight to done. Review points on such a step could never be ticked,
+which is how the review found it. `takeReadySteps` now leaves a committed step with a policy
+`blocked` with a check open and no maker; approving finishes it. Dormant while `NoAgentsBuiltYet`
+is wired.
+
+**`describeOne` carries the step's undecided proposal.** Every write route answered the step with
+`proposal: null`, and the job page swaps the step for that answer: ticking a sub-step (or handing
+the step over) on a step holding a machine's answer took Accept, Correct and Reject off the screen
+and offered a Done the API refused. `tests/api/step-checks-routes.test.ts` holds it, with the
+status and reason of every T6.15 refusal.
+
+**OPEN, NOT DECIDED: does whoever ticked a sub-step count as a maker?** Maker != checker compares
+the checker with `submitted_by`, the person who pressed Done. So somebody who ticked every sub-step,
+handed the step to a colleague who pressed Done, can tick the review points and approve. It is
+unreachable on the firm's process (every doer's band stops at Senior Associate and
+`manager_review` needs a Manager), and extending who counts as the maker is a rule about
+independence for the firm to state, with the queue's verdicts and the roster list following it.
 
 **A TICKED SUB-STEP IS WORK RECORDED.** `withdrawOpenedSteps` (0304) now keeps a step with any
 sub-step marked, done or not applicable, for the rule it already had: work that exists is never
