@@ -30,6 +30,7 @@ import type {
 } from "../usecase/lead/ports";
 import type { Deps } from "../usecase/lead/service";
 import { PartyService } from "../usecase/party/service";
+import { FakeFirmTimeZone } from "./tenancy";
 import { FakePartyRepo, makePartyFakes } from "./party";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
@@ -334,6 +335,9 @@ export function makeLeadFakes(): Deps & {
   /** The real party module the pipeline is built on, for a test that wants to
    *  read back the prospect capture created. */
   party: PartyService;
+  /** UTC unless a test sets the firm's zone. */
+  timeZones: FakeFirmTimeZone;
+  clock: FakeClock;
 } {
   const ids = new FakeIds();
   const events = new RecordingEventSink();
@@ -376,6 +380,7 @@ export function makeLeadFakes(): Deps & {
     rotation,
     territory,
     territories,
+    timeZones: new FakeFirmTimeZone(),
     ids,
     clock: new FakeClock(new Date("2026-03-01T10:00:00Z")),
     events,

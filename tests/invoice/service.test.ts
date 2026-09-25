@@ -434,3 +434,72 @@ describe("the list says what is still OWED, not just what was billed", () => {
     expect(Number(row?.totals.total)).toBe(10000);
   });
 });
+
+describe("the day on the invoice is the firm's, or the caller's — never the server's", () => {
+  // 20:00 UTC on 1 July is 01:30 on 2 July in Delhi. An invoice issued then was
+  // dated the 1st: Greenwich's day, the day before it was issued.
+  async function lined(s: ReturnType<typeof setup>) {
+    const invoice = await s.service.raise(raise(), ACTOR);
+    await s.service.addLine({
+      tenantId: TENANT,
+      invoiceId: invoice.id,
+      description: "Advisory",
+      quantity: "1",
+      unitAmount: "1000",
+    });
+    return invoice;
+  }
+
+  it("dates an issued invoice by the FIRM's calendar", async () => {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2026-07-01T20:00:00.000Z");
+    const invoice = await lined(s);
+    const issued = await s.service.issue(TENANT, invoice.id, ACTOR);
+    expect(issued.issuedOn).toBe("2026-07-02");
+  });
+
+  it("takes the caller's own today when it sends one", async () => {
+    // A partner in Dubai at 23:30 local on the 1st, for a firm in Delhi where
+    // it is already the 2nd: their today is the 1st, and that is a real today.
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2026-07-01T19:30:00.000Z");
+    const invoice = await lined(s);
+    const issued = await s.service.issue(TENANT, invoice.id, ACTOR, "2026-07-01");
+    expect(issued.issuedOn).toBe("2026-07-01");
+  });
+
+  it("REFUSES an asOf that is not today anywhere, so it cannot backdate a tax invoice", async () => {
+    const s = setup();
+    const invoice = await lined(s);
+    await expect(s.service.issue(TENANT, invoice.id, ACTOR, "2026-06-01")).rejects.toMatchObject({
+      code: "NOT_CALLERS_TODAY",
+    });
+    // And nothing moved: still a draft.
+    const after = await s.invoices.find(TENANT, invoice.id);
+    expect(after?.status).toBe("draft");
+  });
+
+  it("puts an undated invoice in the FIRM's year's books on 1 April morning in Delhi", async () => {
+    // 31 March 20:00 UTC is 1 April 01:30 IST — a new financial year there.
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2027-03-31T20:00:00.000Z");
+    const invoice = await s.service.raise(raise(), ACTOR);
+    expect(invoice.number).toMatch(/2027-28/);
+  });
+
+  it("dates a credit note by the firm's day when none is given", async () => {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2026-07-01T20:00:00.000Z");
+    const invoice = await lined(s);
+    await s.service.issue(TENANT, invoice.id, ACTOR);
+    const credit = await s.service.issueCreditNote(
+      { tenantId: TENANT, invoiceId: invoice.id, amount: "100", reason: "goodwill" },
+      ACTOR,
+    );
+    expect(credit.issuedOn).toBe("2026-07-02");
+  });
+});

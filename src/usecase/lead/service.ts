@@ -51,6 +51,7 @@ import {
   LostReasonRequired,
   NoContactDetail,
   InvalidLeadJurisdiction,
+  LeadNotCallersToday,
   LeadPartyArchived,
   OwnerNotStaff,
   SameStage,
@@ -61,9 +62,11 @@ import type {
   TerritoryRules,
   LeadRecord,
   LeadRepository,
+  FirmTimeZone,
   ProspectDirectory,
   StaffDirectory,
 } from "./ports";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 
 export interface Deps {
   readonly leads: LeadRepository;
@@ -81,6 +84,9 @@ export interface Deps {
   /** For the identifier's valid-from date. Time is a port here for the same
    *  reason it is in identity: a test must be able to fix "today". */
   readonly clock: Clock;
+  /** The firm's zone — whose "today" a contact detail is dated from when the
+   *  caller does not send its own. */
+  readonly timeZones: FirmTimeZone;
   readonly events: EventSink;
 }
 
@@ -116,6 +122,9 @@ export interface CaptureLeadInput {
   readonly tradeName?: string | undefined;
   readonly industry?: string | undefined;
   readonly website?: string | undefined;
+  /** The caller's today — what the contact details it attaches are dated
+   *  from. The firm's day when absent; never the server's. */
+  readonly asOf?: string | undefined;
   /**
    * Whose desk to put it on. THREE meanings, and they are genuinely different
    * instructions rather than two spellings of one:
@@ -241,6 +250,7 @@ export class LeadService {
 
     // Everything that can be refused without writing is refused first — a
     // capture that fails halfway leaves a party nobody asked for.
+    const today = await this.today(input.tenantId, input.asOf);
     if (!input.identifiers.some((i) => isDedupIdentifier(i.type))) {
       throw new NoContactDetail(DEDUP_IDENTIFIER_TYPES);
     }
@@ -272,7 +282,7 @@ export class LeadService {
 
     // Only the identifiers nobody has yet. Re-adding one would be refused by
     // the party module as a duplicate, and rightly — it is the same fact.
-    const added = await this.attachNewIdentifiers(input, partyId, match, actor);
+    const added = await this.attachNewIdentifiers(input, partyId, match, today, actor);
 
     const open = existingPartyId === null
       ? null
@@ -688,9 +698,9 @@ export class LeadService {
     input: CaptureLeadInput,
     partyId: string,
     match: DedupMatch,
+    validFrom: string,
     actor: Actor,
   ): Promise<readonly IdentifierType[]> {
-    const validFrom = this.deps.clock.now().toISOString().slice(0, 10);
     const attached: IdentifierType[] = [];
     for (const [index, identifier] of input.identifiers.entries()) {
       if (match.existingByIndex.has(index)) continue;
@@ -707,6 +717,21 @@ export class LeadService {
       attached.push(identifier.type);
     }
     return attached;
+  }
+
+  /**
+   * The day a capture is dated from: the caller's, when it says, else the
+   * FIRM's (0071). It was `toISOString().slice(0, 10)` — the server's UTC day,
+   * so a PAN captured at 02:00 in Delhi was "in force from" the day before.
+   * The caller's day is held to the firm's or one either side: it says what
+   * day it is, it does not backdate a contact detail.
+   */
+  private async today(tenantId: string, asOf?: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const firmDay = dayInZone(this.deps.clock.now().toISOString(), zone);
+    if (asOf === undefined) return firmDay;
+    if (!isCallersToday(asOf, firmDay)) throw new LeadNotCallersToday(asOf, firmDay);
+    return asOf;
   }
 
   /** The TYPES of the identifiers at these positions — never their values. A

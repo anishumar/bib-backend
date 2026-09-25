@@ -25,7 +25,19 @@ export type LeadErrorCode =
   | "LOST_REASON_NOT_APPLICABLE"
   | "BLANK_TITLE"
   | "INVALID_LEAD_JURISDICTION"
-  | "PARTY_ARCHIVED";
+  | "PARTY_ARCHIVED"
+  | "NOT_CALLERS_TODAY";
+
+/** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`). */
+export class LeadNotCallersToday extends LeadError {
+  constructor(given: string, firmDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
+        `day is ${firmDay}, and anywhere in the world today is that day or the one either side.`,
+    );
+  }
+}
 
 /** The contact details on this capture belong to a client the firm archived
  *  (0305). Refused rather than quietly restored: putting a client away was a

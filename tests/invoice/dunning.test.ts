@@ -53,7 +53,7 @@ function setup(): {
   const invoices = new FakeInvoiceRepo();
   const events = new RecordingEventSink();
   const clock = new FakeClock(TODAY);
-  const billing = new InvoiceService({ invoices, ids: new FakeIds(), clock, events });
+  const billing = new InvoiceService({ invoices, timeZones: new FakeFirmTimeZone(), ids: new FakeIds(), clock, events });
   const service = new DunningService({
     timeZones: new FakeFirmTimeZone(),
     dunning,

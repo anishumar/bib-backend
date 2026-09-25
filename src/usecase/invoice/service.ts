@@ -59,8 +59,11 @@ import {
   InvalidPaymentMethod,
   CreditExceedsInvoice,
   IrnAlreadyRegistered,
+  NotCallersToday,
 } from "../../domain/invoice/errors";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
+  FirmTimeZone,
   InvoiceFilters,
   InvoiceRecord,
   InvoiceRepository,
@@ -71,6 +74,8 @@ import type {
 
 export interface Deps {
   readonly invoices: InvoiceRepository;
+  /** The firm's zone, for "today" when the caller does not send its own. */
+  readonly timeZones: FirmTimeZone;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -88,6 +93,8 @@ export interface RaiseInvoiceInput {
   /** Which year's books this belongs to. Defaults to today, and a firm raising
    *  an invoice on 2 April for March's work overrides it. */
   readonly seriesDate?: string | undefined;
+  /** The caller's today (see `isCallersToday`); the firm's day when absent. */
+  readonly asOf?: string | undefined;
 }
 
 export interface AddInvoiceLineInput {
@@ -127,7 +134,7 @@ export class InvoiceService {
       throw new InvalidInvoiceAmount("fxRate", input.fxRate);
     }
     this.dateOrThrow("fxRateDate", input.fxRateDate);
-    const seriesDate = input.seriesDate ?? this.today();
+    const seriesDate = input.seriesDate ?? (await this.today(input.tenantId, input.asOf));
     this.dateOrThrow("seriesDate", seriesDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
@@ -213,7 +220,7 @@ export class InvoiceService {
    * Send it. An invoice with no lines is refused — it asks the client for
    * nothing, and a document that does that is a mistake somebody will chase.
    */
-  async issue(tenantId: string, invoiceId: string, actor: Actor): Promise<Invoice> {
+  async issue(tenantId: string, invoiceId: string, actor: Actor, asOf?: string): Promise<Invoice> {
     const invoice = await this.mustFind(tenantId, invoiceId);
     if (!canTransition(invoice.status, "issued")) {
       throw new InvalidInvoiceTransition(invoice.status, "issued");
@@ -221,7 +228,11 @@ export class InvoiceService {
     const lines = await this.deps.invoices.listLines(tenantId, invoiceId);
     if (lines.length === 0) throw new EmptyInvoice(invoiceId);
 
-    const issued = await this.deps.invoices.issue(tenantId, invoiceId, this.today());
+    // The DATE ON THE TAX INVOICE. The caller's today, or the firm's: never
+    // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
+    // before it was issued.
+    const issuedOn = await this.today(tenantId, asOf);
+    const issued = await this.deps.invoices.issue(tenantId, invoiceId, issuedOn);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
@@ -442,6 +453,7 @@ export class InvoiceService {
       readonly reason: string;
       readonly note?: string | undefined;
       readonly issuedOn?: string | undefined;
+      readonly asOf?: string | undefined;
     },
     actor: Actor,
   ): Promise<CreditNote> {
@@ -452,7 +464,7 @@ export class InvoiceService {
     if (!isCreditReason(input.reason)) {
       throw new InvalidCreditReason(input.reason, CREDIT_REASONS);
     }
-    const issuedOn = input.issuedOn ?? this.today();
+    const issuedOn = input.issuedOn ?? (await this.today(input.tenantId, input.asOf));
     this.dateOrThrow("issuedOn", issuedOn);
 
     // A firm cannot credit more than it billed. Checked here rather than in a
@@ -558,9 +570,21 @@ export class InvoiceService {
     if (!ISO_DATE.test(value)) throw new InvalidInvoiceDate(field, value);
   }
 
-  /** Today as an ISO DATE, not an instant. An invoice date is a calendar fact
-   *  in a jurisdiction — the same rule the scheduler's arithmetic follows. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /**
+   * Today as an ISO DATE, not an instant. An invoice date is a calendar fact
+   * in a jurisdiction — the same rule the scheduler's arithmetic follows.
+   *
+   * WHOSE today: the caller's, when it says (`asOf`, the browser's local day),
+   * and otherwise the FIRM's (0071) — never the server's. It was
+   * `toISOString().slice(0, 10)`, the UTC day, which is yesterday in India
+   * until 05:30. A caller's `asOf` is held to the firm's day or one either
+   * side (`isCallersToday`): it says what day it is, it does not choose one.
+   */
+  private async today(tenantId: string, asOf?: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const firmDay = dayInZone(this.deps.clock.now().toISOString(), zone);
+    if (asOf === undefined) return firmDay;
+    if (!isCallersToday(asOf, firmDay)) throw new NotCallersToday(asOf, firmDay);
+    return asOf;
   }
 }

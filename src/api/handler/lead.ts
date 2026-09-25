@@ -219,6 +219,20 @@ const AssignOwnerBody = z
 
 // ── Routes ────────────────────────────────────────────────────────────────
 
+/** The caller's today: what the contact details a capture attaches are dated
+ *  from. Absent means the firm's day, never the server's. */
+const CaptureQuery = z.object({
+  asOf: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .openapi({
+      description:
+        "Today where the caller is (a browser sends its local date). Defaults to the firm's " +
+        "day. Must be the firm's day or one either side.",
+    }),
+});
+
 const captureRoute = createRoute({
   method: "post",
   path: "/api/v1/leads",
@@ -232,6 +246,7 @@ const captureRoute = createRoute({
     "form submission is not grounds to undo either. The title the merged capture sent comes " +
     "back on `discardedTitle` rather than being dropped in silence.",
   request: {
+    query: CaptureQuery,
     body: { content: { "application/json": { schema: CaptureLeadBody } }, required: true },
   },
   responses: {
@@ -251,7 +266,9 @@ const captureRoute = createRoute({
     ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write parties"),
-    409: errorResponse("The contact details belong to more than one existing party"),
+    409: errorResponse(
+      "The contact details belong to more than one existing party, or to a client the firm archived",
+    ),
   },
 });
 
@@ -452,7 +469,10 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
-    const result = await deps.service.capture({ tenantId: s.tenantId, ...body }, s.actor);
+    const result = await deps.service.capture(
+      { tenantId: s.tenantId, ...body, asOf: c.req.valid("query").asOf },
+      s.actor,
+    );
     // Two literal calls rather than a computed status: 200 and 201 mean
     // different things here and the route documents both.
     if (result.merged) return c.json(result, 200);

@@ -95,3 +95,34 @@ export function dayInZone(instant: string, timeZone: string): string {
   const read = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
   return `${read("year")}-${read("month")}-${read("day")}`;
 }
+
+/**
+ * Whether `asOf`, sent by a caller as "today, where I am", can honestly be that.
+ *
+ * ── WHY A CALLER'S DAY, AND WHY A BOUND ON IT ─────────────────────────────
+ *
+ * "Today" is the caller's fact (see `CLAUDE.md` on the client assignment): the
+ * server's UTC day is yesterday in India until 05:30, and the firm's own day
+ * is right only for somebody sitting in the firm's zone. So a route that
+ * stamps a record with today takes the browser's day and defaults to the
+ * firm's.
+ *
+ * But every inhabited zone is within a day of every other, so a caller's
+ * today is the firm's today, the day before, or the day after — and nothing
+ * else. A date further away is not a statement about today; it is a CHOSEN
+ * date, and a route that writes "today" onto a numbered tax invoice must not
+ * become a way to choose one. That is the class of the 2026-09-23 audit's High
+ * (F-07-1): a caller-supplied day deciding a recorded fact. Where a record
+ * legitimately takes a chosen date, it has its own field for it.
+ *
+ * Also refuses a string that is not a real calendar day (`2026-02-30`).
+ */
+export function isCallersToday(asOf: string, firmDay: string): boolean {
+  const a = ISO_DAY.exec(asOf);
+  const f = ISO_DAY.exec(firmDay);
+  if (!a || !f) return false;
+  const at = Date.UTC(Number(a[1]), Number(a[2]) - 1, Number(a[3]));
+  if (new Date(at).toISOString().slice(0, 10) !== asOf) return false;
+  const firm = Date.UTC(Number(f[1]), Number(f[2]) - 1, Number(f[3]));
+  return Math.abs(at - firm) <= 86_400_000;
+}

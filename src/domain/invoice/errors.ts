@@ -29,7 +29,21 @@ export type InvoiceErrorCode =
   | "CREDIT_EXCEEDS_INVOICE"
   | "DUNNING_ACTION_NOT_FOUND"
   | "DUNNING_NOT_AWAITING_APPROVAL"
-  | "DUNNING_ALREADY_DECIDED";
+  | "DUNNING_ALREADY_DECIDED"
+  | "NOT_CALLERS_TODAY";
+
+/** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
+ *  A document that genuinely belongs to another day has its own field. */
+export class NotCallersToday extends InvoiceError {
+  constructor(given: string, firmDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
+        `day is ${firmDay}, and anywhere in the world today is that day or the one either side. ` +
+        `To put an invoice in another year's books use seriesDate; a credit note takes issuedOn.`,
+    );
+  }
+}
 
 export class InvoiceNotFound extends InvoiceError {
   constructor(id: string) {

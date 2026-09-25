@@ -190,6 +190,15 @@ export interface NewTerritoryRule {
   readonly note: string | null;
 }
 
+/**
+ * Which zone the firm keeps its calendar in (0071): "today" for a contact
+ * detail a capture attaches, when the caller did not say. Structural:
+ * satisfied by `PostgresFirmTimeZone` and `FakeFirmTimeZone`.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 // ── The party seam ───────────────────────────────────────────────────────────
 
 export interface ProspectOrganization {

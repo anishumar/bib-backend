@@ -1181,10 +1181,21 @@ every morning, and opening the screen at 04:11 in Delhi found both halves of it:
 "as of 29-08" on the thirtieth, and then a client assigned from that form was missing from its
 holder's own book because `CURRENT_DATE` on a UTC server had not reached it. So `GET
 /api/v1/my-clients` takes `asOf`, `listOpenForClient` takes the date, `CURRENT_DATE` appears
-nowhere in this module's SQL, and the browser sends its LOCAL calendar day. **The defaults still
-use the server's day**, which is the honest fallback for a caller that did not say — and the
-same one-liner is still the convention in `invoice`, `dunning` and `lead`, which have the same
-bug and their own task to fix it in.
+nowhere in this module's SQL, and the browser sends its LOCAL calendar day. The defaults are the
+FIRM's day (`dayInZone`, since the 2026-09-23 fix), never the server's.
+
+**`invoice`, `dunning` and `lead` follow it since 2026-09-25.** Dunning's sweep had already moved
+to the firm's day in T6.14 and needed nothing more. `invoice` (the date a tax invoice is issued
+on, the year an undated one's series belongs to, a credit note's date) and `lead` (the day the
+contact details a capture attaches are in force from) now take `?asOf=` — the browser's local day
+— and default to the firm's. **A caller's `asOf` on a WRITE is held to the firm's day or one
+either side** (`isCallersToday` in `domain/scheduler/zone.ts`, refused as `NOT_CALLERS_TODAY`):
+every inhabited zone is within a day of every other, so that bound takes away no real today, and
+without it a route that stamps "today" on a numbered tax invoice would be a way to backdate one —
+the 2026-09-23 audit's High was a caller-supplied day deciding a recorded fact. A record that
+legitimately belongs to another day has its own field (`seriesDate`, a credit note's `issuedOn`).
+The one server-side `CURRENT_DATE` left in an adapter is the dashboard's "invoiced in the last N
+days", not part of this.
 
 `party:read` to see an account team, `party:write` to change one — not `tenant:admin`. Naming a
 Key Manager grants nobody anything; it is a fact about a client, like its identifiers. Its
@@ -1827,8 +1838,9 @@ abandon" stays answerable without a verb of its own.
 **`filed_on` is the UTC day, DECIDED rather than defaulted (Shrestha, 2026-08-30).** East of
 Greenwich a filing made after midnight local records the previous day, which is exactly the
 on-time/late boundary. It is survivable only because `work_item.completed_at` keeps the instant, so
-`filed_on` is a projection and the truth is not lost. The general fix is still open and still shared
-with `invoice`, `dunning` and `lead`.
+`filed_on` is a projection and the truth is not lost. `invoice`, `dunning` and `lead` no longer
+share it — they take the caller's or the firm's day since 2026-09-25 (see the client-assignment
+section) — so this is now the one deliberate UTC day left.
 
 **A boolean query parameter is NEVER `z.coerce.boolean()`.** Coercion is `Boolean(value)`, a query
 string carries TEXT, and `Boolean("false")` is `true` — so `?includeSettled=false` meant "include

@@ -24,6 +24,7 @@ import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/inv
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -38,7 +39,13 @@ const owner = postgres(cfg.db.ownerUrl, { max: 4 });
 
 const ledger = new LedgerService({ events: new PostgresEventStore(app), ids: systemIds });
 const invoices = new PostgresInvoiceRepository(app);
-const service = new InvoiceService({ invoices, ids: systemIds, clock: systemClock, events: ledger });
+const service = new InvoiceService({
+  invoices,
+  timeZones: new PostgresFirmTimeZone(app),
+  ids: systemIds,
+  clock: systemClock,
+  events: ledger,
+});
 
 const stamp = Date.now().toString(36);
 

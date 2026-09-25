@@ -12,6 +12,7 @@
 // NOTE ON CLEANUP: this test leaves its rows behind — crm.lead has no DELETE
 // grant, which is itself asserted below. The tenants it creates are uniquely
 // named per run.
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
@@ -51,6 +52,7 @@ const leads = new PostgresLeadRepository(app);
 const service = new LeadService({
   leads,
   prospects: party,
+  timeZones: new PostgresFirmTimeZone(app),
   staff: new PostgresMembershipRepository(app),
   // The real rotation. The tenants below hold no memberships at all, so it
   // declines every capture here and these leads stay unassigned — which is what

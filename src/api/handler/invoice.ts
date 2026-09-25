@@ -172,6 +172,27 @@ const InvoiceSummarySchema = z
   })
   .openapi("InvoiceSummary");
 
+/**
+ * The CALLER's today, for the three writes that stamp one: raising (which
+ * year's books, when not stated), issuing (the date on the tax invoice) and a
+ * credit note (its date, when not stated). Absent means the FIRM's day — never
+ * the server's UTC day, which dated a Delhi invoice issued at 02:00 the day
+ * before. Held to the firm's day or one either side: it says what day it is
+ * where the caller is, and is not a way to choose a date.
+ */
+const CallerDayQuery = z.object({
+  asOf: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .openapi({
+      description:
+        "Today where the caller is (a browser sends its local date). Defaults to the firm's " +
+        "day. Must be the firm's day or one either side; a document that belongs to another " +
+        "day has its own date field.",
+    }),
+});
+
 const RaiseInvoiceRequest = z
   .object({
     partyId: z.string().uuid(),
@@ -222,6 +243,7 @@ const raiseRoute = createRoute({
     "lock inside the same transaction as the insert. A failure releases it, because the " +
     "counter never moved — which is the difference between this and a document reference.",
   request: {
+    query: CallerDayQuery,
     body: { content: { "application/json": { schema: RaiseInvoiceRequest } }, required: true },
   },
   responses: {
@@ -306,13 +328,16 @@ const issueRoute = createRoute({
   path: "/api/v1/invoices/{invoiceId}/issue",
   tags: ["invoices"],
   summary: "Issue it",
-  description: "Refuses an invoice with no lines: it would ask the client for nothing.",
-  request: { params: z.object({ invoiceId: z.string().uuid() }) },
+  description:
+    "Refuses an invoice with no lines: it would ask the client for nothing. The date on it is " +
+    "the caller's `asOf`, or the firm's day.",
+  request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
+    400: errorResponse("asOf is not today anywhere"),
     409: errorResponse("Not a draft, or it has no lines"),
   },
 });
@@ -532,6 +557,7 @@ const creditNoteRoute = createRoute({
     "does not. A firm cannot credit more than it billed.",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
+    query: CallerDayQuery,
     body: { content: { "application/json": { schema: IssueCreditNoteRequest } }, required: true },
   },
   responses: {
@@ -715,7 +741,10 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const raised = await deps.service.raise({ tenantId: s.tenantId, ...c.req.valid("json") }, s.actor);
+    const raised = await deps.service.raise(
+      { tenantId: s.tenantId, ...c.req.valid("json"), asOf: c.req.valid("query").asOf },
+      s.actor,
+    );
     return c.json(toInvoiceBody(raised, seesFees(c.get("principal"))), 201);
   });
 
@@ -785,7 +814,12 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(issueRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const issued = await deps.service.issue(s.tenantId, c.req.valid("param").invoiceId, s.actor);
+    const issued = await deps.service.issue(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      s.actor,
+      c.req.valid("query").asOf,
+    );
     return c.json(toInvoiceBody(issued, seesFees(c.get("principal"))), 200);
   });
 
@@ -860,7 +894,12 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const credit = await deps.service.issueCreditNote(
-      { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
+      {
+        tenantId: s.tenantId,
+        invoiceId: c.req.valid("param").invoiceId,
+        ...c.req.valid("json"),
+        asOf: c.req.valid("query").asOf,
+      },
       s.actor,
     );
     return c.json(toCreditNoteBody(credit, seesFees(c.get("principal"))), 201);

@@ -101,6 +101,15 @@ export interface InvoiceFilters {
   readonly partyId?: string | undefined;
 }
 
+/**
+ * Which zone the firm keeps its calendar in (0071) — "today" for an invoice
+ * nobody dated, when the caller did not say. Structural: satisfied by
+ * `PostgresFirmTimeZone` and `FakeFirmTimeZone`.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
 export interface InvoiceRepository {
   /**
    * Create the invoice AND take its number, in ONE transaction.

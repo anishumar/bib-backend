@@ -659,6 +659,7 @@ export function mapError(err: unknown): MappedError {
       case "NO_CONTACT_DETAIL":
       case "BLANK_TITLE":
       case "INVALID_LEAD_JURISDICTION":
+      case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
@@ -814,6 +815,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_INVOICE_AMOUNT":
       case "INVALID_SERIES_PREFIX":
       case "INVALID_INVOICE_DATE":
+      case "NOT_CALLERS_TODAY":
       case "INVALID_PAYMENT_METHOD":
       case "INVALID_CREDIT_REASON":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };

@@ -1280,3 +1280,38 @@ describe("T2.1b — a territory rule overrides the rotation", () => {
     ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
   });
 });
+
+describe("the day a captured contact detail is in force from (item 4, 2026-09-25)", () => {
+  // It was the server's UTC day: a PAN captured at 02:00 in Delhi was "in
+  // force from" the day before the firm learned it.
+  it("is the FIRM's day, not the server's", async () => {
+    const fakes = makeLeadFakes();
+    fakes.timeZones.set("Asia/Kolkata");
+    fakes.clock.set("2026-03-01T20:30:00.000Z");
+    const service = new LeadService(fakes);
+    const { lead } = await service.capture(capture(), ACTOR);
+    const pan = await fakes.party.findByIdentifier(TENANT, "pan", PAN);
+    expect(pan?.partyId).toBe(lead.partyId);
+    expect(pan?.validFrom).toBe("2026-03-02");
+  });
+
+  it("is the caller's own day when it sends one", async () => {
+    const fakes = makeLeadFakes();
+    fakes.timeZones.set("Asia/Kolkata");
+    fakes.clock.set("2026-03-01T20:30:00.000Z");
+    const service = new LeadService(fakes);
+    await service.capture(capture({ asOf: "2026-03-01" }), ACTOR);
+    const pan = await fakes.party.findByIdentifier(TENANT, "pan", PAN);
+    expect(pan?.validFrom).toBe("2026-03-01");
+  });
+
+  it("REFUSES an asOf that is not today anywhere, before writing anything", async () => {
+    const fakes = makeLeadFakes();
+    const service = new LeadService(fakes);
+    await expect(service.capture(capture({ asOf: "2025-01-01" }), ACTOR)).rejects.toMatchObject({
+      code: "NOT_CALLERS_TODAY",
+    });
+    expect(fakes.leads.rows).toEqual([]);
+    expect(await fakes.party.findByIdentifier(TENANT, "pan", PAN)).toBeNull();
+  });
+});

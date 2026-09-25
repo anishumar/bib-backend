@@ -37,6 +37,7 @@ import type {
 } from "../usecase/invoice/ports";
 import type { Deps } from "../usecase/invoice/service";
 import { FakeIds } from "./ids";
+import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
 import { RecordingEventSink } from "./ledger";
 
@@ -352,10 +353,14 @@ function tax(l: InvoiceLine): string {
 
 export function makeInvoiceFakes(): Deps & {
   invoices: FakeInvoiceRepo;
+  /** UTC unless a test sets the firm's zone. */
+  timeZones: FakeFirmTimeZone;
+  clock: FakeClock;
   events: RecordingEventSink;
 } {
   return {
     invoices: new FakeInvoiceRepo(),
+    timeZones: new FakeFirmTimeZone(),
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
     events: new RecordingEventSink(),

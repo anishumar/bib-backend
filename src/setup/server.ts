@@ -451,6 +451,8 @@ export function wire(cfg: Config, log: Logger): Wired {
   // caller, because a failure between the two spends the number. See the file.
   const invoiceRepository = new PostgresInvoiceRepository(pools.app);
   const invoices = new InvoiceService({
+    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
+    timeZones: new PostgresFirmTimeZone(pools.app),
     invoices: invoiceRepository,
     ids: systemIds,
     clock: systemClock,
@@ -960,6 +962,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       new PostgresRoundRobinAssignment(pools.app),
     ]),
     territories: new PostgresTerritoryRules(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

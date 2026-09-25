@@ -2235,7 +2235,10 @@ open and are recorded above; neither blocks Phase 2.
   > on-time/late boundary on a statutory record. It is survivable only because the work item's
   > `completed_at` keeps the exact instant, so `filed_on` is a convenience projection and the
   > truth is not lost. The general fix — a firm timezone, or the caller's day on every route —
-  > is still open and still shared with `invoice`, `dunning` and `lead`.
+  > is still open and still shared with `invoice`, `dunning` and `lead`. **(2026-09-25: no longer
+  > shared.** Dunning's sweep moved to the firm's day in T6.14; `invoice` and `lead` take `?asOf=`
+  > from the browser, default to the firm's day, and refuse an `asOf` more than a day from it.
+  > `filed_on` is the one deliberate UTC day left.)
   >
   > **`work_item.completed` no longer fires for a CANCELLED task**, decided in the same breath:
   > the verb's own description is *"what did we finish last month"*, and counting cancellations
