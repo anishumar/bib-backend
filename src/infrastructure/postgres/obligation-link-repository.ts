@@ -14,6 +14,7 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import { mayBeWithdrawn } from "../../domain/obligation/model";
+import { lockChainForRemoval } from "./obligation-chain-lock";
 import type {
   RuleServiceLinkRepository,
   UnlinkOutcome,
@@ -139,6 +140,14 @@ export class PostgresRuleServiceLinkRepository implements RuleServiceLinkReposit
     },
   ): Promise<UnlinkOutcome | null> {
     return withTenant(this.app, tenantId, async (db) => {
+      // ── 0. take the chain's turn ───────────────────────────────────────
+      //
+      // Before anything is read, so everything below reads after any other
+      // removal of this filing, or generator write for it, has committed.
+      // See `obligation-chain-lock.ts` for the two orders that went wrong
+      // without it.
+      await lockChainForRemoval(db, input.lineageId);
+
       // ── 1. the removal ─────────────────────────────────────────────────
       const removed = await db<{ id: string }[]>`
         UPDATE delivery.obligation_rule_service
@@ -159,11 +168,18 @@ export class PostgresRuleServiceLinkRepository implements RuleServiceLinkReposit
       //
       // "What still covers it" is the question the generator would ask
       // tomorrow: another ACTIVE engagement of the same entity whose service
-      // still has a LIVE link to this chain. The removal above is visible to
-      // this statement (same transaction), so the service being removed can
-      // never be its own cover. When there are several, the one chosen is the
-      // earliest to start, then the lowest id: `subjectsFor`'s order, so the
-      // row carries the engagement the generator would have given it.
+      // still has a LIVE link to this chain, AND which had started by the
+      // row's statutory date. That last half is the generator's own floor
+      // (`generateReport` skips a subject whose `effectiveFrom` is after the
+      // period's statutory date), and without it a signed engagement starting
+      // in December counted as cover for September's return: the row was kept
+      // and moved onto an engagement that would never have been given it, and
+      // nothing withdrew it afterwards. With it, cover here and a proposal
+      // there are one answer. The removal above is visible to this statement
+      // (same transaction), so the service being removed can never be its own
+      // cover. When there are several, the one chosen is the earliest to
+      // start, then the lowest id: `subjectsFor`'s order, so the row carries
+      // the engagement the generator would have given it.
       //
       // Settled history (a terminal state, already past) is left out entirely:
       // years of filed returns were never going to move, and counting them as
@@ -202,6 +218,7 @@ export class PostgresRuleServiceLinkRepository implements RuleServiceLinkReposit
           WHERE e2.tenant_id = oi.tenant_id
             AND e2.entity_party_id = oi.entity_party_id
             AND e2.status = 'active'
+            AND e2.effective_from <= oi.statutory_due_on
           ORDER BY e2.effective_from, e2.id
           LIMIT 1
         ) cover ON true

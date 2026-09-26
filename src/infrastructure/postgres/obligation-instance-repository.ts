@@ -41,6 +41,7 @@ import type {
   UnstartedInstance,
 } from "../../usecase/obligation/ports";
 import { isoInstant } from "./instant";
+import { lockChainsForWrite } from "./obligation-chain-lock";
 
 /**
  * Only `active` engagements generate.
@@ -65,6 +66,12 @@ const GENERATING_STATUS = "active";
  * moment of the write. A proposal naming no engagement is not a link's to
  * judge; nothing proposes one today (0053 keeps the column nullable for the
  * compliance-engine reading nobody has chosen).
+ *
+ * "At the moment of the write" holds only because `createIfAbsent` takes each
+ * chain's lock before this is asked (`obligation-chain-lock.ts`). This test
+ * reads the link from its statement's snapshot, so on its own a removal that
+ * committed while the statement ran was invisible to it, and the removal could
+ * not see the rows being written either: they committed live under no link.
  *
  * A constant fragment with no parameters, which is what makes `db.unsafe`
  * safe to put it in.
@@ -148,6 +155,14 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     if (!tenantId) return { created: [], restored: [] };
     const proposals = JSON.stringify(rows);
     return withTenant(this.app, tenantId, async (db) => {
+      // ── 0. TAKE EACH CHAIN'S TURN, SHARED ─────────────────────────────────
+      //
+      // Before either statement below starts, so `STILL_LINKED` is asked
+      // after any removal of these filings has committed, and a removal that
+      // arrives now waits for this write and then sees what it wrote. See
+      // `obligation-chain-lock.ts`.
+      await lockChainsForWrite(db, rows.map((r) => r.templateId));
+
       // ── 1. A WITHDRAWN ROW THE PROPOSAL HOLDS THE KEY OF COMES BACK (0309) ─
       //
       // Same row, same id, in place: the withdrawal cleared, the dates the
@@ -163,8 +178,9 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       // survives into RETURNING: restoring clears the column, and the ledger's
       // `obligation.restored` is then the only place the withdrawal is kept.
       const restored = await db<
-        { id: string; template_id: string; entity_party_id: string; period_label: string;
-          statutory_due_on: string; internal_target_on: string; was_withdrawn_at: string }[]
+        { id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+          period_label: string; statutory_due_on: string; internal_target_on: string;
+          was_withdrawn_at: string }[]
       >`
         UPDATE delivery.obligation_instance AS o
         SET withdrawn_at         = NULL,
@@ -197,7 +213,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AND o.work_item_id IS NULL
           AND o.filed_on IS NULL
           AND o.resolved_at IS NULL
-        RETURNING o.id, o.template_id, o.entity_party_id, o.period_label,
+        RETURNING o.id, o.template_id, o.entity_party_id, o.engagement_id, o.period_label,
                   o.statutory_due_on::text, o.internal_target_on::text, p.was_withdrawn_at
       `;
 
@@ -210,8 +226,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
       // were new — which is what the caller records an event for. A row the
       // step above restored holds its key, so it is skipped here.
       const created = await db<
-        { id: string; template_id: string; entity_party_id: string; period_label: string;
-          statutory_due_on: string; internal_target_on: string }[]
+        { id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+          period_label: string; statutory_due_on: string; internal_target_on: string }[]
       >`
         INSERT INTO delivery.obligation_instance
           (id, tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end,
@@ -237,16 +253,17 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         -- holds — the row a supersession could not hand over because somebody
         -- had started it.
         ON CONFLICT (tenant_id, lineage_id, entity_party_id, period_start) DO NOTHING
-        RETURNING id, template_id, entity_party_id, period_label,
+        RETURNING id, template_id, entity_party_id, engagement_id, period_label,
                   statutory_due_on::text, internal_target_on::text
       `;
       const spawned = (r: {
-        id: string; template_id: string; entity_party_id: string; period_label: string;
-        statutory_due_on: string; internal_target_on: string;
+        id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+        period_label: string; statutory_due_on: string; internal_target_on: string;
       }): SpawnedInstance => ({
         id: r.id,
         templateId: r.template_id,
         entityPartyId: r.entity_party_id,
+        engagementId: r.engagement_id,
         periodLabel: r.period_label,
         statutoryDueOn: r.statutory_due_on,
         internalTargetOn: r.internal_target_on,
@@ -743,10 +760,14 @@ export class PostgresCalendarSource implements CalendarSource {
   ): Promise<readonly CalendarSubject[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<
-        { entity_party_id: string; engagement_id: string; effective_from: string }[]
+        {
+          entity_party_id: string; engagement_id: string; effective_from: string;
+          service_entry_id: string;
+        }[]
       >`
         SELECT DISTINCT le.party_id AS entity_party_id, e.id AS engagement_id,
-               e.effective_from::text AS effective_from
+               e.effective_from::text AS effective_from,
+               pinned.entry_id AS service_entry_id
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
@@ -780,6 +801,7 @@ export class PostgresCalendarSource implements CalendarSource {
         entityPartyId: r.entity_party_id,
         engagementId: r.engagement_id,
         effectiveFrom: r.effective_from,
+        serviceEntryId: r.service_entry_id,
       }));
     });
   }

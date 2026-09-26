@@ -62,6 +62,7 @@ function harness() {
   links.services = services;
   links.calendar = calendarSource;
   links.instances = instances;
+  links.templates = templates;
   templates.links = links;
   calendarSource.links = links;
   instances.links = links;
@@ -1796,5 +1797,173 @@ describe("a service lists its compliance filings, and a filing is written once (
     expect((await h.service.filings(FIRM)).map((f) => f.template.id)).toEqual([successor.id]);
     // And the successor's periods reached the client through the inherited link.
     expect(h.instances.rows.some((r) => r.templateId === successor.id)).toBe(true);
+  });
+
+  // ── the review's findings (2026-09-26) ──────────────────────────────────
+
+  it("an engagement that has not started yet covers only what falls due once it has", async () => {
+    // ENTITY holds SERVICE from January and has signed SERVICE_2, active but
+    // starting 1 December. Both carry the filing, so every row is on the
+    // earlier engagement. The generator never gives a period to an engagement
+    // that starts after its statutory date, so neither may the cover test.
+    const rule = await firmWithGst(h);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    subject(ENTITY, ENGAGEMENT_2, SERVICE_2, "2026-12-01");
+    await h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id }, ACTOR);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT)).toBe(true);
+    const ahead = live(ENTITY).filter((r) => r.statutoryDueOn >= TODAY);
+    const beforeStart = ahead.filter((r) => r.statutoryDueOn < "2026-12-01");
+    const fromStart = ahead.filter((r) => r.statutoryDueOn >= "2026-12-01");
+    const past = live(ENTITY).filter((r) => r.statutoryDueOn < TODAY);
+    expect(beforeStart.length).toBeGreaterThan(0);
+    expect(fromStart.length).toBeGreaterThan(0);
+
+    const { effect } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    expect(effect).toMatchObject({
+      withdrawn: beforeStart.length,
+      keptCoveredElsewhere: fromStart.length,
+      keptPastDue: past.length,
+    });
+    const byId = new Map(h.instances.rows.map((r) => [r.id, r]));
+    expect(beforeStart.every((r) => byId.get(r.id)?.withdrawnAt !== null)).toBe(true);
+    expect(fromStart.every((r) => byId.get(r.id)?.engagementId === ENGAGEMENT_2)).toBe(true);
+    // A row already past its date fell due before SERVICE_2 existed: it stays.
+    expect(past.every((r) => byId.get(r.id)?.engagementId === ENGAGEMENT)).toBe(true);
+  });
+
+  it("the counts after adding a filing are THIS service's clients', though the whole chain is filled", async () => {
+    const ENTITY_3 = "00000000-0000-4000-8000-0000000000e3";
+    const ENGAGEMENT_4 = "00000000-0000-4000-8000-00000000e004";
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    // ENTITY already has its rows, and also holds SERVICE_2. ENTITY_2 took
+    // SERVICE today and no sweep has run for it. ENTITY_3 holds only
+    // SERVICE_2, so it is the one client this link reaches.
+    subject(ENTITY, ENGAGEMENT_2, SERVICE_2, "2026-03-01");
+    subject(ENTITY_2, ENGAGEMENT_3, SERVICE, "2026-01-01");
+    subject(ENTITY_3, ENGAGEMENT_4, SERVICE_2, "2026-01-01");
+
+    const { effect } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id },
+      ACTOR,
+    );
+    // The calendar is filled for the whole chain: ENTITY_2's rows arrived too,
+    // on SERVICE's engagement. They are SERVICE's, and are not this link's.
+    expect(live(ENTITY_2).length).toBeGreaterThan(0);
+    expect(live(ENTITY_2).every((r) => r.engagementId === ENGAGEMENT_3)).toBe(true);
+    expect(effect).toMatchObject({
+      linked: true,
+      spawned: live(ENTITY_3).length,
+      restored: 0,
+      companies: 1,
+    });
+    const linked = h.events.recorded.filter((e) => e.verb === "obligation_rule.linked").at(-1);
+    expect(linked?.payload).toMatchObject({ spawned: live(ENTITY_3).length, restored: 0 });
+  });
+
+  it("a link whose calendar fill fails is still recorded, and the error still reaches the caller", async () => {
+    // No states seeded, so the generator has no state to start a filing in
+    // and throws. The link is already written by then, and a retry answers
+    // "already on this service" without recording anything, so this is the
+    // one chance to record it.
+    h.services.keys.set(SERVICE, "gst-filing");
+    subject(ENTITY, ENGAGEMENT, SERVICE, "2026-01-01");
+    const { rule } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "IN",
+        name: "GSTR-3B",
+        recurrence: "monthly",
+        fiscalYearStartMonth: 4,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20 },
+        leadTimeDays: 0,
+        rulePack: "gst-in@2026.07",
+      },
+      ACTOR,
+    );
+    await expect(
+      h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id }, ACTOR),
+    ).rejects.toMatchObject({ code: "NO_INITIAL_STATE" });
+    expect(h.links.isLive(FIRM, rule.lineageId, SERVICE)).toBe(true);
+    const linked = h.events.recorded.filter((e) => e.verb === "obligation_rule.linked");
+    expect(linked).toHaveLength(1);
+    expect(linked[0]?.payload).toMatchObject({
+      lineageId: rule.lineageId,
+      serviceEntryId: SERVICE,
+      confirmed: false,
+      calendarFilled: false,
+    });
+    // Not zero: nobody knows what was written before it failed.
+    expect(linked[0]?.payload).not.toHaveProperty("spawned");
+  });
+
+  it("a filing written for a service whose calendar fill fails is still recorded, rule and link", async () => {
+    h.services.keys.set(SERVICE, "gst-filing");
+    subject(ENTITY, ENGAGEMENT, SERVICE, "2026-01-01");
+    await expect(
+      h.service.createRule(
+        {
+          tenantId: FIRM,
+          jurisdiction: "IN",
+          serviceEntryIds: [SERVICE],
+          name: "GSTR-3B",
+          recurrence: "monthly",
+          fiscalYearStartMonth: 4,
+          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20 },
+          leadTimeDays: 0,
+          rulePack: "gst-in@2026.07",
+        },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "NO_INITIAL_STATE" });
+    expect(h.templates.rows).toHaveLength(1);
+    const created = h.events.recorded.filter((e) => e.verb === "obligation_rule.created");
+    const linked = h.events.recorded.filter((e) => e.verb === "obligation_rule.linked");
+    expect(created).toHaveLength(1);
+    expect(created[0]?.payload).toMatchObject({ services: 1, calendarFilled: false });
+    expect(created[0]?.payload).not.toHaveProperty("spawned");
+    expect(linked).toHaveLength(1);
+    expect(linked[0]?.payload).toMatchObject({ serviceEntryId: SERVICE, onCreate: true });
+  });
+
+  it("the link store refuses what 0309's keys refuse, by the constraint's name", async () => {
+    const rule = await firmWithGst(h);
+    const { rule: successor } = await h.service.supersedeRule(
+      FIRM,
+      rule.id,
+      {
+        effectiveFrom: "2026-09-01",
+        rulePack: "gst-in@2026.09",
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null },
+      },
+      ACTOR,
+    );
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    // A successor's own id is not a chain: the chain is its root's.
+    expect(() =>
+      h.links.write(FIRM, { id: "00000000-0000-4000-8000-00000000b0b2", lineageId: successor.id, serviceEntryId: SERVICE_2, byUserId: null }),
+    ).toThrow(/obligation_rule_service_lineage_root_fkey/);
+    // An entry this firm's catalogue does not hold as a service.
+    expect(() =>
+      h.links.write(FIRM, {
+        id: "00000000-0000-4000-8000-00000000b0b3",
+        lineageId: rule.lineageId,
+        serviceEntryId: "00000000-0000-4000-8000-00000000c0ff",
+        byUserId: null,
+      }),
+    ).toThrow(/obligation_rule_service_service_fkey/);
+    // And a rule store with no link store wired cannot pretend to link.
+    const bare = new FakeObligationTemplateRepo();
+    await expect(
+      bare.createIfAbsent(
+        { ...rule, id: "00000000-0000-4000-8000-00000000a0a9", name: "GSTR-1" },
+        [{ id: "00000000-0000-4000-8000-00000000b0b4", serviceEntryId: SERVICE, byUserId: null }],
+      ),
+    ).rejects.toThrow(/no link store/);
   });
 });

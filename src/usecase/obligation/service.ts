@@ -570,6 +570,19 @@ export class ObligationService {
     tenantId: string,
     lineageId: string,
     actor: Actor,
+    /**
+     * Count only what these services' clients got (T6.16 review). The chain
+     * is still filled WHOLE: rows the nightly sweep has not produced yet for
+     * another service's clients (an engagement activated today, a period just
+     * inside the horizon) are written now, because leaving the calendar short
+     * until tonight helps nobody. But "12 filings added for 4 companies",
+     * said after adding a filing to ONE service, and kept on that link's
+     * ledger event, must be about that service's clients. A row counts when
+     * the engagement it lands on bought one of these services. Unset, every
+     * row counts: the rule's own acts (a formula answered, the law changed)
+     * are about the whole chain.
+     */
+    forServices?: ReadonlySet<string>,
   ): Promise<SpawnOutcome> {
     const today = await this.firmDay(tenantId);
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
@@ -579,12 +592,9 @@ export class ObligationService {
       actor,
       lineageId,
       floor,
+      forServices,
     );
-    return {
-      spawned: report.created,
-      restored: report.restored,
-      companies: report.companies,
-    };
+    return report.counted;
   }
 
   // ── writing rules ────────────────────────────────────────────────────────
@@ -731,49 +741,61 @@ export class ObligationService {
     // this". The half-written worry is answered by T6.4: adding the March
     // exception afterwards RESTATES the rows already generated, so an early
     // spawn costs a restate, never a wrong date left standing.
-    const spawn =
-      serviceEntryIds.length > 0 && generatesDates(created, serviceEntryIds.length)
-        ? await this.spawnFor(input.tenantId, created.lineageId, actor)
-        : NOTHING_SPAWNED;
-
-    // After the spawn, as `updateRule` records its crossing: the count goes on
-    // the rule's own event.
-    await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
-      verb: "obligation_rule.created",
-      objectId: created.id,
-      actor,
-      payload: {
-        jurisdiction: created.jurisdiction,
-        name: created.name,
-        rulePack: created.rulePack,
-        recurrence: created.recurrence,
-        coverage: coverageOf(created, serviceEntryIds.length),
-        leadTimeDays: created.leadTimeDays,
-        ...(serviceEntryIds.length === 0
-          ? {}
-          : { services: serviceEntryIds.length, spawned: spawn.spawned }),
-      },
-    });
-    // One link event per service, like a link made from the picker, so "when
-    // did this service start carrying GSTR-3B" has one answer whichever way it
-    // was added. `onCreate` says the counts are on the event above.
-    for (const serviceEntryId of serviceEntryIds) {
+    // The rule and its links are committed. The events are written in
+    // `finally`, `linkRule`'s arrangement and its reason: a fill that throws
+    // here would otherwise leave a rule and its links the ledger never heard
+    // of, and the retry answers TEMPLATE_KEY_TAKEN, so there is no second
+    // chance to record them. A failed fill carries `calendarFilled: false`
+    // and no count, never a zero nobody measured.
+    let spawn: SpawnOutcome | null = null;
+    try {
+      spawn =
+        serviceEntryIds.length > 0 && generatesDates(created, serviceEntryIds.length)
+          ? await this.spawnFor(input.tenantId, created.lineageId, actor, new Set(serviceEntryIds))
+          : NOTHING_SPAWNED;
+    } finally {
+      // After the spawn, as `updateRule` records its crossing: the count goes
+      // on the rule's own event.
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
-        verb: "obligation_rule.linked",
-        objectId: created.lineageId,
+        verb: "obligation_rule.created",
+        objectId: created.id,
         actor,
         payload: {
-          lineageId: created.lineageId,
-          ruleId: created.id,
-          serviceEntryId,
-          serviceKey: serviceKeys.get(serviceEntryId) ?? null,
+          jurisdiction: created.jurisdiction,
           name: created.name,
-          confirmed: false,
-          onCreate: true,
+          rulePack: created.rulePack,
+          recurrence: created.recurrence,
+          coverage: coverageOf(created, serviceEntryIds.length),
+          leadTimeDays: created.leadTimeDays,
+          ...(serviceEntryIds.length === 0
+            ? {}
+            : spawn === null
+              ? { services: serviceEntryIds.length, calendarFilled: false }
+              : { services: serviceEntryIds.length, spawned: spawn.spawned }),
         },
       });
+      // One link event per service, like a link made from the picker, so
+      // "when did this service start carrying GSTR-3B" has one answer
+      // whichever way it was added. `onCreate` says the counts are on the
+      // event above.
+      for (const serviceEntryId of serviceEntryIds) {
+        await this.deps.events.recordEvent({
+          tenantId: input.tenantId,
+          verb: "obligation_rule.linked",
+          objectId: created.lineageId,
+          actor,
+          payload: {
+            lineageId: created.lineageId,
+            ruleId: created.id,
+            serviceEntryId,
+            serviceKey: serviceKeys.get(serviceEntryId) ?? null,
+            name: created.name,
+            confirmed: false,
+            onCreate: true,
+          },
+        });
+      }
     }
 
     return { rule: created, effect: { ...NO_EFFECT, spawned: spawn.spawned } };
@@ -1224,40 +1246,56 @@ export class ObligationService {
       };
     }
 
-    const services = await this.linkCount(tenantId, lineageId);
+    // ── THE LINK IS WRITTEN; FROM HERE ON IT IS RECORDED WHATEVER HAPPENS ──
+    //
+    // The confirm and the fill are separate writes after it, and either can
+    // throw (a firm with no starting state, a statement timeout on a large
+    // book). The link stands regardless, and a retry answers "already on this
+    // service" without recording anything, so an event written only after
+    // the fill would leave a link the ledger never heard of, for good. So the
+    // event is written in `finally`: with the counts when the fill finished,
+    // and with `calendarFilled: false` and NO counts when it did not, because
+    // nobody knows how much was written before it failed and a zero would be a
+    // claim. The error still reaches the caller; the nightly sweep fills
+    // what the link now reaches.
     let confirmed = false;
-    if (coverageOf(current, services) === "unconfirmed") {
-      current = (
-        await this.applyUpdate(tenantId, current.id, { status: "confirmed" }, actor, {
-          spawnOnCrossing: false,
-        })
-      ).rule;
-      confirmed = true;
+    let spawn: SpawnOutcome | null = null;
+    try {
+      const services = await this.linkCount(tenantId, lineageId);
+      if (coverageOf(current, services) === "unconfirmed") {
+        current = (
+          await this.applyUpdate(tenantId, current.id, { status: "confirmed" }, actor, {
+            spawnOnCrossing: false,
+          })
+        ).rule;
+        confirmed = true;
+      }
+      spawn = generatesDates(current, services)
+        ? await this.spawnFor(tenantId, lineageId, actor, new Set([serviceEntryId]))
+        : NOTHING_SPAWNED;
+    } finally {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "obligation_rule.linked",
+        objectId: lineageId,
+        actor,
+        payload: {
+          lineageId,
+          ruleId: current.id,
+          serviceEntryId,
+          serviceKey,
+          name: current.name,
+          confirmed,
+          // Counts only, like every rule write's effect, and only THIS
+          // service's clients' (`spawnFor`'s `forServices`): which filings
+          // arrived is on the calendar and in their own `obligation.spawned`
+          // / `obligation.restored` events.
+          ...(spawn === null
+            ? { calendarFilled: false }
+            : { spawned: spawn.spawned, restored: spawn.restored }),
+        },
+      });
     }
-
-    const spawn = generatesDates(current, services)
-      ? await this.spawnFor(tenantId, lineageId, actor)
-      : NOTHING_SPAWNED;
-
-    await this.deps.events.recordEvent({
-      tenantId,
-      verb: "obligation_rule.linked",
-      objectId: lineageId,
-      actor,
-      payload: {
-        lineageId,
-        ruleId: current.id,
-        serviceEntryId,
-        serviceKey,
-        name: current.name,
-        confirmed,
-        // Counts only, like every rule write's effect: which filings arrived
-        // is on the calendar and in their own `obligation.spawned` /
-        // `obligation.restored` events.
-        spawned: spawn.spawned,
-        restored: spawn.restored,
-      },
-    });
 
     return {
       rule: current,
@@ -1574,12 +1612,16 @@ export class ObligationService {
      * a desk for a firm that went live in September.
      */
     floor: IsoDate | null,
+    /** The services whose clients `counted` is about; unset, all of them.
+     *  See `spawnFor`. The write is the same either way. */
+    countFor?: ReadonlySet<string>,
   ): Promise<{
     readonly tenantId: string;
     readonly created: number;
     readonly restored: number;
     readonly companies: number;
     readonly rulesWithNoSubjects: readonly string[];
+    readonly counted: SpawnOutcome;
   }> {
     if (!isIsoDate(window.from) || !isIsoDate(window.to) || window.from > window.to) {
       throw new InvalidWindow(window.from, window.to);
@@ -1590,7 +1632,10 @@ export class ObligationService {
     // state, not a misconfiguration — and the sweep runs across every firm, so
     // throwing here would take the worker down for one of them.
     if (rules.length === 0) {
-      return { tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: [] };
+      return {
+        tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: [],
+        counted: NOTHING_SPAWNED,
+      };
     }
 
     const states = await this.deps.states.list(tenantId);
@@ -1606,6 +1651,11 @@ export class ObligationService {
     // row's `engagement_id` whatever order the database returned; the
     // restore is an UPDATE and would let the database choose as well.
     const proposed = new Set<string>();
+    // Which service each engagement bought, from the subjects themselves, so
+    // `counted` can say whose clients a written row belongs to without a
+    // second read. An engagement pins one service, so the map cannot disagree
+    // with itself.
+    const serviceOf = new Map<string, string>();
     // The cap is checked in three places rather than one because a `break`
     // only leaves the loop it is in, and this is three deep. A flag reads worse
     // than a labelled break and survives somebody adding a fourth level.
@@ -1637,6 +1687,7 @@ export class ObligationService {
         barren.push(`${template.jurisdiction} · ${template.name}`);
         continue;
       }
+      for (const s of subjects) serviceOf.set(s.engagementId, s.serviceEntryId);
 
       const periods = periodsBetween(
         template.recurrence,
@@ -1702,7 +1753,10 @@ export class ObligationService {
     }
 
     if (pending.length === 0) {
-      return { tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: barren };
+      return {
+        tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: barren,
+        counted: NOTHING_SPAWNED,
+      };
     }
 
     const { created, restored } = await this.deps.instances.createIfAbsent(pending);
@@ -1745,12 +1799,22 @@ export class ObligationService {
       });
     }
 
+    const ours = (r: { readonly engagementId: string | null }) =>
+      countFor === undefined ||
+      (r.engagementId !== null && countFor.has(serviceOf.get(r.engagementId) ?? ""));
+    const createdOurs = created.filter(ours);
+    const restoredOurs = restored.filter(ours);
     return {
       tenantId,
       created: created.length,
       restored: restored.length,
       companies: new Set([...created, ...restored].map((r) => r.entityPartyId)).size,
       rulesWithNoSubjects: barren,
+      counted: {
+        spawned: createdOurs.length,
+        restored: restoredOurs.length,
+        companies: new Set([...createdOurs, ...restoredOurs].map((r) => r.entityPartyId)).size,
+      },
     };
   }
 

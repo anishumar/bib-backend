@@ -490,6 +490,17 @@ export interface CalendarSubject {
    * one screen whose entire value is being trusted stops being trusted.
    */
   readonly effectiveFrom: IsoDate;
+  /**
+   * The catalogue service this engagement bought, through whose link the rule
+   * reached it (the letter line's pinned version's ENTRY). One per
+   * engagement, because a letter line pins one version.
+   *
+   * On the port so that adding a filing to a service can say what THAT
+   * service's clients got (T6.16 review): the generator fills the whole chain,
+   * and a count over every subject credited this link with filings owed
+   * through a different service.
+   */
+  readonly serviceEntryId: string;
 }
 
 /**
@@ -671,6 +682,9 @@ export interface SpawnedInstance {
   readonly id: string;
   readonly templateId: string;
   readonly entityPartyId: string;
+  /** The engagement the row carries after the write: the proposal's, for a
+   *  new row and for a restored one alike. What a link's count is taken by. */
+  readonly engagementId: string | null;
   readonly periodLabel: string;
   readonly statutoryDueOn: IsoDate;
   readonly internalTargetOn: IsoDate;

@@ -285,17 +285,38 @@ export function makeFakes(): {
   const obligationTemplates = new FakeObligationTemplateRepo();
   const obligationExceptions = new FakeObligationExceptionRepo();
   obligationTemplates.exceptions = obligationExceptions;
+  // ONE WORLD, as one database is (the obligation harness's own wiring): the
+  // rule store writes its links through the link store in the same act, the
+  // generator reaches engagements through it, and removing a link withdraws
+  // calendar rows. Handing the service a link store the rule store could not
+  // see made a rule written for a service answer success and link nothing.
+  const obligationStates = new FakeObligationStateRepo();
+  const obligationInstances = new FakeObligationInstanceRepo();
+  const obligationCalendar = new FakeCalendarSource();
+  const obligationServices = new FakeObligationServices();
+  const obligationLinks = new FakeRuleServiceLinks();
+  obligationInstances.states = obligationStates.rows;
+  obligationInstances.templates = obligationTemplates;
+  obligationInstances.links = obligationLinks;
+  obligationInstances.engagements = obligationCalendar;
+  obligationTemplates.instances = obligationInstances;
+  obligationTemplates.links = obligationLinks;
+  obligationCalendar.links = obligationLinks;
+  obligationLinks.services = obligationServices;
+  obligationLinks.calendar = obligationCalendar;
+  obligationLinks.instances = obligationInstances;
+  obligationLinks.templates = obligationTemplates;
   const obligations = new ObligationService({
     timeZones: new FakeFirmTimeZone(),
     templates: obligationTemplates,
     exceptions: obligationExceptions,
-    states: new FakeObligationStateRepo(),
+    states: obligationStates,
     resolutionOptions: new FakeResolutionOptionRepo(),
-    instances: new FakeObligationInstanceRepo(),
+    instances: obligationInstances,
     compliancePolicy: new FakeCompliancePolicySource(),
-    calendarSource: new FakeCalendarSource(),
-    links: new FakeRuleServiceLinks(),
-    services: new FakeObligationServices(),
+    calendarSource: obligationCalendar,
+    links: obligationLinks,
+    services: obligationServices,
     workItems: new FakeWorkItemRaiser(),
     tenants: new FakeObligationTenants(),
     ids,

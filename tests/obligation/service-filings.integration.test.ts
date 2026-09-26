@@ -28,6 +28,7 @@
 // Run with:  npm run test:integration
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { load } from "../../src/config/config";
@@ -65,6 +66,7 @@ const TODAY = "2026-08-30";
 
 const instances = new PostgresObligationInstanceRepository(app);
 const templates = new PostgresObligationTemplateRepository(app);
+const links = new PostgresRuleServiceLinkRepository(app);
 const events = new RecordingEventSink();
 const service = new ObligationService({
   timeZones: new FakeFirmTimeZone(),
@@ -73,7 +75,7 @@ const service = new ObligationService({
   states: new PostgresObligationStateRepository(app),
   resolutionOptions: new PostgresResolutionOptionRepository(app),
   instances,
-  links: new PostgresRuleServiceLinkRepository(app),
+  links,
   compliancePolicy: { missedFromOn: () => Promise.resolve(null) },
   calendarSource: new PostgresCalendarSource(app),
   services: new PostgresConfigRepository(app),
@@ -801,5 +803,233 @@ describe("0309 runs both ways, and moves the data", () => {
       SELECT to_regclass('delivery.obligation_rule_service') IS NOT NULL AS table
     `;
     expect(still?.table).toBe(true);
+  });
+});
+
+// ── the review's findings: the cover test and the two writers of a chain ────
+
+/** A filing written in the library (on no service, so nothing generates yet)
+ *  under its own pack, for the tests below that link it by hand. */
+async function libraryRule(name: string, dueDayOfMonth: number, serviceEntryIds?: string[]) {
+  const { rule } = await service.createRule(
+    {
+      tenantId,
+      jurisdiction: "IN",
+      ...(serviceEntryIds === undefined ? {} : { serviceEntryIds }),
+      name,
+      recurrence: "monthly",
+      fiscalYearStartMonth: 4,
+      dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth },
+      leadTimeDays: 0,
+      rulePack: `review-${stamp}`,
+    },
+    actor,
+  );
+  return rule;
+}
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Wait until some other session is BLOCKED on the transaction `xid`: the only
+ * honest way to know a concurrent write has reached the point a test holds it
+ * at. `pg_locks` is readable by every role, and a row or key wait shows as an
+ * ungranted lock on the holder's transaction id.
+ */
+async function blockedOn(xid: string): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    const [r] = await owner<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM pg_locks
+       WHERE locktype = 'transactionid' AND NOT granted AND transactionid::text = ${xid}
+    `;
+    if ((r?.n ?? 0) > 0) return;
+    await pause(50);
+  }
+  throw new Error(`nothing ever waited on transaction ${xid}`);
+}
+
+/**
+ * Hold a transaction open on the owner's connection: `work` runs inside it,
+ * and it ends (committed, or rolled back when `rollback` is set) only when the
+ * returned `release` is called. `ready` resolves with its transaction id.
+ */
+function holdOpen(
+  work: (tx: postgres.TransactionSql) => Promise<unknown>,
+  rollback = false,
+): { ready: Promise<string>; release: () => void; done: Promise<void> } {
+  let release: () => void = () => undefined;
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let ready: (xid: string) => void = () => undefined;
+  const readyP = new Promise<string>((resolve) => {
+    ready = resolve;
+  });
+  const ROLLBACK = new Error("roll back the held transaction");
+  const done = owner
+    .begin(async (tx) => {
+      await work(tx);
+      const [x] = await tx<{ xid: string }[]>`SELECT (pg_current_xact_id()::text::numeric % 4294967296)::text AS xid`;
+      ready(x?.xid ?? "");
+      await released;
+      if (rollback) throw ROLLBACK;
+    })
+    .then(() => undefined)
+    .catch((e: unknown) => {
+      if (e !== ROLLBACK) throw e;
+    });
+  return { ready: readyP, release, done };
+}
+
+describe("another service covers a filing only from the day its engagement starts (review)", () => {
+  it("withdraws the periods before a later-starting engagement, and moves only the ones it owes", async () => {
+    // Cobalt Futures holds service A from January and has SIGNED service B,
+    // active but starting on 1 December (`pending_start` on the screen). Both
+    // carry the filing, so every row sits on A, the earlier engagement.
+    const a = await serviceEntry(`floor-a-${stamp}`);
+    const b = await serviceEntry(`floor-b-${stamp}`);
+    const x = await company(`Cobalt Futures ${stamp}`);
+    const onA = await engagementFor(x, a.versionId, "2026-01-01");
+    const onB = await engagementFor(x, b.versionId, "2026-12-01");
+    const rule = await libraryRule("PF return", 15, [a.entryId, b.entryId]);
+    const before = await rowsOf(rule.id);
+    expect(before.length).toBeGreaterThan(0);
+    expect(before.every((r) => r.engagement_id === onA)).toBe(true);
+    const past = before.filter((r) => r.statutory < TODAY);
+    const beforeB = before.filter((r) => r.statutory >= TODAY && r.statutory < "2026-12-01");
+    const owedByB = before.filter((r) => r.statutory >= "2026-12-01");
+    expect(past.length).toBeGreaterThan(0);
+    expect(beforeB.length).toBeGreaterThan(0);
+    expect(owedByB.length).toBeGreaterThan(0);
+
+    const { effect } = await service.unlinkRule({ tenantId, serviceEntryId: a.entryId, ruleId: rule.id }, actor);
+
+    // B owes nothing that falls due before it starts, which is the
+    // generator's own floor, so September to November come off.
+    expect(effect).toMatchObject({
+      withdrawn: beforeB.length,
+      keptCoveredElsewhere: owedByB.length,
+      keptPastDue: past.length,
+      keptStarted: 0,
+    });
+    const after = await rowsOf(rule.id);
+    const byId = new Map(after.map((r) => [r.id, r]));
+    for (const r of beforeB) expect(byId.get(r.id)?.withdrawn_at).not.toBeNull();
+    for (const r of owedByB) {
+      expect(byId.get(r.id)?.withdrawn_at).toBeNull();
+      expect(byId.get(r.id)?.engagement_id).toBe(onB);
+    }
+    // A row already past its date stays where it was: it fell due before B
+    // existed, so B is not the engagement that owed it.
+    for (const r of past) expect(byId.get(r.id)?.engagement_id).toBe(onA);
+
+    // And the generator agrees: a sweep of the same window brings none back.
+    const again = await service.generate(tenantId, { from: "2026-06-01", to: "2027-08-30" }, actor, rule.id);
+    expect(again.restored).toBe(0);
+    const still = await rowsOf(rule.id);
+    for (const r of beforeB) expect(still.find((s) => s.id === r.id)?.withdrawn_at).not.toBeNull();
+  });
+});
+
+describe("two writers of one filing's calendar take turns (review)", () => {
+  it("two removals of one filing from two services at once still take it off: the second waits", async () => {
+    const a = await serviceEntry(`race-a-${stamp}`);
+    const b = await serviceEntry(`race-b-${stamp}`);
+    const y = await company(`Cobalt Twins ${stamp}`);
+    const onA = await engagementFor(y, a.versionId, "2026-01-01");
+    await engagementFor(y, b.versionId, "2026-03-01");
+    const rule = await libraryRule("ESI return", 15, [a.entryId, b.entryId]);
+    const ahead = (await rowsOf(rule.id)).filter((r) => r.statutory >= TODAY);
+    expect(ahead.length).toBeGreaterThan(0);
+    expect(ahead.every((r) => r.engagement_id === onA)).toBe(true);
+
+    // THE INTERLEAVING, forced rather than hoped for. The calendar rows are
+    // held, so the first removal reads them (seeing B's link still live, so
+    // "covered elsewhere") and then waits to move them onto B. The second
+    // removal is started while it waits. Without a lock on the chain it ran
+    // straight through, found no row on B's engagement, and withdrew nothing,
+    // and the first then moved every row onto a service that no longer
+    // carried the filing: live filings with no link, which nothing withdraws.
+    const hold = holdOpen((tx) => tx`
+      SELECT id FROM delivery.obligation_instance
+       WHERE tenant_id = ${tenantId} AND lineage_id = ${rule.id} FOR UPDATE
+    `);
+    const xid = await hold.ready;
+    const first = service.unlinkRule({ tenantId, serviceEntryId: a.entryId, ruleId: rule.id }, actor);
+    await blockedOn(xid);
+    const second = service.unlinkRule({ tenantId, serviceEntryId: b.entryId, ruleId: rule.id }, actor);
+    // It WAITS for the first: the chain's lock is held until that commits.
+    // Released in `finally`, so a red run fails rather than hangs.
+    try {
+      expect(await Promise.race([second.then(() => "finished"), pause(750).then(() => "waiting")])).toBe(
+        "waiting",
+      );
+    } finally {
+      hold.release();
+    }
+    await hold.done;
+    const [one, two] = await Promise.all([first, second]);
+
+    // No service carries it now, so nothing upcoming is left on the calendar.
+    const after = (await rowsOf(rule.id)).filter((r) => r.statutory >= TODAY);
+    expect(after.filter((r) => r.withdrawn_at === null)).toEqual([]);
+    expect(one.effect.withdrawn + two.effect.withdrawn).toBe(ahead.length);
+  });
+
+  it("a removal that lands while the generator is writing waits for it, and then withdraws what it wrote", async () => {
+    const a = await serviceEntry(`race-gen-${stamp}`);
+    const z = await company(`Cobalt Sprint ${stamp}`);
+    const onA = await engagementFor(z, a.versionId, "2026-01-01");
+    // Written in the library and linked by hand, so the calendar is empty
+    // until the generator below runs.
+    const rule = await libraryRule("LWF return", 15);
+    expect(
+      await links.link(tenantId, { id: randomUUID(), lineageId: rule.id, serviceEntryId: a.entryId, byUserId: userId }),
+    ).toBe(true);
+    expect(await rowsOf(rule.id)).toEqual([]);
+    const states = await service.listStates(tenantId);
+    const start = states.find((s) => s.isInitial);
+    if (!start) throw new Error("no initial state");
+
+    // THE INTERLEAVING: an uncommitted row holding October's key makes the
+    // generator's insert wait mid-statement, after it has read the link as
+    // live. The removal is started while it waits. Without a lock on the
+    // chain it ran straight through and found nothing to withdraw, then the
+    // generator committed a year of filings for a service that no longer
+    // carried them. The held row is rolled back, so the generator writes
+    // October itself.
+    const hold = holdOpen(
+      (tx) => tx`
+        INSERT INTO delivery.obligation_instance
+          (tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end,
+           period_label, statutory_due_on, internal_target_on, state_id)
+        VALUES (${tenantId}, ${rule.id}, ${z}, ${onA}, '2026-10-01', '2026-10-31', 'Oct 2026',
+                '2026-11-15', '2026-11-15', ${start.id})
+      `,
+      true,
+    );
+    const xid = await hold.ready;
+    const generated = service.generate(tenantId, { from: "2026-06-01", to: "2027-08-30" }, actor, rule.id);
+    await blockedOn(xid);
+    const removed = service.unlinkRule({ tenantId, serviceEntryId: a.entryId, ruleId: rule.id }, actor);
+    // It WAITS for the generator's write to commit.
+    try {
+      expect(await Promise.race([removed.then(() => "finished"), pause(750).then(() => "waiting")])).toBe(
+        "waiting",
+      );
+    } finally {
+      hold.release();
+    }
+    await hold.done;
+    const [gen, { effect }] = await Promise.all([generated, removed]);
+
+    expect(gen.created).toBeGreaterThan(0);
+    const rows = await rowsOf(rule.id);
+    expect(rows).toHaveLength(gen.created);
+    const ahead = rows.filter((r) => r.statutory >= TODAY);
+    expect(ahead.length).toBeGreaterThan(0);
+    // Every upcoming one it wrote came off with the service, and was counted.
+    expect(ahead.filter((r) => r.withdrawn_at === null)).toEqual([]);
+    expect(effect.withdrawn).toBe(ahead.length);
   });
 });

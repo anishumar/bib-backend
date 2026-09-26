@@ -60,6 +60,7 @@ async function world() {
   links.services = services;
   links.calendar = calendarSource;
   links.instances = instances;
+  links.templates = templates;
   services.keys.set(GST, "gst-monthly");
   services.names.set(GST, "GST monthly filing");
   services.keys.set(FULL, "full-compliance");

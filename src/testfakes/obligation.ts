@@ -63,7 +63,8 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
   instances?: FakeObligationInstanceRepo;
   /** The catalogue links (0309), for `usedIn`, for `listGenerating`'s link
    *  test and for links written in the same act as the rule. Unset, every rule
-   *  is on no service, which is decision 1's reading of "nothing linked". */
+   *  is on no service, which is decision 1's reading of "nothing linked", and
+   *  a create HANDED links refuses rather than dropping them unseen. */
   links?: FakeRuleServiceLinks;
 
   create(t: NewObligationTemplate): Promise<ObligationTemplate> {
@@ -90,11 +91,21 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     // and a successor inherits its predecessor's.
     const lineageId =
       t.supersedesId === null ? t.id : (this.rows.find((r) => r.id === t.supersedesId)?.lineageId ?? t.id);
+    // A harness with no link store cannot write the links it is handed, and
+    // answering success anyway is a rule that reads as linked and is on no
+    // service. Refused before anything is written, as the adapter's one
+    // transaction would leave nothing behind.
+    const store = this.links;
+    if (links.length > 0 && !store) {
+      return Promise.reject(
+        new Error("FakeObligationTemplateRepo was handed links but has no link store: wire `links`"),
+      );
+    }
     const row: ObligationTemplate = { ...t, lineageId, isActive: true };
     this.rows.push(row);
     // The links in the SAME act, as the adapter writes them in one transaction.
     for (const link of links) {
-      this.links?.write(t.tenantId, {
+      store?.write(t.tenantId, {
         id: link.id,
         lineageId,
         serviceEntryId: link.serviceEntryId,
@@ -449,7 +460,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
   private stillLinked(r: NewObligationInstance): boolean {
     if (r.engagementId === null || !this.links || !this.engagements) return true;
     const subject = this.engagements.subjects.find((s) => s.engagementId === r.engagementId);
-    if (!subject || subject.serviceEntryId === null) return false;
+    if (!subject) return false;
     return this.links.isLive(r.tenantId, this.lineage(r.templateId), subject.serviceEntryId);
   }
 
@@ -496,6 +507,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             id: held.id,
             templateId: r.templateId,
             entityPartyId: held.entityPartyId,
+            engagementId: r.engagementId,
             periodLabel: held.periodLabel,
             statutoryDueOn: r.statutoryDueOn,
             internalTargetOn: r.internalTargetOn,
@@ -519,6 +531,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         id: r.id,
         templateId: r.templateId,
         entityPartyId: r.entityPartyId,
+        engagementId: r.engagementId,
         periodLabel: r.periodLabel,
         statutoryDueOn: r.statutoryDueOn,
         internalTargetOn: r.internalTargetOn,
@@ -812,7 +825,6 @@ export class FakeCalendarSource implements CalendarSource {
   readonly subjects: (CalendarSubject & {
     readonly jurisdiction: string;
     readonly entityType: string | null;
-    readonly serviceEntryId: string | null;
   })[] = [];
   readonly gapRows: CoverageGap[] = [];
   /** The catalogue links (0309). Unset, nothing is linked, so nothing is
@@ -832,11 +844,7 @@ export class FakeCalendarSource implements CalendarSource {
         .filter((s) => s.jurisdiction === rule.jurisdiction)
         .filter((s) => rule.entityType === null || s.entityType === rule.entityType)
         // THE LINK: the chain is on the service this engagement bought.
-        .filter(
-          (s) =>
-            s.serviceEntryId !== null &&
-            (this.links?.isLive(tenantId, rule.lineageId, s.serviceEntryId) ?? false),
-        )
+        .filter((s) => this.links?.isLive(tenantId, rule.lineageId, s.serviceEntryId) ?? false)
         // The adapter's promised order, so the fake keeps the same first one.
         .sort(
           (a, b) =>
@@ -847,6 +855,7 @@ export class FakeCalendarSource implements CalendarSource {
           entityPartyId: s.entityPartyId,
           engagementId: s.engagementId,
           effectiveFrom: s.effectiveFrom,
+          serviceEntryId: s.serviceEntryId,
         })),
     );
   }
@@ -888,12 +897,16 @@ interface FakeLinkRow {
  */
 export class FakeRuleServiceLinks implements RuleServiceLinkRepository {
   readonly rows: FakeLinkRow[] = [];
-  /** Service keys and names, for `usedIn`. */
+  /** Service keys and names, for `usedIn`, and the catalogue 0309's service
+   *  key is checked against: an entry it does not know is not a service. */
   services?: FakeObligationServices;
   /** The live engagements (which entity, which service), for the cover test. */
   calendar?: FakeCalendarSource;
   /** The calendar rows and their states, which `unlink` withdraws from. */
   instances?: FakeObligationInstanceRepo;
+  /** The rules, for 0309's root-lineage key. Unset, that key is not modelled:
+   *  every harness that writes links wires it. */
+  templates?: FakeObligationTemplateRepo;
   private n = 0;
 
   /** Monotonic instants, so `linkedAt` orders the way the database's would. */
@@ -923,11 +936,31 @@ export class FakeRuleServiceLinks implements RuleServiceLinkRepository {
       }));
   }
 
-  /** The partial unique index, modelled: one LIVE link per (chain, service). */
+  /**
+   * 0309's keys, modelled, and then the partial unique index: one LIVE link
+   * per (chain, service).
+   *
+   * The two composite keys refuse by their own names, as the adapter's
+   * insert does, so a caller that passes a rule's own id where the CHAIN's
+   * belongs (a successor's id is not a lineage) or links something the
+   * catalogue does not hold as a service fails here and not only against
+   * Postgres, where it surfaces as a 500.
+   */
   write(
     tenantId: string,
     input: { id: string; lineageId: string; serviceEntryId: string; byUserId: string | null },
   ): boolean {
+    if (
+      this.templates &&
+      !this.templates.rows.some(
+        (t) => t.tenantId === tenantId && t.id === input.lineageId && t.lineageId === input.lineageId,
+      )
+    ) {
+      throw new Error("obligation_rule_service_lineage_root_fkey");
+    }
+    if (this.services && !this.services.keys.has(input.serviceEntryId)) {
+      throw new Error("obligation_rule_service_service_fkey");
+    }
     if (this.isLive(tenantId, input.lineageId, input.serviceEntryId)) return false;
     this.rows.push({
       id: input.id,
@@ -955,7 +988,11 @@ export class FakeRuleServiceLinks implements RuleServiceLinkRepository {
       readonly byUserId: string | null;
     },
   ): Promise<boolean> {
-    return Promise.resolve(this.write(tenantId, { ...input }));
+    try {
+      return Promise.resolve(this.write(tenantId, { ...input }));
+    } catch (e: unknown) {
+      return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+    }
   }
 
   unlink(
@@ -1007,12 +1044,13 @@ export class FakeRuleServiceLinks implements RuleServiceLinkRepository {
       if (state.isTerminal && row.statutoryDueOn < input.firmToday) continue;
 
       // Another ACTIVE engagement of the same entity whose service still
-      // carries this chain, earliest first, then by id.
+      // carries this chain, AND which had started by the row's statutory
+      // date (the generator's own floor), earliest first, then by id.
       const cover = subjects
         .filter(
           (s) =>
             s.entityPartyId === row.entityPartyId &&
-            s.serviceEntryId !== null &&
+            s.effectiveFrom <= row.statutoryDueOn &&
             this.isLive(tenantId, input.lineageId, s.serviceEntryId),
         )
         .sort(
