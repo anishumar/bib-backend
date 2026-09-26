@@ -44,6 +44,7 @@ import {
   FakeJobSubjectSource,
   FakeTemplateSource,
   FakeStepDeskResolver,
+  FakeStepCheckRepo,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
@@ -168,6 +169,7 @@ import { ObligationVocabularyService } from "../../src/usecase/obligation/vocabu
 import { ObligationService } from "../../src/usecase/obligation/service";
 import {
   FakeCalendarSource,
+  FakeRuleServiceLinks,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
@@ -278,6 +280,7 @@ function deps(): RouterDeps {
         instances: new FakeObligationInstanceRepo(),
         compliancePolicy: new FakeCompliancePolicySource(),
         calendarSource: new FakeCalendarSource(),
+        links: new FakeRuleServiceLinks(),
         services: new FakeObligationServices(),
         workItems: new FakeWorkItemRaiser(),
         tenants: new FakeObligationTenants(),
@@ -310,6 +313,7 @@ function deps(): RouterDeps {
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
         steps: new FakeJobStepRepo(),
+        stepChecks: new FakeStepCheckRepo(new FakeJobStepRepo()),
         templates: new FakeTemplateSource(),
         subjects: new FakeJobSubjectSource(),
         agents: new FakeAgentRuntime(),

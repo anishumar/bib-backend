@@ -151,13 +151,20 @@ async function main(): Promise<void> {
       console.log(`  ! firm ${r.tenantId}: calendar sweep FAILED — ${r.failure ?? ""}`);
     }
     const generated = calendar.reduce((n, r) => n + r.created, 0);
+    const restoredFilings = calendar.reduce((n, r) => n + r.restored, 0);
     const raisedTasks = calendar.reduce((n, r) => n + r.raised, 0);
     const uncovered = calendar.reduce((n, r) => n + r.uncoveredEngagements, 0);
 
-    if (generated === 0 && raisedTasks === 0) {
-      console.log("  nothing to generate — no live engagement is covered by a rule that dates.");
+    if (generated === 0 && restoredFilings === 0 && raisedTasks === 0) {
+      console.log(
+        "  nothing to generate — no live engagement's service carries a filing that dates " +
+          "(filings are added to services in the Catalogue).",
+      );
     } else {
       if (generated > 0) console.log(`  generated ${String(generated)} obligation(s)`);
+      if (restoredFilings > 0) {
+        console.log(`  brought back ${String(restoredFilings)} filing(s) a service carries again`);
+      }
       if (raisedTasks > 0) {
         console.log(`  raised ${String(raisedTasks)} task(s) at T-X`);
       }

@@ -33,6 +33,7 @@ import {
 } from "../../src/domain/obligation/model";
 import {
   FakeCalendarSource,
+  FakeRuleServiceLinks,
   FakeCompliancePolicySource,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
@@ -94,6 +95,7 @@ function harness(opts: { now?: string; zone?: string } = {}) {
     instances,
     compliancePolicy,
     calendarSource: new FakeCalendarSource(),
+    links: new FakeRuleServiceLinks(),
     services: new FakeObligationServices(),
     workItems: new FakeWorkItemRaiser(),
     tenants: new FakeObligationTenants(),
@@ -119,6 +121,8 @@ function harness(opts: { now?: string; zone?: string } = {}) {
     statutoryDueOn: string;
     stateCode?: string;
     filedOn?: string | null;
+    /** Taken off the calendar when its service stopped including it (0309). */
+    withdrawnAt?: string | null;
   }): string => {
     n += 1;
     const id = uuid("0b11", n);
@@ -139,6 +143,9 @@ function harness(opts: { now?: string; zone?: string } = {}) {
       resolutionOptionId: null,
       resolutionReason: null,
       resolvedAt: null,
+      withdrawnAt: opts.withdrawnAt ?? null,
+      withdrawnByUserId: null,
+      withdrawnReason: opts.withdrawnAt ? "service_unlinked" : null,
     });
     return id;
   };
@@ -202,6 +209,16 @@ describe("the sweep — a deadline that passed with nothing filed", () => {
     const id = h.given({ statutoryDueOn: "2026-01-01", stateCode: "filed", filedOn: "2026-03-01" });
     expect(await h.service.markMissed(TENANT, TODAY, ACTOR)).toBe(0);
     expect(h.stateOf(id)).toBe("filed");
+  });
+
+  it("never flags a WITHDRAWN filing, even once its date has passed (T6.16)", async () => {
+    // It was upcoming when its service stopped including it, and crosses its
+    // date later. Flagging it would fill the decision queue with returns the
+    // firm stopped doing, which is 2026-09-18 again.
+    const id = h.given({ statutoryDueOn: "2026-01-01", withdrawnAt: "2025-12-20T10:00:00.000Z" });
+    expect(await h.service.markMissed(TENANT, TODAY, ACTOR)).toBe(0);
+    expect(h.stateOf(id)).toBe("pending");
+    expect(h.events.verbs()).not.toContain("obligation.missed");
   });
 
   it("does not flag the same filing twice", async () => {

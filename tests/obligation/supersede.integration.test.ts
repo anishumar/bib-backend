@@ -63,7 +63,6 @@ function successor(over: Partial<NewObligationTemplate> = {}): NewObligationTemp
     tenantId,
     jurisdiction: "IN",
     entityType: null,
-    serviceEntryId: null,
     module: "GST",
     // The IDENTITY carries over — same filing, same country. Only the pack
     // moves, which is what makes it a different row at all.
@@ -348,7 +347,8 @@ describe("the handover, and the wall behind it (0303)", () => {
         stateId: state,
       },
     ]);
-    expect(made.map((m) => m.periodLabel)).toEqual(["Dec 2026"]);
+    expect(made.created.map((m) => m.periodLabel)).toEqual(["Dec 2026"]);
+    expect(made.restored).toEqual([]);
     expect(await onCalendar("Oct 2026")).toHaveLength(1);
   });
 

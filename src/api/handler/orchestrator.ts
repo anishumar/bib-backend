@@ -19,7 +19,12 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
-import type { CheckOnDesk, DescribedStep, OrchestratorService } from "../../usecase/orchestrator/service";
+import type {
+  CheckLineView,
+  CheckOnDesk,
+  DescribedStep,
+  OrchestratorService,
+} from "../../usecase/orchestrator/service";
 import type { JobStep } from "../../domain/orchestrator/model";
 import type { AgentRun } from "../../usecase/orchestrator/ports";
 import { scopeOf } from "../scope";
@@ -79,6 +84,67 @@ const PerformerSchema = z
     }),
   })
   .openapi("StepPerformer");
+
+// ── a step's own lists (T6.15) ──────────────────────────────────────────────
+
+const CheckLineSchema = z
+  .object({
+    key: z.string().openapi({
+      description:
+        "The line's own key in the process, stable across edits of its wording. What a mark is " +
+        "stored against, and what the PUT routes take in their path.",
+    }),
+    label: z.string().openapi({
+      description: "What the line says, from the version of the process this job follows.",
+    }),
+    outcome: z.enum(["done", "not_applicable"]).nullable().openapi({
+      description:
+        "`done`: ticked. `not_applicable`: it did not apply here, and `note` says why. Null: " +
+        "open, whether nobody has touched it or somebody ticked it and took the tick back.",
+    }),
+    note: z.string().nullable().openapi({
+      description: "Why it did not apply. Present on `not_applicable` and on nothing else.",
+    }),
+    markedBy: z
+      .object({ userId: z.string().uuid(), displayName: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Who settled it, by the name the account carries now. Null while the line is open.",
+      }),
+    markedAt: z.string().datetime().nullable().openapi({
+      description: "When it was settled, as an instant. Null while the line is open.",
+    }),
+  })
+  .openapi("CheckLine");
+
+/** One line on the wire, field by field. */
+function lineWire(l: CheckLineView): z.infer<typeof CheckLineSchema> {
+  return {
+    key: l.key,
+    label: l.label,
+    outcome: l.outcome,
+    note: l.note,
+    markedBy: l.markedBy === null ? null : { userId: l.markedBy.userId, displayName: l.markedBy.displayName },
+    markedAt: l.markedAt,
+  };
+}
+
+const MarkLineRequest = z
+  .object({
+    outcome: z.enum(["done", "not_applicable"]).nullable().openapi({
+      description:
+        "`done` ticks it, `not_applicable` says it did not apply (and needs `note`), and null " +
+        "takes a tick back. Sending what the line already says changes nothing, including who " +
+        "marked it and when.",
+    }),
+    note: z.string().nullable().optional().openapi({
+      description:
+        "The reason, for `not_applicable`: required, trimmed, at most 500 characters. Ignored " +
+        "on `done` and on null.",
+    }),
+  })
+  .openapi("MarkCheckLineRequest");
 
 const JobStepSchema = z
   .object({
@@ -140,6 +206,19 @@ const JobStepSchema = z
           "Whether the SESSION's user may tick this step, computed where the refusal is, so the " +
           "button and the 409 cannot disagree.",
       }),
+    subSteps: z.array(CheckLineSchema).openapi({
+      description:
+        "The step's sub-steps, in the process's own order (T6.15). Ticked, or marked not " +
+        "applicable with a reason, by whoever does the step, and all of them before it can be " +
+        "marked done. Locked while the step waits to be checked and once it is done. Empty " +
+        "when the process names none, which is every job pinned to an earlier version.",
+    }),
+    subStepsOpen: z.number().int().openapi({
+      description:
+        "How many sub-steps are still open: the same count the complete route refuses on, so " +
+        "the Done button can be disabled from the data the 409 uses. `viewer.mayComplete` says " +
+        "WHO may tick the step; this says whether it is READY to be ticked.",
+    }),
   })
   .openapi("JobStep");
 
@@ -191,6 +270,8 @@ function toWire(d: DescribedStep, ladder: Ladder, proposal?: AgentRun): z.infer<
           },
     assignee: d.assignee,
     viewer: d.viewer,
+    subSteps: d.subSteps.map(lineWire),
+    subStepsOpen: d.subStepsOpen,
     id: s.id,
     stepKey: s.stepKey,
     label: s.label,
@@ -406,6 +487,19 @@ const CheckSchema = z
     decidedBy: z.string().uuid().nullable(),
     decidedAt: z.string().datetime().nullable(),
     viewer: EligibilitySchema,
+    reviewPoints: z.array(CheckLineSchema).openapi({
+      description:
+        "THIS check's review points, in the process's own order (T6.15): ticked, or marked not " +
+        "applicable with a reason, by whoever may check the step, and all of them before it can " +
+        "be approved. Sending it back is never held up by them. A second check after a send-back " +
+        "starts with every point open; a decided check shows what its checker ticked. Empty when " +
+        "the step names none.",
+    }),
+    reviewPointsOpen: z.number().int().openapi({
+      description:
+        "How many review points are still open: the same count the decide route refuses " +
+        "Approve on.",
+    }),
   })
   .openapi("StepCheck");
 
@@ -441,6 +535,8 @@ function toCheckWire(c: CheckOnDesk): z.infer<typeof CheckSchema> {
     decidedBy: c.approval.decidedBy,
     decidedAt: c.approval.decidedAt,
     viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason },
+    reviewPoints: c.reviewPoints.map(lineWire),
+    reviewPointsOpen: c.reviewPointsOpen,
   };
 }
 
@@ -545,6 +641,60 @@ const decideCheckRoute = createRoute({
   },
 });
 
+// ── ticking a line (T6.15) ──────────────────────────────────────────────────
+
+const markSubStepRoute = createRoute({
+  method: "put",
+  path: "/api/v1/jobs/{jobId}/steps/{stepKey}/sub-steps/{itemKey}",
+  tags: ["delivery"],
+  summary: "Tick one of a step's sub-steps, mark it not applicable, or take the tick back",
+  description:
+    "Only while the step is waiting for a person and is not waiting to be checked: submitted " +
+    "work is locked until the checker decides, and a finished step is settled. The same desk " +
+    "and grade rules as marking the step done, and the marker is the SESSION's user. Marking " +
+    "it not applicable needs a reason. No ledger event per tick: the row says who and when, " +
+    "and the counts ride on the step's own transition.",
+  request: {
+    params: z.object({ jobId: z.string().uuid(), stepKey: z.string().min(1), itemKey: z.string().min(1) }),
+    body: { content: { "application/json": { schema: MarkLineRequest } } },
+  },
+  responses: {
+    200: { description: "The step, with its sub-steps", content: { "application/json": { schema: JobStepSchema } } },
+    400: errorResponse("Not applicable with no reason, or a reason over 500 characters"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such job, step or sub-step in the process this job follows"),
+    409: errorResponse(
+      "The step is not waiting for a person, is waiting to be checked, is on somebody else's " +
+        "desk, or is outside the person's grade band",
+    ),
+  },
+});
+
+const markReviewPointRoute = createRoute({
+  method: "put",
+  path: "/api/v1/checks/{approvalId}/review-points/{itemKey}",
+  tags: ["delivery"],
+  summary: "Tick one of a check's review points, mark it not applicable, or take the tick back",
+  description:
+    "Only by somebody the firm's rule lets check this work, which by the rule that can never " +
+    "be switched off is never the person who did it. Only while the check is undecided. The " +
+    "ticks belong to THIS check: after a send-back the next check starts with every point open. " +
+    "Marking it not applicable needs a reason.",
+  request: {
+    params: z.object({ approvalId: z.string().uuid(), itemKey: z.string().min(1) }),
+    body: { content: { "application/json": { schema: MarkLineRequest } } },
+  },
+  responses: {
+    200: { description: "The check, with its review points", content: { "application/json": { schema: CheckSchema } } },
+    400: errorResponse("Not applicable with no reason, or a reason over 500 characters"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("You did this work, or the firm's rule does not put this check in your hands"),
+    404: errorResponse("No such check, or no such review point on its step"),
+    409: errorResponse("Somebody already decided it"),
+  },
+});
+
 export function registerOrchestratorRoutes(
   app: OpenAPIHono<AppEnv>,
   deps: OrchestratorDeps,
@@ -567,12 +717,26 @@ export function registerOrchestratorRoutes(
     return new Map((await deps.grades.listGrades(tenantId)).map((g) => [g.code, g.name]));
   }
 
-  /** One step, described for the session's viewer, after a write moved it — on the wire. */
+  /**
+   * One step, described for the session's viewer, after a write moved it — on the wire.
+   *
+   * WITH ITS UNDECIDED PROPOSAL, read the way the list route reads it. This
+   * answered `proposal: null` for every step until T6.15's review, and the job
+   * page swaps the whole step for this answer: ticking a sub-step (or handing
+   * the step to somebody) on a step holding a machine's answer took the answer,
+   * and Accept, Correct and Reject with it, off the screen, and offered a Done
+   * the API then refused as PROPOSAL_UNDECIDED. The answer is the described
+   * step, whole, or it is not the described step.
+   */
   async function describeOne(tenantId: string, jobId: string, stepId: string, viewer: string) {
-    const [all, ladder] = await Promise.all([deps.service.describeSteps(tenantId, jobId, viewer), ladderOf(tenantId)]);
+    const [all, proposals, ladder] = await Promise.all([
+      deps.service.describeSteps(tenantId, jobId, viewer),
+      deps.service.proposalsFor(tenantId, jobId),
+      ladderOf(tenantId),
+    ]);
     const d = all.find((x) => x.step.id === stepId);
     if (!d) throw new Error(`step ${stepId} vanished after the write`);
-    return toWire(d, ladder);
+    return toWire(d, ladder, proposals.get(stepId));
   }
 
   app.openapi(assignStepRoute, async (c) => {
@@ -680,6 +844,38 @@ export function registerOrchestratorRoutes(
     );
   });
 
+  app.openapi(markSubStepRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { jobId, stepKey, itemKey } = c.req.valid("param");
+    const body = c.req.valid("json");
+    // The marker is the SESSION's user, never a field in the body, for the
+    // reason the step's own performer is: a tick is a record of who did part of
+    // the work, and a caller who could name somebody else would make it a
+    // record of who they said did.
+    const step = await deps.service.markSubStep(
+      { tenantId: s.tenantId, jobId, stepKey, itemKey, outcome: body.outcome, note: body.note ?? null },
+      s.actor,
+      s.userId,
+    );
+    return c.json(await describeOne(s.tenantId, jobId, step.id, s.userId), 200);
+  });
+
+  app.openapi(markReviewPointRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { approvalId, itemKey } = c.req.valid("param");
+    const body = c.req.valid("json");
+    // The checker is the SESSION's user: the right-hand side of maker != checker
+    // is exactly who may tick these, and it must not be a body field.
+    const check = await deps.service.markReviewPoint(
+      { tenantId: s.tenantId, approvalId, itemKey, outcome: body.outcome, note: body.note ?? null },
+      s.actor,
+      s.userId,
+    );
+    return c.json(toCheckWire(check), 200);
+  });
+
   app.openapi(decideCheckRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -712,4 +908,6 @@ export const orchestratorRoutes = {
   listJobChecks: listJobChecksRoute,
   listCheckers: listCheckersRoute,
   decideCheck: decideCheckRoute,
+  markSubStep: markSubStepRoute,
+  markReviewPoint: markReviewPointRoute,
 } as const;

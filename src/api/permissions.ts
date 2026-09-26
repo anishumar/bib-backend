@@ -473,6 +473,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // completing a step, deliberately — a firm that trusts somebody to say "this
   // filing is done" trusts them to say "the machine got it right".
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/decide"), "work:write" as const],
+  // Ticking one of a step's sub-steps (T6.15) is doing part of the step, so it
+  // takes what doing the step takes. The desk and the grade band are the
+  // service's; this is the floor under them.
+  [routeKey("PUT", "/api/v1/jobs/{jobId}/steps/{stepKey}/sub-steps/{itemKey}"), "work:write" as const],
 
   // THE VERIFICATION QUEUE (T2.9).
   //
@@ -497,6 +501,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // anywhere lets somebody approve their own work — that is a CHECK constraint,
   // not a grant.
   [routeKey("POST", "/api/v1/checks/{approvalId}/decide"), "work:write" as const],
+  // Ticking a check's review points (T6.15) is part of deciding it, so the same
+  // floor, and the same firm's rule on top of it (`eligibilityOf`).
+  [routeKey("PUT", "/api/v1/checks/{approvalId}/review-points/{itemKey}"), "work:write" as const],
 
   // WORK ITEMS (T3.1) — the row on somebody's desk.
   //
@@ -570,6 +577,20 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/obligation-rules/{ruleId}/exceptions"), "tenant:admin" as const],
   [
     routeKey("DELETE", "/api/v1/obligation-rules/{ruleId}/exceptions/{periodEndMonth}"),
+    "tenant:admin" as const,
+  ],
+  // WHICH SERVICES OWE WHICH FILING (T6.16). Reading follows the calendar's
+  // reads: everybody on the team needs to see what a service carries,
+  // including the people who cannot change it. Adding and removing follows
+  // every other rule write, `tenant:admin`, and for the same reason and more:
+  // it decides which of the firm's clients owe a statutory filing, and adding
+  // an unconfirmed rule CONFIRMS it, which is a partner taking responsibility
+  // for a date. It is the firm's compliance setup, not an associate's act.
+  [routeKey("GET", "/api/v1/obligation-filings"), "party:read" as const],
+  [routeKey("GET", "/api/v1/services/{serviceEntryId}/filings"), "party:read" as const],
+  [routeKey("POST", "/api/v1/services/{serviceEntryId}/filings"), "tenant:admin" as const],
+  [
+    routeKey("POST", "/api/v1/services/{serviceEntryId}/filings/{ruleId}/unlink"),
     "tenant:admin" as const,
   ],
   [routeKey("GET", "/api/v1/calendar"), "party:read" as const],

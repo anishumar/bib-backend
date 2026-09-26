@@ -25,12 +25,17 @@ import type {
 
 // ── rules ──────────────────────────────────────────────────────────────────
 
+/**
+ * A rule about to be written. No `lineageId` (0303's trigger derives it from
+ * `supersedesId`) and no service: which services owe a filing is a LINK on the
+ * rule's chain (0309), written through `RuleServiceLinkRepository` or in the
+ * same transaction as the rule by `createIfAbsent`'s second argument.
+ */
 export interface NewObligationTemplate {
   readonly id: string;
   readonly tenantId: string;
   readonly jurisdiction: string;
   readonly entityType: string | null;
-  readonly serviceEntryId: string | null;
   readonly module: string | null;
   readonly name: string;
   readonly authority: string | null;
@@ -55,10 +60,13 @@ export interface NewObligationTemplate {
 /** What a partner may change on a rule after it exists. Deliberately short: the
  *  IDENTITY of a rule (jurisdiction, name, pack) is not editable, because
  *  changing it would silently re-point every instance that pinned it. A revised
- *  rule is a new row under a new pack. */
+ *  rule is a new row under a new pack.
+ *
+ *  Which SERVICE owes it is not here either, and that is T6.16's decision 3:
+ *  the catalogue is the one place a rule is linked to a service. Two places to
+ *  say it would be two answers to one question. */
 export interface TemplateEdit {
   readonly entityType?: string | null | undefined;
-  readonly serviceEntryId?: string | null | undefined;
   readonly module?: string | null | undefined;
   readonly authority?: string | null | undefined;
   readonly recurrence?: ObligationTemplate["recurrence"] | undefined;
@@ -70,18 +78,40 @@ export interface TemplateEdit {
   readonly isActive?: boolean | undefined;
 }
 
+/** One catalogue service a rule's chain is linked to, NAMED — the reader would
+ *  otherwise look every service up per row (T6.16). */
+export interface UsedInService {
+  readonly serviceEntryId: string;
+  /** The catalogue key, which is also what `/catalogue` anchors a service on. */
+  readonly serviceKey: string;
+  /** The published version's name, else the newest version's, else null. A
+   *  service that has only a draft can carry filings: a link is on the ENTRY,
+   *  not on a frozen version. */
+  readonly serviceName: string | null;
+  readonly linkedAt: string;
+}
+
 /** A rule as a screen needs it: the rule, its exceptions, and the two things a
- *  reader would otherwise fetch per row — what the service is called, and
+ *  reader would otherwise fetch per row — which services it is used in, and
  *  whether this rule has ever produced anything. */
 export interface TemplateRecord {
   readonly template: ObligationTemplate;
   readonly exceptions: readonly DueRuleException[];
-  /** The catalogue service's name, joined. Null when the rule names no service
-   *  — a rule that reaches an entity regardless of what it bought. */
-  readonly serviceName: string | null;
-  /** How many calendar rows this rule has produced, ever. The number a partner
-   *  looks at before changing a lead time, and the number that makes an
-   *  unresolved rule's zero self-explanatory. */
+  /**
+   * The live links on this rule's CHAIN, named, in one query. Every row of a
+   * chain shows the same list: a predecessor still governing its own periods
+   * is on the same services as its successor, because the link is the chain's.
+   * Empty means the rule adds nothing to the calendar (decision 1).
+   */
+  readonly usedIn: readonly UsedInService[];
+  /**
+   * How many calendar rows this rule has produced, ever, WITHDRAWN ONES
+   * INCLUDED. The number a partner looks at before changing a lead time, and
+   * the one that decides whether the period shape is still editable
+   * (`PERIOD_SHAPE_LOCKED` counts withdrawn rows, because they are keyed on
+   * `period_start` and a relink restores them), so the screen and the refusal
+   * cannot disagree.
+   */
   readonly instanceCount: number;
 }
 
@@ -95,7 +125,6 @@ export interface TemplateRecord {
  */
 export interface TemplatePatch {
   readonly entityType: string | null;
-  readonly serviceEntryId: string | null;
   readonly module: string | null;
   readonly authority: string | null;
   readonly recurrence: ObligationTemplate["recurrence"];
@@ -107,12 +136,41 @@ export interface TemplatePatch {
   readonly isActive: boolean;
 }
 
+/** A link written together with the rule it links (the catalogue's "Write a
+ *  new filing"). The chain is the new rule's own, so only the service and the
+ *  person are named. */
+export interface NewLinkOnCreate {
+  readonly id: string;
+  readonly serviceEntryId: string;
+  readonly byUserId: string | null;
+}
+
 export interface ObligationTemplateRepository {
   create(template: NewObligationTemplate): Promise<ObligationTemplate>;
-  /** Null when a rule with this identity already exists — the caller decides
-   *  whether that is a conflict to report or a seed row to skip. */
-  createIfAbsent(template: NewObligationTemplate): Promise<ObligationTemplate | null>;
+  /**
+   * Null when a rule with this identity already exists — the caller decides
+   * whether that is a conflict to report or a seed row to skip.
+   *
+   * `links` are written in the SAME transaction as the rule (T6.16): a rule
+   * the catalogue wrote for a service and a link to that service are one act,
+   * and a crash between two calls would leave a rule on no service, which
+   * generates nothing and says so only in the library. No link is written
+   * when the rule's identity is taken.
+   */
+  createIfAbsent(
+    template: NewObligationTemplate,
+    links?: readonly NewLinkOnCreate[],
+  ): Promise<ObligationTemplate | null>;
   findById(tenantId: string, templateId: string): Promise<ObligationTemplate | null>;
+  /**
+   * Every row of one chain, oldest period first (0303's `lineage_id`). The
+   * row IN FORCE is the one with no `effectiveTo`: `supersedeRule` refuses to
+   * supersede a rule that already hands over, so a chain has exactly one.
+   * This is how "the rule linked to this service" is judged: the link names
+   * the chain, and it is the chain's current row that says what the filing
+   * now is.
+   */
+  chain(tenantId: string, lineageId: string): Promise<readonly ObligationTemplate[]>;
   update(tenantId: string, templateId: string, patch: TemplatePatch): Promise<ObligationTemplate>;
   /**
    * Close one rule at a day and open its successor on the same day, ATOMICALLY.
@@ -152,6 +210,13 @@ export interface ObligationTemplateRepository {
    *
    * Nothing is created twice either way: `obligation_instance_lineage_key` is
    * one filing per entity, per period, per chain of rules.
+   *
+   * A WITHDRAWN row (0309) is neither handed over nor counted as kept. It
+   * stays on the rule it was withdrawn under; if a linked service ever
+   * proposes its period again, the generator restores it and re-pins it to
+   * the rule that governs the period, which after the cutover is the
+   * successor. And the successor needs no links of its own: links are on the
+   * chain, so it is on every service its predecessor was.
    */
   supersede(
     tenantId: string,
@@ -160,14 +225,30 @@ export interface ObligationTemplateRepository {
     handover: readonly RestatedInstance[],
   ): Promise<SupersedeResult>;
   /** Every rule at the firm, retired ones included — the rules screen shows
-   *  them, because a retired rule still explains an old filing's date. */
+   *  them, because a retired rule still explains an old filing's date. Each
+   *  carries where its chain is used, named, from the same query. */
   list(tenantId: string): Promise<readonly TemplateRecord[]>;
-  /** The generator's own read: active rules with their exceptions, in one pass.
-   *  Exceptions come back attached because the generator needs them per period
-   *  and a query per rule would be a query per rule per firm per night. */
+  /**
+   * The generator's own read: active, confirmed rules with a formula whose
+   * CHAIN has at least one live link (0309), with their exceptions and how
+   * many services they are linked to, in one pass. Exceptions come back
+   * attached because the generator needs them per period and a query per rule
+   * would be a query per rule per firm per night.
+   *
+   * The link test here is the cheap half: without it every confirmed but
+   * unlinked rule would be reported as reaching nobody, every night. WHICH
+   * engagements a rule reaches is still `CalendarSource.subjectsFor`'s, which
+   * joins the links to each engagement's own service.
+   */
   listGenerating(
     tenantId: string,
-  ): Promise<readonly { readonly template: ObligationTemplate; readonly exceptions: readonly DueRuleException[] }[]>;
+  ): Promise<
+    readonly {
+      readonly template: ObligationTemplate;
+      readonly exceptions: readonly DueRuleException[];
+      readonly linkedServices: number;
+    }[]
+  >;
   countAll(tenantId: string): Promise<number>;
 }
 
@@ -198,6 +279,98 @@ export interface ObligationExceptionRepository {
    *  filing was due on the day it was: withdrawing it in June must not erase
    *  the reason April's return was dated as it was. */
   withdraw(tenantId: string, templateId: string, periodEndMonth: number): Promise<void>;
+}
+
+// ── which services owe which filing (T6.16, 0309) ─────────────────────────
+
+/**
+ * What removing a filing from a service did to the calendar.
+ *
+ * `withdrawn` is the rows taken off. The three `kept*` counts are the rows of
+ * THAT SERVICE's engagements on this chain that stayed, by reason, and they
+ * partition `kept`:
+ *
+ *   `keptStarted`          a task is on a desk, or it was filed or decided.
+ *   `keptPastDue`          untouched, but its statutory date has passed on the
+ *                          firm's calendar or a partner's decision is waiting.
+ *                          Removing it would hide a deadline the client may
+ *                          have missed.
+ *   `keptCoveredElsewhere` untouched and upcoming, and another service the
+ *                          same client holds still carries this filing. Its
+ *                          `engagement_id` is re-pointed to that service's
+ *                          engagement (earliest start, then id), so the task it
+ *                          raises is routed by the service that owes it now.
+ *
+ * Settled history (terminal and already past) is not counted at all: years of
+ * filed returns were never going to be affected, and a number that included
+ * them would drown the one a partner reads.
+ */
+export interface UnlinkOutcome {
+  readonly withdrawn: number;
+  readonly kept: number;
+  readonly keptStarted: number;
+  readonly keptPastDue: number;
+  readonly keptCoveredElsewhere: number;
+  /** Rows whose `engagement_id` moved to the engagement that still covers
+   *  them. Includes untouched past-due rows as well as the covered upcoming
+   *  ones, because either may yet raise a task and the task is routed by it. */
+  readonly repointed: number;
+}
+
+/**
+ * The links between a rule's CHAIN and the catalogue services that owe it.
+ *
+ * Its own port rather than methods on the rule repository, because the link
+ * is its own fact with its own history (added, removed, added back) and the
+ * removal reaches into the calendar: `unlink` withdraws filings in the same
+ * transaction, which is the one place in the product a person's catalogue
+ * edit moves rows on `delivery.obligation_instance`.
+ */
+export interface RuleServiceLinkRepository {
+  /** The live links on one chain, named. What the rule's `usedIn` shows and
+   *  what `coverageOf` is given as the link count. */
+  usedIn(tenantId: string, lineageId: string): Promise<readonly UsedInService[]>;
+  /**
+   * Write a live link. False when one is already live for this chain and
+   * service: the partial unique index arbitrates, so a double-click writes
+   * one row and the caller one event.
+   */
+  link(
+    tenantId: string,
+    input: {
+      readonly id: string;
+      readonly lineageId: string;
+      readonly serviceEntryId: string;
+      readonly byUserId: string | null;
+    },
+  ): Promise<boolean>;
+  /**
+   * Remove the live link AND withdraw what it no longer owes, in ONE
+   * transaction. Null when there was no live link to remove.
+   *
+   * ONE METHOD, supersede's argument (0303) in a new place: each half alone
+   * is a broken calendar. A removed link with its filings still live leaves
+   * the client owing work the firm stopped doing; filings withdrawn under a
+   * link that is still live are a gap the next sweep does not fill, because
+   * the generator restores only what it proposes and it has no reason to.
+   *
+   * WHICH ROWS: this chain's rows whose engagement bought THIS service, that
+   * `mayBeWithdrawn` (untouched, upcoming on `firmToday`, not waiting on a
+   * decision, not settled), for an entity no OTHER live link reaches through a
+   * live engagement. `firmToday` is the firm's day from `dayInZone`, passed in
+   * as a date and never `CURRENT_DATE`, which is the database's UTC day.
+   * The guard is repeated in the UPDATE, so a task raised between the read and
+   * the write keeps its filing (counted as started).
+   */
+  unlink(
+    tenantId: string,
+    input: {
+      readonly lineageId: string;
+      readonly serviceEntryId: string;
+      readonly byUserId: string | null;
+      readonly firmToday: IsoDate;
+    },
+  ): Promise<UnlinkOutcome | null>;
 }
 
 // ── the firm's words for where an obligation has got to ────────────────────
@@ -317,6 +490,17 @@ export interface CalendarSubject {
    * one screen whose entire value is being trusted stops being trusted.
    */
   readonly effectiveFrom: IsoDate;
+  /**
+   * The catalogue service this engagement bought, through whose link the rule
+   * reached it (the letter line's pinned version's ENTRY). One per
+   * engagement, because a letter line pins one version.
+   *
+   * On the port so that adding a filing to a service can say what THAT
+   * service's clients got (T6.16 review): the generator fills the whole chain,
+   * and a count over every subject credited this link with filings owed
+   * through a different service.
+   */
+  readonly serviceEntryId: string;
 }
 
 /**
@@ -328,9 +512,16 @@ export interface CalendarSubject {
  * whether the software is broken.
  *
  * The reason is computed from what the query can SEE rather than guessed:
- * whether any rule names the service at all, whether one does but not for this
- * entity's country, and whether the rules that match are all unresolved or
- * retired. Each of those is a different thing for a partner to do next.
+ * whether any filing is linked to the service at all, whether one is but not
+ * for this entity's country, and whether the rules that match are all
+ * unresolved or retired. Each of those is a different thing for a partner to
+ * do next.
+ *
+ * COVERED MEANS A LIVE ROW FOR THIS ENTITY ON A CHAIN THIS SERVICE CARRIES,
+ * not a row naming this engagement's id (T6.16). A client on two services that
+ * share a filing gets ONE row per period, carrying one engagement's id; asking
+ * only for this engagement's id read the second service as a gap forever. A
+ * withdrawn row is not coverage.
  */
 export interface CoverageGap {
   readonly engagementId: string;
@@ -340,8 +531,8 @@ export interface CoverageGap {
   readonly serviceName: string | null;
   readonly jurisdiction: string | null;
   readonly reason: CoverageGapReason;
-  /** How many rules name this service but could not be used, and the shape of
-   *  why — so the screen can link straight to them. */
+  /** Rules linked to this service that could not be used, so the screen can
+   *  link straight to them. */
   readonly blockedRuleIds: readonly string[];
 }
 
@@ -357,10 +548,12 @@ export type CoverageGapReason =
    * actually make, and was invisible under the other reason.
    */
   | "entity_not_registered"
-  /** No rule at this firm names this service. The ordinary case for advisory
-   *  work, and the reason this list is not an error list. */
+  /** No compliance filing is linked to this service in the catalogue. The
+   *  ordinary case for advisory work, and the reason this list is not an error
+   *  list. The code predates the catalogue link (T6.16) and keeps its name:
+   *  "names" now means "is linked to", and the fix is in the Catalogue. */
   | "no_rule_names_this_service"
-  /** Rules name it, but none for the entity's own country. */
+  /** Filings are linked to it, but none for the entity's own country. */
   | "no_rule_for_jurisdiction"
   /** Rules match, and every one of them is waiting on a fact the firm has not
    *  given — the forty-six in the shipped India pack. */
@@ -375,14 +568,27 @@ export type CoverageGapReason =
   | "nothing_due_yet";
 
 export interface CalendarSource {
-  /** The entities one rule reaches: right country, right entity type when the
-   *  rule names one, and an engagement for the service that makes it ours. */
+  /**
+   * The entities one rule reaches: right country, right entity type when the
+   * rule names one, and a live ENGAGEMENT whose pinned service has a LIVE LINK
+   * to this rule's chain (0309). No link, no subjects: decision 1, a rule on
+   * no service generates nothing.
+   *
+   * ORDERED by the engagement's `effective_from`, then its id, and that order
+   * is a promise. A client holding two services that both carry the filing is
+   * two subjects for one entity, and the calendar holds ONE row per (chain,
+   * entity, period); the generator keeps the first subject for each, so the
+   * row's `engagement_id` is chosen by rule rather than by whichever the
+   * database returned first. Earliest start first is also the floor-friendly
+   * choice: the earliest engagement is the one whose `effectiveFrom` floor
+   * lets the most periods through.
+   */
   subjectsFor(
     tenantId: string,
     rule: {
+      readonly lineageId: string;
       readonly jurisdiction: string;
       readonly entityType: string | null;
-      readonly serviceEntryId: string | null;
     },
   ): Promise<readonly CalendarSubject[]>;
 
@@ -476,9 +682,25 @@ export interface SpawnedInstance {
   readonly id: string;
   readonly templateId: string;
   readonly entityPartyId: string;
+  /** The engagement the row carries after the write: the proposal's, for a
+   *  new row and for a restored one alike. What a link's count is taken by. */
+  readonly engagementId: string | null;
   readonly periodLabel: string;
   readonly statutoryDueOn: IsoDate;
   readonly internalTargetOn: IsoDate;
+}
+
+/** A withdrawn row the generator brought back (0309), and the instant it had
+ *  been withdrawn, which the restore clears from the row. */
+export interface RestoredInstance extends SpawnedInstance {
+  readonly withdrawnAt: string;
+}
+
+/** What one proposal did: rows that were new, and withdrawn rows it restored.
+ *  Separate lists because they are separate events and separate counts. */
+export interface ProposalOutcome {
+  readonly created: readonly SpawnedInstance[];
+  readonly restored: readonly RestoredInstance[];
 }
 
 /** An obligation that has reached its internal target with no task raised. */
@@ -490,7 +712,6 @@ export interface RaisableObligation {
   readonly statutoryDueOn: IsoDate;
   readonly templateName: string;
   readonly authority: string | null;
-  readonly serviceEntryId: string | null;
   readonly entityName: string | null;
 }
 
@@ -555,13 +776,45 @@ export interface ObligationInstanceRepository {
    * `obligation.spawned` per instance, and an event has to name the row it
    * happened to. A count would make the second run of a redelivered sweep
    * indistinguishable from the first.
+   *
+   * ── AND A WITHDRAWN ROW IT PROPOSES COMES BACK (0309) ─────────────────────
+   *
+   * A withdrawn row still holds its key, so `DO NOTHING` alone would skip its
+   * period forever. In the SAME transaction, before the insert, a proposal
+   * whose (chain, entity, period) is held by a WITHDRAWN, untouched row
+   * RESTORES that row: the withdrawal is cleared, the dates are the
+   * proposal's (from `scheduleFor`), and it is re-pinned to the proposal's
+   * rule and engagement. Same row, same id. The generator is what restores,
+   * not only the link route, because a client taking a second linked service
+   * proposes the same period through this same call.
+   *
+   * THE WRITE CHECKS THE LINK AGAIN. The subjects were read in an earlier
+   * transaction; a proposal whose rule's chain no longer has a live link to
+   * its engagement's service (somebody removed it mid-sweep) is neither
+   * inserted nor restored. A proposal naming no engagement is not a link's to
+   * judge, and nothing proposes one today.
+   *
+   * THE CALLER DE-DUPLICATES, one proposal per (chain, entity, period): the
+   * restore is an UPDATE, and two proposals for one row would let the
+   * database choose between them.
    */
-  createIfAbsent(rows: readonly NewObligationInstance[]): Promise<readonly SpawnedInstance[]>;
+  createIfAbsent(rows: readonly NewObligationInstance[]): Promise<ProposalOutcome>;
+  /** The calendar a person reads. WITHDRAWN rows are never in it. */
   calendar(tenantId: string, query: CalendarQuery): Promise<readonly CalendarRow[]>;
+  /** ONE row, whatever it holds, withdrawn included: a caller deciding what to
+   *  do about a row has to be able to see that it was taken off. */
   findById(tenantId: string, obligationId: string): Promise<ObligationInstance | null>;
-  /** Everything at or past its internal target with no task yet. */
+  /** Everything at or past its internal target with no task yet. A WITHDRAWN
+   *  filing never gets a task, so it is never in this list. */
   listRaisable(tenantId: string, asOf: IsoDate, limit: number): Promise<readonly RaisableObligation[]>;
-  attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<void>;
+  /**
+   * Record the task raised for a filing. False when nothing was written:
+   * another raise got there first, or the filing was withdrawn since it was
+   * read. The caller then writes no `obligation.work_raised`; the task it
+   * made stays on the desk as ordinary work, which is the window stated in
+   * `ObligationService.raise`.
+   */
+  attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean>;
   /**
    * The obligation a work item was raised for, if it was raised for one.
    *
@@ -642,7 +895,9 @@ export interface ObligationInstanceRepository {
   ): Promise<boolean>;
   /**
    * Everything this rule has produced that nobody has started, with the period
-   * each row covers and the dates it currently holds.
+   * each row covers and the dates it currently holds. WITHDRAWN rows are not
+   * in it: a filing off the calendar is not re-dated in place, it is re-dated
+   * by `scheduleFor` if and when the generator restores it.
    *
    * ── WHY THE PERIOD COMES BACK TOO ─────────────────────────────────────
    *
@@ -681,7 +936,21 @@ export interface ObligationInstanceRepository {
    * silent partial change is the failure mode here.
    */
   restate(tenantId: string, rows: readonly RestatedInstance[]): Promise<number>;
+  /**
+   * Every row this rule has EVER produced, withdrawn ones included. The
+   * period-shape lock reads this: a withdrawn row is still keyed on
+   * `period_start`, and a relink restores it, so moving the shape under it
+   * would orphan it exactly as it would a live one.
+   */
   countFor(tenantId: string, templateId: string): Promise<number>;
+  /**
+   * The rows this rule has on the calendar now: withdrawn ones excluded. The
+   * restater's `locked` is this minus the unstarted rows, and counting a
+   * withdrawn row there would report it as "kept because somebody started
+   * it", which nobody did. Two counts because the two callers need two
+   * different answers.
+   */
+  countLiveFor(tenantId: string, templateId: string): Promise<number>;
 }
 
 // ── the seams into other modules ───────────────────────────────────────────
@@ -698,8 +967,9 @@ export interface WorkItemRaiser {
     tenantId: string,
     input: {
       readonly entityPartyId: string;
+      /** The engagement that reaches this filing. It is what routes the task:
+       *  its client, its Dept, its pinned service. */
       readonly engagementId: string | null;
-      readonly serviceEntryId: string | null;
       readonly title: string;
       readonly description: string | null;
       /** The STATUTORY date, not the internal one. The task is due when the law
@@ -710,11 +980,24 @@ export interface WorkItemRaiser {
   ): Promise<string>;
 }
 
-/** Checking that a rule names a service the firm actually has. The catalogue
- *  lives in the config registry and this use case must not import it. */
+/** A catalogue SERVICE as this module names it: the entry's key, and the name
+ *  a person reads. The name is the PUBLISHED version's, else the newest
+ *  version's, the same derivation `usedIn` shows, so an event and the library
+ *  cannot name one service two ways; null only for an entry with no version at
+ *  all, which then reads by its key. */
+export interface ServiceRef {
+  readonly key: string;
+  readonly name: string | null;
+}
+
+/** Checking that a filing is being added to a service the firm actually has,
+ *  and what to call it. The catalogue lives in the config registry and this
+ *  use case must not import it. */
 export interface ServiceDirectory {
-  /** The entry's key, or null if there is no service entry with that id. */
-  serviceKey(tenantId: string, entryId: string): Promise<string | null>;
+  /** The entry's key and name, or null if there is no SERVICE entry with that
+   *  id. The kind is checked here as a sentence and by 0309's composite key
+   *  as a wall. */
+  findService(tenantId: string, entryId: string): Promise<ServiceRef | null>;
 }
 
 export interface TenantDirectory {

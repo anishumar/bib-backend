@@ -9,6 +9,8 @@
 // unmapped and every refusal answered 500 — invisible to unit tests, which
 // assert on the thrown sentinel and are perfectly happy.
 
+import { NOT_APPLICABLE_NOTE_MAX, namedList } from "./model";
+
 export class OrchestratorError extends Error {
   constructor(
     readonly code: OrchestratorErrorCode,
@@ -33,7 +35,10 @@ export type OrchestratorErrorCode =
   | "PERFORMER_OUT_OF_BAND"
   | "STEP_SETTLED"
   | "NOT_STAFF_HERE"
-  | "STEP_NO_LONGER_NEEDED";
+  | "STEP_NO_LONGER_NEEDED"
+  | "SUB_STEP_NOT_FOUND"
+  | "SUB_STEPS_OPEN"
+  | "NOT_APPLICABLE_NEEDS_A_REASON";
 
 /** The step was withdrawn because the firm's own rule for it stopped applying
  *  after it had opened (0304). Nothing to tick: the note says why. */
@@ -222,6 +227,75 @@ export class AwaitingCheck extends OrchestratorError {
       `Step ${JSON.stringify(stepKey)} is finished and waiting for somebody else to check it. ` +
         `It is not yours to tick off again — and by the firm's own rule it could not be ` +
         `yours to approve either.`,
+    );
+  }
+}
+
+// ── a step's own lists (T6.15) ──────────────────────────────────────────────
+
+/** The line named is not a sub-step of this step in the process version the
+ *  job is pinned to. Almost always a screen that had not reloaded after the
+ *  firm edited its process, which is why the sentence says where to look. */
+export class SubStepNotFound extends OrchestratorError {
+  constructor(stepKey: string, itemKey: string) {
+    super(
+      "SUB_STEP_NOT_FOUND",
+      `Step ${JSON.stringify(stepKey)} has no sub-step ${JSON.stringify(itemKey)} in the version ` +
+        `of the process this job follows. Reload the job to see its sub-steps.`,
+    );
+  }
+}
+
+/**
+ * THE GATE (T6.15). Done is refused while any sub-step of the step has not been
+ * ticked or marked not applicable, and the sentence NAMES what is left, because
+ * "not everything is ticked" on a list of eight is a hunt.
+ *
+ * Carries the labels so the screen could show them; the message already does.
+ *
+ * `told` is who reads it. The DOER is told to tick; a CHECKER pressing Approve
+ * on work whose sub-steps are open cannot tick somebody else's list, so they
+ * are told the one thing they can do. The service's own locks keep that case
+ * from arising (a step's sub-steps are closed to marks while it is checked);
+ * it is reachable only through a write that went round the service, and the
+ * checker must still get a sentence they can act on.
+ */
+export class SubStepsOpen extends OrchestratorError {
+  constructor(
+    readonly stepKey: string,
+    stepLabel: string,
+    readonly openLabels: readonly string[],
+    told: "doer" | "checker" = "doer",
+  ) {
+    const n = openLabels.length;
+    super(
+      "SUB_STEPS_OPEN",
+      `${String(n)} ${n === 1 ? "sub-step" : "sub-steps"} of '${stepLabel}' ` +
+        `${n === 1 ? "is" : "are"} not ticked yet: ${namedList(openLabels)}. ` +
+        (told === "doer"
+          ? `${n === 1 ? "Tick it" : "Tick each one"}, or mark it not applicable with a reason.`
+          : `They are ticked by whoever did the step, so send the work back for them to finish it.`),
+    );
+  }
+}
+
+/**
+ * "Not applicable" with no reason, or with a reason too long to be one.
+ *
+ * The reason is the whole point of the option: "payroll information WHERE
+ * INCLUDED" is only a true record if it says why it was not included. Shared
+ * by sub-steps and review points, which are marked by the same service. The
+ * database refuses both shapes too (0307); this is what a person is told.
+ */
+export class NotApplicableNeedsAReason extends OrchestratorError {
+  constructor(label: string, tooLong = false) {
+    super(
+      "NOT_APPLICABLE_NEEDS_A_REASON",
+      tooLong
+        ? `The reason '${label}' does not apply is longer than ${String(NOT_APPLICABLE_NOTE_MAX)} ` +
+            `characters. Say it in a sentence or two; the detail belongs in the job's files.`
+        : `Marking '${label}' not applicable needs a short reason, like "no payroll this month". ` +
+            `Without one, the record says it did not apply and nothing says why.`,
     );
   }
 }

@@ -22,6 +22,7 @@ import type {
 } from "../../domain/obligation/model";
 import type {
   NewException,
+  NewLinkOnCreate,
   NewObligationState,
   NewObligationTemplate,
   NewResolutionOption,
@@ -36,13 +37,14 @@ import type {
   TemplatePatch,
   TemplateRecord,
 } from "../../usecase/obligation/ports";
+import { toUsedIn, usedInSql, type RawUsedIn } from "./obligation-link-repository";
 
 interface TemplateRow {
   id: string;
   tenant_id: string;
   jurisdiction: string;
   entity_type: string | null;
-  service_entry_id: string | null;
+  lineage_id: string;
   module: string | null;
   name: string;
   authority: string | null;
@@ -87,7 +89,7 @@ interface StateRow {
 }
 
 const TEMPLATE_COLUMNS =
-  "id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority, " +
+  "id, tenant_id, jurisdiction, entity_type, lineage_id, module, name, authority, " +
   "recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month, " +
   "due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id, status, " +
   // `::text` on both dates, which is what `day.ts` names as the better answer
@@ -118,7 +120,7 @@ function toTemplate(r: TemplateRow): ObligationTemplate {
     tenantId: r.tenant_id,
     jurisdiction: r.jurisdiction,
     entityType: r.entity_type,
-    serviceEntryId: r.service_entry_id,
+    lineageId: r.lineage_id,
     module: r.module,
     name: r.name,
     authority: r.authority,
@@ -173,16 +175,19 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
     return created;
   }
 
-  async createIfAbsent(t: NewObligationTemplate): Promise<ObligationTemplate | null> {
+  async createIfAbsent(
+    t: NewObligationTemplate,
+    links: readonly NewLinkOnCreate[] = [],
+  ): Promise<ObligationTemplate | null> {
     return withTenant(this.app, t.tenantId, async (db) => {
       const rows = await db<TemplateRow[]>`
         INSERT INTO delivery.obligation_template
-          (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
+          (id, tenant_id, jurisdiction, entity_type, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
            effective_from, effective_to, status)
         VALUES
-          (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
+          (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
@@ -195,7 +200,25 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
         RETURNING ${db.unsafe(TEMPLATE_COLUMNS)}
       `;
       const row = rows[0];
-      return row ? toTemplate(row) : null;
+      if (!row) return null;
+
+      // THE LINKS, IN THE SAME TRANSACTION (T6.16). The catalogue's "Write a
+      // new filing" is one act: the rule and its place on the service. The
+      // chain is the new row's own lineage, which the trigger has just derived
+      // (a rule written from scratch supersedes nothing, so it is its own id).
+      // A service that is not this firm's, or not a service, fails the
+      // composite key and rolls the rule back with it.
+      for (const link of links) {
+        await db`
+          INSERT INTO delivery.obligation_rule_service
+            (id, tenant_id, lineage_id, service_entry_id, linked_by_user_id)
+          VALUES (${link.id}, ${t.tenantId}, ${row.lineage_id}, ${link.serviceEntryId},
+                  ${link.byUserId})
+          ON CONFLICT (tenant_id, lineage_id, service_entry_id) WHERE unlinked_at IS NULL
+          DO NOTHING
+        `;
+      }
+      return toTemplate(row);
     });
   }
 
@@ -220,12 +243,12 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
 
       const rows = await db<TemplateRow[]>`
         INSERT INTO delivery.obligation_template
-          (id, tenant_id, jurisdiction, entity_type, service_entry_id, module, name, authority,
+          (id, tenant_id, jurisdiction, entity_type, module, name, authority,
            recurrence, fiscal_year_start_month, due_rule, due_month_offset, due_day_of_month,
            due_days_after, unresolved_reason, lead_time_days, rule_pack, supersedes_id,
            effective_from, effective_to, status)
         VALUES
-          (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType}, ${t.serviceEntryId},
+          (${t.id}, ${t.tenantId}, ${t.jurisdiction}, ${t.entityType},
            ${t.module}, ${t.name}, ${t.authority}, ${t.recurrence}, ${t.fiscalYearStartMonth},
            ${t.dueRule?.kind ?? null}, ${t.dueRule?.dueMonthOffset ?? null},
            ${t.dueRule?.dueDayOfMonth ?? null}, ${t.dueRule?.dueDaysAfter ?? null},
@@ -250,6 +273,13 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       // already DECIDED about (`resolved_at`) is not moved either — the
       // decision was taken against the rule it names. Same double cast as the
       // batch insert, for the same reason.
+      //
+      // A WITHDRAWN row (0309) is not handed over: it is off the calendar, and
+      // if a linked service ever proposes its period again the generator
+      // restores it and re-pins it to the rule that governs the period, which
+      // from the cutover on is this successor. The links need nothing at all:
+      // they are on the chain, so the successor is already on every service
+      // its predecessor was.
       const moved =
         handover.length === 0
           ? []
@@ -266,15 +296,19 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
                 AND o.work_item_id IS NULL
                 AND o.filed_on IS NULL
                 AND o.resolved_at IS NULL
+                AND o.withdrawn_at IS NULL
               RETURNING o.id
             `;
 
       // What stayed behind past the cutover: started, filed or decided. Counted
-      // after the move, so the number is what is actually true now.
+      // after the move, so the number is what is actually true now. A withdrawn
+      // row is not "kept because somebody started it" (nobody did), so it is
+      // not in the number a partner is told.
       const [kept] = await db<{ n: string }[]>`
         SELECT count(*)::text AS n FROM delivery.obligation_instance
         WHERE template_id = ${predecessorId}
           AND period_start >= ${t.effectiveFrom}::date
+          AND withdrawn_at IS NULL
       `;
 
       return {
@@ -308,7 +342,6 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       const [row] = await db<TemplateRow[]>`
         UPDATE delivery.obligation_template SET
           entity_type             = ${patch.entityType},
-          service_entry_id        = ${patch.serviceEntryId},
           module                  = ${patch.module},
           authority               = ${patch.authority},
           recurrence              = ${patch.recurrence},
@@ -334,17 +367,22 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       // Retired rules included, deliberately: a retired rule still explains an
       // old filing's date, and the screen marks it rather than hiding it.
       //
-      // The service NAME and the instance COUNT are joined here rather than
-      // fetched per row — this codebase's own rule, learnt five times: a list
-      // that returns ids is one a screen has to re-fetch.
-      const rows = await db<(TemplateRow & { service_name: string | null; instance_count: string })[]>`
+      // WHERE EACH RULE IS USED and the instance COUNT are joined here rather
+      // than fetched per row — this codebase's own rule, learnt five times: a
+      // list that returns ids is one a screen has to re-fetch. `used_in` is the
+      // live links on the rule's CHAIN with the services' names, aggregated in
+      // the same statement (T6.16), so the library and the catalogue render
+      // "used in GST monthly, Full compliance" with no second lookup.
+      //
+      // The count is EVERY row the rule produced, withdrawn ones included: it
+      // is what decides whether the period shape may still change
+      // (`PERIOD_SHAPE_LOCKED` counts them too), and the screen and the
+      // refusal must not disagree about it.
+      const rows = await db<(TemplateRow & { used_in: RawUsedIn[]; instance_count: string })[]>`
         SELECT ${db.unsafe(TEMPLATE_COLUMNS.split(", ").map((c) => `t.${c}`).join(", "))},
-               v.body->>'name'                          AS service_name,
+               ${db.unsafe(usedInSql("t"))} AS used_in,
                COALESCE(i.n, 0)::text                   AS instance_count
         FROM delivery.obligation_template t
-        LEFT JOIN config.version v
-          ON v.entry_id = t.service_entry_id AND v.tenant_id = t.tenant_id
-         AND v.status = 'published'
         LEFT JOIN LATERAL (
           SELECT count(*) AS n FROM delivery.obligation_instance oi
           WHERE oi.template_id = t.id AND oi.tenant_id = t.tenant_id
@@ -355,28 +393,53 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       return rows.map((r) => ({
         template: toTemplate(r),
         exceptions: byTemplate.get(r.id) ?? [],
-        serviceName: r.service_name,
+        usedIn: toUsedIn(r.used_in),
         instanceCount: Number(r.instance_count),
       }));
+    });
+  }
+
+  async chain(tenantId: string, lineageId: string): Promise<readonly ObligationTemplate[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<TemplateRow[]>`
+        SELECT ${db.unsafe(TEMPLATE_COLUMNS)} FROM delivery.obligation_template
+        WHERE lineage_id = ${lineageId}
+        ORDER BY effective_from NULLS FIRST, created_at, id
+      `;
+      return rows.map(toTemplate);
     });
   }
 
   async listGenerating(
     tenantId: string,
   ): Promise<
-    readonly { readonly template: ObligationTemplate; readonly exceptions: readonly DueRuleException[] }[]
+    readonly {
+      readonly template: ObligationTemplate;
+      readonly exceptions: readonly DueRuleException[];
+      readonly linkedServices: number;
+    }[]
   > {
     return withTenant(this.app, tenantId, async (db) => {
-      // Active rules that carry a formula AND that the firm has confirmed.
+      // Active rules that carry a formula, that the firm has confirmed, AND
+      // whose CHAIN is on at least one catalogue service (0309, decision 1).
       // `recurrence <> 'event'` is left to the domain's `generatesDates` rather
       // than duplicated here — one statement of what "generating" means, and
-      // the screen reads the same one. The status test IS duplicated, on
-      // purpose: this query is the sweep's working set and a firm with fifty
-      // unconfirmed pack rows should not fetch their exceptions every night.
-      const rows = await db<TemplateRow[]>`
-        SELECT ${db.unsafe(TEMPLATE_COLUMNS)} FROM delivery.obligation_template
-        WHERE is_active AND due_rule IS NOT NULL AND status = 'confirmed'
-        ORDER BY jurisdiction, name
+      // the screen reads the same one. The status and link tests ARE
+      // duplicated, on purpose: this query is the sweep's working set, and a
+      // firm with fifty pack rows on no service should neither fetch their
+      // exceptions every night nor report fifty rules as reaching nobody.
+      // Which ENGAGEMENTS a rule reaches is `subjectsFor`'s, per service.
+      const rows = await db<(TemplateRow & { linked_services: number })[]>`
+        SELECT ${db.unsafe(TEMPLATE_COLUMNS.split(", ").map((c) => `t.${c}`).join(", "))},
+               k.n AS linked_services
+        FROM delivery.obligation_template t
+        JOIN LATERAL (
+          SELECT count(*)::int AS n FROM delivery.obligation_rule_service l
+          WHERE l.tenant_id = t.tenant_id AND l.lineage_id = t.lineage_id
+            AND l.unlinked_at IS NULL
+        ) k ON k.n > 0
+        WHERE t.is_active AND t.due_rule IS NOT NULL AND t.status = 'confirmed'
+        ORDER BY t.jurisdiction, t.name
       `;
       // EVERY exception for every rule in ONE query rather than one per rule:
       // there are a handful of these in total, and the caller's loop already
@@ -385,6 +448,7 @@ export class PostgresObligationTemplateRepository implements ObligationTemplateR
       return rows.map((r) => ({
         template: toTemplate(r),
         exceptions: byTemplate.get(r.id) ?? [],
+        linkedServices: r.linked_services,
       }));
     });
   }

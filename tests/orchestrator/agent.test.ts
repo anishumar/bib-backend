@@ -28,6 +28,7 @@ import {
   FakeTemplateSource,
   FakeTierSource,
   FakeStepDeskResolver,
+  FakeStepCheckRepo,
 } from "../../src/testfakes/orchestrator";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
@@ -114,6 +115,8 @@ function template(executor: string) {
         condition: null,
         verificationPolicyKey: null,
         performer: null,
+        checklist: [],
+        reviewPoints: [],
       },
     ],
   };
@@ -150,6 +153,7 @@ async function world(executor = "agent") {
     desks: new FakeStepDeskResolver(),
     jobs,
     steps,
+    stepChecks: new FakeStepCheckRepo(steps),
     templates,
     subjects,
     tiers,

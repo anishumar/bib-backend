@@ -258,14 +258,29 @@ export class PeriodShapeLocked extends ObligationError {
   }
 }
 
+/**
+ * The same filing written twice.
+ *
+ * Until T6.16 this told the writer to revise under a new pack and retire the
+ * old rule, which was library advice for a library screen. The catalogue's
+ * "Write a new filing" reaches it now, and there the likeliest cause is a
+ * partner writing, for a second service, a filing the firm already has, when
+ * the dropdown beside the button offers it. Following the old advice would
+ * have been worse than unhelpful: retiring the rule stops the filing on every
+ * other service that carries it. So it names the filing and points at the
+ * list, and keeps the law-changed route for the case that really is a
+ * revision.
+ */
 export class TemplateKeyTaken extends ObligationError {
   constructor(jurisdiction: string, name: string, rulePack: string) {
     super(
       "TEMPLATE_KEY_TAKEN",
-      `This firm already has a ${jurisdiction} rule named ${JSON.stringify(name)} in pack ` +
-        `${JSON.stringify(rulePack)}. To revise it, add it under a NEW rule pack and retire ` +
-        `the old one — the old row stays readable, which is what lets a filing made last year ` +
-        `still explain its own due date.`,
+      `Your firm's library already holds a filing named ${JSON.stringify(name)} for ` +
+        `${jurisdiction} companies, in pack ${JSON.stringify(rulePack)}. A filing is written ` +
+        `once and can be on any number of services, so to put it on a service, choose it from ` +
+        `"Add a filing" on that service in the Catalogue instead of writing it again. If the law ` +
+        `changed, record it on the filing's row in the library with "The law changed", so the ` +
+        `filings already made keep the dates they were made with.`,
     );
   }
 }
@@ -284,9 +299,9 @@ export class ServiceNotFound extends ObligationError {
   constructor(ref: string) {
     super(
       "SERVICE_NOT_FOUND",
-      `No catalogue service ${JSON.stringify(ref)} at this firm. A rule names the service the ` +
-        `firm sells, so the calendar knows which clients it reaches; leave it empty for a rule ` +
-        `that applies to an entity regardless of what it bought.`,
+      `No catalogue service ${JSON.stringify(ref)} at this firm. A compliance filing is added ` +
+        `to a service the firm sells, so the calendar knows which clients owe it. Pick one of ` +
+        `the services in the Catalogue, or define the service there first.`,
     );
   }
 }

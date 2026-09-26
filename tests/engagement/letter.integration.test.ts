@@ -63,6 +63,7 @@ import {
   PostgresCalendarSource,
   PostgresObligationInstanceRepository,
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
+import { PostgresRuleServiceLinkRepository } from "../../src/infrastructure/postgres/obligation-link-repository";
 import { ObligationService } from "../../src/usecase/obligation/service";
 import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
@@ -112,6 +113,7 @@ const obligationServiceForSeeding = new ObligationService({
   states: new PostgresObligationStateRepository(app),
   resolutionOptions: new PostgresResolutionOptionRepository(app),
   instances: new PostgresObligationInstanceRepository(app),
+  links: new PostgresRuleServiceLinkRepository(app),
   compliancePolicy: configRepository,
   calendarSource: new PostgresCalendarSource(app),
   services: configRepository,

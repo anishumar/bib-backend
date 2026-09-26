@@ -1172,27 +1172,72 @@ describe("a period job's umbrella task is one month's task", () => {
     });
   });
 
-  it("asks the NARROWER coverage question: an entity that files GST still owes its bookkeeping task", async () => {
-    // The calendar covers the entity (a GST rule reaches it), but no rule
-    // names THIS service. The one-time task would be skipped — correctly, it
-    // would be a thirteenth row — and September's task must not be.
+  it("an entity that files GST through one engagement still owes its bookkeeping task on the other", async () => {
+    // Since T6.16 a rule reaches an engagement only through the service it
+    // bought, so coverage is per ENGAGEMENT and "covered" and "a filing" are
+    // one answer (the adapter runs one statement for both). The company's GST
+    // engagement is covered; its bookkeeping engagement carries no filing, and
+    // September's bookkeeping must still be spawned. (T6.13 tested this as
+    // one engagement covered and not a filing, which the adapter can no
+    // longer say.)
+    const BOOKS = "00000000-0000-4000-8000-0000000000f2";
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(
+      engagementWork(),
+      engagementWork({ engagementId: BOOKS, serviceName: "Monthly bookkeeping" }),
+    );
+    h.obligations.covered.add(ENGAGEMENT);
+
+    expect(
+      await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT, BOOKS], ACTOR, SEPTEMBER),
+    ).toBe(1);
+    expect(h.items.rows.map((r) => r.title)).toEqual(["Monthly bookkeeping · Sep 2026"]);
+  });
+
+  it("skips the month's task where a filing is linked to the service: it IS a filing", async () => {
     const h = await harness();
     h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
     h.engagements.rows.push(engagementWork());
     h.obligations.covered.add(ENGAGEMENT);
 
     expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR)).toBe(0);
-    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(1);
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(0);
+    expect(h.items.rows).toHaveLength(0);
   });
 
-  it("skips the month's task only where a rule names the service — it IS a filing", async () => {
+  it("KEEPS the month's task where the service has a process of its own, filings linked or not", async () => {
+    // The T6.16 follow-up (the firm's rule, 2026-09-26). A monthly bookkeeping
+    // service with a ten-step close that also carries TDS lost "Monthly
+    // Accounting · Sep 2026", the task its period job's steps hang under,
+    // because the calendar dated its TDS. It keeps it now; the TDS returns get
+    // their own tasks from the calendar beside it.
     const h = await harness();
     h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
-    h.engagements.rows.push(engagementWork());
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly Accounting" }));
     h.obligations.covered.add(ENGAGEMENT);
-    h.obligations.filing.add(ENGAGEMENT);
+    h.obligations.ownProcess.add(ENGAGEMENT);
 
-    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(0);
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(1);
+    expect(h.items.rows[0]).toMatchObject({
+      title: "Monthly Accounting · Sep 2026",
+      dueOn: "2026-10-30",
+      assigneeUserId: PRIYA,
+      isStatutoryDue: false,
+    });
+  });
+
+  it("still skips the ONE-TIME activation task of a covered service with a process: that question is unchanged", async () => {
+    // The activation task is due `effective_from + slaDays` on an engagement
+    // that runs a year, and can never be completed whatever steps the service
+    // has: the thirteenth-row argument, which a process does not answer.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly Accounting" }));
+    h.obligations.covered.add(ENGAGEMENT);
+    h.obligations.ownProcess.add(ENGAGEMENT);
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR)).toBe(0);
     expect(h.items.rows).toHaveLength(0);
   });
 

@@ -98,6 +98,9 @@ export class PostgresNudgeCandidates implements NudgeCandidateSource {
           FROM delivery.obligation_instance o
          WHERE o.tenant_id = ${tenantId}
            AND o.filed_on IS NULL
+           -- WITHDRAWN (0309): the client would be told about a filing the
+           -- firm took off the calendar. Never.
+           AND o.withdrawn_at IS NULL
            AND o.statutory_due_on >= ${asOf}::date
            AND o.statutory_due_on <= ${asOf}::date + ${horizonDays}::int
          ORDER BY o.statutory_due_on ASC
@@ -143,6 +146,11 @@ export class PostgresNudgeRepository implements NudgeRepository {
            WHERE o.id = ${nudge.obligationId}
              AND o.tenant_id = ${tenantId}
              AND o.filed_on IS NULL
+             -- Re-derived at the write, as filed_on is: a filing withdrawn
+             -- between the candidates and this insert writes no nudge and no
+             -- event. A restored filing keeps the rungs it already had
+             -- (obligation_nudge_once), so it is never told twice.
+             AND o.withdrawn_at IS NULL
           ON CONFLICT (tenant_id, obligation_id, rung_key) DO NOTHING
           RETURNING id
         `;

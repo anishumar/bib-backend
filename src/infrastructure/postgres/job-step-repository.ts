@@ -10,6 +10,7 @@ import type {
   NewJobStep,
   StepTransition,
 } from "../../usecase/orchestrator/ports";
+import { lockStepWithSubStepsSettled } from "./step-lines";
 
 interface StepRow {
   id: string;
@@ -155,16 +156,25 @@ export class PostgresJobStepRepository implements JobStepRepository {
    * The timestamps are written here rather than by the caller so that the pairs
    * the schema's CHECK insists on are always coherent — `running` gets a start,
    * `done` keeps that start and gains a finish, `skipped` gets neither.
+   *
+   * WITH `subStepKeys` (T6.15) the step's row is LOCKED first and the marks read
+   * after it, in the same transaction, and nothing is written unless every one
+   * of them is settled: see `step-lines.ts` for why a lock and a second
+   * statement, and not a subquery in the UPDATE, is what makes that read true.
    */
   async transition(
     tenantId: string,
     stepId: string,
     expect: StepStatus,
     to: StepTransition,
+    subStepKeys: readonly string[] = [],
   ): Promise<JobStep | null> {
     const starts = to.status === "running" || to.status === "blocked";
     const finishes = to.status === "done" || to.status === "failed";
     return withTenant(this.app, tenantId, async (db) => {
+      if (subStepKeys.length > 0 && !(await lockStepWithSubStepsSettled(db, stepId, expect, subStepKeys))) {
+        return null;
+      }
       const [row] = await db<StepRow[]>`
         UPDATE delivery.job_step SET
           status       = ${to.status},

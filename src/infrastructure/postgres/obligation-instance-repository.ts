@@ -4,9 +4,16 @@
 // ── THE TWO QUERIES THAT CARRY THE DESIGN ──────────────────────────────────
 //
 // `subjectsFor` is the whole generation scope in one statement: the right
-// country, the right entity type when the rule names one, and an ENGAGEMENT for
-// the service that makes it the firm's problem. Change the scope and it changes
-// here, not in six places.
+// country, the right entity type when the rule names one, and an ENGAGEMENT
+// whose service has a live catalogue LINK to the rule's chain (T6.16, 0309).
+// Change the scope and it changes here, not in six places.
+//
+// ── A WITHDRAWN ROW IS IN NONE OF THESE READS ─────────────────────────────
+//
+// Removing a filing from a service withdraws its untouched upcoming rows
+// (`obligation-link-repository.ts`). Every reader here that shows, raises,
+// misses or decides a filing says `withdrawn_at IS NULL`, and `findById` is
+// the one that does not, because restoring a row has to be able to see it.
 //
 // `gaps` is its inverse and is the cure for the silent hole. An engagement the
 // firm is delivering that the calendar produced nothing for is either perfectly
@@ -14,7 +21,7 @@
 // this query computes rather than a guess a screen makes.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
-import type { IsoDate, ObligationInstance } from "../../domain/obligation/model";
+import type { IsoDate, ObligationInstance, WithdrawnReason } from "../../domain/obligation/model";
 import type {
   CalendarQuery,
   CalendarRow,
@@ -26,12 +33,15 @@ import type {
   MissableObligation,
   NewObligationInstance,
   ObligationInstanceRepository,
+  ProposalOutcome,
   RaisableObligation,
   RestatedInstance,
+  RestoredInstance,
   SpawnedInstance,
   UnstartedInstance,
 } from "../../usecase/obligation/ports";
 import { isoInstant } from "./instant";
+import { lockChainsForWrite } from "./obligation-chain-lock";
 
 /**
  * Only `active` engagements generate.
@@ -43,6 +53,45 @@ import { isoInstant } from "./instant";
  * once here is why the scope is auditable.
  */
 const GENERATING_STATUS = "active";
+
+/**
+ * THE LINK, ASKED AGAIN AT THE WRITE (0309), of a proposal row aliased `r`.
+ *
+ * The generator reads its subjects (who a rule reaches, through which
+ * service) in one transaction and writes the rows in another, a whole sweep
+ * later for a large firm. A filing removed from a service in between must not
+ * be written for that service's clients anyway, and a withdrawn row must not
+ * be restored under a link that no longer exists. So the proposal's rule's
+ * CHAIN must still have a live link to its engagement's pinned service at the
+ * moment of the write. A proposal naming no engagement is not a link's to
+ * judge; nothing proposes one today (0053 keeps the column nullable for the
+ * compliance-engine reading nobody has chosen).
+ *
+ * "At the moment of the write" holds only because `createIfAbsent` takes each
+ * chain's lock before this is asked (`obligation-chain-lock.ts`). This test
+ * reads the link from its statement's snapshot, so on its own a removal that
+ * committed while the statement ran was invisible to it, and the removal could
+ * not see the rows being written either: they committed live under no link.
+ *
+ * A constant fragment with no parameters, which is what makes `db.unsafe`
+ * safe to put it in.
+ */
+const STILL_LINKED = `(
+  r."engagementId" IS NULL OR EXISTS (
+    SELECT 1
+    FROM delivery.obligation_template gt
+    JOIN crm.engagement ge
+      ON ge.id = r."engagementId" AND ge.tenant_id = gt.tenant_id
+    JOIN crm.engagement_letter_line gl
+      ON gl.id = ge.engagement_letter_line_id AND gl.tenant_id = ge.tenant_id
+    JOIN config.version gv
+      ON gv.id = gl.service_version_id AND gv.tenant_id = gl.tenant_id
+    JOIN delivery.obligation_rule_service gk
+      ON gk.tenant_id = gt.tenant_id AND gk.lineage_id = gt.lineage_id
+     AND gk.service_entry_id = gv.entry_id AND gk.unlinked_at IS NULL
+    WHERE gt.id = r."templateId" AND gt.tenant_id = r."tenantId"
+  )
+)`;
 
 interface InstanceRow {
   id: string;
@@ -61,13 +110,17 @@ interface InstanceRow {
   resolution_option_id: string | null;
   resolution_reason: string | null;
   resolved_at: string | null;
+  withdrawn_at: string | null;
+  withdrawn_by_user_id: string | null;
+  withdrawn_reason: string | null;
 }
 
 const INSTANCE_COLUMNS =
   "id, tenant_id, template_id, entity_party_id, engagement_id, period_start::text, " +
   "period_end::text, period_label, statutory_due_on::text, internal_target_on::text, " +
   "state_id, work_item_id, filed_on::text, resolution_option_id, resolution_reason, " +
-  isoInstant("resolved_at", "resolved_at");
+  isoInstant("resolved_at", "resolved_at") + ", " +
+  isoInstant("withdrawn_at", "withdrawn_at") + ", withdrawn_by_user_id, withdrawn_reason";
 
 function toInstance(r: InstanceRow): ObligationInstance {
   return {
@@ -87,25 +140,94 @@ function toInstance(r: InstanceRow): ObligationInstance {
     resolutionOptionId: r.resolution_option_id,
     resolutionReason: r.resolution_reason,
     resolvedAt: r.resolved_at,
+    withdrawnAt: r.withdrawn_at,
+    withdrawnByUserId: r.withdrawn_by_user_id,
+    withdrawnReason: r.withdrawn_reason === null ? null : (r.withdrawn_reason as WithdrawnReason),
   };
 }
 
 export class PostgresObligationInstanceRepository implements ObligationInstanceRepository {
   constructor(private readonly app: Db) {}
 
-  async createIfAbsent(rows: readonly NewObligationInstance[]): Promise<readonly SpawnedInstance[]> {
-    if (rows.length === 0) return [];
+  async createIfAbsent(rows: readonly NewObligationInstance[]): Promise<ProposalOutcome> {
+    if (rows.length === 0) return { created: [], restored: [] };
     const tenantId = rows[0]?.tenantId;
-    if (!tenantId) return [];
+    if (!tenantId) return { created: [], restored: [] };
+    const proposals = JSON.stringify(rows);
     return withTenant(this.app, tenantId, async (db) => {
+      // ── 0. TAKE EACH CHAIN'S TURN, SHARED ─────────────────────────────────
+      //
+      // Before either statement below starts, so `STILL_LINKED` is asked
+      // after any removal of these filings has committed, and a removal that
+      // arrives now waits for this write and then sees what it wrote. See
+      // `obligation-chain-lock.ts`.
+      await lockChainsForWrite(db, rows.map((r) => r.templateId));
+
+      // ── 1. A WITHDRAWN ROW THE PROPOSAL HOLDS THE KEY OF COMES BACK (0309) ─
+      //
+      // Same row, same id, in place: the withdrawal cleared, the dates the
+      // proposal carries (computed by `scheduleFor`, never here), and the rule
+      // and engagement re-pinned to the proposal's, which are the rule that
+      // governs the period and the engagement that reaches it now. Re-pinning
+      // the template fires 0303's lineage trigger, which recomputes the same
+      // chain. The guard is on the row being updated, so a row that somehow
+      // gained a task since stays exactly as it is (0309's CHECK says a
+      // withdrawn row cannot have one anyway).
+      //
+      // The FROM reads the pre-update row, which is how `was_withdrawn_at`
+      // survives into RETURNING: restoring clears the column, and the ledger's
+      // `obligation.restored` is then the only place the withdrawal is kept.
+      const restored = await db<
+        { id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+          period_label: string; statutory_due_on: string; internal_target_on: string;
+          was_withdrawn_at: string }[]
+      >`
+        UPDATE delivery.obligation_instance AS o
+        SET withdrawn_at         = NULL,
+            withdrawn_by_user_id = NULL,
+            withdrawn_reason     = NULL,
+            template_id          = p."templateId",
+            engagement_id        = p."engagementId",
+            statutory_due_on     = p."statutoryDueOn"::date,
+            internal_target_on   = p."internalTargetOn"::date,
+            state_id             = p."stateId"
+        FROM (
+          SELECT r.*, held.id AS held_id,
+                 ${db.unsafe(isoInstant("held.withdrawn_at", "was_withdrawn_at"))}
+          FROM jsonb_to_recordset(${proposals}::text::jsonb)
+            AS r(id uuid, "tenantId" uuid, "templateId" uuid, "entityPartyId" uuid,
+                 "engagementId" uuid, "periodStart" text, "periodEnd" text, "periodLabel" text,
+                 "statutoryDueOn" text, "internalTargetOn" text, "stateId" uuid)
+          JOIN delivery.obligation_template t
+            ON t.id = r."templateId" AND t.tenant_id = r."tenantId"
+          JOIN delivery.obligation_instance held
+            ON held.tenant_id = r."tenantId"
+           AND held.lineage_id = t.lineage_id
+           AND held.entity_party_id = r."entityPartyId"
+           AND held.period_start = r."periodStart"::date
+          WHERE held.withdrawn_at IS NOT NULL
+            AND ${db.unsafe(STILL_LINKED)}
+        ) AS p
+        WHERE o.id = p.held_id
+          AND o.withdrawn_at IS NOT NULL
+          AND o.work_item_id IS NULL
+          AND o.filed_on IS NULL
+          AND o.resolved_at IS NULL
+        RETURNING o.id, o.template_id, o.entity_party_id, o.engagement_id, o.period_label,
+                  o.statutory_due_on::text, o.internal_target_on::text, p.was_withdrawn_at
+      `;
+
+      // ── 2. EVERYTHING ELSE IS NEW, OR ALREADY THERE ─────────────────────
+      //
       // ONE multi-row INSERT rather than a statement per row: the generator
       // proposes hundreds and every one of them is a network round trip
       // otherwise. `ON CONFLICT DO NOTHING` against the re-run key is what makes
       // the second sweep a no-op, and `RETURNING` names exactly the rows that
-      // were new — which is what the caller records an event for.
+      // were new — which is what the caller records an event for. A row the
+      // step above restored holds its key, so it is skipped here.
       const created = await db<
-        { id: string; template_id: string; entity_party_id: string; period_label: string;
-          statutory_due_on: string; internal_target_on: string }[]
+        { id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+          period_label: string; statutory_due_on: string; internal_target_on: string }[]
       >`
         INSERT INTO delivery.obligation_instance
           (id, tenant_id, template_id, entity_party_id, engagement_id, period_start, period_end,
@@ -121,26 +243,35 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         -- Postgres parses it once. Found by RUNNING the worker: the unit tests
         -- use a fake repository and the integration test inserted rows by hand,
         -- so neither ever executed this statement.
-        FROM jsonb_to_recordset(${JSON.stringify(rows)}::text::jsonb)
+        FROM jsonb_to_recordset(${proposals}::text::jsonb)
           AS r(id uuid, "tenantId" uuid, "templateId" uuid, "entityPartyId" uuid,
                "engagementId" uuid, "periodStart" text, "periodEnd" text, "periodLabel" text,
                "statutoryDueOn" text, "internalTargetOn" text, "stateId" uuid)
+        WHERE ${db.unsafe(STILL_LINKED)}
         -- THE LINEAGE, not the template (0303). The template key is implied by
         -- it, and it also refuses a period an EARLIER rule in the chain already
         -- holds — the row a supersession could not hand over because somebody
         -- had started it.
         ON CONFLICT (tenant_id, lineage_id, entity_party_id, period_start) DO NOTHING
-        RETURNING id, template_id, entity_party_id, period_label,
+        RETURNING id, template_id, entity_party_id, engagement_id, period_label,
                   statutory_due_on::text, internal_target_on::text
       `;
-      return created.map((r) => ({
+      const spawned = (r: {
+        id: string; template_id: string; entity_party_id: string; engagement_id: string | null;
+        period_label: string; statutory_due_on: string; internal_target_on: string;
+      }): SpawnedInstance => ({
         id: r.id,
         templateId: r.template_id,
         entityPartyId: r.entity_party_id,
+        engagementId: r.engagement_id,
         periodLabel: r.period_label,
         statutoryDueOn: r.statutory_due_on,
         internalTargetOn: r.internal_target_on,
-      }));
+      });
+      return {
+        created: created.map(spawned),
+        restored: restored.map((r): RestoredInstance => ({ ...spawned(r), withdrawnAt: r.was_withdrawn_at })),
+      };
     });
   }
 
@@ -204,6 +335,10 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AND (${query.entityPartyId ?? null}::uuid IS NULL OR oi.entity_party_id = ${query.entityPartyId ?? null}::uuid)
           AND (${query.module ?? null}::text IS NULL OR t.module = ${query.module ?? null}::text)
           AND (${query.includeSettled ?? false} OR NOT s.is_terminal)
+          -- A WITHDRAWN filing is off the calendar whatever else is asked
+          -- (0309). It is not a flavour of "settled": it was never filed or
+          -- decided, and includeSettled must not bring it back.
+          AND oi.withdrawn_at IS NULL
         ORDER BY oi.internal_target_on, t.name
         LIMIT ${limit}
       `;
@@ -248,12 +383,12 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         {
           id: string; entity_party_id: string; engagement_id: string | null; period_label: string;
           statutory_due_on: string; template_name: string; authority: string | null;
-          service_entry_id: string | null; entity_name: string | null;
+          entity_name: string | null;
         }[]
       >`
         SELECT oi.id, oi.entity_party_id, oi.engagement_id, oi.period_label,
                oi.statutory_due_on::text,
-               t.name AS template_name, t.authority, t.service_entry_id,
+               t.name AS template_name, t.authority,
                ep.display_name AS entity_name
         FROM delivery.obligation_instance oi
         JOIN delivery.obligation_template t
@@ -262,6 +397,8 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           ON ep.id = oi.entity_party_id AND ep.tenant_id = oi.tenant_id
         WHERE oi.work_item_id IS NULL
           AND oi.filed_on IS NULL
+          -- A withdrawn filing never gets a task (0309).
+          AND oi.withdrawn_at IS NULL
           AND oi.internal_target_on <= ${asOf}::date
         ORDER BY oi.internal_target_on
         LIMIT ${limit}
@@ -274,21 +411,24 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         statutoryDueOn: r.statutory_due_on,
         templateName: r.template_name,
         authority: r.authority,
-        serviceEntryId: r.service_entry_id,
         entityName: r.entity_name,
       }));
     });
   }
 
-  async attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<void> {
-    await withTenant(this.app, tenantId, async (db) => {
+  async attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
       // `WHERE work_item_id IS NULL` makes a redelivered raise a no-op rather
       // than a second task pointing at the same filing — the sweep is
-      // at-least-once like everything else the engine touches.
-      await db`
+      // at-least-once like everything else the engine touches. And
+      // `withdrawn_at IS NULL`: a filing taken off since it was read gets no
+      // task (0309's CHECK would refuse one anyway, as a wall under this).
+      const rows = await db<{ id: string }[]>`
         UPDATE delivery.obligation_instance SET work_item_id = ${workItemId}
-        WHERE id = ${obligationId} AND work_item_id IS NULL
+        WHERE id = ${obligationId} AND work_item_id IS NULL AND withdrawn_at IS NULL
+        RETURNING id
       `;
+      return rows.length > 0;
     });
   }
 
@@ -368,6 +508,11 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         WHERE oi.statutory_due_on < ${asOf}::date
           AND oi.filed_on IS NULL
           AND oi.resolved_at IS NULL
+          -- A withdrawn filing is never MISSED (0309). It was upcoming when it
+          -- came off and crosses its date later; without this it would turn
+          -- missed and fill the decision queue with returns the firm stopped
+          -- doing, which is 2026-09-18 again.
+          AND oi.withdrawn_at IS NULL
           AND NOT s.is_terminal
           AND NOT s.needs_decision
           AND (${floor}::date IS NULL OR oi.statutory_due_on >= ${floor}::date)
@@ -402,6 +547,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
           AND s.id = oi.state_id AND s.tenant_id = oi.tenant_id
           AND oi.filed_on IS NULL
           AND oi.resolved_at IS NULL
+          AND oi.withdrawn_at IS NULL
           AND NOT s.is_terminal
           AND NOT s.needs_decision
         RETURNING oi.id
@@ -453,6 +599,10 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         WHERE s.needs_decision
           AND oi.resolved_at IS NULL
           AND oi.filed_on IS NULL
+          -- Unreachable by construction (an undecided filing is never
+          -- withdrawn and a withdrawn one is never missed), and said anyway so
+          -- a test can pin it.
+          AND oi.withdrawn_at IS NULL
         ORDER BY oi.statutory_due_on, t.name
         LIMIT ${limit}
       `;
@@ -530,6 +680,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         WHERE template_id = ${templateId}
           AND work_item_id IS NULL
           AND filed_on IS NULL
+          AND withdrawn_at IS NULL
         ORDER BY period_start
       `;
       return rows.map((r) => ({
@@ -564,6 +715,7 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
         WHERE o.id = r.id
           AND o.work_item_id IS NULL
           AND o.filed_on IS NULL
+          AND o.withdrawn_at IS NULL
         RETURNING o.id
       `;
       return updated.length;
@@ -573,9 +725,22 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
 
   async countFor(tenantId: string, templateId: string): Promise<number> {
     return withTenant(this.app, tenantId, async (db) => {
+      // EVERY row, withdrawn ones included: the period-shape lock reads this,
+      // and a withdrawn row is keyed on its period start as firmly as a live
+      // one. The port says why there are two counts.
       const [row] = await db<{ n: string }[]>`
         SELECT count(*)::text AS n FROM delivery.obligation_instance
         WHERE template_id = ${templateId}
+      `;
+      return Number(row?.n ?? 0);
+    });
+  }
+
+  async countLiveFor(tenantId: string, templateId: string): Promise<number> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ n: string }[]>`
+        SELECT count(*)::text AS n FROM delivery.obligation_instance
+        WHERE template_id = ${templateId} AND withdrawn_at IS NULL
       `;
       return Number(row?.n ?? 0);
     });
@@ -588,39 +753,55 @@ export class PostgresCalendarSource implements CalendarSource {
   async subjectsFor(
     tenantId: string,
     rule: {
+      readonly lineageId: string;
       readonly jurisdiction: string;
       readonly entityType: string | null;
-      readonly serviceEntryId: string | null;
     },
   ): Promise<readonly CalendarSubject[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<
-        { entity_party_id: string; engagement_id: string; effective_from: string }[]
+        {
+          entity_party_id: string; engagement_id: string; effective_from: string;
+          service_entry_id: string;
+        }[]
       >`
         SELECT DISTINCT le.party_id AS entity_party_id, e.id AS engagement_id,
-               e.effective_from::text
+               e.effective_from::text AS effective_from,
+               pinned.entry_id AS service_entry_id
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
          AND e.status = ${GENERATING_STATUS}
-        -- LEFT from here down. A rule that names NO service reaches every live
-        -- engagement, including one whose catalogue version has since been
-        -- unpublished — losing an obligation because we could not resolve what
-        -- the client bought is the worst failure available here, and it is the
-        -- same call unspawnedActivations makes about spawning the job.
-        LEFT JOIN crm.engagement_letter_line ln
+        -- INNER from here down (T6.16). These were LEFT joins while a rule
+        -- naming NO service reached every live engagement whatever it pinned;
+        -- decision 1 ended that reading, so an engagement reaches a rule only
+        -- through the service it bought. The letter line and its version are
+        -- NOT NULL on an engagement (0017), and the version stays readable
+        -- after it is archived, so nothing a client really bought is lost.
+        JOIN crm.engagement_letter_line ln
           ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
-        LEFT JOIN config.version pinned
+        JOIN config.version pinned
           ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+        -- THE LINK. A live one, between this rule's CHAIN and the service the
+        -- engagement's letter line pinned: the entry, never the version, so a
+        -- firm publishing v4 of the service has not stopped owing the filing.
+        JOIN delivery.obligation_rule_service l
+          ON l.tenant_id = e.tenant_id
+         AND l.lineage_id = ${rule.lineageId}
+         AND l.service_entry_id = pinned.entry_id
+         AND l.unlinked_at IS NULL
         WHERE le.jurisdiction = ${rule.jurisdiction}
           AND (${rule.entityType}::text IS NULL OR le.entity_type = ${rule.entityType}::text)
-          AND (${rule.serviceEntryId}::uuid IS NULL
-               OR pinned.entry_id = ${rule.serviceEntryId}::uuid)
+        -- The order is a PROMISE (see the port): earliest engagement first,
+        -- then id, so a client holding two services that share this filing
+        -- gets its one row per period on a predictable engagement.
+        ORDER BY effective_from, engagement_id
       `;
       return rows.map((r) => ({
         entityPartyId: r.entity_party_id,
         engagementId: r.engagement_id,
         effectiveFrom: r.effective_from,
+        serviceEntryId: r.service_entry_id,
       }));
     });
   }
@@ -662,9 +843,30 @@ export class PostgresCalendarSource implements CalendarSource {
           LEFT JOIN core.party cp
             ON cp.id = e.party_id AND cp.tenant_id = e.tenant_id
           WHERE e.status = ${GENERATING_STATUS}
+            -- COVERED means a LIVE row this engagement's work is on (T6.16):
+            -- one carrying its own id, or one for its entity on a chain its
+            -- service carries. The second arm is what a client on two
+            -- services that share a filing needs: ONE row per period exists,
+            -- carrying the other engagement's id, and asking only for this
+            -- engagement's id read this one as a gap forever. A WITHDRAWN row
+            -- is not coverage: it is off the calendar.
             AND NOT EXISTS (
               SELECT 1 FROM delivery.obligation_instance oi
-              WHERE oi.engagement_id = e.id AND oi.tenant_id = e.tenant_id
+              WHERE oi.tenant_id = e.tenant_id
+                AND oi.withdrawn_at IS NULL
+                AND (
+                  oi.engagement_id = e.id
+                  OR (
+                    oi.entity_party_id = e.entity_party_id
+                    AND EXISTS (
+                      SELECT 1 FROM delivery.obligation_rule_service k
+                      WHERE k.tenant_id = oi.tenant_id
+                        AND k.lineage_id = oi.lineage_id
+                        AND k.service_entry_id = pinned.entry_id
+                        AND k.unlinked_at IS NULL
+                    )
+                  )
+                )
             )
         ),
         matched AS (
@@ -691,16 +893,23 @@ export class PostgresCalendarSource implements CalendarSource {
                  ), NULL)                                                       AS blocked_rule_ids
           FROM live l
           LEFT JOIN delivery.obligation_template t
-            -- THE GENERATOR'S OWN PREDICATE, and the first version of this
-            -- query got it wrong: it compared t.service_entry_id to
-            -- l.service_entry_id, which is never true for a rule that names NO
-            -- service — and every rule in the shipped India pack names none,
-            -- because the pack cannot know a firm's own catalogue keys. So a
-            -- firm that had just loaded fifty-seven rules was told none of them
-            -- named its services. A NULL here means "every service", exactly as
-            -- subjectsFor reads it.
+            -- THE GENERATOR'S OWN PREDICATE (T6.16): every row of a chain with
+            -- a LIVE link to this engagement's service, the same join
+            -- subjectsFor makes. Before the catalogue link this read a rule's
+            -- one nullable service column with NULL meaning "every service",
+            -- which is how a firm that loaded the shipped pack was told its
+            -- rules reached a bookkeeping client they did not. No link, no
+            -- match: named = 0 below is 'no_rule_names_this_service', which
+            -- now means "no filing is linked to this service", and its fix is
+            -- in the Catalogue.
             ON t.tenant_id = l.tenant_id
-           AND (t.service_entry_id IS NULL OR t.service_entry_id = l.service_entry_id)
+           AND EXISTS (
+             SELECT 1 FROM delivery.obligation_rule_service k
+             WHERE k.tenant_id = t.tenant_id
+               AND k.lineage_id = t.lineage_id
+               AND k.service_entry_id = l.service_entry_id
+               AND k.unlinked_at IS NULL
+           )
           GROUP BY l.engagement_id
         )
         SELECT l.engagement_id, l.entity_party_id, l.entity_name, l.client_name,

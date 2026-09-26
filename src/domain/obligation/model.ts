@@ -133,10 +133,22 @@ export interface ObligationTemplate {
   /** Null means EVERY entity type, which is the common case: GST does not care
    *  what shape the company is. */
   readonly entityType: string | null;
-  /** The `config.entry` of the service that makes this the firm's problem — the
-   *  catalogue key, not a pinned version. Null means the entity owes it
-   *  regardless, which generates nothing today (see 0053). */
-  readonly serviceEntryId: string | null;
+  /**
+   * The rule's supersession CHAIN: the first rule's own id, inherited by every
+   * successor (0303). Read back from the row and never supplied: a trigger
+   * derives it on insert and refuses to let it move.
+   *
+   * It is what a catalogue service is linked to (0309), not this row's id. A
+   * link naming one row would fall off the day the law changed and the rule
+   * was superseded; a link on the chain carries every successor with it.
+   *
+   * WHICH SERVICES OWE THIS FILING IS NOT ON THE RULE AT ALL. It was, as one
+   * nullable column where NULL meant "every service", and that reading is how
+   * 98 GST filings reached a bookkeeping-only client on 2026-09-18. It lives in
+   * `delivery.obligation_rule_service` now, one row per link, written only
+   * from the catalogue.
+   */
+  readonly lineageId: string;
   /** The statute's own grouping — "GST", "TDS", "MCA". NOT `ServiceBody.module`,
    *  which is the firm's revenue axis. Two axes, deliberately uncrossed. */
   readonly module: string | null;
@@ -189,20 +201,48 @@ export interface ObligationTemplate {
  *   `event_driven`   no period, so nothing to count from until the event
  *                    happens — and nothing here knows that it has.
  *   `retired`        the firm has moved on. Past instances still read.
+ *   `unlinked`       a rule no catalogue service carries (T6.16, 0309). It
+ *                    generates NOTHING, whatever else is true of it: a rule
+ *                    reaches a client only through a service the client
+ *                    bought, and the catalogue is the one place a rule is
+ *                    linked to one. Checked BEFORE `unconfirmed` because it is
+ *                    the more useful answer for a shipped pack row: adding it
+ *                    to a service in the catalogue confirms it in the same act.
  *   `unconfirmed`    a formula this system could run and nobody at the firm has
  *                    checked against the statute — every row a pack seeds. It
  *                    generates NOTHING until the firm confirms it (2026-09-18):
- *                    a shipped rule that names no service reaches every live
+ *                    a shipped rule that named no service reached every live
  *                    engagement at every company in its country, and a firm
  *                    whose one service EXCLUDES the filing was watching its
  *                    client's portal call those filings "missed".
+ *
+ * ── THE LINK COUNT IS A PARAMETER, NOT A FIELD ON THE RULE ─────────────────
+ *
+ * Which services owe a filing is a fact about the CHAIN (`lineageId`), held in
+ * its own table and read in the same query as the rule wherever a screen or
+ * the sweep needs it. It is passed in rather than stored on
+ * `ObligationTemplate` so that no reader can mistake "the rule can produce
+ * dates" for "the rule reaches somebody": the second question needs the
+ * links, and a caller that has not read them cannot answer it by accident.
+ * Whether a rule reaches ONE engagement is `generatesFor`, below.
  */
-export type RuleCoverage = "generating" | "needs_formula" | "event_driven" | "unconfirmed" | "retired";
+export type RuleCoverage =
+  | "generating"
+  | "needs_formula"
+  | "event_driven"
+  | "unlinked"
+  | "unconfirmed"
+  | "retired";
 
-export function coverageOf(t: ObligationTemplate): RuleCoverage {
+export function coverageOf(t: ObligationTemplate, linkedServices: number): RuleCoverage {
   if (!t.isActive) return "retired";
   if (t.dueRule === null) return "needs_formula";
   if (t.recurrence === "event") return "event_driven";
+  // DECISION 1 (T6.16): a rule linked to no service generates nothing. The
+  // "every service" reading a NULL used to carry is gone as a generating
+  // reading, because it is the reading that made a filing a claim about every
+  // client the firm has.
+  if (linkedServices <= 0) return "unlinked";
   // CONFIRMATION IS LOAD-BEARING. `status` was informational from T3.2 to
   // 2026-09-17 — "the firm has checked this against the statute" — while the
   // calendar generated from every active formula regardless. A rule the firm
@@ -214,8 +254,54 @@ export function coverageOf(t: ObligationTemplate): RuleCoverage {
 
 /** The rules that will actually put rows on the calendar. The generator's own
  *  filter, named once so the screen and the sweep cannot disagree about it. */
-export function generatesDates(t: ObligationTemplate): boolean {
-  return coverageOf(t) === "generating";
+export function generatesDates(t: ObligationTemplate, linkedServices: number): boolean {
+  return coverageOf(t, linkedServices) === "generating";
+}
+
+/** A live link between a rule's CHAIN and one catalogue service (0309). */
+export interface RuleServiceLink {
+  readonly lineageId: string;
+  readonly serviceEntryId: string;
+}
+
+/**
+ * The generation predicate for one engagement, STATED in the domain's own
+ * words. Nothing in production calls it, and that is said here so nobody
+ * mistakes its tests for tests of the generator.
+ *
+ * A rule generates for an engagement exactly when it produces dates at all
+ * (`generatesDates`: active, a formula, not event-driven, confirmed, linked to
+ * something) AND one of its chain's live links is to the service THIS
+ * engagement bought. Jurisdiction, entity type and the rule's window are the
+ * other half of the predicate and are asked of the entity and the period
+ * (`governsPeriod`), not of the service.
+ *
+ * The generator does not ask it per engagement: it asks `generatesDates` of
+ * each rule and lets `subjectsFor` join the link, because the engagements a
+ * rule reaches are one set-based statement and a function over an in-memory
+ * list is one row at a time. So the service half lives in SQL, restated by
+ * `subjectsFor` and `gaps` in the calendar adapter, `listGenerating`, and
+ * `obligation-coverage.ts` for the work board, and what guards the LIVE code
+ * is `coverage.integration.test.ts` (those readers against one database) and
+ * `service-filings.integration.test.ts` and `service.test.ts` (the generator
+ * over real SQL and over the fakes). The domain tests of this function pin
+ * the statement a reader of the SQL can check it against; they would stay
+ * green if the generator dropped its link test, which is why the tests above
+ * exist.
+ *
+ * An engagement whose pinned service cannot be resolved (`serviceEntryId`
+ * null) is reached by nothing, which is the safe direction under decision 1:
+ * the coverage screen names the gap, where a guess would put a filing on a
+ * client who did not buy it.
+ */
+export function generatesFor(
+  t: ObligationTemplate,
+  links: readonly RuleServiceLink[],
+  serviceEntryId: string | null,
+): boolean {
+  const mine = links.filter((l) => l.lineageId === t.lineageId);
+  if (!generatesDates(t, mine.length)) return false;
+  return serviceEntryId !== null && mine.some((l) => l.serviceEntryId === serviceEntryId);
 }
 
 /**
@@ -243,6 +329,107 @@ export function governsPeriod(t: ObligationTemplate, periodStart: IsoDate): bool
   if (t.effectiveFrom !== null && periodStart < t.effectiveFrom) return false;
   if (t.effectiveTo !== null && periodStart >= t.effectiveTo) return false;
   return true;
+}
+
+/** A chain read on one day: the row governing that day's period, the row
+ *  that takes over next, and the first period that row governs. Either row
+ *  may be null; `nextFirstPeriod` is set exactly when `next` is. */
+export interface ChainOnDay<T extends ObligationTemplate> {
+  readonly governing: T | null;
+  readonly next: T | null;
+  readonly nextFirstPeriod: IsoDate | null;
+}
+
+/**
+ * The start of the first period a row governs, or null when its window holds
+ * no period start at all (review of the T6.16 follow-ups, 2026-09-26).
+ *
+ * ── A ROW'S `effectiveFrom` IS NOT WHEN IT TAKES OVER ─────────────────────
+ *
+ * It is the day the change was recorded from, and the supersede form takes
+ * any day. `governsPeriod` tests the period START, so a quarterly rule cut
+ * over on 1 August does not govern the quarter that began on 1 July: its
+ * first period is October's. The card said "From August 2026" in September
+ * while July to September was still due under the old rule, and an annual
+ * rule cut over on 1 January named January although January to March is
+ * still the old financial year.
+ *
+ * Found in the generator's own terms: the periods from the cutover, and the
+ * first whose start the row governs. A period starts at most a year after
+ * any day, so a year and a day is always far enough to look. An event-driven
+ * rule has no period; its "period" is the day, as in `chainOnDay`.
+ */
+export function firstPeriodGoverned(t: ObligationTemplate): IsoDate | null {
+  if (t.effectiveFrom === null) return null;
+  if (t.recurrence === "event") return governsPeriod(t, t.effectiveFrom) ? t.effectiveFrom : null;
+  const periods = periodsBetween(
+    t.recurrence,
+    t.fiscalYearStartMonth,
+    t.effectiveFrom,
+    addDays(t.effectiveFrom, 366),
+  );
+  return periods.find((p) => governsPeriod(t, p.start))?.start ?? null;
+}
+
+/**
+ * Which row of a chain governs the period containing `day`, and which row
+ * takes over after it (T6.16 follow-up, 2026-09-26).
+ *
+ * ── THE ROW "IN FORCE" IS NOT THE ROW TODAY'S RETURNS ARE DUE ON ──────────
+ *
+ * After a partner records "from April 2027 the law says the 22nd", the chain's
+ * open-ended row is the SUCCESSOR, and a screen showing that row told the firm
+ * September's return was due on the 22nd while the calendar (correctly) still
+ * dated it the 20th. What a partner checks a filing against is the rule that
+ * governs the period being filed NOW, and, separately, what changes and when.
+ *
+ * Asked in the generator's own terms, never with new date arithmetic: the
+ * period containing `day` is `periodsBetween` over that one day, and a row
+ * governs it by `governsPeriod`, tested against the period START (August's
+ * return is August's law). A row's own recurrence is used, so a chain whose
+ * rows disagree cannot borrow a period shape from its neighbour. An
+ * event-driven rule has no period; its "period" is the day itself, which is
+ * when an event happening today would be judged.
+ *
+ * `governing` is null when no row's window covers the day (a chain written to
+ * start later), and `next` is then the row that starts it. `next` is the row
+ * whose FIRST GOVERNED PERIOD (`firstPeriodGoverned`) comes soonest among the
+ * rows opening after the day's period begins, and `nextFirstPeriod` is that
+ * period's start: the day a screen means by "from April 2027". Picking by
+ * the cutover alone named a row whose window holds no period at all, and
+ * named the cutover's month for a change that waits for the next quarter.
+ *
+ * Windows only. A RETIRED row is read like any other, because the generator
+ * dates nothing under it and hiding it would say the row before it goes on
+ * for ever; what each row does is `coverageOf`, which the wire carries beside
+ * both (review, 2026-09-26).
+ */
+export function chainOnDay<T extends ObligationTemplate>(
+  chain: readonly T[],
+  day: IsoDate,
+): ChainOnDay<T> {
+  const periodStart = (t: T): IsoDate =>
+    periodsBetween(t.recurrence, t.fiscalYearStartMonth, day, day)[0]?.start ?? day;
+  // Oldest window first, so two rows claiming one period (which 0057's
+  // half-open windows are there to prevent) resolve to the later one, as the
+  // chain's own order would.
+  const ordered = [...chain].sort((a, b) =>
+    (a.effectiveFrom ?? "").localeCompare(b.effectiveFrom ?? "") || a.id.localeCompare(b.id),
+  );
+  const governing = ordered.filter((t) => governsPeriod(t, periodStart(t))).at(-1) ?? null;
+  let next: T | null = null;
+  let nextFirstPeriod: IsoDate | null = null;
+  for (const t of ordered) {
+    if (t.effectiveFrom === null || t.effectiveFrom <= periodStart(t)) continue;
+    const first = firstPeriodGoverned(t);
+    if (first === null) continue;
+    // `<=`, so a tie goes to the later window, as `governing` does.
+    if (nextFirstPeriod === null || first <= nextFirstPeriod) {
+      next = t;
+      nextFirstPeriod = first;
+    }
+  }
+  return { governing, next, nextFirstPeriod };
 }
 
 // ── the state an obligation is in ──────────────────────────────────────────
@@ -765,6 +952,57 @@ export interface ObligationInstance {
   /** An instant, not a day: unlike `filedOn` this is not a claim about a
    *  statutory date, it is when a person clicked. */
   readonly resolvedAt: string | null;
+  /**
+   * Taken off the calendar because the service that owed it stopped including
+   * it and nothing else the client holds covers it (T6.16, 0309). KEPT and
+   * marked, never deleted: "we thought you owed this, then you stopped buying
+   * the service" is a fact somebody may have to explain. Null is the ordinary
+   * case. Every reader that shows, raises, misses, nudges or escalates a filing
+   * leaves a withdrawn one out; `findById` does not, because restoring one has
+   * to be able to see it.
+   */
+  readonly withdrawnAt: string | null;
+  readonly withdrawnByUserId: string | null;
+  readonly withdrawnReason: WithdrawnReason | null;
+}
+
+/** Why a filing was taken off the calendar. A closed set, so "why" can be
+ *  grouped; one member today (0309). */
+export type WithdrawnReason = "service_unlinked";
+
+/**
+ * Whether removing a rule from a service may take this filing off the
+ * calendar (T6.16, decision 2).
+ *
+ * UNTOUCHED — no task raised, not filed, not decided: the same three columns
+ * the supersede handover tests (0303). A filing somebody started keeps the
+ * date its owner is working to; a filed or decided one is history.
+ * UPCOMING — its statutory date is on or after the FIRM's today (`dayInZone`,
+ * never the server's). A date that has passed is a deadline the client may
+ * have missed, and quietly removing it would hide exactly the row a partner
+ * most needs to see.
+ * NOT WAITING ON A DECISION and NOT SETTLED, by the state's FLAGS, never its
+ * code: a missed filing is a partner's question and stays one.
+ *
+ * Whether ANOTHER linked service of the same client still covers it is the
+ * other half, and only the adapter can answer that, in the same transaction
+ * as the removal. Named here so the SQL, the fake and a reader agree on what
+ * the first half means.
+ */
+export function mayBeWithdrawn(
+  row: Pick<ObligationInstance, "workItemId" | "filedOn" | "resolvedAt" | "statutoryDueOn" | "withdrawnAt">,
+  state: Pick<ObligationState, "isTerminal" | "needsDecision">,
+  firmToday: IsoDate,
+): boolean {
+  return (
+    row.withdrawnAt === null &&
+    row.workItemId === null &&
+    row.filedOn === null &&
+    row.resolvedAt === null &&
+    row.statutoryDueOn >= firmToday &&
+    !state.isTerminal &&
+    !state.needsDecision
+  );
 }
 
 /**

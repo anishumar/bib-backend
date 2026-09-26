@@ -51,6 +51,11 @@ export interface PendingCheck {
   /** The policy's own label, pinned with it, so a queue can say "Manager
    *  review" without resolving a config version per row. */
   readonly policyLabel: string | null;
+  /** The process version the check's JOB is pinned to (T6.15), joined in the
+   *  same query, so the queue can say which review points each check has
+   *  without reading the job behind every row. Null for a job that has not
+   *  pinned one, which a job with a check cannot be. */
+  readonly templateVersionId: string | null;
 }
 
 export interface StepApprovalRepository {
@@ -61,8 +66,15 @@ export interface StepApprovalRepository {
    * against two requests arriving together; the adapter turns that conflict
    * into null, which the caller reads as "already open" rather than as an
    * error.
+   *
+   * `subStepKeys` (T6.15): opened only if the step is still `blocked` and
+   * every one of these sub-steps is marked, as read after the STEP's row is
+   * locked, the lock every sub-step mark takes too. Null otherwise, and the
+   * caller tells the two nulls apart by looking for an open check. This is
+   * what keeps a tick taken back between Done's own read and this insert from
+   * reaching the checker as a list with a line open. Empty means no guard.
    */
-  openIfAbsent(approval: NewStepApproval): Promise<StepApproval | null>;
+  openIfAbsent(approval: NewStepApproval, subStepKeys?: readonly string[]): Promise<StepApproval | null>;
 
   /** The open check on this step, or null. */
   findOpenForStep(tenantId: string, jobStepId: string): Promise<StepApproval | null>;
@@ -75,11 +87,19 @@ export interface StepApprovalRepository {
    * Conditional in SQL for `AgentRunRepository.decide`'s reason: two people can
    * be looking at the same queue and both click. Null means somebody else got
    * there first, and their decision is the one that stands.
+   *
+   * `settled` (T6.15), passed on APPROVE only: decided only if every named
+   * review point of THIS check and every named sub-step of its step is
+   * marked, as read after the check's row is locked, the lock every review
+   * mark takes too. Null otherwise; the caller reads the check again to tell
+   * "somebody answered first" from "a point was taken back". Sending work back
+   * is never guarded, and never passes this.
    */
   decide(
     tenantId: string,
     approvalId: string,
     write: ApprovalDecisionWrite,
+    settled?: { readonly reviewPointKeys: readonly string[]; readonly subStepKeys: readonly string[] },
   ): Promise<StepApproval | null>;
 
   /** Everything waiting to be checked at this firm, oldest first — the queue. */

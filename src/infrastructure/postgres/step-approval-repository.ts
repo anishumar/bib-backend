@@ -18,6 +18,7 @@ import type {
   PendingCheck,
   StepApprovalRepository,
 } from "../../usecase/verification/ports";
+import { lockStepWithSubStepsSettled, openReviewPoints, openSubSteps } from "./step-lines";
 
 interface ApprovalRow {
   id: string;
@@ -42,6 +43,7 @@ interface CheckRow extends ApprovalRow {
   step_label: string;
   submitted_by_name: string | null;
   submitted_by_email: string | null;
+  template_version_id: string | null;
 }
 
 const COLUMNS =
@@ -92,6 +94,9 @@ function toCheck(r: CheckRow): PendingCheck {
     // two rows can legitimately be pinned to different versions of the same
     // rule.
     policyLabel: null,
+    // The job's pinned process (T6.15), so the use case can say which review
+    // points each row has without reading the job behind every row.
+    templateVersionId: r.template_version_id,
   };
 }
 
@@ -108,9 +113,21 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
    *
    * Returns null when nothing was inserted, which the caller reads as "already
    * waiting" and not as an error.
+   *
+   * WITH `subStepKeys` (T6.15) the STEP's row is locked first and the check
+   * opens only if the step is still waiting and every listed sub-step is
+   * marked, read after the lock (`step-lines.ts`). The step was moved to
+   * "submitted" by its own transition a moment earlier, and this is the write
+   * that closes the list to marks, so this is where the list has to be true.
    */
-  async openIfAbsent(approval: NewStepApproval): Promise<StepApproval | null> {
+  async openIfAbsent(approval: NewStepApproval, subStepKeys: readonly string[] = []): Promise<StepApproval | null> {
     return withTenant(this.app, approval.tenantId, async (db) => {
+      if (
+        subStepKeys.length > 0 &&
+        !(await lockStepWithSubStepsSettled(db, approval.jobStepId, "blocked", subStepKeys))
+      ) {
+        return null;
+      }
       const [row] = await db<ApprovalRow[]>`
         INSERT INTO delivery.step_approval
           (id, tenant_id, job_id, job_step_id, policy_version_id, policy_key)
@@ -153,13 +170,33 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
    * first's answer, and that answer is part of an audit record.
    *
    * Null means somebody got there first. Not an error — their decision stands.
+   *
+   * WITH `settled` (T6.15, Approve only) the CHECK's row is locked first, the
+   * lock every review mark takes, and it is decided only if every listed
+   * review point of this check and every listed sub-step of its step is
+   * marked, read after the lock. The sub-steps cannot move while the check is
+   * pending (their marks refuse a step with one), so that half is a wall under
+   * a wall, for a mark written by something other than the service.
    */
   async decide(
     tenantId: string,
     approvalId: string,
     write: ApprovalDecisionWrite,
+    settled?: { readonly reviewPointKeys: readonly string[]; readonly subStepKeys: readonly string[] },
   ): Promise<StepApproval | null> {
     return withTenant(this.app, tenantId, async (db) => {
+      if (settled !== undefined && settled.reviewPointKeys.length + settled.subStepKeys.length > 0) {
+        const [held] = await db<{ job_step_id: string }[]>`
+          SELECT job_step_id FROM delivery.step_approval
+          WHERE id = ${approvalId} AND decision = 'pending'
+          FOR NO KEY UPDATE
+        `;
+        if (!held) return null;
+        const open =
+          (await openReviewPoints(db, approvalId, settled.reviewPointKeys)) +
+          (await openSubSteps(db, held.job_step_id, settled.subStepKeys));
+        if (open > 0) return null;
+      }
       const [row] = await db<ApprovalRow[]>`
         UPDATE delivery.step_approval SET
           decision   = ${write.decision},
@@ -187,9 +224,11 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
                a.policy_version_id, a.policy_key, a.decision, a.notes,
                a.decided_by, a.decided_at,
                s.step_key, s.label AS step_label,
-               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email
+               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email,
+               j.template_version_id
         FROM delivery.step_approval a
         JOIN delivery.job_step s ON s.id = a.job_step_id
+        JOIN delivery.job j ON j.id = a.job_id
         LEFT JOIN tenancy.user_account u ON u.id = a.submitted_by
         WHERE a.decision = 'pending'
         ORDER BY a.submitted_at
@@ -209,9 +248,11 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
                a.policy_version_id, a.policy_key, a.decision, a.notes,
                a.decided_by, a.decided_at,
                s.step_key, s.label AS step_label,
-               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email
+               u.display_name AS submitted_by_name, u.email::text AS submitted_by_email,
+               j.template_version_id
         FROM delivery.step_approval a
         JOIN delivery.job_step s ON s.id = a.job_step_id
+        JOIN delivery.job j ON j.id = a.job_id
         LEFT JOIN tenancy.user_account u ON u.id = a.submitted_by
         WHERE a.job_id = ${jobId}
         ORDER BY a.submitted_at

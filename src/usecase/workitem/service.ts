@@ -997,7 +997,10 @@ export class WorkItemService {
     //
     // A PERIOD task asks the narrower question. Its row is completable and
     // dated, so the thirteenth-row argument does not apply; what would be
-    // wrong is skipping September's bookkeeping because the company files GST.
+    // wrong is skipping September's bookkeeping because the company files GST,
+    // or because the bookkeeping service itself carries TDS: a service with a
+    // process of its own keeps its month's task, and only a service that IS
+    // its filings is skipped (`filingEngagements`, the T6.16 follow-up).
     const covered = period
       ? await this.deps.obligations.filingEngagements(tenantId, engagementIds)
       : await this.deps.obligations.coveredEngagements(tenantId, engagementIds);
@@ -1088,7 +1091,6 @@ export class WorkItemService {
     input: {
       readonly entityPartyId: string;
       readonly engagementId: string | null;
-      readonly serviceEntryId: string | null;
       readonly title: string;
       readonly description: string | null;
       readonly dueOn: string;

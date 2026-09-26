@@ -5,12 +5,13 @@
 // work-item fakes do. A stub that recorded "createIfAbsent was called twice"
 // could not have proved the acceptance line, because the whole claim is that
 // the SECOND call changes nothing — and only a store can show that.
-import type {
-  DueRuleException,
-  ObligationInstance,
-  ObligationState,
-  ObligationTemplate,
-  ResolutionOption,
+import {
+  mayBeWithdrawn,
+  type DueRuleException,
+  type ObligationInstance,
+  type ObligationState,
+  type ObligationTemplate,
+  type ResolutionOption,
 } from "../domain/obligation/model";
 import type { Actor } from "../domain/ledger/model";
 import type {
@@ -23,6 +24,7 @@ import type {
   DecisionRow,
   MissableObligation,
   NewException,
+  NewLinkOnCreate,
   NewObligationInstance,
   NewObligationState,
   NewObligationTemplate,
@@ -32,17 +34,23 @@ import type {
   ObligationStatePatch,
   ObligationStateRepository,
   ObligationTemplateRepository,
+  ProposalOutcome,
   RaisableObligation,
   ResolutionOptionPatch,
   ResolutionOptionRepository,
   RestatedInstance,
+  RestoredInstance,
+  RuleServiceLinkRepository,
   ServiceDirectory,
+  ServiceRef,
   SpawnedInstance,
   SupersedeResult,
   TemplatePatch,
   TemplateRecord,
   TenantDirectory,
+  UnlinkOutcome,
   UnstartedInstance,
+  UsedInService,
   WorkItemRaiser,
 } from "../usecase/obligation/ports";
 
@@ -54,6 +62,11 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
   /** The calendar, for the handover `supersede` makes in the same transaction
    *  (0303). Unset, a supersession hands nothing over. */
   instances?: FakeObligationInstanceRepo;
+  /** The catalogue links (0309), for `usedIn`, for `listGenerating`'s link
+   *  test and for links written in the same act as the rule. Unset, every rule
+   *  is on no service, which is decision 1's reading of "nothing linked", and
+   *  a create HANDED links refuses rather than dropping them unseen. */
+  links?: FakeRuleServiceLinks;
 
   create(t: NewObligationTemplate): Promise<ObligationTemplate> {
     return this.createIfAbsent(t).then((r) => {
@@ -62,7 +75,10 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     });
   }
 
-  createIfAbsent(t: NewObligationTemplate): Promise<ObligationTemplate | null> {
+  createIfAbsent(
+    t: NewObligationTemplate,
+    links: readonly NewLinkOnCreate[] = [],
+  ): Promise<ObligationTemplate | null> {
     // The rule's own identity, exactly as the unique key defines it.
     const held = this.rows.find(
       (r) =>
@@ -72,9 +88,40 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
         r.rulePack === t.rulePack,
     );
     if (held) return Promise.resolve(null);
-    const row: ObligationTemplate = { ...t, isActive: true };
+    // 0303's trigger, modelled: a rule that replaces nothing is its own chain,
+    // and a successor inherits its predecessor's.
+    const lineageId =
+      t.supersedesId === null ? t.id : (this.rows.find((r) => r.id === t.supersedesId)?.lineageId ?? t.id);
+    // A harness with no link store cannot write the links it is handed, and
+    // answering success anyway is a rule that reads as linked and is on no
+    // service. Refused before anything is written, as the adapter's one
+    // transaction would leave nothing behind.
+    const store = this.links;
+    if (links.length > 0 && !store) {
+      return Promise.reject(
+        new Error("FakeObligationTemplateRepo was handed links but has no link store: wire `links`"),
+      );
+    }
+    const row: ObligationTemplate = { ...t, lineageId, isActive: true };
     this.rows.push(row);
+    // The links in the SAME act, as the adapter writes them in one transaction.
+    for (const link of links) {
+      store?.write(t.tenantId, {
+        id: link.id,
+        lineageId,
+        serviceEntryId: link.serviceEntryId,
+        byUserId: link.byUserId,
+      });
+    }
     return Promise.resolve(row);
+  }
+
+  chain(tenantId: string, lineageId: string): Promise<readonly ObligationTemplate[]> {
+    return Promise.resolve(
+      this.rows
+        .filter((r) => r.tenantId === tenantId && r.lineageId === lineageId)
+        .sort((a, b) => (a.effectiveFrom ?? "").localeCompare(b.effectiveFrom ?? "")),
+    );
   }
 
   supersede(
@@ -102,6 +149,8 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
     const successor: ObligationTemplate = {
       ...t,
       supersedesId: predecessorId,
+      // The chain carries over, and with it every service link (0309).
+      lineageId: predecessor.lineageId,
       isActive: true,
     };
     this.rows[i] = { ...predecessor, effectiveTo: t.effectiveFrom };
@@ -118,6 +167,9 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
       if (at < 0 || !held) continue;
       if (held.templateId !== predecessorId || held.periodStart < cutover) continue;
       if (held.workItemId !== null || held.filedOn !== null || held.resolvedAt !== null) continue;
+      // A withdrawn row stays where it is (0309); the generator re-pins it if
+      // it is ever restored.
+      if (held.withdrawnAt !== null) continue;
       calendar[at] = {
         ...held,
         templateId: t.id,
@@ -127,23 +179,14 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
       handedOver.push(held.id);
     }
     const kept = calendar.filter(
-      (r) => r.templateId === predecessorId && r.periodStart >= cutover,
+      (r) => r.templateId === predecessorId && r.periodStart >= cutover && r.withdrawnAt === null,
     ).length;
     return Promise.resolve({ rule: successor, handedOver, kept });
   }
 
-  /** The chain a rule belongs to, as 0303's trigger derives it: the first rule
-   *  it replaces, walking `supersedesId` back. */
+  /** The chain a rule belongs to, as 0303's trigger derived it on insert. */
   lineageOf(templateId: string): string {
-    let at = this.rows.find((r) => r.id === templateId);
-    let seen = 0;
-    while (at?.supersedesId && seen < 100) {
-      const up = this.rows.find((r) => r.id === at?.supersedesId);
-      if (!up) break;
-      at = up;
-      seen += 1;
-    }
-    return at?.id ?? templateId;
+    return this.rows.find((r) => r.id === templateId)?.lineageId ?? templateId;
   }
 
   findById(tenantId: string, templateId: string): Promise<ObligationTemplate | null> {
@@ -168,8 +211,11 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
         .map((template) => ({
           template,
           exceptions: this.exceptions?.forTemplate(template.id) ?? [],
-          serviceName: null,
-          instanceCount: 0,
+          usedIn: this.links?.namedFor(tenantId, template.lineageId) ?? [],
+          // Every row ever, withdrawn ones included — the adapter's count.
+          instanceCount:
+            this.instances?.rows.filter((i) => i.tenantId === tenantId && i.templateId === template.id)
+              .length ?? 0,
         })),
     );
   }
@@ -177,15 +223,26 @@ export class FakeObligationTemplateRepo implements ObligationTemplateRepository 
   listGenerating(
     tenantId: string,
   ): Promise<
-    readonly { template: ObligationTemplate; exceptions: readonly DueRuleException[] }[]
+    readonly {
+      template: ObligationTemplate;
+      exceptions: readonly DueRuleException[];
+      linkedServices: number;
+    }[]
   > {
+    // The adapter's WHERE, modelled: active, a formula, confirmed, and a chain
+    // on at least one service. The event test stays with `generatesDates`.
     return Promise.resolve(
       this.rows
-        .filter((r) => r.tenantId === tenantId && r.isActive && r.dueRule !== null)
+        .filter(
+          (r) =>
+            r.tenantId === tenantId && r.isActive && r.dueRule !== null && r.status === "confirmed",
+        )
         .map((template) => ({
           template,
           exceptions: this.exceptions?.forTemplate(template.id) ?? [],
-        })),
+          linkedServices: this.links?.namedFor(tenantId, template.lineageId).length ?? 0,
+        }))
+        .filter((r) => r.linkedServices > 0),
     );
   }
 
@@ -387,22 +444,79 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     return this.templates?.lineageOf(templateId) ?? templateId;
   }
 
-  createIfAbsent(rows: readonly NewObligationInstance[]): Promise<readonly SpawnedInstance[]> {
+  /** The chain a calendar row's rule belongs to — what the link store keys
+   *  its withdrawal on. */
+  lineageFor(templateId: string): string {
+    return this.lineage(templateId);
+  }
+
+  /** The links and the engagements, for the write's own link test (0309).
+   *  Either unset, the test is skipped: an unwired harness proposes only what
+   *  it means to write. */
+  links?: FakeRuleServiceLinks;
+  engagements?: FakeCalendarSource;
+
+  /** `STILL_LINKED` in the adapter: the proposal's chain still has a live link
+   *  to its engagement's service at the moment of the write. */
+  private stillLinked(r: NewObligationInstance): boolean {
+    if (r.engagementId === null || !this.links || !this.engagements) return true;
+    const subject = this.engagements.subjects.find((s) => s.engagementId === r.engagementId);
+    if (!subject) return false;
+    return this.links.isLive(r.tenantId, this.lineage(r.templateId), subject.serviceEntryId);
+  }
+
+  createIfAbsent(rows: readonly NewObligationInstance[]): Promise<ProposalOutcome> {
     const made: SpawnedInstance[] = [];
+    const restored: RestoredInstance[] = [];
     for (const r of rows) {
+      if (!this.stillLinked(r)) continue;
       // THE RE-RUN KEY, and the whole point of this fake being a store: the
       // second proposal of the same (lineage, entity, period) must produce
       // nothing at all — including a period an earlier rule in the chain
       // already holds.
       const lineage = this.lineage(r.templateId);
-      const held = this.rows.some(
+      const at = this.rows.findIndex(
         (x) =>
           x.tenantId === r.tenantId &&
           this.lineage(x.templateId) === lineage &&
           x.entityPartyId === r.entityPartyId &&
           x.periodStart === r.periodStart,
       );
-      if (held) continue;
+      const held = this.rows[at];
+      if (held) {
+        // A WITHDRAWN untouched row comes back in place (0309): same id, the
+        // proposal's rule, engagement and dates.
+        if (
+          held.withdrawnAt !== null &&
+          held.workItemId === null &&
+          held.filedOn === null &&
+          held.resolvedAt === null
+        ) {
+          const wasWithdrawnAt = held.withdrawnAt;
+          this.rows[at] = {
+            ...held,
+            templateId: r.templateId,
+            engagementId: r.engagementId,
+            statutoryDueOn: r.statutoryDueOn,
+            internalTargetOn: r.internalTargetOn,
+            stateId: r.stateId,
+            withdrawnAt: null,
+            withdrawnByUserId: null,
+            withdrawnReason: null,
+          };
+          restored.push({
+            id: held.id,
+            templateId: r.templateId,
+            entityPartyId: held.entityPartyId,
+            engagementId: r.engagementId,
+            periodLabel: held.periodLabel,
+            statutoryDueOn: r.statutoryDueOn,
+            internalTargetOn: r.internalTargetOn,
+            withdrawnAt: wasWithdrawnAt,
+          });
+        }
+        continue;
+      }
       this.rows.push({
         ...r,
         workItemId: null,
@@ -410,17 +524,21 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         resolutionOptionId: null,
         resolutionReason: null,
         resolvedAt: null,
+        withdrawnAt: null,
+        withdrawnByUserId: null,
+        withdrawnReason: null,
       });
       made.push({
         id: r.id,
         templateId: r.templateId,
         entityPartyId: r.entityPartyId,
+        engagementId: r.engagementId,
         periodLabel: r.periodLabel,
         statutoryDueOn: r.statutoryDueOn,
         internalTargetOn: r.internalTargetOn,
       });
     }
-    return Promise.resolve(made);
+    return Promise.resolve({ created: made, restored });
   }
 
   findById(tenantId: string, obligationId: string): Promise<ObligationInstance | null> {
@@ -432,7 +550,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
   calendar(tenantId: string, _query: CalendarQuery): Promise<readonly CalendarRow[]> {
     return Promise.resolve(
       this.rows
-        .filter((r) => r.tenantId === tenantId)
+        .filter((r) => r.tenantId === tenantId && r.withdrawnAt === null)
         .map(
           (r): CalendarRow => ({
             id: r.id,
@@ -474,6 +592,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             r.tenantId === tenantId &&
             r.workItemId === null &&
             r.filedOn === null &&
+            r.withdrawnAt === null &&
             r.internalTargetOn <= asOf,
         )
         .slice(0, limit)
@@ -485,19 +604,20 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
           statutoryDueOn: r.statutoryDueOn,
           templateName: "Filing",
           authority: null,
-          serviceEntryId: null,
           entityName: null,
         })),
     );
   }
 
-  attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<void> {
+  attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
     const row = this.rows[i];
-    // `WHERE work_item_id IS NULL`, modelled — a redelivered raise is a no-op
-    // rather than a second task pointing at the same filing.
-    if (row && row.workItemId === null) this.rows[i] = { ...row, workItemId };
-    return Promise.resolve();
+    // `WHERE work_item_id IS NULL AND withdrawn_at IS NULL`, modelled — a
+    // redelivered raise is a no-op rather than a second task pointing at the
+    // same filing, and a withdrawn filing gets no task.
+    if (!row || row.workItemId !== null || row.withdrawnAt !== null) return Promise.resolve(false);
+    this.rows[i] = { ...row, workItemId };
+    return Promise.resolve(true);
   }
 
   findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null> {
@@ -551,6 +671,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
         if (r.statutoryDueOn >= asOf) return false;
         if (r.filedOn !== null) return false;
         if (r.resolvedAt !== null) return false;
+        if (r.withdrawnAt !== null) return false;
         if (floor !== null && r.statutoryDueOn < floor) return false;
         const st = this.states.find((x) => x.id === r.stateId);
         return st !== undefined && !st.isTerminal && !st.needsDecision;
@@ -579,6 +700,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     // sweep over the same row write no second event.
     const st = this.states.find((x) => x.id === held.stateId);
     if (held.filedOn !== null || held.resolvedAt !== null) return Promise.resolve(false);
+    if (held.withdrawnAt !== null) return Promise.resolve(false);
     if (st === undefined || st.isTerminal || st.needsDecision) return Promise.resolve(false);
     this.rows[i] = { ...held, stateId };
     return Promise.resolve(true);
@@ -589,6 +711,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
       .filter((r) => {
         if (r.tenantId !== tenantId) return false;
         if (r.resolvedAt !== null || r.filedOn !== null) return false;
+        if (r.withdrawnAt !== null) return false;
         const st = this.states.find((x) => x.id === r.stateId);
         return st !== undefined && st.needsDecision;
       })
@@ -645,9 +768,10 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
             r.tenantId === tenantId &&
             r.templateId === templateId &&
             // Only what nobody has started — a task on a desk keeps the date
-            // its owner is working to.
+            // its owner is working to — and never a withdrawn row.
             r.workItemId === null &&
-            r.filedOn === null,
+            r.filedOn === null &&
+            r.withdrawnAt === null,
         )
         .map((r) => ({
           id: r.id,
@@ -668,7 +792,7 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
       if (i < 0 || !held) continue;
       // The same guard the SQL carries: the ids came from a snapshot, and
       // between that read and this write somebody may have picked the task up.
-      if (held.workItemId !== null || held.filedOn !== null) continue;
+      if (held.workItemId !== null || held.filedOn !== null || held.withdrawnAt !== null) continue;
       this.rows[i] = {
         ...held,
         statutoryDueOn: next.statutoryDueOn,
@@ -679,41 +803,60 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     return Promise.resolve(moved);
   }
 
-
   countFor(tenantId: string, templateId: string): Promise<number> {
     return Promise.resolve(
       this.rows.filter((r) => r.tenantId === tenantId && r.templateId === templateId).length,
     );
   }
+
+  countLiveFor(tenantId: string, templateId: string): Promise<number> {
+    return Promise.resolve(
+      this.rows.filter(
+        (r) => r.tenantId === tenantId && r.templateId === templateId && r.withdrawnAt === null,
+      ).length,
+    );
+  }
 }
 
 export class FakeCalendarSource implements CalendarSource {
-  /** Every entity the fake knows about, with the rule facts a subject is
-   *  matched on. A test adds these rather than a database. */
+  /** Every LIVE engagement the fake knows about, with the facts a subject is
+   *  matched on: the entity's country and type, and the SERVICE the
+   *  engagement's letter line pinned. A test adds these rather than a
+   *  database. */
   readonly subjects: (CalendarSubject & {
     readonly jurisdiction: string;
     readonly entityType: string | null;
-    readonly serviceEntryId: string | null;
   })[] = [];
   readonly gapRows: CoverageGap[] = [];
+  /** The catalogue links (0309). Unset, nothing is linked, so nothing is
+   *  reached: decision 1, exactly as the SQL answers it. */
+  links?: FakeRuleServiceLinks;
 
   subjectsFor(
-    _tenantId: string,
+    tenantId: string,
     rule: {
+      readonly lineageId: string;
       readonly jurisdiction: string;
       readonly entityType: string | null;
-      readonly serviceEntryId: string | null;
     },
   ): Promise<readonly CalendarSubject[]> {
     return Promise.resolve(
       this.subjects
         .filter((s) => s.jurisdiction === rule.jurisdiction)
         .filter((s) => rule.entityType === null || s.entityType === rule.entityType)
-        .filter((s) => rule.serviceEntryId === null || s.serviceEntryId === rule.serviceEntryId)
+        // THE LINK: the chain is on the service this engagement bought.
+        .filter((s) => this.links?.isLive(tenantId, rule.lineageId, s.serviceEntryId) ?? false)
+        // The adapter's promised order, so the fake keeps the same first one.
+        .sort(
+          (a, b) =>
+            a.effectiveFrom.localeCompare(b.effectiveFrom) ||
+            a.engagementId.localeCompare(b.engagementId),
+        )
         .map((s) => ({
           entityPartyId: s.entityPartyId,
           engagementId: s.engagementId,
           effectiveFrom: s.effectiveFrom,
+          serviceEntryId: s.serviceEntryId,
         })),
     );
   }
@@ -725,9 +868,221 @@ export class FakeCalendarSource implements CalendarSource {
 
 export class FakeObligationServices implements ServiceDirectory {
   readonly keys = new Map<string, string>();
+  /** A service's display name, for `usedIn`. Absent falls back to null, as a
+   *  service with no version reads. */
+  readonly names = new Map<string, string>();
 
-  serviceKey(_tenantId: string, entryId: string): Promise<string | null> {
-    return Promise.resolve(this.keys.get(entryId) ?? null);
+  findService(_tenantId: string, entryId: string): Promise<ServiceRef | null> {
+    const key = this.keys.get(entryId);
+    return Promise.resolve(key === undefined ? null : { key, name: this.names.get(entryId) ?? null });
+  }
+}
+
+interface FakeLinkRow {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly lineageId: string;
+  readonly serviceEntryId: string;
+  readonly linkedAt: string;
+  readonly linkedByUserId: string | null;
+  unlinkedAt: string | null;
+  unlinkedByUserId: string | null;
+}
+
+/**
+ * Which catalogue services owe which filing (0309), as a STORE.
+ *
+ * Its `unlink` re-implements the adapter's withdrawal rule in TypeScript,
+ * using the domain's `mayBeWithdrawn` for the first half and the calendar's
+ * subjects for "another linked service still covers it", so a unit test over
+ * it is exactly as honest as the mirror is. The integration test runs the SQL.
+ */
+export class FakeRuleServiceLinks implements RuleServiceLinkRepository {
+  readonly rows: FakeLinkRow[] = [];
+  /** Service keys and names, for `usedIn`, and the catalogue 0309's service
+   *  key is checked against: an entry it does not know is not a service. */
+  services?: FakeObligationServices;
+  /** The live engagements (which entity, which service), for the cover test. */
+  calendar?: FakeCalendarSource;
+  /** The calendar rows and their states, which `unlink` withdraws from. */
+  instances?: FakeObligationInstanceRepo;
+  /** The rules, for 0309's root-lineage key. Unset, that key is not modelled:
+   *  every harness that writes links wires it. */
+  templates?: FakeObligationTemplateRepo;
+  private n = 0;
+
+  /** Monotonic instants, so `linkedAt` orders the way the database's would. */
+  private instant(): string {
+    this.n += 1;
+    return new Date(Date.UTC(2026, 0, 1, 0, 0, this.n)).toISOString();
+  }
+
+  isLive(tenantId: string, lineageId: string, serviceEntryId: string): boolean {
+    return this.rows.some(
+      (l) =>
+        l.tenantId === tenantId &&
+        l.lineageId === lineageId &&
+        l.serviceEntryId === serviceEntryId &&
+        l.unlinkedAt === null,
+    );
+  }
+
+  namedFor(tenantId: string, lineageId: string): readonly UsedInService[] {
+    return this.rows
+      .filter((l) => l.tenantId === tenantId && l.lineageId === lineageId && l.unlinkedAt === null)
+      .map((l) => ({
+        serviceEntryId: l.serviceEntryId,
+        serviceKey: this.services?.keys.get(l.serviceEntryId) ?? l.serviceEntryId,
+        serviceName: this.services?.names.get(l.serviceEntryId) ?? null,
+        linkedAt: l.linkedAt,
+      }));
+  }
+
+  /**
+   * 0309's keys, modelled, and then the partial unique index: one LIVE link
+   * per (chain, service).
+   *
+   * The two composite keys refuse by their own names, as the adapter's
+   * insert does, so a caller that passes a rule's own id where the CHAIN's
+   * belongs (a successor's id is not a lineage) or links something the
+   * catalogue does not hold as a service fails here and not only against
+   * Postgres, where it surfaces as a 500.
+   */
+  write(
+    tenantId: string,
+    input: { id: string; lineageId: string; serviceEntryId: string; byUserId: string | null },
+  ): boolean {
+    if (
+      this.templates &&
+      !this.templates.rows.some(
+        (t) => t.tenantId === tenantId && t.id === input.lineageId && t.lineageId === input.lineageId,
+      )
+    ) {
+      throw new Error("obligation_rule_service_lineage_root_fkey");
+    }
+    if (this.services && !this.services.keys.has(input.serviceEntryId)) {
+      throw new Error("obligation_rule_service_service_fkey");
+    }
+    if (this.isLive(tenantId, input.lineageId, input.serviceEntryId)) return false;
+    this.rows.push({
+      id: input.id,
+      tenantId,
+      lineageId: input.lineageId,
+      serviceEntryId: input.serviceEntryId,
+      linkedAt: this.instant(),
+      linkedByUserId: input.byUserId,
+      unlinkedAt: null,
+      unlinkedByUserId: null,
+    });
+    return true;
+  }
+
+  usedIn(tenantId: string, lineageId: string): Promise<readonly UsedInService[]> {
+    return Promise.resolve(this.namedFor(tenantId, lineageId));
+  }
+
+  link(
+    tenantId: string,
+    input: {
+      readonly id: string;
+      readonly lineageId: string;
+      readonly serviceEntryId: string;
+      readonly byUserId: string | null;
+    },
+  ): Promise<boolean> {
+    try {
+      return Promise.resolve(this.write(tenantId, { ...input }));
+    } catch (e: unknown) {
+      return Promise.reject(e instanceof Error ? e : new Error(String(e)));
+    }
+  }
+
+  unlink(
+    tenantId: string,
+    input: {
+      readonly lineageId: string;
+      readonly serviceEntryId: string;
+      readonly byUserId: string | null;
+      readonly firmToday: string;
+    },
+  ): Promise<UnlinkOutcome | null> {
+    const live = this.rows.find(
+      (l) =>
+        l.tenantId === tenantId &&
+        l.lineageId === input.lineageId &&
+        l.serviceEntryId === input.serviceEntryId &&
+        l.unlinkedAt === null,
+    );
+    if (!live) return Promise.resolve(null);
+    // 0309's both-or-neither CHECK: an unlink is a person's act.
+    if (input.byUserId === null) {
+      return Promise.reject(new Error("obligation_rule_service_unlinked_chk"));
+    }
+    live.unlinkedAt = this.instant();
+    live.unlinkedByUserId = input.byUserId;
+
+    const subjects = this.calendar?.subjects ?? [];
+    const serviceOf = (engagementId: string | null) =>
+      subjects.find((s) => s.engagementId === engagementId)?.serviceEntryId ?? null;
+    const instances = this.instances;
+    const out = {
+      withdrawn: 0,
+      kept: 0,
+      keptStarted: 0,
+      keptPastDue: 0,
+      keptCoveredElsewhere: 0,
+      repointed: 0,
+    };
+    if (!instances) return Promise.resolve(out);
+
+    for (let i = 0; i < instances.rows.length; i += 1) {
+      const row = instances.rows[i];
+      if (!row || row.tenantId !== tenantId || row.withdrawnAt !== null) continue;
+      if (instances.lineageFor(row.templateId) !== input.lineageId) continue;
+      if (serviceOf(row.engagementId) !== input.serviceEntryId) continue;
+      const state = instances.states.find((s) => s.id === row.stateId);
+      if (!state) continue;
+      // Settled history is not counted, as the SQL leaves it out.
+      if (state.isTerminal && row.statutoryDueOn < input.firmToday) continue;
+
+      // Another ACTIVE engagement of the same entity whose service still
+      // carries this chain, AND which had started by the row's statutory
+      // date (the generator's own floor), earliest first, then by id.
+      const cover = subjects
+        .filter(
+          (s) =>
+            s.entityPartyId === row.entityPartyId &&
+            s.effectiveFrom <= row.statutoryDueOn &&
+            this.isLive(tenantId, input.lineageId, s.serviceEntryId),
+        )
+        .sort(
+          (a, b) =>
+            a.effectiveFrom.localeCompare(b.effectiveFrom) ||
+            a.engagementId.localeCompare(b.engagementId),
+        )[0];
+      const touched = row.workItemId !== null || row.filedOn !== null || row.resolvedAt !== null;
+      const eligible = mayBeWithdrawn(row, state, input.firmToday);
+
+      if (eligible && !cover) {
+        instances.rows[i] = {
+          ...row,
+          withdrawnAt: this.instant(),
+          withdrawnByUserId: input.byUserId,
+          withdrawnReason: "service_unlinked",
+        };
+        out.withdrawn += 1;
+        continue;
+      }
+      if (eligible) out.keptCoveredElsewhere += 1;
+      else if (touched) out.keptStarted += 1;
+      else out.keptPastDue += 1;
+      if (!touched && !state.isTerminal && cover && cover.engagementId !== row.engagementId) {
+        instances.rows[i] = { ...row, engagementId: cover.engagementId };
+        out.repointed += 1;
+      }
+    }
+    out.kept = out.keptStarted + out.keptPastDue + out.keptCoveredElsewhere;
+    return Promise.resolve(out);
   }
 }
 
@@ -747,7 +1102,6 @@ export class FakeWorkItemRaiser implements WorkItemRaiser {
     input: {
       readonly entityPartyId: string;
       readonly engagementId: string | null;
-      readonly serviceEntryId: string | null;
       readonly title: string;
       readonly description: string | null;
       readonly dueOn: string;

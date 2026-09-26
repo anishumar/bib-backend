@@ -1,7 +1,13 @@
 // The ports the orchestrator needs from the world — the seams (T2.7). Owned by
 // this use case, stated in our vocabulary; adapters in infrastructure/ implement
 // them.
-import type { JobStep, StepStatus } from "../../domain/orchestrator/model";
+import type {
+  CheckListKind,
+  JobStep,
+  MarkOutcome,
+  StepCheckMark,
+  StepStatus,
+} from "../../domain/orchestrator/model";
 import type {
   AgentDecision,
   ConfidenceTiers,
@@ -70,12 +76,22 @@ export interface JobStepRepository {
    * start it and the second would overwrite the first's actor and timestamps.
    * Returns null when the row had already moved, which the caller reads as
    * "somebody else got there" and not as an error.
+   *
+   * `subStepKeys` (T6.15): the move is made only if every one of these
+   * sub-steps is marked, done or not applicable, AS READ AFTER THE STEP'S ROW
+   * IS LOCKED, and null comes back otherwise. The caller's own read of the
+   * marks is for the sentence it shows; this is the one the move stands on,
+   * because a tick taken back between that read and this write would otherwise
+   * finish a step with a line open. Every mark write takes the same row lock
+   * (`StepCheckRepository`), so the two cannot interleave. Empty means no
+   * guard, and costs nothing.
    */
   transition(
     tenantId: string,
     stepId: string,
     expect: StepStatus,
     to: StepTransition,
+    subStepKeys?: readonly string[],
   ): Promise<JobStep | null>;
 
   /** Move a step to somebody's desk, or off everybody's (null). Refused in
@@ -145,6 +161,13 @@ export interface TemplateStep {
     readonly maxGradeRank: number | null;
     readonly maxGradeCode: string | null;
   } | null;
+  /** The step's sub-steps, ticked by whoever does it before it can be marked
+   *  done (T6.15). Empty for every step published before the field existed,
+   *  which is what those processes meant: the step is ticked as a whole. */
+  readonly checklist: readonly { readonly key: string; readonly label: string }[];
+  /** The step's review points, ticked by whoever CHECKS it before it can be
+   *  approved (T6.15). Empty on a step that names no check. */
+  readonly reviewPoints: readonly { readonly key: string; readonly label: string }[];
 }
 
 export interface ResolvedTemplate {
@@ -351,4 +374,89 @@ export interface AgentRunRepository {
  */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * One mark to write on one line of a step's list (T6.15).
+ *
+ * `outcome` is never null here: unticking is `clear`, which never INSERTS a row
+ * (an absent row and a cleared one both read as open, and a row for a line
+ * nobody touched would be a record of nothing).
+ */
+export interface NewStepCheckMark {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly jobStepId: string;
+  /** The check a REVIEW mark is made under; null for a sub-step. */
+  readonly stepApprovalId: string | null;
+  readonly list: CheckListKind;
+  readonly itemKey: string;
+  /** Copied from the pinned template, so the row reads on its own. */
+  readonly label: string;
+  readonly outcome: MarkOutcome;
+  /** The reason, on `not_applicable` only; null on `done`. */
+  readonly note: string | null;
+  readonly markedByUserId: string;
+  readonly markedAt: string;
+}
+
+/** Which line a clear is about: a sub-step of a step, or a review point of one
+ *  check. */
+export interface StepCheckLineRef {
+  readonly tenantId: string;
+  readonly list: CheckListKind;
+  readonly jobStepId: string;
+  readonly stepApprovalId: string | null;
+  readonly itemKey: string;
+}
+
+/**
+ * The marks on a step's two lists (T6.15, `delivery.job_step_check`).
+ *
+ * The READS are whole: every mark on a job in one query, and every mark on a
+ * set of checks in one query, because the job page and the checks queue render
+ * a screenful at once and a lookup per step or per check is the per-row read
+ * this codebase has been caught by six times. Each mark carries the marker's
+ * name from the same query.
+ *
+ * There is no delete, and `bib_app` holds no DELETE grant on the table:
+ * unticking is a row whose outcome is null again, never a row removed, the
+ * arrangement every other record of who-did-what in this schema has.
+ *
+ * ── A WRITE CARRIES ITS OWN PRECONDITION ────────────────────────────────────
+ *
+ * The service checks that a list is open to marks (the step waiting, nothing
+ * waiting to be checked; the check still pending) and then writes, in a later
+ * transaction. Between the two, somebody can press Done, or Approve, and a
+ * mark landing after that would change a list somebody else has already
+ * judged. So both writes check again, in their own transaction, under a row
+ * lock: a SUB-STEP mark locks its step's row, and a REVIEW mark locks its
+ * check's row, which are the rows the moves that read those lists lock too
+ * (`JobStepRepository.transition`, `StepApprovalRepository.openIfAbsent` and
+ * `decide`). A write that finds the list closed writes nothing and says so,
+ * and the service then says why in words.
+ */
+export interface StepCheckRepository {
+  /** Every mark on every step of one job, both lists, every round of every
+   *  check. */
+  listForJob(tenantId: string, jobId: string): Promise<readonly StepCheckMark[]>;
+  /** Every review mark made under these checks. For the firm-wide queue, whose
+   *  rows belong to many jobs. */
+  listForApprovals(tenantId: string, approvalIds: readonly string[]): Promise<readonly StepCheckMark[]>;
+  /**
+   * Write a mark, or overwrite the one already on that line.
+   *
+   * IDEMPOTENT: writing the outcome and the reason the line already has
+   * changes nothing, including who marked it and when. A second click must not
+   * move the record of who ticked it to whoever clicked last.
+   *
+   * Null when the list is no longer open to marks: a sub-step whose step is
+   * not waiting any more or is waiting to be checked (or has just been
+   * approved), a review point whose check is decided. Nothing was written.
+   */
+  upsert(mark: NewStepCheckMark): Promise<StepCheckMark | null>;
+  /** Untick a line: outcome, reason, marker and time all back to null. A line
+   *  with no row, or one already open, is left as it is. False, with nothing
+   *  written, on the same closed lists `upsert` answers null for. */
+  clear(ref: StepCheckLineRef): Promise<boolean>;
 }

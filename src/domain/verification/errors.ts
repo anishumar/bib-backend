@@ -4,6 +4,7 @@
 // string search.
 
 import { INELIGIBILITY_MESSAGES, type IneligibilityReason } from "./model";
+import { namedList } from "../orchestrator/model";
 
 export class VerificationError extends Error {
   constructor(
@@ -23,7 +24,9 @@ export type VerificationErrorCode =
   | "STEP_NOT_CHECKABLE"
   | "REJECTION_NEEDS_A_REASON"
   | "REPORTS_TO_CYCLE"
-  | "REPORTS_TO_NOT_A_COLLEAGUE";
+  | "REPORTS_TO_NOT_A_COLLEAGUE"
+  | "REVIEW_POINT_NOT_FOUND"
+  | "REVIEW_POINTS_OPEN";
 
 /**
  * The refusal this whole task exists to produce.
@@ -104,6 +107,43 @@ export class ReportsToNotAColleague extends VerificationError {
       "REPORTS_TO_NOT_A_COLLEAGUE",
       `${JSON.stringify(userId)} is not an active member of staff at this firm, so nobody can ` +
         `report to them. Identity is global in this product but a reporting line is not.`,
+    );
+  }
+}
+
+// ── review points (T6.15) ───────────────────────────────────────────────────
+
+/** The line named is not a review point of the step this check is about, in
+ *  the process version the job is pinned to. */
+export class ReviewPointNotFound extends VerificationError {
+  constructor(stepKey: string, itemKey: string) {
+    super(
+      "REVIEW_POINT_NOT_FOUND",
+      `Step ${JSON.stringify(stepKey)} has no review point ${JSON.stringify(itemKey)} in the ` +
+        `version of the process this job follows. Reload the check to see its review points.`,
+    );
+  }
+}
+
+/**
+ * THE CHECKER'S GATE (T6.15). Approving is refused while any review point of
+ * THIS check has not been ticked or marked not applicable. Sending the work
+ * back never is, and the sentence says so: the checker who found the problem at
+ * point three must not have to tick the rest to say so.
+ */
+export class ReviewPointsOpen extends VerificationError {
+  constructor(
+    readonly stepKey: string,
+    stepLabel: string,
+    readonly openLabels: readonly string[],
+  ) {
+    const n = openLabels.length;
+    super(
+      "REVIEW_POINTS_OPEN",
+      `${String(n)} ${n === 1 ? "review point" : "review points"} of '${stepLabel}' ` +
+        `${n === 1 ? "is" : "are"} not ticked yet: ${namedList(openLabels)}. ` +
+        `${n === 1 ? "Tick it" : "Tick each one"}, or mark it not applicable with a reason, ` +
+        `before approving. Sending the work back is always allowed.`,
     );
   }
 }

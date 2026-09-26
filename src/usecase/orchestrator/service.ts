@@ -97,12 +97,28 @@ import type { PermissionSource } from "../authz/ports";
 import type { FirmTimeZone, StepDeskResolver } from "./ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { bandLabel, withinBand } from "../../domain/orchestrator/model";
+import type { StepBand } from "../../domain/orchestrator/model";
 import {
   NotStaffHere,
   NotYourStep,
   PerformerOutOfBand,
   StepSettled,
 } from "../../domain/orchestrator/errors";
+// T6.15: a step's own two lists, and the gates they put on Done and Approve.
+import type {
+  CheckListKind,
+  ListTally,
+  MarkOutcome,
+  StepCheckMark,
+} from "../../domain/orchestrator/model";
+import { NOT_APPLICABLE_NOTE_MAX, openLines, tallyOf } from "../../domain/orchestrator/model";
+import {
+  NotApplicableNeedsAReason,
+  SubStepNotFound,
+  SubStepsOpen,
+} from "../../domain/orchestrator/errors";
+import { ReviewPointNotFound, ReviewPointsOpen } from "../../domain/verification/errors";
+import type { StepCheckRepository } from "./ports";
 
 export interface Deps {
   readonly jobs: JobRepository;
@@ -120,6 +136,8 @@ export interface Deps {
   readonly checkers: CheckerDirectory;
   /** Whose desk a job's steps default to (0301). */
   readonly desks: StepDeskResolver;
+  /** The ticks on a step's sub-steps and on a check's review points (T6.15). */
+  readonly stepChecks: StepCheckRepository;
   /** Resolves a role to its permissions, so eligibility can require the same
    *  `work:write` that doing the step required. Shared with the authz service
    *  rather than restated — one notion of what a role carries. */
@@ -131,6 +149,22 @@ export interface Deps {
   readonly events: EventSink;
 }
 
+/**
+ * One line of a step's list as a screen reads it (T6.15): the label from the
+ * PINNED template, in the template's order, and who settled it and when.
+ * `outcome` null is open, whether nobody ever touched it or somebody ticked it
+ * and took the tick back.
+ */
+export interface CheckLineView {
+  readonly key: string;
+  readonly label: string;
+  readonly outcome: MarkOutcome | null;
+  /** The reason, on "not applicable" only. */
+  readonly note: string | null;
+  readonly markedBy: { readonly userId: string; readonly displayName: string } | null;
+  readonly markedAt: string | null;
+}
+
 /** One step as the job page reads it (0301). */
 export interface DescribedStep {
   readonly step: JobStep;
@@ -140,6 +174,21 @@ export interface DescribedStep {
     readonly mayComplete: boolean;
     readonly reason: "ON_ANOTHER_DESK" | "OUTSIDE_BAND" | null;
   };
+  /** The step's sub-steps (T6.15), empty when its process names none. */
+  readonly subSteps: readonly CheckLineView[];
+  /** How many of them are still open: the same count `completeStep` refuses
+   *  on, so the Done button and the 409 cannot disagree. `viewer.mayComplete`
+   *  keeps its meaning (WHO may tick it); this says whether it is READY. */
+  readonly subStepsOpen: number;
+}
+
+/** A step a person asked to finish, past the sub-step gate: its pinned
+ *  definition, read once for the gate, the move's own guard and the check
+ *  policy. The counts for the transition event are NOT carried from the gate:
+ *  they are read again after the move, when the list can no longer change
+ *  (`subStepCounts`), so the event says what was actually submitted. */
+interface SubStepGate {
+  readonly def: TemplateStep | null;
 }
 
 /** How many jobs one tick takes per firm. A sweep is a fair share of the
@@ -161,6 +210,12 @@ export interface CheckOnDesk extends PendingCheck {
    *  by reading config. */
   readonly rule: string | null;
   readonly viewer: Eligibility;
+  /** THIS check's review points (T6.15): the pinned step's lines with this
+   *  round's ticks. A second round after a send-back reads them all open,
+   *  because its marks are keyed on its own approval. */
+  readonly reviewPoints: readonly CheckLineView[];
+  /** How many are still open: what `decideCheck` refuses Approve on. */
+  readonly reviewPointsOpen: number;
 }
 
 /** One member of staff, and whether they may check one particular thing. The
@@ -342,6 +397,34 @@ export class OrchestratorService {
       throw new CorrectionChangedNothing(step.stepKey);
     }
 
+    const job = await this.deps.jobs.findById(input.tenantId, input.jobId);
+    if (!job) throw new JobNotFound(input.jobId);
+
+    // THE SUB-STEP GATE (T6.15), the same one `completeStep` applies: a person
+    // accepting what a machine produced is saying the work is DONE, so they
+    // are held to the step's list exactly as somebody ticking it by hand is.
+    // Checked BEFORE the verdict is written, because a proposal
+    // recorded as accepted on a step that then refused to finish would be an
+    // answer standing on work that is not done. A rejection finishes nothing,
+    // so it is never gated.
+    //
+    // One gap is left, stated rather than hidden: the move after the verdict
+    // is guarded too (`finishOrSendForChecking`), and a tick taken back in the
+    // instant between this read and that move refuses the move AFTER the
+    // verdict is written. The answer then stands as accepted and the step stays
+    // waiting, with no proposal on it: an ordinary open step, finished with
+    // Done once the line is ticked. Closing it would mean the verdict and the
+    // move in one transaction, across two repositories.
+    //
+    // NO DESK OR BAND RULE HERE, and that predates T6.15: deciding a machine's
+    // answer has never checked whose desk the step is on (T2.8). Ticking its
+    // sub-steps does (`markSubStep` shares `completeStep`'s rules), so somebody
+    // who may not tick them can still accept once the desk holder has.
+    const gate: SubStepGate =
+      input.outcome === "rejected"
+        ? { def: null }
+        : await this.subStepGate(input.tenantId, job, step, await this.pinnedStepDef(input.tenantId, job, step.stepKey));
+
     const at = this.deps.clock.now().toISOString();
     // Only where nothing has been decided, in SQL — two people looking at the
     // same queue can click at once, and the second must not overwrite the
@@ -387,9 +470,7 @@ export class OrchestratorService {
     // machine drafted the work. The person who accepted the machine's output is
     // the MAKER here — they own it now — which the gate records and which the
     // database then refuses to let them approve.
-    const job = await this.deps.jobs.findById(input.tenantId, input.jobId);
-    if (!job) throw new JobNotFound(input.jobId);
-    return this.finishOrSendForChecking(input.tenantId, job, step, decidedBy, actor);
+    return this.finishOrSendForChecking(input.tenantId, job, step, decidedBy, actor, gate);
   }
 
   /**
@@ -487,31 +568,360 @@ export class OrchestratorService {
     const openCheck = await this.deps.checks.findOpenForStep(input.tenantId, step.id);
     if (openCheck) throw new AwaitingCheck(step.stepKey);
 
-    // WHOSE DESK (0301). A step on somebody else's desk is theirs to tick;
-    // taking it first is one click and one ledger row, and it is what makes
-    // `performed_by` an answer rather than a coincidence. A step on nobody's
-    // desk may be ticked by anybody the process's band allows.
-    const staff = await this.deps.checkers.activeStaff(input.tenantId);
-    if (step.assigneeUserId !== null && step.assigneeUserId !== performedBy) {
+    const def = await this.pinnedStepDef(input.tenantId, job, step.stepKey);
+    await this.assertMayDo(input.tenantId, step, performedBy, def?.performer ?? null);
+
+    // THE SUB-STEP GATE (T6.15). After the desk, so somebody who may not do
+    // the step at all is told that rather than which lines are open; before
+    // anything is written, so a refused Done moves nothing.
+    const gate = await this.subStepGate(input.tenantId, job, step, def);
+
+    return this.finishOrSendForChecking(input.tenantId, job, step, performedBy, actor, gate);
+  }
+
+  /**
+   * WHOSE DESK (0301), and whether this person may do the step at all. Shared
+   * by ticking a step done and ticking one of its sub-steps (T6.15), because a
+   * sub-step is the same work in smaller pieces: somebody who could not tick
+   * the step must not be able to tick it line by line either.
+   *
+   * A step on somebody else's desk is theirs to tick; taking it first is one
+   * click and one ledger row, and it is what makes `performed_by` an answer
+   * rather than a coincidence. A step on nobody's desk may be ticked by anybody
+   * the process's band allows.
+   */
+  private async assertMayDo(tenantId: string, step: JobStep, userId: string, band: StepBand | null): Promise<void> {
+    const staff = await this.deps.checkers.activeStaff(tenantId);
+    if (step.assigneeUserId !== null && step.assigneeUserId !== userId) {
       const holder = staff.find((m) => m.userId === step.assigneeUserId);
       throw new NotYourStep(step.stepKey, holder?.displayName ?? "somebody else");
     }
-    const band = await this.bandOf(input.tenantId, job, step.stepKey);
     if (band !== null) {
-      const me = staff.find((m) => m.userId === performedBy);
+      const me = staff.find((m) => m.userId === userId);
       if (!withinBand(me?.gradeRank ?? null, band)) {
         throw new PerformerOutOfBand(step.stepKey, me?.displayName ?? "you", me?.gradeName ?? null, bandLabel(band));
       }
     }
+  }
 
-    return this.finishOrSendForChecking(input.tenantId, job, step, performedBy, actor);
+  /**
+   * Refuse to finish a step while any of its sub-steps is open (T6.15).
+   *
+   * A step whose pinned process names no sub-steps, or whose pinned version no
+   * longer reads, passes with nothing to say: every job pinned before T6.15
+   * behaves exactly as it did, and a job must never be stranded because a
+   * config row went bad (`pinnedStepDef`'s reason). Only then are the marks
+   * read, so a step with no list costs no query.
+   *
+   * THIS READ IS FOR THE SENTENCE, NOT FOR THE MOVE. It names what is left, in
+   * the order the process wrote it. The move itself is guarded again under the
+   * step's row lock (`finishOrSendForChecking`), because a tick taken back
+   * between here and there, from a second tab or by a colleague on a step on
+   * nobody's desk, would otherwise finish the step with a line open.
+   */
+  private async subStepGate(tenantId: string, job: Job, step: JobStep, def: TemplateStep | null): Promise<SubStepGate> {
+    const lines = def?.checklist ?? [];
+    if (lines.length === 0) return { def };
+    const marks = outcomesOf(marksOn(await this.deps.stepChecks.listForJob(tenantId, job.id), "checklist", step.id));
+    const open = openLines(lines, marks);
+    if (open.length > 0) throw new SubStepsOpen(step.stepKey, step.label, open.map((l) => l.label));
+    return { def };
+  }
+
+  /**
+   * How a step's sub-steps stand, for a transition event: `{ subSteps }` with
+   * the counts, or nothing at all for a step with no list. Read AFTER the move,
+   * once the list is closed to marks, so the counts are the list that was
+   * actually submitted rather than the one the gate saw a moment earlier.
+   */
+  private async subStepCounts(
+    tenantId: string,
+    job: Job,
+    step: JobStep,
+    def: TemplateStep | null,
+  ): Promise<{ readonly subSteps?: ListTally }> {
+    const lines = def?.checklist ?? [];
+    if (lines.length === 0) return {};
+    const marks = outcomesOf(marksOn(await this.deps.stepChecks.listForJob(tenantId, job.id), "checklist", step.id));
+    return { subSteps: tallyOf(lines, marks) };
+  }
+
+  /**
+   * Why a move guarded on the sub-steps was refused, in words (T6.15): the
+   * guard answers only "not now", and a person needs to know which "not".
+   * Read again, because the answer is whatever changed after the gate.
+   */
+  private async whyNotFinished(tenantId: string, job: Job, step: JobStep, def: TemplateStep | null): Promise<Error> {
+    const now = await this.deps.steps.findById(tenantId, step.id);
+    if (now?.status === "skipped") return new StepNoLongerNeeded(step.stepKey, now.outcomeNote);
+    if (now?.status !== "blocked") return new StepNotWaiting(step.stepKey, now?.status ?? "done");
+    const marks = outcomesOf(marksOn(await this.deps.stepChecks.listForJob(tenantId, job.id), "checklist", step.id));
+    const open = openLines(def?.checklist ?? [], marks);
+    if (open.length > 0) return new SubStepsOpen(step.stepKey, step.label, open.map((l) => l.label));
+    // Settled and still waiting, yet the move lost: somebody else's move got
+    // there first, the ordinary race every transition here reads as this.
+    return new StepNotWaiting(step.stepKey, "done");
+  }
+
+  /**
+   * Why a sub-step mark found its list closed (T6.15). The service read the
+   * step as open a moment before; the mark's own check, under the step's lock,
+   * found it otherwise, and this says what it found.
+   */
+  private async whySubStepsLocked(tenantId: string, step: JobStep): Promise<Error> {
+    const now = await this.deps.steps.findById(tenantId, step.id);
+    if (now?.status === "skipped") return new StepNoLongerNeeded(step.stepKey, now.outcomeNote);
+    if (now?.status !== "blocked") return new StepNotWaiting(step.stepKey, now?.status ?? "done");
+    if (await this.deps.checks.findOpenForStep(tenantId, step.id)) return new AwaitingCheck(step.stepKey);
+    // Approved a moment ago and about to be done: the list that was approved
+    // is closed too, and "done" is what it is about to be.
+    return new StepNotWaiting(step.stepKey, "done");
+  }
+
+  /**
+   * Why a decision on a check was not recorded (T2.9, T6.15): somebody else
+   * decided it first, which is what a lost race always meant here, or, on
+   * Approve, a review point (or a sub-step) was taken back after the gate read
+   * the lists. Read again, for the same reason as `whyNotFinished`.
+   */
+  private async whyNotDecided(
+    tenantId: string,
+    approval: StepApproval,
+    job: Job,
+    step: JobStep,
+    def: TemplateStep | null,
+  ): Promise<Error> {
+    const now = await this.deps.checks.findById(tenantId, approval.id);
+    if (now !== null && now.decision !== "pending") return new ApprovalAlreadyDecided(approval.id, now.decision);
+    const reviewLines = def?.reviewPoints ?? [];
+    const subLines = def?.checklist ?? [];
+    if (reviewLines.length > 0 || subLines.length > 0) {
+      const marks = await this.deps.stepChecks.listForJob(tenantId, job.id);
+      const open = openLines(reviewLines, outcomesOf(marksOn(marks, "review", approval.id)));
+      if (open.length > 0) return new ReviewPointsOpen(step.stepKey, step.label, open.map((l) => l.label));
+      const subOpen = openLines(subLines, outcomesOf(marksOn(marks, "checklist", step.id)));
+      if (subOpen.length > 0) return new SubStepsOpen(step.stepKey, step.label, subOpen.map((l) => l.label), "checker");
+    }
+    return new ApprovalAlreadyDecided(approval.id, "decided");
+  }
+
+  /**
+   * What the job's PINNED process says about one step, or null.
+   *
+   * From the pin, never from what is in force, for the reason the pin exists at
+   * all: a firm adding a review step or a sub-step to its process in April must
+   * not retroactively put a March job's finished work in front of a reviewer,
+   * or shut a March step behind a list nobody was shown.
+   *
+   * A job with no pinned template has not started, so no step of it can be
+   * being completed. A template that no longer parses answers null, which is the
+   * same fact `TemplateUnreadable` reports elsewhere but must not throw here:
+   * refusing to let somebody tick off finished work because a config row went
+   * bad would strand the job entirely. Null therefore means no band, no check
+   * and no list, which is the most permissive reading and the one that keeps
+   * work moving.
+   */
+  private async pinnedStepDef(tenantId: string, job: Job, stepKey: string): Promise<TemplateStep | null> {
+    if (job.templateVersionId === null) return null;
+    const template = await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
+    return template?.steps.find((s) => s.key === stepKey) ?? null;
   }
 
   /** The grade band the pinned process names for a step, or null. */
   private async bandOf(tenantId: string, job: Job, stepKey: string): Promise<ResolvedTemplate["steps"][number]["performer"]> {
-    if (job.templateVersionId === null) return null;
-    const template = await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
-    return template?.steps.find((s) => s.key === stepKey)?.performer ?? null;
+    return (await this.pinnedStepDef(tenantId, job, stepKey))?.performer ?? null;
+  }
+
+  // ── a step's own lists: sub-steps and review points (T6.15) ─────────────────
+
+  /**
+   * The person whose step it is ticks one of its sub-steps, marks it not
+   * applicable with a reason, or takes the tick back (`outcome: null`).
+   *
+   * THE TICKS ARE LOCKED ONCE THE WORK IS SUBMITTED. Only a `blocked` step with
+   * no open check takes a mark: a pending step has not opened, a done one is
+   * settled, and a step waiting to be checked is work somebody else is now
+   * looking at, so the list they are looking at must not move under them. After
+   * a send-back the check is closed and the doer may change their ticks again;
+   * nothing about the send-back clears them, because the work behind them is
+   * still the work.
+   *
+   * An undecided machine proposal does NOT lock them: on an
+   * `agent_with_approval` step the person accepting the answer ticks the list
+   * first, and `decideProposal` holds them to it.
+   *
+   * No ledger event per tick, for 0051's reason about the task checklist: the
+   * row already says who and when, and ten events per step would bury the
+   * transitions somebody actually reads. The counts ride on `job.step_advanced`
+   * when the step moves.
+   */
+  async markSubStep(
+    input: {
+      readonly tenantId: string;
+      readonly jobId: string;
+      readonly stepKey: string;
+      readonly itemKey: string;
+      readonly outcome: MarkOutcome | null;
+      readonly note: string | null;
+    },
+    _actor: Actor,
+    byUserId: string,
+  ): Promise<JobStep> {
+    const job = await this.deps.jobs.findById(input.tenantId, input.jobId);
+    if (!job) throw new JobNotFound(input.jobId);
+    const step = await this.deps.steps.findByKey(input.tenantId, input.jobId, input.stepKey);
+    if (!step) throw new StepNotFound(input.stepKey);
+    if (step.status === "skipped") throw new StepNoLongerNeeded(step.stepKey, step.outcomeNote);
+    if (step.status !== "blocked") throw new StepNotWaiting(step.stepKey, step.status);
+
+    const openCheck = await this.deps.checks.findOpenForStep(input.tenantId, step.id);
+    if (openCheck) throw new AwaitingCheck(step.stepKey);
+
+    const def = await this.pinnedStepDef(input.tenantId, job, step.stepKey);
+    await this.assertMayDo(input.tenantId, step, byUserId, def?.performer ?? null);
+
+    const line = (def?.checklist ?? []).find((l) => l.key === input.itemKey);
+    if (!line) throw new SubStepNotFound(step.stepKey, input.itemKey);
+
+    // The reads above are what a person is told; the write checks again under
+    // the step's row lock, and refuses if Done, Approve or a sweep moved the
+    // step in between (`StepCheckRepository`).
+    const written = await this.writeMark({
+      tenantId: input.tenantId,
+      list: "checklist",
+      jobStepId: step.id,
+      stepApprovalId: null,
+      line,
+      outcome: input.outcome,
+      note: input.note,
+      byUserId,
+    });
+    if (!written) throw await this.whySubStepsLocked(input.tenantId, step);
+    return step;
+  }
+
+  /**
+   * Whoever may CHECK a step ticks one of its review points (T6.15), marks it
+   * not applicable with a reason, or takes the tick back.
+   *
+   * Only an eligible checker, by `eligibilityOf` itself, so the rule that
+   * decides who may approve is the rule that decides who may tick the points
+   * the approval stands on, and maker != checker holds here with no second
+   * statement of it: the person who did the work can never tick their own
+   * review points.
+   *
+   * Keyed on the APPROVAL, never the step. A send-back closes this check, the
+   * redo opens a new one, and the new one starts with every point open, while
+   * this round's ticks stay on this round's row: "it took two goes" keeps what
+   * each checker looked at.
+   */
+  async markReviewPoint(
+    input: {
+      readonly tenantId: string;
+      readonly approvalId: string;
+      readonly itemKey: string;
+      readonly outcome: MarkOutcome | null;
+      readonly note: string | null;
+    },
+    _actor: Actor,
+    byUserId: string,
+  ): Promise<CheckOnDesk> {
+    const approval = await this.deps.checks.findById(input.tenantId, input.approvalId);
+    if (!approval) throw new ApprovalNotFound(input.approvalId);
+    if (approval.decision !== "pending") {
+      throw new ApprovalAlreadyDecided(input.approvalId, approval.decision);
+    }
+
+    const eligibility = await this.eligibilityOf(input.tenantId, approval, byUserId);
+    if (!eligibility.eligible && eligibility.reason !== null) {
+      throw new NotEligibleToCheck(eligibility.reason);
+    }
+
+    const step = await this.deps.steps.findById(input.tenantId, approval.jobStepId);
+    if (!step) throw new StepNotFound(approval.jobStepId);
+    const job = await this.deps.jobs.findById(input.tenantId, approval.jobId);
+    if (!job) throw new JobNotFound(approval.jobId);
+
+    const def = await this.pinnedStepDef(input.tenantId, job, step.stepKey);
+    const line = (def?.reviewPoints ?? []).find((l) => l.key === input.itemKey);
+    if (!line) throw new ReviewPointNotFound(step.stepKey, input.itemKey);
+
+    const written = await this.writeMark({
+      tenantId: input.tenantId,
+      list: "review",
+      // The APPROVAL's step, never one the caller names, so the pairing the
+      // composite foreign key in 0307 insists on is true by construction.
+      jobStepId: approval.jobStepId,
+      stepApprovalId: approval.id,
+      line,
+      outcome: input.outcome,
+      note: input.note,
+      byUserId,
+    });
+    // Decided between the read above and the write, which checked again under
+    // the check's own row lock: a tick must never land on an approval somebody
+    // has already given, nor move a point under a Send back.
+    if (!written) {
+      const now = await this.deps.checks.findById(input.tenantId, approval.id);
+      throw new ApprovalAlreadyDecided(input.approvalId, now?.decision ?? "decided");
+    }
+
+    const rows = await this.deps.checks.listForJob(input.tenantId, approval.jobId);
+    const row = rows.find((r) => r.approval.id === approval.id);
+    if (!row) throw new ApprovalNotFound(input.approvalId);
+    const [described] = await this.withEligibility(input.tenantId, [row], byUserId);
+    if (!described) throw new ApprovalNotFound(input.approvalId);
+    return described;
+  }
+
+  /**
+   * One mark, written or cleared, with the one rule both lists share: "not
+   * applicable" needs a reason, trimmed, of a sentence or two. A tick needs
+   * none, and a reason sent with one is dropped rather than stored, because the
+   * row's reason column means "why this did not apply" and nothing else.
+   *
+   * False when the repository found the list closed to marks under its lock;
+   * the caller says why, because only it knows which list it asked about.
+   */
+  private async writeMark(m: {
+    readonly tenantId: string;
+    readonly list: CheckListKind;
+    readonly jobStepId: string;
+    readonly stepApprovalId: string | null;
+    readonly line: { readonly key: string; readonly label: string };
+    readonly outcome: MarkOutcome | null;
+    readonly note: string | null;
+    readonly byUserId: string;
+  }): Promise<boolean> {
+    if (m.outcome === null) {
+      return this.deps.stepChecks.clear({
+        tenantId: m.tenantId,
+        list: m.list,
+        jobStepId: m.jobStepId,
+        stepApprovalId: m.stepApprovalId,
+        itemKey: m.line.key,
+      });
+    }
+    let note: string | null = null;
+    if (m.outcome === "not_applicable") {
+      note = (m.note ?? "").trim();
+      if (note === "") throw new NotApplicableNeedsAReason(m.line.label);
+      if (note.length > NOT_APPLICABLE_NOTE_MAX) throw new NotApplicableNeedsAReason(m.line.label, true);
+    }
+    const written = await this.deps.stepChecks.upsert({
+      id: this.deps.ids.newId(),
+      tenantId: m.tenantId,
+      jobStepId: m.jobStepId,
+      stepApprovalId: m.stepApprovalId,
+      list: m.list,
+      itemKey: m.line.key,
+      label: m.line.label,
+      outcome: m.outcome,
+      note,
+      markedByUserId: m.byUserId,
+      markedAt: this.deps.clock.now().toISOString(),
+    });
+    return written !== null;
   }
 
   /**
@@ -604,12 +1014,18 @@ export class OrchestratorService {
       job.templateVersionId === null
         ? null
         : await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
-    const bands = new Map((template?.steps ?? []).map((s) => [s.key, s.performer]));
+    const defs = new Map((template?.steps ?? []).map((s) => [s.key, s]));
     const staff = await this.deps.checkers.activeStaff(tenantId);
     const byUser = new Map(staff.map((m) => [m.userId, m]));
     const viewer = byUser.get(viewerUserId) ?? null;
+    // Every mark on the job in ONE read (T6.15), and only when the process
+    // names a sub-step anywhere: a job pinned before T6.15 costs nothing.
+    const anyList = (template?.steps ?? []).some((s) => s.checklist.length > 0);
+    const marks = anyList ? await this.deps.stepChecks.listForJob(tenantId, jobId) : [];
     return steps.map((step) => {
-      const performer = bands.get(step.stepKey) ?? null;
+      const def = defs.get(step.stepKey) ?? null;
+      const performer = def?.performer ?? null;
+      const subSteps = lineViews(def?.checklist ?? [], marksOn(marks, "checklist", step.id));
       // The band first. A viewer outside it can neither tick the step nor
       // take it — `assignStep` refuses the same grade — so "on another desk"
       // must not turn into a "Take it" button for a partner reading a
@@ -631,6 +1047,8 @@ export class OrchestratorService {
                 displayName: byUser.get(step.assigneeUserId)?.displayName ?? "somebody no longer on the roster",
               },
         viewer: { mayComplete: reason === null, reason },
+        subSteps,
+        subStepsOpen: subSteps.filter((l) => l.outcome === null).length,
       };
     });
   }
@@ -659,9 +1077,20 @@ export class OrchestratorService {
     step: JobStep,
     performedBy: string,
     actor: Actor,
+    // The step's pinned definition, from the gate both callers pass through
+    // first (T6.15). The review policy is read from the same definition: one
+    // pinned read where there used to be two.
+    gate: SubStepGate,
   ): Promise<JobStep> {
     const at = this.deps.clock.now().toISOString();
-    const policyKey = await this.policyKeyFor(tenantId, job, step.stepKey);
+    // The `verification_policy` key the PINNED step names, or null for a step
+    // nobody checks. From the pin, for `pinnedStepDef`'s reason.
+    const policyKey = gate.def?.verificationPolicyKey ?? null;
+    // THE MOVE IS GUARDED ON THE SUB-STEPS (T6.15), under the step's row lock,
+    // whatever the gate read a moment ago: see `subStepGate`. Empty for a step
+    // with no list, which is every step of every process before T6.15, and
+    // then the moves below are exactly the ones they always were.
+    const subStepKeys = (gate.def?.checklist ?? []).map((l) => l.key);
 
     if (policyKey !== null) {
       // blocked -> blocked, recording WHO did it. The status does not move, and
@@ -680,22 +1109,43 @@ export class OrchestratorService {
       // first would freeze a null maker onto it and quietly disable maker !=
       // checker for this step.
       const resolved = await this.deps.policies.publishedPolicy(tenantId, policyKey);
-      const approval = await this.deps.checks.openIfAbsent({
-        id: this.deps.ids.newId(),
-        tenantId,
-        jobId: job.id,
-        jobStepId: step.id,
-        // Null when the step names a policy the firm has since withdrawn. The
-        // check still opens — under maker != checker alone — because the firm
-        // said this step is reviewed, and unpublishing the rule about WHO does
-        // it is not the same as saying nobody does.
-        policyVersionId: resolved?.versionId ?? null,
-        policyKey,
-      });
-      // Null means somebody else opened one between the read and the write. That
-      // is the unique partial index doing its job, and it is not an error: the
-      // step is waiting to be checked either way, which is what the caller
-      // asked for.
+      // The sub-step guard rides on the OPENING, not on the transition above:
+      // the transition leaves the step `blocked`, so the list is still open to
+      // marks after it, and it is the check opening that closes it. Guarding
+      // the insert under the step's lock is what makes the list the checker
+      // sees the list that was submitted.
+      const approval = await this.deps.checks.openIfAbsent(
+        {
+          id: this.deps.ids.newId(),
+          tenantId,
+          jobId: job.id,
+          jobStepId: step.id,
+          // Null when the step names a policy the firm has since withdrawn. The
+          // check still opens — under maker != checker alone — because the firm
+          // said this step is reviewed, and unpublishing the rule about WHO does
+          // it is not the same as saying nobody does.
+          policyVersionId: resolved?.versionId ?? null,
+          policyKey,
+        },
+        subStepKeys,
+      );
+      if (approval === null && subStepKeys.length > 0 && (await this.deps.checks.findOpenForStep(tenantId, step.id)) === null) {
+        // Null with no check open: the guard refused. A line was taken back
+        // after the gate read it (or the step moved). Nothing was opened, so
+        // the maker recorded above is put back as it was: a refused Done
+        // moves nothing, and a step that says who submitted it when nobody's
+        // submission stands would read as work waiting that is not.
+        await this.deps.steps.transition(tenantId, step.id, "blocked", {
+          status: "blocked",
+          at,
+          performedBy: step.performedBy ?? undefined,
+        });
+        throw await this.whyNotFinished(tenantId, job, step, gate.def);
+      }
+      // Otherwise null means somebody else opened one between the read and the
+      // write. That is the unique partial index doing its job, and it is not an
+      // error: the step is waiting to be checked either way, which is what the
+      // caller asked for.
       if (approval !== null) {
         await this.deps.events.recordEvent({
           tenantId,
@@ -712,27 +1162,44 @@ export class OrchestratorService {
             // Whether a rule was actually in force, so "why was this approved by
             // an associate" is answerable. Never WHO — that is on the row.
             policyResolved: resolved !== null,
+            // Counts only, never a label or a reason: the log cannot be erased,
+            // and a step with no sub-steps says nothing about them at all.
+            ...(await this.subStepCounts(tenantId, job, step, gate.def)),
           },
         });
       }
       return held;
     }
 
-    const done = await this.deps.steps.transition(tenantId, step.id, "blocked", {
-      status: "done",
-      at,
-      performedBy,
-    });
+    const done = await this.deps.steps.transition(
+      tenantId,
+      step.id,
+      "blocked",
+      { status: "done", at, performedBy },
+      subStepKeys,
+    );
     // Lost the race with another writer — somebody else completed it between the
-    // read and the write. Their record stands; ours would only overwrite it.
-    if (!done) throw new StepNotWaiting(step.stepKey, "done");
+    // read and the write. Their record stands; ours would only overwrite it. Or,
+    // on a step with sub-steps, a line was taken back after the gate read it,
+    // and the guard kept the step open; which of the two is said in words.
+    if (!done) {
+      throw subStepKeys.length > 0
+        ? await this.whyNotFinished(tenantId, job, step, gate.def)
+        : new StepNotWaiting(step.stepKey, "done");
+    }
 
     await this.deps.events.recordEvent({
       tenantId,
       verb: "job.step_advanced",
       objectId: job.id,
       actor,
-      payload: { stepKey: step.stepKey, from: "blocked", to: "done", executor: step.executor },
+      payload: {
+        stepKey: step.stepKey,
+        from: "blocked",
+        to: "done",
+        executor: step.executor,
+        ...(await this.subStepCounts(tenantId, job, step, gate.def)),
+      },
     });
 
     // Immediately, not on the next tick. Finishing a step is what makes the next
@@ -740,26 +1207,6 @@ export class OrchestratorService {
     // concludes the button did not work.
     await this.advance(tenantId, job, actor);
     return done;
-  }
-
-  /**
-   * The `verification_policy` key this step's PINNED template names, or null.
-   *
-   * From the pin, never from what is in force, for the reason the pin exists at
-   * all: a firm adding a review step to its process in April must not
-   * retroactively put a March job's finished work in front of a reviewer.
-   *
-   * A job with no pinned template has not started, so no step of it can be
-   * being completed. A template that no longer parses answers null, which is
-   * the same fact `TemplateUnreadable` reports elsewhere but must not throw
-   * here — refusing to let somebody tick off finished work because a config row
-   * went bad would strand the job entirely.
-   */
-  private async policyKeyFor(tenantId: string, job: Job, stepKey: string): Promise<string | null> {
-    if (job.templateVersionId === null) return null;
-    const template = await this.deps.templates.pinnedTemplate(tenantId, job.templateVersionId);
-    const def = template?.steps.find((s) => s.key === stepKey) ?? null;
-    return def?.verificationPolicyKey ?? null;
   }
 
   // ── the verification queue (T2.9) ──────────────────────────────────────────
@@ -842,16 +1289,61 @@ export class OrchestratorService {
       throw new NotEligibleToCheck(eligibility.reason);
     }
 
+    // THE REVIEW-POINT GATE (T6.15), on APPROVE ONLY. Sending work back is
+    // never held up by it: the checker may find the problem at point three,
+    // and making them tick the rest to say so would make the record claim they
+    // looked at things they stopped looking at. After eligibility, so somebody
+    // who may not check this at all is told that first.
+    //
+    // AND THE SUB-STEPS, AS A WALL UNDER A WALL. The doer's ticks were closed
+    // when the work was submitted and every sub-step mark refuses a step with a
+    // check pending (under the step's row lock, `StepCheckRepository`), so
+    // through this service an approval cannot find them open. A mark written
+    // round the service can, and approving then would finish a step with a line
+    // open, so Approve is refused too, with a sentence for the checker: the
+    // lines are the doer's, and Send back is how they get to them.
+    //
+    // THESE READS ARE FOR THE SENTENCE. The decision is guarded again under the
+    // check's row lock (the lock every review mark takes), so a point taken back
+    // by a second checker between this read and the decision refuses it.
+    const def = await this.pinnedStepDef(input.tenantId, job, step.stepKey);
+    const reviewLines = def?.reviewPoints ?? [];
+    const subLines = def?.checklist ?? [];
+    const hasLists = reviewLines.length > 0 || subLines.length > 0;
+    if (input.decision === "approved" && hasLists) {
+      const marks = await this.deps.stepChecks.listForJob(input.tenantId, job.id);
+      const open = openLines(reviewLines, outcomesOf(marksOn(marks, "review", approval.id)));
+      if (open.length > 0) throw new ReviewPointsOpen(step.stepKey, step.label, open.map((l) => l.label));
+      const subOpen = openLines(subLines, outcomesOf(marksOn(marks, "checklist", step.id)));
+      if (subOpen.length > 0) {
+        throw new SubStepsOpen(step.stepKey, step.label, subOpen.map((l) => l.label), "checker");
+      }
+    }
+
     const at = this.deps.clock.now().toISOString();
-    const decided = await this.deps.checks.decide(input.tenantId, approval.id, {
-      decision: input.decision,
-      notes,
-      decidedBy,
-      decidedAt: at,
-    });
+    const decided = await this.deps.checks.decide(
+      input.tenantId,
+      approval.id,
+      { decision: input.decision, notes, decidedBy, decidedAt: at },
+      input.decision === "approved" && hasLists
+        ? { reviewPointKeys: reviewLines.map((l) => l.key), subStepKeys: subLines.map((l) => l.key) }
+        : undefined,
+    );
     // Somebody else answered between the read and the write. Their decision is
-    // part of the audit record and ours would overwrite it.
-    if (!decided) throw new ApprovalAlreadyDecided(input.approvalId, "decided");
+    // part of the audit record and ours would overwrite it. Or, on Approve, a
+    // line was taken back after the gate read it; which of the two is said.
+    if (!decided) throw await this.whyNotDecided(input.tenantId, approval, job, step, def);
+
+    // Counts only, on both verbs: "sent back with two of six points ticked" is
+    // a fact worth a GROUP BY, and which two is prose that stays on the rows.
+    // Read AFTER the decision, once neither list can move (review marks refuse a
+    // decided check; sub-step marks refuse one pending or approved), so the
+    // counts are the lists the decision was made on.
+    const after = hasLists ? await this.deps.stepChecks.listForJob(input.tenantId, job.id) : [];
+    const reviewTally =
+      reviewLines.length > 0 ? { reviewPoints: tallyOf(reviewLines, outcomesOf(marksOn(after, "review", approval.id))) } : {};
+    const subTally =
+      subLines.length > 0 ? { subSteps: tallyOf(subLines, outcomesOf(marksOn(after, "checklist", step.id))) } : {};
 
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
@@ -868,6 +1360,7 @@ export class OrchestratorService {
         stepKey: step.stepKey,
         policyKey: approval.policyKey,
         checkedUnderPolicy: approval.policyVersionId !== null,
+        ...reviewTally,
       },
     });
 
@@ -901,6 +1394,7 @@ export class OrchestratorService {
         to: "done",
         executor: step.executor,
         checked: true,
+        ...subTally,
       },
     });
 
@@ -1039,15 +1533,41 @@ export class OrchestratorService {
     const candidates = await this.candidates(tenantId);
     const me = viewer === null ? undefined : candidates.find((c) => c.candidate.userId === viewer);
 
+    // REVIEW POINTS (T6.15). Each row's lines come from its job's PINNED
+    // version, which the row carries from the same query that read it; each
+    // version is resolved once however many rows share it, and every mark on
+    // every row is ONE read, made only when some row has a line to mark.
+    const versions = new Map<string, Promise<ResolvedTemplate | null>>();
+    const linesOf = async (row: PendingCheck): Promise<readonly { readonly key: string; readonly label: string }[]> => {
+      if (row.templateVersionId === null) return [];
+      let template = versions.get(row.templateVersionId);
+      if (template === undefined) {
+        template = this.deps.templates.pinnedTemplate(tenantId, row.templateVersionId);
+        versions.set(row.templateVersionId, template);
+      }
+      return (await template)?.steps.find((s) => s.key === row.stepKey)?.reviewPoints ?? [];
+    };
+    const lines = await Promise.all(rows.map(linesOf));
+    const marks = lines.some((l) => l.length > 0)
+      ? await this.deps.stepChecks.listForApprovals(tenantId, rows.map((r) => r.approval.id))
+      : [];
+
     const out: CheckOnDesk[] = [];
-    for (const row of rows) {
+    for (const [i, row] of rows.entries()) {
       const policy = await this.policyOf(tenantId, row.approval);
       const maker = await this.makerOf(tenantId, row.approval);
       const verdict: Eligibility =
         me === undefined
           ? { eligible: false, reason: "NO_WORK_PERMISSION" }
           : isEligible(me.candidate, maker, policy);
-      out.push({ ...row, rule: policy?.rule ?? null, viewer: verdict });
+      const reviewPoints = lineViews(lines[i] ?? [], marksOn(marks, "review", row.approval.id));
+      out.push({
+        ...row,
+        rule: policy?.rule ?? null,
+        viewer: verdict,
+        reviewPoints,
+        reviewPointsOpen: reviewPoints.filter((l) => l.outcome === null).length,
+      });
     }
     return out;
   }
@@ -1285,6 +1805,9 @@ export class OrchestratorService {
   ): Promise<number> {
     const defs = new Map(template.steps.map((s) => [s.key, s]));
     let withdrawn = 0;
+    // Read at most once per walk, and only when a step is actually about to be
+    // withdrawn: this pass runs on every sweep of every open job.
+    let marks: Promise<readonly StepCheckMark[]> | null = null;
 
     for (const step of steps) {
       if (step.status !== "blocked" && step.status !== "running") continue;
@@ -1297,6 +1820,16 @@ export class OrchestratorService {
       // Work recorded on it: leave it to finish the ordinary way.
       if (step.performedBy !== null) continue;
       if (await this.deps.runs.openForStep(tenantId, step.id)) continue;
+      // A TICKED SUB-STEP IS WORK RECORDED (T6.15). "Bank statements collected"
+      // is somebody saying they did part of this step, and discarding it
+      // because a catalogue field changed is exactly what this pass refuses to
+      // do to a step sent for checking. A "not applicable" counts too: it is a
+      // person's judgement about this step, with a reason, and it is on the row.
+      if (def.checklist.length > 0) {
+        marks ??= this.deps.stepChecks.listForJob(tenantId, job.id);
+        const mine = marksOn(await marks, "checklist", step.id);
+        if ([...mine.values()].some((m) => m.outcome !== null)) continue;
+      }
 
       const moved = await this.deps.steps.transition(tenantId, step.id, step.status, {
         status: "skipped",
@@ -1426,12 +1959,34 @@ export class OrchestratorService {
       // which commits nothing.
       const published = await this.deps.tiers.publishedTiers(tenantId);
       const tiers = published?.tiers ?? ASK_A_PERSON;
-      const approvalRequired = step.executor === "agent_with_approval";
+      // A STEP WITH SUB-STEPS IS NEVER FINISHED UNATTENDED (T6.15). The config
+      // validator already refuses sub-steps on an `agent` step, so a published
+      // template cannot reach this with any; this is the second wall, for a
+      // body that reached the engine another way. Nobody would ever tick the
+      // lines of a step a machine closed on its own, so it asks for a person,
+      // and a person accepting the answer is held to the list in
+      // `decideProposal`. Recorded on the run as `approval_required`, which is
+      // what it is: the step needs somebody to say it is done.
+      const def = template.steps.find((s) => s.key === step.stepKey);
+      const hasSubSteps = (def?.checklist.length ?? 0) > 0;
+      const approvalRequired = step.executor === "agent_with_approval" || hasSubSteps;
       const decision = decideFor(outcome.confidence, tiers, approvalRequired);
 
       const committing = decision === "committed";
+      // A COMMITTED ANSWER ON A CHECKED STEP IS STILL CHECKED. 0048 wrote this
+      // down on the day checks existed: `submitted_by` is nullable for "a step
+      // an agent COMMITTED unattended", and "anybody eligible may check it". The
+      // engine never did it, and moved such a step straight to done, so a firm
+      // saying "a Manager reviews this" was not reviewed whenever a machine
+      // happened to be sure. T6.15 made the hole visible: review points on such
+      // a step could never be ticked, because no check ever opened to tick
+      // them on. So the step waits `blocked` with a check open and no maker,
+      // exactly as 0048 describes; approving it finishes it and advances the
+      // job, sending it back leaves it for a person to redo, as for any check.
+      const policyKey = def?.verificationPolicyKey ?? null;
+      const checked = committing && policyKey !== null;
       const settled = await this.deps.steps.transition(tenantId, running.id, "running", {
-        status: committing ? "done" : "blocked",
+        status: committing && !checked ? "done" : "blocked",
         at,
       });
       if (!settled) continue;
@@ -1458,7 +2013,7 @@ export class OrchestratorService {
       });
 
       advanced += 1;
-      if (!committing) awaitingPeople += 1;
+      if (!committing || checked) awaitingPeople += 1;
       // `agent_run.completed` and `agent_run.escalated` have been in the verb
       // registry since the ledger was written and NOTHING has ever emitted
       // them — the "registered feature with no writer" shape this codebase keeps
@@ -1481,9 +2036,45 @@ export class OrchestratorService {
           reviewAt: tiers.reviewAt,
           model,
           promptVersion,
-          ...(committing ? { from: "running", to: "done" } : {}),
+          ...(committing ? { from: "running", to: checked ? "blocked" : "done" } : {}),
+          ...(checked ? { awaitingCheck: true } : {}),
         },
       });
+
+      if (checked) {
+        // The check opens the way `finishOrSendForChecking` opens one, against
+        // the policy in force now, and with no maker: `performed_by` is null
+        // because no person made this, so the database derives a null
+        // `submitted_by` and maker != checker has nobody to compare. No
+        // sub-step guard, because a machine's step has no sub-steps (the
+        // validator refuses them, and a step with any is never committed).
+        const resolved = await this.deps.policies.publishedPolicy(tenantId, policyKey);
+        const approval = await this.deps.checks.openIfAbsent({
+          id: this.deps.ids.newId(),
+          tenantId,
+          jobId: job.id,
+          jobStepId: settled.id,
+          policyVersionId: resolved?.versionId ?? null,
+          policyKey,
+        });
+        if (approval !== null) {
+          await this.deps.events.recordEvent({
+            tenantId,
+            verb: "job.step_advanced",
+            objectId: job.id,
+            actor,
+            payload: {
+              stepKey: step.stepKey,
+              from: "running",
+              to: "blocked",
+              executor: step.executor,
+              awaitingCheck: true,
+              policyKey,
+              policyResolved: resolved !== null,
+            },
+          });
+        }
+      }
     }
     return { advanced, awaitingPeople };
   }
@@ -1621,6 +2212,58 @@ function explain(
       applies = `under a rule this engine cannot read (${JSON.stringify(op)}), so it was kept`;
   }
   return `${fact} is ${JSON.stringify(actual)}, and this step applies ${applies}`;
+}
+
+/**
+ * One list's marks on one step (a sub-step) or on one check (a review point),
+ * keyed by line. Sub-step marks are found by their STEP and carry no check;
+ * review marks by their CHECK, which is what keeps one round's ticks off the
+ * next round's list.
+ */
+function marksOn(
+  all: readonly StepCheckMark[],
+  list: CheckListKind,
+  ownerId: string,
+): ReadonlyMap<string, StepCheckMark> {
+  const out = new Map<string, StepCheckMark>();
+  for (const m of all) {
+    if (m.list !== list) continue;
+    if ((list === "checklist" ? m.jobStepId : m.stepApprovalId) !== ownerId) continue;
+    out.set(m.itemKey, m);
+  }
+  return out;
+}
+
+function outcomesOf(marks: ReadonlyMap<string, StepCheckMark>): ReadonlyMap<string, MarkOutcome | null> {
+  return new Map([...marks].map(([k, m]) => [k, m.outcome]));
+}
+
+/**
+ * A list as the screen reads it: the PINNED template's lines, in its order,
+ * each with its mark. The label is the template's, not the row's copy; the two
+ * are the same version, so they cannot differ. The marker's name comes from
+ * the same query as the mark, so a tick by somebody who has since left still
+ * says who.
+ */
+function lineViews(
+  lines: readonly { readonly key: string; readonly label: string }[],
+  marks: ReadonlyMap<string, StepCheckMark>,
+): readonly CheckLineView[] {
+  return lines.map((l) => {
+    const m = marks.get(l.key);
+    const settled = m !== undefined && m.outcome !== null;
+    return {
+      key: l.key,
+      label: l.label,
+      outcome: settled ? m.outcome : null,
+      note: settled ? m.note : null,
+      markedBy:
+        settled && m.markedByUserId !== null
+          ? { userId: m.markedByUserId, displayName: m.markedByName ?? "somebody no longer on the roster" }
+          : null,
+      markedAt: settled ? m.markedAt : null,
+    };
+  });
 }
 
 function resolveFact(fact: string, subject: JobSubject | null): string | null {

@@ -57,7 +57,11 @@ import type {
   PublishOutcome,
   SeedRow,
 } from "../../usecase/config/ports";
-import type { ServiceDirectory as ObligationServiceDirectory } from "../../usecase/obligation/ports";
+import type {
+  ServiceDirectory as ObligationServiceDirectory,
+  ServiceRef as ObligationServiceRef,
+} from "../../usecase/obligation/ports";
+import { serviceNameSql } from "./obligation-link-repository";
 import type { CompliancePolicySource as SchedulerCompliancePolicySource } from "../../usecase/scheduler/ports";
 import type { PolicyDirectory, ServiceCatalogue } from "../../usecase/proposal/ports";
 import type { Amount } from "../../domain/money/model";
@@ -128,19 +132,26 @@ export class PostgresConfigRepository
   constructor(private readonly app: Db) {}
 
   /**
-   * The `ServiceDirectory` port T3.2 declares — does this catalogue ENTRY exist?
+   * The `ServiceDirectory` port T3.2 declares — does this catalogue ENTRY exist,
+   * and what is it called?
    *
    * The entry and not a version, deliberately: a compliance rule is about what
    * the firm SELLS, and a firm publishing v4 of 'gst-filing' has not stopped
    * owing its clients GSTR-3B. Pinning a version on a rule would quietly stop
    * it generating the day somebody edited the catalogue.
+   *
+   * The name is `usedIn`'s own derivation (`serviceNameSql`), because the link
+   * and unlink events are named from it and the library shows the other: one
+   * service, one name, on the screen and in /audit.
    */
-  async serviceKey(tenantId: string, entryId: string): Promise<string | null> {
+  async findService(tenantId: string, entryId: string): Promise<ObligationServiceRef | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [row] = await db<{ key: string }[]>`
-        SELECT key FROM config.entry WHERE id = ${entryId} AND kind = 'service'
+      const [row] = await db<{ key: string; name: string | null }[]>`
+        SELECT e.key, ${db.unsafe(serviceNameSql("e"))} AS name
+          FROM config.entry e
+         WHERE e.id = ${entryId} AND e.kind = 'service'
       `;
-      return row?.key ?? null;
+      return row ? { key: row.key, name: row.name } : null;
     });
   }
 
@@ -697,6 +708,12 @@ function toResolvedTemplate(
       condition: s.condition,
       verificationPolicyKey: s.verificationPolicyKey,
       performer: s.performer,
+      // Both lists, field by field like the rest (T6.15). `readWorkflowTemplate`
+      // has already turned an absent list into an empty one, so a version
+      // published before the fields existed reaches the orchestrator as a step
+      // with no sub-steps and no review points: exactly what it meant.
+      checklist: s.checklist.map((l) => ({ key: l.key, label: l.label })),
+      reviewPoints: s.reviewPoints.map((l) => ({ key: l.key, label: l.label })),
     })),
   };
 

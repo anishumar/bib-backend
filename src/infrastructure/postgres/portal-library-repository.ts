@@ -17,6 +17,8 @@
 //   `payment_portal_scope`          (0066) —          "
 //   `credit_note_portal_scope`      (0066) —          "
 //   `obligation_instance_portal_scope` (0062) — the filings in the digest
+//   `obligation_instance_portal_live`  (0309) — never a withdrawn one (and a
+//                                     withdrawn row is never filed anyway)
 //   `client_ask_portal_scope`       (0063) — the asks in the digest
 //
 // Repeating any of them here would feel safer and would silently disarm the

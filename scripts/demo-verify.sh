@@ -209,9 +209,19 @@ RULES=$(as partner "$API/api/v1/obligation-rules")
 at_least "compliance rules on file"  57  "$(pick "len(d['rules'])" <<< "$RULES")"
 at_least "...waiting on a fact"      40  "$(pick "sum(1 for r in d['rules'] if r.get('unresolvedReason'))" <<< "$RULES")"
 is "...four confirmed by the partner" "4" "$(pick "sum(1 for r in d['rules'] if r['status']=='confirmed')" <<< "$RULES")"
+# T6.16: each is on the service that owes it, which is how they were confirmed,
+# and nothing else is on any service, so nothing else reaches a client.
+is "...each on the service that owes it" "4" "$(pick "sum(1 for r in d['rules'] if r['status']=='confirmed' and r['usedIn'])" <<< "$RULES")"
+is "...and no other rule is on a service" "0" "$(pick "sum(1 for r in d['rules'] if r['status']!='confirmed' and r['usedIn'])" <<< "$RULES")"
 
 CAL=$(as partner "$API/api/v1/calendar")
-at_least "filings generated"       100 "$(pick "len(d['rows'])" <<< "$CAL")"
+# 60, where it was 100 before T6.16, and the drop is the fix. On no service the
+# four rules reached every engagement of both companies, so Cobalt Logistics,
+# which buys only GST, carried TDS deposits and TDS statements as well: eight
+# rule-and-company pairs, which last measured 93 (2026-09-25, already under the
+# old 100). On their services they are six (Foods owes all four, Logistics the
+# two GST returns); the same months give roughly 73, and 60 leaves room.
+at_least "filings generated"       60  "$(pick "len(d['rows'])" <<< "$CAL")"
 # PER ENTITY, never per client. G0.1: a group of two companies files two sets of
 # returns, and a calendar showing one is the bug that rule exists to stop.
 at_least "...for Cobalt Foods"     10  "$(pick "sum(1 for r in d['rows'] if r['entityName'].startswith('Cobalt Foods'))" <<< "$CAL")"

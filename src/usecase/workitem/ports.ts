@@ -151,10 +151,10 @@ export interface WorkVocabularyRepository {
  *     somebody's desk. **The board can never end up empty.**
  *
  * The predicate is the generator's own: an ACTIVE rule, carrying a due formula,
- * that is not event-driven, naming this engagement's catalogue service and the
- * entity's own country. `ObligationService.coverage` reports the engagements
- * that fall on the other side of it, with a reason, so a partner sees the gap
- * rather than wondering.
+ * that is not event-driven, confirmed, whose chain has a live catalogue LINK to
+ * this engagement's service (T6.16), for the entity's own country.
+ * `ObligationService.coverage` reports the engagements that fall on the other
+ * side of it, with a reason, so a partner sees the gap rather than wondering.
  */
 export interface ObligationCoverage {
   /** The subset of `engagementIds` the calendar will generate for. */
@@ -164,26 +164,28 @@ export interface ObligationCoverage {
   ): Promise<ReadonlySet<string>>;
 
   /**
-   * The subset of `engagementIds` whose SERVICE a dated rule NAMES — the
-   * narrower question a PER-PERIOD task asks (T6.13).
+   * The subset of `engagementIds` whose service IS its filings: the calendar
+   * dates them (`coveredEngagements`) AND the service names no process of its
+   * own. The question a PER-PERIOD task asks (T6.13), and a yes skips it.
    *
-   * `coveredEngagements` answers "will the calendar produce rows for this
-   * entity", and a rule owed by "Any service" — the shipped pack's default,
-   * since a pack cannot know a firm's catalogue keys — makes that true of
-   * every engagement at every Indian company the moment one GST rule is
-   * answered. Right for the one-time task, which would otherwise be a
-   * thirteenth row nobody can complete. Wrong for a monthly bookkeeping task:
-   * the calendar's GSTR-3B rows say nothing about whether September's books
-   * were done, and skipping the one dated task bookkeeping has because the
-   * entity also files GST would leave the first real client's first real
-   * service with no deadline on anybody's desk.
+   * T6.13 made this narrower than `coveredEngagements` because a rule owed by
+   * "Any service" (the shipped pack's every row, since a pack cannot know a
+   * firm's catalogue keys) covered every engagement at an entity the moment one
+   * GST rule was answered, so the entity's bookkeeping was covered by its GST
+   * rule and must still get September's task. T6.16's decision 1 removed that
+   * case: a rule reaches an engagement only through a link to the service it
+   * bought.
    *
-   * So a per-period task is skipped only where a rule names ITS service — the
-   * service IS a filing, and the calendar already dates it. A filing service
-   * whose rule still says "Any service" gets both rows for a period until the
-   * partner names the service on the rule, which is visible and fixable on
-   * the rules screen; the other reading fails silently, and silence is the
-   * failure this module was built to avoid.
+   * AND A SERVICE WITH ITS OWN PROCESS KEEPS ITS TASK (the firm's rule,
+   * 2026-09-26). The catalogue invites a filing onto ANY service, so a monthly
+   * bookkeeping service with a ten-step close that also carries TDS was losing
+   * its "Monthly Accounting · Sep 2026" task, the one its period job's steps
+   * hang under, because the calendar dated its TDS. A service whose live
+   * published body names a `workflowTemplateKey` is therefore never in this
+   * set: its month's task is raised and its filings get their own tasks from
+   * the calendar beside it. A service naming none ("GST Compliance") is its
+   * filings, and skipping is right. The process is read LIVE, as the
+   * orchestrator reads it, never from the version the client signed.
    */
   filingEngagements(
     tenantId: string,

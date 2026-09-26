@@ -125,6 +125,11 @@ export class PostgresEscalationSubjects implements EscalationSubjectSource {
         WHERE oi.filed_on IS NULL
           AND oi.resolved_at IS NULL
           AND os.is_terminal = false
+          -- WITHDRAWN (0309): the firm stopped doing this filing, so nobody is
+          -- late on it. The window this watch fires in (past the internal
+          -- target, before the statutory date) is exactly where an untouched
+          -- upcoming row sits when its service stops including it.
+          AND oi.withdrawn_at IS NULL
       `;
       return rows.map((r) => ({
         obligationId: r.id,
@@ -303,6 +308,12 @@ export class PostgresEscalationNoticeRepository implements EscalationNoticeRepos
             AND oi.filed_on IS NULL
             AND oi.resolved_at IS NULL
             AND os.is_terminal = false
+            -- A notice about a filing since WITHDRAWN (0309) is no longer
+            -- live: the work it was about stopped. Restoring the filing
+            -- brings the notice back, the way reopening a task does, and the
+            -- once-per-rung index (0058) stops a restored filing re-firing a
+            -- rung it already climbed.
+            AND oi.withdrawn_at IS NULL
           )
         -- A CEILING, not pagination — see MAX_LIST_ROWS. Notices accumulate for
         -- as long as the ladder keeps firing, and this list is filtered and

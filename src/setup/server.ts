@@ -67,6 +67,7 @@ import {
   PostgresCalendarSource,
   PostgresObligationInstanceRepository,
 } from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresRuleServiceLinkRepository } from "../infrastructure/postgres/obligation-link-repository";
 import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
 import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import {
@@ -145,6 +146,7 @@ import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-res
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
+import { PostgresStepCheckRepository } from "../infrastructure/postgres/step-check-repository";
 import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run-repository";
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
@@ -305,6 +307,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     states: new PostgresObligationStateRepository(pools.app),
     resolutionOptions: new PostgresResolutionOptionRepository(pools.app),
     instances: new PostgresObligationInstanceRepository(pools.app),
+    // Which catalogue services owe which filing (T6.16). The catalogue is the
+    // one writer; the generator, the coverage read and the library read it.
+    links: new PostgresRuleServiceLinkRepository(pools.app),
     // The firm's go-live floor, read from the config registry it is published
     // in. `configRepository` already implements two other ports for this
     // module's neighbours; this is the third, and it stays a PORT so the
@@ -400,6 +405,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     // and one of what a role carries, because eligibility to check somebody's
     // work must not be able to disagree with either.
     checks: new PostgresStepApprovalRepository(pools.app),
+    // The ticks on a step's sub-steps and a check's review points (T6.15). In
+    // BOTH processes: the worker's walk reads them too, because a step with a
+    // ticked sub-step is work recorded and is never withdrawn (0304's rule).
+    stepChecks: new PostgresStepCheckRepository(pools.app),
     policies: configRepository,
     checkers: memberships,
     desks: new PostgresJobDeskResolver(pools.app),

@@ -713,14 +713,24 @@ export class FakeEngagementWork implements EngagementWorkSource {
  * with no compliance rules gets the engagement's own task, exactly as it did
  * before T3.2 existed. Every existing spawn test therefore stays honest without
  * being touched. A test that wants the other branch adds an id to `covered`.
+ *
+ * THE SECOND SET IS A FACT ABOUT THE SERVICE, NOT A SECOND ANSWER. T6.13 kept
+ * a free-standing `filing` set for an entity whose GST rule named "any
+ * service"; decision 1 removed that case, and a fake that could say "covered
+ * but not a filing" for no reason let a work-item test pass against a state
+ * Postgres could not produce, so it went. The adapter now says it for exactly
+ * one reason (the T6.16 follow-up, 2026-09-26): the engagement's service names
+ * a PROCESS of its own, read live, and keeps its month's task. So the fake says
+ * it for that reason alone: `ownProcess` holds the engagements whose service
+ * has one, and `filingEngagements` is `covered` without them, never more than
+ * `covered`, as the adapter's filter over its own rows can never be. Coverage is
+ * per ENGAGEMENT: an entity with a covered GST engagement and an uncovered
+ * bookkeeping one is two ids.
  */
 export class FakeObligationCoverage implements ObligationCoverage {
   readonly covered = new Set<string>();
-  /** Engagements whose SERVICE a rule names — the narrower set a per-period
-   *  task asks about (T6.13). Separate from `covered` because the two answers
-   *  differ in exactly the case the tests are about: an entity that files GST
-   *  is covered, and its bookkeeping engagement is not a filing. */
-  readonly filing = new Set<string>();
+  /** Engagements whose service's LIVE body names a `workflowTemplateKey`. */
+  readonly ownProcess = new Set<string>();
 
   coveredEngagements(
     _tenantId: string,
@@ -729,11 +739,12 @@ export class FakeObligationCoverage implements ObligationCoverage {
     return Promise.resolve(new Set(engagementIds.filter((id) => this.covered.has(id))));
   }
 
-  filingEngagements(
-    _tenantId: string,
+  async filingEngagements(
+    tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
-    return Promise.resolve(new Set(engagementIds.filter((id) => this.filing.has(id))));
+    const covered = await this.coveredEngagements(tenantId, engagementIds);
+    return new Set([...covered].filter((id) => !this.ownProcess.has(id)));
   }
 }
 

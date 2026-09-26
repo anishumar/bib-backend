@@ -342,6 +342,10 @@ describe("nothing here can be deleted", () => {
     "obligation_template_exception",
     "obligation_state",
     "obligation_instance",
+    // Which services owe which filing (0309). Removing a filing from a service
+    // is `unlinked_at`, never a DELETE: "GSTR-3B was on this service from
+    // March to June" has to stay answerable.
+    "obligation_rule_service",
   ];
 
   for (const table of tables) {
