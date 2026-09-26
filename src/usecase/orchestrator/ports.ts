@@ -13,6 +13,7 @@ import type {
   ConfidenceTiers,
   ProposalOutcome,
 } from "../../domain/agent/model";
+import type { OwnerFacts, OwnerPerson } from "../../domain/workitem/model";
 
 export interface NewJobStep {
   readonly id: string;
@@ -104,15 +105,37 @@ export interface JobStepRepository {
 }
 
 /**
- * Whose desk a job's steps default to (0301): the SPOC for the job's Dept on
- * the job's client, in force on the day. ONE user id or null — two SPOCs on a
- * Dept is a real state, and the default is then nobody's until a person
- * chooses. Read directly from the rows by the adapter rather than through the
- * work item use case, which owns the same lookup for the umbrella task: the
- * two use cases must not import each other.
+ * What the owner rule needs to know about a job's steps (0301, then
+ * 2026-09-27): the job's Dept, its client's SPOCs for that Dept, the client's
+ * Key Manager and the person who signs for the firm, all in force on the day
+ * and all active staff. The RULE is `resolveOwner` in the domain, the same
+ * function the work item use case calls for the job's task, so a task and its
+ * steps are always decided alike; this port only gathers the facts.
+ *
+ * THE JOB'S DEPT is the split code when the firm splits by Dept (or a team's
+ * SPOCs when it splits by team), and otherwise the Dept of the job's
+ * services: one Dept is that Dept, several is `several_depts`. Asking only the
+ * split code was the bug that made this port change: a firm keeping a client's
+ * work together has no split code, so every job's steps went to nobody while
+ * its task went to the SPOC.
  */
 export interface StepDeskResolver {
-  spocFor(tenantId: string, jobId: string, onDate: string): Promise<string | null>;
+  ownerFactsFor(tenantId: string, jobId: string, onDate: string): Promise<StepOwnerFacts>;
+}
+
+/**
+ * The owner rule's facts, and who holds the job's TASK now.
+ *
+ * A month's task is created when its period's job is (the period's start) and
+ * the job's steps only when the job becomes runnable (its end: "comes after
+ * close of month"). A Key Manager who hands the task out in between has
+ * already decided who does the month, and the steps must follow that decision
+ * rather than re-run the ladder and land back on the Key Manager. So the one
+ * ACTIVE member of staff every open task of the job is on, or null when there
+ * is no open task, one is on nobody's desk, or two are on different desks.
+ */
+export interface StepOwnerFacts extends OwnerFacts {
+  readonly taskHolder: OwnerPerson | null;
 }
 
 /**

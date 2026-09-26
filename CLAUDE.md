@@ -1749,9 +1749,10 @@ Associate" on eight steps and "Manager" on the ninth, and any member of staff co
 step. So a template step carries a `performer` BAND — `{minGradeRank, minGradeCode, maxGradeRank,
 maxGradeCode}`, rank compared and code read, either end open, null for anybody — and a job step
 carries `assignee_user_id`. At `createSteps` every human step inside its band defaults to the
-job's Dept SPOC (`StepDeskResolver`, read from `crm.client_assignment` by the adapter because the
-work item use case owns the same lookup and the two must not import each other); outside the
-band it starts on nobody's desk rather than on a desk the process forbids. `assignStep` takes,
+job's OWNER under `resolveOwner` (SPOC, Key Manager, signing partner: the ladder the job's task is
+routed by, 2026-09-27; `StepDeskResolver.ownerFactsFor` gathers the facts because the two use
+cases must not import each other); outside the band it starts on nobody's desk rather than on a
+desk the process forbids. `assignStep` takes,
 hands over or releases, checks the roster and the band, and writes `job.step_assigned` with
 `how`. `completeStep` refuses somebody else's step (`NotYourStep` — take it first, one click and
 one ledger row) and a performer outside the band (`PerformerOutOfBand`). `describeSteps` computes
@@ -2098,11 +2099,13 @@ is deliberately NOT statutory:** an engagement's SLA is the firm's own promise, 
 it true would put every piece of advisory work on the statutory priority and make the flag
 meaningless the day it matters. T3.2's obligations set it, from the law.
 
-**Routing refuses to guess, and the refusal is a SENTENCE.** One SPOC for the service's Dept →
-assigned. None → UNASSIGNED with `assignment_note` saying so. Falling back to the Key Manager
-is a rule the firm never gave, and **a wrong assignee is worse than none**: it sits on a desk
-whose owner believes it is not theirs, while unassigned work is visible in a queue that gets
-chased. The note is what makes that queue clearable rather than a pile.
+**Routing has a ladder, and every rung past the first leaves a SENTENCE.** One SPOC for the
+service's Dept → assigned, no note. No SPOC → the client's Key Manager; no Key Manager → the
+person who signs for the firm; nobody at all → unassigned. **Until 2026-09-27 the second and third
+rungs did not exist**: falling back to the Key Manager was "a rule the firm never gave", on the
+ground that a wrong assignee is worse than none. The firm has now given it (see "Work always has
+an owner" below), and the old objection is answered by the note rather than ignored: a fallback
+owner is TOLD, on the row, that the work came to them to hand out and why.
 
 **MORE THAN ONE SPOC TAKES TURNS (Shrestha, 2026-09-25).** From 2026-08-30 that case was also
 left unassigned, because "take the first" was a rule nobody gave. The firm has now given one:
@@ -2111,7 +2114,9 @@ ever put on each desk, `resolveAssignee` picks the fewest, and the tie-break is 
 longer-standing assignment. Two alternate, three rotate, and nothing is stored: the counter is
 read off `delivery.work_item` each time, so a SPOC back from leave catches up on their own. A
 job's steps follow the same rule through `PostgresJobDeskResolver`, so they land on the desk the
-month's task did.
+month's task did. **That sentence was false for every firm on the default split until
+2026-09-27**: the resolver found the SPOC only through the job's split code, which a kept-together
+job does not have. See "Work always has an owner" below.
 
 **`slaDays` is PINNED and the Dept is LIVE, on the same row.** A catalogue revision must not
 make finished work retroactively late (G2.3), so the SLA is snapshotted from the version the
@@ -2168,6 +2173,67 @@ falls behind.
 runs AHEAD of constraint validation, so `enforce_work_item_state_facts` catches a cross-tenant
 state BEFORE the composite foreign key does, and answers with a sentence naming the state and
 the firm. Both defences are real; the trigger is the outer one.
+
+## Work always has an owner — the owner rule (Shrestha, 2026-09-27, 0311)
+
+**The rule is the FIRM's, given 2026-09-27**: work the ENGINE creates (an engagement's task, a
+month's task, a filing's task, a job's steps) is never left on nobody's desk if somebody can hold
+it. `resolveOwner` in `domain/workitem/model.ts` is the one statement of the ladder:
+
+1. the client's SPOC for the work's Dept (`resolveAssignee`, turn-taking and all), with no note;
+2. no SPOC: the client's **Key Manager**, to HAND OUT, with a note saying why;
+3. no Key Manager either: the **person who signs for the firm** (`/admin/firm`), same;
+4. nobody at all: unassigned, the note naming all three gaps.
+
+A task raised BY HAND with nobody picked stays unassigned: the person raising it is on the screen
+and can pick. **Only ACTIVE staff are candidates on any rung** (`infrastructure/postgres/
+work-owner.ts`): an assignment row outlives the membership it names, and a SPOC who left last
+month is nobody to route work to. A Key Manager must be in force on the day (STARTED as well as not
+ended; `listOpenForClient` does not check the start and is not used for this).
+
+**The TASK and the job's STEPS call the same function**, and that is the other half of the change.
+`PostgresJobDeskResolver` used to find the SPOC through the job's SPLIT CODE only, so on the
+default split (`none`, a client's work kept together) every job's steps went to nobody while its
+task, routed by the service's Dept, went to the SPOC: 0 of 619 steps assigned on such jobs locally,
+30 of 30 on jobs split by Dept, and nothing tested the file. The job's Dept is now the split code
+when there is one, else the Dept of the job's services (LIVE, the task's read): one Dept is that
+Dept, several is `several_depts` (no single SPOC can take a job holding FRC and TRC work, so its
+steps go to the Key Manager), none is a service filed under no Dept.
+`tests/orchestrator/owner.integration.test.ts` was watched go red with the old behaviour put back
+and with the active-staff filter removed.
+
+**STEPS GO FIRST TO WHOEVER ALREADY HOLDS THE JOB'S TASK** (`StepOwnerFacts.taskHolder`: the one
+active member of staff every open task of the job is on). A month's task is created when its
+period's job is, at the period's START, and the job's steps only when it becomes runnable, at the
+period's END ("comes after close of month"). A Key Manager who hands the task out in between has
+decided who does the month; re-running the ladder when the steps are written would put them back
+on the Key Manager. Found by walking it, not by a test: the first walk handed the task out before
+the steps existed. Recorded `with_task` unless the ladder would have named the same person.
+
+**A fallback owner holds the TASK, not necessarily the steps.** A step's band still decides who may
+hold it: a Key Manager who is a Director leaves an Analyst's step on nobody's desk. So **handing the
+task on hands out the job** (`WorkItemService.assign` → `JobStepHandover` →
+`OrchestratorService.adoptUnheldSteps`): every human step not settled and held by nobody, or by the
+task's previous owner, moves to the new owner wherever the band admits them, each a
+`job.step_assigned` with `how: "with_task"`. Only when every open task of the job is then on that
+one desk; a step a colleague took stays theirs. The assign route answers `stepsHandedOver`.
+
+**0311 dropped `work_item_note_only_when_unassigned`.** 0051 refused a note beside a name as "a
+stale sentence contradicting the name beside it"; a fallback owner's note is the opposite, the
+only thing telling them the task is theirs to hand out. It cannot go stale: a hand move writes NULL
+over it (`setAssignee`). Its down REFUSES while any assigned task carries a note.
+
+**The owner is asked for on the FIRM's TODAY, the day the work is created**, for a spawned task
+(`WorkItemService` now holds a `timeZones` port) as for the job's steps. It used to be the
+engagement's `effective_from`, and that put a task and its steps on different desks whenever the
+account team was named after that day: the book import does it every time (team from today,
+engagement from the paper letter's date, so the task found nobody and the steps found the Key
+Manager), and a handover sent November's task to September's SPOC. A SPOC named from a later day
+is still not today's. A filing's task (`raiseForObligation`) still asks on its due date: it has no
+steps to agree with, and changing it was not part of this.
+
+`how` on `work_item.assigned` and `job.step_assigned` names the rung (`spoc`, `key_manager`,
+`partner`), so "why is this on the Key Manager's desk" is answerable from the ledger.
 
 ## The compliance calendar — generated, never typed (T3.2)
 

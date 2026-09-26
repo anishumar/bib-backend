@@ -33,6 +33,7 @@ import { NudgeService } from "../usecase/nudge/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-resolver";
+import { PostgresWorkOwnerDirectory } from "../infrastructure/postgres/work-owner";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
@@ -242,6 +243,19 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // does this client talk to about this Dept's work, on the day the work
     // begins.
     spocs: new PostgresClientAssignmentRepository(pools.app),
+    // THE OWNER RULE'S LATER RUNGS (2026-09-27): the client's Key Manager,
+    // then the person who signs for the firm, when there is no SPOC.
+    owners: new PostgresWorkOwnerDirectory(pools.app),
+    // The firm's day, which a spawned task's owner is looked up on: the same
+    // day the job's steps ask on (2026-09-27).
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // A task's unheld steps go with it when it is handed on. The same kind of
+    // cycle as `filings`, broken the same way: the orchestrator is built
+    // further down, and nothing calls this before a request.
+    jobSteps: {
+      adoptUnheldSteps: (tenantId, jobId, from, to, actor): Promise<number> =>
+        orchestrator.adoptUnheldSteps(tenantId, jobId, from, to, actor),
+    },
     axes: new PostgresServiceAxisRepository(pools.app),
     policies: configRepository,
     reviewers: memberships,

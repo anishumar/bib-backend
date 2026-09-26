@@ -45,7 +45,14 @@ function step(over: Partial<TemplateStep> & { key: string }): TemplateStep {
 }
 const template = (steps: readonly TemplateStep[]): ResolvedTemplate => ({ versionId: "v1", label: "Monthly close", steps });
 
-async function world(steps: readonly TemplateStep[], spoc: string | null) {
+interface Rungs {
+  readonly keyManager?: { userId: string; displayName: string | null };
+  readonly partner?: { userId: string; displayName: string | null };
+  readonly noLookup?: FakeStepDeskResolver["noLookup"];
+  readonly taskHolder?: { userId: string; displayName: string | null };
+}
+
+async function world(steps: readonly TemplateStep[], spoc: string | null, rungs: Rungs = {}) {
   const jobs = new FakeJobRepo();
   const stepRepo = new FakeJobStepRepo();
   const templates = new FakeTemplateSource();
@@ -53,6 +60,10 @@ async function world(steps: readonly TemplateStep[], spoc: string | null) {
   const events = new RecordingEventSink();
   const desks = new FakeStepDeskResolver();
   desks.spoc = spoc;
+  desks.keyManager = rungs.keyManager ?? null;
+  desks.partner = rungs.partner ?? null;
+  desks.noLookup = rungs.noLookup ?? null;
+  desks.taskHolder = rungs.taskHolder ?? null;
   const checkers = new FakeCheckerDirectory()
     .add({ userId: ROHAN, displayName: "Rohan Mehta", gradeRank: 4, gradeName: "Senior Associate" })
     .add({ userId: KAVYA, displayName: "Kavya Nair", gradeRank: 1, gradeName: "Analyst" })
@@ -168,5 +179,138 @@ describe("the band on a template step", () => {
     expect(validateBody("workflow_template", body({ ...JUNIOR, minGradeRank: 9, minGradeCode: "director" }))).toMatch(/lower rank goes first/);
     expect(validateBody("workflow_template", body({ minGradeRank: 1, minGradeCode: null, maxGradeRank: null, maxGradeCode: null }))).toMatch(/go together/);
     expect(validateBody("workflow_template", body({ minGradeRank: null, minGradeCode: null, maxGradeRank: null, maxGradeCode: null }))).toMatch(/both ends open/);
+  });
+});
+
+describe("the owner rule on a job's steps: SPOC, then Key Manager, then the signing partner (2026-09-27)", () => {
+  const steps3 = () => [
+    step({ key: "open", performer: JUNIOR }),
+    step({ key: "review", performer: MANAGER_UP, dependsOn: ["open"] }),
+    step({ key: "mis", dependsOn: ["review"] }),
+  ];
+
+  it("puts the steps on the Key Manager when there is no SPOC and they are inside the band", async () => {
+    const w = await world(steps3(), null, { keyManager: { userId: KAVYA, displayName: "Kavya Nair" } });
+    const by = new Map(w.stepRepo.rows.map((r) => [r.stepKey, r.assigneeUserId]));
+    expect(by.get("open")).toBe(KAVYA);
+    expect(by.get("review")).toBeNull();
+    expect(by.get("mis")).toBe(KAVYA);
+    const assigned = w.events.recorded.filter((e) => e.verb === "job.step_assigned");
+    expect(assigned.map((e) => e.payload)).toEqual([
+      expect.objectContaining({ stepKey: "open", how: "key_manager" }),
+      expect.objectContaining({ stepKey: "mis", how: "key_manager" }),
+    ]);
+  });
+
+  it("leaves a step on nobody's desk when the owner is outside its band: they hold the TASK, not the step", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR })], null, {
+      keyManager: { userId: RAJAT, displayName: "Rajat Gupta" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBeNull();
+  });
+
+  it("falls to the person who signs for the firm when there is no Key Manager either", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR })], null, {
+      partner: { userId: ROHAN, displayName: "Rohan Mehta" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBe(ROHAN);
+    expect(w.events.recorded.find((e) => e.verb === "job.step_assigned")?.payload).toMatchObject({ how: "partner" });
+  });
+
+  it("never asks one Dept's SPOC about a job that holds several Depts' work", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR })], ROHAN, {
+      noLookup: { kind: "several_depts", names: ["FRC", "TRC"] },
+      keyManager: { userId: KAVYA, displayName: "Kavya Nair" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBe(KAVYA);
+  });
+});
+
+describe("a job's steps follow its task (2026-09-27)", () => {
+  it("moves every unheld step inside the new owner's band, and records each as going with the task", async () => {
+    // The Key Manager is a Director: outside the Analyst's band on "open", so
+    // that step starts on nobody's desk, and inside "review" (Manager or
+    // above) and "mis" (anybody), so those start on his.
+    const w = await world(
+      [step({ key: "open", performer: JUNIOR }), step({ key: "review", performer: MANAGER_UP, dependsOn: ["open"] }), step({ key: "mis", dependsOn: ["review"] })],
+      null,
+      { keyManager: { userId: RAJAT, displayName: "Rajat Gupta" } },
+    );
+    const before = new Map(w.stepRepo.rows.map((r) => [r.stepKey, r.assigneeUserId]));
+    expect([before.get("open"), before.get("review"), before.get("mis")]).toEqual([null, RAJAT, RAJAT]);
+
+    // Handing the task to Kavya hands her the job, as far as her grade goes.
+    const moved = await w.service.adoptUnheldSteps(TENANT, JOB, RAJAT, KAVYA, ACTOR);
+
+    expect(moved).toBe(2);
+    const by = new Map(w.stepRepo.rows.map((r) => [r.stepKey, r.assigneeUserId]));
+    expect(by.get("open")).toBe(KAVYA);
+    expect(by.get("mis")).toBe(KAVYA);
+    // An Analyst is not "Manager or above": that step stays with Rajat.
+    expect(by.get("review")).toBe(RAJAT);
+    const withTask = w.events.recorded.filter((e) => e.verb === "job.step_assigned" && e.payload["how"] === "with_task");
+    expect(withTask).toHaveLength(2);
+    expect(withTask.map((e) => e.payload)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ stepKey: "open", assigneeUserId: KAVYA, previousAssigneeUserId: null }),
+        expect.objectContaining({ stepKey: "mis", assigneeUserId: KAVYA, previousAssigneeUserId: RAJAT }),
+      ]),
+    );
+  });
+
+  it("moves a step the task's previous owner held, and leaves one a colleague took", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR }), step({ key: "mis", performer: JUNIOR })], ROHAN);
+    // Kavya took "mis" herself; "open" is still on the SPOC's desk.
+    await w.service.assignStep({ tenantId: TENANT, jobId: JOB, stepKey: "mis", assigneeUserId: KAVYA }, ACTOR, KAVYA);
+
+    // The task goes from Rohan to... Kavya is already on "mis"; hand it to a
+    // third person in the band: Rohan's steps move, Kavya's stays hers.
+    const moved = await w.service.adoptUnheldSteps(TENANT, JOB, ROHAN, KAVYA, ACTOR);
+    expect(moved).toBe(1);
+    expect(w.stepRepo.rows.find((r) => r.stepKey === "open")?.assigneeUserId).toBe(KAVYA);
+    expect(w.stepRepo.rows.find((r) => r.stepKey === "mis")?.assigneeUserId).toBe(KAVYA);
+
+    const other = await world([step({ key: "open", performer: JUNIOR })], null);
+    await other.service.assignStep({ tenantId: TENANT, jobId: JOB, stepKey: "open", assigneeUserId: ROHAN }, ACTOR, ROHAN);
+    expect(await other.service.adoptUnheldSteps(TENANT, JOB, RAJAT, KAVYA, ACTOR)).toBe(0);
+    expect(other.stepRepo.rows[0]?.assigneeUserId).toBe(ROHAN);
+  });
+
+  it("does not move a finished step, and moves nothing for somebody who is not staff here", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR }), step({ key: "mis", performer: JUNIOR, dependsOn: ["open"] })], ROHAN);
+    await w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "open" }, ACTOR, ROHAN);
+
+    expect(await w.service.adoptUnheldSteps(TENANT, JOB, ROHAN, KAVYA, ACTOR)).toBe(1);
+    expect(w.stepRepo.rows.find((r) => r.stepKey === "open")?.assigneeUserId).toBe(ROHAN);
+    expect(await w.service.adoptUnheldSteps(TENANT, JOB, KAVYA, "00000000-0000-4000-8000-0000000000ff", ACTOR)).toBe(0);
+  });
+});
+
+describe("steps follow whoever already holds the job's task (2026-09-27)", () => {
+  it("puts the steps on the task's holder, not back on the ladder's pick, when the task was handed out first", async () => {
+    // A month's task exists from the period's start and its steps from the
+    // period's end. The Key Manager (a Director) handed the task to Kavya in
+    // between; the steps are hers, recorded as going with the task.
+    const w = await world([step({ key: "open", performer: JUNIOR })], null, {
+      keyManager: { userId: RAJAT, displayName: "Rajat Gupta" },
+      taskHolder: { userId: KAVYA, displayName: "Kavya Nair" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBe(KAVYA);
+    expect(w.events.recorded.find((e) => e.verb === "job.step_assigned")?.payload).toMatchObject({ how: "with_task" });
+  });
+
+  it("records the ladder's own rung when the task's holder IS the ladder's pick", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR })], ROHAN, {
+      taskHolder: { userId: ROHAN, displayName: "Rohan Mehta" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBe(ROHAN);
+    expect(w.events.recorded.find((e) => e.verb === "job.step_assigned")?.payload).toMatchObject({ how: "spoc" });
+  });
+
+  it("still keeps a step off a holder outside its band", async () => {
+    const w = await world([step({ key: "open", performer: JUNIOR })], ROHAN, {
+      taskHolder: { userId: RAJAT, displayName: "Rajat Gupta" },
+    });
+    expect(w.stepRepo.rows[0]?.assigneeUserId).toBeNull();
   });
 });

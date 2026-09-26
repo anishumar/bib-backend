@@ -20,8 +20,8 @@
 # Most of what this creates is healthy. A small, clearly-labelled corner is not,
 # and every piece of it is a state this product exists to make visible:
 #
-#   · a client with no SPOC for one Dept  → work lands UNASSIGNED, with the
-#                                            reason, instead of on a guessed desk
+#   · a client with no SPOC for one Dept  → work lands on its KEY MANAGER to
+#                                            hand out, with the reason (2026-09-27)
 #   · a client with TWO SPOCs for one Dept → the router refuses to choose
 #   · an associate with no manager recorded → an escalation that reaches NOBODY
 #   · fifty-odd shipped rules with no formula → the calendar's coverage tab
@@ -552,11 +552,11 @@ warn "Lakeview has TWO SPOCs on TRC — the router will refuse to choose."
 
 assign "$HARBOUR" "{\"role\":\"key_manager\",\"userId\":\"$MANAGER_ID\",\"validFrom\":\"$LAST_WEEK\"}"
 # PROBLEM CORNER (3). Harbour has a Key Manager and NO SPOC on any Dept, which
-# is what a client looks like the week it is signed. Work raised for it has
-# nobody to route to and the router refuses to guess: a wrong assignee sits on a
-# desk whose owner believes it is not theirs, while unassigned work is visible
-# in a queue that gets chased.
-warn "Harbour has no SPOC on any Dept - its work will land unassigned, with the reason."
+# is what a client looks like the week it is signed. Since 2026-09-27 the work
+# the engine raises for it goes to the Key Manager to HAND OUT, with a sentence
+# on the task saying so and why (the owner rule, `resolveOwner`); until then it
+# sat on nobody's desk.
+warn "Harbour has no SPOC on any Dept - its work will land on Ravi, its Key Manager, to hand out."
 
 # ── The compliance rules ─────────────────────────────────────────────────────
 
@@ -940,7 +940,7 @@ cat <<EOF
   Meera Menon     portal      meera@cobaltfoods.in
 
   THE PROBLEM CORNER — all deliberate, all worth showing:
-    · Harbour has no SPOC at all        → its work is unassigned, with the reason
+    · Harbour has no SPOC at all        → its work goes to Ravi (Key Manager) to hand out
     · Lakeview has TWO SPOCs on TRC     → the router refuses to choose
     · Farhan reports to nobody          → his escalations reach NOBODY
     · Harbour Provisions is unregistered → its calendar is empty, with a reason

@@ -4,8 +4,10 @@
 import type { JobStep, StepCheckMark, StepStatus } from "../domain/orchestrator/model";
 import type { StepApproval } from "../domain/verification/model";
 import type { ConfidenceTiers } from "../domain/agent/model";
+import type { NoSpocLookup, OwnerPerson } from "../domain/workitem/model";
 import type {
   StepDeskResolver,
+  StepOwnerFacts,
   AgentOutcome,
   AgentRun,
   AgentRunRepository,
@@ -373,12 +375,34 @@ export class FakeAgentRuntime implements AgentRuntime {
   }
 }
 
-/** Whose desk a job's steps default to. A test sets `spoc`; null is "nobody". */
+/**
+ * The facts the owner rule decides a job's step desk from (0301, 2026-09-27).
+ * A test sets `spoc` (the job's one SPOC; null is none), and for the later
+ * rungs `keyManager` and `partner`; `noLookup` says the Dept could not be
+ * looked up at all. The decision is the real `resolveOwner`, in the service.
+ */
 export class FakeStepDeskResolver implements StepDeskResolver {
   spoc: string | null = null;
+  deptName: string | null = "Financial Reporting and Compliance";
+  noLookup: NoSpocLookup | null = null;
+  keyManager: OwnerPerson | null = null;
+  partner: OwnerPerson | null = null;
+  /** Who holds the job's task now; null is "nobody, or not one person". */
+  taskHolder: OwnerPerson | null = null;
 
-  spocFor(_tenantId: string, _jobId: string, _onDate: string): Promise<string | null> {
-    return Promise.resolve(this.spoc);
+  ownerFactsFor(_tenantId: string, _jobId: string, _onDate: string): Promise<StepOwnerFacts> {
+    const spocs =
+      this.noLookup === null && this.spoc !== null
+        ? [{ userId: this.spoc, displayName: null, email: "spoc@example.test", routed: 0 }]
+        : [];
+    return Promise.resolve({
+      deptName: this.noLookup === null ? this.deptName : null,
+      noLookup: this.noLookup,
+      spocs,
+      keyManager: this.keyManager,
+      partner: this.partner,
+      taskHolder: this.taskHolder,
+    });
   }
 }
 

@@ -46,10 +46,12 @@ import {
   isValidVocabularyCode,
   normalizeVocabularyCode,
   priorityOrder,
-  resolveAssignee,
+  resolveOwner,
   stateOrder,
   wouldCycle,
 } from "../../domain/workitem/model";
+import type { NoSpocLookup, OwnerOutcome, OwnerSource } from "../../domain/workitem/model";
+import { dayInZone } from "../../domain/scheduler/zone";
 import {
   AssigneeNotStaff,
   BlockReasonRequired,
@@ -95,6 +97,7 @@ import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/v
 import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
 import type {
   EngagementWorkSource,
+  JobStepHandover,
   ObligationCoverage,
   ObligationFiling,
   NewWorkItem,
@@ -107,6 +110,8 @@ import type {
   SpawnPeriod,
   SpocDirectory,
   WorkAxisDirectory,
+  WorkOwnerDirectory,
+  WorkItemTimeZone,
   WorkItemApprovalRepository,
   WorkItemClientDirectory,
   WorkItemFilter,
@@ -570,6 +575,12 @@ export interface Deps {
   readonly clients: WorkItemClientDirectory;
   readonly staff: WorkItemStaffDirectory;
   readonly spocs: SpocDirectory;
+  /** The Key Manager and the signing partner: the owner rule's later rungs. */
+  readonly owners: WorkOwnerDirectory;
+  /** A task's unheld steps go with it when it is handed on. */
+  readonly jobSteps: JobStepHandover;
+  /** The firm's zone, for the day a spawned task's owner is looked up on. */
+  readonly timeZones: WorkItemTimeZone;
   readonly axes: WorkAxisDirectory;
   readonly policies: ReviewPolicySource;
   readonly reviewers: ReviewerDirectory;
@@ -1005,6 +1016,15 @@ export class WorkItemService {
       ? await this.deps.obligations.filingEngagements(tenantId, engagementIds)
       : await this.deps.obligations.coveredEngagements(tenantId, engagementIds);
 
+    // WHO OWNS IT IS ASKED ON THE FIRM'S TODAY, the day the work is created,
+    // and the day the job's steps ask on (2026-09-27). Asking on the
+    // engagement's first day instead put a task and its steps on different
+    // desks whenever the account team was named after that day, which the
+    // book import does every time (the team from today, the engagement from
+    // the paper letter's date), and handed November's task to September's SPOC
+    // after a handover. A SPOC named from a later day is still not today's.
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+
     let created = 0;
     for (const w of work) {
       if (covered.has(w.engagementId)) continue;
@@ -1016,12 +1036,7 @@ export class WorkItemService {
       const priority = defaultPriorityFor(priorities, false);
       if (!priority) throw new NoDefaultPriority();
 
-      const routing = await this.routeToSpoc(
-        tenantId,
-        w.clientPartyId,
-        w.deptCode,
-        w.effectiveFrom,
-      );
+      const routing = await this.routeOwner(tenantId, w.clientPartyId, w.deptCode, today);
 
       const item = await this.deps.items.createIfAbsentForEngagement({
         id: this.deps.ids.newId(),
@@ -1057,7 +1072,7 @@ export class WorkItemService {
       if (!item) continue;
       created += 1;
       await this.recordCreated(item, actor, "engagement");
-      if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, "spoc");
+      if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, routing.outcome.how ?? "spoc");
     }
     return created;
   }
@@ -1111,7 +1126,7 @@ export class WorkItemService {
     const w = work[0];
 
     const clientPartyId = w?.clientPartyId ?? input.entityPartyId;
-    const routing = await this.routeToSpoc(
+    const routing = await this.routeOwner(
       tenantId,
       clientPartyId,
       w?.deptCode ?? null,
@@ -1149,7 +1164,7 @@ export class WorkItemService {
     } satisfies NewWorkItem);
 
     await this.recordCreated(item, actor, "obligation");
-    if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, "spoc");
+    if (item.assigneeUserId !== null) await this.recordAssigned(item, actor, routing.outcome.how ?? "spoc");
     return item.id;
   }
 
@@ -1329,12 +1344,28 @@ export class WorkItemService {
   /** Put it on somebody's desk, or take it off. Taking it off records WHY as a
    *  note, so the unassigned queue stays readable rather than becoming a pile
    *  of rows with no explanation. */
-  async assign(input: AssignWorkItemInput, actor: Actor): Promise<WorkItem> {
+  /**
+   * Put a task on somebody's desk, or take it off.
+   *
+   * AND THE JOB'S STEPS GO WITH IT (2026-09-27). A fallback owner (the Key
+   * Manager, the signing partner) receives a job's task to hand out, and the
+   * firm's rule is that handing out the TASK hands out the job: its steps
+   * nobody holds, or that the task's previous owner held, move to the new
+   * owner wherever the process lets that person do them. Only when every open
+   * task of the job is now on that one desk, so a job whose tasks sit with two
+   * people (a client keeping FRC and TRC work together) keeps its steps where
+   * they are for somebody to hand out one by one. `stepsHandedOver` says how
+   * many moved, so the screen can say so.
+   */
+  async assign(
+    input: AssignWorkItemInput,
+    actor: Actor,
+  ): Promise<{ readonly item: WorkItem; readonly stepsHandedOver: number }> {
     const item = await this.requireItem(input.tenantId, input.workItemId);
     if (input.assigneeUserId !== null) {
       await this.requireStaff(input.tenantId, input.assigneeUserId);
     }
-    if (item.assigneeUserId === input.assigneeUserId) return item;
+    if (item.assigneeUserId === input.assigneeUserId) return { item, stepsHandedOver: 0 };
 
     const updated = await this.deps.items.setAssignee(
       input.tenantId,
@@ -1343,7 +1374,22 @@ export class WorkItemService {
       input.assigneeUserId === null ? "Taken off a desk by hand; nobody has it now." : null,
     );
     await this.recordAssigned(updated, actor, "manual");
-    return updated;
+
+    let stepsHandedOver = 0;
+    const to = input.assigneeUserId;
+    if (to !== null && updated.jobId !== null) {
+      const open = await this.deps.items.list(input.tenantId, { jobId: updated.jobId, openOnly: true });
+      if (open.every((t) => t.item.assigneeUserId === to)) {
+        stepsHandedOver = await this.deps.jobSteps.adoptUnheldSteps(
+          input.tenantId,
+          updated.jobId,
+          item.assigneeUserId,
+          to,
+          actor,
+        );
+      }
+    }
+    return { item: updated, stepsHandedOver };
   }
 
   // ── the checklist ────────────────────────────────────────────────────────
@@ -1780,52 +1826,48 @@ export class WorkItemService {
   }
 
   /**
-   * A service's Dept code, turned into a SPOC or an honest refusal to guess.
+   * A service's Dept code, turned into the work's owner (2026-09-27).
    *
-   * Three ways this can fail to produce a name, and each gets its own sentence
-   * on the row rather than a silent null: the service is filed under no Dept,
-   * the firm has no such Dept any more, or `resolveAssignee`'s two cases (none,
-   * or several). An unassigned queue is only chased if each row says what to
-   * do about it.
+   * The facts are gathered here and the ladder is `resolveOwner`'s, the one
+   * the job's step desk also calls: SPOC, then Key Manager, then the person
+   * who signs for the firm, then nobody. Every rung past the first leaves a
+   * sentence on the row saying why the work came to that desk and what would
+   * send it straight to a SPOC next time.
    */
-  private async routeToSpoc(
+  private async routeOwner(
     tenantId: string,
     clientPartyId: string,
     deptCode: string | null,
     onDate: string,
-  ): Promise<{
-    readonly axisId: string | null;
-    readonly outcome: { readonly userId: string | null; readonly note: string | null };
-  }> {
+  ): Promise<{ readonly axisId: string | null; readonly outcome: OwnerOutcome }> {
+    let axisId: string | null = null;
+    let deptName: string | null = null;
+    let noLookup: NoSpocLookup | null = null;
+    let spocs: Awaited<ReturnType<SpocDirectory["spocsFor"]>> = [];
     if (deptCode === null) {
-      return {
-        axisId: null,
-        outcome: {
-          userId: null,
-          note:
-            `This service is not filed under a Dept, so there was no SPOC to route to. ` +
-            `Setting a Dept on the service in the catalogue routes work like this ` +
-            `automatically from then on.`,
-        },
-      };
+      noLookup = { kind: "no_dept" };
+    } else {
+      const axis = await this.deps.axes.findByCode(tenantId, "dept", deptCode);
+      if (!axis) {
+        noLookup = { kind: "unknown_dept", code: deptCode };
+      } else {
+        axisId = axis.id;
+        deptName = axis.name;
+        spocs = await this.deps.spocs.spocsFor(tenantId, clientPartyId, axis.id, onDate);
+      }
     }
-
-    const axis = await this.deps.axes.findByCode(tenantId, "dept", deptCode);
-    if (!axis) {
-      return {
-        axisId: null,
-        outcome: {
-          userId: null,
-          note:
-            `The service names Dept ${JSON.stringify(deptCode)}, which is not one of this ` +
-            `firm's Depts, so there was no SPOC to route to. Add it on the structure screen ` +
-            `or correct the service.`,
-        },
-      };
-    }
-
-    const spocs = await this.deps.spocs.spocsFor(tenantId, clientPartyId, axis.id, onDate);
-    return { axisId: axis.id, outcome: resolveAssignee(spocs, axis.name) };
+    // The later rungs are read only when the first one is empty: the common
+    // case costs what it cost before.
+    const needFallback = noLookup !== null || spocs.length === 0;
+    const keyManager = needFallback
+      ? await this.deps.owners.keyManagerFor(tenantId, clientPartyId, onDate)
+      : null;
+    const partner =
+      needFallback && keyManager === null ? await this.deps.owners.signingPartner(tenantId) : null;
+    return {
+      axisId,
+      outcome: resolveOwner({ deptName, noLookup, spocs, keyManager, partner }),
+    };
   }
 
   private async requireApproval(
@@ -1944,7 +1986,7 @@ export class WorkItemService {
   private async recordAssigned(
     item: WorkItem,
     actor: Actor,
-    how: "spoc" | "manual",
+    how: OwnerSource | "manual",
   ): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId: item.tenantId,

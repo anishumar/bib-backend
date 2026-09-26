@@ -20,6 +20,7 @@
 import type { Actor } from "../domain/ledger/model";
 import type {
   ChecklistItem,
+  OwnerPerson,
   SpocCandidate,
   WorkItem,
   WorkItemApproval,
@@ -35,6 +36,7 @@ import type {
   ApprovalDecisionWrite,
   EngagementWork,
   EngagementWorkSource,
+  JobStepHandover,
   NewWorkItem,
   NewWorkItemApproval,
   NewWorkItemPriority,
@@ -49,6 +51,7 @@ import type {
   SpocDirectory,
   WorkAxisDirectory,
   WorkAxisRow,
+  WorkOwnerDirectory,
   WorkItemApprovalRepository,
   WorkItemClientDirectory,
   WorkItemClientRow,
@@ -767,5 +770,66 @@ export class FakeObligationFiling implements ObligationFiling {
   ): Promise<void> {
     this.calls.push({ workItemId, discharged });
     return Promise.resolve();
+  }
+}
+
+/**
+ * The owner rule's later rungs (2026-09-27). A test names a Key Manager per
+ * client, in force from a day, and the firm's signatory; both default to
+ * nobody, which reproduces the routing every test before this was written for.
+ */
+export class FakeWorkOwnerDirectory implements WorkOwnerDirectory {
+  private readonly keyManagers: {
+    clientPartyId: string;
+    person: OwnerPerson;
+    validFrom: string;
+    validTo: string | null;
+  }[] = [];
+  partner: OwnerPerson | null = null;
+
+  setKeyManager(
+    clientPartyId: string,
+    person: OwnerPerson,
+    validFrom = "2000-01-01",
+    validTo: string | null = null,
+  ): this {
+    this.keyManagers.push({ clientPartyId, person, validFrom, validTo });
+    return this;
+  }
+
+  keyManagerFor(_tenantId: string, clientPartyId: string, onDate: string): Promise<OwnerPerson | null> {
+    const hit = this.keyManagers.find(
+      (k) =>
+        k.clientPartyId === clientPartyId &&
+        k.validFrom <= onDate &&
+        (k.validTo === null || onDate < k.validTo),
+    );
+    return Promise.resolve(hit?.person ?? null);
+  }
+
+  signingPartner(_tenantId: string): Promise<OwnerPerson | null> {
+    return Promise.resolve(this.partner);
+  }
+}
+
+/** Records what a task's hand-over asked of its job's steps, and moves
+ *  `moves` of them, so a test can say what the orchestrator would answer. */
+export class FakeJobStepHandover implements JobStepHandover {
+  readonly calls: {
+    jobId: string;
+    fromUserId: string | null;
+    toUserId: string;
+  }[] = [];
+  moves = 0;
+
+  adoptUnheldSteps(
+    _tenantId: string,
+    jobId: string,
+    fromUserId: string | null,
+    toUserId: string,
+    _actor: Actor,
+  ): Promise<number> {
+    this.calls.push({ jobId, fromUserId, toUserId });
+    return Promise.resolve(this.moves);
   }
 }

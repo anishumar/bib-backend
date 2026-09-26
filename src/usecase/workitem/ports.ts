@@ -12,6 +12,7 @@
 import type { Actor } from "../../domain/ledger/model";
 import type {
   ChecklistItem,
+  OwnerPerson,
   SpocCandidate,
   WorkItem,
   WorkItemApproval,
@@ -507,6 +508,52 @@ export interface SpocDirectory {
     axisId: string,
     onDate: string,
   ): Promise<readonly SpocCandidate[]>;
+}
+
+/**
+ * The two rungs of the owner rule after the SPOC (2026-09-27): the client's
+ * Key Manager, and the person who signs for the firm. Both answer with an
+ * ACTIVE member of staff or nothing, because a Key Manager who has left the
+ * firm, or a signatory whose access was revoked, is nobody to hand work to,
+ * and the next rung is then the honest answer.
+ *
+ * `onDate` for the Key Manager is the same day the SPOC was looked up on, so
+ * the two rungs answer about one day. The signatory is a column on the firm
+ * and has no day.
+ */
+export interface WorkOwnerDirectory {
+  keyManagerFor(tenantId: string, clientPartyId: string, onDate: string): Promise<OwnerPerson | null>;
+  signingPartner(tenantId: string): Promise<OwnerPerson | null>;
+}
+
+/**
+ * The firm's own timezone (0071): which calendar day it is for the firm when
+ * the engine creates work, the day the work's owner is looked up on
+ * (2026-09-27). The job's steps ask on the same day, so a task and its steps
+ * are decided about one day. `PostgresFirmTimeZone` satisfies it, as it does
+ * every other use case's.
+ */
+export interface WorkItemTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * A task's steps follow the task (2026-09-27). When a fallback owner hands a
+ * job's task to somebody, the steps nobody holds go with it, so handing a job
+ * out is one act. Declared here because the work item use case and the
+ * orchestrator must not import each other; `setup/` satisfies it with the
+ * orchestrator's own method, the arrangement `ObligationFiling` has.
+ *
+ * Returns how many steps moved, for the caller to report.
+ */
+export interface JobStepHandover {
+  adoptUnheldSteps(
+    tenantId: string,
+    jobId: string,
+    fromUserId: string | null,
+    toUserId: string,
+    actor: Actor,
+  ): Promise<number>;
 }
 
 /** A Dept or delivery team, as this use case needs it. */

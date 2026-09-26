@@ -176,6 +176,17 @@ const WorkItemSchema = z
   })
   .openapi("WorkItem");
 
+/** The task, and how many of its job's steps went with it (2026-09-27). */
+const AssignResponse = WorkItemSchema.extend({
+  stepsHandedOver: z.number().int().nonnegative().openapi({
+    description:
+      "How many of the job's steps moved to the new owner with the task: the steps nobody " +
+      "held, or that the task's previous owner held, which the process lets the new owner " +
+      "do. Zero when the task has no job, when it was taken off a desk, or when another " +
+      "open task of the same job is on somebody else's desk.",
+  }),
+}).openapi("AssignedWorkItem");
+
 const ChecklistItemSchema = z
   .object({
     id: z.string().uuid(),
@@ -733,7 +744,7 @@ const assignRoute = createRoute({
     body: { content: { "application/json": { schema: AssignRequest } }, required: true },
   },
   responses: {
-    200: { description: "Assigned", content: { "application/json": { schema: WorkItemSchema } } },
+    200: { description: "Assigned", content: { "application/json": { schema: AssignResponse } } },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item at this firm"),
@@ -1153,8 +1164,11 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     if (!s.ok) return c.json(s.deny, s.status);
     const { workItemId } = c.req.valid("param");
     const { assigneeUserId } = c.req.valid("json");
-    await deps.service.assign({ tenantId: s.tenantId, workItemId, assigneeUserId }, s.actor);
-    return c.json(toWire(await readBack(deps, s.tenantId, workItemId)), 200);
+    const { stepsHandedOver } = await deps.service.assign(
+      { tenantId: s.tenantId, workItemId, assigneeUserId },
+      s.actor,
+    );
+    return c.json({ ...toWire(await readBack(deps, s.tenantId, workItemId)), stepsHandedOver }, 200);
   });
 
   app.openapi(addChecklistRoute, async (c) => {

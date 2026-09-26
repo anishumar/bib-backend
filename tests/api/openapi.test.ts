@@ -163,6 +163,8 @@ import {
   FakeWorkItemRepo,
   FakeWorkItemStaff,
   FakeWorkVocabularyRepo,
+  FakeJobStepHandover,
+  FakeWorkOwnerDirectory,
 } from "../../src/testfakes/workitem";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
 import { ObligationVocabularyService } from "../../src/usecase/obligation/vocabulary";
@@ -356,6 +358,9 @@ function deps(): RouterDeps {
           clients: new FakeWorkItemClients(),
           staff: new FakeWorkItemStaff(),
           spocs: new FakeSpocDirectory(),
+          owners: new FakeWorkOwnerDirectory(),
+          jobSteps: new FakeJobStepHandover(),
+          timeZones: new FakeFirmTimeZone(),
           axes: new FakeWorkAxes(),
           policies: new FakeReviewPolicies(),
           reviewers: new FakeReviewers(),

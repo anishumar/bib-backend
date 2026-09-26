@@ -6,6 +6,7 @@
 // checker, and the idempotency the spawn path rests on.
 import { beforeEach, describe, expect, it } from "vitest";
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
@@ -15,12 +16,14 @@ import {
   FakeReviewPermissions,
   FakeReviewPolicies,
   FakeReviewers,
+  FakeJobStepHandover,
   FakeSpocDirectory,
   FakeWorkAxes,
   FakeWorkItemApprovalRepo,
   FakeWorkItemClients,
   FakeWorkItemRepo,
   FakeWorkItemStaff,
+  FakeWorkOwnerDirectory,
   FakeWorkVocabularyRepo,
 } from "../../src/testfakes/workitem";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
@@ -51,6 +54,9 @@ async function harness() {
   const clients = new FakeWorkItemClients();
   const staff = new FakeWorkItemStaff();
   const spocs = new FakeSpocDirectory();
+  const owners = new FakeWorkOwnerDirectory();
+  const jobSteps = new FakeJobStepHandover();
+  const timeZones = new FakeFirmTimeZone();
   const axes = new FakeWorkAxes();
   const policies = new FakeReviewPolicies();
   const reviewers = new FakeReviewers();
@@ -76,6 +82,9 @@ async function harness() {
     clients,
     staff,
     spocs,
+    owners,
+    jobSteps,
+    timeZones,
     axes,
     policies,
     reviewers,
@@ -116,6 +125,10 @@ async function harness() {
     items,
     approvals,
     spocs,
+    owners,
+    jobSteps,
+    timeZones,
+    clock,
     axes,
     policies,
     reviewers,
@@ -1259,5 +1272,141 @@ describe("a period job's umbrella task is one month's task", () => {
       "GST monthly filing · Sep 2026",
       "GST monthly filing · Oct 2026",
     ]);
+  });
+});
+
+describe("THE OWNER RULE: work always has an owner (2026-09-27)", () => {
+  const RAVI_KM = { userId: RAVI, displayName: "Ravi" };
+
+  it("gives the task to the client's Key Manager to hand out when there is no SPOC", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork());
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+
+    const [row] = h.items.rows;
+    expect(row?.assigneeUserId).toBe(RAVI);
+    // The note is what tells Ravi the task came to him to HAND OUT, and why.
+    expect(row?.assignmentNote).toContain("Key Manager to hand out");
+    expect(h.recorded().at(-1)).toMatchObject({ verb: "work_item.assigned", payload: { how: "key_manager", userId: RAVI } });
+  });
+
+  it("gives it to the person who signs for the firm when the client has no Key Manager either", async () => {
+    const h = await harness();
+    h.owners.partner = { userId: ANAND, displayName: "Anand" };
+    h.engagements.rows.push(engagementWork());
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+    expect(h.items.rows[0]?.assignmentNote).toContain("Anand, who signs for the firm");
+    expect(h.recorded().at(-1)?.payload).toMatchObject({ how: "partner" });
+  });
+
+  it("routes a statutory filing's task by the same ladder", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork());
+
+    const id = await h.service.raiseForObligation(
+      FIRM,
+      { entityPartyId: ENTITY, engagementId: ENGAGEMENT, title: "GSTR-3B · Aug 2026", description: null, dueOn: "2026-09-20" },
+      ACTOR,
+    );
+
+    expect(h.items.rows.find((r) => r.id === id)?.assigneeUserId).toBe(RAVI);
+    expect(h.recorded().at(-1)?.payload).toMatchObject({ how: "key_manager" });
+  });
+
+  it("asks who owns it on the firm's TODAY, the day the job's steps ask on, not the engagement's first day", async () => {
+    // Priya was the FRC SPOC until 5 September and Anand is from then. The
+    // engagement began on the 1st and the work is created on the 10th (NOW):
+    // it is Anand's, as the job's steps will be.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" }, "2000-01-01", "2026-09-05");
+    h.spocs.add(CLIENT, FRC, { userId: ANAND, displayName: "Anand", email: "anand@10x.test" }, "2026-09-05");
+    h.engagements.rows.push(engagementWork());
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { label: "Sep 2026", end: "2026-09-30" });
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+  });
+
+  it("finds an account team named today for an engagement back-dated by the book import", async () => {
+    // The import names the team from today and dates the engagement from the
+    // paper letter. Asking on the engagement's day found nobody.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" }, "2026-09-10");
+    h.engagements.rows.push(engagementWork({ effectiveFrom: "2023-04-01" }));
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { label: "Sep 2026", end: "2026-09-30" });
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(PRIYA);
+  });
+
+  it("reads today in the FIRM's zone: 04:11 UTC on the 10th is still the 10th in Kolkata, 23:30 UTC is the 11th", async () => {
+    const h = await harness();
+    h.timeZones.set("Asia/Kolkata");
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" }, "2026-09-11");
+    h.engagements.rows.push(engagementWork());
+    h.clock.set(new Date("2026-09-10T19:00:00.000Z")); // 00:30 on the 11th in Kolkata
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(PRIYA);
+  });
+});
+
+describe("handing a task on takes its job's steps with it (2026-09-27)", () => {
+  it("hands the job's unheld steps to the new owner, and says how many went", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, { userId: RAVI, displayName: "Ravi" });
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const task = h.items.rows[0];
+    if (!task) throw new Error("no task was spawned");
+    h.jobSteps.moves = 10;
+
+    const out = await h.service.assign({ tenantId: FIRM, workItemId: task.id, assigneeUserId: PRIYA }, ACTOR);
+
+    expect(out.item.assigneeUserId).toBe(PRIYA);
+    // A hand move clears the router's note: it was about Ravi's desk.
+    expect(out.item.assignmentNote).toBeNull();
+    expect(out.stepsHandedOver).toBe(10);
+    expect(h.jobSteps.calls).toEqual([{ jobId: JOB, fromUserId: RAVI, toUserId: PRIYA }]);
+  });
+
+  it("leaves the steps where they are while another open task of the job is on somebody else's desk", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, { userId: RAVI, displayName: "Ravi" });
+    h.engagements.rows.push(engagementWork(), { ...engagementWork(), engagementId: ENGAGEMENT_2 });
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT, ENGAGEMENT_2], ACTOR);
+    const [first, second] = h.items.rows;
+    if (!first || !second) throw new Error("two tasks were expected");
+
+    const one = await h.service.assign({ tenantId: FIRM, workItemId: first.id, assigneeUserId: PRIYA }, ACTOR);
+    expect(one.stepsHandedOver).toBe(0);
+    expect(h.jobSteps.calls).toEqual([]);
+
+    // Once every open task of the job is Priya's, the job is hers.
+    await h.service.assign({ tenantId: FIRM, workItemId: second.id, assigneeUserId: PRIYA }, ACTOR);
+    expect(h.jobSteps.calls).toEqual([{ jobId: JOB, fromUserId: RAVI, toUserId: PRIYA }]);
+  });
+
+  it("moves no steps when a task is taken off a desk, or has no job", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, { userId: RAVI, displayName: "Ravi" });
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const task = h.items.rows[0];
+    if (!task) throw new Error("no task was spawned");
+    await h.service.assign({ tenantId: FIRM, workItemId: task.id, assigneeUserId: null }, ACTOR);
+
+    const byHand = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "Board minutes", assigneeUserId: null },
+      ACTOR,
+    );
+    await h.service.assign({ tenantId: FIRM, workItemId: byHand.id, assigneeUserId: PRIYA }, ACTOR);
+
+    expect(h.jobSteps.calls).toEqual([]);
   });
 });
