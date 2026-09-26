@@ -2235,6 +2235,56 @@ steps to agree with, and changing it was not part of this.
 `how` on `work_item.assigned` and `job.step_assigned` names the rung (`spoc`, `key_manager`,
 `partner`), so "why is this on the Key Manager's desk" is answerable from the ledger.
 
+### The catch-up: naming the account team moves the work waiting for it (2026-09-27)
+
+The engine asks who owns a task ONCE, when it creates it, and the book import names the account
+team AFTER the paper letter every time, so an imported client's work sat with the Key Manager to
+hand out (or with nobody) and naming the SPOC afterwards moved none of it.
+`ClientAssignmentService.assign` now calls a `ClientWorkCatchUp` port after the assignment and its
+event are written (satisfied in `setup/server.ts` with `WorkItemService.catchUpClient`; neither use
+case imports the other), and the assign route answers `caughtUp: { moves: [{ userId, tasks, steps
+}] }`, `null` when moving failed. **The assignment stands either way**: it is the firm's record of
+who looks after the client, and a failure to tidy old work must not undo it.
+
+**WHAT MOVES is only work nobody has decided about** (`listCatchUpCandidates`): the client's ENGINE
+work (an engagement's task, or a filing's through `obligation_instance`; a task raised by hand has
+neither), in a STARTING state, carrying a note that is not `TAKEN_OFF_BY_HAND_NOTE`, the sentence
+`assign` leaves when a PERSON takes a task off a desk. A note on an assigned row is the router's
+(0311), so what is read is: on the Key Manager's or the signing partner's desk to hand out, or on
+nobody's with the router's sentence. **A task the SPOC holds carries no note, and nothing on its
+row tells it apart from one a person handed over, so it is never re-dealt**: naming a second SPOC,
+or a new one after a handover, moves none of the old SPOC's work. **A new Key Manager does take
+over the outgoing one's hand-out tasks** (Shrestha, 2026-09-27): they carry the router's note, the
+outgoing Key Manager no longer holds the client, and the ladder now names the new one.
+
+Each candidate is asked `routeOwner` again, on the day its creator asked (the firm's today; a
+filing's due date while that is still ahead, else today), and `catchUpMove` (domain) says what the
+answer means: nobody means NOTHING (work is never taken off a desk by this), somebody else means a
+MOVE with that rung's note (none for a SPOC), and the same person by another rung (the Key Manager
+is now also the Dept's SPOC) means the desk stays and only the sentence changes, with no event. The
+write is `reroute`, refused by its own WHERE when the holder, the note (NULL-safe on both) or the
+starting state changed since the read, so a colleague who handed the task out a moment earlier
+keeps it. The steps go exactly as they do on a hand move: once every open task of the job sits on
+the new desk, `adoptUnheldSteps` from the one previous desk. Recorded as `work_item.assigned` with
+the rung's `how` plus `catchUp: true` and `fromUserId`, the actor being whoever named the team.
+**Not built, and said:** nothing moves on the day a FUTURE-dated SPOC starts (there is no sweep
+for it), and ENDING an assignment triggers nothing.
+`tests/workitem/service.test.ts`, `tests/workitem/catch-up.integration.test.ts` (seven clauses,
+each watched go red when removed).
+
+### The Send warning: where an unsigned letter's work will land (2026-09-27)
+
+`GET /api/v1/engagement-letters/{letterId}/routing` (`party:read`) answers, one row per Dept the
+letter's lines are filed under, whose desk the work would land on TODAY: `how` (the rung, or null
+for nobody), `ownerName`, and `reason` (`no_spoc` · `no_dept` · `unknown_dept`, null when a SPOC
+takes it). **It is the router's own question** (`WorkItemService.routingForLetter` calls
+`routeOwner`), over `LetterWorkSource`, which reads the two facts `EngagementWorkSource` hands the
+router once the letter is signed, the same way: the CLIENT is the letter's party and the Dept is
+the LIVE published service's `module`. A preview that joined differently would promise one desk
+and deliver another. The letter page shows it as a warning above Send on a draft, and in "Where
+it stands" while sent: **a warning, never a refusal** (decided 2026-09-27), and the book import
+never sees it.
+
 ## The compliance calendar — generated, never typed (T3.2)
 
 `delivery.obligation_template` + `_exception` + `obligation_state` (0052) and

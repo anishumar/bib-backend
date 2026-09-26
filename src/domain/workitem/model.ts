@@ -650,6 +650,54 @@ export function resolveOwner(facts: OwnerFacts): OwnerOutcome {
   };
 }
 
+/**
+ * The note a task carries when a PERSON took it off a desk and left it with
+ * nobody (`WorkItemService.assign` with no assignee). One constant, because
+ * the catch-up below must tell it apart from the router's own "nobody could
+ * be given this": a person deciding a task should sit unassigned is a
+ * decision, and the router re-deciding it would overrule them. Worded as it
+ * has been since T3.1, so rows written before this constant match it.
+ */
+export const TAKEN_OFF_BY_HAND_NOTE = "Taken off a desk by hand; nobody has it now.";
+
+/** Where a task the owner rule placed sits now, as the catch-up reads it. */
+export interface PlacedTask {
+  readonly assigneeUserId: string | null;
+  readonly assignmentNote: string | null;
+}
+
+/** What the catch-up does to one task: nothing, move it, or keep the desk and
+ *  correct the sentence on it. */
+export type CatchUpDecision =
+  | { readonly kind: "move"; readonly userId: string; readonly how: OwnerSource; readonly note: string | null }
+  | { readonly kind: "renote"; readonly note: string | null };
+
+/**
+ * THE CATCH-UP (T6.17, Shrestha 2026-09-27): the account team was named after
+ * the work was created, so ask the owner rule again and say what changes.
+ *
+ * Called only on a task the ROUTER placed and nobody has decided on since (on
+ * a fallback desk with its note, or on nobody's with the router's note), and
+ * only while it has not been started: the caller's read guarantees that, and
+ * this is the rule about what the new answer means.
+ *
+ *   - The rule names nobody: nothing. Work is never taken OFF a desk by this;
+ *     a Key Manager who has left leaves the task where it is for somebody to
+ *     hand out, which is what the note on it already says.
+ *   - The rule names somebody else: the task MOVES to them, with the new
+ *     rung's note (none, when it is the SPOC).
+ *   - The rule names the person who already holds it, by another rung (the
+ *     Key Manager is now also the Dept's SPOC): the desk stays and only the
+ *     sentence changes, because "no SPOC is recorded" would now be false.
+ */
+export function catchUpMove(task: PlacedTask, now: OwnerOutcome): CatchUpDecision | null {
+  if (now.userId === null || now.how === null) return null;
+  if (now.userId !== task.assigneeUserId) {
+    return { kind: "move", userId: now.userId, how: now.how, note: now.note };
+  }
+  return now.note === task.assignmentNote ? null : { kind: "renote", note: now.note };
+}
+
 function whyNoSpoc(facts: OwnerFacts): string {
   const lookup = facts.noLookup;
   if (lookup === null) {

@@ -54,8 +54,10 @@ import {
 } from "../../domain/clientassignment/errors";
 import type {
   AssignableAxisDirectory,
+  CaughtUpWork,
   ClientAssignmentRepository,
   ClientDirectory,
+  ClientWorkCatchUp,
   HandoverClose,
   NewClientAssignment,
   StaffDirectory,
@@ -72,6 +74,22 @@ export interface Deps {
    *  day, not the server's UTC day. Structural: `PostgresFirmTimeZone`. */
   readonly timeZones: { timeZoneFor(tenantId: string): Promise<string> };
   readonly events: EventSink;
+  /** The work already created for the client, moved to the team just named
+   *  (T6.17). See `assign`. */
+  readonly work: ClientWorkCatchUp;
+}
+
+/** An assignment, and what naming it moved of the client's existing work. */
+export interface AssignOutcome {
+  readonly assignment: ClientAssignment;
+  /**
+   * What the catch-up moved (T6.17). NULL when moving it failed: the
+   * assignment stands either way, because it is the firm's record of who
+   * looks after the client, and a failure to tidy the work already created
+   * must not undo it. The screen says the old work did not move, so somebody
+   * hands it out by hand.
+   */
+  readonly caughtUp: CaughtUpWork | null;
 }
 
 export interface AssignInput {
@@ -173,8 +191,18 @@ export class ClientAssignmentService {
    * nothing is closed on the firm's behalf. Ending the outgoing SPOC is a
    * separate, deliberate call, and that asymmetry is the point: the firm is the
    * one that knows whether this is a replacement or a second pair of hands.
+   *
+   * AND THE CLIENT'S WAITING WORK CATCHES UP (T6.17, Shrestha 2026-09-27). The
+   * engine asked who owns each task once, when it created it; a team named
+   * afterwards (the book import names it after the paper letter, every time)
+   * found that work with the Key Manager or the signing partner to hand out,
+   * or with nobody. Naming somebody now asks the owner rule again for the
+   * work nobody has decided about (`ClientWorkCatchUp`), and the answer says
+   * how much moved. After the assignment and its event are written, and
+   * outside them: a catch-up that fails leaves the assignment standing and
+   * says so with `caughtUp: null`.
    */
-  async assign(input: AssignInput, actor: Actor): Promise<ClientAssignment> {
+  async assign(input: AssignInput, actor: Actor): Promise<AssignOutcome> {
     if (!isAssignmentRole(input.role)) {
       throw new InvalidAssignmentRole(input.role, ASSIGNMENT_ROLES);
     }
@@ -245,7 +273,17 @@ export class ClientAssignmentService {
         ...(handover ? { handedOverFrom: handover.assignmentId } : {}),
       },
     });
-    return created;
+
+    let caughtUp: CaughtUpWork | null = null;
+    try {
+      caughtUp = await this.deps.work.catchUp(input.tenantId, input.clientPartyId, actor);
+    } catch {
+      // Deliberately swallowed, and reported as `null` rather than a zero
+      // nobody measured: see `AssignOutcome.caughtUp`. Each task the catch-up
+      // did move before failing is on its own row and its own ledger event.
+      caughtUp = null;
+    }
+    return { assignment: created, caughtUp };
   }
 
   /**

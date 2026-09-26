@@ -55,7 +55,10 @@ import {
 } from "../infrastructure/postgres/obligation-instance-repository";
 import { PostgresRuleServiceLinkRepository } from "../infrastructure/postgres/obligation-link-repository";
 import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
-import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
+import {
+  PostgresEngagementWorkSource,
+  PostgresLetterWorkSource,
+} from "../infrastructure/postgres/engagement-work-source";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresMembershipRepository } from "../infrastructure/postgres/membership-repository";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
@@ -261,6 +264,9 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     reviewers: memberships,
     permissions: configRepository,
     engagements: new PostgresEngagementWorkSource(pools.app),
+    // Only the API asks for a letter's routing preview; the worker holds the
+    // same adapter so the two services are built from one list.
+    letters: new PostgresLetterWorkSource(pools.app),
     // T3.2, and it matters MORE here than in the API: this is the process that
     // actually spawns engagement tasks, so a worker whose coverage check
     // disagreed with the API's would put a duplicate on somebody's desk exactly

@@ -63,6 +63,9 @@ import type {
   WorkItemStatePatch,
   WorkItemStateWrite,
   WorkVocabularyRepository,
+  CatchUpCandidate,
+  LetterWorkLine,
+  LetterWorkSource,
 } from "../usecase/workitem/ports";
 
 export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
@@ -219,6 +222,10 @@ export class FakeWorkItemRepo implements WorkItemRepository {
   clients = new Map<string, string>();
   people = new Map<string, { email: string; displayName: string | null }>();
   approvals: FakeWorkItemApprovalRepo | null = null;
+  /** Tasks an OBLIGATION points at, and the engagement it is owed under: the
+   *  `delivery.obligation_instance.work_item_id` link, which the real
+   *  catch-up read joins and a filing's own row does not carry. */
+  readonly filings = new Map<string, { engagementId: string | null }>();
 
   create(item: NewWorkItem): Promise<WorkItem> {
     const row = this.materialise(item);
@@ -426,6 +433,54 @@ export class FakeWorkItemRepo implements WorkItemRepository {
       out.push({ workItemId: blocker.id, title: blocker.title });
     }
     return out.sort((a, b) => a.title.localeCompare(b.title));
+  }
+
+  // ── the catch-up (T6.17) ─────────────────────────────────────────────────
+
+  async listCatchUpCandidates(
+    tenantId: string,
+    clientPartyId: string,
+    exceptNote: string,
+  ): Promise<readonly CatchUpCandidate[]> {
+    const out: CatchUpCandidate[] = [];
+    for (const r of this.rows) {
+      if (r.tenantId !== tenantId || r.clientPartyId !== clientPartyId) continue;
+      if (r.assignmentNote === null || r.assignmentNote === exceptNote) continue;
+      const filing = this.filings.get(r.id);
+      if (r.engagementId === null && filing === undefined) continue;
+      const state = await this.vocabulary.findState(tenantId, r.stateId);
+      if (state?.isInitial !== true || state.isTerminal) continue;
+      out.push({
+        workItemId: r.id,
+        jobId: r.jobId,
+        assigneeUserId: r.assigneeUserId,
+        assignmentNote: r.assignmentNote,
+        engagementId: r.engagementId ?? filing?.engagementId ?? null,
+        isFiling: filing !== undefined,
+        dueOn: r.dueOn,
+      });
+    }
+    return out;
+  }
+
+  async reroute(
+    tenantId: string,
+    workItemId: string,
+    expected: { readonly assigneeUserId: string | null; readonly note: string | null },
+    next: { readonly assigneeUserId: string; readonly note: string | null },
+  ): Promise<WorkItem | null> {
+    const r = this.rows.find((x) => x.tenantId === tenantId && x.id === workItemId);
+    if (!r) return null;
+    // The WHERE clause, reproduced: the same holder, the same note, and still
+    // in a starting state, or nothing is written.
+    if (r.assigneeUserId !== expected.assigneeUserId || r.assignmentNote !== expected.note) return null;
+    const state = await this.vocabulary.findState(tenantId, r.stateId);
+    if (state?.isInitial !== true) return null;
+    return this.replace(tenantId, workItemId, (x) => ({
+      ...x,
+      assigneeUserId: next.assigneeUserId,
+      assignmentNote: next.note,
+    }));
   }
 
   // ── internals ────────────────────────────────────────────────────────────
@@ -809,6 +864,20 @@ export class FakeWorkOwnerDirectory implements WorkOwnerDirectory {
 
   signingPartner(_tenantId: string): Promise<OwnerPerson | null> {
     return Promise.resolve(this.partner);
+  }
+}
+
+/** An engagement letter's lines, for the routing preview (T6.17). A test sets
+ *  a letter's client and lines; an unknown letter is null, as the adapter's
+ *  is. */
+export class FakeLetterWork implements LetterWorkSource {
+  readonly letters = new Map<string, { clientPartyId: string; lines: LetterWorkLine[] }>();
+
+  linesOf(
+    _tenantId: string,
+    letterId: string,
+  ): Promise<{ readonly clientPartyId: string; readonly lines: readonly LetterWorkLine[] } | null> {
+    return Promise.resolve(this.letters.get(letterId) ?? null);
   }
 }
 

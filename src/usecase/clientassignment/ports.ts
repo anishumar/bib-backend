@@ -2,6 +2,7 @@
 // owned by the use case that needs them (never a shared top-level ports
 // package), stated in our vocabulary. Adapters in infrastructure/ implement
 // them.
+import type { Actor } from "../../domain/ledger/model";
 import type {
   AssignmentRole,
   ClientAssignment,
@@ -150,4 +151,29 @@ export interface AssignableAxisRow {
  */
 export interface AssignableAxisDirectory {
   findById(tenantId: string, axisId: string): Promise<AssignableAxisRow | null>;
+}
+
+/**
+ * What the catch-up moved, per person it moved work to (T6.17). Ids and
+ * counts; the screen names the people from the roster it already holds.
+ */
+export interface CaughtUpWork {
+  readonly moves: readonly {
+    readonly userId: string;
+    readonly tasks: number;
+    readonly steps: number;
+  }[];
+}
+
+/**
+ * THE CATCH-UP (T6.17, Shrestha 2026-09-27): naming somebody on a client's
+ * account team moves the work the engine already created for that client and
+ * could only put on a fallback desk (the Key Manager's or the signing
+ * partner's, to hand out) or on nobody's. The work item use case owns what
+ * moves and how; this use case only says WHEN, because naming the team is its
+ * act. Declared here and satisfied in `setup/` with the work item service's
+ * own method, so neither use case imports the other.
+ */
+export interface ClientWorkCatchUp {
+  catchUp(tenantId: string, clientPartyId: string, actor: Actor): Promise<CaughtUpWork>;
 }

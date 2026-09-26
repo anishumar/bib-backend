@@ -13,6 +13,7 @@ import {
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
   FakeClientDirectory,
+  FakeClientWorkCatchUp,
 } from "../../src/testfakes/clientassignment";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -55,6 +56,7 @@ function svc(clock = new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)), timeZone
   service: ClientAssignmentService;
   assignments: FakeClientAssignmentRepo;
   events: RecordingEventSink;
+  work: FakeClientWorkCatchUp;
 } {
   const assignments = new FakeClientAssignmentRepo()
     .withHolder(ANITA, { email: "anita@10x.test", displayName: "Anita R" })
@@ -84,6 +86,7 @@ function svc(clock = new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)), timeZone
     });
 
   const events = new RecordingEventSink();
+  const work = new FakeClientWorkCatchUp();
   return {
     service: new ClientAssignmentService({
       assignments,
@@ -94,16 +97,18 @@ function svc(clock = new FakeClock(new Date(`${TODAY}T09:00:00.000Z`)), timeZone
       clock,
       timeZones: { timeZoneFor: () => Promise.resolve(timeZone) },
       events,
+      work,
     }),
     assignments,
     events,
+    work,
   };
 }
 
 describe("putting somebody in charge", () => {
   it("records a Key Manager with no axis, open-ended, from today by default", async () => {
     const { service } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       { tenantId: TENANT, clientPartyId: CLIENT, role: "key_manager", userId: ANITA },
       ACTOR,
     );
@@ -267,7 +272,7 @@ describe("putting somebody in charge", () => {
 
   it("records who decided, and a handover names the row it closed", async () => {
     const { service, events } = svc();
-    const first = await service.assign(
+    const { assignment: first } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -298,7 +303,7 @@ describe("putting somebody in charge", () => {
 describe("a handover is two rows, never an edit", () => {
   it("closes the outgoing Key Manager on the day the new one starts — contiguous, no overlap", async () => {
     const { service } = svc();
-    const anita = await service.assign(
+    const { assignment: anita } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -363,7 +368,7 @@ describe("a handover is two rows, never an edit", () => {
   // then refuse as an unexplained 500.
   it("closes the person who held it on the BACKDATED day, not today's holder", async () => {
     const { service } = svc();
-    const priya = await service.assign(
+    const { assignment: priya } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -513,7 +518,7 @@ describe('"who was the SPOC in March"', () => {
 describe("ending an assignment", () => {
   it("closes it and records the date it stopped being in force", async () => {
     const { service, events } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       { tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", axisId: FRC, userId: ANITA },
       ACTOR,
     );
@@ -527,7 +532,7 @@ describe("ending an assignment", () => {
 
   it("refuses to re-end one that already ended — history is not corrected by writing over it", async () => {
     const { service } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       { tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", axisId: FRC, userId: ANITA },
       ACTOR,
     );
@@ -539,7 +544,7 @@ describe("ending an assignment", () => {
 
   it("refuses an end date on or before the start — that period is in force on no day", async () => {
     const { service } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -591,7 +596,7 @@ describe("an assignment whose holder has left", () => {
 
   it("is NOT stale once the row itself is closed — leaving is the ordinary end of a job", async () => {
     const { service, assignments } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -685,7 +690,7 @@ describe("one person's book", () => {
 
   it("drops a client once the assignment has ended", async () => {
     const { service } = svc();
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       {
         tenantId: TENANT,
         clientPartyId: CLIENT,
@@ -704,12 +709,50 @@ describe("'from today' is the firm's day", () => {
   it("starts an assignment on the firm's calendar day, not the server's UTC day", async () => {
     // 20:00 UTC is already tomorrow in India.
     const { service } = svc(new FakeClock(new Date(`${TODAY}T20:00:00.000Z`)), "Asia/Kolkata");
-    const row = await service.assign(
+    const { assignment: row } = await service.assign(
       { tenantId: TENANT, clientPartyId: CLIENT, role: "key_manager", userId: ANITA },
       ACTOR,
     );
     const next = new Date(`${TODAY}T00:00:00.000Z`);
     next.setUTCDate(next.getUTCDate() + 1);
     expect(row.validFrom).toBe(next.toISOString().slice(0, 10));
+  });
+});
+
+describe("naming the account team catches up the client's waiting work (T6.17)", () => {
+  it("asks for the catch-up on the client just assigned, and hands back what moved", async () => {
+    const { service, work } = svc();
+    work.answer = { moves: [{ userId: ANITA, tasks: 3, steps: 20 }] };
+
+    const out = await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", axisId: FRC, userId: ANITA },
+      ACTOR,
+    );
+
+    expect(work.calls).toEqual([{ tenantId: TENANT, clientPartyId: CLIENT }]);
+    expect(out.caughtUp).toEqual({ moves: [{ userId: ANITA, tasks: 3, steps: 20 }] });
+    expect(out.assignment.userId).toBe(ANITA);
+  });
+
+  it("keeps the assignment, and its event, when moving the old work fails, and says so with null", async () => {
+    const { service, work, events, assignments } = svc();
+    work.failWith = new Error("the database went away");
+
+    const out = await service.assign(
+      { tenantId: TENANT, clientPartyId: CLIENT, role: "key_manager", userId: ANITA },
+      ACTOR,
+    );
+
+    expect(out.caughtUp).toBeNull();
+    expect(await assignments.findById(TENANT, out.assignment.id)).not.toBeNull();
+    expect(events.verbs()).toContain("client_assignment.created");
+  });
+
+  it("does not ask when the assignment itself is refused", async () => {
+    const { service, work } = svc();
+    await expect(
+      service.assign({ tenantId: TENANT, clientPartyId: CLIENT, role: "spoc", userId: ANITA }, ACTOR),
+    ).rejects.toThrow(AxisRequiredForSpoc);
+    expect(work.calls).toEqual([]);
   });
 });

@@ -87,6 +87,7 @@ import {
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
   FakeClientDirectory,
+  FakeClientWorkCatchUp,
 } from "../../src/testfakes/clientassignment";
 import { ClientImportService } from "../../src/usecase/clientimport/service";
 import {
@@ -151,6 +152,7 @@ import {
 } from "../../src/testfakes/identity";
 import {
   FakeEngagementWork,
+  FakeLetterWork,
   FakeObligationCoverage,
   FakeObligationFiling,
   FakeReviewPermissions,
@@ -366,6 +368,7 @@ function deps(): RouterDeps {
           reviewers: new FakeReviewers(),
           permissions: new FakeReviewPermissions(),
           engagements: new FakeEngagementWork(),
+          letters: new FakeLetterWork(),
           obligations: new FakeObligationCoverage(),
           filings: new FakeObligationFiling(),
           ids: new FakeIds(),
@@ -388,6 +391,7 @@ function deps(): RouterDeps {
         ids: makeFakes().ids,
         clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
+        work: new FakeClientWorkCatchUp(),
         events: makeFakes().events,
       }),
     },

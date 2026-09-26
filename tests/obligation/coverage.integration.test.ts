@@ -44,6 +44,7 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeEngagementWork,
+  FakeLetterWork,
   FakeObligationFiling,
   FakeReviewPermissions,
   FakeReviewPolicies,
@@ -502,6 +503,7 @@ async function monthTasks(engagementIds: readonly string[], versionId: string): 
     reviewers: new FakeReviewers(),
     permissions: new FakeReviewPermissions(),
     engagements,
+    letters: new FakeLetterWork(),
     obligations: coverage,
     filings: new FakeObligationFiling(),
     ids,

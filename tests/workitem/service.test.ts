@@ -11,6 +11,7 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeEngagementWork,
+  FakeLetterWork,
   FakeObligationCoverage,
   FakeObligationFiling,
   FakeReviewPermissions,
@@ -62,6 +63,7 @@ async function harness() {
   const reviewers = new FakeReviewers();
   const permissions = new FakeReviewPermissions();
   const engagements = new FakeEngagementWork();
+  const letters = new FakeLetterWork();
   const obligations = new FakeObligationCoverage();
   const filings = new FakeObligationFiling();
   const events = new RecordingEventSink();
@@ -90,6 +92,7 @@ async function harness() {
     reviewers,
     permissions,
     engagements,
+    letters,
     obligations,
     filings,
     ids,
@@ -134,6 +137,7 @@ async function harness() {
     reviewers,
     permissions,
     engagements,
+    letters,
     obligations,
     filings,
     events,
@@ -1408,5 +1412,338 @@ describe("handing a task on takes its job's steps with it (2026-09-27)", () => {
     await h.service.assign({ tenantId: FIRM, workItemId: byHand.id, assigneeUserId: PRIYA }, ACTOR);
 
     expect(h.jobSteps.calls).toEqual([]);
+  });
+});
+
+describe("THE CATCH-UP: naming the account team moves the work waiting for it (T6.17)", () => {
+  const RAVI_KM = { userId: RAVI, displayName: "Ravi" };
+  const priyaSpoc = { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" };
+
+  /** A client whose September task landed on Ravi's desk (the Key Manager) to
+   *  hand out, because nobody was the FRC SPOC when the letter was signed. */
+  async function waitingOnKeyManager() {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { label: "Sep 2026", end: "2026-09-30" });
+    const task = h.items.rows[0];
+    if (!task) throw new Error("no task was spawned");
+    expect(task.assigneeUserId).toBe(RAVI);
+    return { h, task };
+  }
+
+  it("moves the Key Manager's hand-out task to the SPOC named afterwards, with its steps, and clears the note", async () => {
+    const { h, task } = await waitingOnKeyManager();
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+    h.jobSteps.moves = 10;
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    const after = h.items.rows.find((r) => r.id === task.id);
+    expect(after?.assigneeUserId).toBe(PRIYA);
+    // The SPOC rung leaves no note: "no SPOC is recorded" is no longer true.
+    expect(after?.assignmentNote).toBeNull();
+    expect(out.moves).toEqual([{ userId: PRIYA, tasks: 1, steps: 10 }]);
+    // The steps go the way a hand-over sends them: off Ravi's desk, to Priya.
+    expect(h.jobSteps.calls).toEqual([{ jobId: JOB, fromUserId: RAVI, toUserId: PRIYA }]);
+    expect(h.recorded().at(-1)).toMatchObject({
+      verb: "work_item.assigned",
+      objectId: task.id,
+      payload: { how: "spoc", userId: PRIYA, catchUp: true, fromUserId: RAVI, clientPartyId: CLIENT },
+    });
+  });
+
+  it("gives a task that went to nobody to the Key Manager named afterwards, with the Key Manager's note", async () => {
+    const h = await harness();
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    expect(h.items.rows[0]?.assigneeUserId).toBeNull();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+    expect(h.items.rows[0]?.assignmentNote).toContain("Key Manager to hand out");
+    expect(out.moves).toEqual([{ userId: RAVI, tasks: 1, steps: 0 }]);
+    // Nobody held it, so only the steps nobody holds may follow.
+    expect(h.jobSteps.calls).toEqual([{ jobId: JOB, fromUserId: null, toUserId: RAVI }]);
+    expect(h.recorded().at(-1)?.payload).toMatchObject({ how: "key_manager", catchUp: true, fromUserId: null });
+  });
+
+  it("moves the signing partner's hand-out task to a Key Manager named afterwards", async () => {
+    const h = await harness();
+    h.owners.partner = { userId: ANAND, displayName: "Anand" };
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+
+    await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+  });
+
+  it("hands the outgoing Key Manager's hand-out work to the incoming one (Shrestha, 2026-09-27)", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM, "2000-01-01", "2026-09-10");
+    h.owners.setKeyManager(CLIENT, { userId: ANAND, displayName: "Anand" }, "2026-09-10");
+    h.engagements.rows.push(engagementWork());
+    // Created while Ravi was still the Key Manager.
+    h.clock.set(new Date("2026-09-05T04:00:00.000Z"));
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+    h.clock.set(new Date(NOW));
+
+    await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+    expect(h.recorded().at(-1)?.payload).toMatchObject({ how: "key_manager", fromUserId: RAVI });
+  });
+
+  it("leaves alone a task a person handed on, even to the Key Manager", async () => {
+    const { h, task } = await waitingOnKeyManager();
+    // Ravi handed it to Anand by hand: the note is gone, and so is the router's claim on it.
+    await h.service.assign({ tenantId: FIRM, workItemId: task.id, assigneeUserId: ANAND }, ACTOR);
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+    expect(out.moves).toEqual([]);
+  });
+
+  it("leaves alone a task a person took off a desk and left with nobody", async () => {
+    const { h, task } = await waitingOnKeyManager();
+    await h.service.assign({ tenantId: FIRM, workItemId: task.id, assigneeUserId: null }, ACTOR);
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBeNull();
+    expect(out.moves).toEqual([]);
+  });
+
+  it("leaves alone a task that has been started, and one that is finished", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork(), { ...engagementWork(), engagementId: ENGAGEMENT_2 });
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT, ENGAGEMENT_2], ACTOR);
+    const [started, finished] = h.items.rows;
+    if (!started || !finished) throw new Error("two tasks were expected");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: started.id, stateId: (await stateNamed(h, "in_progress")).id }, ACTOR);
+    await h.service.moveToState({ tenantId: FIRM, workItemId: finished.id, stateId: (await stateNamed(h, "completed")).id }, ACTOR);
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows.map((r) => r.assigneeUserId)).toEqual([RAVI, RAVI]);
+    expect(out.moves).toEqual([]);
+  });
+
+  it("leaves alone work somebody raised by hand, and work a SPOC already holds", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, priyaSpoc);
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const byHand = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "Board minutes" }, ACTOR);
+    // A second FRC SPOC, named today: the old SPOC's work is not re-dealt.
+    h.spocs.add(CLIENT, FRC, { userId: ANAND, displayName: "Anand", email: "anand@10x.test" }, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(PRIYA);
+    expect(h.items.rows.find((r) => r.id === byHand.id)?.assigneeUserId).toBeNull();
+    expect(out.moves).toEqual([]);
+  });
+
+  it("does nothing, and takes nothing off a desk, when the rule still names the same person or nobody", async () => {
+    const { h } = await waitingOnKeyManager();
+    const before = h.recorded().length;
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(out.moves).toEqual([]);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+    expect(h.recorded().length).toBe(before);
+  });
+
+  it("keeps the desk and corrects the sentence when the Key Manager is now also the Dept's SPOC", async () => {
+    const { h } = await waitingOnKeyManager();
+    h.spocs.add(CLIENT, FRC, { userId: RAVI, displayName: "Ravi", email: "ravi@10x.test" }, "2026-09-10");
+    const before = h.recorded().length;
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+    expect(h.items.rows[0]?.assignmentNote).toBeNull();
+    // Not a move: nothing on the ledger and nothing counted.
+    expect(out.moves).toEqual([]);
+    expect(h.recorded().length).toBe(before);
+  });
+
+  it("moves a filing's task, asking about its due date while that is still ahead", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork());
+    const id = await h.service.raiseForObligation(
+      FIRM,
+      { entityPartyId: ENTITY, engagementId: ENGAGEMENT, title: "GSTR-3B · Sep 2026", description: null, dueOn: "2026-10-20" },
+      ACTOR,
+    );
+    h.items.filings.set(id, { engagementId: ENGAGEMENT });
+    // Priya takes FRC from 1 October: in force on the filing's due date.
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-10-01");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows.find((r) => r.id === id)?.assigneeUserId).toBe(PRIYA);
+    // A filing's task has no job, so no steps are asked about.
+    expect(out.moves).toEqual([{ userId: PRIYA, tasks: 1, steps: 0 }]);
+    expect(h.jobSteps.calls).toEqual([]);
+  });
+
+  it("asks about TODAY for a filing already past its due date", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork());
+    const id = await h.service.raiseForObligation(
+      FIRM,
+      { entityPartyId: ENTITY, engagementId: ENGAGEMENT, title: "GSTR-3B · Aug 2026", description: null, dueOn: "2026-09-08" },
+      ACTOR,
+    );
+    h.items.filings.set(id, { engagementId: ENGAGEMENT });
+    // Named from today (the 10th): not in force on the 8th, and still the
+    // person who should have the overdue filing now.
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows.find((r) => r.id === id)?.assigneeUserId).toBe(PRIYA);
+  });
+
+  it("does not overwrite a task somebody handed out between the read and the write", async () => {
+    const { h, task } = await waitingOnKeyManager();
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+    // Anand takes it by hand the moment after the catch-up read its candidates.
+    const read = h.items.listCatchUpCandidates.bind(h.items);
+    h.items.listCatchUpCandidates = async (...args) => {
+      const out = await read(...args);
+      await h.service.assign({ tenantId: FIRM, workItemId: task.id, assigneeUserId: ANAND }, ACTOR);
+      return out;
+    };
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(ANAND);
+    expect(out.moves).toEqual([]);
+  });
+
+  it("moves no steps while another open task of the job is on somebody else's desk", async () => {
+    const h = await harness();
+    h.owners.setKeyManager(CLIENT, RAVI_KM);
+    h.engagements.rows.push(engagementWork(), { ...engagementWork(), engagementId: ENGAGEMENT_2 });
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT, ENGAGEMENT_2], ACTOR);
+    const second = h.items.rows[1];
+    if (!second) throw new Error("two tasks were expected");
+    // The second task was handed to Anand by hand; only the first is waiting.
+    await h.service.assign({ tenantId: FIRM, workItemId: second.id, assigneeUserId: ANAND }, ACTOR);
+    h.jobSteps.calls.length = 0;
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, CLIENT, ACTOR);
+
+    expect(h.items.rows[0]?.assigneeUserId).toBe(PRIYA);
+    expect(out.moves).toEqual([{ userId: PRIYA, tasks: 1, steps: 0 }]);
+    expect(h.jobSteps.calls).toEqual([]);
+  });
+
+  it("touches only the client it was asked about", async () => {
+    const { h } = await waitingOnKeyManager();
+    h.spocs.add(CLIENT, FRC, priyaSpoc, "2026-09-10");
+
+    const out = await h.service.catchUpClient(FIRM, ENTITY, ACTOR);
+
+    expect(out.moves).toEqual([]);
+    expect(h.items.rows[0]?.assigneeUserId).toBe(RAVI);
+  });
+});
+
+describe("where an unsigned letter's work will land (T6.17's Send warning)", () => {
+  const LETTER = "00000000-0000-4000-8000-0000000000b9";
+  const TRC = "00000000-0000-4000-8000-0000000000a2";
+  const line = (n: number, name: string, deptCode: string | null) => ({
+    lineId: `00000000-0000-4000-8000-00000000010${n}`,
+    name,
+    deptCode,
+  });
+
+  it("names the SPOC where there is one and the fallback desk where there is not, one row per Dept", async () => {
+    const h = await harness();
+    h.axes.add(TRC, "TRC", "Tax & Regulatory");
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.owners.setKeyManager(CLIENT, { userId: RAVI, displayName: "Ravi" });
+    h.letters.letters.set(LETTER, {
+      clientPartyId: CLIENT,
+      lines: [line(1, "Bookkeeping", "FRC"), line(2, "GST returns", "TRC"), line(3, "Payroll", "FRC")],
+    });
+
+    const r = await h.service.routingForLetter(FIRM, LETTER);
+
+    expect(r).toMatchObject({ letterId: LETTER, clientPartyId: CLIENT, onDate: "2026-09-10" });
+    expect(r.depts).toEqual([
+      {
+        deptCode: "FRC",
+        deptName: "Financial Reporting & Compliance",
+        lines: [
+          { lineId: line(1, "", null).lineId, name: "Bookkeeping" },
+          { lineId: line(3, "", null).lineId, name: "Payroll" },
+        ],
+        how: "spoc",
+        userId: PRIYA,
+        ownerName: "Priya",
+        reason: null,
+      },
+      {
+        deptCode: "TRC",
+        deptName: "Tax & Regulatory",
+        lines: [{ lineId: line(2, "", null).lineId, name: "GST returns" }],
+        how: "key_manager",
+        userId: RAVI,
+        ownerName: "Ravi",
+        reason: "no_spoc",
+      },
+    ]);
+  });
+
+  it("says why a line has no SPOC to find, and when nobody at all would get it", async () => {
+    const h = await harness();
+    h.letters.letters.set(LETTER, {
+      clientPartyId: CLIENT,
+      lines: [line(1, "Advisory", null), line(2, "Audit", "AUD")],
+    });
+
+    const r = await h.service.routingForLetter(FIRM, LETTER);
+
+    expect(r.depts.map((d) => [d.deptCode, d.reason, d.how, d.userId])).toEqual([
+      [null, "no_dept", null, null],
+      ["AUD", "unknown_dept", null, null],
+    ]);
+  });
+
+  it("goes to the signing partner when the client has neither a SPOC nor a Key Manager", async () => {
+    const h = await harness();
+    h.owners.partner = { userId: ANAND, displayName: "Anand" };
+    h.letters.letters.set(LETTER, { clientPartyId: CLIENT, lines: [line(1, "Bookkeeping", "FRC")] });
+
+    const r = await h.service.routingForLetter(FIRM, LETTER);
+
+    expect(r.depts[0]).toMatchObject({ how: "partner", userId: ANAND, ownerName: "Anand", reason: "no_spoc" });
+  });
+
+  it("refuses a letter that is not at this firm", async () => {
+    const h = await harness();
+    await expect(h.service.routingForLetter(FIRM, LETTER)).rejects.toMatchObject({
+      code: "ROUTING_LETTER_NOT_FOUND",
+    });
   });
 });

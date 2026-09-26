@@ -78,6 +78,34 @@ const ClientAssignmentSchema = z
   })
   .openapi("ClientAssignment");
 
+const CaughtUpSchema = z
+  .object({
+    moves: z.array(
+      z.object({
+        userId: z.string().uuid().openapi({
+          description: "Whose desk the work moved to. Named from the firm's roster by the screen.",
+        }),
+        tasks: z.number().int().nonnegative(),
+        steps: z.number().int().nonnegative().openapi({
+          description: "The tasks' job steps that went with them, as they do when a task is handed on.",
+        }),
+      }),
+    ),
+  })
+  .openapi("CaughtUpWork");
+
+const AssignedClientSchema = ClientAssignmentSchema.extend({
+  caughtUp: CaughtUpSchema.nullable().openapi({
+    description:
+      "The client's work that naming this person MOVED (T6.17): tasks the engine created " +
+      "before the account team existed, still unstarted and still on the Key Manager's or " +
+      "the signing partner's desk to hand out, or on nobody's. Only work nobody has decided " +
+      "about moves; a task a person handed on, took off a desk or started stays. Empty " +
+      "`moves` when nothing was waiting. NULL when moving it failed: the assignment stands " +
+      "and the waiting work is still where it was, for somebody to hand out.",
+  }),
+}).openapi("AssignedClient");
+
 const AccountTeamResponse = z
   .object({
     onDate: IsoDate.openapi({
@@ -243,8 +271,8 @@ const assignRoute = createRoute({
   },
   responses: {
     201: {
-      description: "Assigned",
-      content: { "application/json": { schema: ClientAssignmentSchema } },
+      description: "Assigned, with what that moved of the client's waiting work",
+      content: { "application/json": { schema: AssignedClientSchema } },
     },
     400: errorResponse(
       "Not a valid role or date, a SPOC with no Dept, or a Key Manager given one",
@@ -332,7 +360,7 @@ export function registerClientAssignmentRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
-    const created = await deps.service.assign(
+    const { assignment: created, caughtUp } = await deps.service.assign(
       {
         tenantId: s.tenantId,
         clientPartyId: partyId,
@@ -350,7 +378,18 @@ export function registerClientAssignmentRoutes(
     const view = await deps.service.accountTeam(s.tenantId, partyId);
     const record = view.all.find((r) => r.assignment.id === created.id);
     if (!record) throw new Error(`assignment ${created.id} was not readable after creation`);
-    return c.json(toWire(record), 201);
+    return c.json(
+      {
+        ...toWire(record),
+        caughtUp:
+          caughtUp === null
+            ? null
+            : {
+                moves: caughtUp.moves.map((m) => ({ userId: m.userId, tasks: m.tasks, steps: m.steps })),
+              },
+      },
+      201,
+    );
   });
 
   app.openapi(endAssignmentRoute, async (c) => {

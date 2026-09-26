@@ -16,6 +16,8 @@ import {
   priorityOrder,
   resolveAssignee,
   resolveOwner,
+  catchUpMove,
+  TAKEN_OFF_BY_HAND_NOTE,
   stateOrder,
   wouldCycle,
 } from "../../src/domain/workitem/model";
@@ -450,5 +452,37 @@ describe("the owner rule: SPOC, then Key Manager, then the person who signs for 
     expect(
       resolveOwner(facts({ noLookup: { kind: "unknown_dept", code: "FRX" }, keyManager: km })).note,
     ).toContain('Dept "FRX", which is not one of this firm\'s Depts');
+  });
+});
+
+describe("catchUpMove: what asking the owner rule again means for one waiting task (T6.17)", () => {
+  const KM_NOTE = "No SPOC is recorded for FRC on this client, so it came to the client's Key Manager to hand out.";
+
+  it("moves the task when the rule now names somebody else, with that rung's note", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "priya", how: "spoc", note: null }),
+    ).toEqual({ kind: "move", userId: "priya", how: "spoc", note: null });
+    expect(
+      catchUpMove({ assigneeUserId: null, assignmentNote: "nobody" }, { userId: "ravi", how: "key_manager", note: KM_NOTE }),
+    ).toEqual({ kind: "move", userId: "ravi", how: "key_manager", note: KM_NOTE });
+  });
+
+  it("never takes a task off a desk: a rule that names nobody leaves it where it is", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: null, how: null, note: "nobody" }),
+    ).toBeNull();
+  });
+
+  it("keeps the desk and corrects only the sentence when the same person now holds it by another rung", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "ravi", how: "spoc", note: null }),
+    ).toEqual({ kind: "renote", note: null });
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "ravi", how: "key_manager", note: KM_NOTE }),
+    ).toBeNull();
+  });
+
+  it("keeps the hand-unassign sentence as it has read since T3.1, so rows written before the constant still match it", () => {
+    expect(TAKEN_OFF_BY_HAND_NOTE).toBe("Taken off a desk by hand; nobody has it now.");
   });
 });

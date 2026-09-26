@@ -69,7 +69,10 @@ import {
 } from "../infrastructure/postgres/obligation-instance-repository";
 import { PostgresRuleServiceLinkRepository } from "../infrastructure/postgres/obligation-link-repository";
 import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
-import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
+import {
+  PostgresEngagementWorkSource,
+  PostgresLetterWorkSource,
+} from "../infrastructure/postgres/engagement-work-source";
 import {
   PostgresServiceAxisRepository,
   PostgresWorkSplitSetting,
@@ -128,6 +131,7 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
+import type { CaughtUpWork } from "../usecase/clientassignment/ports";
 import { ClientImportService } from "../usecase/clientimport/service";
 import type { PortalMemberFinder } from "../usecase/clientimport/ports";
 import { PortalAccessService } from "../usecase/portalaccess/service";
@@ -285,6 +289,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     reviewers: memberships,
     permissions: configRepository,
     engagements: new PostgresEngagementWorkSource(pools.app),
+    // The routing preview on an unsigned letter's Send (T6.17): its lines read
+    // the way `engagements` reads the signed letter's, so the warning names the
+    // desk the work will really land on.
+    letters: new PostgresLetterWorkSource(pools.app),
     // T3.2. Where a compliance rule already covers an engagement, the CALENDAR
     // puts a task on somebody's desk once per period and this must not add a
     // thirteenth that can never be completed. Derived rather than configured —
@@ -752,6 +760,14 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
     timeZones: new PostgresFirmTimeZone(pools.app),
     events: ledger,
+    // THE CATCH-UP (T6.17): naming somebody on a client's account team moves
+    // the work already waiting on a fallback desk. The work item service is
+    // built above, so this is an ordinary call and not a cycle; a closure all
+    // the same, so the port stays in this use case's own words.
+    work: {
+      catchUp: (tenantId, clientPartyId, actor): Promise<CaughtUpWork> =>
+        workItems.catchUpClient(tenantId, clientPartyId, actor),
+    },
   });
 
   // GATE 4's writer (G3.4). 0059 built the wall — `crm.portal_access`,

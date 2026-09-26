@@ -36,7 +36,9 @@ import type {
 import {
   DEFAULT_WORK_ITEM_PRIORITIES,
   DEFAULT_WORK_ITEM_STATES,
+  TAKEN_OFF_BY_HAND_NOTE,
   boardOrder,
+  catchUpMove,
   defaultPriorityFor,
   dueOnFrom,
   initialState,
@@ -86,6 +88,7 @@ import {
   WorkItemClientNotFound,
   WorkItemNotFound,
   WorkItemTitleRequired,
+  RoutingLetterNotFound,
 } from "../../domain/workitem/errors";
 // T2.9's rule about who may check whose work, reused UNCHANGED. A second
 // implementation of maker != checker plus a grade threshold is a second answer
@@ -98,6 +101,7 @@ import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/mo
 import type {
   EngagementWorkSource,
   JobStepHandover,
+  LetterWorkSource,
   ObligationCoverage,
   ObligationFiling,
   NewWorkItem,
@@ -586,6 +590,8 @@ export interface Deps {
   readonly reviewers: ReviewerDirectory;
   readonly permissions: ReviewPermissionSource;
   readonly engagements: EngagementWorkSource;
+  /** An unsigned letter's lines, for the routing preview on its Send (T6.17). */
+  readonly letters: LetterWorkSource;
   readonly obligations: ObligationCoverage;
   /**
    * The compliance calendar, told when a filing's task settles (0054).
@@ -696,6 +702,51 @@ export interface WorkItemCheckOnDesk extends WorkItemCheck {
      *  refusal two ways. Null when they may check it. */
     readonly reason: string | null;
   };
+}
+
+/**
+ * What the catch-up moved (T6.17), per person it moved work to. Ids and
+ * counts only: the screen that asked already holds the firm's roster and
+ * names them from it.
+ */
+export interface CaughtUpWork {
+  readonly moves: readonly {
+    readonly userId: string;
+    readonly tasks: number;
+    readonly steps: number;
+  }[];
+}
+
+/**
+ * Whose desk an unsigned letter's work will land on, one row per Dept its
+ * lines are filed under (T6.17's Send warning). The owner rule answered for
+ * TODAY, the day the account team can still be changed; the router asks again
+ * when the signed letter becomes work, so this is a forecast and says so.
+ */
+export interface LetterRouting {
+  readonly letterId: string;
+  readonly clientPartyId: string;
+  readonly onDate: string;
+  readonly depts: readonly LetterDeptRouting[];
+}
+
+export interface LetterDeptRouting {
+  /** The service's Dept code, or null for lines filed under no Dept. */
+  readonly deptCode: string | null;
+  /** The firm's name for it; null when the code is not one of its Depts. */
+  readonly deptName: string | null;
+  readonly lines: readonly { readonly lineId: string; readonly name: string }[];
+  /** Which rung answered; null when nobody could be named. */
+  readonly how: OwnerSource | null;
+  readonly userId: string | null;
+  readonly ownerName: string | null;
+  /**
+   * Why the SPOC rung was passed, when it was: the Dept has no SPOC on this
+   * client (`no_spoc`), the service is filed under no Dept (`no_dept`), or it
+   * names a Dept code the firm does not have (`unknown_dept`). Null when a
+   * SPOC takes it.
+   */
+  readonly reason: "no_spoc" | "no_dept" | "unknown_dept" | null;
 }
 
 /** One work item and everything its own screen shows. */
@@ -1371,7 +1422,7 @@ export class WorkItemService {
       input.tenantId,
       item.id,
       input.assigneeUserId,
-      input.assigneeUserId === null ? "Taken off a desk by hand; nobody has it now." : null,
+      input.assigneeUserId === null ? TAKEN_OFF_BY_HAND_NOTE : null,
     );
     await this.recordAssigned(updated, actor, "manual");
 
@@ -1390,6 +1441,156 @@ export class WorkItemService {
       }
     }
     return { item: updated, stepsHandedOver };
+  }
+
+  /**
+   * THE CATCH-UP (T6.17, Shrestha 2026-09-27): a client's account team was
+   * named after its work was created, so the work the router could only put on
+   * a fallback desk, or on nobody's, goes where the owner rule now says.
+   *
+   * The engine asks who owns a task ONCE, when it creates it. A letter signed
+   * before anybody was named SPOC (the book import does this every time: the
+   * paper letter first, the team afterwards) left its work with the Key
+   * Manager to hand out, or with nobody, and naming the SPOC afterwards moved
+   * none of it. This runs when somebody is named on the client's account team
+   * (`ClientAssignmentService.assign`, through a port wired in `setup/`).
+   *
+   * WHAT MOVES is only what nobody has decided about: engine work, not
+   * started, still carrying the router's note (`listCatchUpCandidates`). A
+   * task a person handed on, took off a desk, or started stays where it is;
+   * so does anything a SPOC already holds, which is why naming a new SPOC
+   * beside an old one moves none of the old one's work. A new Key Manager
+   * DOES take over the tasks the outgoing one was holding to hand out: they
+   * carry the router's note, the outgoing Key Manager no longer holds the
+   * client, and the owner rule now names the new one (Shrestha, 2026-09-27).
+   * Each task is asked the owner rule's own question again (`routeOwner`, on
+   * the day its creator asked: the firm's today, or a filing's due date while
+   * it is still ahead), and `catchUpMove` says what the new answer means.
+   *
+   * THE STEPS GO WITH THE TASK exactly as they do when a person hands it on
+   * (`assign`): once every open task of the job sits on the new desk, the
+   * steps nobody holds, or the previous holder held, move within the band.
+   *
+   * Each move is its own conditional write (`reroute`), so a colleague who
+   * handed the task out a moment ago keeps it. Recorded as
+   * `work_item.assigned` with the rung that answered and `catchUp: true`.
+   */
+  async catchUpClient(tenantId: string, clientPartyId: string, actor: Actor): Promise<CaughtUpWork> {
+    const candidates = await this.deps.items.listCatchUpCandidates(
+      tenantId,
+      clientPartyId,
+      TAKEN_OFF_BY_HAND_NOTE,
+    );
+    if (candidates.length === 0) return { moves: [] };
+
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+    const engagementIds = [
+      ...new Set(candidates.map((c) => c.engagementId).filter((id): id is string => id !== null)),
+    ];
+    const work = new Map(
+      (await this.deps.engagements.workFor(tenantId, engagementIds)).map((w) => [w.engagementId, w]),
+    );
+
+    const tally = new Map<string, { tasks: number; steps: number }>();
+    const count = (userId: string): { tasks: number; steps: number } => {
+      const hit = tally.get(userId) ?? { tasks: 0, steps: 0 };
+      tally.set(userId, hit);
+      return hit;
+    };
+    // The jobs a moved task belongs to, and whose desk it came off: the steps
+    // are asked about once per job, after all of its tasks have moved.
+    const jobs = new Map<string, { to: string; from: Set<string | null> }>();
+
+    for (const c of candidates) {
+      const w = c.engagementId === null ? undefined : work.get(c.engagementId);
+      const onDate = c.isFiling && c.dueOn !== null && c.dueOn > today ? c.dueOn : today;
+      const routing = await this.routeOwner(tenantId, clientPartyId, w?.deptCode ?? null, onDate);
+      const decision = catchUpMove(c, routing.outcome);
+      if (decision === null) continue;
+      const holder = decision.kind === "move" ? decision.userId : c.assigneeUserId;
+      // `renote` only ever keeps a desk somebody holds (`catchUpMove`).
+      if (holder === null) continue;
+      const moved = await this.deps.items.reroute(
+        tenantId,
+        c.workItemId,
+        { assigneeUserId: c.assigneeUserId, note: c.assignmentNote },
+        { assigneeUserId: holder, note: decision.note },
+      );
+      if (moved === null || decision.kind === "renote") continue;
+      await this.recordAssigned(moved, actor, decision.how, {
+        catchUp: true,
+        fromUserId: c.assigneeUserId,
+      });
+      count(decision.userId).tasks += 1;
+      if (moved.jobId !== null) {
+        const job = jobs.get(moved.jobId) ?? { to: decision.userId, from: new Set<string | null>() };
+        job.to = decision.userId;
+        job.from.add(c.assigneeUserId);
+        jobs.set(moved.jobId, job);
+      }
+    }
+
+    for (const [jobId, job] of jobs) {
+      const open = await this.deps.items.list(tenantId, { jobId, openOnly: true });
+      if (!open.every((t) => t.item.assigneeUserId === job.to)) continue;
+      // One previous desk is the one whose steps may follow; tasks that came
+      // off two desks leave both people's steps where they are.
+      const from = job.from.size === 1 ? ([...job.from][0] ?? null) : null;
+      count(job.to).steps += await this.deps.jobSteps.adoptUnheldSteps(tenantId, jobId, from, job.to, actor);
+    }
+
+    return {
+      moves: [...tally].map(([userId, n]) => ({ userId, tasks: n.tasks, steps: n.steps })),
+    };
+  }
+
+  /**
+   * WHOSE DESK A LETTER'S WORK WILL LAND ON, before it is signed (T6.17).
+   *
+   * The warning on an unsigned letter's Send: a Dept with no SPOC on this
+   * client sends its work to the Key Manager, or to the person who signs for
+   * the firm, to hand out, and the person sending should know that while the
+   * account team can still be set. A warning, never a refusal (2026-09-27).
+   *
+   * The SAME question the router asks when the signed letter becomes work
+   * (`routeOwner`, with the facts `LetterWorkSource` reads the way
+   * `EngagementWorkSource` does), asked for today. One row per Dept, in the
+   * order its first line appears on the letter.
+   */
+  async routingForLetter(tenantId: string, letterId: string): Promise<LetterRouting> {
+    const letter = await this.deps.letters.linesOf(tenantId, letterId);
+    if (letter === null) throw new RoutingLetterNotFound(letterId);
+    const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
+
+    const byDept = new Map<string | null, { lineId: string; name: string }[]>();
+    for (const line of letter.lines) {
+      const group = byDept.get(line.deptCode) ?? [];
+      group.push({ lineId: line.lineId, name: line.name });
+      byDept.set(line.deptCode, group);
+    }
+
+    const depts: LetterDeptRouting[] = [];
+    for (const [deptCode, lines] of byDept) {
+      const routing = await this.routeOwner(tenantId, letter.clientPartyId, deptCode, today);
+      const lookup = routing.noLookup;
+      depts.push({
+        deptCode,
+        deptName: routing.deptName,
+        lines,
+        how: routing.outcome.how,
+        userId: routing.outcome.userId,
+        ownerName: routing.ownerName,
+        reason:
+          routing.outcome.how === "spoc"
+            ? null
+            : lookup === null
+              ? "no_spoc"
+              : lookup.kind === "unknown_dept"
+                ? "unknown_dept"
+                : "no_dept",
+      });
+    }
+    return { letterId, clientPartyId: letter.clientPartyId, onDate: today, depts };
   }
 
   // ── the checklist ────────────────────────────────────────────────────────
@@ -1839,7 +2040,14 @@ export class WorkItemService {
     clientPartyId: string,
     deptCode: string | null,
     onDate: string,
-  ): Promise<{ readonly axisId: string | null; readonly outcome: OwnerOutcome }> {
+  ): Promise<{
+    readonly axisId: string | null;
+    readonly deptName: string | null;
+    readonly noLookup: NoSpocLookup | null;
+    readonly outcome: OwnerOutcome;
+    /** The person `outcome` names, as the directory has them. */
+    readonly ownerName: string | null;
+  }> {
     let axisId: string | null = null;
     let deptName: string | null = null;
     let noLookup: NoSpocLookup | null = null;
@@ -1864,10 +2072,17 @@ export class WorkItemService {
       : null;
     const partner =
       needFallback && keyManager === null ? await this.deps.owners.signingPartner(tenantId) : null;
-    return {
-      axisId,
-      outcome: resolveOwner({ deptName, noLookup, spocs, keyManager, partner }),
-    };
+    const outcome = resolveOwner({ deptName, noLookup, spocs, keyManager, partner });
+    const spoc = outcome.how === "spoc" ? spocs.find((p) => p.userId === outcome.userId) : undefined;
+    const ownerName =
+      spoc !== undefined
+        ? (spoc.displayName ?? spoc.email)
+        : outcome.how === "key_manager"
+          ? (keyManager?.displayName ?? null)
+          : outcome.how === "partner"
+            ? (partner?.displayName ?? null)
+            : null;
+    return { axisId, deptName, noLookup, outcome, ownerName };
   }
 
   private async requireApproval(
@@ -1987,6 +2202,9 @@ export class WorkItemService {
     item: WorkItem,
     actor: Actor,
     how: OwnerSource | "manual",
+    // The catch-up's two facts (T6.17): the router re-decided it after the
+    // account team was named, and whose desk it came off.
+    catchUp?: { readonly catchUp: true; readonly fromUserId: string | null },
   ): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId: item.tenantId,
@@ -2001,6 +2219,7 @@ export class WorkItemService {
         userId: item.assigneeUserId,
         deptAxisId: item.deptAxisId,
         clientPartyId: item.clientPartyId,
+        ...(catchUp ?? {}),
       },
     });
   }
