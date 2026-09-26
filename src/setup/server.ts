@@ -67,6 +67,7 @@ import {
   PostgresCalendarSource,
   PostgresObligationInstanceRepository,
 } from "../infrastructure/postgres/obligation-instance-repository";
+import { PostgresRuleServiceLinkRepository } from "../infrastructure/postgres/obligation-link-repository";
 import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
 import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
 import {
@@ -306,6 +307,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     states: new PostgresObligationStateRepository(pools.app),
     resolutionOptions: new PostgresResolutionOptionRepository(pools.app),
     instances: new PostgresObligationInstanceRepository(pools.app),
+    // Which catalogue services owe which filing (T6.16). The catalogue is the
+    // one writer; the generator, the coverage read and the library read it.
+    links: new PostgresRuleServiceLinkRepository(pools.app),
     // The firm's go-live floor, read from the config registry it is published
     // in. `configRepository` already implements two other ports for this
     // module's neighbours; this is the third, and it stays a PORT so the

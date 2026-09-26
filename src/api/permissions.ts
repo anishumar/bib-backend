@@ -571,6 +571,20 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     routeKey("DELETE", "/api/v1/obligation-rules/{ruleId}/exceptions/{periodEndMonth}"),
     "tenant:admin" as const,
   ],
+  // WHICH SERVICES OWE WHICH FILING (T6.16). Reading follows the calendar's
+  // reads: everybody on the team needs to see what a service carries,
+  // including the people who cannot change it. Adding and removing follows
+  // every other rule write, `tenant:admin`, and for the same reason and more:
+  // it decides which of the firm's clients owe a statutory filing, and adding
+  // an unconfirmed rule CONFIRMS it, which is a partner taking responsibility
+  // for a date. It is the firm's compliance setup, not an associate's act.
+  [routeKey("GET", "/api/v1/obligation-filings"), "party:read" as const],
+  [routeKey("GET", "/api/v1/services/{serviceEntryId}/filings"), "party:read" as const],
+  [routeKey("POST", "/api/v1/services/{serviceEntryId}/filings"), "tenant:admin" as const],
+  [
+    routeKey("POST", "/api/v1/services/{serviceEntryId}/filings/{ruleId}/unlink"),
+    "tenant:admin" as const,
+  ],
   [routeKey("GET", "/api/v1/calendar"), "party:read" as const],
   // The coverage screen is the ANSWER to an empty calendar, so it is readable by
   // whoever can read the calendar. Hiding it behind admin would mean the person

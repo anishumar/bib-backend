@@ -18,6 +18,9 @@
 //   `work_item_portal_visible`    (0062) — only what the firm marked visible
 //   `obligation_instance_portal_scope` (0062) — only the granted companies'
 //                                                filings
+//   `obligation_instance_portal_live`  (0309) — never a filing the firm took
+//                                                off the calendar when a
+//                                                service stopped including it
 //
 // Repeating the filter here would make the SQL feel safer and would silently
 // disarm the negative control — `tests/portal/portal-reads.integration.test.ts`

@@ -174,8 +174,10 @@ export const PORTAL_PATHS: ReadonlySet<string> = new Set([
   // What makes it safe is not this line: it is that every table it reads carries
   // its own RESTRICTIVE policy written in terms of `crm.portal_sees()`
   // (`delivery.work_item` in 0059, `delivery.obligation_instance` and the
-  // client-visible flag in 0062), and that the one adapter behind it uses
-  // `withPortal` rather than `withTenant`. This line only says a client may ASK.
+  // client-visible flag in 0062, and in 0309 a second one on the filings so a
+  // withdrawn filing never reaches a client), and that the one adapter behind
+  // it uses `withPortal` rather than `withTenant`. This line only says a client
+  // may ASK.
   "/api/v1/portal/home",
   // ── THE ACTION CENTRE (T6.6), AND THE FIRST TEMPLATES ON THIS LIST ──────
   //

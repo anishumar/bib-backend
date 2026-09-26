@@ -57,14 +57,39 @@ const RuleStatus = z.enum(["unconfirmed", "confirmed"]).openapi({
 });
 
 const Coverage = z
-  .enum(["generating", "needs_formula", "event_driven", "unconfirmed", "retired"])
+  .enum(["generating", "needs_formula", "event_driven", "unlinked", "unconfirmed", "retired"])
   .openapi({
     description:
       "What this rule is actually doing, derived rather than stored. 'needs_formula' is NOT an " +
-      "error and is the ordinary state of most of the shipped pack — it means the obligation " +
-      "is real and its timing depends on a fact this system does not hold (an AGM date, a " +
-      "State, a turnover). The reason is on the rule.",
+      "error and is the ordinary state of most of the shipped pack: the obligation is real and " +
+      "its timing depends on a fact this system does not hold (an AGM date, a State, a " +
+      "turnover), and the reason is on the rule. 'unlinked' means no service in the catalogue " +
+      "carries it, so it adds nothing to the calendar; adding it to a service there puts it " +
+      "on the calendar for that service's clients, and confirms it if it was unconfirmed.",
   });
+
+const UsedInSchema = z
+  .object({
+    serviceEntryId: z.string().uuid().openapi({
+      description: "The catalogue service's entry id: what the link and unlink routes take.",
+    }),
+    serviceKey: z.string().openapi({
+      description:
+        "The service's catalogue key. The catalogue screen anchors each service on it, so a " +
+        "library row can link straight to the service that uses it.",
+    }),
+    serviceName: z.string().nullable().openapi({
+      description:
+        "The published version's name, else the newest version's. Null only for a service with " +
+        "no version at all; show the key then.",
+    }),
+    linkedAt: z.string().openapi({
+      description:
+        "When the filing was added to this service, as an ISO instant. Links moved in by " +
+        "migration 0309 carry the moment it ran.",
+    }),
+  })
+  .openapi("ObligationRuleUsedIn");
 
 const DueRuleSchema = z
   .object({
@@ -98,12 +123,22 @@ const RuleSchema = z
   .object({
     id: z.string().uuid(),
     jurisdiction: z.string(),
+    lineageId: z.string().uuid().openapi({
+      description:
+        "The rule's chain: the first rule's id, shared by every rule that later replaced it when " +
+        "the law changed. A catalogue service carries the CHAIN, so every row of one chain " +
+        "shows the same usedIn, and the catalogue's filings list has one row per chain.",
+    }),
     entityType: z.string().nullable().openapi({
       description: "Null means every entity type — the common case: GST does not care what " +
         "shape the company is.",
     }),
-    serviceEntryId: z.string().uuid().nullable(),
-    serviceName: z.string().nullable(),
+    usedIn: z.array(UsedInSchema).openapi({
+      description:
+        "The catalogue services that carry this filing, named. Empty means no service does, so " +
+        "the rule adds nothing to the calendar. Services are added and removed in the " +
+        "Catalogue, the one place a filing is linked to a service.",
+    }),
     module: z.string().nullable().openapi({
       description:
         "The STATUTE's grouping — 'GST', 'TDS', 'MCA'. Not the firm's revenue Dept, which is a " +
@@ -148,10 +183,68 @@ const RuleSchema = z
     coverage: Coverage,
     exceptions: z.array(ExceptionSchema),
     instanceCount: z.number().int().openapi({
-      description: "How many calendar rows this rule has produced, ever.",
+      description:
+        "How many calendar rows this rule has produced, ever, including any taken off the " +
+        "calendar when a service stopped including them. It is what decides whether the " +
+        "period shape can still change.",
     }),
   })
   .openapi("ObligationRule");
+
+const LinkEffectSchema = z
+  .object({
+    linked: z.boolean().openapi({
+      description:
+        "False when the filing was already on this service: nothing was written and nothing " +
+        "recorded, so pressing Add twice is harmless.",
+    }),
+    confirmed: z.boolean().openapi({
+      description:
+        "Adding it also CONFIRMED a rule nobody at the firm had checked. The screen showed its " +
+        "dates in words before the person pressed Add, which is what confirming is.",
+    }),
+    spawned: z.number().int().openapi({
+      description: "Filings this put on the calendar for the service's live clients, now.",
+    }),
+    restored: z.number().int().openapi({
+      description:
+        "Filings taken off the calendar when this filing was earlier removed from a service, " +
+        "and brought back by adding it again.",
+    }),
+    companies: z.number().int().openapi({
+      description: "How many companies those filings are for.",
+    }),
+  })
+  .openapi("ObligationLinkEffect");
+
+const UnlinkEffectSchema = z
+  .object({
+    unlinked: z.boolean().openapi({
+      description: "False when the filing was not on this service: nothing changed.",
+    }),
+    withdrawn: z.number().int().openapi({
+      description:
+        "Upcoming filings nobody had started, taken off the calendar for the clients no other " +
+        "service still covers. Kept and marked, never deleted.",
+    }),
+    kept: z.number().int().openapi({
+      description:
+        "Filings of this service that stayed on the calendar: the three counts below added up.",
+    }),
+    keptStarted: z.number().int().openapi({
+      description: "Kept because work on them has started: a task, a filing, or a decision.",
+    }),
+    keptPastDue: z.number().int().openapi({
+      description:
+        "Kept because their date has passed or a partner's decision is waiting on them. " +
+        "Removing them would hide a deadline the client may have missed.",
+    }),
+    keptCoveredElsewhere: z.number().int().openapi({
+      description:
+        "Kept because another service the same client holds still includes this filing.",
+    }),
+  })
+  .openapi("ObligationUnlinkEffect");
 
 const RuleEffectSchema = z
   .object({
@@ -250,12 +343,13 @@ const CoverageGapSchema = z
       .openapi({
         description:
           "Why the calendar produced nothing for this engagement. NONE of these is an error: " +
-          "'no_rule_names_this_service' is the ordinary state of advisory work. Each names " +
-          "something a partner can do next, which is the point — an empty calendar with no " +
-          "explanation is indistinguishable from broken software.",
+          "'no_rule_names_this_service' means no compliance filing is linked to this service in " +
+          "the catalogue, which is the ordinary state of advisory work. Each names something a " +
+          "partner can do next, which is the point: an empty calendar with no explanation is " +
+          "indistinguishable from broken software.",
       }),
     blockedRuleIds: z.array(z.string().uuid()).openapi({
-      description: "Rules that name this service but could not be used, so the screen can link " +
+      description: "Rules linked to this service that could not be used, so the screen can link " +
         "straight to them.",
     }),
   })
@@ -265,10 +359,17 @@ function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
   const t = r.template;
   return {
     id: t.id,
+    lineageId: t.lineageId,
     jurisdiction: t.jurisdiction,
     entityType: t.entityType,
-    serviceEntryId: t.serviceEntryId,
-    serviceName: r.serviceName,
+    // Field by field, like everything else here: a spread would put whatever
+    // the read model grows next on the wire without the schema saying so.
+    usedIn: r.usedIn.map((u) => ({
+      serviceEntryId: u.serviceEntryId,
+      serviceKey: u.serviceKey,
+      serviceName: u.serviceName,
+      linkedAt: u.linkedAt,
+    })),
     module: t.module,
     name: t.name,
     authority: t.authority,
@@ -291,8 +392,9 @@ function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
     effectiveFrom: t.effectiveFrom,
     effectiveTo: t.effectiveTo,
     // DERIVED here rather than stored, so the screen and the generator cannot
-    // disagree about what a rule is doing.
-    coverage: coverageOf(t),
+    // disagree about what a rule is doing. The link count is the chain's, from
+    // the same query.
+    coverage: coverageOf(t, r.usedIn.length),
     exceptions: r.exceptions.map((e) => ({
       periodEndMonth: e.periodEndMonth,
       kind: e.kind,
@@ -311,7 +413,14 @@ const CreateRuleRequest = z
   .object({
     jurisdiction: z.string().length(2),
     entityType: z.string().nullable().optional(),
-    serviceEntryId: z.string().uuid().nullable().optional(),
+    serviceEntryIds: z.array(z.string().uuid()).max(50).optional().openapi({
+      description:
+        "The catalogue services this new filing is added to, in the same act: the catalogue's " +
+        "'Write a new filing' sends the service it was written on, and that service's live " +
+        "clients get the filings on the calendar straight away. Absent or empty is the library " +
+        "writing a rule on no service, which adds nothing to the calendar until a service " +
+        "carries it.",
+    }),
     module: z.string().nullable().optional(),
     name: z.string().min(1),
     authority: z.string().nullable().optional(),
@@ -328,7 +437,6 @@ const CreateRuleRequest = z
 const UpdateRuleRequest = z
   .object({
     entityType: z.string().nullable().optional(),
-    serviceEntryId: z.string().uuid().nullable().optional(),
     module: z.string().nullable().optional(),
     authority: z.string().nullable().optional(),
     recurrence: Recurrence.optional(),
@@ -361,9 +469,35 @@ const SupersedeRuleRequest = z
     authority: z.string().nullable().optional(),
     module: z.string().nullable().optional(),
     entityType: z.string().nullable().optional(),
-    serviceEntryId: z.string().uuid().nullable().optional(),
   })
   .openapi("SupersedeObligationRuleRequest");
+
+const ServiceParam = z.object({
+  serviceEntryId: z.string().uuid().openapi({
+    description: "The catalogue service's entry id (the entry, not a version).",
+  }),
+});
+
+const ServiceRuleParam = z.object({
+  serviceEntryId: z.string().uuid().openapi({
+    description: "The catalogue service's entry id (the entry, not a version).",
+  }),
+  ruleId: z.string().uuid().openapi({
+    description:
+      "Any rule of the filing's chain: its lineageId or the rule in force. The chain is what " +
+      "is removed, so every rule that replaced another comes off together.",
+  }),
+});
+
+const LinkFilingRequest = z
+  .object({
+    ruleId: z.string().uuid().openapi({
+      description:
+        "Any rule of the filing's chain; the chain is what is added, and its rule in force is " +
+        "what is judged. An unconfirmed rule with a formula is confirmed by adding it.",
+    }),
+  })
+  .openapi("LinkObligationFilingRequest");
 
 const AddExceptionRequest = z
   .object({
@@ -485,7 +619,7 @@ const createRuleRoute = createRoute({
     ),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
-    404: errorResponse("The named catalogue service does not exist at this firm"),
+    404: errorResponse("One of the catalogue services it is written for does not exist at this firm"),
     409: errorResponse("This firm already has a rule with that jurisdiction, name and pack"),
   },
 });
@@ -598,6 +732,102 @@ const withdrawExceptionRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
     404: errorResponse("No such rule, or no exception for that month"),
+  },
+});
+
+// ── which services owe which filing (T6.16) ────────────────────────────────
+//
+// The catalogue is the ONE place a filing is linked to a service (decision 3),
+// so these routes hang off the service. Reading is `party:read`, like every
+// read of the compliance calendar; adding and removing is `tenant:admin`, like
+// every other write to it, because it decides which of the firm's clients owe
+// a statutory filing.
+
+const listFilingsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/obligation-filings",
+  tags: ["obligations"],
+  summary: "Every compliance filing at this firm, once each, and where it is used",
+  description:
+    "One row per filing: the rule IN FORCE of each chain, retired ones included, each with the " +
+    "services that carry it. The catalogue reads this once for the whole page: its picker " +
+    "offers the active ones grouped by module, and each service finds its own filings here by " +
+    "usedIn, so twenty services cost one request rather than twenty.",
+  responses: {
+    200: {
+      description: "The filings",
+      content: { "application/json": { schema: z.object({ filings: z.array(RuleSchema) }) } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
+  },
+});
+
+const serviceFilingsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/services/{serviceEntryId}/filings",
+  tags: ["obligations"],
+  summary: "The compliance filings one catalogue service carries",
+  request: { params: ServiceParam },
+  responses: {
+    200: {
+      description: "The service's filings, as the rule in force of each",
+      content: { "application/json": { schema: z.object({ filings: z.array(RuleSchema) }) } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read clients"),
+    404: errorResponse("No catalogue service with that id at this firm"),
+  },
+});
+
+const linkFilingRoute = createRoute({
+  method: "post",
+  path: "/api/v1/services/{serviceEntryId}/filings",
+  tags: ["obligations"],
+  summary: "Add a compliance filing to a service",
+  description:
+    "The service's live clients get the filing on the calendar straight away, one filing per " +
+    "period however many of their services carry it. Adding an unconfirmed rule confirms it " +
+    "in the same act. Adding a filing that is already on the service changes nothing and " +
+    "answers linked: false.",
+  request: {
+    params: ServiceParam,
+    body: { content: { "application/json": { schema: LinkFilingRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "The filing as the service now shows it, and what adding it did",
+      content: {
+        "application/json": { schema: z.object({ rule: RuleSchema, effect: LinkEffectSchema }) },
+      },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such rule, or no catalogue service with that id, at this firm"),
+  },
+});
+
+const unlinkFilingRoute = createRoute({
+  method: "post",
+  path: "/api/v1/services/{serviceEntryId}/filings/{ruleId}/unlink",
+  tags: ["obligations"],
+  summary: "Remove a compliance filing from a service",
+  description:
+    "Nothing is deleted. The link is marked removed, and the service's upcoming filings nobody " +
+    "has started are taken off the calendar for the clients no other service still covers. " +
+    "Started, filed, decided and past-due filings stay and are counted. Adding the filing back " +
+    "brings the removed ones back.",
+  request: { params: ServiceRuleParam },
+  responses: {
+    200: {
+      description: "The filing, and what removing it did",
+      content: {
+        "application/json": { schema: z.object({ rule: RuleSchema, effect: UnlinkEffectSchema }) },
+      },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not administer the firm"),
+    404: errorResponse("No such rule, or no catalogue service with that id, at this firm"),
   },
 });
 
@@ -1016,11 +1246,82 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
         ),
         effect,
       },
       201,
+    );
+  });
+
+  app.openapi(listFilingsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const filings = await deps.service.filings(s.tenantId);
+    return c.json({ filings: filings.map(ruleToWire) }, 200);
+  });
+
+  app.openapi(serviceFilingsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { serviceEntryId } = c.req.valid("param");
+    const filings = await deps.service.filingsForService(s.tenantId, serviceEntryId);
+    return c.json({ filings: filings.map(ruleToWire) }, 200);
+  });
+
+  app.openapi(linkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { serviceEntryId } = c.req.valid("param");
+    const { ruleId } = c.req.valid("json");
+    const { rule, effect } = await deps.service.linkRule(
+      { tenantId: s.tenantId, serviceEntryId, ruleId },
+      s.actor,
+    );
+    // The filing as it now reads, usedIn included, from the same list the
+    // catalogue reads, so the card can swap the row in without a reload.
+    const record = (await deps.service.filings(s.tenantId)).find(
+      (r) => r.template.lineageId === rule.lineageId,
+    );
+    return c.json(
+      {
+        rule: ruleToWire(record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 }),
+        effect: {
+          linked: effect.linked,
+          confirmed: effect.confirmed,
+          spawned: effect.spawned,
+          restored: effect.restored,
+          companies: effect.companies,
+        },
+      },
+      200,
+    );
+  });
+
+  app.openapi(unlinkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { serviceEntryId, ruleId } = c.req.valid("param");
+    const { rule, effect } = await deps.service.unlinkRule(
+      { tenantId: s.tenantId, serviceEntryId, ruleId },
+      s.actor,
+    );
+    const record = (await deps.service.filings(s.tenantId)).find(
+      (r) => r.template.lineageId === rule.lineageId,
+    );
+    return c.json(
+      {
+        rule: ruleToWire(record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 }),
+        effect: {
+          unlinked: effect.unlinked,
+          withdrawn: effect.withdrawn,
+          kept: effect.kept,
+          keptStarted: effect.keptStarted,
+          keptPastDue: effect.keptPastDue,
+          keptCoveredElsewhere: effect.keptCoveredElsewhere,
+        },
+      },
+      200,
     );
   });
 
@@ -1040,7 +1341,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
         ),
         effect,
       },
@@ -1065,7 +1366,6 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
         authority: body.authority,
         module: body.module,
         entityType: body.entityType,
-        serviceEntryId: body.serviceEntryId,
       },
       s.actor,
     );
@@ -1075,7 +1375,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], serviceName: null, instanceCount: 0 },
+          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
         ),
         effect,
       },
@@ -1335,6 +1635,10 @@ export const obligationRoutes = {
   updateRule: updateRuleRoute,
   addException: addExceptionRoute,
   withdrawException: withdrawExceptionRoute,
+  listFilings: listFilingsRoute,
+  serviceFilings: serviceFilingsRoute,
+  linkFiling: linkFilingRoute,
+  unlinkFiling: unlinkFilingRoute,
   calendar: calendarRoute,
   coverage: coverageRoute,
   decisionQueue: decisionQueueRoute,

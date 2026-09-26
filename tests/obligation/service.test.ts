@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { ObligationService } from "../../src/usecase/obligation/service";
 import {
   FakeCalendarSource,
+  FakeRuleServiceLinks,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
@@ -54,6 +55,17 @@ function harness() {
   const tenants = new FakeObligationTenants();
   const ids = new FakeIds();
   const events = new RecordingEventSink();
+  // The catalogue links (0309), in the same one world: the generator reaches
+  // an engagement only through them, the library names them, and removing one
+  // withdraws calendar rows.
+  const links = new FakeRuleServiceLinks();
+  links.services = services;
+  links.calendar = calendarSource;
+  links.instances = instances;
+  templates.links = links;
+  calendarSource.links = links;
+  instances.links = links;
+  instances.engagements = calendarSource;
 
   const service = new ObligationService({
     timeZones: new FakeFirmTimeZone(),
@@ -62,6 +74,7 @@ function harness() {
     states,
     resolutionOptions,
     instances,
+    links,
     compliancePolicy,
     calendarSource,
     services,
@@ -79,6 +92,7 @@ function harness() {
     states,
     resolutionOptions,
     instances,
+    links,
     compliancePolicy,
     calendarSource,
     services,
@@ -90,8 +104,11 @@ function harness() {
 
 type H = ReturnType<typeof harness>;
 
-/** A firm that can actually generate: states seeded, one monthly GST rule, one
- *  entity with a live engagement that started at the beginning of the year. */
+/** A firm that can actually generate: states seeded, one monthly GST rule on
+ *  the firm's GST service (written in the catalogue, so linked in the same
+ *  act), one entity with a live engagement for that service that started at
+ *  the beginning of the year. The subject is added AFTER the rule, so the
+ *  create's own spawn reaches nobody and each test generates what it means to. */
 async function firmWithGst(h: H, over: { leadTimeDays?: number; effectiveFrom?: string } = {}) {
   await h.service.seedDefaultStates(FIRM, ACTOR);
   h.services.keys.set(SERVICE, "gst-filing");
@@ -99,7 +116,7 @@ async function firmWithGst(h: H, over: { leadTimeDays?: number; effectiveFrom?: 
     {
       tenantId: FIRM,
       jurisdiction: "IN",
-      serviceEntryId: SERVICE,
+      serviceEntryIds: [SERVICE],
       name: "GSTR-3B",
       authority: "GST",
       recurrence: "monthly",
@@ -166,11 +183,14 @@ describe("re-running the generator changes nothing", () => {
   it("generates NOTHING for a rule that cannot compute a date", async () => {
     // The forty-six unresolved rules in the shipped pack. A plausible-looking
     // wrong due date is the dangerous kind, so the honest answer is no row.
+    // ON A SERVICE, so the zero is the formula's and not decision 1's.
     await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "annual-compliance");
     await h.service.createRule(
       {
         tenantId: FIRM,
         jurisdiction: "IN",
+        serviceEntryIds: [SERVICE],
         name: "AOC-4",
         recurrence: "annual",
         fiscalYearStartMonth: 4,
@@ -187,7 +207,7 @@ describe("re-running the generator changes nothing", () => {
       effectiveFrom: "2026-01-01",
       jurisdiction: "IN",
       entityType: "private_limited",
-      serviceEntryId: null,
+      serviceEntryId: SERVICE,
     });
 
     const out = await h.service.generate(FIRM, { from: "2026-04-01", to: "2027-03-31" }, ACTOR);
@@ -197,10 +217,12 @@ describe("re-running the generator changes nothing", () => {
 
   it("generates nothing for an event-driven rule, formula or not", async () => {
     await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "fema");
     await h.service.createRule(
       {
         tenantId: FIRM,
         jurisdiction: "IN",
+        serviceEntryIds: [SERVICE],
         name: "FC-GPR",
         recurrence: "event",
         fiscalYearStartMonth: 4,
@@ -216,7 +238,7 @@ describe("re-running the generator changes nothing", () => {
       effectiveFrom: "2026-01-01",
       jurisdiction: "IN",
       entityType: null,
-      serviceEntryId: null,
+      serviceEntryId: SERVICE,
     });
     const out = await h.service.generate(FIRM, { from: "2026-01-01", to: "2027-12-31" }, ACTOR);
     expect(out.created).toBe(0);
@@ -454,13 +476,14 @@ describe("one firm's failure never stops the others", () => {
     const h = harness();
     h.tenants.ids.push(FIRM, OTHER_FIRM);
     await firmWithGst(h);
-    // The second firm has a rule and NO states, so its pass throws.
+    // The second firm has a rule on a service and NO states, so its pass
+    // throws. Written in the library and linked by hand, because writing it
+    // for a service generates at once and would throw here instead.
     h.services.keys.set(SERVICE, "gst-filing");
-    await h.service.createRule(
+    const { rule: theirs } = await h.service.createRule(
       {
         tenantId: OTHER_FIRM,
         jurisdiction: "IN",
-        serviceEntryId: SERVICE,
         name: "GSTR-3B",
         recurrence: "monthly",
         fiscalYearStartMonth: 4,
@@ -470,6 +493,12 @@ describe("one firm's failure never stops the others", () => {
       },
       ACTOR,
     );
+    h.links.write(OTHER_FIRM, {
+      id: "00000000-0000-4000-8000-00000000b0b1",
+      lineageId: theirs.lineageId,
+      serviceEntryId: SERVICE,
+      byUserId: null,
+    });
 
     const reports = await h.service.sweep(ACTOR);
     expect(reports).toHaveLength(2);
@@ -550,7 +579,7 @@ describe("writing a rule", () => {
         {
           tenantId: FIRM,
           jurisdiction: "IN",
-          serviceEntryId: SERVICE,
+          serviceEntryIds: [SERVICE],
           name: "GSTR-3B",
           recurrence: "monthly",
           fiscalYearStartMonth: 4,
@@ -561,6 +590,9 @@ describe("writing a rule", () => {
         ACTOR,
       ),
     ).rejects.toThrow(/no catalogue service/i);
+    // Refused BEFORE anything was written: no rule, no link.
+    expect(h.templates.rows).toHaveLength(0);
+    expect(h.links.rows).toHaveLength(0);
   });
 
   it("refuses a second rule with the same identity, and says how to revise", async () => {
@@ -570,7 +602,7 @@ describe("writing a rule", () => {
         {
           tenantId: FIRM,
           jurisdiction: "IN",
-          serviceEntryId: SERVICE,
+          serviceEntryIds: [SERVICE],
           name: "GSTR-3B",
           recurrence: "monthly",
           fiscalYearStartMonth: 4,
@@ -588,12 +620,11 @@ describe("writing a rule", () => {
     expect(rule.status).toBe("confirmed");
   });
 
-  it("lets a partner confirm a shipped date, records who did, and fills the calendar then", async () => {
-    // Confirming is the moment a date stops coming from a document and starts
-    // coming from the firm — and since 2026-09-18 it is also the moment the
-    // rule starts generating at all. A pack row reaches every live engagement
-    // in its country, so an unchecked one on the calendar is a claim about
-    // every client the firm has.
+  it("confirming a shipped date in the LIBRARY alone fills nothing: it is on no service (T6.16)", async () => {
+    // Until T6.16 this was the crossing that filled the calendar, and a pack
+    // row named no service, so it reached every live engagement in its country
+    // — which is how a bookkeeping-only client got 98 GST filings. Now a rule
+    // reaches a client only through a service in the catalogue.
     await h.service.seedDefaultStates(FIRM, ACTOR);
     await h.service.seedIndiaRulePack(FIRM, ACTOR);
     h.calendarSource.subjects.push({
@@ -606,11 +637,6 @@ describe("writing a rule", () => {
     });
     const gstr3b = h.templates.rows.find((r) => r.name === "GSTR-3B");
     if (!gstr3b) throw new Error("no GSTR-3B in the pack");
-    expect(gstr3b.status).toBe("unconfirmed");
-
-    const before = await h.service.generate(FIRM, { from: "2026-04-01", to: "2027-03-31" }, ACTOR);
-    expect(before.created).toBe(0);
-    expect(h.instances.rows).toHaveLength(0);
 
     const { rule: confirmed, effect } = await h.service.updateRule(
       FIRM,
@@ -619,11 +645,61 @@ describe("writing a rule", () => {
       ACTOR,
     );
     expect(confirmed.status).toBe("confirmed");
-    // THE CROSSING: answering it fills the calendar there and then.
+    expect(effect.spawned).toBe(0);
+    const out = await h.service.generate(FIRM, { from: "2026-04-01", to: "2027-03-31" }, ACTOR);
+    expect(out.created).toBe(0);
+    expect(h.instances.rows).toHaveLength(0);
+    // And the library says why, rather than showing it as producing dates.
+    const [record] = (await h.service.listRules(FIRM)).filter((r) => r.template.id === gstr3b.id);
+    expect(record?.usedIn).toEqual([]);
+  });
+
+  it("adding a shipped date to a SERVICE confirms it, records who did, and fills the calendar then", async () => {
+    // Confirming is the moment a date stops coming from a document and starts
+    // coming from the firm. The catalogue shows the dates in words before the
+    // partner presses Add, so adding an unconfirmed rule IS confirming it.
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await h.service.seedIndiaRulePack(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "gst-monthly");
+    h.calendarSource.subjects.push({
+      entityPartyId: ENTITY,
+      engagementId: ENGAGEMENT,
+      effectiveFrom: "2026-01-01",
+      jurisdiction: "IN",
+      entityType: "private_limited",
+      serviceEntryId: SERVICE,
+    });
+    const gstr3b = h.templates.rows.find((r) => r.name === "GSTR-3B");
+    if (!gstr3b) throw new Error("no GSTR-3B in the pack");
+    expect(gstr3b.status).toBe("unconfirmed");
+
+    const { rule: confirmed, effect } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: gstr3b.id },
+      ACTOR,
+    );
+    expect(confirmed.status).toBe("confirmed");
+    expect(effect).toMatchObject({ linked: true, confirmed: true, restored: 0, companies: 1 });
+    // The service's live clients get the filings straight away.
     expect(effect.spawned).toBeGreaterThan(0);
     expect(h.instances.rows.length).toBe(effect.spawned);
-    const event = h.events.recorded.find((e) => e.verb === "obligation_rule.updated");
-    expect(event?.payload).toMatchObject({ statusFrom: "unconfirmed", statusTo: "confirmed" });
+
+    // ONE confirm event, through the library's own path, and ONE link event
+    // carrying the count. The spawn is counted once, on the link.
+    const updated = h.events.recorded.filter((e) => e.verb === "obligation_rule.updated");
+    expect(updated).toHaveLength(1);
+    expect(updated[0]?.payload).toMatchObject({ statusFrom: "unconfirmed", statusTo: "confirmed" });
+    expect(updated[0]?.payload).not.toHaveProperty("spawned");
+    const linked = h.events.recorded.find((e) => e.verb === "obligation_rule.linked");
+    expect(linked?.objectId).toBe(gstr3b.lineageId);
+    expect(linked?.payload).toMatchObject({
+      lineageId: gstr3b.lineageId,
+      ruleId: gstr3b.id,
+      serviceEntryId: SERVICE,
+      serviceKey: "gst-monthly",
+      confirmed: true,
+      spawned: effect.spawned,
+      restored: 0,
+    });
   });
 
   it("stops a retired rule generating, and keeps what it already produced", async () => {
@@ -728,7 +804,7 @@ describe("writing a rule", () => {
       {
         tenantId: FIRM,
         jurisdiction: "IN",
-        serviceEntryId: SERVICE,
+        serviceEntryIds: [SERVICE],
         name: "PF monthly return",
         recurrence: "monthly",
         fiscalYearStartMonth: 4,
@@ -747,8 +823,8 @@ describe("writing a rule", () => {
       entityType: "private_limited",
       serviceEntryId: SERVICE,
     });
-    // Creating it generated NOTHING — a half-written rule must not fill a
-    // calendar, and a brand-new rule is what the nightly sweep is for.
+    // Creating it generated NOTHING: it has no formula yet, so there is no
+    // date to put on anybody's calendar.
     expect(h.instances.rows).toHaveLength(0);
 
     const { effect } = await h.service.updateRule(
@@ -999,8 +1075,11 @@ describe("superseding a rule — the law changed, from a day", () => {
       { leadTimeDays: 5 },
       ACTOR,
     );
-    // July and August moved; September did not, because it is not this rule's.
-    expect(edit.restated).toBe(2);
+    // June, July and August moved; September did not, because it is not this
+    // rule's. June is there because the supersession generates for the whole
+    // CHAIN (T6.16), and the ninety-day reach-back puts June under the old
+    // rule, exactly as the nightly sweep would have.
+    expect(edit.restated).toBe(3);
     expect(h.instances.rows.find((r) => r.periodLabel === "Sep 2026")?.statutoryDueOn).toBe(
       septAfterHandover?.statutoryDueOn,
     );
@@ -1137,10 +1216,12 @@ describe("exceptions", () => {
 
   it("changes the date for one period and leaves the other eleven", async () => {
     await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "tds-monthly");
     const { rule: tds } = await h.service.createRule(
       {
         tenantId: FIRM,
         jurisdiction: "IN",
+        serviceEntryIds: [SERVICE],
         name: "TDS deposit",
         recurrence: "monthly",
         fiscalYearStartMonth: 4,
@@ -1168,7 +1249,7 @@ describe("exceptions", () => {
       effectiveFrom: "2026-01-01",
       jurisdiction: "IN",
       entityType: null,
-      serviceEntryId: null,
+      serviceEntryId: SERVICE,
     });
 
     await h.service.generate(FIRM, { from: "2027-02-01", to: "2027-03-31" }, ACTOR);
@@ -1328,5 +1409,382 @@ describe("the shipped rule pack, seeded", () => {
     const h = harness();
     await h.service.seedIndiaRulePack(FIRM, ACTOR);
     expect(h.templates.rows.every((r) => r.status === "unconfirmed")).toBe(true);
+  });
+
+  it("seeds every one of them on NO service, so none generates until the catalogue adds it", async () => {
+    const h = harness();
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await h.service.seedIndiaRulePack(FIRM, ACTOR);
+    expect(h.links.rows).toHaveLength(0);
+    expect(await h.templates.listGenerating(FIRM)).toHaveLength(0);
+  });
+});
+
+// ── T6.16: a service lists its compliance filings; a filing is written once ─
+
+describe("a service lists its compliance filings, and a filing is written once (T6.16)", () => {
+  const SERVICE_2 = "00000000-0000-4000-8000-00000000c002";
+  const ENTITY_2 = "00000000-0000-4000-8000-0000000000e2";
+  /** A SECOND engagement of ENTITY, for SERVICE_2. */
+  const ENGAGEMENT_2 = "00000000-0000-4000-8000-00000000e002";
+  /** ENTITY_2's only engagement, for SERVICE. */
+  const ENGAGEMENT_3 = "00000000-0000-4000-8000-00000000e003";
+  /** Twelve months of GSTR-3B, April to March: on TODAY (30 August) April to
+   *  July are past their date and August to March are ahead. */
+  const YEAR = { from: "2026-04-01", to: "2027-03-31" };
+
+  let h: H;
+  beforeEach(() => {
+    h = harness();
+  });
+
+  const subject = (
+    entityPartyId: string,
+    engagementId: string,
+    serviceEntryId: string,
+    effectiveFrom: string,
+  ) =>
+    h.calendarSource.subjects.push({
+      entityPartyId,
+      engagementId,
+      effectiveFrom,
+      jurisdiction: "IN",
+      entityType: "private_limited",
+      serviceEntryId,
+    });
+  const rowsOf = (entity: string) => h.instances.rows.filter((r) => r.entityPartyId === entity);
+  const live = (entity: string) => rowsOf(entity).filter((r) => r.withdrawnAt === null);
+
+  it("writes a new filing FOR a service in one act, and that service's clients get it now", async () => {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "gst-monthly");
+    subject(ENTITY, ENGAGEMENT, SERVICE, "2026-01-01");
+
+    const { rule, effect } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "IN",
+        serviceEntryIds: [SERVICE, SERVICE],
+        name: "GSTR-3B",
+        recurrence: "monthly",
+        fiscalYearStartMonth: 4,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20 },
+        leadTimeDays: 0,
+        rulePack: "gst-in@2026.09",
+      },
+      ACTOR,
+    );
+    // Linked in the same act, once however often it was asked for.
+    expect(h.links.rows).toHaveLength(1);
+    expect(h.links.rows[0]).toMatchObject({ lineageId: rule.lineageId, serviceEntryId: SERVICE });
+    expect(h.links.rows[0]?.linkedByUserId).toBe(ACTOR.id);
+    // And the calendar is filled at once: the reach-back and a year ahead.
+    expect(effect.spawned).toBeGreaterThan(0);
+    expect(h.instances.rows).toHaveLength(effect.spawned);
+
+    const created = h.events.recorded.find((e) => e.verb === "obligation_rule.created");
+    expect(created?.payload).toMatchObject({ coverage: "generating", services: 1, spawned: effect.spawned });
+    const linked = h.events.recorded.filter((e) => e.verb === "obligation_rule.linked");
+    expect(linked).toHaveLength(1);
+    expect(linked[0]?.payload).toMatchObject({ serviceEntryId: SERVICE, onCreate: true, confirmed: false });
+  });
+
+  it("a rule written in the library, on no service, generates nothing and is shown as unused", async () => {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    subject(ENTITY, ENGAGEMENT, SERVICE, "2026-01-01");
+    const { rule, effect } = await h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "IN",
+        name: "GSTR-1",
+        recurrence: "monthly",
+        fiscalYearStartMonth: 4,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11 },
+        leadTimeDays: 0,
+        rulePack: "gst-in@2026.09",
+      },
+      ACTOR,
+    );
+    expect(effect.spawned).toBe(0);
+    expect((await h.service.generate(FIRM, YEAR, ACTOR)).created).toBe(0);
+    const [record] = await h.service.listRules(FIRM);
+    expect(record?.usedIn).toEqual([]);
+    const created = h.events.recorded.find((e) => e.verb === "obligation_rule.created");
+    expect(created?.payload).toMatchObject({ coverage: "unlinked" });
+    expect(created?.payload).not.toHaveProperty("services");
+    expect(rule.status).toBe("confirmed");
+  });
+
+  it("adding the same filing to the same service twice writes and records nothing the second time", async () => {
+    const rule = await firmWithGst(h);
+    const before = h.events.recorded.length;
+    const { effect } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    expect(effect).toEqual({ linked: false, confirmed: false, spawned: 0, restored: 0, companies: 0 });
+    expect(h.links.rows).toHaveLength(1);
+    expect(h.events.recorded).toHaveLength(before);
+  });
+
+  it("refuses a rule or a service the firm does not have, by name", async () => {
+    const rule = await firmWithGst(h);
+    await expect(
+      h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id }, ACTOR),
+    ).rejects.toMatchObject({ code: "SERVICE_NOT_FOUND" });
+    await expect(
+      h.service.linkRule(
+        { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: "00000000-0000-4000-8000-0000000000aa" },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "TEMPLATE_NOT_FOUND" });
+    await expect(h.service.filingsForService(FIRM, SERVICE_2)).rejects.toMatchObject({
+      code: "SERVICE_NOT_FOUND",
+    });
+  });
+
+  it("adding a rule that is still waiting on a formula does NOT confirm it: there is no date to confirm", async () => {
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await h.service.seedIndiaRulePack(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "annual-compliance");
+    const waiting = h.templates.rows.find((r) => r.dueRule === null && r.recurrence !== "event");
+    if (!waiting) throw new Error("the pack has no rule waiting on a fact");
+    const { rule, effect } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: waiting.id },
+      ACTOR,
+    );
+    expect(effect).toMatchObject({ linked: true, confirmed: false, spawned: 0 });
+    expect(rule.status).toBe("unconfirmed");
+    expect(h.events.verbs()).not.toContain("obligation_rule.updated");
+  });
+
+  it("the same filing on a second service writes nothing twice: ONE filing per period, on the earliest engagement", async () => {
+    const rule = await firmWithGst(h);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    // The SECOND service's engagement of the same company is listed FIRST, and
+    // starts later: the choice of engagement is a rule, not the list's order.
+    h.calendarSource.subjects.unshift({
+      entityPartyId: ENTITY,
+      engagementId: ENGAGEMENT_2,
+      effectiveFrom: "2026-03-01",
+      jurisdiction: "IN",
+      entityType: "private_limited",
+      serviceEntryId: SERVICE_2,
+    });
+    const { effect: second } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id },
+      ACTOR,
+    );
+    // Linking it filled the calendar for the company once, through whichever
+    // service reached it; the rows land on the EARLIER engagement.
+    expect(second.linked).toBe(true);
+    const labels = rowsOf(ENTITY).map((r) => r.periodLabel);
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT)).toBe(true);
+
+    // And a full sweep adds nothing: every period is held once.
+    const again = await h.service.generate(FIRM, YEAR, ACTOR);
+    const after = rowsOf(ENTITY).map((r) => r.periodLabel);
+    expect(new Set(after).size).toBe(after.length);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT)).toBe(true);
+    expect(again.created).toBe(after.length - labels.length);
+
+    // The library says where it is used, both services, named.
+    const [record] = (await h.service.listRules(FIRM)).filter((r) => r.template.id === rule.id);
+    expect(record?.usedIn.map((u) => u.serviceKey)).toEqual(["gst-filing", "full-compliance"]);
+  });
+
+  it("removing a filing withdraws the untouched upcoming ones, and keeps and counts the rest", async () => {
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    expect(h.instances.rows).toHaveLength(12);
+    const at = (label: string) => h.instances.rows.findIndex((r) => r.periodLabel === label);
+    // September is on somebody's desk; October was filed early.
+    const sep = at("Sep 2026");
+    const oct = at("Oct 2026");
+    const filedState = h.states.rows.find((s) => s.isFiled);
+    h.instances.rows[sep] = { ...h.instances.rows[sep]!, workItemId: "00000000-0000-4000-8000-00000000a0a1" };
+    h.instances.rows[oct] = {
+      ...h.instances.rows[oct]!,
+      filedOn: "2026-08-29",
+      stateId: filedState?.id ?? "",
+    };
+
+    const { effect } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    // Aug and Nov to Mar: untouched and ahead of 30 August. April to July have
+    // passed their date; September and October were started.
+    expect(effect).toEqual({
+      unlinked: true,
+      withdrawn: 6,
+      kept: 6,
+      keptStarted: 2,
+      keptPastDue: 4,
+      keptCoveredElsewhere: 0,
+    });
+    const withdrawn = h.instances.rows.filter((r) => r.withdrawnAt !== null);
+    expect(withdrawn.map((r) => r.periodLabel).sort()).toEqual(
+      ["Aug 2026", "Dec 2026", "Feb 2027", "Jan 2027", "Mar 2027", "Nov 2026"],
+    );
+    // KEPT AND MARKED, never deleted: every row is still in the store.
+    expect(h.instances.rows).toHaveLength(12);
+    expect(withdrawn.every((r) => r.withdrawnReason === "service_unlinked")).toBe(true);
+    expect(withdrawn.every((r) => r.withdrawnByUserId === ACTOR.id)).toBe(true);
+    // The link is history, not gone.
+    expect(h.links.rows[0]?.unlinkedAt).not.toBeNull();
+
+    const event = h.events.recorded.find((e) => e.verb === "obligation_rule.unlinked");
+    expect(event?.objectId).toBe(rule.lineageId);
+    expect(event?.payload).toMatchObject({
+      lineageId: rule.lineageId,
+      serviceEntryId: SERVICE,
+      withdrawn: 6,
+      kept: 6,
+      keptStarted: 2,
+      keptPastDue: 4,
+      keptCoveredElsewhere: 0,
+    });
+
+    // AND THE WITHDRAWN ONES LEAVE EVERY READER: the calendar, the raise and
+    // the missed sweep, however far the clock runs on.
+    const onCalendar = (await h.service.calendar(FIRM, {})).map((r) => r.periodLabel);
+    expect(onCalendar).toHaveLength(6);
+    expect(onCalendar).not.toContain("Nov 2026");
+    await h.service.raise(FIRM, "2027-06-01", ACTOR);
+    const withdrawnIds = new Set(withdrawn.map((r) => r.id));
+    expect(h.instances.rows.filter((r) => withdrawnIds.has(r.id)).every((r) => r.workItemId === null)).toBe(
+      true,
+    );
+    await h.service.markMissed(FIRM, "2027-06-01", ACTOR);
+    const missed = h.events.recorded.filter((e) => e.verb === "obligation.missed").map((e) => e.objectId);
+    expect(missed.some((id) => withdrawnIds.has(id))).toBe(false);
+    // Nothing generates for it now, not even for a new period.
+    expect((await h.service.generate(FIRM, { from: "2027-04-01", to: "2027-06-30" }, ACTOR)).created).toBe(0);
+  });
+
+  it("a client another linked service still covers keeps its filings, re-pointed to that engagement", async () => {
+    const rule = await firmWithGst(h);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    subject(ENTITY, ENGAGEMENT_2, SERVICE_2, "2026-02-01");
+    subject(ENTITY_2, ENGAGEMENT_3, SERVICE, "2026-01-01");
+    await h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id }, ACTOR);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT)).toBe(true);
+    const ahead = (entity: string) => live(entity).filter((r) => r.statutoryDueOn >= TODAY).length;
+    const behind = (entity: string) => live(entity).filter((r) => r.statutoryDueOn < TODAY).length;
+    const [e1Ahead, e1Behind, e2Ahead, e2Behind] = [
+      ahead(ENTITY), behind(ENTITY), ahead(ENTITY_2), behind(ENTITY_2),
+    ];
+    const e1Rows = rowsOf(ENTITY).length;
+    expect(e2Ahead).toBeGreaterThan(0);
+
+    const { effect } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    // ENTITY still holds SERVICE_2, which carries the filing: nothing of its
+    // comes off, and its rows now name the engagement that owes them. ENTITY_2
+    // held only SERVICE, so its upcoming ones come off.
+    expect(effect).toMatchObject({
+      withdrawn: e2Ahead,
+      keptCoveredElsewhere: e1Ahead,
+      keptPastDue: e1Behind + e2Behind,
+      keptStarted: 0,
+    });
+    expect(live(ENTITY)).toHaveLength(e1Rows);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT_2)).toBe(true);
+    expect(live(ENTITY_2)).toHaveLength(e2Behind);
+  });
+
+  it("removing the SECOND service touches nothing the first still owns", async () => {
+    const rule = await firmWithGst(h);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    subject(ENTITY, ENGAGEMENT_2, SERVICE_2, "2026-02-01");
+    await h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id }, ACTOR);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    const before = live(ENTITY).length;
+
+    const { effect } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id },
+      ACTOR,
+    );
+    // Every row is the first service's (it carries the earlier engagement), so
+    // none is the removed service's to withdraw or to count.
+    expect(effect).toMatchObject({ unlinked: true, withdrawn: 0, kept: 0 });
+    expect(live(ENTITY)).toHaveLength(before);
+    expect(rowsOf(ENTITY).every((r) => r.engagementId === ENGAGEMENT)).toBe(true);
+  });
+
+  it("adding it back brings the SAME filings back, one per period, and says so", async () => {
+    const rule = await firmWithGst(h);
+    await h.service.generate(FIRM, YEAR, ACTOR);
+    const ids = new Map(h.instances.rows.map((r) => [r.periodLabel, r.id]));
+    const { effect: off } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    expect(off.withdrawn).toBe(8);
+
+    const rowsBefore = h.instances.rows.length;
+    const { effect: on } = await h.service.linkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE, ruleId: rule.id },
+      ACTOR,
+    );
+    // The eight withdrawn ones are back, in place; the spawn's window (ninety
+    // days back, a year ahead) also reaches the spring of 2027 for the first
+    // time, and only those are NEW.
+    expect(on).toMatchObject({ linked: true, confirmed: false, restored: 8, companies: 1 });
+    expect(on.spawned).toBe(h.instances.rows.length - rowsBefore);
+    expect(on.spawned).toBeGreaterThan(0);
+    expect(h.instances.rows.every((r) => r.withdrawnAt === null)).toBe(true);
+    const labels = h.instances.rows.map((r) => r.periodLabel);
+    expect(new Set(labels).size).toBe(labels.length);
+    for (const [label, id] of ids) {
+      expect(h.instances.rows.find((r) => r.periodLabel === label)?.id).toBe(id);
+    }
+    const restored = h.events.recorded.filter((e) => e.verb === "obligation.restored");
+    expect(restored).toHaveLength(8);
+    expect(restored[0]?.payload).toHaveProperty("withdrawnAt");
+    // History kept: two links, the first removed.
+    expect(h.links.rows).toHaveLength(2);
+    expect(h.links.rows.filter((l) => l.unlinkedAt === null)).toHaveLength(1);
+  });
+
+  it("removing a filing that is not on the service changes nothing and records nothing", async () => {
+    const rule = await firmWithGst(h);
+    h.services.keys.set(SERVICE_2, "full-compliance");
+    const before = h.events.recorded.length;
+    const { effect } = await h.service.unlinkRule(
+      { tenantId: FIRM, serviceEntryId: SERVICE_2, ruleId: rule.id },
+      ACTOR,
+    );
+    expect(effect.unlinked).toBe(false);
+    expect(h.events.recorded).toHaveLength(before);
+  });
+
+  it("a superseded rule stays on its services, and the catalogue shows the rule now in force", async () => {
+    const rule = await firmWithGst(h);
+    const { rule: successor } = await h.service.supersedeRule(
+      FIRM,
+      rule.id,
+      {
+        effectiveFrom: "2026-09-01",
+        rulePack: "gst-in@2026.09",
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null },
+      },
+      ACTOR,
+    );
+    expect(successor.lineageId).toBe(rule.lineageId);
+    const rows = await h.service.listRules(FIRM);
+    expect(rows.every((r) => r.usedIn.map((u) => u.serviceEntryId).includes(SERVICE))).toBe(true);
+
+    const filings = await h.service.filingsForService(FIRM, SERVICE);
+    expect(filings.map((f) => f.template.id)).toEqual([successor.id]);
+    // ONE row per filing, however many rules its chain holds.
+    expect((await h.service.filings(FIRM)).map((f) => f.template.id)).toEqual([successor.id]);
+    // And the successor's periods reached the client through the inherited link.
+    expect(h.instances.rows.some((r) => r.templateId === successor.id)).toBe(true);
   });
 });

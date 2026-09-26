@@ -15,6 +15,7 @@ import { FakeWorkVocabularyRepo } from "./workitem";
 import { ObligationService } from "../usecase/obligation/service";
 import {
   FakeCalendarSource,
+  FakeRuleServiceLinks,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
@@ -293,6 +294,7 @@ export function makeFakes(): {
     instances: new FakeObligationInstanceRepo(),
     compliancePolicy: new FakeCompliancePolicySource(),
     calendarSource: new FakeCalendarSource(),
+    links: new FakeRuleServiceLinks(),
     services: new FakeObligationServices(),
     workItems: new FakeWorkItemRaiser(),
     tenants: new FakeObligationTenants(),

@@ -1088,7 +1088,6 @@ export class WorkItemService {
     input: {
       readonly entityPartyId: string;
       readonly engagementId: string | null;
-      readonly serviceEntryId: string | null;
       readonly title: string;
       readonly description: string | null;
       readonly dueOn: string;

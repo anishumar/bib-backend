@@ -18,6 +18,8 @@ import {
   addDays,
   coverageOf,
   daysInMonth,
+  generatesFor,
+  mayBeWithdrawn,
   effectiveDueRule,
   internalTargetDate,
   isIsoDate,
@@ -38,7 +40,7 @@ function rule(over: Partial<ObligationTemplate> = {}): ObligationTemplate {
     tenantId: "t",
     jurisdiction: "IN",
     entityType: null,
-    serviceEntryId: null,
+    lineageId: "r",
     module: null,
     name: "Filing",
     authority: null,
@@ -338,36 +340,152 @@ describe("scheduleFor is the one place a rule plus a period becomes dates", () =
 });
 
 describe("what a rule is actually doing, and why an empty calendar is explainable", () => {
-  it("says `generating` only when it is active AND has a formula AND has periods AND is confirmed", () => {
-    expect(coverageOf(rule({ status: "confirmed" }))).toBe("generating");
+  it("says `generating` only when active, with a formula and periods, confirmed AND on a service", () => {
+    expect(coverageOf(rule({ status: "confirmed" }), 1)).toBe("generating");
   });
 
-  it("says `unconfirmed` for a formula nobody at the firm has checked — a pack's every row", () => {
+  it("says `unlinked` for a confirmed formula no service carries (T6.16, decision 1)", () => {
+    // NOT generating. A rule reaches a client only through a service the
+    // client bought, and "every service" is gone as a generating reading: it
+    // is the reading that put 98 GST filings on a bookkeeping-only client.
+    expect(coverageOf(rule({ status: "confirmed" }), 0)).toBe("unlinked");
+  });
+
+  it("says `unlinked` before `unconfirmed`, because adding it to a service confirms it", () => {
+    // A shipped pack row is both. The actionable answer is the catalogue,
+    // where adding it shows its dates in words and confirms it in one act.
+    expect(coverageOf(rule(), 0)).toBe("unlinked");
+  });
+
+  it("says `unconfirmed` for a formula nobody at the firm has checked, even on a service", () => {
     // NOT generating. Until 2026-09-18 this row put its filings on the calendar
     // of every live engagement in its country, including a client whose only
     // service excluded the filing — and that client's portal called them missed.
-    expect(coverageOf(rule())).toBe("unconfirmed");
-    expect(coverageOf(rule({ status: "unconfirmed" }))).toBe("unconfirmed");
+    expect(coverageOf(rule(), 1)).toBe("unconfirmed");
+    expect(coverageOf(rule({ status: "unconfirmed" }), 2)).toBe("unconfirmed");
   });
 
   it("says `needs_formula` for a real obligation whose timing we cannot derive", () => {
     // NOT an error, and the screen must not render it as one: forty-six of the
     // fifty-seven shipped rules are here, each with the firm's own words for
-    // what is missing.
-    expect(coverageOf(rule({ dueRule: null, unresolvedReason: "State-specific" }))).toBe(
+    // what is missing. Asked before the link, so a service carrying it says
+    // what it still needs.
+    expect(coverageOf(rule({ dueRule: null, unresolvedReason: "State-specific" }), 1)).toBe(
+      "needs_formula",
+    );
+    expect(coverageOf(rule({ dueRule: null, unresolvedReason: "State-specific" }), 0)).toBe(
       "needs_formula",
     );
   });
 
   it("says `event_driven` for a rule with a formula and no period to count from", () => {
-    expect(coverageOf(rule({ recurrence: "event" }))).toBe("event_driven");
+    expect(coverageOf(rule({ recurrence: "event" }), 1)).toBe("event_driven");
   });
 
   it("says `retired` first, whatever else is true of the rule", () => {
     // A retired rule still explains an old filing's date, so it stays readable
     // — and it must not be reported as needing a formula it will never get.
-    expect(coverageOf(rule({ isActive: false, dueRule: null, unresolvedReason: "x" }))).toBe(
+    expect(coverageOf(rule({ isActive: false, dueRule: null, unresolvedReason: "x" }), 1)).toBe(
       "retired",
     );
+  });
+});
+
+describe("the generation predicate for ONE engagement: the rule, and a link to its service (T6.16)", () => {
+  const GST = "svc-gst";
+  const FULL = "svc-full";
+  const BOOKS = "svc-books";
+  const confirmed = rule({ id: "r2", lineageId: "chain", status: "confirmed" });
+
+  it("generates for an engagement whose service carries the rule's chain", () => {
+    expect(generatesFor(confirmed, [{ lineageId: "chain", serviceEntryId: GST }], GST)).toBe(true);
+  });
+
+  it("generates NOTHING for a rule no service carries, whatever the engagement bought", () => {
+    // Decision 1. The old NULL reached every engagement; nothing does now.
+    expect(generatesFor(confirmed, [], GST)).toBe(false);
+    expect(generatesFor(confirmed, [], null)).toBe(false);
+  });
+
+  it("does not generate for a service that does not carry it: the bookkeeping client", () => {
+    expect(generatesFor(confirmed, [{ lineageId: "chain", serviceEntryId: GST }], BOOKS)).toBe(false);
+  });
+
+  it("generates for BOTH services of one rule, which is how it is written once and reused", () => {
+    const links = [
+      { lineageId: "chain", serviceEntryId: GST },
+      { lineageId: "chain", serviceEntryId: FULL },
+    ];
+    expect(generatesFor(confirmed, links, GST)).toBe(true);
+    expect(generatesFor(confirmed, links, FULL)).toBe(true);
+    expect(generatesFor(confirmed, links, BOOKS)).toBe(false);
+  });
+
+  it("reads the link on the CHAIN, so a successor is on its predecessor's services", () => {
+    const successor = rule({ id: "r3", lineageId: "chain", supersedesId: "r2", status: "confirmed" });
+    expect(generatesFor(successor, [{ lineageId: "chain", serviceEntryId: GST }], GST)).toBe(true);
+    // A link to some OTHER chain carries nothing for this one.
+    expect(generatesFor(successor, [{ lineageId: "other", serviceEntryId: GST }], GST)).toBe(false);
+  });
+
+  it("still refuses an unconfirmed or formula-less rule, linked or not", () => {
+    const links = [{ lineageId: "chain", serviceEntryId: GST }];
+    expect(generatesFor(rule({ lineageId: "chain" }), links, GST)).toBe(false);
+    expect(
+      generatesFor(
+        rule({ lineageId: "chain", status: "confirmed", dueRule: null, unresolvedReason: "x" }),
+        links,
+        GST,
+      ),
+    ).toBe(false);
+  });
+
+  it("is reached by nothing when the engagement's service cannot be resolved", () => {
+    // The safe direction under decision 1: the coverage screen names the gap,
+    // where a guess would put a filing on a client who did not buy it.
+    expect(generatesFor(confirmed, [{ lineageId: "chain", serviceEntryId: GST }], null)).toBe(false);
+  });
+});
+
+describe("which filing removing a rule from a service may take off the calendar (T6.16)", () => {
+  const TODAY = "2026-09-26";
+  const open = { isTerminal: false, needsDecision: false };
+  const untouched = {
+    workItemId: null,
+    filedOn: null,
+    resolvedAt: null,
+    withdrawnAt: null,
+    statutoryDueOn: "2026-10-20",
+  };
+
+  it("takes an untouched filing whose date is still ahead", () => {
+    expect(mayBeWithdrawn(untouched, open, TODAY)).toBe(true);
+  });
+
+  it("takes one due TODAY on the firm's calendar: the deadline has not passed", () => {
+    expect(mayBeWithdrawn({ ...untouched, statutoryDueOn: TODAY }, open, TODAY)).toBe(true);
+  });
+
+  it("keeps one whose date has passed: removing it would hide a deadline the client may have missed", () => {
+    expect(mayBeWithdrawn({ ...untouched, statutoryDueOn: "2026-09-25" }, open, TODAY)).toBe(false);
+  });
+
+  it("keeps one somebody started, filed or decided", () => {
+    expect(mayBeWithdrawn({ ...untouched, workItemId: "wi" }, open, TODAY)).toBe(false);
+    expect(mayBeWithdrawn({ ...untouched, filedOn: "2026-09-01" }, open, TODAY)).toBe(false);
+    expect(
+      mayBeWithdrawn({ ...untouched, resolvedAt: "2026-09-01T00:00:00.000Z" }, open, TODAY),
+    ).toBe(false);
+  });
+
+  it("keeps one waiting on a decision or already settled, by the state's FLAGS", () => {
+    expect(mayBeWithdrawn(untouched, { isTerminal: false, needsDecision: true }, TODAY)).toBe(false);
+    expect(mayBeWithdrawn(untouched, { isTerminal: true, needsDecision: false }, TODAY)).toBe(false);
+  });
+
+  it("does not take one twice", () => {
+    expect(
+      mayBeWithdrawn({ ...untouched, withdrawnAt: "2026-09-20T00:00:00.000Z" }, open, TODAY),
+    ).toBe(false);
   });
 });

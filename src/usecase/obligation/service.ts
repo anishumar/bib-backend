@@ -101,6 +101,7 @@ import type {
   ObligationTemplateRepository,
   ResolutionOptionRepository,
   RestatedInstance,
+  RuleServiceLinkRepository,
   ServiceDirectory,
   TemplateEdit,
   TemplateRecord,
@@ -158,6 +159,10 @@ const DECISION_QUEUE_LIMIT = 200;
 export interface GenerateReport {
   readonly tenantId: string;
   readonly created: number;
+  /** Withdrawn filings a linked service proposed again, and which came back
+   *  (0309). Counted apart from `created`: they are not new, and the ledger
+   *  records them under their own verb. */
+  readonly restored: number;
   readonly raised: number;
   /** Deadlines that passed undischarged on this pass. Counted into the worker's
    *  own log, because a queue nobody is told about is the silence this module
@@ -179,6 +184,10 @@ export interface Deps {
   readonly states: ObligationStateRepository;
   readonly resolutionOptions: ResolutionOptionRepository;
   readonly instances: ObligationInstanceRepository;
+  /** Which catalogue services owe which filing (T6.16). The catalogue is the
+   *  one place a link is made, through `linkRule`, `unlinkRule` and a
+   *  `createRule` that names services. */
+  readonly links: RuleServiceLinkRepository;
   /** The firm's published go-live date, behind a port so this module does not
    *  import the config registry's use case to read one date. */
   readonly compliancePolicy: CompliancePolicySource;
@@ -196,7 +205,13 @@ export interface CreateRuleInput {
   readonly tenantId: string;
   readonly jurisdiction: string;
   readonly entityType?: string | null | undefined;
-  readonly serviceEntryId?: string | null | undefined;
+  /**
+   * The catalogue services this new filing is added to, in the same act
+   * (T6.16): the catalogue's "Write a new filing" sends the one it was written
+   * on. Empty or absent is the library writing a rule on no service, which
+   * generates nothing until a service carries it (decision 1).
+   */
+  readonly serviceEntryIds?: readonly string[] | undefined;
   readonly module?: string | null | undefined;
   readonly name: string;
   readonly authority?: string | null | undefined;
@@ -237,6 +252,63 @@ export interface RuleEffect {
 }
 
 const NO_EFFECT: RuleEffect = { restated: 0, locked: 0, spawned: 0 };
+
+/** What generating for one chain did, as the screen tells it: "12 filings
+ *  added to the calendar for 4 companies". `companies` is distinct entities
+ *  across both lists. */
+interface SpawnOutcome {
+  readonly spawned: number;
+  readonly restored: number;
+  readonly companies: number;
+}
+
+const NOTHING_SPAWNED: SpawnOutcome = { spawned: 0, restored: 0, companies: 0 };
+
+/**
+ * What adding a filing to a service did (T6.16).
+ *
+ * `linked` false is the idempotent answer: it was already on the service, so
+ * nothing was written and nothing recorded. `confirmed` says adding it also
+ * CONFIRMED a rule nobody at the firm had checked, which the screen showed in
+ * words before the person pressed Add. `spawned` and `restored` are the
+ * filings it put on the calendar and the withdrawn ones it brought back;
+ * `companies` is how many companies those are for.
+ */
+export interface LinkEffect {
+  readonly linked: boolean;
+  readonly confirmed: boolean;
+  readonly spawned: number;
+  readonly restored: number;
+  readonly companies: number;
+}
+
+/**
+ * What removing a filing from a service did (T6.16). `unlinked` false is the
+ * idempotent answer: it was not on the service. The rest is `UnlinkOutcome`,
+ * whose doc says what each count means.
+ */
+export interface UnlinkEffect {
+  readonly unlinked: boolean;
+  readonly withdrawn: number;
+  readonly kept: number;
+  readonly keptStarted: number;
+  readonly keptPastDue: number;
+  readonly keptCoveredElsewhere: number;
+}
+
+/** The row IN FORCE of a chain: the one with no end, else the latest. The
+ *  catalogue judges a link by it, because it is what the filing now is. */
+function currentOf(chain: readonly ObligationTemplate[]): ObligationTemplate | undefined {
+  const open = chain.filter((t) => t.effectiveTo === null);
+  const pool = open.length > 0 ? open : chain;
+  return pool[pool.length - 1];
+}
+
+/** Who did it, for a column that names a person. System and agent actors have
+ *  no account, which is the null. */
+function userOf(actor: Actor): string | null {
+  return actor.type === "human" ? actor.id : null;
+}
 
 export class ObligationService {
   constructor(private readonly deps: Deps) {}
@@ -332,7 +404,6 @@ export class ObligationService {
         tenantId,
         jurisdiction: "IN",
         entityType: null,
-        serviceEntryId: null,
         module: seed.module,
         name: seed.name,
         authority: seed.authority,
@@ -351,13 +422,14 @@ export class ObligationService {
         effectiveFrom: null,
         effectiveTo: null,
         supersedesId: null,
-        // UNCONFIRMED, and since 2026-09-18 that is what keeps it OFF the
-        // calendar. A pack row names no service, so it reaches every live
-        // engagement at every company in its country the moment it generates
-        // — including a bookkeeping client whose service excludes the filing,
-        // whose portal then called it "missed". The partner answers each rule
-        // (`status: "confirmed"`, optionally scoped to a service) and THAT
-        // fills the calendar, the same way answering a formula does.
+        // UNCONFIRMED, and on NO service. A pack cannot know a firm's
+        // catalogue, and on 2026-09-18 a pack row that named no service reached
+        // every live engagement at every company in its country the moment it
+        // generated, including a bookkeeping client whose service excludes the
+        // filing, whose portal then called it "missed". Since T6.16 a row
+        // generates only once it is BOTH confirmed and added to a service in
+        // the catalogue, and adding an unconfirmed one there confirms it in the
+        // same act, with its dates shown in words first.
         status: "unconfirmed",
       });
       if (!template) continue;
@@ -429,7 +501,9 @@ export class ObligationService {
     exceptions: readonly DueRuleException[],
   ): Promise<{ readonly restated: number; readonly locked: number }> {
     const unstarted = await this.deps.instances.listUnstarted(tenantId, template.id);
-    const total = await this.deps.instances.countFor(tenantId, template.id);
+    // The rows ON THE CALENDAR, not every row ever: a withdrawn one (0309) is
+    // not "locked because somebody started it", nobody did. See the port.
+    const total = await this.deps.instances.countLiveFor(tenantId, template.id);
     const locked = total - unstarted.length;
 
     const moved: RestatedInstance[] = [];
@@ -482,28 +556,99 @@ export class ObligationService {
    * It generates only; it does NOT raise tasks or flag anything missed. Those
    * are the sweep's, and having them fall out of a config edit would mean a
    * partner correcting a typo could put work on somebody's desk.
+   *
+   * ── FOR THE WHOLE CHAIN, NOT ONE ROW (T6.16) ─────────────────────────────
+   *
+   * It was one template. A chain whose predecessor still governs periods the
+   * ninety-day reach-back has not produced yet would then lose those periods
+   * the day its service was added, so it generates every row of the lineage:
+   * each still proposes only the periods it governs (`governsPeriod`), and the
+   * lineage key keeps it to one filing per period. It is also what brings a
+   * withdrawn filing back, through the generator's own insert.
    */
   private async spawnFor(
     tenantId: string,
-    templateId: string,
+    lineageId: string,
     actor: Actor,
-  ): Promise<number> {
+  ): Promise<SpawnOutcome> {
     const today = await this.firmDay(tenantId);
     const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
-    const report = await this.generate(
+    const report = await this.generateReport(
       tenantId,
       { from: addDays(today, -REACH_BACK_DAYS), to: addDays(today, HORIZON_DAYS) },
       actor,
-      templateId,
+      lineageId,
       floor,
     );
-    return report.created;
+    return {
+      spawned: report.created,
+      restored: report.restored,
+      companies: report.companies,
+    };
   }
 
   // ── writing rules ────────────────────────────────────────────────────────
 
+  /** The library: every rule row, predecessors and retired ones included, each
+   *  with the services its chain is used in. */
   async listRules(tenantId: string): Promise<readonly TemplateRecord[]> {
     return this.deps.templates.list(tenantId);
+  }
+
+  /**
+   * One row per FILING: the rule in force of every chain at the firm, retired
+   * ones included, each with where it is used (T6.16).
+   *
+   * What the catalogue reads. Its picker offers the active ones grouped by
+   * `module`, each saying how many services already carry it, and every
+   * service card finds its own filings in the same list by `usedIn`, so a page
+   * of twenty services is ONE read rather than twenty (the local rate limit is
+   * three hundred a minute, and the catalogue has been caught fetching per row
+   * once already). Retired chains are in it because a service that still
+   * carries one must be able to show it, marked, and offer to remove it.
+   *
+   * Derived from the library's own query rather than a second statement, so
+   * the two screens cannot disagree about a rule.
+   */
+  async filings(tenantId: string): Promise<readonly TemplateRecord[]> {
+    const rows = await this.deps.templates.list(tenantId);
+    const byChain = new Map<string, TemplateRecord[]>();
+    for (const r of rows) {
+      const list = byChain.get(r.template.lineageId) ?? [];
+      list.push(r);
+      byChain.set(r.template.lineageId, list);
+    }
+    const out: TemplateRecord[] = [];
+    for (const chain of byChain.values()) {
+      const inForce = currentOf(
+        [...chain].sort((a, b) =>
+          (a.template.effectiveFrom ?? "").localeCompare(b.template.effectiveFrom ?? ""),
+        ).map((r) => r.template),
+      );
+      const record = chain.find((r) => r.template.id === inForce?.id);
+      if (record) out.push(record);
+    }
+    return out;
+  }
+
+  /** The filings one service carries, as its card in the catalogue shows
+   *  them. A service that does not exist is refused by name rather than
+   *  answered with an empty list that reads as "carries nothing". */
+  async filingsForService(
+    tenantId: string,
+    serviceEntryId: string,
+  ): Promise<readonly TemplateRecord[]> {
+    const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
+    if (key === null) throw new ServiceNotFound(serviceEntryId);
+    return (await this.filings(tenantId)).filter((r) =>
+      r.usedIn.some((u) => u.serviceEntryId === serviceEntryId),
+    );
+  }
+
+  /** How many live services a rule's chain is on: `coverageOf`'s second
+   *  argument. */
+  private async linkCount(tenantId: string, lineageId: string): Promise<number> {
+    return (await this.deps.links.usedIn(tenantId, lineageId)).length;
   }
 
   async createRule(
@@ -531,18 +676,24 @@ export class ObligationService {
     if (dueRule === null && unresolvedReason === null) throw new UnresolvedReasonRequired();
     if (dueRule !== null && unresolvedReason !== null) throw new UnresolvedReasonNotAllowed();
 
-    const serviceEntryId = input.serviceEntryId ?? null;
-    if (serviceEntryId !== null) {
+    // THE SERVICES IT IS WRITTEN FOR (T6.16). Each must be a service this firm
+    // has, refused here by name so the caller gets a sentence; 0309's
+    // composite key refuses the same thing as a wall. Asked for twice is
+    // asked for once.
+    const serviceEntryIds = [...new Set(input.serviceEntryIds ?? [])];
+    const serviceKeys = new Map<string, string>();
+    for (const serviceEntryId of serviceEntryIds) {
       const key = await this.deps.services.serviceKey(input.tenantId, serviceEntryId);
       if (key === null) throw new ServiceNotFound(serviceEntryId);
+      serviceKeys.set(serviceEntryId, key);
     }
+    const byUserId = userOf(actor);
 
     const created = await this.deps.templates.createIfAbsent({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       jurisdiction: input.jurisdiction,
       entityType: (input.entityType ?? "").trim() || null,
-      serviceEntryId,
       module: (input.module ?? "").trim() || null,
       name,
       authority: (input.authority ?? "").trim() || null,
@@ -560,9 +711,33 @@ export class ObligationService {
       // The firm wrote it, so the firm has said what the law is: confirmed.
       // "Checked against the statute" is a question asked of a PACK's rows.
       status: "confirmed",
-    });
+    }, serviceEntryIds.map((serviceEntryId) => ({
+      id: this.deps.ids.newId(),
+      serviceEntryId,
+      byUserId,
+    })));
     if (!created) throw new TemplateKeyTaken(input.jurisdiction, name, rulePack);
 
+    // ── WRITTEN FOR A SERVICE, IT FILLS THE CALENDAR NOW (T6.16) ───────────
+    //
+    // Until T6.16 a written rule deliberately generated nothing: a partner
+    // types the formula first and the March carve-out second, and the nightly
+    // sweep was what a brand-new rule was FOR. Two things changed. Under
+    // decision 1 a rule written in the LIBRARY is on no service and could not
+    // generate anyway, so that path still produces nothing and says so. And a
+    // rule written in the CATALOGUE is written FOR a service, which is the same
+    // act as adding an existing filing to it, and adding one fills the calendar
+    // at once because the partner has just said "this service's clients owe
+    // this". The half-written worry is answered by T6.4: adding the March
+    // exception afterwards RESTATES the rows already generated, so an early
+    // spawn costs a restate, never a wrong date left standing.
+    const spawn =
+      serviceEntryIds.length > 0 && generatesDates(created, serviceEntryIds.length)
+        ? await this.spawnFor(input.tenantId, created.lineageId, actor)
+        : NOTHING_SPAWNED;
+
+    // After the spawn, as `updateRule` records its crossing: the count goes on
+    // the rule's own event.
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "obligation_rule.created",
@@ -573,20 +748,35 @@ export class ObligationService {
         name: created.name,
         rulePack: created.rulePack,
         recurrence: created.recurrence,
-        coverage: coverageOf(created),
+        coverage: coverageOf(created, serviceEntryIds.length),
         leadTimeDays: created.leadTimeDays,
+        ...(serviceEntryIds.length === 0
+          ? {}
+          : { services: serviceEntryIds.length, spawned: spawn.spawned }),
       },
     });
+    // One link event per service, like a link made from the picker, so "when
+    // did this service start carrying GSTR-3B" has one answer whichever way it
+    // was added. `onCreate` says the counts are on the event above.
+    for (const serviceEntryId of serviceEntryIds) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "obligation_rule.linked",
+        objectId: created.lineageId,
+        actor,
+        payload: {
+          lineageId: created.lineageId,
+          ruleId: created.id,
+          serviceEntryId,
+          serviceKey: serviceKeys.get(serviceEntryId) ?? null,
+          name: created.name,
+          confirmed: false,
+          onCreate: true,
+        },
+      });
+    }
 
-    // ── AND IT DOES NOT GENERATE HERE, DELIBERATELY ────────────────────────
-    //
-    // `updateRule` does, when a rule crosses into producing dates. This does
-    // not, and the difference is not an oversight. A partner writing a rule
-    // from scratch types the formula first and the March carve-out second —
-    // generating on the first save would put a year of filings on the calendar
-    // from a rule that is still half written, and every one of them would then
-    // need restating. A brand-new rule is what the nightly sweep is FOR.
-    return { rule: created, effect: NO_EFFECT };
+    return { rule: created, effect: { ...NO_EFFECT, spawned: spawn.spawned } };
   }
 
   /**
@@ -650,7 +840,6 @@ export class ObligationService {
       readonly authority?: string | null | undefined;
       readonly module?: string | null | undefined;
       readonly entityType?: string | null | undefined;
-      readonly serviceEntryId?: string | null | undefined;
     },
     actor: Actor,
   ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
@@ -688,23 +877,21 @@ export class ObligationService {
       throw new InvalidLeadTime(leadTimeDays);
     }
 
-    const serviceEntryId =
-      input.serviceEntryId === undefined ? current.serviceEntryId : input.serviceEntryId;
-    if (serviceEntryId !== null && serviceEntryId !== current.serviceEntryId) {
-      const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
-      if (key === null) throw new ServiceNotFound(serviceEntryId);
-    }
-
     // The IDENTITY carries over: same jurisdiction, same name, same period
     // shape. A successor that changed the name would be a different obligation,
     // and one that changed the recurrence would orphan the predecessor's rows
     // the same way editing it in place would.
+    //
+    // AND ITS SERVICES CARRY OVER WITH NOTHING COPIED (T6.16). A link is on
+    // the chain (`lineageId`), and the successor inherits the chain through
+    // `supersedes_id`, so the day the law changes every service that carried
+    // the filing still does. Re-pointing a filing to a different service is
+    // not an amendment of the law; it is the catalogue's to do.
     const next: NewObligationTemplate = {
       id: this.deps.ids.newId(),
       tenantId,
       jurisdiction: current.jurisdiction,
       entityType: input.entityType === undefined ? current.entityType : trimToNull(input.entityType),
-      serviceEntryId,
       module: input.module === undefined ? current.module : trimToNull(input.module),
       name: current.name,
       authority: input.authority === undefined ? current.authority : trimToNull(input.authority),
@@ -742,7 +929,7 @@ export class ObligationService {
     const future = (await this.deps.instances.listUnstarted(tenantId, predecessorId)).filter(
       (r) => r.periodStart >= input.effectiveFrom,
     );
-    const asTemplate: ObligationTemplate = { ...next, isActive: true };
+    const asTemplate: ObligationTemplate = { ...next, lineageId: current.lineageId, isActive: true };
     const redated = new Set<string>();
     const handover: RestatedInstance[] = future.map((row) => {
       const schedule = scheduleFor(asTemplate, [], {
@@ -790,8 +977,9 @@ export class ObligationService {
     // Whatever the predecessor never reached — a later period, an entity it
     // had no row for. The lineage key refuses any period a row it KEPT still
     // holds, so a started filing is never generated a second time beside it.
-    const spawned = generatesDates(successor)
-      ? await this.spawnFor(tenantId, successor.id, actor)
+    // Asked of the chain's links, which the successor already has.
+    const spawned = generatesDates(successor, await this.linkCount(tenantId, successor.lineageId))
+      ? (await this.spawnFor(tenantId, successor.lineageId, actor)).spawned
       : 0;
 
     return { rule: successor, effect: { restated, locked: kept, spawned } };
@@ -803,8 +991,34 @@ export class ObligationService {
     edit: TemplateEdit & { readonly status?: string | undefined },
     actor: Actor,
   ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
+    const { rule, effect } = await this.applyUpdate(tenantId, templateId, edit, actor, {
+      spawnOnCrossing: true,
+    });
+    return { rule, effect };
+  }
+
+  /**
+   * THE EDIT PATH, shared by the library's PATCH and by the catalogue's "add
+   * it and confirm it" (`linkRule`), so confirming a rule is one code path and
+   * one `obligation_rule.updated` event whichever screen it came from.
+   *
+   * `spawnOnCrossing` is off for `linkRule` only, and not to skip the spawn:
+   * `linkRule` spawns itself right after, and records what it produced on
+   * `obligation_rule.linked`. Two events carrying the same count would make a
+   * report summing them count every filing twice.
+   */
+  private async applyUpdate(
+    tenantId: string,
+    templateId: string,
+    edit: TemplateEdit & { readonly status?: string | undefined },
+    actor: Actor,
+    options: { readonly spawnOnCrossing: boolean },
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
     const current = await this.deps.templates.findById(tenantId, templateId);
     if (!current) throw new TemplateNotFound(templateId);
+    // The chain's services, which an edit cannot change: the same number on
+    // both sides of the crossing below.
+    const linked = await this.linkCount(tenantId, current.lineageId);
 
     const recurrence = edit.recurrence ?? current.recurrence;
     if (!isObligationRecurrence(String(recurrence))) {
@@ -847,13 +1061,6 @@ export class ObligationService {
       }
     }
 
-    const serviceEntryId =
-      edit.serviceEntryId === undefined ? current.serviceEntryId : edit.serviceEntryId;
-    if (serviceEntryId !== null && serviceEntryId !== current.serviceEntryId) {
-      const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
-      if (key === null) throw new ServiceNotFound(serviceEntryId);
-    }
-
     // The formula and its reason are ONE decision, and the table says so
     // (`obligation_due_rule_chk`). Resolved together here so the caller gets a
     // sentence rather than a constraint name.
@@ -869,7 +1076,6 @@ export class ObligationService {
     // dynamic assembly — see `TemplatePatch`.
     const updated = await this.deps.templates.update(tenantId, templateId, {
       entityType: edit.entityType === undefined ? current.entityType : trimToNull(edit.entityType),
-      serviceEntryId,
       module: edit.module === undefined ? current.module : trimToNull(edit.module),
       authority: edit.authority === undefined ? current.authority : trimToNull(edit.authority),
       recurrence,
@@ -888,10 +1094,9 @@ export class ObligationService {
     // and watch nothing happen for twelve months — a control that looks live
     // and is inert, which is the trap this codebase keeps naming.
     //
-    // Only the fields that DECIDE A DATE trigger it. Renaming the authority or
-    // pointing the rule at a different catalogue service changes nothing about
-    // when anything is due, and a response claiming it moved 162 filings would
-    // be a lie a partner would act on.
+    // Only the fields that DECIDE A DATE trigger it. Renaming the authority
+    // changes nothing about when anything is due, and a response claiming it
+    // moved 162 filings would be a lie a partner would act on.
     const datesChanged =
       updated.leadTimeDays !== current.leadTimeDays ||
       !sameDueRule(current.dueRule, updated.dueRule);
@@ -909,9 +1114,14 @@ export class ObligationService {
     // of their answer. A correction to a rule that was ALREADY generating
     // spawns nothing — the periods exist, and restating them is the whole of
     // it, since the period shape is locked once rows exist.
+    //
+    // A rule on no service never crosses (decision 1): confirming it in the
+    // library fills nothing, because it reaches nobody until the catalogue
+    // adds it to a service, and THAT is when its filings arrive.
+    const crossed = !generatesDates(current, linked) && generatesDates(updated, linked);
     const spawned =
-      !generatesDates(current) && generatesDates(updated)
-        ? await this.spawnFor(tenantId, templateId, actor)
+      crossed && options.spawnOnCrossing
+        ? (await this.spawnFor(tenantId, updated.lineageId, actor)).spawned
         : 0;
 
     await this.deps.events.recordEvent({
@@ -946,12 +1156,202 @@ export class ObligationService {
           ? {}
           : { restated: moved.restated, locked: moved.locked, spawned }),
         ...(updated.isActive === current.isActive ? {} : { isActive: updated.isActive }),
-        ...(coverageOf(updated) === coverageOf(current)
+        ...(coverageOf(updated, linked) === coverageOf(current, linked)
           ? {}
-          : { coverageFrom: coverageOf(current), coverageTo: coverageOf(updated) }),
+          : { coverageFrom: coverageOf(current, linked), coverageTo: coverageOf(updated, linked) }),
       },
     });
     return { rule: updated, effect: { ...moved, spawned } };
+  }
+
+  // ── which services owe which filing (T6.16) ──────────────────────────────
+
+  /**
+   * Add a filing to a catalogue service: the catalogue's "Add a filing".
+   *
+   * ── THE CHAIN IS LINKED, THE CURRENT ROW IS JUDGED ────────────────────────
+   *
+   * Any rule id in a chain is accepted; the link names the chain (0309), and
+   * what the filing now IS (its formula, whether anybody has confirmed it) is
+   * the chain's row in force. Adding it twice is not an error and records
+   * nothing: `linked` comes back false.
+   *
+   * ── ADDING AN UNCONFIRMED RULE CONFIRMS IT, IN THE SAME ACT ───────────────
+   *
+   * The screen shows the dates in words ("due on the 20th of the month after
+   * each month ends") before the person presses Add, which is exactly what
+   * confirming a shipped date is: a partner checking it against the statute
+   * and taking responsibility for it. So it goes through the library's own
+   * confirm path (`applyUpdate`, one `obligation_rule.updated` with
+   * `statusFrom`/`statusTo`), not a second writer of `status`. Only a rule
+   * that COULD then generate is confirmed: one still waiting on a formula has
+   * no dates to confirm, and stays as it is on the service, saying what it
+   * needs.
+   *
+   * ── AND THE SERVICE'S CLIENTS GET THE FILINGS NOW ─────────────────────────
+   *
+   * The link is written FIRST, so the generation that follows finds the
+   * service's engagements through it (`spawnFor` runs in its own transaction
+   * and reads what has committed). It generates for the whole chain and
+   * restores withdrawn rows it proposes, which is how removing a filing and
+   * adding it back returns the same rows rather than new ones. A client who
+   * holds another service that already carries this filing gets nothing new:
+   * the lineage key holds one filing per period, whichever service reached it.
+   */
+  async linkRule(
+    input: { readonly tenantId: string; readonly serviceEntryId: string; readonly ruleId: string },
+    actor: Actor,
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: LinkEffect }> {
+    const { tenantId, serviceEntryId } = input;
+    const given = await this.deps.templates.findById(tenantId, input.ruleId);
+    if (!given) throw new TemplateNotFound(input.ruleId);
+    const serviceKey = await this.deps.services.serviceKey(tenantId, serviceEntryId);
+    if (serviceKey === null) throw new ServiceNotFound(serviceEntryId);
+
+    const lineageId = given.lineageId;
+    let current = currentOf(await this.deps.templates.chain(tenantId, lineageId)) ?? given;
+
+    const linked = await this.deps.links.link(tenantId, {
+      id: this.deps.ids.newId(),
+      lineageId,
+      serviceEntryId,
+      byUserId: userOf(actor),
+    });
+    if (!linked) {
+      return {
+        rule: current,
+        effect: { linked: false, confirmed: false, spawned: 0, restored: 0, companies: 0 },
+      };
+    }
+
+    const services = await this.linkCount(tenantId, lineageId);
+    let confirmed = false;
+    if (coverageOf(current, services) === "unconfirmed") {
+      current = (
+        await this.applyUpdate(tenantId, current.id, { status: "confirmed" }, actor, {
+          spawnOnCrossing: false,
+        })
+      ).rule;
+      confirmed = true;
+    }
+
+    const spawn = generatesDates(current, services)
+      ? await this.spawnFor(tenantId, lineageId, actor)
+      : NOTHING_SPAWNED;
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation_rule.linked",
+      objectId: lineageId,
+      actor,
+      payload: {
+        lineageId,
+        ruleId: current.id,
+        serviceEntryId,
+        serviceKey,
+        name: current.name,
+        confirmed,
+        // Counts only, like every rule write's effect: which filings arrived
+        // is on the calendar and in their own `obligation.spawned` /
+        // `obligation.restored` events.
+        spawned: spawn.spawned,
+        restored: spawn.restored,
+      },
+    });
+
+    return {
+      rule: current,
+      effect: {
+        linked: true,
+        confirmed,
+        spawned: spawn.spawned,
+        restored: spawn.restored,
+        companies: spawn.companies,
+      },
+    };
+  }
+
+  /**
+   * Remove a filing from a catalogue service: the catalogue's "Remove from
+   * this service" (T6.16, decision 2).
+   *
+   * The link is removed and, IN THE SAME TRANSACTION, the service's
+   * untouched upcoming filings on this chain are WITHDRAWN for every client no
+   * other linked service still covers: kept on the row and marked, never
+   * deleted. Everything else is KEPT and counted by reason, because a partial
+   * change reported as a whole one is how a deadline moves without anybody
+   * being told. Which rows qualify is `mayBeWithdrawn` in the domain and
+   * `RuleServiceLinkRepository.unlink`'s SQL, and "upcoming" is on the FIRM's
+   * calendar (`dayInZone`), never the server's.
+   *
+   * Any rule id in the chain is accepted, as for `linkRule`. Removing a filing
+   * that is not on the service records nothing: `unlinked` comes back false.
+   */
+  async unlinkRule(
+    input: { readonly tenantId: string; readonly serviceEntryId: string; readonly ruleId: string },
+    actor: Actor,
+  ): Promise<{ readonly rule: ObligationTemplate; readonly effect: UnlinkEffect }> {
+    const { tenantId, serviceEntryId } = input;
+    const given = await this.deps.templates.findById(tenantId, input.ruleId);
+    if (!given) throw new TemplateNotFound(input.ruleId);
+    const serviceKey = await this.deps.services.serviceKey(tenantId, serviceEntryId);
+    if (serviceKey === null) throw new ServiceNotFound(serviceEntryId);
+
+    const lineageId = given.lineageId;
+    const current = currentOf(await this.deps.templates.chain(tenantId, lineageId)) ?? given;
+    const outcome = await this.deps.links.unlink(tenantId, {
+      lineageId,
+      serviceEntryId,
+      byUserId: userOf(actor),
+      firmToday: await this.firmDay(tenantId),
+    });
+    if (outcome === null) {
+      return {
+        rule: current,
+        effect: {
+          unlinked: false,
+          withdrawn: 0,
+          kept: 0,
+          keptStarted: 0,
+          keptPastDue: 0,
+          keptCoveredElsewhere: 0,
+        },
+      };
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation_rule.unlinked",
+      objectId: lineageId,
+      actor,
+      payload: {
+        lineageId,
+        ruleId: current.id,
+        serviceEntryId,
+        serviceKey,
+        name: current.name,
+        // COUNTS, not a verb per row: see `obligation_rule.unlinked` in the
+        // registry. Which filings came off is on each row.
+        withdrawn: outcome.withdrawn,
+        kept: outcome.kept,
+        keptStarted: outcome.keptStarted,
+        keptPastDue: outcome.keptPastDue,
+        keptCoveredElsewhere: outcome.keptCoveredElsewhere,
+        repointed: outcome.repointed,
+      },
+    });
+
+    return {
+      rule: current,
+      effect: {
+        unlinked: true,
+        withdrawn: outcome.withdrawn,
+        kept: outcome.kept,
+        keptStarted: outcome.keptStarted,
+        keptPastDue: outcome.keptPastDue,
+        keptCoveredElsewhere: outcome.keptCoveredElsewhere,
+      },
+    };
   }
 
   async addException(
@@ -1086,6 +1486,7 @@ export class ObligationService {
         reports.push({
           tenantId,
           created: 0,
+          restored: 0,
           raised: 0,
           missed: 0,
           rulesWithNoSubjects: [],
@@ -1127,7 +1528,7 @@ export class ObligationService {
   /**
    * Create every obligation falling due in a window, for one firm.
    *
-   * Idempotent — the unique key on (tenant, template, entity, period start)
+   * Idempotent — the unique key on (tenant, lineage, entity, period start)
    * means running it twice a day for a year changes nothing after the first
    * time. That is T3.2's acceptance line and it holds structurally rather than
    * by care.
@@ -1136,15 +1537,33 @@ export class ObligationService {
     tenantId: string,
     window: { readonly from: IsoDate; readonly to: IsoDate },
     actor: Actor = SYSTEM_ACTOR,
+    onlyLineageId?: string,
+    floor: IsoDate | null = null,
+  ): Promise<Omit<GenerateReport, "raised" | "missed" | "uncoveredEngagements">> {
+    const r = await this.generateReport(tenantId, window, actor, onlyLineageId, floor);
+    return {
+      tenantId: r.tenantId,
+      created: r.created,
+      restored: r.restored,
+      rulesWithNoSubjects: r.rulesWithNoSubjects,
+    };
+  }
+
+  private async generateReport(
+    tenantId: string,
+    window: { readonly from: IsoDate; readonly to: IsoDate },
+    actor: Actor,
     /**
-     * One rule only, for the write path.
+     * One CHAIN only, for the write path (T6.16: it was one template).
      *
-     * A partner who has just given a rule its formula is told how many filings
-     * that produced, in the same response. Without the filter the reply would
-     * be the whole firm's sweep and the number would answer a question nobody
-     * asked; with it, the work is bounded by the one rule they edited.
+     * A partner who has just given a rule its formula, or added a filing to a
+     * service, is told how many filings that produced, in the same response.
+     * Without the filter the reply would be the whole firm's sweep and the
+     * number would answer a question nobody asked; with it, the work is
+     * bounded by the one filing they touched. Every row of the chain, because
+     * a predecessor still governs the periods before its successor's cutover.
      */
-    onlyTemplateId?: string,
+    onlyLineageId: string | undefined,
     /**
      * The firm's compliance floor (`compliance_policy.missedFromOn`), or null
      * for none. A filing that fell due BEFORE the floor is never generated —
@@ -1154,8 +1573,14 @@ export class ObligationService {
      * still put June's and July's returns on the calendar and their tasks on
      * a desk for a firm that went live in September.
      */
-    floor: IsoDate | null = null,
-  ): Promise<Omit<GenerateReport, "raised" | "missed" | "uncoveredEngagements">> {
+    floor: IsoDate | null,
+  ): Promise<{
+    readonly tenantId: string;
+    readonly created: number;
+    readonly restored: number;
+    readonly companies: number;
+    readonly rulesWithNoSubjects: readonly string[];
+  }> {
     if (!isIsoDate(window.from) || !isIsoDate(window.to) || window.from > window.to) {
       throw new InvalidWindow(window.from, window.to);
     }
@@ -1165,7 +1590,7 @@ export class ObligationService {
     // state, not a misconfiguration — and the sweep runs across every firm, so
     // throwing here would take the worker down for one of them.
     if (rules.length === 0) {
-      return { tenantId, created: 0, rulesWithNoSubjects: [] };
+      return { tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: [] };
     }
 
     const states = await this.deps.states.list(tenantId);
@@ -1174,23 +1599,40 @@ export class ObligationService {
 
     const pending: NewObligationInstance[] = [];
     const barren: string[] = [];
+    // ONE PROPOSAL PER (chain, entity, period), and which one is a rule
+    // (T6.16). A client holding two services that both carry a filing is two
+    // subjects for one entity, and the calendar holds ONE row per period.
+    // Leaving the choice to whichever proposal the insert met first made the
+    // row's `engagement_id` whatever order the database returned; the
+    // restore is an UPDATE and would let the database choose as well.
+    const proposed = new Set<string>();
     // The cap is checked in three places rather than one because a `break`
     // only leaves the loop it is in, and this is three deep. A flag reads worse
     // than a labelled break and survives somebody adding a fourth level.
     let full = false;
 
-    for (const { template, exceptions } of rules) {
+    for (const { template, exceptions, linkedServices } of rules) {
       if (full) break;
       // The generator's own filter, named once in the domain so the rules
       // screen and this loop cannot disagree about what "generating" means.
-      if (!generatesDates(template)) continue;
-      if (onlyTemplateId !== undefined && template.id !== onlyTemplateId) continue;
+      if (!generatesDates(template, linkedServices)) continue;
+      if (onlyLineageId !== undefined && template.lineageId !== onlyLineageId) continue;
 
-      const subjects = await this.deps.calendarSource.subjectsFor(tenantId, {
-        jurisdiction: template.jurisdiction,
-        entityType: template.entityType,
-        serviceEntryId: template.serviceEntryId,
-      });
+      // WHO THIS CHAIN REACHES: only the engagements whose service carries it
+      // (decision 1). Sorted HERE as well as by the adapter, earliest
+      // engagement first and then by id, because the choice of engagement is
+      // this loop's promise and must not depend on an adapter's ORDER BY.
+      const subjects = [
+        ...(await this.deps.calendarSource.subjectsFor(tenantId, {
+          lineageId: template.lineageId,
+          jurisdiction: template.jurisdiction,
+          entityType: template.entityType,
+        })),
+      ].sort(
+        (a, b) =>
+          a.effectiveFrom.localeCompare(b.effectiveFrom) ||
+          a.engagementId.localeCompare(b.engagementId),
+      );
       if (subjects.length === 0) {
         barren.push(`${template.jurisdiction} · ${template.name}`);
         continue;
@@ -1231,10 +1673,16 @@ export class ObligationService {
           // THE FIRM'S OWN FLOOR, the same test: a filing due before the day
           // the firm started keeping this calendar is not the firm's either.
           if (floor !== null && schedule.statutoryDueOn < floor) continue;
+          // The FIRST subject for this entity that passes the floors is the
+          // one: subjects are in order, and the earliest engagement is also
+          // the one whose floor lets the most periods through.
+          const key = `${template.lineageId}|${subject.entityPartyId}|${period.start}`;
+          if (proposed.has(key)) continue;
           if (pending.length >= GENERATE_BATCH) {
             full = true;
             break;
           }
+          proposed.add(key);
 
           pending.push({
             id: this.deps.ids.newId(),
@@ -1254,10 +1702,10 @@ export class ObligationService {
     }
 
     if (pending.length === 0) {
-      return { tenantId, created: 0, rulesWithNoSubjects: barren };
+      return { tenantId, created: 0, restored: 0, companies: 0, rulesWithNoSubjects: barren };
     }
 
-    const created = await this.deps.instances.createIfAbsent(pending);
+    const { created, restored } = await this.deps.instances.createIfAbsent(pending);
 
     // ONE EVENT PER INSTANCE, and the batch cap above is what makes that
     // affordable. "When did we first know this client owed this filing?" is
@@ -1278,8 +1726,32 @@ export class ObligationService {
         },
       });
     }
+    // And one per row BROUGHT BACK (0309), for the same reason and with the
+    // instant it had been withdrawn, which restoring cleared from the row.
+    for (const row of restored) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "obligation.restored",
+        objectId: row.id,
+        actor,
+        payload: {
+          templateId: row.templateId,
+          entityPartyId: row.entityPartyId,
+          periodLabel: row.periodLabel,
+          statutoryDueOn: row.statutoryDueOn,
+          internalTargetOn: row.internalTargetOn,
+          withdrawnAt: row.withdrawnAt,
+        },
+      });
+    }
 
-    return { tenantId, created: created.length, rulesWithNoSubjects: barren };
+    return {
+      tenantId,
+      created: created.length,
+      restored: restored.length,
+      companies: new Set([...created, ...restored].map((r) => r.entityPartyId)).size,
+      rulesWithNoSubjects: barren,
+    };
   }
 
   /**
@@ -1298,12 +1770,21 @@ export class ObligationService {
     const due = await this.deps.instances.listRaisable(tenantId, asOf, RAISE_BATCH);
     let raised = 0;
     for (const o of due) {
+      // ASKED AGAIN, per row, right before the task is made (T6.16). The list
+      // is a snapshot and a whole batch may be worked through after it; a
+      // filing removed from its service in the meantime must not land on a
+      // desk. The window that is left is one `raiseForObligation` call wide:
+      // a withdrawal inside it leaves the task on the desk as ordinary work,
+      // unattached (`attachWorkItem` answers false and no `work_raised` is
+      // written), which is the same shape two concurrent sweeps have always
+      // had and the work board shows plainly.
+      const fresh = await this.deps.instances.findById(tenantId, o.id);
+      if (fresh === null || fresh.withdrawnAt !== null || fresh.workItemId !== null) continue;
       const workItemId = await this.deps.workItems.raiseForObligation(
         tenantId,
         {
           entityPartyId: o.entityPartyId,
           engagementId: o.engagementId,
-          serviceEntryId: o.serviceEntryId,
           title: `${o.templateName} · ${o.entityName ?? "entity"} · ${o.periodLabel}`,
           description: o.authority ? `Filed with ${o.authority}.` : null,
           // The STATUTORY date on the task, never the internal one: the task is
@@ -1313,7 +1794,7 @@ export class ObligationService {
         },
         actor,
       );
-      await this.deps.instances.attachWorkItem(tenantId, o.id, workItemId);
+      if (!(await this.deps.instances.attachWorkItem(tenantId, o.id, workItemId))) continue;
       raised += 1;
       await this.deps.events.recordEvent({
         tenantId,

@@ -169,6 +169,7 @@ import { ObligationVocabularyService } from "../../src/usecase/obligation/vocabu
 import { ObligationService } from "../../src/usecase/obligation/service";
 import {
   FakeCalendarSource,
+  FakeRuleServiceLinks,
   FakeObligationExceptionRepo,
   FakeObligationInstanceRepo,
   FakeObligationServices,
@@ -279,6 +280,7 @@ function deps(): RouterDeps {
         instances: new FakeObligationInstanceRepo(),
         compliancePolicy: new FakeCompliancePolicySource(),
         calendarSource: new FakeCalendarSource(),
+        links: new FakeRuleServiceLinks(),
         services: new FakeObligationServices(),
         workItems: new FakeWorkItemRaiser(),
         tenants: new FakeObligationTenants(),

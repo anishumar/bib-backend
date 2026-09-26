@@ -284,9 +284,9 @@ export class ServiceNotFound extends ObligationError {
   constructor(ref: string) {
     super(
       "SERVICE_NOT_FOUND",
-      `No catalogue service ${JSON.stringify(ref)} at this firm. A rule names the service the ` +
-        `firm sells, so the calendar knows which clients it reaches; leave it empty for a rule ` +
-        `that applies to an entity regardless of what it bought.`,
+      `No catalogue service ${JSON.stringify(ref)} at this firm. A compliance filing is added ` +
+        `to a service the firm sells, so the calendar knows which clients owe it. Pick one of ` +
+        `the services in the Catalogue, or define the service there first.`,
     );
   }
 }
