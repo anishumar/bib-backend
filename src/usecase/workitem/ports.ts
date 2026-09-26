@@ -164,8 +164,9 @@ export interface ObligationCoverage {
   ): Promise<ReadonlySet<string>>;
 
   /**
-   * The subset of `engagementIds` whose SERVICE carries a dated filing — the
-   * question a PER-PERIOD task asks (T6.13).
+   * The subset of `engagementIds` whose service IS its filings: the calendar
+   * dates them (`coveredEngagements`) AND the service names no process of its
+   * own. The question a PER-PERIOD task asks (T6.13), and a yes skips it.
    *
    * T6.13 made this narrower than `coveredEngagements` because a rule owed by
    * "Any service" (the shipped pack's every row, since a pack cannot know a
@@ -173,16 +174,18 @@ export interface ObligationCoverage {
    * GST rule was answered, so the entity's bookkeeping was covered by its GST
    * rule and must still get September's task. T6.16's decision 1 removed that
    * case: a rule reaches an engagement only through a link to the service it
-   * bought, so today the two answers are the same and the adapter runs one
-   * statement for both.
+   * bought.
    *
-   * THE QUESTION IS KEPT SEPARATE ON PURPOSE, and there is an open product
-   * decision behind it. A per-period task is skipped where the calendar dates
-   * the service's filings, on the reading that the service IS its filings. The
-   * catalogue now invites a firm to add a filing to ANY service, so a monthly
-   * bookkeeping service that also carries a TDS filing would lose its own
-   * monthly checklist task. If the firm says that a service with its own
-   * process keeps its per-period task, this method is where that rule goes.
+   * AND A SERVICE WITH ITS OWN PROCESS KEEPS ITS TASK (the firm's rule,
+   * 2026-09-26). The catalogue invites a filing onto ANY service, so a monthly
+   * bookkeeping service with a ten-step close that also carries TDS was losing
+   * its "Monthly Accounting · Sep 2026" task, the one its period job's steps
+   * hang under, because the calendar dated its TDS. A service whose live
+   * published body names a `workflowTemplateKey` is therefore never in this
+   * set: its month's task is raised and its filings get their own tasks from
+   * the calendar beside it. A service naming none ("GST Compliance") is its
+   * filings, and skipping is right. The process is read LIVE, as the
+   * orchestrator reads it, never from the version the client signed.
    */
   filingEngagements(
     tenantId: string,

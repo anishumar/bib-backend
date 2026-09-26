@@ -2281,6 +2281,21 @@ engagement's service, for the entity's country). **The failure then
 inverts: a firm with no rules is not covered, so it gets exactly the behaviour it had before this
 existed, and the board can never end up empty.**
 
+**A PER-PERIOD task asks a narrower question, and a service with its own PROCESS keeps it (T6.13,
+then the T6.16 follow-up, 2026-09-26).** The one-time activation task asks `coveredEngagements`
+and is skipped wherever the calendar dates the service's filings. A month's task ("Monthly
+Accounting · Sep 2026", the task a period job's steps hang under) asks `filingEngagements`: is the
+service ITS FILINGS? Only when the calendar dates them AND the service's live published body names
+no `workflowTemplateKey` (read through the pinned version to the entry and out to what is
+published now, the orchestrator's read, judged by `readServiceBody`). A pure "GST Compliance" is
+its filings and gets no month's task; a bookkeeping service with a ten-step close that also
+carries TDS keeps its month's task, and the TDS returns get their own tasks from the calendar
+beside it. Read live because the period job pins the firm's CURRENT process when it opens: asking
+the signed version would skip the task on every engagement signed before the firm wrote its
+process while the job walked that process anyway. `obligation-coverage.ts` is the one place the
+rule is written; `coverage.integration.test.ts` runs it, and the real spawn over it, for all four
+shapes (process and link, link alone, process alone, and a process published after signing).
+
 `GET /api/v1/calendar/coverage` is the other half: every live engagement the calendar produced
 nothing for, WITH A REASON, and **none of the reasons is an error** — the commonest,
 `no_rule_names_this_service` (since T6.16: no filing is linked to this service in the
@@ -2352,10 +2367,13 @@ joins its chain to the engagement's pinned service. `coverageOf(t, linkedService
 generator, and its doc says which are), and `listGenerating` (chains with a live link, with the
 count), `subjectsFor` (joins the link; its LEFT joins became inner, since nothing reaches an
 engagement except through its service), `gaps` and `obligation-coverage.ts` all restate it;
-`coverage.integration.test.ts` runs them against one database. T6.13's two coverage questions now
-give one answer (the switch is gone, the port keeps both, see its open question below), and
-`FakeObligationCoverage` keeps ONE set for the same reason: its second set let a work-item test
-pass against "covered but not a filing", which the adapter can no longer produce. The obligation
+`coverage.integration.test.ts` runs them against one database. T6.13's two coverage questions gave
+one answer for a while (the "any service" case they differed on was gone), and part again on ONE
+fact only: a service with a process of its own keeps its per-period task (the decision below).
+`FakeObligationCoverage` models exactly that: `covered`, and `ownProcess` as a fact about the
+engagement's service, so it can say "covered but not a filing" for the adapter's one reason and no
+other; its old free-standing second set let a work-item test pass against a state Postgres could
+not produce. The obligation
 fakes also refuse what 0309's keys refuse (a successor's id as a lineage, an entry that is not a
 service) by the constraint's name, and a rule store handed links with no link store wired refuses
 rather than answering success with nothing linked, which is what `makeFakes()` did.
@@ -2467,12 +2485,15 @@ the catalogue's single read), `GET /api/v1/services/{serviceEntryId}/filings`, `
 `tenant:admin`. Rule rows carry `lineageId` and `usedIn: [{serviceEntryId, serviceKey,
 serviceName, linkedAt}]` from ONE query; `serviceEntryId` is gone from every rule write.
 
-**OPEN, FOR THE FIRM: does a link skip a per-period task?** T6.13 skips a recurring engagement's
-per-period umbrella task where the calendar dates its service's filings (the service IS its
-filings). The catalogue now invites adding a filing to ANY service, so a monthly bookkeeping
-service that also carries TDS would lose its own monthly task. Kept as T6.13 decided, with
-`filingEngagements` as the one place a narrower rule would go (for example: a service with its own
-process keeps its task).
+**DECIDED (the user, 2026-09-26): a link skips a per-period task only when the service has no
+process of its own.** T6.13 skipped a recurring engagement's per-period umbrella task wherever the
+calendar dated its service's filings (the service IS its filings), and the catalogue invites a
+filing onto ANY service, so a monthly bookkeeping service that also carried TDS lost its own
+monthly task. `filingEngagements` now counts an engagement only when the calendar reaches it AND
+its service's LIVE published body names no `workflowTemplateKey`: a service with a process always
+gets its month's task and its filings get their own tasks alongside; one with none (a pure GST
+Compliance) keeps T6.13's behaviour, the filings are the work. `coveredEngagements`, the one-time
+activation task, is unchanged. See "The silent hole" above.
 
 ## The escalation ladder — the sweep that tells somebody, and the one thing it may not do (T4.5)
 

@@ -714,20 +714,23 @@ export class FakeEngagementWork implements EngagementWorkSource {
  * before T3.2 existed. Every existing spawn test therefore stays honest without
  * being touched. A test that wants the other branch adds an id to `covered`.
  *
- * ONE SET, BECAUSE SINCE T6.16 THE ADAPTER GIVES ONE ANSWER. T6.13 kept a
- * second set, `filing`, for the case the two questions differed on: an entity
- * whose GST rule named "any service" was COVERED, and its bookkeeping
- * engagement was not a FILING. Decision 1 removed that case, and
- * `obligation-coverage.ts` now runs one statement for both methods, so a fake
- * that could still say "covered but not a filing" let a test pass against a
- * state Postgres cannot produce. Coverage is per ENGAGEMENT: an entity with a
- * covered GST engagement and an uncovered bookkeeping one is two ids, and
- * that is the shape the per-period test now uses. If the firm decides a
- * per-period task should survive a link (the open question in CLAUDE.md), the
- * second set comes back with the adapter's second statement, not before.
+ * THE SECOND SET IS A FACT ABOUT THE SERVICE, NOT A SECOND ANSWER. T6.13 kept
+ * a free-standing `filing` set for an entity whose GST rule named "any
+ * service"; decision 1 removed that case, and a fake that could say "covered
+ * but not a filing" for no reason let a work-item test pass against a state
+ * Postgres could not produce, so it went. The adapter now says it for exactly
+ * one reason (the T6.16 follow-up, 2026-09-26): the engagement's service names
+ * a PROCESS of its own, read live, and keeps its month's task. So the fake says
+ * it for that reason alone: `ownProcess` holds the engagements whose service
+ * has one, and `filingEngagements` is `covered` without them, never more than
+ * `covered`, as the adapter's filter over its own rows can never be. Coverage is
+ * per ENGAGEMENT: an entity with a covered GST engagement and an uncovered
+ * bookkeeping one is two ids.
  */
 export class FakeObligationCoverage implements ObligationCoverage {
   readonly covered = new Set<string>();
+  /** Engagements whose service's LIVE body names a `workflowTemplateKey`. */
+  readonly ownProcess = new Set<string>();
 
   coveredEngagements(
     _tenantId: string,
@@ -736,11 +739,12 @@ export class FakeObligationCoverage implements ObligationCoverage {
     return Promise.resolve(new Set(engagementIds.filter((id) => this.covered.has(id))));
   }
 
-  filingEngagements(
+  async filingEngagements(
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
-    return this.coveredEngagements(tenantId, engagementIds);
+    const covered = await this.coveredEngagements(tenantId, engagementIds);
+    return new Set([...covered].filter((id) => !this.ownProcess.has(id)));
   }
 }
 

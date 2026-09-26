@@ -14,52 +14,83 @@
 // rows, and it is also why the answer is safe — a firm with no rules is not
 // covered, so it gets exactly the behaviour it had before this existed.
 //
-// ── TWO QUESTIONS, AND SINCE T6.16 ONE ANSWER ──────────────────────────────
+// ── TWO QUESTIONS, AND TWO ANSWERS AGAIN (T6.16 follow-up, 2026-09-26) ─────
 //
 // T6.13 split `coveredEngagements` from `filingEngagements` because a rule
 // owed by "Any service" (a NULL service, the shipped pack's every row) reached
 // every engagement at the entity while naming none of them: bookkeeping was
-// COVERED by the entity's GST rule, and was not a filing. That is the one case
-// the two differed on, and decision 1 removed it: a rule linked to no service
-// generates nothing, and a rule reaches an engagement only through a link to
-// the service that engagement bought. So "will the calendar produce rows for
-// this engagement" and "did this engagement buy a filing" are now the same
-// question, and both methods run this one statement with no switch.
+// COVERED by the entity's GST rule, and was not a filing. Decision 1 removed
+// that case, and for a while both methods ran this statement with no switch.
 //
-// The PORT keeps both methods, and that is deliberate. The use case asks two
-// different questions for two different tasks, and if the firm decides that a
-// per-period task should survive a link (a bookkeeping service that also
-// carries TDS still owes its own monthly checklist), `filingEngagements` is the
-// one place that rule would go.
+// Then the catalogue invited a filing onto ANY service, and a monthly
+// bookkeeping service (a ten-step close of its own) that also carries TDS
+// lost its month's task, "Monthly Accounting · Sep 2026": the calendar dated
+// its filings, so the per-period spawn read the service as being its filings.
+// The rule the firm chose: a service that names a PROCESS of its own keeps its
+// per-period task, and its filings get their own tasks beside it; a service
+// that names none (a pure "GST Compliance") IS its filings, as T6.13 had it.
+// So `filingEngagements` is "reached AND no process of its own", and this is
+// the one place that rule is written.
+//
+// THE PROCESS IS READ LIVE, the orchestrator's read (`job-subject-repository`):
+// through the pinned version to the ENTRY and out to what is published now,
+// judged by `readServiceBody`. A workflow key is not a term of the contract,
+// and the period job this task sits on pins the firm's CURRENT process when it
+// opens. Asking the signed version instead would skip the task on every
+// engagement signed before the firm wrote its process, which is exactly the
+// book a firm brings with it, while the job walked that process anyway. An
+// entry with nothing published names no process, as it does for the
+// orchestrator.
+//
+// `coveredEngagements` (the ONE-TIME activation task) is unchanged and does not
+// ask: that task is due `effective_from + slaDays` on an engagement that runs a
+// year and can never be completed, whatever steps the service has.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
+import { readServiceBody } from "../../domain/config/model";
 import type { ObligationCoverage } from "../../usecase/workitem/ports";
+
+interface ReachedRow {
+  engagement_id: string;
+  /** The service's PUBLISHED body now; null when nothing is published. */
+  live_body: Record<string, unknown> | null;
+}
 
 export class PostgresObligationCoverage implements ObligationCoverage {
   constructor(private readonly app: Db) {}
 
-  coveredEngagements(
+  async coveredEngagements(
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
-    return this.reached(tenantId, engagementIds);
+    const rows = await this.reached(tenantId, engagementIds);
+    return new Set(rows.map((r) => r.engagement_id));
   }
 
-  filingEngagements(
+  async filingEngagements(
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
-    return this.reached(tenantId, engagementIds);
+    const rows = await this.reached(tenantId, engagementIds);
+    return new Set(
+      rows
+        // A service with a process of its own keeps its month's task (the
+        // header says why). Judged by the domain's own reading of a service
+        // body, so a blank key is "no process" here exactly as it is to the
+        // orchestrator, which runs no process for it either.
+        .filter((r) => r.live_body === null || readServiceBody(r.live_body).workflowTemplateKey === null)
+        .map((r) => r.engagement_id),
+    );
   }
 
   private async reached(
     tenantId: string,
     engagementIds: readonly string[],
-  ): Promise<ReadonlySet<string>> {
-    if (engagementIds.length === 0) return new Set();
+  ): Promise<readonly ReachedRow[]> {
+    if (engagementIds.length === 0) return [];
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ engagement_id: string }[]>`
-        SELECT DISTINCT e.id AS engagement_id
+      return db<ReachedRow[]>`
+        SELECT DISTINCT e.id AS engagement_id, live.body AS live_body
         FROM crm.engagement e
         -- INNER, as subjectsFor has it since T6.16. These were LEFT joins so a
         -- rule naming NO service could still reach an engagement whose version
@@ -69,6 +100,15 @@ export class PostgresObligationCoverage implements ObligationCoverage {
           ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
         JOIN config.version pinned
           ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+        -- What the service says NOW, read for its process alone: the hop the
+        -- orchestrator makes. LEFT, because an entry with nothing published
+        -- is still reached (the link is on the entry) and names no process.
+        -- One row at most: 0005 allows one published version per entry, so
+        -- the DISTINCT below still yields one row per engagement.
+        LEFT JOIN config.version live
+          ON live.entry_id = pinned.entry_id
+         AND live.tenant_id = pinned.tenant_id
+         AND live.status = 'published'
         JOIN core.legal_entity le
           ON le.party_id = e.entity_party_id AND le.tenant_id = e.tenant_id
         JOIN delivery.obligation_template t
@@ -96,7 +136,6 @@ export class PostgresObligationCoverage implements ObligationCoverage {
          AND t.status = 'confirmed'
         WHERE e.id = ANY(${db.array(engagementIds as string[])}::uuid[])
       `;
-      return new Set(rows.map((r) => r.engagement_id));
     });
   }
 }

@@ -1206,6 +1206,41 @@ describe("a period job's umbrella task is one month's task", () => {
     expect(h.items.rows).toHaveLength(0);
   });
 
+  it("KEEPS the month's task where the service has a process of its own, filings linked or not", async () => {
+    // The T6.16 follow-up (the firm's rule, 2026-09-26). A monthly bookkeeping
+    // service with a ten-step close that also carries TDS lost "Monthly
+    // Accounting · Sep 2026", the task its period job's steps hang under,
+    // because the calendar dated its TDS. It keeps it now; the TDS returns get
+    // their own tasks from the calendar beside it.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly Accounting" }));
+    h.obligations.covered.add(ENGAGEMENT);
+    h.obligations.ownProcess.add(ENGAGEMENT);
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, SEPTEMBER)).toBe(1);
+    expect(h.items.rows[0]).toMatchObject({
+      title: "Monthly Accounting · Sep 2026",
+      dueOn: "2026-10-30",
+      assigneeUserId: PRIYA,
+      isStatutoryDue: false,
+    });
+  });
+
+  it("still skips the ONE-TIME activation task of a covered service with a process: that question is unchanged", async () => {
+    // The activation task is due `effective_from + slaDays` on an engagement
+    // that runs a year, and can never be completed whatever steps the service
+    // has: the thirteenth-row argument, which a process does not answer.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly Accounting" }));
+    h.obligations.covered.add(ENGAGEMENT);
+    h.obligations.ownProcess.add(ENGAGEMENT);
+
+    expect(await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR)).toBe(0);
+    expect(h.items.rows).toHaveLength(0);
+  });
+
   it("is one task per engagement PER JOB, so October's job gets its own", async () => {
     const h = await harness();
     h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });

@@ -25,12 +25,38 @@
 // the opposite, from all three sides, because that reading is how 98 GST
 // filings reached a bookkeeping-only client on 2026-09-18.
 //
+// ── AND THE TWO QUESTIONS PART AGAIN ON A SERVICE'S PROCESS ────────────────
+//
+// The T6.16 follow-up (2026-09-26): a per-period service that names a process
+// of its own keeps its month's task even when the calendar dates its filings,
+// so `filingEngagements` reads the service's LIVE published body. The last
+// block runs that read, and the real work-item spawn over it, so "a task is
+// raised" is asserted of the statement the worker runs and not of a fake.
+//
 // Run with:  npm run test:integration
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresObligationCoverage } from "../../src/infrastructure/postgres/obligation-coverage";
 import { PostgresCalendarSource } from "../../src/infrastructure/postgres/obligation-instance-repository";
+import { FakeClock } from "../../src/testfakes/clock";
+import { FakeIds } from "../../src/testfakes/ids";
+import { RecordingEventSink } from "../../src/testfakes/ledger";
+import {
+  FakeEngagementWork,
+  FakeObligationFiling,
+  FakeReviewPermissions,
+  FakeReviewPolicies,
+  FakeReviewers,
+  FakeSpocDirectory,
+  FakeWorkAxes,
+  FakeWorkItemApprovalRepo,
+  FakeWorkItemClients,
+  FakeWorkItemRepo,
+  FakeWorkItemStaff,
+  FakeWorkVocabularyRepo,
+} from "../../src/testfakes/workitem";
+import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -51,20 +77,39 @@ let otherVersionId = "";
 let engagementId = "";
 let stateId = "";
 
-/** A `service` entry plus one published version, and the entry id back. */
-async function service(key: string): Promise<{ entryId: string; versionId: string }> {
+/** A `service` entry plus one published version, and the entry id back.
+ *  `process` names the workflow template the service's body points at. */
+async function service(
+  key: string,
+  process: string | null = null,
+): Promise<{ entryId: string; versionId: string }> {
   const [entry] = await owner<{ id: string }[]>`
     INSERT INTO config.entry (tenant_id, kind, key)
     VALUES (${tenantId}, 'service', ${key}) RETURNING id
   `;
   if (!entry) throw new Error("entry seed failed");
+  const body = process === null ? { name: key } : { name: key, workflowTemplateKey: process };
   const [version] = await owner<{ id: string }[]>`
     INSERT INTO config.version (tenant_id, entry_id, version, body, status, published_at)
-    VALUES (${tenantId}, ${entry.id}, 1, ${owner.json({ name: key })}, 'published', now())
+    VALUES (${tenantId}, ${entry.id}, 1, ${owner.json(body)}, 'published', now())
     RETURNING id
   `;
   if (!version) throw new Error("version seed failed");
   return { entryId: entry.id, versionId: version.id };
+}
+
+/** Publish a new version of a service, archiving the one in force, as the
+ *  registry does: one published version per entry (0005). */
+async function republish(entryId: string, body: Record<string, string>): Promise<void> {
+  await owner`
+    UPDATE config.version SET status = 'archived', archived_at = now()
+     WHERE entry_id = ${entryId} AND status = 'published'
+  `;
+  await owner`
+    INSERT INTO config.version (tenant_id, entry_id, version, body, status, published_at)
+    SELECT ${tenantId}, ${entryId}, max(version) + 1, ${owner.json(body)}, 'published', now()
+      FROM config.version WHERE entry_id = ${entryId}
+  `;
 }
 
 /** A rule, and the id back. A rule written from scratch is its own chain, so
@@ -401,5 +446,139 @@ describe("one filing, two services of the same client", () => {
 
     await drop(id);
     await owner`UPDATE crm.engagement SET status = 'cancelled' WHERE id = ${earlier}`;
+  });
+});
+
+// ── T6.16 follow-up: a service with its own process keeps its month's task ──
+
+const SPAWNER = { type: "human" as const, id: "00000000-0000-4000-8000-00000000c0a1" };
+const SEPTEMBER_JOB = "00000000-0000-4000-8000-00000000c0b1";
+
+/**
+ * September's umbrella task for each engagement, spawned by the REAL work-item
+ * use case with THIS adapter as its coverage. The desk is faked (no SPOC, a
+ * fresh vocabulary); the question that decides whether a task is raised at all
+ * is asked of Postgres, which is the point. Returns the engagements that got
+ * one.
+ */
+async function monthTasks(engagementIds: readonly string[], versionId: string): Promise<string[]> {
+  const vocabulary = new FakeWorkVocabularyRepo();
+  const items = new FakeWorkItemRepo();
+  const approvals = new FakeWorkItemApprovalRepo();
+  items.vocabulary = vocabulary;
+  items.approvals = approvals;
+  approvals.items = items;
+  const engagements = new FakeEngagementWork();
+  const ids = new FakeIds();
+  const events = new RecordingEventSink();
+  await new WorkVocabularyService({ vocabulary, ids, events }).seedDefaultVocabulary(tenantId, SPAWNER);
+  for (const id of engagementIds) {
+    engagements.rows.push({
+      engagementId: id,
+      clientPartyId: clientId,
+      entityPartyId: entityId,
+      effectiveFrom: "2026-01-01",
+      serviceVersionId: versionId,
+      serviceName: "Monthly Accounting",
+      slaDays: 10,
+      deptCode: null,
+    });
+  }
+  const spawner = new WorkItemService({
+    items,
+    approvals,
+    vocabulary,
+    clients: new FakeWorkItemClients(),
+    staff: new FakeWorkItemStaff(),
+    spocs: new FakeSpocDirectory(),
+    axes: new FakeWorkAxes(),
+    policies: new FakeReviewPolicies(),
+    reviewers: new FakeReviewers(),
+    permissions: new FakeReviewPermissions(),
+    engagements,
+    obligations: coverage,
+    filings: new FakeObligationFiling(),
+    ids,
+    clock: new FakeClock(new Date("2026-10-01T04:00:00Z")),
+    events,
+  });
+  await spawner.spawnForEngagements(tenantId, SEPTEMBER_JOB, engagementIds, SPAWNER, {
+    label: "Sep 2026",
+    end: "2026-09-30",
+  });
+  return items.rows.map((r) => r.engagementId).filter((id): id is string => id !== null);
+}
+
+describe("a per-period service with a PROCESS of its own keeps its month's task", () => {
+  it("process + a linked filing: its filings are generated AND September's task is raised", async () => {
+    // The shape the firm hit: Monthly Accounting (a ten-step close) that also
+    // carries TDS lost "Monthly Accounting · Sep 2026".
+    const books = await service(`monthly-accounting-${stamp}`, "monthly-accounting-close");
+    const eng = await engagementFor(books.versionId, "2026-01-01");
+    const id = await rule({ name: `TDS on books ${stamp}` });
+    await link(id, books.entryId);
+
+    // The calendar still dates the TDS returns, and the one-time activation
+    // task is still skipped: that question did not change.
+    expect(await reachedBy(id)).toContain(eng);
+    expect((await coverage.coveredEngagements(tenantId, [eng])).has(eng)).toBe(true);
+    // But the service is not merely its filings, so the month's task stays.
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(false);
+    expect(await monthTasks([eng], books.versionId)).toEqual([eng]);
+
+    await drop(id);
+    await owner`UPDATE crm.engagement SET status = 'cancelled' WHERE id = ${eng}`;
+  });
+
+  it("no process + a linked filing: the service IS its filings, and no month's task is raised", async () => {
+    // A pure "GST Compliance": T6.13's behaviour, kept.
+    const gst = await service(`gst-compliance-${stamp}`);
+    const eng = await engagementFor(gst.versionId, "2026-01-01");
+    const id = await rule({ name: `GSTR-3B compliance ${stamp}` });
+    await link(id, gst.entryId);
+
+    expect((await coverage.coveredEngagements(tenantId, [eng])).has(eng)).toBe(true);
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(true);
+    expect(await monthTasks([eng], gst.versionId)).toEqual([]);
+
+    await drop(id);
+    await owner`UPDATE crm.engagement SET status = 'cancelled' WHERE id = ${eng}`;
+  });
+
+  it("process + no linked filing: nothing covers it, and the month's task is raised", async () => {
+    const books = await service(`bookkeeping-only-${stamp}`, "monthly-accounting-close");
+    const eng = await engagementFor(books.versionId, "2026-01-01");
+
+    expect((await coverage.coveredEngagements(tenantId, [eng])).has(eng)).toBe(false);
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(false);
+    expect(await monthTasks([eng], books.versionId)).toEqual([eng]);
+
+    await owner`UPDATE crm.engagement SET status = 'cancelled' WHERE id = ${eng}`;
+  });
+
+  it("reads the process LIVE, never from the version the client signed", async () => {
+    // Signed on a version that named no process: the book a firm brings with
+    // it. The period job pins the firm's CURRENT process when it opens, so
+    // the task it hangs under must follow what is published now.
+    const svc = await service(`bookkeeping-live-${stamp}`);
+    const eng = await engagementFor(svc.versionId, "2026-01-01");
+    const id = await rule({ name: `TDS live ${stamp}` });
+    await link(id, svc.entryId);
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(true);
+    expect(await monthTasks([eng], svc.versionId)).toEqual([]);
+
+    await republish(svc.entryId, {
+      name: `bookkeeping-live-${stamp}`,
+      workflowTemplateKey: "monthly-accounting-close",
+    });
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(false);
+    expect(await monthTasks([eng], svc.versionId)).toEqual([eng]);
+
+    // And taking the process away makes the service its filings again.
+    await republish(svc.entryId, { name: `bookkeeping-live-${stamp}` });
+    expect((await coverage.filingEngagements(tenantId, [eng])).has(eng)).toBe(true);
+
+    await drop(id);
+    await owner`UPDATE crm.engagement SET status = 'cancelled' WHERE id = ${eng}`;
   });
 });
