@@ -713,14 +713,21 @@ export class FakeEngagementWork implements EngagementWorkSource {
  * with no compliance rules gets the engagement's own task, exactly as it did
  * before T3.2 existed. Every existing spawn test therefore stays honest without
  * being touched. A test that wants the other branch adds an id to `covered`.
+ *
+ * ONE SET, BECAUSE SINCE T6.16 THE ADAPTER GIVES ONE ANSWER. T6.13 kept a
+ * second set, `filing`, for the case the two questions differed on: an entity
+ * whose GST rule named "any service" was COVERED, and its bookkeeping
+ * engagement was not a FILING. Decision 1 removed that case, and
+ * `obligation-coverage.ts` now runs one statement for both methods, so a fake
+ * that could still say "covered but not a filing" let a test pass against a
+ * state Postgres cannot produce. Coverage is per ENGAGEMENT: an entity with a
+ * covered GST engagement and an uncovered bookkeeping one is two ids, and
+ * that is the shape the per-period test now uses. If the firm decides a
+ * per-period task should survive a link (the open question in CLAUDE.md), the
+ * second set comes back with the adapter's second statement, not before.
  */
 export class FakeObligationCoverage implements ObligationCoverage {
   readonly covered = new Set<string>();
-  /** Engagements whose SERVICE a rule names — the narrower set a per-period
-   *  task asks about (T6.13). Separate from `covered` because the two answers
-   *  differ in exactly the case the tests are about: an entity that files GST
-   *  is covered, and its bookkeeping engagement is not a filing. */
-  readonly filing = new Set<string>();
 
   coveredEngagements(
     _tenantId: string,
@@ -730,10 +737,10 @@ export class FakeObligationCoverage implements ObligationCoverage {
   }
 
   filingEngagements(
-    _tenantId: string,
+    tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>> {
-    return Promise.resolve(new Set(engagementIds.filter((id) => this.filing.has(id))));
+    return this.coveredEngagements(tenantId, engagementIds);
   }
 }
 
