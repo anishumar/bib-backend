@@ -168,7 +168,10 @@ watched go red with the grant check pinned to yesterday.
 **A policy per table as each portal read lands, never a sweep.** `delivery.work_item` is guarded
 by 0059 because it is the one business table carrying `client_party_id` directly, and
 `delivery.obligation_instance` by 0062 — on `entity_party_id`, because that is the column THAT
-table names (see the portal section below for why no join reaches the client from there). The column that
+table names (see the portal section below for why no join reaches the client from there) — and
+by 0309's `obligation_instance_portal_live`, so a filing withdrawn from a service never reaches a
+client, in the guarded shape `NOT crm.is_portal_session() OR withdrawn_at IS NULL` (the bare
+narrowing would hide the firm's own rows; see T6.7 below). The column that
 names the client differs per table and a guessed join is a wall with a hole in it; until each
 gets its line, those tables are unreachable through gate 2, which is a real defence and not a
 permanent one. `tests/portal/gate4.integration.test.ts` is the proof and it TRIES — it asks for
@@ -1946,7 +1949,7 @@ the client's money; `internal_target_on` is T–X, the firm's own, and it is the
 finding out you are late on the day you are late is useless. Every screen orders by the internal
 target. **ANY DATE-CHANGING EDIT RE-DATES WHAT IS ALREADY GENERATED** (`listUnstarted` +
 `restate`, T6.4), because the sweep materialises a year ahead and generation is idempotent on
-`(tenant, template, entity, period_start)`: without it a partner changes a rule and watches
+`(tenant, lineage, entity, period_start)` (0303): without it a partner changes a rule and watches
 nothing happen for twelve months. It moves only rows nobody has started — a task on a desk keeps
 the date its owner is working to — and the caller REPORTS how many it therefore could not touch,
 because a partial change presented as a whole one is how a deadline moves without anybody being
@@ -2219,6 +2222,11 @@ was created and superseded before any sweep ran. Two halves, and each needs the 
   generator's `ON CONFLICT` targets it, so a period a KEPT row still holds is skipped rather than
   produced beside it. `supersede.integration.test.ts` proves the handover guard with ids it must
   refuse, the key through the sweep's own insert and by hand, and the frozen chain.
+- **The services (T6.16).** A catalogue link is on the CHAIN, so a successor is on every service
+  its predecessor was with nothing copied, and the day the law changes no client stops owing the
+  filing. A WITHDRAWN row is neither handed over nor counted as kept: it stays on the rule it was
+  withdrawn under, and if it is ever restored the generator re-pins it to the rule that governs
+  its period.
 
 **`restate`'s SQL is executed by an integration test, not a fake.** It uses the same
 `jsonb_to_recordset(…::text::jsonb)` construction as the batch insert, whose double cast exists
@@ -2242,9 +2250,12 @@ domain predicate, in `listGenerating`, in `gaps` (reason `rules_unconfirmed`) an
 `obligation-coverage.ts`, which `coverage.integration.test.ts` runs against one database. **A
 rule the firm WRITES is created `confirmed`** (it is the firm's own statement of the law, and a
 brand-new rule is still what the nightly sweep is for); **a rule a pack SEEDS is not**, and
-confirming it is the crossing that fills the calendar there and then, exactly as answering a
-formula does. Scoping it to a service at the same time is what keeps a filing off the clients
-who did not buy it.
+confirming it is what turns the calendar on for it, exactly as answering a formula does. **Since
+T6.16 confirming is not enough, and that is the rest of the 2026-09-18 fix**: the 98 filings came
+from rules that named NO service, which read as "every service". A rule now reaches a client only
+through a LINK to a service the client bought (`delivery.obligation_rule_service`, 0309), made
+only in the catalogue, and adding an unconfirmed rule there confirms it in the same act. See the
+T6.16 section below.
 
 **And the compliance floor now clips GENERATION, not only the missed decision.** A filing whose
 statutory date falls before `compliance_policy.missedFromOn` is not generated at all — the same
@@ -2262,13 +2273,15 @@ times three recurring services is twelve hundred of them.
 The obvious mechanism is a flag on the service. **A flag can be WRONG, and being wrong means
 SILENCE**: no engagement task and no calendar rows either. So the discriminator is DERIVED —
 `ObligationCoverage` asks the GENERATOR'S OWN PREDICATE (an active rule, with a formula, not
-event-driven, naming this engagement's service and the entity's country). **The failure then
+event-driven, confirmed, with a LIVE catalogue link between the rule's chain and this
+engagement's service, for the entity's country). **The failure then
 inverts: a firm with no rules is not covered, so it gets exactly the behaviour it had before this
 existed, and the board can never end up empty.**
 
 `GET /api/v1/calendar/coverage` is the other half: every live engagement the calendar produced
-nothing for, WITH A REASON, and **none of the five reasons is an error** — the commonest,
-`no_rule_names_this_service`, is the ordinary state of advisory work. The worker logs the count
+nothing for, WITH A REASON, and **none of the reasons is an error** — the commonest,
+`no_rule_names_this_service` (since T6.16: no filing is linked to this service in the
+catalogue), is the ordinary state of advisory work. The worker logs the count
 every sweep and `worker:once` prints it whether or not anything generated. An empty calendar with
 nothing said about it is indistinguishable from broken software, and that is the failure this
 whole mechanism exists to prevent.
@@ -2282,14 +2295,140 @@ whole mechanism exists to prevent.
   If you add a repository method with non-trivial SQL, run it.
 - **The coverage reason was wrong on its commonest case** — it required a rule to name the
   engagement's service, and every rule in the shipped pack names none (a pack cannot know a firm's
-  catalogue keys). Fixed to the generator's predicate, and `entity_not_registered` added, which was
-  the real answer.
+  catalogue keys). Fixed then to the generator's predicate, which read NULL as "every service", and
+  `entity_not_registered` added, which was the real answer. **T6.16 inverted that reading**: a pack
+  rule still names no service, and now generates nothing until the firm adds it to one in the
+  catalogue. That is exactly why the link lives in the catalogue and not in the pack.
 - **Two id-only foreign keys**, caught by `tenant-keys.integration.test.ts` and not by review.
-  `service_entry_id` and `supersedes_id` both carry the tenant now.
+  `service_entry_id` and `supersedes_id` both carried the tenant from then on. `service_entry_id`
+  is DROPPED since 0309; the link table's references, `(lineage_id, lineage_root, tenant_id)` and
+  `(service_entry_id, tenant_id, service_kind)`, are composite for the same reason.
 
 `/calendar` and `/admin/obligation-rules` are the screens, and the whole chain was walked in the
 browser — load the pack, register a company, sweep, set a lead time, sweep, and find the GSTR-3B
 task on the board at High priority, from the law, with nobody setting it.
+
+### A filing belongs to a service: the catalogue links it, removing it withdraws (T6.16, 0309)
+
+A rule named AT MOST ONE service, in `obligation_template.service_entry_id`, and NULL meant "every
+service". Both halves cost the firm: the NULL is how 98 GST filings reached a bookkeeping-only
+client on 2026-09-18, and one service per rule meant a filing two services owe was written twice,
+as two chains, which is two filings for one return the day a client holds both. The firm's model
+(2026-09-26): a service lists its compliance filings in the catalogue, any number of them, and a
+filing written once is offered to the next service from a list. Four decisions, not to be re-made:
+(1) a rule linked to NO service generates nothing; (2) removing a rule from a service WITHDRAWS its
+untouched upcoming filings for clients no other linked service covers, kept and marked, never
+deleted; (3) the catalogue is the one place a rule is linked to a service and the rules screen is
+the library; (4) built before the SFF freeze.
+
+**THE LINK IS ON THE CHAIN.** `delivery.obligation_rule_service` holds one row per link between a
+rule's `lineage_id` (0303) and a catalogue ENTRY (not a version: a firm publishing v4 of a service
+has not stopped owing the filing, and a service with only a draft can carry filings). A successor
+inherits the chain, so its services come with it. Removing is `unlinked_at` +
+`unlinked_by_user_id` (both or neither; the only writer is a person pressing Remove), the live-link
+uniqueness is a PARTIAL index, adding it back is a new row, `bib_app` may UPDATE only the two
+removal columns and a trigger freezes a removed link. Two facts are proved by KEYS, 0067's and
+0303's move: a generated `lineage_root` copy of `lineage_id` references `obligation_template (id,
+lineage_id, tenant_id)`, so the lineage must be a ROOT; and a generated `service_kind = 'service'`
+references a new `config.entry UNIQUE (id, tenant_id, kind)`, so the entry must be a SERVICE.
+
+**THE COLUMN IS GONE.** The data move gave each (lineage, service) a template named ONE live system
+link (null user, the migration's instant); a NULL one got none, and under decision 1 it stopped
+generating, which is the decision. No calendar row was touched. Then `service_entry_id`, its key
+and its index were dropped: two sources of truth for "which service" is how this codebase's readers
+have drifted before. The down restores the column from single links (the earliest where a chain is
+on several, the narrower direction, with a NOTICE) and REFUSES while any filing is withdrawn,
+because the schema before 0309 cannot keep one off the calendar.
+
+**ONE PREDICATE, EVERY READER.** A rule generates for an engagement iff it is active, confirmed,
+has a formula, is not event-driven, is for the entity's country, governs the period, AND a live link
+joins its chain to the engagement's pinned service. `coverageOf(t, linkedServices)` gained
+`unlinked` (asked before `unconfirmed`: adding a pack row to a service is also what confirms it),
+`generatesFor` is the per-engagement form, and `listGenerating` (chains with a live link, with the
+count), `subjectsFor` (joins the link; its LEFT joins became inner, since nothing reaches an
+engagement except through its service), `gaps` and `obligation-coverage.ts` all restate it;
+`coverage.integration.test.ts` runs them against one database. T6.13's two coverage questions now
+give one answer (the switch is gone, the port keeps both, see its open question below).
+
+**TWO SERVICES, ONE ROW PER PERIOD, ON A CHOSEN ENGAGEMENT.** A client holding two services that
+carry one filing is two subjects for one entity. The generator sorts subjects by `effective_from`
+then id and keeps the FIRST per (chain, entity, period), so the row's `engagement_id` is a rule
+rather than whatever order the database returned; the earliest engagement is also the one whose
+floor lets the most periods through. `gaps` counts an engagement covered when a live row exists for
+its ENTITY on a chain its service carries, not only a row carrying its own id: that second
+engagement otherwise read as a gap forever.
+
+**REMOVING WITHDRAWS, IN ONE TRANSACTION WITH THE REMOVAL** (`RuleServiceLinkRepository.unlink`,
+supersede's argument: each half alone is a broken calendar). The rows are THIS service's (the
+row's engagement pins it) on this chain. `mayBeWithdrawn` in the domain names the first half:
+untouched (`work_item_id`, `filed_on`, `resolved_at` all null, the handover's three columns),
+upcoming on the FIRM's day (`dayInZone`, passed in as a date and never `CURRENT_DATE`), not
+waiting on a decision, not settled. The second half is the SQL's: no other ACTIVE engagement of the
+same entity whose service still has a live link. Everything else is KEPT and counted by reason
+(`keptStarted`, `keptPastDue`, `keptCoveredElsewhere`; settled history is not counted, it would
+drown the number), and an untouched row another service still covers is RE-POINTED to that
+service's engagement, so the task it raises is routed by the service that owes it. The UPDATE
+repeats every condition, so a task raised between the read and the write keeps its filing.
+`withdrawn_at` / `withdrawn_by_user_id` / `withdrawn_reason` (a closed set, `service_unlinked`),
+and a CHECK that a withdrawn row is untouched, a wall under every guard.
+
+**EVERY READER LEAVES A WITHDRAWN ROW OUT**, and each is a test in
+`service-filings.integration.test.ts`, several watched go red with the filter removed: the calendar
+(whatever `includeSettled` says), `listRaisable` and `attachWorkItem` (a withdrawn filing never gets
+a task), `listMissable` and `markMissed` (never MISSED: it came off upcoming and crosses its date
+later, which would be 2026-09-18 again), `decisionQueue`, `listUnstarted` and `restate`, the
+escalation watch and its queue (a notice already raised leaves it), the nudge candidates and the
+nudge write, and `gaps` (a withdrawn row is not coverage). The PORTAL is a policy, not a filter:
+`obligation_instance_portal_live` in 0062's guarded shape, proved by a test that drops it inside a
+rolled-back transaction and watches the row come back. `findById` is the one reader that sees it,
+because restoring has to. `countFor` counts withdrawn rows (the period-shape lock: they are keyed on
+`period_start`) and `countLiveFor` does not (the restater's `locked`, which must not call a
+withdrawn row "started").
+
+**ADDING IT BACK RESTORES THE SAME ROWS, AND THE GENERATOR IS WHAT RESTORES.** The lineage key was
+kept exactly as 0303 built it; the generator's own write, in one transaction, first UPDATEs any
+WITHDRAWN untouched row its proposal holds the key of (withdrawal cleared, the proposal's dates
+from `scheduleFor`, re-pinned to the governing rule and the covering engagement), then inserts the
+rest `ON CONFLICT DO NOTHING`. Not only the link route: a client taking a second linked service
+proposes the same period through the same insert. Restored rows get `obligation.restored`, per row
+like `obligation.spawned`, carrying the instant they had been withdrawn. **The write checks the link
+again** (`STILL_LINKED`): the subjects were read a transaction earlier, and a filing removed
+mid-sweep must be neither inserted nor restored for that service. A restored filing keeps the
+nudge rungs and escalation rungs it already had (their once-indexes), so it is never told twice;
+one that went past its date while withdrawn comes back as a generated one would, and the missed
+sweep asks a partner about it.
+
+**LINKING CONFIRMS, THROUGH THE LIBRARY'S OWN PATH.** `linkRule` writes the link FIRST (the spawn
+that follows runs in its own transaction and must see it), confirms a rule whose chain's current row
+is `unconfirmed` through `applyUpdate` (one `obligation_rule.updated`, `statusFrom`/`statusTo`, its
+crossing spawn switched off so the count is recorded once), then spawns for the whole CHAIN, not one
+row (a predecessor still governs reach-back periods), and records `obligation_rule.linked` with the
+counts. A rule still waiting on a formula is linked and NOT confirmed: there is no date to confirm.
+Adding twice writes nothing twice. **A rule WRITTEN for a service fills the calendar at once**
+(`createRule` with `serviceEntryIds`, links in the same transaction as the rule), reversing T6.4's
+"writing a rule does not generate" for that path only: the catalogue's "Write a new filing" is the
+same act as adding one, and T6.4's restate is what makes an early spawn safe (the March exception
+added afterwards moves the rows). A rule written in the library is on no service and generates
+nothing, as decision 1 says.
+
+**Counts on the rule's events, a verb per row only where the generator writes.** `obligation_rule.
+linked` / `unlinked` carry ids and counts (the handover's and restate's arrangement: which filings
+came off is on each row), `obligation.restored` is per row (the generator's own writes are always
+per row).
+
+**Routes**: `GET /api/v1/obligation-filings` (one row per chain, the rule in force, with `usedIn`:
+the catalogue's single read), `GET /api/v1/services/{serviceEntryId}/filings`, `POST
+/api/v1/services/{serviceEntryId}/filings` `{ ruleId }`, `POST
+/api/v1/services/{serviceEntryId}/filings/{ruleId}/unlink`. Reads `party:read`, writes
+`tenant:admin`. Rule rows carry `lineageId` and `usedIn: [{serviceEntryId, serviceKey,
+serviceName, linkedAt}]` from ONE query; `serviceEntryId` is gone from every rule write.
+
+**OPEN, FOR THE FIRM: does a link skip a per-period task?** T6.13 skips a recurring engagement's
+per-period umbrella task where the calendar dates its service's filings (the service IS its
+filings). The catalogue now invites adding a filing to ANY service, so a monthly bookkeeping
+service that also carries TDS would lose its own monthly task. Kept as T6.13 decided, with
+`filingEngagements` as the one place a narrower rule would go (for example: a service with its own
+process keeps its task).
 
 ## The escalation ladder — the sweep that tells somebody, and the one thing it may not do (T4.5)
 
