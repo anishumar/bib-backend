@@ -54,6 +54,30 @@ export function isEditable(status: LetterStatus): boolean {
 }
 
 /**
+ * Which layout a letter PRINTS in (0083).
+ *
+ * `classic` is the one-page-flow document every letter issued before 0083 went
+ * out in; `annexure` is the firm's own format — a cover letter, Annexure 1
+ * (scope, deliverables and a summary of fees by section) and Annexure 2 (the
+ * terms). RECORDED on the letter rather than decided at render time, because a
+ * rendered letter's bytes are evidence: an issued letter must re-render as the
+ * document the client holds, whatever the product prints today.
+ *
+ * Presentation, not a term — it is not in `canonicalContent`.
+ */
+export type LetterLayout = "classic" | "annexure";
+
+export const LETTER_LAYOUTS: readonly LetterLayout[] = ["classic", "annexure"];
+
+/** What every letter drafted now is printed in — "switch everyone", 2026-09-26.
+ *  The classic layout is kept for the letters issued in it, never offered. */
+export const CURRENT_LETTER_LAYOUT: LetterLayout = "annexure";
+
+export function isLetterLayout(v: string): v is LetterLayout {
+  return (LETTER_LAYOUTS as readonly string[]).includes(v);
+}
+
+/**
  * Where an engagement has got to.
  *
  * `pending_advance` is the START state, not an exception — an engagement whose
@@ -115,6 +139,9 @@ export interface EngagementLetter {
   readonly jurisdiction: string;
   readonly title: string;
   readonly status: LetterStatus;
+  /** Which layout it prints in — see `LetterLayout`. Frozen with the rest of a
+   *  signed letter, so a re-render reproduces what the client holds. */
+  readonly layout: LetterLayout;
   readonly currency: CurrencyCode;
   readonly fxRate: Amount;
   readonly fxRateDate: string;
@@ -287,7 +314,8 @@ export interface LetterLine {
    *  separate from the fee, never summed into a total. */
   readonly oopEstimate: OutOfPocketEstimate | null;
   /** WHY there is no amount. Required when `unitAmount` is null (0023) — a
-   *  signed line that says neither a price nor why is a term nobody can read. */
+   *  signed line that says neither a price nor why is a term nobody can read —
+   *  unless the line is in a fee group, whose fee is the reason. */
   readonly pricingNote: string | null;
   /**
    * When THIS line's work begins, when it differs from the rest of the letter.
@@ -298,6 +326,78 @@ export interface LetterLine {
    * it starts next period.
    */
   readonly effectiveFrom: string | null;
+  /**
+   * The FEE GROUP that prices this line, or null for a line priced on its own
+   * (0083).
+   *
+   * A grouped line carries no price and no discount of its own — the group's
+   * fee covers it and every other service in the group, stated once. The
+   * database refuses anything else (`el_line_grouped_is_unpriced_chk`), because
+   * a price on both would be counted twice.
+   */
+  readonly feeGroupId: string | null;
+}
+
+/**
+ * ONE FEE FOR SEVERAL SERVICES — a section of the letter's Annexure 1 (0083).
+ *
+ * "USD 5,000 per month" for accounting, tax and payroll across four companies is
+ * one fee on twelve lines: an engagement is one service for one legal entity
+ * (G0.1), and before this the only way to write the retainer down was twelve
+ * prices nobody agreed to. The group states the fee; its lines state the work.
+ *
+ * It is also the SECTION the letter prints: its title is the heading ("B.
+ * Ongoing recurring services"), its prose is what the section says about
+ * itself, and its fee is the section's row in the Summary of Fees. Its letter —
+ * A, B, … — is its rank among the letter's live groups, derived when it is read
+ * (`sectionCode`) so that striking one out never leaves a gap.
+ *
+ * A TERM. The signature commits to all of it (`canonicalContent`) and the
+ * freeze makes it unwritable once the letter is signed.
+ */
+export interface FeeGroup {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly engagementLetterId: string;
+  readonly position: number;
+  readonly title: string;
+  /** How often the fee is billed. Required — a fee with no period is not one
+   *  anybody can invoice. */
+  readonly billingFrequency: BillingFrequency;
+  /** PER BILLING PERIOD: 5,000 on a monthly group is 5,000 a month. */
+  readonly amount: Amount;
+  readonly currency: CurrencyCode;
+  /** "40% advance, 60% on completion" — how the fee is paid, as the firm
+   *  writes it. */
+  readonly paymentTerms: string | null;
+  /** What the Summary of Fees says this row is for. Null prints the title and
+   *  the services the group covers. */
+  readonly feeDescription: string | null;
+  /** The paragraph under the section's heading. */
+  readonly intro: string | null;
+  /** What the section delivers, as a whole. */
+  readonly deliverables: string | null;
+  /** What the client must do for the section as a whole. Each service's own
+   *  responsibilities stay on its line. */
+  readonly clientObligations: string | null;
+}
+
+/**
+ * A section's letter from its rank among the letter's live groups: 0 → "A",
+ * 25 → "Z", 26 → "AA". Derived, never stored, so a section struck out of a
+ * draft does not leave the letter starting at B.
+ */
+export function sectionCode(index: number): string {
+  if (!Number.isInteger(index) || index < 0) {
+    throw new RangeError(`a section index is a non-negative integer, got ${String(index)}`);
+  }
+  let n = index;
+  let code = "";
+  do {
+    code = String.fromCharCode(65 + (n % 26)) + code;
+    n = Math.floor(n / 26) - 1;
+  } while (n >= 0);
+  return code;
 }
 
 export interface LetterClause {
@@ -470,6 +570,18 @@ export function utcDay(at: Date): string {
  * product re-derives one — the fingerprint is stored and the freeze (0017) is
  * what actually holds a signed letter still — and a signature that did not cover
  * the client's own scope wording was the worse of the two.
+ *
+ * FEE GROUPS (0083) are terms of the same weight as a line's price — the fee,
+ * how often it is billed, how it is paid, and every word the section prints —
+ * and WHICH lines a group covers is part of the fee's meaning. So each group is
+ * a row of its own, naming its member lines by position.
+ *
+ * They are appended ONLY WHEN THERE ARE ANY, and a line's membership lives on
+ * the group's row rather than as a new field on every line's. That is not
+ * tidiness: DocuSign verifies a completed envelope against the hash this
+ * function produces at signature, so a letter sent before 0083 and signed after
+ * it must render to the same string at both moments. A letter with no groups
+ * renders exactly as it did.
  */
 export function canonicalContent(input: {
   readonly letter: Pick<
@@ -508,6 +620,20 @@ export function canonicalContent(input: {
     | "exclusionsOverride"
     | "oopEstimate"
     | "pricingNote"
+    | "feeGroupId"
+  >[];
+  readonly feeGroups: readonly Pick<
+    FeeGroup,
+    | "id"
+    | "position"
+    | "title"
+    | "billingFrequency"
+    | "amount"
+    | "paymentTerms"
+    | "feeDescription"
+    | "intro"
+    | "deliverables"
+    | "clientObligations"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
@@ -585,11 +711,36 @@ export function canonicalContent(input: {
       ].join("\t"),
     );
 
+  const feeGroups = [...input.feeGroups]
+    .sort((a, b) => a.position - b.position)
+    .map((g) =>
+      [
+        "feegroup",
+        String(g.position),
+        g.title,
+        g.billingFrequency,
+        g.amount,
+        g.paymentTerms ?? "",
+        g.feeDescription ?? "",
+        g.intro ?? "",
+        g.deliverables ?? "",
+        g.clientObligations ?? "",
+        // The lines this fee pays for, by POSITION — the same identity the
+        // line rows above use. Moving a service from one group to another
+        // changes what each fee covers, and that is a different agreement.
+        input.lines
+          .filter((l) => l.feeGroupId === g.id)
+          .map((l) => l.position)
+          .sort((a, b) => a - b)
+          .join(","),
+      ].join("\t"),
+    );
+
   const clauses = [...input.clauses]
     .sort((a, b) => a.position - b.position)
     .map((c) => ["clause", String(c.position), c.clauseVersionId].join("\t"));
 
-  return [head, ...lines, ...clauses].join("\n");
+  return [head, ...lines, ...feeGroups, ...clauses].join("\n");
 }
 
 /** A jurisdiction code, as this product stores it: ISO 3166-1 alpha-2.

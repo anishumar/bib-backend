@@ -23,11 +23,13 @@ import type { EventSink } from "../ledger/ports";
 import type {
   Engagement,
   EngagementLetter,
+  FeeGroup,
   LetterClause,
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
 import {
+  CURRENT_LETTER_LAYOUT,
   canTransition,
   canonicalContent,
   clauseApplies,
@@ -89,6 +91,12 @@ import {
   EntityOutsideClient,
   IssuerNotAFirmEntity,
   QuoteOfAnotherClient,
+  FeeGroupEmpty,
+  FeeGroupNotEmpty,
+  FeeGroupNotFound,
+  FeeGroupTitleRequired,
+  GroupedLinePriced,
+  LineNotPriced,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
@@ -104,6 +112,7 @@ import type {
   FirmTimeZone,
   EngagementRecord,
   EngagementRepository,
+  FeeGroupEdit,
   FirmSignatory,
   FirmSignatureImage,
   FirmSignatureRecord,
@@ -286,7 +295,57 @@ export interface AddLetterLineInput {
   readonly oopEstimate?:
     | { readonly min: string; readonly max: string; readonly currency: string }
     | undefined;
-  /** WHY there is no amount, and REQUIRED when there is none. */
+  /** WHY there is no amount, and REQUIRED when there is none — unless the line
+   *  is in a fee group, whose fee is the reason. */
+  readonly pricingNote?: string | undefined;
+  /**
+   * The FEE GROUP that prices this line (0083). The line then has no price of
+   * its own: `unitAmount` must be absent and the discount "0", because the
+   * group's fee already pays for it.
+   */
+  readonly feeGroupId?: string | undefined;
+}
+
+/** A fee group's terms as a caller states them (0083). Prose is optional and
+ *  a blank clears it. */
+export interface FeeGroupInput {
+  readonly title: string;
+  readonly billingFrequency: string;
+  readonly amount: string;
+  readonly paymentTerms?: string | undefined;
+  readonly feeDescription?: string | undefined;
+  readonly intro?: string | undefined;
+  readonly deliverables?: string | undefined;
+  readonly clientObligations?: string | undefined;
+}
+
+/** A partial edit of one. Absent leaves a field as it is; for the prose, a
+ *  blank string clears it. */
+export interface FeeGroupChange {
+  readonly title?: string | undefined;
+  readonly billingFrequency?: string | undefined;
+  readonly amount?: string | undefined;
+  readonly paymentTerms?: string | undefined;
+  readonly feeDescription?: string | undefined;
+  readonly intro?: string | undefined;
+  readonly deliverables?: string | undefined;
+  readonly clientObligations?: string | undefined;
+}
+
+/**
+ * How one line is priced: by a fee group, or on its own (0083).
+ *
+ * Into a group, the line gives up any price it had. On its own, it needs a
+ * price or a reason, exactly as when it was first added.
+ */
+export interface LinePricingInput {
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly lineId: string;
+  /** The group to put it in, or null to price it on its own. */
+  readonly feeGroupId: string | null;
+  readonly unitAmount?: string | undefined;
+  readonly discountPercent?: string | undefined;
   readonly pricingNote?: string | undefined;
 }
 
@@ -453,6 +512,10 @@ export class EngagementService {
       proposalId: input.proposalId ?? null,
       jurisdiction,
       title: input.title,
+      // Every letter drafted now prints in the firm's Annexure format (0083).
+      // Stated rather than left to the column's default, which exists for the
+      // writers that are not this service.
+      layout: CURRENT_LETTER_LAYOUT,
       currency,
       fxRate: input.fxRate,
       fxRateDate: input.fxRateDate,
@@ -813,21 +876,19 @@ export class EngagementService {
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidAmount("quantity", input.quantity);
     }
-    // THE UNPRICED LINE. On a letter this is a TERM two parties sign, so the
-    // reason is required and a discount off it is refused — the same two rules
-    // the CHECKs make (0023), stated here so a caller is told what to send.
-    const unitAmount = input.unitAmount ?? null;
-    if (unitAmount !== null && !isAmount(unitAmount)) {
-      throw new InvalidAmount("unit amount", unitAmount);
+    // A FEE GROUP'S LINE (0083) has no price of its own: the group's fee pays
+    // for it. Checked before the pricing rules below, which a grouped line is
+    // exempt from — "why is there no amount" is answered by the group.
+    const feeGroupId = input.feeGroupId ?? null;
+    if (feeGroupId !== null) {
+      await this.liveFeeGroupOrThrow(input.tenantId, letter.id, feeGroupId);
     }
-    const pricingNote = blankToNull(input.pricingNote);
-    if (unitAmount === null && pricingNote === null) throw new UnpricedLineNeedsReason();
-    if (!isAmount(input.discountPercent) || Number(input.discountPercent) > 100) {
-      throw new InvalidAmount("discount", input.discountPercent);
-    }
-    if (unitAmount === null && Number(input.discountPercent) !== 0) {
-      throw new UnpricedLineHasDiscount(input.discountPercent);
-    }
+    const { unitAmount, pricingNote } = this.pricingOrThrow({
+      grouped: feeGroupId !== null,
+      unitAmount: input.unitAmount,
+      discountPercent: input.discountPercent,
+      pricingNote: input.pricingNote,
+    });
     if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
       throw new InvalidDate("effective date", input.effectiveFrom);
     }
@@ -875,7 +936,202 @@ export class EngagementService {
       exclusionsOverride: blankToNull(input.exclusionsOverride),
       oopEstimate,
       pricingNote,
+      feeGroupId,
     });
+  }
+
+  /**
+   * THE PRICE RULES FOR ONE LINE, in one place — adding a line and repricing
+   * one ask the same questions, and two copies would disagree on the case that
+   * matters.
+   *
+   * On its own, a line is priced, or it says why it is not (0023), and a
+   * discount off "as mutually agreed" is refused. In a fee group it has no
+   * price and no discount at all — anything else would charge twice (0083) —
+   * and it needs no reason, because the group is the reason.
+   */
+  private pricingOrThrow(input: {
+    readonly grouped: boolean;
+    readonly unitAmount: string | undefined;
+    readonly discountPercent: string;
+    readonly pricingNote: string | undefined;
+  }): { unitAmount: string | null; pricingNote: string | null } {
+    if (!isAmount(input.discountPercent) || Number(input.discountPercent) > 100) {
+      throw new InvalidAmount("discount", input.discountPercent);
+    }
+    const unitAmount = input.unitAmount ?? null;
+    if (unitAmount !== null && !isAmount(unitAmount)) {
+      throw new InvalidAmount("unit amount", unitAmount);
+    }
+    const pricingNote = blankToNull(input.pricingNote);
+    if (input.grouped) {
+      if (unitAmount !== null || Number(input.discountPercent) !== 0) throw new GroupedLinePriced();
+      return { unitAmount: null, pricingNote };
+    }
+    // THE UNPRICED LINE. On a letter this is a TERM two parties sign, so the
+    // reason is required and a discount off it is refused — the same two rules
+    // the CHECKs make (0023), stated here so a caller is told what to send.
+    if (unitAmount === null && pricingNote === null) throw new UnpricedLineNeedsReason();
+    if (unitAmount === null && Number(input.discountPercent) !== 0) {
+      throw new UnpricedLineHasDiscount(input.discountPercent);
+    }
+    return { unitAmount, pricingNote };
+  }
+
+  /**
+   * Price a line by a fee group, or on its own (0083).
+   *
+   * Into a group, the line GIVES UP its price, its discount and its pricing
+   * note: the group's fee pays for it, and a note about a price the line no
+   * longer has would be a sentence about nothing. Out of one, it needs a price
+   * or a reason, exactly as when it was added — `LineNotPriced` says which to
+   * send, because "as mutually agreed" is a term too.
+   */
+  async setLinePricing(input: LinePricingInput): Promise<LetterLine> {
+    const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    const lines = await this.deps.letters.listLines(input.tenantId, letter.id);
+    const line = lines.find((l) => l.id === input.lineId);
+    if (line === undefined) throw new LetterLineNotFound(input.lineId);
+
+    if (input.feeGroupId !== null) {
+      await this.liveFeeGroupOrThrow(input.tenantId, letter.id, input.feeGroupId);
+      if (input.unitAmount !== undefined || Number(input.discountPercent ?? "0") !== 0) {
+        throw new GroupedLinePriced();
+      }
+      return this.deps.letters.setLinePricing(input.tenantId, letter.id, line.id, {
+        feeGroupId: input.feeGroupId,
+        unitAmount: null,
+        discountPercent: "0",
+        pricingNote: null,
+      });
+    }
+
+    if (input.unitAmount === undefined && blankToNull(input.pricingNote) === null) {
+      throw new LineNotPriced(line.description);
+    }
+    const priced = this.pricingOrThrow({
+      grouped: false,
+      unitAmount: input.unitAmount,
+      discountPercent: input.discountPercent ?? "0",
+      pricingNote: input.pricingNote,
+    });
+    return this.deps.letters.setLinePricing(input.tenantId, letter.id, line.id, {
+      feeGroupId: null,
+      unitAmount: priced.unitAmount,
+      discountPercent: input.discountPercent ?? "0",
+      pricingNote: priced.pricingNote,
+    });
+  }
+
+  // ── Fee groups (0083) ──────────────────────────────────────────────────────
+  //
+  // A section of the letter and the one fee it charges. Draft-only, like every
+  // other change to a letter's terms, through `editableOrThrow`. No ledger
+  // event, for the reason adding a line records none: drafting a document is
+  // not a state transition, and what the client was finally asked to sign is
+  // recorded at send.
+
+  async addFeeGroup(
+    tenantId: string,
+    letterId: string,
+    input: FeeGroupInput,
+  ): Promise<FeeGroup> {
+    const letter = await this.editableOrThrow(tenantId, letterId);
+    const terms = this.feeGroupTermsOrThrow(input);
+    return this.deps.letters.addFeeGroup({
+      id: this.deps.ids.newId(),
+      tenantId,
+      engagementLetterId: letter.id,
+      // THE LETTER'S currency, and only that: a group is held to it by a
+      // composite key (0083), so a fee in another currency cannot be written.
+      currency: letter.currency,
+      title: terms.title,
+      billingFrequency: terms.billingFrequency,
+      amount: terms.amount,
+      paymentTerms: blankToNull(input.paymentTerms),
+      feeDescription: blankToNull(input.feeDescription),
+      intro: blankToNull(input.intro),
+      deliverables: blankToNull(input.deliverables),
+      clientObligations: blankToNull(input.clientObligations),
+    });
+  }
+
+  async editFeeGroup(
+    tenantId: string,
+    letterId: string,
+    groupId: string,
+    change: FeeGroupChange,
+  ): Promise<FeeGroup> {
+    await this.editableOrThrow(tenantId, letterId);
+    const current = await this.liveFeeGroupOrThrow(tenantId, letterId, groupId);
+    const terms = this.feeGroupTermsOrThrow({
+      title: change.title ?? current.title,
+      billingFrequency: change.billingFrequency ?? current.billingFrequency,
+      amount: change.amount ?? current.amount,
+    });
+    const edit: FeeGroupEdit = {
+      title: terms.title,
+      billingFrequency: terms.billingFrequency,
+      amount: terms.amount,
+      // Absent keeps the words; a blank clears them. Null and "" are not the
+      // same thing to the reader of a contract, and the column refuses "".
+      ...(change.paymentTerms === undefined ? {} : { paymentTerms: blankToNull(change.paymentTerms) }),
+      ...(change.feeDescription === undefined
+        ? {}
+        : { feeDescription: blankToNull(change.feeDescription) }),
+      ...(change.intro === undefined ? {} : { intro: blankToNull(change.intro) }),
+      ...(change.deliverables === undefined
+        ? {}
+        : { deliverables: blankToNull(change.deliverables) }),
+      ...(change.clientObligations === undefined
+        ? {}
+        : { clientObligations: blankToNull(change.clientObligations) }),
+    };
+    return this.deps.letters.editFeeGroup(tenantId, letterId, groupId, edit);
+  }
+
+  /**
+   * Strike a group off a draft — refused while it still prices a service,
+   * because the service would be left with no price and no reason. The trigger
+   * in 0083 refuses it too; this is the sentence a person is told first.
+   */
+  async removeFeeGroup(tenantId: string, letterId: string, groupId: string): Promise<void> {
+    await this.editableOrThrow(tenantId, letterId);
+    const group = await this.liveFeeGroupOrThrow(tenantId, letterId, groupId);
+    const covered = (await this.deps.letters.listLines(tenantId, letterId)).filter(
+      (l) => l.feeGroupId === groupId,
+    );
+    if (covered.length > 0) throw new FeeGroupNotEmpty(group.title, covered.length);
+    await this.deps.letters.removeFeeGroup(tenantId, letterId, groupId);
+  }
+
+  /** A live group on THIS letter, or a refusal naming the id. A group on
+   *  another letter is "not found" here — the composite key would refuse the
+   *  line anyway, and the caller has the wrong id either way. */
+  private async liveFeeGroupOrThrow(
+    tenantId: string,
+    letterId: string,
+    groupId: string,
+  ): Promise<FeeGroup> {
+    const groups = await this.deps.letters.listFeeGroups(tenantId, letterId);
+    const group = groups.find((g) => g.id === groupId);
+    if (group === undefined) throw new FeeGroupNotFound(groupId);
+    return group;
+  }
+
+  /** The three things a group cannot exist without, each refused by name. */
+  private feeGroupTermsOrThrow(input: {
+    readonly title: string;
+    readonly billingFrequency: string;
+    readonly amount: string;
+  }): { title: string; billingFrequency: BillingFrequency; amount: string } {
+    const title = input.title.trim();
+    if (title === "") throw new FeeGroupTitleRequired();
+    if (!isBillingFrequency(input.billingFrequency)) {
+      throw new InvalidLineBillingFrequency(input.billingFrequency, BILLING_FREQUENCIES);
+    }
+    if (!isAmount(input.amount)) throw new InvalidAmount("fee", input.amount);
+    return { title, billingFrequency: input.billingFrequency, amount: input.amount };
   }
 
   /** The line's jurisdiction, normalised. Refused rather than dropped: "in" and
@@ -1414,8 +1670,11 @@ export class EngagementService {
   }
 
   private async contentHashOf(letter: EngagementLetter): Promise<string> {
-    const [lines, clauses] = await this.requireCompleteTerms(letter.tenantId, letter.id);
-    return this.deps.hasher.hash(canonicalContent({ letter, lines, clauses }));
+    const [lines, clauses, feeGroups] = await this.requireCompleteTerms(
+      letter.tenantId,
+      letter.id,
+    );
+    return this.deps.hasher.hash(canonicalContent({ letter, lines, feeGroups, clauses }));
   }
 
   /**
@@ -1510,10 +1769,13 @@ export class EngagementService {
     }
     if (input.signedByName.trim() === "") throw new SignatureIncomplete("a signatory's name");
 
-    const [lines, clauses] = await this.requireCompleteTerms(input.tenantId, input.letterId);
+    const [lines, clauses, feeGroups] = await this.requireCompleteTerms(
+      input.tenantId,
+      input.letterId,
+    );
 
     const contentHash = this.deps.hasher.hash(
-      canonicalContent({ letter, lines, clauses }),
+      canonicalContent({ letter, lines, feeGroups, clauses }),
     );
     const signer = input.migrated === true ? this.deps.migrationSigner : this.deps.esign;
     const provider = await signer.sign({
@@ -1735,14 +1997,19 @@ export class EngagementService {
   private async requireCompleteTerms(
     tenantId: string,
     letterId: string,
-  ): Promise<[readonly LetterLine[], readonly LetterClause[]]> {
-    const [lines, clauses] = await Promise.all([
+  ): Promise<[readonly LetterLine[], readonly LetterClause[], readonly FeeGroup[]]> {
+    const [lines, clauses, feeGroups] = await Promise.all([
       this.deps.letters.listLines(tenantId, letterId),
       this.deps.letters.listClauses(tenantId, letterId),
+      this.deps.letters.listFeeGroups(tenantId, letterId),
     ]);
     if (lines.length === 0) throw new EmptyLetter();
     if (clauses.length === 0) throw new NoClauses();
-    return [lines, clauses];
+    // A fee for nothing (0083). The Summary of Fees would print a charge that
+    // no service on the letter explains.
+    const empty = feeGroups.find((g) => !lines.some((l) => l.feeGroupId === g.id));
+    if (empty !== undefined) throw new FeeGroupEmpty(empty.title);
+    return [lines, clauses, feeGroups];
   }
 
   private async moveTo(

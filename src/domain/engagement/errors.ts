@@ -55,7 +55,13 @@ export type EngagementErrorCode =
   | "QUOTE_OF_ANOTHER_CLIENT"
   | "ADDRESSEE_NOT_A_PERSON"
   | "ADDRESSEE_NOT_LINKED"
-  | "ENTITY_OUTSIDE_CLIENT";
+  | "ENTITY_OUTSIDE_CLIENT"
+  | "FEE_GROUP_NOT_FOUND"
+  | "FEE_GROUP_TITLE_REQUIRED"
+  | "FEE_GROUP_NOT_EMPTY"
+  | "FEE_GROUP_EMPTY"
+  | "GROUPED_LINE_PRICED"
+  | "LINE_NOT_PRICED";
 
 /** The client, or the company a line is for, was archived (0305). A letter
  *  may not name a party the firm put away; restore it first. */
@@ -556,6 +562,76 @@ export class QuoteNamesNoEntity extends EngagementError {
         `line must name one because signing it creates an engagement, which is one service ` +
         `for one legal entity. Name the company ${lineCount === 1 ? "that line" : "those lines"} ` +
         `is for, or add the lines by hand.`,
+    );
+  }
+}
+
+// ── Fee groups — one fee for several services (0083) ───────────────────────
+
+export class FeeGroupNotFound extends EngagementError {
+  constructor(id: string) {
+    super("FEE_GROUP_NOT_FOUND", `No fee group ${JSON.stringify(id)} on this engagement letter`);
+  }
+}
+
+export class FeeGroupTitleRequired extends EngagementError {
+  constructor() {
+    super(
+      "FEE_GROUP_TITLE_REQUIRED",
+      `A fee group needs a title — "Ongoing recurring services". It is the heading of its ` +
+        `section of the letter and the name its row in the Summary of Fees goes by.`,
+    );
+  }
+}
+
+/** Striking out a group that still prices services would leave them with no
+ *  price and no reason — the trigger in 0083 refuses it too. */
+export class FeeGroupNotEmpty extends EngagementError {
+  constructor(title: string, serviceCount: number) {
+    super(
+      "FEE_GROUP_NOT_EMPTY",
+      `"${title}" still covers ${String(serviceCount)} service${serviceCount === 1 ? "" : "s"} ` +
+        `on this letter. Move ${serviceCount === 1 ? "it" : "them"} into another group, give ` +
+        `${serviceCount === 1 ? "it a price" : "them prices"} of ${serviceCount === 1 ? "its" : "their"} ` +
+        `own, or remove ${serviceCount === 1 ? "it" : "them"} from the letter first: struck out, ` +
+        `the group would leave ${serviceCount === 1 ? "it" : "them"} with no price at all.`,
+    );
+  }
+}
+
+/** A fee for nothing is not a term anybody can read — refused at send. */
+export class FeeGroupEmpty extends EngagementError {
+  constructor(title: string) {
+    super(
+      "FEE_GROUP_EMPTY",
+      `The fee group "${title}" covers no services, so the letter would charge its fee for ` +
+        `nothing it names. Put the services it pays for into it, or strike it out, before ` +
+        `sending the letter.`,
+    );
+  }
+}
+
+/** A grouped line carrying its own price would be counted twice. */
+export class GroupedLinePriced extends EngagementError {
+  constructor() {
+    super(
+      "GROUPED_LINE_PRICED",
+      `A service covered by a fee group has no price or discount of its own — the group's fee ` +
+        `pays for it, and a price on both would charge the client twice. Leave "unitAmount" ` +
+        `out and send a discount of "0", or take the service out of the group.`,
+    );
+  }
+}
+
+/** A line priced on its own needs a price or a reason — 0023's rule for any
+ *  line with no amount, met again when a service leaves its fee group. */
+export class LineNotPriced extends EngagementError {
+  constructor(description: string) {
+    super(
+      "LINE_NOT_PRICED",
+      `Priced on its own, "${description}" needs a price: send its "unitAmount", or a ` +
+        `"pricingNote" saying why it has none ("As mutually agreed"). Outside a fee group ` +
+        `nothing else on the letter says what it costs.`,
     );
   }
 }

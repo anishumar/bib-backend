@@ -84,6 +84,7 @@ import {
 import { EngagementService } from "../usecase/engagement/service";
 import { DocumentService } from "../usecase/document/service";
 import { ProposalService } from "../usecase/proposal/service";
+import { proposalLinks, proposalPdfs } from "./proposal-delivery";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
@@ -518,6 +519,17 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       parties: workerParties,
       documents,
       shareTokens: new RandomTokenFactory(),
+      structure: new PostgresRelationshipRepository(pools.app),
+      timeZones: new PostgresFirmTimeZone(pools.app),
+      staff: memberships,
+      // NO MAILER, for the chaser's reason and one of its own: this process
+      // holds no SMTP password (run_worker.tf) and only ever READS a quote
+      // here. An email asked of it is refused by name, before anything moves
+      // (0085). The PDF and the links are the real ones, so the graph is the
+      // one the API composes.
+      mailer: null,
+      pdfs: proposalPdfs(fileStore),
+      links: proposalLinks(cfg.auth.appBaseUrl),
       ids: systemIds,
       clock: systemClock,
       events: ledger,

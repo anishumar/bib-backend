@@ -387,9 +387,15 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/proposals"), "party:read" as const],
   [routeKey("GET", "/api/v1/proposals/{proposalId}"), "party:read" as const],
   [routeKey("POST", "/api/v1/proposals"), "party:write" as const],
+  // A draft's head — its title, validity, Background and the cover's two names
+  // (0084). The same permission that drafts it and adds its lines.
+  [routeKey("PATCH", "/api/v1/proposals/{proposalId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/send"), "party:write" as const],
+  // A new link, and a new email with it (0085) — sending again, so Send's own
+  // permission.
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/reissue"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/decision"), "party:write" as const],
   [
     routeKey("POST", "/api/v1/proposals/{proposalId}/discount-approval"),
@@ -434,6 +440,23 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/lines"), "party:write" as const],
   [
     routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/lines/{lineId}"),
+    "party:write" as const,
+  ],
+  // A fee group and a line's pricing (0083). `party:write`, like every other
+  // change to a draft letter's terms — a fee group is the same kind of act as a
+  // priced line, stated for several services at once. What an associate may
+  // SEE of the fee is the fee axis, applied in the handler.
+  [
+    routeKey("PUT", "/api/v1/engagement-letters/{letterId}/lines/{lineId}/pricing"),
+    "party:write" as const,
+  ],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/fee-groups"), "party:write" as const],
+  [
+    routeKey("PATCH", "/api/v1/engagement-letters/{letterId}/fee-groups/{groupId}"),
+    "party:write" as const,
+  ],
+  [
+    routeKey("DELETE", "/api/v1/engagement-letters/{letterId}/fee-groups/{groupId}"),
     "party:write" as const,
   ],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses"), "party:write" as const],

@@ -28,6 +28,7 @@ import {
   BlankBlockBody,
   BlocksAlreadySeeded,
   InvalidBlockKind,
+  LetterOnlyBlockKind,
   InvalidSortOrder,
   StandardBlockNotFound,
 } from "../../src/domain/document/errors";
@@ -182,17 +183,17 @@ describe("blocksFor — which lines a document written for a country gets", () =
   });
 
   it("copies an unscoped line to every country", () => {
-    expect(blocksFor([line({})], "AE")).toHaveLength(1);
+    expect(blocksFor([line({})], "AE", "proposal")).toHaveLength(1);
   });
 
   it("copies a scoped line only to its own", () => {
     const gst = line({ id: "gst", jurisdiction: "IN" });
-    expect(blocksFor([gst], "IN")).toHaveLength(1);
-    expect(blocksFor([gst], "AE")).toHaveLength(0);
+    expect(blocksFor([gst], "IN", "proposal")).toHaveLength(1);
+    expect(blocksFor([gst], "AE", "proposal")).toHaveLength(0);
   });
 
   it("never copies a retired line", () => {
-    expect(blocksFor([line({ isActive: false })], "IN")).toHaveLength(0);
+    expect(blocksFor([line({ isActive: false })], "IN", "proposal")).toHaveLength(0);
   });
 
   it("orders by kind, then order, then id — total, so ties are stable", () => {
@@ -205,9 +206,9 @@ describe("blocksFor — which lines a document written for a country gets", () =
       line({ id: "z", kind: "exclusion", sortOrder: 2 }),
       line({ id: "c", kind: "commercial", sortOrder: 1 }),
     ];
-    expect(blocksFor(rows, "IN").map((b) => b.id)).toEqual(["a", "z", "c", "b"]);
+    expect(blocksFor(rows, "IN", "proposal").map((b) => b.id)).toEqual(["a", "z", "c", "b"]);
     // The same input shuffled gives the same answer.
-    expect(blocksFor(rows.slice().reverse(), "IN").map((b) => b.id)).toEqual(["a", "z", "c", "b"]);
+    expect(blocksFor(rows.slice().reverse(), "IN", "proposal").map((b) => b.id)).toEqual(["a", "z", "c", "b"]);
   });
 });
 
@@ -364,5 +365,67 @@ describe("what a document says is its own from then on", () => {
     await standardSet(s);
     await s.service.seedBlocks(TENANT, PROPOSAL, "IN");
     expect(await s.service.listBlocks(TENANT, LETTER)).toEqual([]);
+  });
+});
+
+// ── The Annexure letter's own prose (0083) ────────────────────────────────
+//
+// A cover letter and an acceptance are an ENGAGEMENT LETTER's, and they are the
+// firm's own words: legal text this product never writes. They are copied
+// onto a letter like everything else — and never onto a proposal, which has no
+// cover letter and which nobody signs to accept.
+
+describe("the cover letter and the acceptance (0083)", () => {
+  async function withLetterProse(s: ReturnType<typeof setup>): Promise<void> {
+    await s.service.addStandardBlock(
+      { tenantId: TENANT, kind: "cover", body: "This letter confirms our engagement.", sortOrder: 1 },
+      ACTOR,
+    );
+    await s.service.addStandardBlock(
+      { tenantId: TENANT, kind: "acceptance", body: "The terms are accepted.", sortOrder: 1 },
+      ACTOR,
+    );
+    await s.service.addStandardBlock(
+      { tenantId: TENANT, kind: "exclusion", body: "Statutory audit.", sortOrder: 1 },
+      ACTOR,
+    );
+  }
+
+  it("are copied onto a letter", async () => {
+    const s = setup();
+    await withLetterProse(s);
+    const copied = await s.service.seedBlocks(TENANT, LETTER, "IN");
+    expect(copied.map((b) => b.kind)).toEqual(["exclusion", "cover", "acceptance"]);
+  });
+
+  it("are never copied onto a proposal", async () => {
+    const s = setup();
+    await withLetterProse(s);
+    const copied = await s.service.seedBlocks(TENANT, PROPOSAL, "IN");
+    expect(copied.map((b) => b.kind)).toEqual(["exclusion"]);
+  });
+
+  it("cannot be written onto a proposal by hand, and are refused by name", async () => {
+    const s = setup();
+    await expect(
+      s.service.addBlock({ tenantId: TENANT, owner: PROPOSAL, kind: "cover", body: "x", sortOrder: 1 }),
+    ).rejects.toBeInstanceOf(LetterOnlyBlockKind);
+    const onLetter = await s.service.addBlock({
+      tenantId: TENANT,
+      owner: LETTER,
+      kind: "acceptance",
+      body: "Accepted, for the group.",
+      sortOrder: 2,
+    });
+    expect(onLetter.kind).toBe("acceptance");
+  });
+
+  it("are filtered by the rule itself, not only by the service", () => {
+    const standard: StandardBlock[] = [
+      { id: "c", tenantId: TENANT, kind: "cover", body: "x", isHeading: false, sortOrder: 1, jurisdiction: null, isActive: true },
+      { id: "e", tenantId: TENANT, kind: "exclusion", body: "y", isHeading: false, sortOrder: 1, jurisdiction: null, isActive: true },
+    ];
+    expect(blocksFor(standard, "IN", "proposal").map((b) => b.id)).toEqual(["e"]);
+    expect(blocksFor(standard, "IN", "engagement_letter").map((b) => b.id)).toEqual(["e", "c"]);
   });
 });

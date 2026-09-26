@@ -156,7 +156,7 @@ const BrandAssetSchema = z
     id: z.string().uuid(),
     entityPartyId: z.string().uuid(),
     entityName: z.string(),
-    kind: z.enum(["logo", "signature", "letterhead"]),
+    kind: z.enum(BRAND_ASSET_KINDS as unknown as [string, ...string[]]),
     documentVersionId: z.string().uuid(),
     version: VersionSchema,
     createdAt: z.string(),
@@ -248,7 +248,7 @@ const NewVersionForm = z.object({ file: binaryPart }).openapi("NewDocumentVersio
 
 const RenderRequest = z
   .object({
-    kind: z.enum(["engagement_letter", "invoice"]).openapi({
+    kind: z.enum(["engagement_letter", "invoice", "proposal"]).openapi({
       description: "What to render. Deliberately narrow — the API says what it can do.",
     }),
     subjectRef: z.string().uuid(),
@@ -468,7 +468,7 @@ const renderRoute = createRoute({
   tags: ["documents"],
   summary: "Produce a PDF of one of the firm's own documents",
   description:
-    "Renders an engagement letter or an invoice, stores it as a `generated` document and " +
+    "Renders an engagement letter, an invoice or a proposal, stores it as a `generated` document and " +
     "attaches it to the record it came from. Re-rendering unchanged data produces the SAME " +
     "bytes and therefore the same content hash — the store is content-addressed, so calling " +
     "this twice costs one blob.",

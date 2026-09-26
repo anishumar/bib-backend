@@ -34,8 +34,15 @@ import {
   ServiceNotPublished,
 } from "../../src/domain/proposal/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
-import { ProposalIssuerNotAFirmEntity, ProposalPartyArchived } from "../../src/domain/proposal/errors";
+import {
+  NothingToRevise,
+  PreparerNotStaff,
+  ProposalAddresseeNotAPerson,
+  ProposalIssuerNotAFirmEntity,
+  ProposalPartyArchived,
+} from "../../src/domain/proposal/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
+import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const PARTY = "00000000-0000-0000-0000-0000000000bb";
@@ -1266,5 +1273,167 @@ describe("why the client said no", () => {
     await s.service.send(TENANT, id, ACTOR);
     const rejected = await s.service.decide(TENANT, id, "rejected", ACTOR, "   ");
     expect(rejected.declinedReason).toBeNull();
+  });
+});
+
+describe("the cover's two names and the Background (0084)", () => {
+  const PRIYA = "00000000-0000-0000-0000-0000000000f1";
+  const ACME_LTD = "00000000-0000-0000-0000-0000000000f2";
+  const COLLEAGUE = "00000000-0000-0000-0000-0000000000f3";
+
+  function withContacts(): ReturnType<typeof setup> {
+    const s = setup();
+    s.parties.know(PRIYA, "Priya Sharma", "person").know(ACME_LTD, "Acme Ltd").know(PARTY, "Acme Industries");
+    s.structure.record(PARTY, { people: [PRIYA], entities: [ACME_LTD] });
+    s.staff.add(TENANT, COLLEAGUE);
+    return s;
+  }
+
+  it("is prepared by whoever drafts it, unless somebody else is named", async () => {
+    const s = withContacts();
+    const mine = await s.service.draft(
+      { tenantId: TENANT, partyId: PARTY, title: "Q", currency: "INR", fxRate: "1", fxRateDate: "2026-06-01" },
+      ACTOR,
+    );
+    expect(mine.preparedByUserId).toBe(PARTNER);
+    const theirs = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "Q",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+        preparedByUserId: COLLEAGUE,
+      },
+      ACTOR,
+    );
+    expect(theirs.preparedByUserId).toBe(COLLEAGUE);
+  });
+
+  it("names nobody when a system actor drafts it", async () => {
+    const s = withContacts();
+    const p = await s.service.draft(
+      { tenantId: TENANT, partyId: PARTY, title: "Q", currency: "INR", fxRate: "1", fxRateDate: "2026-06-01" },
+      SYSTEM_ACTOR,
+    );
+    expect(p.preparedByUserId).toBeNull();
+  });
+
+  it("refuses a colleague who does not work here, before a number is spent", async () => {
+    const s = withContacts();
+    await expect(
+      s.service.draft(
+        {
+          tenantId: TENANT,
+          partyId: PARTY,
+          title: "Q",
+          currency: "INR",
+          fxRate: "1",
+          fxRateDate: "2026-06-01",
+          preparedByUserId: "00000000-0000-0000-0000-0000000000ff",
+        },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(PreparerNotStaff);
+    expect(s.proposals.rows).toHaveLength(0);
+  });
+
+  it("is prepared for a PERSON recorded at the client — the letter's addressee rule", async () => {
+    const s = withContacts();
+    const p = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "Q",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+        addressedToPartyId: PRIYA,
+        background: "  Acme makes pumps.  ",
+      },
+      ACTOR,
+    );
+    expect(p.addressedToPartyId).toBe(PRIYA);
+    expect(p.background).toBe("Acme makes pumps.");
+    // A company where a person belongs, and a person with no role there.
+    await expect(
+      s.service.revise({ tenantId: TENANT, proposalId: p.id, addressedToPartyId: ACME_LTD }),
+    ).rejects.toBeInstanceOf(ProposalAddresseeNotAPerson);
+    s.parties.know("00000000-0000-0000-0000-0000000000f9", "A Stranger", "person");
+    await expect(
+      s.service.revise({
+        tenantId: TENANT,
+        proposalId: p.id,
+        addressedToPartyId: "00000000-0000-0000-0000-0000000000f9",
+      }),
+    ).rejects.toThrow(/A Stranger has no recorded role at Acme Industries/);
+  });
+
+  it("revises a draft's head: absent leaves a field, null clears it, blank is none", async () => {
+    const s = withContacts();
+    const id = await draftWith(s, { validUntil: "2026-07-31" });
+    await s.service.revise({ tenantId: TENANT, proposalId: id, background: "Pumps.", addressedToPartyId: PRIYA });
+    const revised = await s.service.revise({
+      tenantId: TENANT,
+      proposalId: id,
+      title: "  Acme — FY27 compliance ",
+      validUntil: null,
+      preparedByUserId: COLLEAGUE,
+    });
+    expect(revised).toMatchObject({
+      title: "Acme — FY27 compliance",
+      validUntil: null,
+      background: "Pumps.",
+      addressedToPartyId: PRIYA,
+      preparedByUserId: COLLEAGUE,
+    });
+    const cleared = await s.service.revise({ tenantId: TENANT, proposalId: id, background: "   " });
+    expect(cleared.background).toBeNull();
+  });
+
+  it("refuses a revision that names nothing, and one to a proposal already sent", async () => {
+    const s = withContacts();
+    const id = await draftWith(s);
+    await expect(s.service.revise({ tenantId: TENANT, proposalId: id })).rejects.toBeInstanceOf(
+      NothingToRevise,
+    );
+    await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "25000",
+      discountPercent: "0",
+    });
+    await s.service.send(TENANT, id, ACTOR);
+    await expect(
+      s.service.revise({ tenantId: TENANT, proposalId: id, background: "Too late." }),
+    ).rejects.toBeInstanceOf(NotADraft);
+  });
+
+  it("puts the two names on the read model, so the screen shows people and not ids", async () => {
+    const s = withContacts();
+    s.proposals.partyNames.set(PRIYA, "Priya Sharma");
+    s.proposals.accounts.set(COLLEAGUE, { displayName: "Siddharth Kohli", email: "sk@example.test" });
+    const p = await s.service.draft(
+      {
+        tenantId: TENANT,
+        partyId: PARTY,
+        title: "Q",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-06-01",
+        addressedToPartyId: PRIYA,
+        preparedByUserId: COLLEAGUE,
+      },
+      ACTOR,
+    );
+    const view = await s.service.describe(TENANT, p.id);
+    // `email` is that person's email identifier, when the firm holds one —
+    // what Send offers to email it to (0085). This fake holds none.
+    expect(view.addressee).toEqual({ id: PRIYA, displayName: "Priya Sharma", email: null });
+    expect(view.preparedBy).toEqual({ userId: COLLEAGUE, displayName: "Siddharth Kohli", email: "sk@example.test" });
   });
 });

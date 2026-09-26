@@ -17,6 +17,7 @@ export type DocumentErrorCode =
   | "INVALID_JURISDICTION"
   | "FIRM_ENTITY_NOT_FOUND"
   | "INVALID_BLOCK_KIND"
+  | "LETTER_ONLY_BLOCK_KIND"
   | "BLANK_BLOCK_BODY"
   | "INVALID_SORT_ORDER"
   | "STANDARD_BLOCK_NOT_FOUND"
@@ -77,6 +78,20 @@ export class InvalidBlockKind extends DocumentError {
     super(
       "INVALID_BLOCK_KIND",
       `${JSON.stringify(given)} is not a block kind. Valid: ${valid.join(", ")}.`,
+    );
+  }
+}
+
+/** A cover-letter or acceptance line, written onto a proposal (0083). A
+ *  proposal has neither, and the database refuses the row too. */
+export class LetterOnlyBlockKind extends DocumentError {
+  constructor(kind: string) {
+    super(
+      "LETTER_ONLY_BLOCK_KIND",
+      `A proposal has no ${kind === "cover" ? "cover letter" : "acceptance"} — "${kind}" lines ` +
+        `belong to an engagement letter, which opens with the firm's cover paragraphs and is ` +
+        `accepted by the client's signature. Use an exclusion, a commercial note or a team line ` +
+        `on a proposal.`,
     );
   }
 }

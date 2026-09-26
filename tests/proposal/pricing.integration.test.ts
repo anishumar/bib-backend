@@ -24,6 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresProposalRepository } from "../../src/infrastructure/postgres/proposal-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
@@ -41,6 +42,7 @@ import { LedgerService } from "../../src/usecase/ledger/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
+import { FAKE_PROPOSAL_LINKS, UNWIRED_PROPOSAL_PDFS } from "../../src/testfakes/proposal";
 import { DocumentService } from "../../src/usecase/document/service";
 import { FakeProposalRepo } from "../../src/testfakes/proposal";
 import { RandomTokenFactory } from "../../src/infrastructure/crypto/random-tokens";
@@ -89,6 +91,13 @@ const service = new ProposalService({
   parties: new PostgresPartyRepository(app),
   documents,
   shareTokens: new RandomTokenFactory(),
+  structure: new PostgresRelationshipRepository(app),
+  timeZones: new PostgresFirmTimeZone(app),
+  staff: new PostgresMembershipRepository(app),
+  // Nothing here emails a proposal (0085's own test does).
+  mailer: null,
+  pdfs: UNWIRED_PROPOSAL_PDFS,
+  links: FAKE_PROPOSAL_LINKS,
   ids: systemIds,
   clock: systemClock,
   events: ledger,
@@ -236,6 +245,9 @@ describe("the money adds up, in numeric", () => {
       fxRate: "1",
       fxRateDate: "2026-06-01",
       validUntil: null,
+      background: null,
+      addressedToPartyId: null,
+      preparedByUserId: null,
     });
     for (const l of fromDb.lines) {
       await fake.addLine({
@@ -418,6 +430,9 @@ describe("a line with no price — what the total MEANS then (G1.6)", () => {
       fxRate: "1",
       fxRateDate: "2026-06-01",
       validUntil: null,
+      background: null,
+      addressedToPartyId: null,
+      preparedByUserId: null,
     });
     for (const l of fromDb.lines) {
       await fake.addLine({

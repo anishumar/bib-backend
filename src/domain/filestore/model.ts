@@ -99,9 +99,19 @@ export const SUBJECT_KINDS: readonly SubjectKind[] = [
 ];
 
 /** The firm's own marks, per issuing entity (G1.2 applied to paper). */
-export type BrandAssetKind = "logo" | "signature" | "letterhead";
+/**
+ * What a firm's company may put in force as its own mark. `proposal_cover`
+ * (0084) is the full-page artwork a proposal's first page is drawn from — the
+ * firm's design, with its logo and "Proposal For Services" in it.
+ */
+export type BrandAssetKind = "logo" | "signature" | "letterhead" | "proposal_cover";
 
-export const BRAND_ASSET_KINDS: readonly BrandAssetKind[] = ["logo", "signature", "letterhead"];
+export const BRAND_ASSET_KINDS: readonly BrandAssetKind[] = [
+  "logo",
+  "signature",
+  "letterhead",
+  "proposal_cover",
+];
 
 /** A document's identity — the thing that outlives any particular set of bytes. */
 export interface StoredDocument {

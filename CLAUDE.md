@@ -393,9 +393,10 @@ Two rules that came out of it, and both are now enforced by tests:
 - **Nothing is hard-deleted, and nothing in `core` is soft-deleted either.** `bib_app` holds
   no DELETE grant on a single table in this database, so removal is impossible at the
   database level rather than merely unimplemented. The only soft deletes in the product are
-  `removed_at` on `crm.proposal_line`, `crm.engagement_letter_line` and `crm.document_block`
-  — all three the same thing, a line struck off a document before it went out. A fourth needs
-  the same argument: it is a LINE OF A DOCUMENT, removed while that document was a draft.
+  `removed_at` on `crm.proposal_line`, `crm.engagement_letter_line`, `crm.document_block` and
+  `crm.engagement_letter_fee_group` (0083) — all four the same thing, a line struck off a
+  document before it went out (a fee group is a row of the letter's Summary of Fees). A fifth
+  needs the same argument: it is a LINE OF A DOCUMENT, removed while that document was a draft.
   Every state transition writes an event naming its actor.
 
 **Parties are permanent — there is no `deleted_at` in `core` and there never will be (G0.3).**
@@ -934,8 +935,9 @@ session.** A proposal goes to somebody who has no login and will not get one. Th
 `<tenant_id>.<secret>` — the tenant travels inside it so that resolving a link is still an
 ordinary `withTenant` read, because the alternative is a digest lookup across every firm on a
 table that holds money. Only the SHA-256 digest is stored, the token arrives in the BODY (a
-path lands in access logs and Referer headers), the route is read-only, and malformed,
-unknown and withdrawn all answer the same way so it cannot enumerate anything. Adding a fifth
+path lands in access logs and Referer headers), the route is read-only (answering is its own
+route since 0085 — see below), and malformed, unknown and withdrawn all answer the same way so
+it cannot enumerate anything. Adding a fifth
 entry to that set needs a paragraph as good as this one — `tests/api/auth-coverage.test.ts`
 holds the build red until somebody writes it.
 
@@ -1104,6 +1106,206 @@ firm's default issuer has no jurisdiction — which is exactly the position the 
 written from. Its limit, stated: a deliberate foreign choice (English law under an Indian entity, a
 neutral arbitral seat) is now unrepresentable. Making the exception representable belongs on the
 LETTER and is a decision nobody has taken.
+
+## The Annexure letter, and one fee for several services (0083)
+
+The firm's own engagement-letter format (10X Global's MyDojo letter, July 2026) is a different
+DOCUMENT from the one this product printed: a **cover letter** on page one (date, addressee,
+subject, the firm's paragraphs, "Yours sincerely" and the firm's signature, then an Acceptance
+and the client's), **Annexure 1** — Scope of Services, Deliverables & Fees, organised in
+SECTIONS with a Summary of Fees — and **Annexure 2**, the numbered terms.
+
+**The layout is a column on the letter, and every letter drafted now is `annexure`** ("switch
+everyone", 2026-09-26). 0083 set every letter already sent, signed or withdrawn to `classic` —
+TRUE of them, it is the layout they were issued in — and every draft to `annexure`. A rendered
+letter's bytes are evidence, so the layout is RECORDED, never derived from the code version: a
+letter issued in the classic layout re-renders as the document its client holds, and an
+envelope still out with DocuSign carries a PDF the product can still produce. It is frozen with
+the rest of a signed letter (0019 covers it the day it exists) and it is NOT a term — absent from
+`canonicalContent`, because the same agreement in either layout is the same agreement.
+
+**The classic path is untouched, and a test holds it there.** `PdfLibRenderer.render` branches on
+`annexureLetter` after the setup every document shares and before the first classic draw;
+`render-source.ts` branches on `layout` right after the head query. `tests/render/layout.test.ts`
+PINS the hash of a classic letter and an invoice as they rendered before 0083. If one fails, do
+not update the constant — a hash that moved is every issued document's re-render moving.
+
+**A FEE GROUP IS ONE FEE FOR SEVERAL SERVICES, and it is a section of Annexure 1.** "USD 5,000 per
+month" for accounting, tax and payroll across four companies is TWELVE lines under G0.1, and
+before 0083 the only way to write the retainer down was twelve prices nobody agreed to.
+`crm.engagement_letter_fee_group` states the fee once — title, amount PER BILLING PERIOD, a NOT
+NULL frequency, payment terms ("40% advance, 60% on completion"), the sentence the Summary of Fees
+prints, and the section's own prose (intro, deliverables, the client's responsibilities for the
+section as a whole). Its section letter (A, B, …) is its RANK among the live groups, derived on
+read by `sectionCode`, so striking one out never leaves a letter starting at B.
+
+- **A grouped line has no price of its own** — `el_line_grouped_is_unpriced_chk`: null amount,
+  zero discount, and no pricing note needed, because the group is the reason (0023's check was
+  widened by exactly that case). A price on both would be counted twice.
+- **The group is held to its letter's currency and a line to its own letter's group** by
+  composite keys, not by the service.
+- **A group still pricing a live service cannot be struck off, and a live service cannot sit in a
+  struck-off group** — a trigger each way (`trg_el_fee_group_keeps_its_lines`,
+  `trg_el_line_group_is_live`), named to sort after the freeze. **A letter with a group covering
+  nothing cannot be sent** (`FeeGroupEmpty`): a fee for nothing the letter names.
+- **It is a TERM.** `canonicalContent` appends one row per group — its fee, words and the
+  POSITIONS of the lines it covers — ONLY WHEN THERE ARE ANY, and adds no field to a line's row:
+  DocuSign verifies a completed envelope against that string, so a letter sent before 0083 and
+  signed after it must render identically at both moments.
+- **Totals count a group's fee ONCE** and do not count its lines as unpriced. **MRR shares it**
+  across the engagements it covers, the last one taking the rounding so the shares add up to the
+  fee exactly (`crm.engagement_mrr`, redefined; an ungrouped line's arithmetic is 0038's,
+  expression for expression). A grouped engagement is billed at the GROUP's frequency — its
+  line's own is only the service's recurrence copied at drafting.
+- **`billable-engagements` carries `feeGroup`**, so the invoice screen can say a figure is a
+  whole group's and must not prefill it per engagement: four engagements of a 5,000 retainer are
+  billed 5,000, not 20,000.
+
+Lines go into a group when they are added (`feeGroupId`) or afterwards with `PUT
+…/lines/{lineId}/pricing`, which moves a line in (it GIVES UP its price, discount and note) or out
+(it needs a price or a reason again, `LineNotPriced`).
+
+**The cover letter and the acceptance are the firm's own prose — block kinds `cover` and
+`acceptance`, LETTER-ONLY.** They are legal text ("you may procure services … for your
+consolidated subsidiaries" binds a client's group), so this product never writes them: the firm
+maintains them in its standard set, each new letter copies them (G1.7), and a proposal never gets
+them — `blocksFor` filters by document, `addBlock` refuses by name (`LetterOnlyBlockKind`) and
+`document_block_letter_only_kinds_chk` refuses the row. **Nothing is seeded**: a firm with none
+prints a cover letter that goes from the salutation straight to "Yours sincerely".
+
+**What the Annexure letter prints that nothing typed.** Only restatements of terms the letter
+already holds, each of which was hashed and frozen and ABSENT from the classic PDF: the ADVANCE
+(below the Summary of Fees), an out-of-pocket range, which companies a service is for, and who
+the client signs for — "Accepted for and on behalf of MyDojo, Inc., for itself and on behalf of
+PrepWorks, Maths Genie and …", every company a line is for. `planAnnexure`
+(`domain/engagement/annexure.ts`) decides the structure and is tested without a PDF: one item for
+one service across four companies (lines merge only when everything they print is the same), a
+company named once per section when every item covers the same ones and never on a one-company
+letter, lines priced on their own as a last section.
+
+**Not built, and said:** the firm's address and website in the footer (`registered_address` is a
+free-form record nothing writes a shape into), the signatory's phone, a page header, and fee
+groups on a PROPOSAL — a quote's lines carry across ungrouped and are grouped on the letter.
+
+## The proposal as a document — "Proposal For Services" (0084)
+
+Until 0084 a proposal was a screen and a share link and **nothing printed it**: `render-source.ts`
+refused the kind by name. The firm's own proposal (10X Global, September 2026) is its own
+document, not the letter with the signatures taken off: a **cover** — the firm's full-page artwork
+with "Prepared for" (who, at which client) and "Prepared by" (who, at which of the firm's
+companies) printed over it — then Background, "In-scope processes / services", the work in
+SECTIONS by the firm's own **Dept** ("A. Financial Reporting & Compliance"), each service under
+its **catalogue code** ("H3. Transfer pricing audit — Form 3CEB") with "Fees H3: INR 50,000
+Yearly", a Summary of Fees (Section · Sub Section · Description · Frequency · Fees) and Notes —
+team, general exclusions, commercials — with the logo and the reference on every page after the
+cover. `POST /documents/render` takes `kind: "proposal"` and files it like any render (not
+client-visible by default — a quote may never be sent).
+
+**`planProposal` (`domain/proposal/document.ts`) decides the structure and is tested without a
+page**, `planAnnexure`'s argument. Three rules: a Dept is a section, in `service_axis` order and
+lettered by RANK among the Depts used, taken from the PINNED version (a code with no row prints
+under the code; no Dept is a last "Other services"); a service prints under its `ref`, or is
+numbered in its section (A1) when it has none; a company is named only when the proposal's lines
+are for more than one. **Not merged**, unlike the letter: two lines are two prices.
+
+**Three columns and a brand-asset kind.** `background` (the letter's prose, carried to a letter
+drafted from the quote by the caller); `addressed_to_party_id` (a PERSON in the client's structure
+— the letter's addressee rule on the same read, `ADDRESSEE_NOT_A_PERSON` 400 /
+`ADDRESSEE_NOT_LINKED` 409); `prepared_by_user_id` (active STAFF of this firm — the key targets
+the GLOBAL account table, so the service holds it; drafting sets it to the drafter, and 0084
+BACKFILLED it from each proposal's `proposal.drafted` actor, which is a fact, not a default).
+`PATCH /proposals/{id}` revises a DRAFT's head — title, validity, Background, the two names —
+with the WHERE clause repeating `status = 'draft'`, and records no event, the same as adding a
+line. `files.brand_asset.kind` gains **`proposal_cover`**, per issuing entity, refused at upload
+unless PNG or JPEG like a logo.
+
+**The artwork is the firm's; where the names go is the layout's.** The renderer draws the cover
+to FILL the page (aspect kept, overflow off the paper) and places the two blocks at fractions of
+the ARTWORK (`PREPARED_FOR_AT`, `PREPARED_BY_AT` — the positions in the firm's template), "for" in
+ink and "by" in white on the design's dark block. An artwork designed for this cover leaves those
+two places clear. No artwork is ordinary: a plain cover with the logo, "Proposal for Services" and
+the proposal's own title. Section headings are the template's deep red (`ACCENT`) — a property of
+the LAYOUT, the same at every firm, not a brand setting.
+
+**What the proposal prints that nothing typed:** the template's own headings, "Our
+responsibilities:" where the firm's sample says "10x's Responsibilities" (a product for more than
+one firm cannot print one firm's name, and the cover already names the issuing company), and
+restatements of terms it holds — each fee, an out-of-pocket range, "valid until". Money prints
+whole where it is whole ("INR 50,000"); frequencies in the firm's words ("Yearly").
+
+**The letter and invoice paths are untouched, and the pinned hashes prove it.** The flow engine
+took a `FlowStyle` (the letter's is the old constants) and the cursor a `turn` hook (absent: a
+blank page, as before); `tests/render/layout.test.ts` still matches the pre-0083 hashes.
+
+**Not built, and said:** fee groups on a proposal, a serif body face (the firm's sample is Times;
+this product embeds Noto Sans everywhere), and page numbers (the template has none). The PDF
+download on the client's share link was built in 0085, below.
+
+## The proposal by email, and the client's own answer (0085)
+
+**Decided 2026-09-26 (user):** bib emails the proposal itself — the PDF attached, with Accept and
+Decline buttons — and the CLIENT answers on the share link's page. The link was read-only until
+this, with "letting a client answer on an unauthenticated link" left as a decision for later; this
+is that decision, taken by the person whose it was. The user's four answers: buttons that open a
+confirm page (not DocuSign, not reply-parsing, not AMP / Outlook Actionable Messages — each works
+in one mail client and needs the vendor's approval); a NAME plus a tick against a statement to
+accept; the firm's own mailbox as the sender; and an email to the preparer when the client answers
+(no confirmation copy to the client, no reminders, no first-open notice).
+
+**The buttons do not answer.** Company mail filters open every link in a message to scan it, so a
+link that accepted on opening would be pressed by a scanner. Each opens `/p/<token>?answer=accept`
+(or `decline`) with that answer READY, and the answer is `POST /proposals/shared/answer` — a name
+for either, and `confirmed` against `acceptanceStatement` for an acceptance. The statement is
+composed once, in the domain (`acceptanceStatement(ref, client)`), sent to the page on the shared
+view and recorded by the answer, so what the box said is what the firm keeps.
+
+**Three things 0085 stores, and none of them is the link** (still only a digest, on the proposal):
+
+- **The PDF of record** — `crm.proposal.sent_pdf_version_id`, the one render the client was
+  sent: the email's attachment, the link's download (`POST /proposals/shared/pdf`) and what an
+  answer is recorded against. Filed through `FileStoreService.render` (so it is an ordinary
+  document on the proposal's page) and PINNED the first time a sent proposal needs it —
+  `coalesce` in `pinSentPdf`, so two racing renders cite one file — and never re-rendered after,
+  because a render reads today's brand assets.
+- **Each email** — `crm.proposal_email`: address, note, the PDF version and the DIGEST of the link
+  it carried. Written only once the mail server took it.
+- **The client's answer** — `crm.proposal_client_decision`: name, statement (acceptances only, a
+  CHECK), the email whose link was used (by digest), the PDF, and the address and browser as the
+  rate limiter derived them. One per proposal. Written with the status in ONE transaction whose
+  UPDATE repeats `status = 'sent'` (`recordClientAnswer`), so two tabs answering at once land one
+  answer — the integration test races them. A colleague's recorded decision writes no row.
+
+**Personal data stays out of the ledger**, 0080's rule: `proposal.emailed` carries the email's id
+and the PDF hash; `proposal.accepted`/`rejected` from the link carry `via: "share_link"`,
+`emailId` and `pdfContentHash`, with the SYSTEM actor, as `proposal.viewed` does.
+`proposal.link_reissued` is the other new verb.
+
+**Send may email; failure is an answer, not an exception.** `POST /proposals/{id}/send` takes an
+optional `{ email: { to, note? } }`. The address is checked (and a process with no mailer is
+refused, `EMAIL_UNAVAILABLE` 501) BEFORE anything moves. After the proposal is sent, a render or a
+relay failing comes back as `email.status = "failed"` beside the link — throwing would lose the
+link, which is readable once. `POST /proposals/{id}/reissue` issues a NEW link (the old one stops:
+one live link per proposal) and optionally emails it; only while `sent`.
+
+**The letter** (`SmtpMailer.sendProposal`) goes out under the FIRM's display name — `Letter`
+gained `fromName`, `replyTo` and `attachments`, and the ADDRESS is still `BIB_MAIL_FROM`, the one
+the relay authenticates. Replies go to the preparer. It says "Nothing is decided by opening it."
+The preparer's notice (`sendDecisionNotice`) is best-effort after the answer is recorded: the
+transport logs a refusal and the client's answer stands. **The worker gets `mailer: null`** — it
+composes the proposal service only to read quotes and holds no SMTP password.
+
+**`PUBLIC_PATHS` is nine.** The eighth (`…/shared/answer`) and ninth (`…/shared/pdf`) have their
+paragraph on the list in `api/guards.ts`, and `tests/api/auth-coverage.test.ts` pins them and
+proves they are not shadowed by a `/proposals/{proposalId}/…` template. Paths are chosen so no
+staff route can match them: `shared/decision` would have collided with `{proposalId}/decision`.
+
+**The sender is configuration, and it is not done.** `BIB_MAIL_FROM` is one address per
+deployment (bib-qa: a personal Gmail, display name "10xcrm"). The user chose the firm's own
+mailbox; until its SMTP login is set, a proposal emailed from bib-qa comes from that Gmail under
+the firm's name. A second firm on one deployment would need a sender per firm — not built.
+
+**Not built:** a confirmation copy to the client, reminders before expiry, a notice on first open,
+and a portal-authenticated answer.
 
 ## Invoicing — the one number in this product that may not gap (T3.4)
 

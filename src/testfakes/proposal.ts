@@ -14,20 +14,32 @@
 //   RLS, the one-line-per-position index, and the composite key that holds a
 //   line to its proposal's currency. All database properties, proven against
 //   real Postgres.
-import { FakePartyStanding } from "./party";
+import { FakeClientStructure, FakePartyStanding } from "./party";
+import { FakeStaffDirectory } from "./lead";
+import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
 import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
 import { readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
+  DecisionNotice,
+  FiledPdf,
+  NewClientAnswer,
   NewProposal,
+  NewProposalEmail,
   NewProposalLine,
   PinnedService,
   PolicyDirectory,
+  ProposalEmail,
+  ProposalLetter,
+  ProposalLinks,
+  ProposalMailer,
+  ProposalPdfs,
   ProposalFilters,
   ProposalRecord,
   ProposalRepository,
+  ProposalRevision,
   ProposalSummary,
   ServiceCatalogue,
   SharedProposalRecord,
@@ -60,6 +72,13 @@ export class FakeProposalRepo implements ProposalRepository {
   partyNames = new Map<string, string>();
   /** The digests attachShareToken has issued, and what they open. */
   readonly shareDigests = new Map<string, string>();
+  /** The emails recordEmail kept, with the digest each carried (0085). */
+  readonly emails: NewProposalEmail[] = [];
+  /** The client answers recordClientAnswer kept (0085). */
+  readonly answers: NewClientAnswer[] = [];
+  /** Filed PDFs a test's `FakeProposalPdfs` produced, by version id — what
+   *  `findPdf` resolves, as the join on files.document_version does. */
+  readonly pdfs = new Map<string, FiledPdf>();
   /** The firm's name, as it appears on the document a recipient reads. */
   firmName = "Harbour Point Advisory";
 
@@ -85,9 +104,39 @@ export class FakeProposalRepo implements ProposalRepository {
       lastViewedAt: null,
       viewCount: 0,
       declinedReason: null,
+      background: p.background,
+      addressedToPartyId: p.addressedToPartyId,
+      preparedByUserId: p.preparedByUserId,
+      sentPdfVersionId: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
+  }
+
+  /** Display names and addresses for the colleagues a test names as having
+   *  prepared a proposal, so the read model carries what the adapter's join
+   *  would. Unknown ids read as an account with no name. */
+  readonly accounts = new Map<string, { displayName: string | null; email: string }>();
+  /** Email identifiers for the people a test names under "Prepared for" —
+   *  what Send offers to email it to (0085). */
+  readonly partyEmails = new Map<string, string>();
+
+  revise(tenantId: string, proposalId: string, change: ProposalRevision): Promise<Proposal | null> {
+    const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
+    // The adapter's WHERE clause: a proposal no longer a draft is not touched.
+    if (current?.status !== "draft") return Promise.resolve(null);
+    return Promise.resolve(
+      this.replace(tenantId, proposalId, (p) => ({
+        ...p,
+        title: change.title ?? p.title,
+        validUntil: change.validUntil === undefined ? p.validUntil : change.validUntil,
+        background: change.background === undefined ? p.background : change.background,
+        addressedToPartyId:
+          change.addressedToPartyId === undefined ? p.addressedToPartyId : change.addressedToPartyId,
+        preparedByUserId:
+          change.preparedByUserId === undefined ? p.preparedByUserId : change.preparedByUserId,
+      })),
+    );
   }
 
   findById(tenantId: string, proposalId: string): Promise<Proposal | null> {
@@ -169,6 +218,9 @@ export class FakeProposalRepo implements ProposalRepository {
 
   attachShareToken(tenantId: string, proposalId: string, digest: string): Promise<void> {
     this.replace(tenantId, proposalId, (p) => p);
+    // ONE live link per proposal, as the column is: a new digest replaces the
+    // old one, so the earlier link stops opening anything (0085's reissue).
+    for (const [d, id] of this.shareDigests) if (id === proposalId) this.shareDigests.delete(d);
     this.shareDigests.set(digest, proposalId);
     return Promise.resolve();
   }
@@ -203,6 +255,12 @@ export class FakeProposalRepo implements ProposalRepository {
         oopEstimate: l.oopEstimate,
       })),
       totals: totalsOf(lines, proposal.currency),
+      answer: (() => {
+        const a = this.answers.find((x) => x.tenantId === tenantId && x.proposalId === proposalId);
+        return a === undefined
+          ? null
+          : { decision: a.decision, signerName: a.signerName, decidedAt: a.decidedAt };
+      })(),
     };
   }
 
@@ -269,6 +327,62 @@ export class FakeProposalRepo implements ProposalRepository {
       })),
       totals: totalsOf(lines, proposal.currency),
       approvedBy: null,
+      addressee:
+        proposal.addressedToPartyId === null
+          ? null
+          : {
+              id: proposal.addressedToPartyId,
+              displayName:
+                this.partyNames.get(proposal.addressedToPartyId) ?? proposal.addressedToPartyId,
+              email: this.partyEmails.get(proposal.addressedToPartyId) ?? null,
+            },
+      preparedBy:
+        proposal.preparedByUserId === null
+          ? null
+          : {
+              userId: proposal.preparedByUserId,
+              displayName: this.accounts.get(proposal.preparedByUserId)?.displayName ?? null,
+              email:
+                this.accounts.get(proposal.preparedByUserId)?.email ??
+                `${proposal.preparedByUserId}@example.test`,
+            },
+      firmName: this.firmName,
+      sentPdf:
+        proposal.sentPdfVersionId === null
+          ? null
+          : (this.pdfs.get(proposal.sentPdfVersionId) ?? null),
+      emails: this.emails
+        .filter((e) => e.tenantId === tenantId && e.proposalId === proposalId)
+        .sort((a, b) => b.sentAt.localeCompare(a.sentAt))
+        .map((e) => ({
+          id: e.id,
+          to: e.toEmail,
+          note: e.note,
+          sentAt: e.sentAt,
+          sentBy:
+            e.sentBy === null
+              ? null
+              : {
+                  userId: e.sentBy,
+                  displayName: this.accounts.get(e.sentBy)?.displayName ?? null,
+                  email: this.accounts.get(e.sentBy)?.email ?? `${e.sentBy}@example.test`,
+                },
+          pdfContentHash: this.pdfs.get(e.pdfVersionId)?.contentHash ?? "",
+        })),
+      clientDecision: (() => {
+        const a = this.answers.find((x) => x.tenantId === tenantId && x.proposalId === proposalId);
+        if (a === undefined) return null;
+        return {
+          decision: a.decision,
+          signerName: a.signerName,
+          statement: a.statement,
+          decidedAt: a.decidedAt,
+          ipAddress: a.ipAddress,
+          userAgent: a.userAgent,
+          emailedTo: this.emails.find((e) => e.id === a.emailId)?.toEmail ?? null,
+          pdf: a.pdfVersionId === null ? null : (this.pdfs.get(a.pdfVersionId) ?? null),
+        };
+      })(),
     };
   }
 
@@ -297,6 +411,65 @@ export class FakeProposalRepo implements ProposalRepository {
           lineCount: lines.length,
         };
       }),
+    );
+  }
+
+  // ── 0085 ────────────────────────────────────────────────────────────────
+
+  findIdByShareDigest(_tenantId: string, digest: string): Promise<string | null> {
+    return Promise.resolve(this.shareDigests.get(digest) ?? null);
+  }
+
+  pinSentPdf(tenantId: string, proposalId: string, versionId: string): Promise<string> {
+    // The adapter's coalesce: the first pin stands.
+    const pinned = this.replace(tenantId, proposalId, (p) => ({
+      ...p,
+      sentPdfVersionId: p.sentPdfVersionId ?? versionId,
+    }));
+    return Promise.resolve(pinned.sentPdfVersionId ?? versionId);
+  }
+
+  findPdf(_tenantId: string, versionId: string): Promise<FiledPdf | null> {
+    return Promise.resolve(this.pdfs.get(versionId) ?? null);
+  }
+
+  recordEmail(email: NewProposalEmail): Promise<ProposalEmail> {
+    this.emails.push(email);
+    return Promise.resolve({
+      id: email.id,
+      tenantId: email.tenantId,
+      proposalId: email.proposalId,
+      toEmail: email.toEmail,
+      note: email.note,
+      pdfVersionId: email.pdfVersionId,
+      sentBy: email.sentBy,
+      sentAt: email.sentAt,
+    });
+  }
+
+  findEmailByLink(
+    tenantId: string,
+    proposalId: string,
+    digest: string,
+  ): Promise<ProposalEmail | null> {
+    const found = [...this.emails]
+      .reverse()
+      .find((e) => e.tenantId === tenantId && e.proposalId === proposalId && e.linkDigest === digest);
+    return Promise.resolve(found ?? null);
+  }
+
+  recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null> {
+    const current = this.rows.find((r) => r.tenantId === answer.tenantId && r.id === answer.proposalId);
+    // The adapter's WHERE: only while it is sent.
+    if (current?.status !== "sent") return Promise.resolve(null);
+    this.answers.push(answer);
+    return Promise.resolve(
+      this.replace(answer.tenantId, answer.proposalId, (p) => ({
+        ...p,
+        status: answer.decision,
+        decidedAt: answer.decidedAt,
+        declinedReason: answer.declinedReason,
+      })),
     );
   }
 
@@ -380,6 +553,78 @@ export class FakePolicyDirectory implements PolicyDirectory {
   }
 }
 
+/**
+ * The two letters of 0085, KEPT rather than sent, so a test reads exactly what
+ * the use case asked the adapter to write. `failWith` makes the next sends
+ * reject, the way a mail server that will not take a letter does.
+ */
+export class FakeProposalMailer implements ProposalMailer {
+  readonly letters: ProposalLetter[] = [];
+  readonly notices: DecisionNotice[] = [];
+  failWith: Error | null = null;
+
+  sendProposal(letter: ProposalLetter): Promise<void> {
+    if (this.failWith !== null) return Promise.reject(this.failWith);
+    this.letters.push(letter);
+    return Promise.resolve();
+  }
+
+  sendDecisionNotice(notice: DecisionNotice): Promise<void> {
+    if (this.failWith !== null) return Promise.reject(this.failWith);
+    this.notices.push(notice);
+    return Promise.resolve();
+  }
+}
+
+/**
+ * Rendering and filing, without a renderer: each `file` produces a NEW
+ * version, as `FileStoreService.render` files a new document each time, and
+ * registers it with the repository fake so `findPdf` resolves it the way the
+ * join does. `failWith` makes the render throw.
+ */
+export class FakeProposalPdfs implements ProposalPdfs {
+  readonly filed: FiledPdf[] = [];
+  failWith: Error | null = null;
+  constructor(private readonly repo: FakeProposalRepo) {}
+
+  file(_tenantId: string, proposalId: string): Promise<FiledPdf> {
+    if (this.failWith !== null) return Promise.reject(this.failWith);
+    const n = this.filed.length + 1;
+    const ref = this.repo.rows.find((r) => r.id === proposalId)?.ref ?? proposalId;
+    // Uuid-shaped, because the API's schema says these are uuids and a fake
+    // that the wire would refuse proves nothing about the wire.
+    const pdf: FiledPdf = {
+      documentId: `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`,
+      versionId: `00000000-0000-4000-9000-${String(n).padStart(12, "0")}`,
+      contentHash: String(n).repeat(64).slice(0, 64),
+      filename: `${ref}.pdf`,
+    };
+    this.filed.push(pdf);
+    this.repo.pdfs.set(pdf.versionId, pdf);
+    return Promise.resolve(pdf);
+  }
+
+  bytes(_tenantId: string, pdf: FiledPdf): Promise<Uint8Array> {
+    return Promise.resolve(new TextEncoder().encode(`%PDF-fake ${pdf.versionId}`));
+  }
+}
+
+/**
+ * For a test that composes the proposal service against real Postgres and
+ * never emails: a PDF asked of it is a failure that names the omission, not a
+ * fake file the database would refuse to pin (0085's foreign key).
+ */
+export const UNWIRED_PROPOSAL_PDFS: ProposalPdfs = {
+  file: () => Promise.reject(new Error("this test composes no document store for proposal PDFs")),
+  bytes: () => Promise.reject(new Error("this test composes no document store for proposal PDFs")),
+};
+
+/** Links from a fixed origin, so a test can read them back. */
+export const FAKE_PROPOSAL_LINKS: ProposalLinks = {
+  shareUrl: (token) => `https://app.example.test/p/${token}`,
+  staffUrl: (proposalId) => `https://app.example.test/proposals/${proposalId}`,
+};
+
 export function makeProposalFakes(): Deps & {
   /** Which parties are archived; empty unless a test archives one (0305). */
   parties: FakePartyStanding;
@@ -398,6 +643,14 @@ export function makeProposalFakes(): Deps & {
    *  narrow port — so a test can write a document's own prose and then read it
    *  back through the proposal's share link. */
   prose: DocumentService;
+  /** Whom a client's proposal may be prepared for (F-10-1, 0084). */
+  structure: FakeClientStructure;
+  timeZones: FakeFirmTimeZone;
+  /** Who works here — whom "Prepared by" may name (0084). */
+  staff: FakeStaffDirectory;
+  /** The letters of 0085, kept rather than sent. */
+  mailer: FakeProposalMailer;
+  pdfs: FakeProposalPdfs;
 } {
   // The REAL DocumentService over in-memory ports: quoting must fail here if
   // the rule that picks an issuing entity stops working, and a stub that
@@ -420,6 +673,12 @@ export function makeProposalFakes(): Deps & {
     // The identity fake, reused: both ports want the same guarantee, and a
     // second predictable-token fake would be the same class with a new name.
     shareTokens: new FakeTokenFactory(),
+    structure: new FakeClientStructure(),
+    timeZones: new FakeFirmTimeZone(),
+    staff: new FakeStaffDirectory(),
+    mailer: new FakeProposalMailer(),
+    pdfs: new FakeProposalPdfs(proposals),
+    links: FAKE_PROPOSAL_LINKS,
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-06-01T09:00:00Z")),
     events: new RecordingEventSink(),

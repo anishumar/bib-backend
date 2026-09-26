@@ -19,12 +19,16 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
+import { BLOCK_KIND_VALUES } from "./document";
 import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { ProposalService } from "../../usecase/proposal/service";
 import type { ProposalRecord, ProposalSummary, ProposalView } from "../../usecase/proposal/ports";
 import type { ProposalStatus } from "../../domain/proposal/model";
+import { EMAIL_NOTE_MAX, SIGNER_NAME_MAX } from "../../domain/proposal/model";
+import type { EmailOutcome } from "../../usecase/proposal/service";
+import type { SharedProposal } from "../../usecase/proposal/ports";
 import type { BillingFrequency } from "../../domain/document/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 
@@ -221,6 +225,13 @@ const ProposalSchema = z
     /** WHY the client said no. Null on every other status — the schema says so
      *  too, so a reason can never sit on a proposal that was accepted. */
     declinedReason: z.string().nullable(),
+    /** The firm's paragraph about the client's business — the proposal's
+     *  Background (0084). Null when unwritten. */
+    background: z.string().nullable(),
+    /** The person at the client it is prepared for (0084). */
+    addressedToPartyId: z.string().uuid().nullable(),
+    /** The colleague the cover names under "Prepared by" (0084). */
+    preparedByUserId: z.string().uuid().nullable(),
   })
   .openapi("Proposal");
 
@@ -295,7 +306,7 @@ const ApproverSchema = z
 const DocumentBlockSchema = z
   .object({
     id: z.string().uuid(),
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string(),
     isHeading: z.boolean(),
     sortOrder: z.number().int(),
@@ -314,6 +325,49 @@ const DocumentBlockSchema = z
   })
   .openapi("ProposalBlock");
 
+/** A rendered proposal in the document store. `contentHash` is its
+ *  fingerprint — lower-case SHA-256, what any stored file carries. */
+const FiledPdfSchema = z
+  .object({
+    documentId: z.string().uuid(),
+    versionId: z.string().uuid(),
+    contentHash: z.string(),
+    filename: z.string(),
+  })
+  .openapi("ProposalPdf");
+
+const ProposalEmailSchema = z
+  .object({
+    id: z.string().uuid(),
+    to: z.string(),
+    note: z.string().nullable(),
+    sentAt: z.string(),
+    /** Who pressed the button. Null for a system actor or an erased account. */
+    sentBy: ApproverSchema,
+    /** The fingerprint of the PDF it attached. */
+    pdfContentHash: z.string(),
+  })
+  .openapi("ProposalEmail");
+
+const ClientDecisionSchema = z
+  .object({
+    decision: z.enum(["accepted", "rejected"]),
+    /** The name they typed. */
+    signerName: z.string(),
+    /** The sentence they ticked, word for word. Acceptances only. */
+    statement: z.string().nullable(),
+    decidedAt: z.string(),
+    /** As this deployment derives a caller's address (api/ratelimit.ts). */
+    ipAddress: z.string().nullable(),
+    userAgent: z.string().nullable(),
+    /** Where bib emailed the link they used. Null when it reached them some
+     *  other way. */
+    emailedTo: z.string().nullable(),
+    /** The PDF of record when they answered. */
+    pdf: FiledPdfSchema.nullable(),
+  })
+  .openapi("ProposalClientDecision");
+
 const ProposalRecordSchema = z
   .object({
     proposal: ProposalSchema,
@@ -324,6 +378,28 @@ const ProposalRecordSchema = z
     blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
     approvedBy: ApproverSchema,
+    /** "Prepared for", by NAME (0084), with that person's email identifier
+     *  when the firm holds one — what Send offers to email it to (0085). Null
+     *  when the proposal names nobody. */
+    addressee: z
+      .object({
+        id: z.string().uuid(),
+        displayName: z.string(),
+        email: z.string().nullable(),
+      })
+      .nullable(),
+    /** "Prepared by", with the address the cover prints (0084). The email is
+     *  the discriminator — an account may have no display name. */
+    preparedBy: ApproverSchema,
+    /** The PDF of record (0085): the file the client was sent — the email's
+     *  attachment and the link's download. Null until a sent proposal has one. */
+    sentPdf: FiledPdfSchema.nullable(),
+    /** Every email bib sent it in, newest first (0085). */
+    emails: z.array(ProposalEmailSchema),
+    /** The evidence behind an answer the CLIENT gave on the link (0085). Null
+     *  when unanswered, and when a colleague recorded the answer — the History
+     *  names that colleague. */
+    clientDecision: ClientDecisionSchema.nullable(),
   })
   .openapi("ProposalRecord");
 
@@ -337,6 +413,25 @@ const ProposalSummarySchema = z
   })
   .openapi("ProposalSummary");
 
+/**
+ * What happened to the email. ONE object with nullable fields rather than a
+ * discriminated union: this spec is OpenAPI 3.0, where a nullable `oneOf`
+ * generates as `unknown` in the front end's client and the whole field loses
+ * its type. `status` says which of the others are set.
+ */
+const EmailOutcomeSchema = z
+  .object({
+    status: z.enum(["sent", "failed"]),
+    to: z.string(),
+    /** Set when `sent`. */
+    emailId: z.string().uuid().nullable(),
+    sentAt: z.string().nullable(),
+    /** Set when `failed`: what went wrong, in the mail server's or the
+     *  renderer's own words. */
+    reason: z.string().nullable(),
+  })
+  .openapi("ProposalEmailOutcome");
+
 const SentProposalSchema = z
   .object({
     proposal: ProposalSchema,
@@ -345,9 +440,17 @@ const SentProposalSchema = z
      *
      * Only its digest is stored, so this response is the only place it can ever
      * be read — the same contract sessions and magic links keep, for the same
-     * reason. A firm that loses it re-sends, which issues a new one.
+     * reason. A firm that loses it asks for a new one (`…/reissue`), and the
+     * old one stops working.
      */
     shareToken: z.string(),
+    /**
+     * What happened to the email (0085), when one was asked for. `failed` is an
+     * ordinary answer: the proposal IS sent and the link above DOES work — the
+     * person who pressed the button needs both facts with the one that went
+     * wrong. Null when no email was asked for.
+     */
+    email: EmailOutcomeSchema.nullable(),
   })
   .openapi("SentProposal");
 
@@ -358,7 +461,7 @@ const SentProposalSchema = z
 /** One line of prose as the RECIPIENT reads it — see `SharedProposal.blocks`. */
 const SharedBlockSchema = z
   .object({
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string(),
     /** A section title inside the block (the team block is a list with
      *  headings in it), not an item. */
@@ -416,6 +519,18 @@ const SharedProposalSchema = z
      *  lines are the firm's standard wording and which were written for this
      *  client. Empty when the document carries none. */
     blocks: z.array(SharedBlockSchema),
+    /** The answer given on this page, by name and date (0085). Null when
+     *  unanswered, and when the firm recorded the answer itself. */
+    answer: z
+      .object({
+        decision: z.enum(["accepted", "rejected"]),
+        signerName: z.string(),
+        decidedAt: z.string(),
+      })
+      .nullable(),
+    /** The sentence beside the acceptance's tick box, WORD FOR WORD — the page
+     *  shows this text and the API records the same (0085). */
+    acceptanceStatement: z.string(),
   })
   .openapi("SharedProposal");
 
@@ -442,8 +557,30 @@ const DraftProposalRequest = z
     fxRate: RateSchema,
     fxRateDate: DaySchema,
     validUntil: DaySchema.optional(),
+    /** The Background paragraph (0084). Blank is "none". */
+    background: z.string().max(4000).optional(),
+    /** The PERSON at the client it is prepared for — somebody recorded in the
+     *  client's structure, the letter's addressee rule. */
+    addressedToPartyId: z.string().uuid().optional(),
+    /** The colleague the cover names. Omit it and it is whoever is drafting. */
+    preparedByUserId: z.string().uuid().optional(),
   })
   .openapi("DraftProposalRequest");
+
+/**
+ * A change to a DRAFT's head (0084). Every field optional; `null` clears one
+ * (the title excepted — a proposal always has one). Sending nothing is refused
+ * rather than recorded as an edit that changed nothing.
+ */
+const ReviseProposalRequest = z
+  .object({
+    title: z.string().trim().min(1).max(300).optional(),
+    validUntil: DaySchema.nullable().optional(),
+    background: z.string().max(4000).nullable().optional(),
+    addressedToPartyId: z.string().uuid().nullable().optional(),
+    preparedByUserId: z.string().uuid().nullable().optional(),
+  })
+  .openapi("ReviseProposalRequest");
 
 const AddLineRequest = z
   .object({
@@ -505,6 +642,48 @@ const DecisionRequest = z
   })
   .openapi("ProposalDecisionRequest");
 
+/**
+ * Send, or send again — and whether bib emails it (0085). Absent `email` is
+ * the old behaviour: the link comes back and the firm sends it however it
+ * likes. The address is judged by the use case, which names the problem; a
+ * format check here would answer with a schema's words instead.
+ */
+const SendRequest = z
+  .object({
+    email: z
+      .object({
+        to: z.string().min(1).max(320),
+        note: z.string().max(EMAIL_NOTE_MAX).optional().openapi({
+          description:
+            "The colleague's own words, printed above the standard letter. Blank is none.",
+        }),
+      })
+      .optional(),
+  })
+  .openapi("SendProposalRequest");
+
+/**
+ * The client's answer, from the link's page (0085). The token rides in the
+ * BODY like the view's, for the view's reason.
+ */
+const AnswerSharedRequest = z
+  .object({
+    token: z.string().min(1).max(512),
+    decision: z.enum(["accepted", "rejected"]),
+    signerName: z.string().max(SIGNER_NAME_MAX).openapi({
+      description: "The client's full name, as they typed it. Required for either answer.",
+    }),
+    confirmed: z.boolean().optional().openapi({
+      description:
+        "The tick against `acceptanceStatement`. An acceptance without it is refused " +
+        "(`ACCEPTANCE_NOT_CONFIRMED`); a decline ignores it.",
+    }),
+    declinedReason: z.string().max(2000).optional().openapi({
+      description: "Why, on a decline, in the client's words. Optional; ignored on an acceptance.",
+    }),
+  })
+  .openapi("AnswerSharedProposalRequest");
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 const draftRoute = createRoute({
@@ -558,6 +737,32 @@ const getRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
+  },
+});
+
+const reviseRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/proposals/{proposalId}",
+  tags: ["proposals"],
+  summary: "Change a draft proposal's head",
+  description:
+    "Its title, how long it is valid, its Background, and the two names its cover prints — " +
+    "who it is prepared for and who prepared it (0084). A draft only: once sent, the client " +
+    "holds what it said. Answers with the whole proposal, names resolved.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ReviseProposalRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Revised", content: { "application/json": { schema: ProposalRecordSchema } } },
+    400: errorResponse(
+      "Nothing to change, a value that failed validation, a company named where a person " +
+        "belongs, or a colleague who does not work here",
+    ),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("Not a draft, or the person named has no recorded role at this client"),
   },
 });
 
@@ -627,17 +832,50 @@ const sendRoute = createRoute({
   summary: "Send the proposal",
   description:
     "The gate: a discount past the firm's published limit blocks here until somebody " +
-    "holding `proposal:approve` has signed it off.",
-  request: { params: z.object({ proposalId: z.string().uuid() }) },
+    "holding `proposal:approve` has signed it off. With `email`, bib also emails it — the " +
+    "PDF of record attached, with Accept and Decline buttons that open its link (0085); the " +
+    "address is checked before anything moves, and a mail server that will not take the " +
+    "letter comes back as `email.status = \"failed\"` beside a proposal that IS sent.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: SendRequest } }, required: false },
+  },
   responses: {
     200: {
       description: "Sent, with the share link — returned once and never again",
       content: { "application/json": { schema: SentProposalSchema } },
     },
+    400: errorResponse("The email address is not one"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
     409: errorResponse("Not a draft, empty, or an unapproved over-limit discount"),
+  },
+});
+
+const reissueRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/{proposalId}/reissue",
+  tags: ["proposals"],
+  summary: "Give a sent proposal a new link — and, with `email`, email it again",
+  description:
+    "The link is readable once. A firm that lost it, or a client who lost the email, gets a " +
+    "new one here, and THE OLD ONE STOPS WORKING — a proposal has one live link. Only while " +
+    "the proposal is out: answered and expired proposals refuse (0085).",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: SendRequest } }, required: false },
+  },
+  responses: {
+    200: {
+      description: "A new link — returned once and never again",
+      content: { "application/json": { schema: SentProposalSchema } },
+    },
+    400: errorResponse("The email address is not one"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("Not out for an answer — a draft, answered, or expired"),
   },
 });
 
@@ -660,6 +898,56 @@ const viewSharedRoute = createRoute({
       content: { "application/json": { schema: SharedProposalSchema } },
     },
     400: errorResponse("Request failed validation"),
+    404: errorResponse("Not a link we recognise — malformed, unknown and withdrawn are one answer"),
+    409: errorResponse("The proposal has expired"),
+    429: errorResponse("Too many attempts from this address"),
+  },
+});
+
+const answerSharedRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/shared/answer",
+  tags: ["proposals"],
+  summary: "Accept or decline a proposal from its share link",
+  description:
+    "PUBLIC — no session, like the view (0085). The client answers the proposal the firm " +
+    "sent them: a name for either answer, and for an acceptance the tick against " +
+    "`acceptanceStatement`. Once, while the offer stands — a second answer is refused and " +
+    "the first stands. The name, the statement, the address and the browser are kept as the " +
+    "firm's evidence; the colleague who prepared it is emailed.",
+  request: {
+    body: { content: { "application/json": { schema: AnswerSharedRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Answered — the proposal as its recipient now reads it",
+      content: { "application/json": { schema: SharedProposalSchema } },
+    },
+    400: errorResponse("No name typed, or an acceptance with the statement unticked"),
+    404: errorResponse("Not a link we recognise — malformed, unknown and withdrawn are one answer"),
+    409: errorResponse("Already answered, or expired"),
+    429: errorResponse("Too many attempts from this address"),
+  },
+});
+
+const sharedPdfRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/shared/pdf",
+  tags: ["proposals"],
+  summary: "Download the proposal's PDF from its share link",
+  description:
+    "PUBLIC — no session (0085). The PDF of record: the file bib emailed, or — for a " +
+    "proposal nothing has asked for a PDF of yet — rendered and pinned now, so every later " +
+    "download is the same file. The token rides in the BODY, so the page fetches this and " +
+    "saves the bytes itself.",
+  request: {
+    body: { content: { "application/json": { schema: ViewSharedRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "The PDF",
+      content: { "application/pdf": { schema: z.any() } },
+    },
     404: errorResponse("Not a link we recognise — malformed, unknown and withdrawn are one answer"),
     409: errorResponse("The proposal has expired"),
     429: errorResponse("Too many attempts from this address"),
@@ -723,6 +1011,11 @@ function toProposalBody(
     // not a price. It is on the STAFF model only — SharedProposal is a separate
     // shape, so it can never reach the recipient's own screen.
     declinedReason: proposal.declinedReason,
+    // What the document says about the client and who it is between — words
+    // and names, not money.
+    background: proposal.background,
+    addressedToPartyId: proposal.addressedToPartyId,
+    preparedByUserId: proposal.preparedByUserId,
   };
 }
 
@@ -827,6 +1120,100 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
     })),
     totals: toTotalsBody(record.totals, fees),
     approvedBy: record.approvedBy === null ? null : { ...record.approvedBy },
+    addressee:
+      record.addressee === null
+        ? null
+        : {
+            id: record.addressee.id,
+            displayName: record.addressee.displayName,
+            email: record.addressee.email,
+          },
+    preparedBy:
+      record.preparedBy === null
+        ? null
+        : {
+            userId: record.preparedBy.userId,
+            displayName: record.preparedBy.displayName,
+            email: record.preparedBy.email,
+          },
+    sentPdf: record.sentPdf === null ? null : { ...record.sentPdf },
+    emails: record.emails.map((e) => ({
+      id: e.id,
+      to: e.to,
+      note: e.note,
+      sentAt: e.sentAt,
+      sentBy: e.sentBy === null ? null : { ...e.sentBy },
+      pdfContentHash: e.pdfContentHash,
+    })),
+    clientDecision:
+      record.clientDecision === null
+        ? null
+        : {
+            decision: record.clientDecision.decision,
+            signerName: record.clientDecision.signerName,
+            statement: record.clientDecision.statement,
+            decidedAt: record.clientDecision.decidedAt,
+            ipAddress: record.clientDecision.ipAddress,
+            userAgent: record.clientDecision.userAgent,
+            emailedTo: record.clientDecision.emailedTo,
+            pdf: record.clientDecision.pdf === null ? null : { ...record.clientDecision.pdf },
+          },
+  };
+}
+
+/** What sending returned, field by field. */
+function toSentBody(
+  proposal: ProposalRecord["proposal"],
+  shareToken: string,
+  email: EmailOutcome | null,
+  fees: boolean,
+): z.infer<typeof SentProposalSchema> {
+  return {
+    proposal: toProposalBody(proposal, fees),
+    shareToken,
+    email:
+      email === null
+        ? null
+        : email.status === "sent"
+          ? { status: "sent", to: email.to, emailId: email.emailId, sentAt: email.sentAt, reason: null }
+          : { status: "failed", to: email.to, emailId: null, sentAt: null, reason: email.reason },
+  };
+}
+
+/** The recipient's view, field by field — the view and the answer both return
+ *  it, and a field mapped in one and not the other is a page that disagrees
+ *  with itself after the client presses a button. */
+function toSharedBody(shared: SharedProposal): z.infer<typeof SharedProposalSchema> {
+  return {
+    id: shared.id,
+    ref: shared.ref,
+    firmName: shared.firmName,
+    issuedBy: shared.issuedBy,
+    addressedTo: shared.addressedTo,
+    title: shared.title,
+    status: shared.status,
+    currency: shared.currency,
+    validUntil: shared.validUntil,
+    sentAt: shared.sentAt,
+    lines: shared.lines.map((l) => ({
+      description: l.description,
+      quantity: l.quantity,
+      unitAmount: l.unitAmount,
+      discountPercent: l.discountPercent,
+      net: l.net,
+      pricingNote: l.pricingNote,
+      billingFrequency: l.billingFrequency,
+      oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
+    })),
+    totals: { ...shared.totals },
+    blocks: shared.blocks.map((b) => ({
+      kind: b.kind,
+      body: b.body,
+      isHeading: b.isHeading,
+      sortOrder: b.sortOrder,
+    })),
+    answer: shared.answer === null ? null : { ...shared.answer },
+    acceptanceStatement: shared.acceptanceStatement,
   };
 }
 
@@ -874,6 +1261,24 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(reviseRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.revise({
+      tenantId: s.tenantId,
+      proposalId,
+      title: body.title,
+      validUntil: body.validUntil,
+      background: body.background,
+      addressedToPartyId: body.addressedToPartyId,
+      preparedByUserId: body.preparedByUserId,
+    });
     const record = await deps.service.describe(s.tenantId, proposalId);
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });
@@ -960,11 +1365,28 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
-    const { proposal, shareToken } = await deps.service.send(s.tenantId, proposalId, s.actor);
-    return c.json(
-      { proposal: toProposalBody(proposal, seesFees(c.get("principal"))), shareToken },
-      200,
+    const body = c.req.valid("json");
+    const { proposal, shareToken, email } = await deps.service.send(
+      s.tenantId,
+      proposalId,
+      s.actor,
+      body?.email,
     );
+    return c.json(toSentBody(proposal, shareToken, email, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(reissueRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const { proposal, shareToken, email } = await deps.service.reissue(
+      s.tenantId,
+      proposalId,
+      s.actor,
+      body?.email,
+    );
+    return c.json(toSentBody(proposal, shareToken, email, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(viewSharedRoute, async (c) => {
@@ -974,38 +1396,50 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     // be worse than saying plainly that a link was opened.
     const { token } = c.req.valid("json");
     const shared = await deps.service.viewShared(token, SYSTEM_ACTOR);
-    return c.json(
+    return c.json(toSharedBody(shared), 200);
+  });
+
+  app.openapi(answerSharedRoute, async (c) => {
+    // PUBLIC, like the view — the argument is on PUBLIC_PATHS in guards.ts. The
+    // SYSTEM actor for the ledger, for the view's reason; the NAME the client
+    // typed is the evidence, and it lives in the erasable row, not the log.
+    const body = c.req.valid("json");
+    // The address as the rate limiter derived it — the one place that knows
+    // which address this deployment may believe. Its fail-closed shared key
+    // is not an address, and is recorded as none.
+    const clientKey = c.get("clientKey");
+    const userAgent = c.req.header("user-agent");
+    const shared = await deps.service.answerShared(
       {
-        id: shared.id,
-        ref: shared.ref,
-        firmName: shared.firmName,
-        issuedBy: shared.issuedBy,
-        addressedTo: shared.addressedTo,
-        title: shared.title,
-        status: shared.status,
-        currency: shared.currency,
-        validUntil: shared.validUntil,
-        sentAt: shared.sentAt,
-        lines: shared.lines.map((l) => ({
-          description: l.description,
-          quantity: l.quantity,
-          unitAmount: l.unitAmount,
-          discountPercent: l.discountPercent,
-          net: l.net,
-          pricingNote: l.pricingNote,
-          billingFrequency: l.billingFrequency,
-          oopEstimate: l.oopEstimate === null ? null : { ...l.oopEstimate },
-        })),
-        totals: { ...shared.totals },
-        blocks: shared.blocks.map((b) => ({
-          kind: b.kind,
-          body: b.body,
-          isHeading: b.isHeading,
-          sortOrder: b.sortOrder,
-        })),
+        token: body.token,
+        decision: body.decision,
+        signerName: body.signerName,
+        confirmed: body.confirmed ?? false,
+        declinedReason: body.declinedReason,
+        ipAddress:
+          clientKey === null || clientKey === "unknown-client" ? null : clientKey.slice(0, 64),
+        userAgent: userAgent === undefined || userAgent === "" ? null : userAgent.slice(0, 512),
       },
-      200,
+      SYSTEM_ACTOR,
     );
+    return c.json(toSharedBody(shared), 200);
+  });
+
+  app.openapi(sharedPdfRoute, async (c) => {
+    // PUBLIC. The same bytes the email attached — see `sharedPdf`.
+    const { token } = c.req.valid("json");
+    const pdf = await deps.service.sharedPdf(token, SYSTEM_ACTOR);
+    return new Response(pdf.bytes, {
+      status: 200,
+      headers: {
+        "content-type": "application/pdf",
+        "content-length": String(pdf.bytes.byteLength),
+        "content-disposition": `attachment; filename="${pdf.filename.replace(/[^\w.-]/g, "_")}"`,
+        "x-content-type-options": "nosniff",
+        // A capability's bytes: nothing in between keeps a copy.
+        "cache-control": "private, no-store",
+      },
+    });
   });
 
   app.openapi(decideRoute, async (c) => {

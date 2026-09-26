@@ -141,6 +141,38 @@ describe("a letter handed to a real relay", () => {
     expect(received.length).toBe(before + 1);
   });
 
+  it("carries a proposal as the FIRM, with a reply-to and the PDF attached (0085)", async () => {
+    // The three things 0085 added to a letter, through a real relay: the
+    // display name is the firm's while the ADDRESS stays the one this relay
+    // authenticates, a reply goes to the colleague, and the PDF is a real MIME
+    // attachment rather than a link to one.
+    await mailerOn(port).sendProposal({
+      to: "priya@nexusfintech.in",
+      replyTo: "sahil@10xglobal.in",
+      firmName: "10X Global Inc.",
+      preparedBy: "Sahil Kohli",
+      greetingName: "Priya Sharma",
+      clientName: "Nexus Fintech",
+      ref: "PR-2026-0001",
+      title: "Proposal for Services",
+      validUntil: "2026-10-31",
+      note: null,
+      viewUrl: "https://app.10xglobal.in/p/t.s",
+      acceptUrl: "https://app.10xglobal.in/p/t.s?answer=accept",
+      declineUrl: "https://app.10xglobal.in/p/t.s?answer=decline",
+      pdf: { filename: "PR-2026-0001.pdf", bytes: new TextEncoder().encode("%PDF-1.7 test") },
+    });
+    const raw = received.at(-1);
+    expect(raw).toBeDefined();
+    if (raw === undefined) return;
+    expect(raw).toContain('From: "10X Global Inc." <no-reply@10xglobal.in>');
+    expect(raw).toContain("Reply-To: sahil@10xglobal.in");
+    expect(raw).toContain("Subject: Proposal PR-2026-0001 from 10X Global Inc.");
+    expect(raw).toContain("multipart/mixed");
+    expect(raw).toContain("Content-Type: application/pdf; name=PR-2026-0001.pdf");
+    expect(raw).toContain("Content-Disposition: attachment; filename=PR-2026-0001.pdf");
+  });
+
   it("REJECTS when the relay is unreachable, which is what the swallow rests on", async () => {
     // `IdentityService.requestMagicLink` swallows this deliberately, so that a
     // failed send cannot be told apart from an unknown account. That decision

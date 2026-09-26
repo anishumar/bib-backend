@@ -33,8 +33,10 @@ import type {
   ProposalStatus,
 } from "../../domain/proposal/model";
 import {
+  acceptanceStatement,
   canTransition,
   composeShareToken,
+  isEmailAddress,
   isPastValidity,
   isProposalDecision,
   largestDiscount,
@@ -79,18 +81,39 @@ import {
   ShareLinkUnknown,
   ServiceNotPublished,
   ProposalIssuerNotAFirmEntity,
+  ProposalAddresseeNotAPerson,
+  ProposalAddresseeNotLinked,
+  PreparerNotStaff,
+  NothingToRevise,
+  AcceptanceNotConfirmed,
+  AlreadyAnswered,
+  EmailUnavailable,
+  InvalidRecipient,
+  NotOutForAnswer,
+  SignerNameRequired,
 } from "../../domain/proposal/errors";
+import { dayInZone } from "../../domain/scheduler/zone";
 import type {
+  ClientStructureDirectory,
   DocumentIdentity,
+  FiledPdf,
+  FirmTimeZone,
   PartyStanding,
   PolicyDirectory,
   ProposalFilters,
+  ProposalLinks,
+  ProposalMailer,
+  ProposalPdfs,
+  ProposalRecord,
   ProposalRepository,
+  ProposalRevision,
   ProposalView,
   ProposalSummary,
   ServiceCatalogue,
   ShareLinkTokens,
   SharedProposal,
+  SharedProposalRecord,
+  StaffDirectory,
 } from "./ports";
 
 export interface Deps {
@@ -106,9 +129,74 @@ export interface Deps {
   readonly parties: PartyStanding;
   /** Mints the share link and hashes it. Only the digest is ever stored. */
   readonly shareTokens: ShareLinkTokens;
+  /** The client's structure — whom "Prepared for" may name (F-10-1, 0084). */
+  readonly structure: ClientStructureDirectory;
+  /** The firm's zone, for the day that structure is read on. */
+  readonly timeZones: FirmTimeZone;
+  /** Whether "Prepared by" names a colleague (0084). */
+  readonly staff: StaffDirectory;
+  /**
+   * The two letters of 0085 — the proposal to the client, and the notice to
+   * the colleague who prepared it when the client answers.
+   *
+   * NULLABLE, and null in exactly one place: the worker, which composes this
+   * service so the letter use case can read a quote and never sends one. It
+   * holds no SMTP password (infra/terraform/run_worker.tf), so it is given no
+   * mailer, and an email asked of it is refused by name before anything moves
+   * rather than logged as sent.
+   */
+  readonly mailer: ProposalMailer | null;
+  /** The proposal as a PDF, rendered and filed through the document store. */
+  readonly pdfs: ProposalPdfs;
+  /** Where a letter's links point. */
+  readonly links: ProposalLinks;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+}
+
+/**
+ * An email a colleague asked Send to write (0085): where to, and their own
+ * words above the standard letter.
+ */
+export interface EmailRequest {
+  readonly to: string;
+  readonly note?: string | undefined;
+}
+
+/**
+ * What happened to that email.
+ *
+ * `failed` is an ordinary answer, not an exception, because by the time a
+ * letter is written the proposal HAS been sent and its link DOES work — both
+ * facts the person who pressed Send needs, together with the one that went
+ * wrong. Throwing would lose the link, which is readable exactly once.
+ */
+export type EmailOutcome =
+  | {
+      readonly status: "sent";
+      readonly to: string;
+      readonly emailId: string;
+      readonly sentAt: string;
+    }
+  | { readonly status: "failed"; readonly to: string; readonly reason: string };
+
+/**
+ * The client's answer, as their page sends it (0085).
+ *
+ * `confirmed` is the tick against `acceptanceStatement`; an acceptance without
+ * it is refused, which is what makes the answer a statement rather than a
+ * click. The address and browser are as the API derived them — evidence, never
+ * checked against anything.
+ */
+export interface SharedAnswerInput {
+  readonly token: string;
+  readonly decision: string;
+  readonly signerName: string;
+  readonly confirmed: boolean;
+  readonly declinedReason?: string | undefined;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
 }
 
 export interface DraftProposalInput {
@@ -140,6 +228,32 @@ export interface DraftProposalInput {
   readonly fxRate: string;
   readonly fxRateDate: string;
   readonly validUntil?: string | undefined;
+  /** The Background paragraph — what the firm says about the client's
+   *  business. Blank is "none". */
+  readonly background?: string | undefined;
+  /** The PERSON at the client it is prepared for: a person recorded in the
+   *  client's structure (F-10-1), the letter's addressee rule. */
+  readonly addressedToPartyId?: string | undefined;
+  /**
+   * The colleague the cover names under "Prepared by". ABSENT means whoever is
+   * drafting — which is what "prepared by" means — and a system actor drafts
+   * with nobody named.
+   */
+  readonly preparedByUserId?: string | undefined;
+}
+
+/**
+ * A change to a draft's head (0084). Absent leaves a field as it is; `null`
+ * clears it. The title cannot be cleared — a proposal always has one.
+ */
+export interface ReviseProposalInput {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly title?: string | undefined;
+  readonly validUntil?: string | null | undefined;
+  readonly background?: string | null | undefined;
+  readonly addressedToPartyId?: string | null | undefined;
+  readonly preparedByUserId?: string | null | undefined;
 }
 
 /**
@@ -153,6 +267,9 @@ export interface DraftProposalInput {
 export interface SendResult {
   readonly proposal: Proposal;
   readonly shareToken: string;
+  /** What happened to the email, when one was asked for — null when the
+   *  colleague took the link to send themselves (0085). */
+  readonly email: EmailOutcome | null;
 }
 
 export interface AddLineInput {
@@ -220,6 +337,13 @@ export class ProposalService {
     }
     // Before the reference is drawn, so a refusal spends no number (0305).
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    // The two names on the cover (0084), before the number too.
+    if (input.addressedToPartyId !== undefined) {
+      await this.requireContact(input.tenantId, input.partyId, input.addressedToPartyId);
+    }
+    if (input.preparedByUserId !== undefined) {
+      await this.requireStaff(input.tenantId, input.preparedByUserId);
+    }
 
     // WHO is offering, before anything is written. Named by the caller, or
     // resolved from the firm's own rule — never guessed here, and never left
@@ -259,6 +383,10 @@ export class ProposalService {
       fxRate: input.fxRate,
       fxRateDate: input.fxRateDate,
       validUntil: input.validUntil ?? null,
+      background: blankToNull(input.background),
+      addressedToPartyId: input.addressedToPartyId ?? null,
+      // Prepared by whoever is preparing it, unless the caller named somebody.
+      preparedByUserId: input.preparedByUserId ?? (actor.type === "human" ? actor.id : null),
     });
 
     // The firm's standard prose, COPIED onto this document (G1.7). After the
@@ -293,9 +421,83 @@ export class ProposalService {
         currency: proposal.currency,
         fxRate: proposal.fxRate,
         fxRateDate: proposal.fxRateDate,
+        // Ids, erasable where they point; the names stay out of the log.
+        addressedToPartyId: proposal.addressedToPartyId,
+        preparedByUserId: proposal.preparedByUserId,
       },
     });
     return proposal;
+  }
+
+  /**
+   * Change what a DRAFT says about itself (0084) — its title, how long it is
+   * valid, its Background, and the two names on its cover.
+   *
+   * A draft only, like every other change to a proposal's content: once it has
+   * been sent, the client holds what it said. No event, deliberately, the same
+   * as adding or removing a line — the ledger records what happened TO a
+   * proposal (drafted, sent, viewed, decided), and a draft being written is not
+   * a transition. What went out is recorded by `proposal.sent` and by the PDF
+   * the store keeps.
+   */
+  async revise(input: ReviseProposalInput): Promise<Proposal> {
+    const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
+    const change: {
+      title?: string;
+      validUntil?: string | null;
+      background?: string | null;
+      addressedToPartyId?: string | null;
+      preparedByUserId?: string | null;
+    } = {};
+    if (input.title !== undefined) change.title = input.title.trim();
+    if (input.validUntil !== undefined) change.validUntil = input.validUntil;
+    if (input.background !== undefined) change.background = blankToNull(input.background ?? undefined);
+    if (input.addressedToPartyId !== undefined) {
+      if (input.addressedToPartyId !== null) {
+        await this.requireContact(input.tenantId, proposal.partyId, input.addressedToPartyId);
+      }
+      change.addressedToPartyId = input.addressedToPartyId;
+    }
+    if (input.preparedByUserId !== undefined) {
+      if (input.preparedByUserId !== null) await this.requireStaff(input.tenantId, input.preparedByUserId);
+      change.preparedByUserId = input.preparedByUserId;
+    }
+    if (Object.keys(change).length === 0) throw new NothingToRevise();
+
+    const revision: ProposalRevision = change;
+    const revised = await this.deps.proposals.revise(input.tenantId, input.proposalId, revision);
+    // Sent between the read above and the write: the WHERE clause refused it.
+    if (revised === null) throw new NotADraft((await this.findOrThrow(input.tenantId, input.proposalId)).status);
+    return revised;
+  }
+
+  /** "Prepared for" is a PERSON with a recorded role in the client's structure
+   *  — the letter's addressee rule, on the same read (F-10-1). */
+  private async requireContact(
+    tenantId: string,
+    clientPartyId: string,
+    personPartyId: string,
+  ): Promise<void> {
+    const person = await this.deps.parties.findParty(tenantId, personPartyId);
+    if (person !== null && person.kind !== "person") {
+      throw new ProposalAddresseeNotAPerson(person.displayName);
+    }
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const today = dayInZone(this.deps.clock.now().toISOString(), zone);
+    const structure = await this.deps.structure.structureOf(tenantId, clientPartyId, today);
+    if (structure.people.some((p) => p.id === personPartyId)) return;
+    const client = await this.deps.parties.findParty(tenantId, clientPartyId);
+    throw new ProposalAddresseeNotLinked(
+      person?.displayName ?? personPartyId,
+      client?.displayName ?? clientPartyId,
+    );
+  }
+
+  /** "Prepared by" is somebody who works here: the key points at a GLOBAL
+   *  account table and would accept anybody. */
+  private async requireStaff(tenantId: string, userId: string): Promise<void> {
+    if (await this.deps.staff.isActiveStaff(tenantId, userId)) return;
+    throw new PreparerNotStaff(userId);
   }
 
   /** Quote one thing, from one frozen catalogue version. */
@@ -519,9 +721,22 @@ export class ProposalService {
   /**
    * Send it. The gate the acceptance criteria names: an over-limit discount
    * blocks here until it has been approved.
+   *
+   * With `email` (0085), bib also emails it: the PDF of record attached, and
+   * Accept and Decline buttons that open the link's page. The address is
+   * checked BEFORE anything moves, so a typo is a refusal and not a sent
+   * proposal nobody received. What can fail AFTER the proposal moved — the
+   * render, the mail server — comes back as `email.status = "failed"` beside
+   * the link, never as an exception that would lose the link.
    */
-  async send(tenantId: string, proposalId: string, actor: Actor): Promise<SendResult> {
+  async send(
+    tenantId: string,
+    proposalId: string,
+    actor: Actor,
+    email?: EmailRequest,
+  ): Promise<SendResult> {
     const proposal = await this.draftOrThrow(tenantId, proposalId);
+    const request = email === undefined ? null : this.checkEmail(email);
     const lines = await this.deps.proposals.listLines(tenantId, proposalId);
     if (lines.length === 0) throw new EmptyProposal();
 
@@ -533,20 +748,7 @@ export class ProposalService {
     }
 
     const sent = await this.moveTo(proposal, "sent");
-
-    // The link is minted HERE, at the moment of sending, and returned exactly
-    // once. Only its digest is stored, so this is the only time anybody can
-    // read it — the same contract as a magic link, for the same reason: a
-    // leaked backup then contains nothing anyone can open.
-    //
-    // The tenant travels inside the token so that opening it is still a
-    // tenant-scoped read. See composeShareToken.
-    const shareToken = composeShareToken(tenantId, this.deps.shareTokens.newToken());
-    await this.deps.proposals.attachShareToken(
-      tenantId,
-      proposalId,
-      this.deps.shareTokens.hash(shareToken),
-    );
+    const shareToken = await this.issueLink(tenantId, proposalId);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "proposal.sent",
@@ -560,7 +762,52 @@ export class ProposalService {
         validUntil: proposal.validUntil,
       },
     });
-    return { proposal: sent, shareToken };
+    if (request === null) return { proposal: sent, shareToken, email: null };
+
+    const outcome = await this.deliver(sent, shareToken, request, actor);
+    return { proposal: await this.findOrThrow(tenantId, proposalId), shareToken, email: outcome };
+  }
+
+  /**
+   * A NEW LINK for a proposal that is out, and — with `email` — a new email
+   * carrying it (0085).
+   *
+   * The link is readable once, so a firm that lost it, or a client who lost
+   * the email, needs another; the old one stops working the moment this one
+   * exists, because a proposal has one live link (0014's digest column). That
+   * is the trade the staff page states before anybody presses it.
+   *
+   * Only while the proposal is `sent`: an answered proposal is final and an
+   * expired one is a new quote, so neither has anything a new link could do.
+   */
+  async reissue(
+    tenantId: string,
+    proposalId: string,
+    actor: Actor,
+    email?: EmailRequest,
+  ): Promise<SendResult> {
+    const proposal = await this.findOrThrow(tenantId, proposalId);
+    const request = email === undefined ? null : this.checkEmail(email);
+
+    const now = this.deps.clock.now().toISOString();
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+      await this.expire(proposal, actor);
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+    if (proposal.status !== "sent") throw new NotOutForAnswer(proposal.status);
+
+    const shareToken = await this.issueLink(tenantId, proposalId);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "proposal.link_reissued",
+      objectId: proposal.id,
+      actor,
+      payload: { partyId: proposal.partyId, emailed: request !== null },
+    });
+    if (request === null) return { proposal, shareToken, email: null };
+
+    const outcome = await this.deliver(proposal, shareToken, request, actor);
+    return { proposal: await this.findOrThrow(tenantId, proposalId), shareToken, email: outcome };
   }
 
   /**
@@ -573,10 +820,10 @@ export class ProposalService {
    *   apart lets somebody probing learn which firms exist and which links used
    *   to — and a real recipient cannot act on the difference anyway.
    *
-   *   It does not let the recipient ACCEPT. Binding a firm to a client's click
-   *   on an unauthenticated link is a bigger decision than this task; staff
-   *   record the decision, and the board says so rather than this quietly
-   *   deciding it.
+   *   It does not ANSWER. Opening is reading; the answer is `answerShared`, a
+   *   separate request with a name typed and — for an acceptance — a statement
+   *   ticked. Mail scanners open every link in an email to check it, so an
+   *   answer that happened on opening would be given by a scanner (0085).
    *
    *   It does not return the staff read model with fields nulled. `SharedProposal`
    *   is its own shape, so a field added for colleagues cannot reach a client's
@@ -613,23 +860,130 @@ export class ProposalService {
         payload: { via: "share_link" },
       });
     }
-    // The document's own prose, from the module that owns it — the same seam
-    // `describe` uses. Only the words travel: a recipient is not told which
-    // lines are house wording and which were written for them.
-    const blocks = await this.deps.documents.listBlocks(parsed.tenantId, {
-      kind: "proposal",
-      id: shared.id,
+    return this.withProse(parsed.tenantId, shared);
+  }
+
+  /**
+   * The CLIENT answers, on the link's page (0085).
+   *
+   * ── WHY THIS IS SAFE ON A LINK WITH NO SESSION ──────────────────────────
+   *
+   * The link is the capability the firm handed this client on purpose, and
+   * the one act it now authorises is the one the firm sent it to invite: yes
+   * or no, once, while the offer stands. It cannot change a price, a line or
+   * a date, and it cannot be undone into a different answer — the status is
+   * terminal and the repository writes it only while the proposal is `sent`.
+   * It is a POST with a typed name, so the mail scanners that open every link
+   * in an email cannot give it; an acceptance also needs the statement ticked.
+   *
+   * ── WHAT IS KEPT ────────────────────────────────────────────────────────
+   *
+   * The name, the statement word for word, the email whose link was used, the
+   * PDF of record, and the address and browser — in the erasable evidence row,
+   * never the ledger. The events say only that the answer came through the
+   * link, with the PDF's fingerprint.
+   *
+   * A render failing does not refuse the answer: the client answered what they
+   * were shown, and the evidence row records that no PDF could be filed.
+   */
+  async answerShared(input: SharedAnswerInput, actor: Actor): Promise<SharedProposal> {
+    const decision = input.decision;
+    if (!isProposalDecision(decision)) throw new InvalidDecision(decision);
+    const { tenantId, digest, proposal } = await this.openLink(input.token);
+
+    if (proposal.status === "accepted" || proposal.status === "rejected") {
+      throw new AlreadyAnswered(proposal.status);
+    }
+    const now = this.deps.clock.now().toISOString();
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+      await this.expire(proposal, actor);
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+    if (proposal.status === "expired") {
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+
+    const signerName = input.signerName.trim();
+    if (signerName === "") throw new SignerNameRequired();
+    if (decision === "accepted" && !input.confirmed) throw new AcceptanceNotConfirmed();
+
+    const record = await this.recordOrThrow(tenantId, proposal.id);
+    const statement =
+      decision === "accepted" ? acceptanceStatement(proposal.ref, record.party.displayName) : null;
+    const pdf = await this.pdfOfRecord(proposal, actor).catch(() => null);
+    const email = await this.deps.proposals.findEmailByLink(tenantId, proposal.id, digest);
+    const reason = decision === "rejected" ? blankToNull(input.declinedReason) : null;
+
+    const decided = await this.deps.proposals.recordClientAnswer({
+      id: this.deps.ids.newId(),
+      tenantId,
+      proposalId: proposal.id,
+      decision,
+      declinedReason: reason,
+      signerName,
+      statement,
+      emailId: email?.id ?? null,
+      pdfVersionId: pdf?.versionId ?? null,
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+      decidedAt: now,
     });
-    return {
-      ...shared,
-      status: shared.status,
-      blocks: blocks.map((b) => ({
-        kind: b.kind,
-        body: b.body,
-        isHeading: b.isHeading,
-        sortOrder: b.sortOrder,
-      })),
-    };
+    if (decided === null) {
+      // Answered a moment ago — another tab, another person holding the link.
+      // The first answer stands, and this one is told what it was.
+      const current = await this.findOrThrow(tenantId, proposal.id);
+      if (current.status === "accepted" || current.status === "rejected") {
+        throw new AlreadyAnswered(current.status);
+      }
+      throw new ProposalExpired(current.validUntil ?? now.slice(0, 10));
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: decision === "accepted" ? "proposal.accepted" : "proposal.rejected",
+      objectId: proposal.id,
+      actor,
+      // The shape `decide` records, plus WHERE it came from. The name, the
+      // address and the browser are personal and stay in the evidence row.
+      payload: {
+        partyId: proposal.partyId,
+        decision: decision satisfies ProposalDecision,
+        declinedReasonRecorded: reason !== null,
+        via: "share_link",
+        emailId: email?.id ?? null,
+        pdfContentHash: pdf?.contentHash ?? null,
+      },
+    });
+    await this.tellPreparer(record, decided, signerName, reason);
+
+    const shared = await this.deps.proposals.findShared(tenantId, digest);
+    if (shared === null) throw new ShareLinkUnknown();
+    return this.withProse(tenantId, shared);
+  }
+
+  /**
+   * The PDF of record, for the link's Download button (0085).
+   *
+   * The same file the email attached, and filed now if nothing has asked for
+   * it yet — a proposal sent before 0085, or one sent without an email. An
+   * answered proposal still downloads: it is the client's copy of what they
+   * answered. An expired one does not, for the reason its page does not open.
+   */
+  async sharedPdf(
+    token: string,
+    actor: Actor,
+  ): Promise<{ readonly filename: string; readonly bytes: Uint8Array }> {
+    const { tenantId, proposal } = await this.openLink(token);
+    const now = this.deps.clock.now().toISOString();
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+      await this.expire(proposal, actor);
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+    if (proposal.status === "expired") {
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+    const pdf = await this.pdfOfRecord(proposal, actor);
+    return { filename: pdf.filename, bytes: await this.deps.pdfs.bytes(tenantId, pdf) };
   }
 
   /**
@@ -689,6 +1043,212 @@ export class ProposalService {
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
+
+  /**
+   * An email request, checked before anything moves: an address that is not
+   * one, or a process with no mailer, must refuse the SEND — not produce a sent
+   * proposal whose email never had a chance.
+   */
+  private checkEmail(email: EmailRequest): { readonly to: string; readonly note: string | null } {
+    if (this.deps.mailer === null) throw new EmailUnavailable();
+    const to = email.to.trim();
+    if (!isEmailAddress(to)) throw new InvalidRecipient(email.to);
+    return { to, note: blankToNull(email.note) };
+  }
+
+  /**
+   * Mint a link and make it THE link — returned exactly once. Only its digest
+   * is stored, so this is the only time anybody can read it: the same contract
+   * as a magic link, for the same reason — a leaked backup then contains
+   * nothing anyone can open. The tenant travels inside the token so opening it
+   * is still a tenant-scoped read (see `composeShareToken`).
+   */
+  private async issueLink(tenantId: string, proposalId: string): Promise<string> {
+    const shareToken = composeShareToken(tenantId, this.deps.shareTokens.newToken());
+    await this.deps.proposals.attachShareToken(
+      tenantId,
+      proposalId,
+      this.deps.shareTokens.hash(shareToken),
+    );
+    return shareToken;
+  }
+
+  /**
+   * Write the email and hand it over. Everything that can fail here — the
+   * render, reading the bytes, the mail server — comes back as `failed` with
+   * the reason, because the proposal has already been sent and the caller
+   * holds the only copy of its link. The mail adapter has already logged a
+   * refusal loudly; this is the half the person at the screen reads.
+   */
+  private async deliver(
+    proposal: Proposal,
+    shareToken: string,
+    request: { readonly to: string; readonly note: string | null },
+    actor: Actor,
+  ): Promise<EmailOutcome> {
+    const mailer = this.deps.mailer;
+    if (mailer === null) throw new EmailUnavailable();
+
+    let pdf: FiledPdf;
+    try {
+      pdf = await this.pdfOfRecord(proposal, actor);
+      const record = await this.recordOrThrow(proposal.tenantId, proposal.id);
+      const viewUrl = this.deps.links.shareUrl(shareToken);
+      await mailer.sendProposal({
+        to: request.to,
+        replyTo: record.preparedBy?.email ?? null,
+        firmName: record.firmName,
+        preparedBy: record.preparedBy?.displayName ?? null,
+        greetingName: record.addressee?.displayName ?? null,
+        clientName: record.party.displayName,
+        ref: proposal.ref,
+        title: proposal.title,
+        validUntil: proposal.validUntil,
+        note: request.note,
+        viewUrl,
+        // Each opens the page with that answer ready and nothing given: the
+        // answer is a separate POST with a name, which a scanner cannot make.
+        acceptUrl: `${viewUrl}?answer=accept`,
+        declineUrl: `${viewUrl}?answer=decline`,
+        pdf: { filename: pdf.filename, bytes: await this.deps.pdfs.bytes(proposal.tenantId, pdf) },
+      });
+    } catch (err) {
+      return {
+        status: "failed",
+        to: request.to,
+        reason: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    const sentAt = this.deps.clock.now().toISOString();
+    const sent = await this.deps.proposals.recordEmail({
+      id: this.deps.ids.newId(),
+      tenantId: proposal.tenantId,
+      proposalId: proposal.id,
+      toEmail: request.to,
+      note: request.note,
+      pdfVersionId: pdf.versionId,
+      linkDigest: this.deps.shareTokens.hash(shareToken),
+      sentBy: actor.type === "human" ? actor.id : null,
+      sentAt,
+    });
+    await this.deps.events.recordEvent({
+      tenantId: proposal.tenantId,
+      verb: "proposal.emailed",
+      objectId: proposal.id,
+      actor,
+      // The email's id and the PDF's fingerprint — never the address, which is
+      // personal and lives in the erasable row (0085).
+      payload: {
+        partyId: proposal.partyId,
+        emailId: sent.id,
+        pdfContentHash: pdf.contentHash,
+        noteWritten: request.note !== null,
+      },
+    });
+    return { status: "sent", to: request.to, emailId: sent.id, sentAt };
+  }
+
+  /**
+   * THE PDF OF RECORD — the pinned one, or a render filed and pinned now.
+   *
+   * Pinned once and never re-rendered after, because a render reads the
+   * firm's brand assets as they stand today and "the proposal they accepted"
+   * must not change when somebody uploads a new logo. Two callers racing to
+   * pin both render; the repository keeps the first, and the second is handed
+   * that one, so everybody downstream cites the same file.
+   */
+  private async pdfOfRecord(proposal: Proposal, actor: Actor): Promise<FiledPdf> {
+    const { tenantId } = proposal;
+    const current = await this.findOrThrow(tenantId, proposal.id);
+    if (current.sentPdfVersionId !== null) {
+      const pinned = await this.deps.proposals.findPdf(tenantId, current.sentPdfVersionId);
+      if (pinned !== null) return pinned;
+    }
+    const filed = await this.deps.pdfs.file(tenantId, proposal.id, actor);
+    const pinnedId = await this.deps.proposals.pinSentPdf(tenantId, proposal.id, filed.versionId);
+    if (pinnedId === filed.versionId) return filed;
+    return (await this.deps.proposals.findPdf(tenantId, pinnedId)) ?? filed;
+  }
+
+  /** A share token, resolved the way `viewShared` resolves one: malformed,
+   *  unknown and withdrawn are one answer. */
+  private async openLink(
+    token: string,
+  ): Promise<{ readonly tenantId: string; readonly digest: string; readonly proposal: Proposal }> {
+    const parsed = parseShareToken(token);
+    if (parsed === null) throw new ShareLinkUnknown();
+    const digest = this.deps.shareTokens.hash(token);
+    const proposalId = await this.deps.proposals.findIdByShareDigest(parsed.tenantId, digest);
+    if (proposalId === null) throw new ShareLinkUnknown();
+    const proposal = await this.deps.proposals.findById(parsed.tenantId, proposalId);
+    if (proposal === null) throw new ShareLinkUnknown();
+    return { tenantId: parsed.tenantId, digest, proposal };
+  }
+
+  private async recordOrThrow(tenantId: string, proposalId: string): Promise<ProposalRecord> {
+    const record = await this.deps.proposals.describe(tenantId, proposalId);
+    if (record === null) throw new ProposalNotFound(proposalId);
+    return record;
+  }
+
+  /** The recipient's view with the document's own prose and the acceptance
+   *  statement — the two things the proposal table does not own. */
+  private async withProse(
+    tenantId: string,
+    shared: SharedProposalRecord,
+  ): Promise<SharedProposal> {
+    // The document's own prose, from the module that owns it — the same seam
+    // `describe` uses. Only the words travel: a recipient is not told which
+    // lines are house wording and which were written for them.
+    const blocks = await this.deps.documents.listBlocks(tenantId, {
+      kind: "proposal",
+      id: shared.id,
+    });
+    return {
+      ...shared,
+      blocks: blocks.map((b) => ({
+        kind: b.kind,
+        body: b.body,
+        isHeading: b.isHeading,
+        sortOrder: b.sortOrder,
+      })),
+      acceptanceStatement: acceptanceStatement(shared.ref, shared.addressedTo),
+    };
+  }
+
+  /**
+   * Tell the colleague who prepared it that the client answered (0085).
+   *
+   * After the answer is recorded and never able to undo it: the client's
+   * answer stands whatever happens to a notice about it. A refusal is not
+   * swallowed silently — the mail adapter logs every letter the relay would
+   * not take — it is only kept from failing the client's request.
+   */
+  private async tellPreparer(
+    record: ProposalRecord,
+    decided: Proposal,
+    signerName: string,
+    declinedReason: string | null,
+  ): Promise<void> {
+    const mailer = this.deps.mailer;
+    const to = record.preparedBy?.email;
+    if (mailer === null || to === undefined) return;
+    if (decided.status !== "accepted" && decided.status !== "rejected") return;
+    await mailer
+      .sendDecisionNotice({
+        to,
+        clientName: record.party.displayName,
+        ref: decided.ref,
+        title: decided.title,
+        decision: decided.status,
+        signerName,
+        decidedAt: decided.decidedAt ?? this.deps.clock.now().toISOString(),
+        declinedReason,
+        proposalUrl: this.deps.links.staffUrl(decided.id),
+      })
+      .catch(() => undefined);
+  }
 
   private async findOrThrow(tenantId: string, proposalId: string): Promise<Proposal> {
     const proposal = await this.deps.proposals.findById(tenantId, proposalId);
