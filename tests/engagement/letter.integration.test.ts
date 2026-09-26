@@ -417,7 +417,7 @@ async function nameTheFirmSignatory(): Promise<void> {
   signatoryNamed = true;
 }
 
-async function signedLetter(advance?: string): Promise<string> {
+async function signedLetter(advance?: string, layout?: "classic"): Promise<string> {
   const letter = await service.draft(
     {
       tenantId: tenantA,
@@ -432,6 +432,12 @@ async function signedLetter(advance?: string): Promise<string> {
     },
     SYSTEM_ACTOR,
   );
+  // A letter in the layout every letter issued before 0083 went out in. Set
+  // while it is a DRAFT, the only time anything may set it; nothing in the
+  // product does, because the product drafts in the current layout.
+  if (layout !== undefined) {
+    await owner`UPDATE crm.engagement_letter SET layout = ${layout} WHERE id = ${letter.id}`;
+  }
   await service.addLine({
     tenantId: tenantA,
     letterId: letter.id,
@@ -1507,30 +1513,40 @@ describe("the signature blocks a letter PRINTS (0080)", () => {
   // table, and a join nobody executed is how a PDF ships with a blank name.
   const source = new PostgresRenderSource(app, () => Promise.resolve(null));
 
+  // EVERY LETTER DRAFTED SINCE 0083 PRINTS IN THE ANNEXURE LAYOUT, where both
+  // blocks sit on the cover letter: the firm's under "Yours sincerely", the
+  // client's under the acceptance.
   it("prints the firm's block by NAME once sent, and the client's block on the anchors DocuSign looks for", async () => {
     await nameTheFirmSignatory();
     const id = await signedLetter();
 
     const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+    const cover = described?.document.annexureLetter?.cover;
 
-    expect(described?.document.signatures).toEqual([
-      {
-        heading: "For EL Test A LLP",
-        lines: ["Siddharth Jain", "Director"],
-        signAnchor: null,
-        dateAnchor: null,
-        // No brand asset was uploaded, so nothing was pinned at send and the
-        // block prints a bare rule (0081). Asserted rather than left off: null
-        // here is the state every letter issued before the pin existed is in.
-        image: null,
-      },
-      {
-        heading: "Accepted for and on behalf of Acme Ltd",
-        lines: ["Priya Menon"],
-        signAnchor: CLIENT_SIGN_ANCHOR,
-        dateAnchor: CLIENT_DATE_ANCHOR,
-      },
-    ]);
+    expect(cover?.firm).toEqual({
+      heading: "For EL Test A LLP",
+      // The signatory's address under their name — "you may reach out to the
+      // undersigned" — as the firm's own template prints it.
+      lines: ["Siddharth Jain", "Director", `firm-signatory-${stamp}@example.test`],
+      signAnchor: null,
+      dateAnchor: null,
+      // No brand asset was uploaded, so nothing was pinned at send and the
+      // block prints a bare rule (0081).
+      image: null,
+    });
+    expect(cover?.client).toEqual({
+      // WHO the client signs for: itself, and every company a line is for.
+      heading:
+        "Accepted for and on behalf of Acme Ltd, for itself and on behalf of Acme Foods Ltd " +
+        "and Acme Logistics Ltd",
+      lines: ["Priya Menon"],
+      signAnchor: CLIENT_SIGN_ANCHOR,
+      dateAnchor: CLIENT_DATE_ANCHOR,
+    });
+    // And none of the classic document's parts: the annexure letter IS the
+    // document.
+    expect(described?.document.signatures).toBeUndefined();
+    expect(described?.document.terms).toBeUndefined();
   });
 
   // THE CLIENT'S BLOCK NEVER CARRIES A MARK, whatever the firm has uploaded.
@@ -1543,19 +1559,51 @@ describe("the signature blocks a letter PRINTS (0080)", () => {
 
     const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
 
-    expect(described?.document.signatures?.[1]).not.toHaveProperty("image");
+    expect(described?.document.annexureLetter?.cover.client).not.toHaveProperty("image");
   });
 
-  // The clauses the letter PINNED reach the page. Until 0081 the render source
-  // read `crm.document_block` and nothing else, so a contract's actual terms
-  // were on the firm's screen, inside the content hash, and absent from the PDF
-  // the client signed.
-  it("prints the TERMS the letter was assembled from", async () => {
+  // The clauses the letter PINNED reach the page — Annexure 2, numbered.
+  it("prints the TERMS the letter was assembled from, as Annexure 2", async () => {
     await nameTheFirmSignatory();
     const id = await signedLetter();
 
     const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+    const terms = described?.document.annexureLetter?.annexures[1];
 
+    expect(terms?.label).toBe("Annexure 2");
+    // The pinned wording, not the library's rewrite of it.
+    expect(terms?.flow).toEqual([
+      { kind: "heading", level: 2, text: "1. Scope of work" },
+      { kind: "paragraph", text: "The firm will perform the services listed above.", muted: false },
+    ]);
+  });
+
+  // A LETTER ISSUED IN THE CLASSIC LAYOUT RE-RENDERS IN IT (0083). Every letter
+  // that went out before 0083 is `classic`, and its PDF has to come out as the
+  // document its client holds — so the classic path is exercised on a letter
+  // that says so, exactly as it did before.
+  it("prints a CLASSIC letter as it always did — both blocks at the end, and the terms", async () => {
+    await nameTheFirmSignatory();
+    const id = await signedLetter(undefined, "classic");
+
+    const described = await source.describe({ tenantId: tenantA, kind: "engagement_letter", subjectRef: id });
+
+    expect(described?.document.annexureLetter).toBeUndefined();
+    expect(described?.document.signatures).toEqual([
+      {
+        heading: "For EL Test A LLP",
+        lines: ["Siddharth Jain", "Director"],
+        signAnchor: null,
+        dateAnchor: null,
+        image: null,
+      },
+      {
+        heading: "Accepted for and on behalf of Acme Ltd",
+        lines: ["Priya Menon"],
+        signAnchor: CLIENT_SIGN_ANCHOR,
+        dateAnchor: CLIENT_DATE_ANCHOR,
+      },
+    ]);
     expect(described?.document.terms?.length ?? 0).toBeGreaterThan(0);
     for (const term of described?.document.terms ?? []) {
       expect(term.heading).toBeTruthy();

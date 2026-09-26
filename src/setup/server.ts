@@ -117,6 +117,8 @@ import { PostgresSignatureRequestRepository } from "../infrastructure/postgres/s
 import { esignFor } from "./esign";
 import { blobStoreFor } from "./blobs";
 import { signedCopyFiler } from "./signed-copies";
+import { proposalLinks, proposalPdfs } from "./proposal-delivery";
+import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
@@ -622,6 +624,11 @@ export function wire(cfg: Config, log: Logger): Wired {
   // of putting a port here before there was anything to swap in.
   const authz = new AuthzService({ permissions: configRepository });
 
+  // ONE mailer for every letter this API writes — the sign-in and invitation
+  // letters below, and since 0085 the proposal and its answer notice — so
+  // `log` or `smtp` is decided in one place and cannot differ between them.
+  const mailer = mailerFor(cfg, log);
+
   const identity = new IdentityService({
     users,
     memberships,
@@ -639,7 +646,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     // validateServer refuses it in a production-like environment; `smtp` is
     // the real transport. The switch is here rather than inside either adapter
     // so that neither of them can be half-registered.
-    mailer: mailerFor(cfg, log),
+    mailer,
     ids: systemIds,
     clock: systemClock,
     // The constant-time floor on the sign-in-link route. Injected because a
@@ -1008,6 +1015,20 @@ export function wire(cfg: Config, log: Logger): Wired {
     // want 32 bytes from the OS CSPRNG and only the digest at rest; one
     // implementation of that is the right number.
     shareTokens: new RandomTokenFactory(),
+    // Whom a proposal may be prepared for (0084): the same structure read the
+    // letter's addressee is held to, so the two documents accept the same
+    // people — on the firm's day.
+    structure: new PostgresRelationshipRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // Who may be named as having prepared one: the lead pipeline's question.
+    staff: memberships,
+    // The proposal by email (0085): the SAME mailer the sign-in letters use,
+    // so `log` and `smtp` are decided once for every letter this API writes;
+    // the PDF of record through the document store; links from the origin the
+    // sign-in letters link from.
+    mailer,
+    pdfs: proposalPdfs(fileStore),
+    links: proposalLinks(cfg.auth.appBaseUrl),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -1220,7 +1241,7 @@ export function wire(cfg: Config, log: Logger): Wired {
  * variable. They are here because the TYPE says nullable and a non-null
  * assertion would be a claim this file cannot make on its own.
  */
-function mailerFor(cfg: Config, log: Logger): Mailer {
+function mailerFor(cfg: Config, log: Logger): Mailer & ProposalMailer {
   if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
   const { smtp, from, fromName } = cfg.mail;
   if (smtp === null || from === null) {

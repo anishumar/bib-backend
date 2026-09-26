@@ -25,6 +25,7 @@ import type {
 } from "../../domain/document/model";
 import {
   ANY_JURISDICTION,
+  blockKindsFor,
   blocksFor,
   formatDocumentRef,
   isBlockKind,
@@ -44,6 +45,7 @@ import {
   InvalidBlockKind,
   InvalidJurisdictionKey,
   InvalidSortOrder,
+  LetterOnlyBlockKind,
   NoIssuingEntity,
   StandardBlockNotFound,
 } from "../../domain/document/errors";
@@ -307,7 +309,7 @@ export class DocumentService {
     if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
 
     const standard = await this.deps.standardBlocks.list(tenantId);
-    const chosen = blocksFor(standard, normalizeJurisdiction(jurisdiction));
+    const chosen = blocksFor(standard, normalizeJurisdiction(jurisdiction), owner.kind);
     if (chosen.length === 0) return [];
 
     // Renumbered from 1 WITHIN EACH KIND rather than carrying the standard set's
@@ -348,6 +350,9 @@ export class DocumentService {
     readonly sortOrder: number;
   }): Promise<DocumentBlock> {
     const kind = this.blockKindOrThrow(input.kind);
+    // A proposal has no cover letter and no acceptance (0083). Refused by name
+    // here; `document_block_letter_only_kinds_chk` refuses the row regardless.
+    if (!blockKindsFor(input.owner.kind).includes(kind)) throw new LetterOnlyBlockKind(kind);
     const body = this.bodyOrThrow(input.body);
     this.sortOrderOrThrow(input.sortOrder);
     return this.deps.blocks.add({

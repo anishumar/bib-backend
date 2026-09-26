@@ -47,9 +47,20 @@
 // every time, and subsetting is a function of which glyphs the document uses.
 // The test that renders twice a second apart covers this.
 import { PDFDocument, rgb } from "pdf-lib";
-import type { PDFPage } from "pdf-lib";
+import type { PDFImage, PDFPage } from "pdf-lib";
 import { FontSet } from "./font-set";
-import type { RenderableDocument, Section, SignatureBlock } from "../../domain/render/model";
+import type {
+  AnnexureLetter,
+  CoverLine,
+  Flow,
+  LineTable,
+  ProposalDocument,
+  RenderableDocument,
+  RenderableImage,
+  Section,
+  SignatureBlock,
+  TotalRow,
+} from "../../domain/render/model";
 import { wrapParagraph } from "../../domain/render/model";
 import { UnrenderableText } from "../../domain/render/errors";
 import type { DocumentRenderer } from "../../usecase/render/ports";
@@ -82,10 +93,77 @@ const RULE = rgb(0.85, 0.87, 0.9);
  *  provider searches for, which must be in the text and must not be seen. */
 const PAPER = rgb(1, 1, 1);
 
+/** How far a bulleted line's text sits from the margin, and where its bullet
+ *  is drawn inside that — the firm's scope blocks are written as lists. */
+const BULLET_INDENT = 12;
+/** What a paragraph line has to start with to be drawn as a bullet: the three
+ *  marks people type, and the en dash Word turns a hyphen into. */
+const BULLET = /^\s*[-*\u2022\u2013]\s+/;
+
+/** The proposal's section headings (0084) — the deep red of the firm's
+ *  template. A property of the proposal LAYOUT, like its sizes, not of any
+ *  one firm's data. */
+const ACCENT = rgb(0.639, 0.067, 0.204);
+/** Text drawn over the cover artwork's dark band — "Prepared by". */
+const ON_ARTWORK = rgb(1, 1, 1);
+
+/**
+ * WHERE on the cover artwork the two name blocks go, as fractions of the
+ * artwork's own width and height — the positions in the firm's template
+ * (10X Global's proposal, 2026). Relative to the ARTWORK rather than the page,
+ * so they stay over the same part of the design however it is scaled: "Prepared
+ * for" in the light area right of the upper photograph, "Prepared by" in white
+ * on the block at the foot. An artwork designed for this cover leaves those two
+ * places clear.
+ */
+const PREPARED_FOR_AT = { x: 0.616, y: 0.409 } as const;
+const PREPARED_BY_AT = { x: 0.603, y: 0.779 } as const;
+
+/** Where the header's logo sits on a proposal page, and where its text starts. */
+const PROPOSAL_HEADER_TOP = 35;
+const PROPOSAL_LOGO_MAX_HEIGHT = 20;
+const PROPOSAL_BODY_TOP = 80;
+
 interface Cursor {
   page: PDFPage;
   y: number;
+  /**
+   * How a page this cursor breaks onto is started. Absent — every letter and
+   * invoice — it is a blank page with the text starting at the top margin,
+   * exactly as it always was. The proposal's draws the logo and the running
+   * line first (0084).
+   */
+  readonly turn?: ((cursor: Cursor) => void) | undefined;
 }
+
+/**
+ * How running text is SET: its size, and how each level of heading looks. The
+ * letter's is the constants this file always used, so an Annexure letter draws
+ * byte for byte as before; the proposal's is larger and heads its sections in
+ * the template's red (0084).
+ */
+interface FlowStyle {
+  readonly body: number;
+  readonly headings: Readonly<Record<1 | 2 | 3, { size: number; before: number; color: typeof INK }>>;
+}
+
+const LETTER_FLOW: FlowStyle = {
+  body: SIZE_BODY,
+  headings: {
+    1: { size: SIZE_HEADING, before: 16, color: INK },
+    2: { size: SIZE_BODY, before: 10, color: INK },
+    3: { size: SIZE_BODY, before: 6, color: MUTED },
+  },
+};
+
+const PROPOSAL_FLOW: FlowStyle = {
+  body: 10,
+  headings: {
+    1: { size: 11, before: 16, color: ACCENT },
+    2: { size: 10, before: 8, color: INK },
+    3: { size: 10, before: 6, color: INK },
+  },
+};
 
 /**
  * One weight of the chain, with the two operations the layout needs.
@@ -150,6 +228,23 @@ export class PdfLibRenderer implements DocumentRenderer {
     const body = new Face(fonts, false);
     const bold = new Face(fonts, true);
 
+    // THE ANNEXURE LETTER (0083) draws pages of its own. Branching HERE — after
+    // the setup every document shares and before the first classic draw — is
+    // what keeps every classic letter and every invoice byte-identical: nothing
+    // from this line down changes for them, and a letter issued before 0083
+    // must re-render as the document its client holds.
+    if (doc.annexureLetter !== undefined) {
+      await this.drawAnnexureLetter(pdf, doc, doc.annexureLetter, body, bold);
+      if (doc.footer !== null) this.drawFooter(pdf, doc, body);
+      return pdf.save();
+    }
+    // THE PROPOSAL (0084), for the same reason and in the same place.
+    if (doc.proposal !== undefined) {
+      await this.drawProposal(pdf, doc, doc.proposal, body, bold);
+      if (doc.footer !== null) this.drawFooter(pdf, doc, body);
+      return pdf.save();
+    }
+
     const cursor: Cursor = { page: pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: 0 };
     cursor.y = PAGE_HEIGHT - MARGIN_TOP;
 
@@ -175,11 +270,18 @@ export class PdfLibRenderer implements DocumentRenderer {
 
   /** Move down, starting a new page when the next block will not fit. */
   private advance(pdf: PDFDocument, cursor: Cursor, height: number): void {
-    if (cursor.y - height < MARGIN_BOTTOM) {
-      cursor.page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-      cursor.y = PAGE_HEIGHT - MARGIN_TOP;
-    }
+    if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
     cursor.y -= height;
+  }
+
+  /** Break onto a new page — the cursor's own way if it has one (0084). */
+  private newPage(pdf: PDFDocument, cursor: Cursor): void {
+    if (cursor.turn !== undefined) {
+      cursor.turn(cursor);
+      return;
+    }
+    cursor.page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    cursor.y = PAGE_HEIGHT - MARGIN_TOP;
   }
 
   private text(
@@ -231,24 +333,26 @@ export class PdfLibRenderer implements DocumentRenderer {
     // The logo, when the firm has set one for this issuing entity. Absent is an
     // ordinary state and the document simply leads with its title — a firm that
     // has not uploaded a logo still gets a usable letter.
-    if (doc.logo !== null) {
-      const image =
-        doc.logo.mediaType === "image/png"
-          ? await pdf.embedPng(doc.logo.bytes)
-          : await pdf.embedJpg(doc.logo.bytes);
-      const maxH = 34;
-      const scale = Math.min(maxH / image.height, 160 / image.width, 1);
-      const w = image.width * scale;
-      const h = image.height * scale;
-      this.advance(pdf, cursor, h);
-      cursor.page.drawImage(image, { x: MARGIN_X, y: cursor.y, width: w, height: h });
-      this.advance(pdf, cursor, 14);
-    }
+    if (doc.logo !== null) await this.drawLogo(pdf, cursor, doc.logo);
 
     this.advance(pdf, cursor, SIZE_TITLE);
     this.text(cursor, doc.documentTitle, { size: SIZE_TITLE, font: bold });
     this.textRight(cursor, doc.reference, PAGE_WIDTH - MARGIN_X, { size: SIZE_BODY, font: body, color: MUTED });
     this.rule(pdf, cursor);
+  }
+
+  /** The firm's mark at the head of page one — the classic head's and the
+   *  Annexure letterhead's, drawn by one method so the two cannot drift. */
+  private async drawLogo(pdf: PDFDocument, cursor: Cursor, logo: RenderableImage): Promise<void> {
+    const image =
+      logo.mediaType === "image/png" ? await pdf.embedPng(logo.bytes) : await pdf.embedJpg(logo.bytes);
+    const maxH = 34;
+    const scale = Math.min(maxH / image.height, 160 / image.width, 1);
+    const w = image.width * scale;
+    const h = image.height * scale;
+    this.advance(pdf, cursor, h);
+    cursor.page.drawImage(image, { x: MARGIN_X, y: cursor.y, width: w, height: h });
+    this.advance(pdf, cursor, 14);
   }
 
   private drawParties(
@@ -418,8 +522,16 @@ export class PdfLibRenderer implements DocumentRenderer {
     body: Face,
     bold: Face,
     pdf: PDFDocument,
+    // The Annexure letter's acceptance heading names the client AND every
+    // company it signs for, which does not fit on one line. OFF for the classic
+    // letter, whose block must draw exactly as it always has.
+    wrapHeading = false,
   ): Promise<void> {
     const lineWidth = 220;
+    const headingLines = wrapHeading
+      ? wrapParagraph(block.heading, CONTENT_WIDTH, (t) => bold.widthOfTextAtSize(t, SIZE_BODY))
+      : [block.heading];
+    const headingExtra = (headingLines.length - 1) * SIZE_BODY * LEADING;
     // The mark, embedded BEFORE any space is reserved: its height decides how
     // much room the block needs, and asking for that room afterwards is what
     // would let a tall signature overrun the page the block was kept on.
@@ -441,10 +553,14 @@ export class PdfLibRenderer implements DocumentRenderer {
     // 34pt and what the mark actually needs, so a tall signature pushes the rule
     // down instead of being drawn through the heading above it.
     const gap = Math.max(34, markHeight + 8);
-    this.advance(pdf, cursor, 28 + gap + under * SIZE_BODY * LEADING);
-    cursor.y += gap + under * SIZE_BODY * LEADING;
+    this.advance(pdf, cursor, 28 + gap + under * SIZE_BODY * LEADING + headingExtra);
+    cursor.y += gap + under * SIZE_BODY * LEADING + headingExtra;
 
-    this.text(cursor, block.heading, { size: SIZE_BODY, font: bold });
+    headingLines.forEach((line, i) => {
+      // The room for every line was reserved above, so this moves within it.
+      if (i > 0) cursor.y -= SIZE_BODY * LEADING;
+      this.text(cursor, line, { size: SIZE_BODY, font: bold });
+    });
     this.advance(pdf, cursor, gap);
     if (block.signAnchor !== null) {
       this.text(cursor, block.signAnchor, { x: MARGIN_X + 2, font: body, color: PAPER });
@@ -485,6 +601,458 @@ export class PdfLibRenderer implements DocumentRenderer {
       body.draw(page, label, MARGIN_X, MARGIN_BOTTOM - 26, SIZE_SMALL, MUTED);
     });
   }
+
+  // ── The Annexure letter (0083) ───────────────────────────────────────────
+  //
+  // Page one is a LETTER — letterhead, date, addressee, subject, the firm's
+  // paragraphs, its signature, then the acceptance and the client's. Each
+  // annexure starts a page of its own, as the firm's own template does, so
+  // "Annexure 2, clause 8" is a place a reader can turn to.
+  //
+  // Everything here is new code that nothing classic calls. The one shared
+  // method it borrows, `drawSignature`, is asked to wrap its heading only here.
+
+  private async drawAnnexureLetter(
+    pdf: PDFDocument,
+    doc: RenderableDocument,
+    letter: AnnexureLetter,
+    body: Face,
+    bold: Face,
+  ): Promise<void> {
+    const cursor: Cursor = { page: pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: PAGE_HEIGHT - MARGIN_TOP };
+    const cover = letter.cover;
+
+    // Letterhead: the mark, the issuing company and its reference.
+    if (doc.logo !== null) await this.drawLogo(pdf, cursor, doc.logo);
+    this.advance(pdf, cursor, SIZE_HEADING);
+    this.text(cursor, doc.issuer.name, { size: SIZE_HEADING, font: bold });
+    this.textRight(cursor, doc.reference, PAGE_WIDTH - MARGIN_X, {
+      size: SIZE_BODY,
+      font: body,
+      color: MUTED,
+    });
+    for (const line of doc.issuer.lines) {
+      this.advance(pdf, cursor, SIZE_SMALL * LEADING);
+      this.text(cursor, line, { size: SIZE_SMALL, font: body, color: MUTED });
+    }
+    this.rule(pdf, cursor);
+
+    // Date, addressee, subject, salutation — the order every letter has.
+    this.advance(pdf, cursor, 8);
+    this.drawLines(pdf, cursor, cover.dateLine, body, SIZE_BODY, INK);
+    this.advance(pdf, cursor, 8);
+    for (const line of cover.addressee) this.drawLines(pdf, cursor, line, body, SIZE_BODY, INK);
+    this.advance(pdf, cursor, 10);
+    this.drawLines(pdf, cursor, cover.subject, bold, SIZE_BODY, INK);
+    this.advance(pdf, cursor, 10);
+    this.drawLines(pdf, cursor, cover.salutation, body, SIZE_BODY, INK);
+    this.advance(pdf, cursor, 4);
+
+    this.drawFlow(pdf, cursor, cover.body, body, bold);
+
+    this.advance(pdf, cursor, 6);
+    this.drawLines(pdf, cursor, cover.closing, body, SIZE_BODY, INK);
+    if (cover.firm !== null) await this.drawSignature(cursor, cover.firm, body, bold, pdf, true);
+
+    this.drawFlowHeading(pdf, cursor, 1, cover.acceptanceHeading, bold);
+    this.drawFlow(pdf, cursor, cover.acceptance, body, bold);
+    await this.drawSignature(cursor, cover.client, body, bold, pdf, true);
+
+    for (const annexure of letter.annexures) {
+      cursor.page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      cursor.y = PAGE_HEIGHT - MARGIN_TOP;
+      this.advance(pdf, cursor, SIZE_SMALL);
+      this.text(cursor, annexure.label, { size: SIZE_SMALL, font: bold, color: MUTED });
+      this.advance(pdf, cursor, 6);
+      this.drawLines(pdf, cursor, annexure.title, bold, SIZE_TITLE, INK);
+      this.rule(pdf, cursor);
+      this.drawFlow(pdf, cursor, annexure.flow, body, bold);
+    }
+  }
+
+  // ── The proposal (0084) ──────────────────────────────────────────────────
+  //
+  // Page one is the COVER: the firm's artwork over the whole page, with who the
+  // proposal is prepared for and by printed on it where the design leaves room.
+  // Every page after it carries the logo and the running line, and the text
+  // flows under them. New code nothing else calls; the flow primitives it
+  // shares are asked for the proposal's style only here.
+
+  private async drawProposal(
+    pdf: PDFDocument,
+    doc: RenderableDocument,
+    proposal: ProposalDocument,
+    body: Face,
+    bold: Face,
+  ): Promise<void> {
+    const coverPage = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    const cover = proposal.cover;
+    if (cover.artwork !== null) {
+      const art = await this.embed(pdf, cover.artwork);
+      // COVER, not contain: the artwork fills the page and keeps its
+      // proportions, and whatever overhangs is off the paper. Stretching it to
+      // A4, as a word processor does, distorts the photographs in it.
+      const scale = Math.max(PAGE_WIDTH / art.width, PAGE_HEIGHT / art.height);
+      const w = art.width * scale;
+      const h = art.height * scale;
+      const left = (PAGE_WIDTH - w) / 2;
+      const top = (PAGE_HEIGHT - h) / 2;
+      coverPage.drawImage(art, { x: left, y: PAGE_HEIGHT - top - h, width: w, height: h });
+      this.drawCoverBlock(coverPage, "Prepared for", cover.preparedFor, {
+        x: left + PREPARED_FOR_AT.x * w,
+        top: top + PREPARED_FOR_AT.y * h,
+        color: INK,
+      }, body, bold);
+      this.drawCoverBlock(coverPage, "Prepared by", cover.preparedBy, {
+        x: left + PREPARED_BY_AT.x * w,
+        top: top + PREPARED_BY_AT.y * h,
+        color: ON_ARTWORK,
+      }, body, bold);
+    } else {
+      // A PLAIN COVER, for a firm that has uploaded no artwork: the logo, the
+      // title, the proposal's own title, and the same two blocks.
+      const cursor: Cursor = { page: coverPage, y: PAGE_HEIGHT - MARGIN_TOP };
+      if (doc.logo !== null) await this.drawLogo(pdf, cursor, doc.logo);
+      let y = PAGE_HEIGHT * 0.62;
+      for (const line of wrapParagraph(cover.title, CONTENT_WIDTH, (t) => bold.widthOfTextAtSize(t, 30))) {
+        bold.draw(coverPage, line, MARGIN_X, y, 30, INK);
+        y -= 30 * 1.2;
+      }
+      y -= 6;
+      for (const line of wrapParagraph(cover.subtitle, CONTENT_WIDTH, (t) => body.widthOfTextAtSize(t, 13))) {
+        body.draw(coverPage, line, MARGIN_X, y, 13, MUTED);
+        y -= 13 * LEADING;
+      }
+      this.drawCoverBlock(coverPage, "Prepared for", cover.preparedFor, {
+        x: MARGIN_X,
+        top: PAGE_HEIGHT * 0.52,
+        color: INK,
+      }, body, bold);
+      this.drawCoverBlock(coverPage, "Prepared by", cover.preparedBy, {
+        x: MARGIN_X,
+        top: PAGE_HEIGHT * 0.72,
+        color: INK,
+      }, body, bold);
+    }
+
+    // Every page after the cover: the logo, the running line, then the text.
+    const logo = doc.logo === null ? null : await this.embed(pdf, doc.logo);
+    const turn = (c: Cursor): void => {
+      c.page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+      const baseline = PAGE_HEIGHT - PROPOSAL_HEADER_TOP - PROPOSAL_LOGO_MAX_HEIGHT;
+      if (logo !== null) {
+        const scale = Math.min(PROPOSAL_LOGO_MAX_HEIGHT / logo.height, 140 / logo.width, 1);
+        c.page.drawImage(logo, {
+          x: MARGIN_X,
+          y: baseline,
+          width: logo.width * scale,
+          height: logo.height * scale,
+        });
+      }
+      const running = proposal.running;
+      body.draw(
+        c.page,
+        running,
+        PAGE_WIDTH - MARGIN_X - body.widthOfTextAtSize(running, SIZE_SMALL),
+        baseline + 2,
+        SIZE_SMALL,
+        MUTED,
+      );
+      c.y = PAGE_HEIGHT - PROPOSAL_BODY_TOP;
+    };
+    const cursor: Cursor = { page: coverPage, y: 0, turn };
+    turn(cursor);
+    this.drawFlow(pdf, cursor, proposal.flow, body, bold, PROPOSAL_FLOW);
+  }
+
+  /** "Prepared for:" and the lines under it — underlined label, then each
+   *  line in its own weight, wrapped to the room left on the page. */
+  private drawCoverBlock(
+    page: PDFPage,
+    label: string,
+    lines: readonly CoverLine[],
+    at: { readonly x: number; readonly top: number; readonly color: typeof INK },
+    body: Face,
+    bold: Face,
+  ): void {
+    const labelSize = 12;
+    const size = 11;
+    const width = PAGE_WIDTH - at.x - 24;
+    let y = PAGE_HEIGHT - at.top - labelSize;
+    bold.draw(page, label, at.x, y, labelSize, at.color);
+    const labelWidth = bold.widthOfTextAtSize(label, labelSize);
+    bold.draw(page, ":", at.x + labelWidth, y, labelSize, at.color);
+    page.drawLine({
+      start: { x: at.x, y: y - 2 },
+      end: { x: at.x + labelWidth, y: y - 2 },
+      thickness: 0.8,
+      color: at.color,
+    });
+    y -= labelSize * 0.9;
+    for (const line of lines) {
+      const face = line.bold ? bold : body;
+      for (const part of wrapParagraph(line.text, width, (t) => face.widthOfTextAtSize(t, size))) {
+        y -= size * LEADING;
+        face.draw(page, part, at.x, y, size, at.color);
+      }
+    }
+  }
+
+  /** An image into this document — PNG or JPEG, the two it can draw. */
+  private async embed(pdf: PDFDocument, image: RenderableImage): Promise<PDFImage> {
+    return image.mediaType === "image/png" ? pdf.embedPng(image.bytes) : pdf.embedJpg(image.bytes);
+  }
+
+  /** Text wrapped to the page, one line per advance. */
+  private drawLines(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    value: string,
+    font: Face,
+    size: number,
+    color: typeof INK,
+  ): void {
+    for (const line of wrapParagraph(value, CONTENT_WIDTH, (t) => font.widthOfTextAtSize(t, size))) {
+      this.advance(pdf, cursor, size * LEADING);
+      font.draw(cursor.page, line, MARGIN_X, cursor.y, size, color);
+    }
+  }
+
+  /** Start a page when fewer than `height` points are left on this one. */
+  private ensureRoom(pdf: PDFDocument, cursor: Cursor, height: number): void {
+    if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+  }
+
+  private drawFlow(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    flow: readonly Flow[],
+    body: Face,
+    bold: Face,
+    style: FlowStyle = LETTER_FLOW,
+  ): void {
+    for (const piece of flow) {
+      if (piece.kind === "heading") this.drawFlowHeading(pdf, cursor, piece.level, piece.text, bold, style);
+      else if (piece.kind === "paragraph") {
+        this.drawFlowParagraph(pdf, cursor, piece.text, piece.muted === true, body, style, piece.lead, bold);
+      } else if (piece.kind === "table") this.drawFlowTable(pdf, cursor, piece.table, body, bold, style);
+      else this.drawFigures(pdf, cursor, piece.rows, body, bold);
+    }
+  }
+
+  /**
+   * A heading, KEPT WITH WHAT FOLLOWS: the heading and two lines of text below
+   * it go on one page, so a section never ends a page with its own title.
+   */
+  private drawFlowHeading(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    level: 1 | 2 | 3,
+    text: string,
+    bold: Face,
+    style: FlowStyle = LETTER_FLOW,
+  ): void {
+    const { size, before, color } = style.headings[level];
+    const lines = wrapParagraph(text, CONTENT_WIDTH, (t) => bold.widthOfTextAtSize(t, size));
+    this.ensureRoom(pdf, cursor, before + lines.length * size * LEADING + 2 * style.body * LEADING);
+    cursor.y -= before;
+    for (const line of lines) {
+      this.advance(pdf, cursor, size * LEADING);
+      bold.draw(cursor.page, line, MARGIN_X, cursor.y, size, color);
+    }
+    cursor.y -= 2;
+  }
+
+  /** The firm's prose, its own line breaks kept and its bullets hung. */
+  private drawFlowParagraph(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    text: string,
+    muted: boolean,
+    body: Face,
+    style: FlowStyle = LETTER_FLOW,
+    lead?: string,
+    bold?: Face,
+  ): void {
+    const color = muted ? MUTED : INK;
+    const size = style.body;
+    // A LABEL run into the first line (0084): "Fees" in the heading weight,
+    // then the sentence it starts, wrapping under the label's full width.
+    let hards = text.split("\n");
+    if (lead !== undefined && bold !== undefined) {
+      const leadWidth = bold.widthOfTextAtSize(`${lead} `, size);
+      const [first = "", ...rest] = hards;
+      const lines = wrapAfterLabel(first, CONTENT_WIDTH - leadWidth, CONTENT_WIDTH, (t) =>
+        body.widthOfTextAtSize(t, size),
+      );
+      lines.forEach((line, i) => {
+        this.advance(pdf, cursor, size * LEADING);
+        if (i === 0) {
+          bold.draw(cursor.page, lead, MARGIN_X, cursor.y, size, INK);
+          body.draw(cursor.page, line, MARGIN_X + leadWidth, cursor.y, size, color);
+        } else {
+          body.draw(cursor.page, line, MARGIN_X, cursor.y, size, color);
+        }
+      });
+      hards = rest;
+    }
+    // An indented line straight after a bullet belongs to it and hangs under
+    // its text, the way the firm writes a two-line item.
+    let hanging = false;
+    for (const hard of hards) {
+      const bullet = BULLET.exec(hard);
+      const continues: boolean = bullet === null && hanging && /^\s+\S/.test(hard);
+      hanging = bullet !== null || continues;
+      const content = bullet === null ? hard : hard.slice(bullet[0].length);
+      const indent = bullet === null && !continues ? 0 : BULLET_INDENT;
+      const lines = wrapParagraph(content, CONTENT_WIDTH - indent, (t) =>
+        body.widthOfTextAtSize(t, size),
+      );
+      lines.forEach((line, i) => {
+        this.advance(pdf, cursor, size * LEADING);
+        if (bullet !== null && i === 0) {
+          body.draw(cursor.page, "\u2022", MARGIN_X + 2, cursor.y, size, color);
+        }
+        body.draw(cursor.page, line, MARGIN_X + indent, cursor.y, size, color);
+      });
+    }
+    cursor.y -= 4;
+  }
+
+  /**
+   * A table whose every cell wraps, with each row kept whole and the header
+   * repeated on a new page. The classic `drawTable` wraps only its left column
+   * and never breaks a row across pages; this is the Summary of Fees, whose fee
+   * cell carries a second line ("40% advance, 60% on completion") and whose rows
+   * can be long.
+   */
+  private drawFlowTable(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    table: LineTable,
+    body: Face,
+    bold: Face,
+    style: FlowStyle = LETTER_FLOW,
+  ): void {
+    const size = style.body;
+    const totalWeight = table.columns.reduce((n, c) => n + c.weight, 0);
+    const widths = table.columns.map((c) => (c.weight / totalWeight) * CONTENT_WIDTH);
+    const edges: number[] = [];
+    let acc = MARGIN_X;
+    for (const w of widths) {
+      edges.push(acc);
+      acc += w;
+    }
+    const line = (y: number): void => {
+      cursor.page.drawLine({
+        start: { x: MARGIN_X, y },
+        end: { x: PAGE_WIDTH - MARGIN_X, y },
+        thickness: 0.75,
+        color: RULE,
+      });
+    };
+    const header = (): void => {
+      this.advance(pdf, cursor, 14 + SIZE_SMALL);
+      table.columns.forEach((col, i) => {
+        const x = edges[i] ?? MARGIN_X;
+        const w = widths[i] ?? 0;
+        if (col.align === "right") {
+          this.textRight(cursor, col.label, x + w - 4, { size: SIZE_SMALL, font: bold, color: MUTED });
+        } else {
+          this.text(cursor, col.label, { x, size: SIZE_SMALL, font: bold, color: MUTED });
+        }
+      });
+      cursor.y -= 6;
+      line(cursor.y);
+    };
+
+    const wrappedRows = table.rows.map((row) =>
+      row.map((cell, i) =>
+        wrapParagraph(cell, (widths[i] ?? CONTENT_WIDTH) - 8, (t) => body.widthOfTextAtSize(t, size)),
+      ),
+    );
+    const heightOf = (cells: readonly (readonly string[])[]): number =>
+      Math.max(1, ...cells.map((c) => c.length)) * size * LEADING + 8;
+
+    // The header and the first row together, or neither.
+    this.ensureRoom(pdf, cursor, 20 + 14 + heightOf(wrappedRows[0] ?? []));
+    header();
+    for (const cells of wrappedRows) {
+      const height = heightOf(cells);
+      if (cursor.y - height < MARGIN_BOTTOM) {
+        this.newPage(pdf, cursor);
+        header();
+      }
+      const first = cursor.y - 4 - size;
+      cells.forEach((cellLines, i) => {
+        const x = edges[i] ?? MARGIN_X;
+        const w = widths[i] ?? 0;
+        const align = table.columns[i]?.align ?? "left";
+        cellLines.forEach((text, j) => {
+          const y = first - j * size * LEADING;
+          if (align === "right") {
+            const tw = body.widthOfTextAtSize(text, size);
+            body.draw(cursor.page, text, x + w - 4 - tw, y, size, INK);
+          } else {
+            body.draw(cursor.page, text, x, y, size, INK);
+          }
+        });
+      });
+      cursor.y -= height;
+      line(cursor.y);
+    }
+    cursor.y -= 4;
+  }
+
+  /** Label-and-figure rows under a table, right-aligned like the classic
+   *  totals. */
+  private drawFigures(
+    pdf: PDFDocument,
+    cursor: Cursor,
+    rows: readonly TotalRow[],
+    body: Face,
+    bold: Face,
+  ): void {
+    const right = PAGE_WIDTH - MARGIN_X;
+    for (const row of rows) {
+      this.advance(pdf, cursor, 16);
+      const font = row.emphasis ? bold : body;
+      this.textRight(cursor, row.value, right - 4, { font, size: SIZE_BODY });
+      this.textRight(cursor, row.label, right - 124, {
+        font,
+        size: SIZE_BODY,
+        color: row.emphasis ? INK : MUTED,
+      });
+    }
+  }
+}
+
+/**
+ * A line of text wrapped after a LABEL — the first line has only what the
+ * label leaves, the rest the full width. `wrapParagraph`'s rule otherwise: a
+ * word longer than a line overflows rather than being broken.
+ */
+function wrapAfterLabel(
+  text: string,
+  firstWidth: number,
+  width: number,
+  measure: (s: string) => number,
+): readonly string[] {
+  const out: string[] = [];
+  let line = "";
+  let room = firstWidth;
+  for (const word of text.split(/\s+/).filter((w) => w.length > 0)) {
+    const candidate = line === "" ? word : `${line} ${word}`;
+    if (line !== "" && measure(candidate) > room) {
+      out.push(line);
+      line = word;
+      room = width;
+    } else {
+      line = candidate;
+    }
+  }
+  out.push(line);
+  return out;
 }
 
 /**
@@ -525,10 +1093,63 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
   });
   doc.totals.forEach((t) => { check(`the "${t.label}" total`, t.value); });
   check("the footer", doc.footer);
-  doc.signatures?.forEach((b) => {
+  const block = (b: SignatureBlock): void => {
     check("a signature block's heading", b.heading);
     b.lines.forEach((l) => { check(`the signature block "${b.heading}"`, l); });
     check("a signature anchor", b.signAnchor);
     check("a signature anchor", b.dateAnchor);
-  });
+  };
+  doc.signatures?.forEach(block);
+
+  // The Annexure letter (0083): every string it will draw, by where it is.
+  const flow = (where: string, pieces: readonly Flow[]): void => {
+    pieces.forEach((piece, i) => {
+      const at = `${where} (${String(i + 1)})`;
+      if (piece.kind === "heading") check(at, piece.text);
+      else if (piece.kind === "paragraph") {
+        check(at, piece.text);
+        check(at, piece.lead ?? null);
+      } else if (piece.kind === "table") {
+        piece.table.columns.forEach((c) => { check(`a column heading in ${where}`, c.label); });
+        piece.table.rows.forEach((row, r) => {
+          row.forEach((cell) => { check(`row ${String(r + 1)} of the table in ${where}`, cell); });
+        });
+      } else {
+        piece.rows.forEach((r) => {
+          check(`a figure's label in ${where}`, r.label);
+          check(`the "${r.label}" figure in ${where}`, r.value);
+        });
+      }
+    });
+  };
+  const letter = doc.annexureLetter;
+  if (letter !== undefined) {
+    const cover = letter.cover;
+    check("the cover letter's date", cover.dateLine);
+    cover.addressee.forEach((l, i) => { check(`the addressee's line ${String(i + 1)}`, l); });
+    check("the subject line", cover.subject);
+    check("the salutation", cover.salutation);
+    flow("the cover letter", cover.body);
+    check("the closing", cover.closing);
+    if (cover.firm !== null) block(cover.firm);
+    check("the acceptance heading", cover.acceptanceHeading);
+    flow("the acceptance", cover.acceptance);
+    block(cover.client);
+    letter.annexures.forEach((a) => {
+      check("an annexure's label", a.label);
+      check(`the title of ${a.label}`, a.title);
+      flow(a.label, a.flow);
+    });
+  }
+
+  // The proposal (0084): its cover, its running line and its flow.
+  const proposal = doc.proposal;
+  if (proposal !== undefined) {
+    check("the cover's title", proposal.cover.title);
+    check("the proposal's title on the cover", proposal.cover.subtitle);
+    proposal.cover.preparedFor.forEach((l, i) => { check(`"Prepared for" line ${String(i + 1)}`, l.text); });
+    proposal.cover.preparedBy.forEach((l, i) => { check(`"Prepared by" line ${String(i + 1)}`, l.text); });
+    check("the running line", proposal.running);
+    flow("the proposal", proposal.flow);
+  }
 }

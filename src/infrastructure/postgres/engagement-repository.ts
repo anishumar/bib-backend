@@ -19,23 +19,30 @@ import type {
   Engagement,
   EngagementLetter,
   EngagementStatus,
+  FeeGroup,
   LetterClause,
+  LetterLayout,
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
+import { sectionCode } from "../../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
   BillableEngagement,
   EngagementRepository,
+  FeeGroupEdit,
+  FeeGroupRecord,
   FirmSignatureRecord,
   LetterClauseRecord,
   LetterFilters,
   LetterLineRecord,
   LetterRecord,
   LetterSummary,
+  LinePricing,
   NewEngagement,
+  NewFeeGroup,
   NewLetter,
   NewLetterClause,
   NewLetterLine,
@@ -54,6 +61,7 @@ interface LetterRow {
   jurisdiction: string;
   title: string;
   status: LetterStatus;
+  layout: LetterLayout;
   currency: string;
   fx_rate: string;
   fx_rate_date: Date;
@@ -104,6 +112,7 @@ interface LineRow {
   oop_estimate_max: string | null;
   oop_currency: string | null;
   pricing_note: string | null;
+  fee_group_id: string | null;
 }
 
 /** Every column of a line, in one place: the SELECT list appears in three
@@ -112,7 +121,58 @@ const LINE_COLUMNS = `id, tenant_id, engagement_letter_id, entity_party_id, serv
                       description, position, quantity, unit_amount, currency, discount_percent,
                       effective_from, jurisdiction, billing_frequency, scope_override,
                       client_obligations_override, volume_limits_override, exclusions_override,
-                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note`;
+                      oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
+                      fee_group_id`;
+
+/** Every column of a letter, for the same reason — it appeared SEVEN times,
+ *  written out, until 0083 added `layout` and the choice was seven edits or
+ *  one. `describeLetter` and `listLetters` prefix theirs and list them there. */
+const LETTER_COLUMNS = `id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
+                        jurisdiction, title, status, layout, currency, fx_rate, fx_rate_date,
+                        advance_required, advance_amount, advance_recorded_at,
+                        advance_recorded_by, sent_at, signed_at, signed_by_name,
+                        signature_method, signature_reference, signed_content_hash,
+                        signed_by_title, withdrawn_at, background, addressed_to_party_id,
+                        issued_on, supersedes_id, effective_from, firm_signatory_user_id,
+                        firm_signatory_title, firm_signed_at, firm_signature_version_id`;
+
+interface FeeGroupRow {
+  id: string;
+  tenant_id: string;
+  engagement_letter_id: string;
+  position: number;
+  title: string;
+  billing_frequency: BillingFrequency;
+  amount: string;
+  currency: string;
+  payment_terms: string | null;
+  fee_description: string | null;
+  intro: string | null;
+  deliverables: string | null;
+  client_obligations: string | null;
+}
+
+const FEE_GROUP_COLUMNS = `id, tenant_id, engagement_letter_id, position, title,
+                           billing_frequency, amount, currency, payment_terms,
+                           fee_description, intro, deliverables, client_obligations`;
+
+function toFeeGroup(r: FeeGroupRow): FeeGroup {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    engagementLetterId: r.engagement_letter_id,
+    position: r.position,
+    title: r.title,
+    billingFrequency: r.billing_frequency,
+    amount: r.amount,
+    currency: r.currency,
+    paymentTerms: r.payment_terms,
+    feeDescription: r.fee_description,
+    intro: r.intro,
+    deliverables: r.deliverables,
+    clientObligations: r.client_obligations,
+  };
+}
 
 /** The out-of-pocket range as ONE value or none — the three columns move
  *  together (`el_line_oop_is_whole_chk`). */
@@ -157,6 +217,7 @@ function toLetter(r: LetterRow): EngagementLetter {
     jurisdiction: r.jurisdiction,
     title: r.title,
     status: r.status,
+    layout: r.layout,
     currency: r.currency,
     fxRate: r.fx_rate,
     fxRateDate: toDay(r.fx_rate_date),
@@ -206,6 +267,7 @@ function toLine(r: LineRow): LetterLine {
     exclusionsOverride: r.exclusions_override,
     oopEstimate: toOopEstimate(r),
     pricingNote: r.pricing_note,
+    feeGroupId: r.fee_group_id,
   };
 }
 
@@ -280,21 +342,15 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db<LetterRow[]>`
         INSERT INTO crm.engagement_letter
           (id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id, jurisdiction,
-           title, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
+           title, layout, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
            background, addressed_to_party_id, issued_on, supersedes_id, effective_from)
         VALUES
           (${l.id}, ${l.tenantId}, ${l.ref}, ${l.partyId}, ${l.issuingEntityPartyId},
-           ${l.proposalId}, ${l.jurisdiction}, ${l.title},
+           ${l.proposalId}, ${l.jurisdiction}, ${l.title}, ${l.layout},
            ${l.currency}, ${l.fxRate}, ${l.fxRateDate}, ${l.advanceRequired}, ${l.advanceAmount},
            ${l.background}, ${l.addressedToPartyId}, ${l.issuedOn}, ${l.supersedesId},
            ${l.effectiveFrom})
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       if (!row) throw new Error("engagement letter insert returned no row");
       return toLetter(row);
@@ -304,13 +360,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
   async findLetter(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
-        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-               jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-               advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-               signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        SELECT ${db.unsafe(LETTER_COLUMNS)}
         FROM crm.engagement_letter WHERE id = ${letterId}
       `;
       return row ? toLetter(row) : null;
@@ -331,7 +381,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
-               l.proposal_id, l.jurisdiction, l.title, l.status,
+               l.proposal_id, l.jurisdiction, l.title, l.status, l.layout,
                l.currency, l.fx_rate, l.fx_rate_date, l.advance_required, l.advance_amount,
                l.advance_recorded_at, l.advance_recorded_by, l.sent_at, l.signed_at,
                l.signed_by_name, l.signature_method, l.signature_reference,
@@ -389,6 +439,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.effective_from, l.jurisdiction, l.billing_frequency, l.scope_override,
                l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
+               l.fee_group_id,
                -- NULL for an unpriced line, and deliberately not coalesced:
                -- there is no net of an amount that does not exist, and a zero
                -- here would be a line the client gets free.
@@ -427,6 +478,11 @@ export class PostgresEngagementRepository implements EngagementRepository {
       // `unpriced_line_count` says how many the figures leave out. Without that
       // count the three sums silently understate a letter and nothing on the row
       // says so.
+      //
+      // A FEE GROUP'S fee is counted ONCE, beside the lines priced on their own,
+      // and its lines are not "unpriced": the group is their price (0083).
+      // Lines carry no amount of their own once grouped, so nothing is counted
+      // twice.
       const [totals] = await db<
         {
           gross: string | null;
@@ -435,15 +491,35 @@ export class PostgresEngagementRepository implements EngagementRepository {
           unpriced_line_count: string;
         }[]
       >`
-        SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
-               coalesce(sum(round(unit_amount * quantity, 4)
-                          - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                 AS discount,
-               coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
-                 AS net,
-               count(*) FILTER (WHERE unit_amount IS NULL) AS unpriced_line_count
-        FROM crm.engagement_letter_line
+        -- Two aggregates with no GROUP BY, so each is exactly one row even on a
+        -- letter with no lines or no groups — a group added before its services
+        -- still shows its fee.
+        SELECT t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
+               t.unpriced_line_count
+        FROM (
+          SELECT coalesce(sum(round(unit_amount * quantity, 4)), 0) AS gross,
+                 coalesce(sum(round(unit_amount * quantity, 4)
+                            - round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
+                   AS discount,
+                 coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
+                   AS net,
+                 count(*) FILTER (WHERE unit_amount IS NULL AND fee_group_id IS NULL)
+                   AS unpriced_line_count
+          FROM crm.engagement_letter_line
+          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ) t
+        CROSS JOIN (
+          SELECT coalesce(sum(amount), 0) AS fees
+          FROM crm.engagement_letter_fee_group
+          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ) g
+      `;
+
+      const groups = await db<FeeGroupRow[]>`
+        SELECT ${db.unsafe(FEE_GROUP_COLUMNS)}
+        FROM crm.engagement_letter_fee_group
         WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ORDER BY position
       `;
 
       const engagements = await db<EngagementRow[]>`
@@ -488,6 +564,13 @@ export class PostgresEngagementRepository implements EngagementRepository {
           head.superseded_by_id === null || head.superseded_by_ref === null
             ? null
             : { id: head.superseded_by_id, ref: head.superseded_by_ref },
+        feeGroups: groups.map(
+          (g, i): FeeGroupRecord => ({
+            group: toFeeGroup(g),
+            code: sectionCode(i),
+            lineIds: lines.filter((l) => l.fee_group_id === g.id).map((l) => l.id),
+          }),
+        ),
         lines: lines.map(
           (r): LetterLineRecord => ({
             line: toLine(r),
@@ -550,7 +633,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
-               l.proposal_id, l.jurisdiction, l.title, l.status,
+               l.proposal_id, l.jurisdiction, l.title, l.status, l.layout,
                l.currency, l.fx_rate, l.fx_rate_date, l.advance_required, l.advance_amount,
                l.advance_recorded_at, l.advance_recorded_by, l.sent_at, l.signed_at,
                l.signed_by_name, l.signature_method, l.signature_reference,
@@ -560,7 +643,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.firm_signed_at, l.firm_signature_version_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
-               t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
+               t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
+               coalesce(t.line_count, 0) AS line_count,
                coalesce(t.unpriced_line_count, 0) AS unpriced_line_count
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
@@ -573,10 +657,20 @@ export class PostgresEngagementRepository implements EngagementRepository {
                  coalesce(sum(round(unit_amount * quantity * (1 - discount_percent / 100), 4)), 0)
                    AS net,
                  count(*) AS line_count,
-                 count(*) FILTER (WHERE unit_amount IS NULL) AS unpriced_line_count
+                 -- A grouped line is priced by its group (0083), so it is not
+                 -- one of the lines these figures leave out.
+                 count(*) FILTER (WHERE unit_amount IS NULL AND fee_group_id IS NULL)
+                   AS unpriced_line_count
           FROM crm.engagement_letter_line
           WHERE engagement_letter_id = l.id AND removed_at IS NULL
         ) t ON true
+        -- Each live fee group's fee, once (0083) — the same arithmetic as the
+        -- letter's own read, so the list and the page cannot disagree.
+        LEFT JOIN LATERAL (
+          SELECT coalesce(sum(amount), 0) AS fees
+          FROM crm.engagement_letter_fee_group
+          WHERE engagement_letter_id = l.id AND removed_at IS NULL
+        ) g ON true
         WHERE (${filters.status ?? null}::text IS NULL OR l.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR l.party_id = ${filters.partyId ?? null})
         ORDER BY l.created_at DESC
@@ -612,9 +706,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
            description, position, quantity, unit_amount, currency, discount_percent,
            effective_from, jurisdiction, billing_frequency, scope_override,
            client_obligations_override, volume_limits_override, exclusions_override,
-           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note)
+           oop_estimate_min, oop_estimate_max, oop_currency, pricing_note, fee_group_id)
         SELECT $1, $2, $3, $4, $5, $6, coalesce(max(position), 0) + 1,
-               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21
+               $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
@@ -641,6 +735,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           l.oopEstimate?.max ?? null,
           l.oopEstimate?.currency ?? null,
           l.pricingNote,
+          l.feeGroupId,
         ],
       );
       if (!row) throw new Error("engagement letter line insert returned no row");
@@ -667,6 +762,118 @@ export class PostgresEngagementRepository implements EngagementRepository {
         [letterId],
       );
       return rows.map(toLine);
+    });
+  }
+
+  /**
+   * Into a fee group or out of one, with the price the line has afterwards —
+   * ONE statement, so no reader sees a line both grouped and priced, which
+   * `el_line_grouped_is_unpriced_chk` would refuse half way through anyway.
+   */
+  async setLinePricing(
+    tenantId: string,
+    letterId: string,
+    lineId: string,
+    pricing: LinePricing,
+  ): Promise<LetterLine> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db.unsafe<LineRow[]>(
+        `
+        UPDATE crm.engagement_letter_line
+           SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7
+         WHERE id = $1 AND engagement_letter_id = $2 AND tenant_id = $3 AND removed_at IS NULL
+        RETURNING ${LINE_COLUMNS}
+      `,
+        [
+          lineId,
+          letterId,
+          tenantId,
+          pricing.feeGroupId,
+          pricing.unitAmount,
+          pricing.discountPercent,
+          pricing.pricingNote,
+        ],
+      );
+      if (!row) throw new Error(`engagement letter line ${lineId} vanished while being repriced`);
+      return toLine(row);
+    });
+  }
+
+  async addFeeGroup(g: NewFeeGroup): Promise<FeeGroup> {
+    return withTenant(this.app, g.tenantId, async (db) => {
+      // The position is assigned in the same statement that inserts, after the
+      // letter's last LIVE group — the line's own arrangement, for the same
+      // reason: two people adding a group to one draft cannot race for it.
+      const [row] = await db<FeeGroupRow[]>`
+        INSERT INTO crm.engagement_letter_fee_group
+          (id, tenant_id, engagement_letter_id, currency, position, title, billing_frequency,
+           amount, payment_terms, fee_description, intro, deliverables, client_obligations)
+        SELECT ${g.id}, ${g.tenantId}, ${g.engagementLetterId}, ${g.currency},
+               coalesce(max(position), 0) + 1, ${g.title}, ${g.billingFrequency}, ${g.amount},
+               ${g.paymentTerms}, ${g.feeDescription}, ${g.intro}, ${g.deliverables},
+               ${g.clientObligations}
+        FROM crm.engagement_letter_fee_group
+        WHERE engagement_letter_id = ${g.engagementLetterId} AND removed_at IS NULL
+        RETURNING ${db.unsafe(FEE_GROUP_COLUMNS)}
+      `;
+      if (!row) throw new Error("fee group insert returned no row");
+      return toFeeGroup(row);
+    });
+  }
+
+  async editFeeGroup(
+    tenantId: string,
+    letterId: string,
+    groupId: string,
+    edit: FeeGroupEdit,
+  ): Promise<FeeGroup> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // One UPDATE naming every column, each kept as it is unless the edit
+      // carries it — `undefined` is "not mentioned", which is different from a
+      // prose field the caller cleared to null.
+      const keep = (v: unknown): boolean => v === undefined;
+      const [row] = await db<FeeGroupRow[]>`
+        UPDATE crm.engagement_letter_fee_group
+           SET title = CASE WHEN ${keep(edit.title)} THEN title ELSE ${edit.title ?? null} END,
+               billing_frequency = CASE WHEN ${keep(edit.billingFrequency)} THEN billing_frequency
+                                        ELSE ${edit.billingFrequency ?? null} END,
+               amount = CASE WHEN ${keep(edit.amount)} THEN amount
+                             ELSE ${edit.amount ?? null}::numeric END,
+               payment_terms = CASE WHEN ${keep(edit.paymentTerms)} THEN payment_terms
+                                    ELSE ${edit.paymentTerms ?? null} END,
+               fee_description = CASE WHEN ${keep(edit.feeDescription)} THEN fee_description
+                                      ELSE ${edit.feeDescription ?? null} END,
+               intro = CASE WHEN ${keep(edit.intro)} THEN intro ELSE ${edit.intro ?? null} END,
+               deliverables = CASE WHEN ${keep(edit.deliverables)} THEN deliverables
+                                   ELSE ${edit.deliverables ?? null} END,
+               client_obligations = CASE WHEN ${keep(edit.clientObligations)} THEN client_obligations
+                                         ELSE ${edit.clientObligations ?? null} END
+         WHERE id = ${groupId} AND engagement_letter_id = ${letterId} AND removed_at IS NULL
+        RETURNING ${db.unsafe(FEE_GROUP_COLUMNS)}
+      `;
+      if (!row) throw new Error(`fee group ${groupId} vanished while being edited`);
+      return toFeeGroup(row);
+    });
+  }
+
+  async removeFeeGroup(tenantId: string, letterId: string, groupId: string): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`
+        UPDATE crm.engagement_letter_fee_group SET removed_at = now()
+        WHERE id = ${groupId} AND engagement_letter_id = ${letterId} AND removed_at IS NULL
+      `;
+    });
+  }
+
+  async listFeeGroups(tenantId: string, letterId: string): Promise<readonly FeeGroup[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<FeeGroupRow[]>`
+        SELECT ${db.unsafe(FEE_GROUP_COLUMNS)}
+        FROM crm.engagement_letter_fee_group
+        WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ORDER BY position
+      `;
+      return rows.map(toFeeGroup);
     });
   }
 
@@ -716,13 +923,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                withdrawn_at = CASE WHEN ${status} = 'withdrawn' THEN ${at}::timestamptz
                                    ELSE NULL END
          WHERE id = ${letterId}
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       if (!row) throw new Error(`engagement letter ${letterId} vanished mid-transition`);
       return toLetter(row);
@@ -764,13 +965,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                -- a brand asset somebody replaced in between.
                firm_signature_version_id = ${firm?.signatureVersionId ?? null}
          WHERE id = ${letterId} AND status = 'draft'
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       // `AND status = 'draft'` makes the transition its own lock, the same
       // trick the signature uses: two people sending one draft cannot both find
@@ -796,13 +991,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
   async findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
-        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-               jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-               advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-               signature_method, signature_reference, signed_content_hash, signed_by_title,
-               withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-               effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        SELECT ${db.unsafe(LETTER_COLUMNS)}
         FROM crm.engagement_letter
         WHERE supersedes_id = ${letterId} AND status <> 'withdrawn'
       `;
@@ -833,13 +1022,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                signature_reference = ${signature.signatureReference},
                signed_content_hash = ${signature.signedContentHash}
          WHERE id = ${letterId} AND status = 'sent'
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       // `AND status = 'sent'` makes the transition itself the lock: two
       // concurrent signatures cannot both find the row in that state, so the
@@ -882,13 +1065,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         UPDATE crm.engagement_letter
            SET advance_recorded_at = ${at}::timestamptz, advance_recorded_by = ${recordedByUserId}
          WHERE id = ${letterId} AND advance_recorded_at IS NULL
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id,
-                  jurisdiction, title, status, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-                  advance_recorded_at, advance_recorded_by, sent_at, signed_at, signed_by_name,
-                  signature_method, signature_reference, signed_content_hash, signed_by_title,
-                  withdrawn_at, background, addressed_to_party_id, issued_on, supersedes_id,
-                  effective_from, firm_signatory_user_id, firm_signatory_title, firm_signed_at,
-                  firm_signature_version_id
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       // Same trick as the signature: `advance_recorded_at IS NULL` is the lock,
       // so two clicks cannot both release the engagements.
@@ -943,7 +1120,12 @@ export class PostgresEngagementRepository implements EngagementRepository {
                ll.description, ll.quantity::text AS quantity,
                ll.unit_amount::text AS unit_amount, ll.pricing_note,
                ll.currency, ll.discount_percent::text AS discount_percent,
-               ll.billing_frequency
+               -- A grouped engagement is billed at its GROUP's period (0083); the
+               -- line's own is the service's recurrence, copied at drafting.
+               coalesce(g.billing_frequency, ll.billing_frequency) AS billing_frequency,
+               g.id AS fee_group_id, g.rank AS fee_group_rank, g.title AS fee_group_title,
+               g.amount::text AS fee_group_amount,
+               g.billing_frequency AS fee_group_frequency, g.line_count AS fee_group_line_count
           FROM crm.engagement e
           JOIN crm.engagement_letter l
             ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
@@ -951,6 +1133,18 @@ export class PostgresEngagementRepository implements EngagementRepository {
             ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
           JOIN core.party ep
             ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
+          -- The group that prices the line, with its section letter (its rank
+          -- among the letter's live groups) and how many live lines it covers.
+          LEFT JOIN LATERAL (
+            SELECT fg.id, fg.title, fg.amount, fg.billing_frequency,
+                   (SELECT count(*) FROM crm.engagement_letter_fee_group o
+                     WHERE o.engagement_letter_id = fg.engagement_letter_id
+                       AND o.removed_at IS NULL AND o.position <= fg.position)::int AS rank,
+                   (SELECT count(*) FROM crm.engagement_letter_line m
+                     WHERE m.fee_group_id = fg.id AND m.removed_at IS NULL)::int AS line_count
+              FROM crm.engagement_letter_fee_group fg
+             WHERE fg.id = ll.fee_group_id AND fg.tenant_id = ll.tenant_id
+          ) g ON true
          WHERE e.party_id = ${partyId}
          ORDER BY ep.display_name ASC, ll.position ASC
       `;
@@ -970,6 +1164,21 @@ export class PostgresEngagementRepository implements EngagementRepository {
         status: r.status,
         effectiveFrom: r.effective_from,
         endsOn: r.ends_on,
+        feeGroup:
+          r.fee_group_id === null ||
+          r.fee_group_rank === null ||
+          r.fee_group_title === null ||
+          r.fee_group_amount === null ||
+          r.fee_group_frequency === null
+            ? null
+            : {
+                id: r.fee_group_id,
+                code: sectionCode(r.fee_group_rank - 1),
+                title: r.fee_group_title,
+                amount: r.fee_group_amount,
+                billingFrequency: r.fee_group_frequency,
+                lineCount: r.fee_group_line_count ?? 0,
+              },
       }));
     });
   }
@@ -995,4 +1204,10 @@ interface BillableRow {
   status: string;
   effective_from: string;
   ends_on: string | null;
+  fee_group_id: string | null;
+  fee_group_rank: number | null;
+  fee_group_title: string | null;
+  fee_group_amount: string | null;
+  fee_group_frequency: string | null;
+  fee_group_line_count: number | null;
 }

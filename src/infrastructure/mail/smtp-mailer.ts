@@ -23,6 +23,12 @@
 // `usecase/identity/ports.ts` says the same thing from the other side, which is
 // why `sendPortalInvite` takes `firmName` at all.
 import type { Mailer } from "../../usecase/identity/ports";
+import type {
+  DecisionNotice,
+  ProposalLetter,
+  ProposalMailer,
+} from "../../usecase/proposal/ports";
+import { longDay } from "../../domain/day";
 
 /**
  * A rendered letter, ready to hand over.
@@ -36,6 +42,24 @@ export interface Letter {
   readonly subject: string;
   readonly text: string;
   readonly html: string;
+  /**
+   * The display name to send AS, in place of the deployment's (0085). A
+   * proposal goes out under the FIRM's name, because that is who is offering
+   * the work. Only the name: the address is the one the relay authenticates,
+   * and a letter claiming another would be refused or, worse, delivered.
+   */
+  readonly fromName?: string | undefined;
+  /** Where a reply goes, when not to the sender — the colleague who prepared
+   *  a proposal, so the client's question reaches a person. */
+  readonly replyTo?: string | undefined;
+  readonly attachments?: readonly Attachment[] | undefined;
+}
+
+/** A file carried with a letter — the proposal's PDF of record. */
+export interface Attachment {
+  readonly filename: string;
+  readonly contentType: string;
+  readonly content: Uint8Array;
 }
 
 /** The one thing this adapter needs from a mail server. */
@@ -50,7 +74,7 @@ export interface MailTransport {
  *  tenant, and the FIRM is named in the invite's own text. */
 const PRODUCT = "BiB";
 
-export class SmtpMailer implements Mailer {
+export class SmtpMailer implements Mailer, ProposalMailer {
   constructor(private readonly transport: MailTransport) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -367,6 +391,141 @@ export class SmtpMailer implements Mailer {
       ]),
     });
   }
+
+  /**
+   * THE PROPOSAL ITSELF (0085) — the PDF attached, and two buttons.
+   *
+   * ── IT IS AN UNASKED LETTER WITH LINKS IN IT, SO IT HAS TO LOOK LIKE ONE ─
+   *
+   * The portal invite's problem, and the same answer: the FIRM is named in the
+   * From name, the subject and the first line; the reader is told why they got
+   * it; and every link says what it does before anybody presses it. A reply
+   * goes to the colleague who prepared it, never into a no-reply box.
+   *
+   * ── WHY THE BUTTONS DO NOT ANSWER ───────────────────────────────────────
+   *
+   * Company mail filters open every link in a message to scan it. A button that
+   * accepted on opening would be pressed by the filter before the client read
+   * the proposal. So each opens the proposal's page with that answer READY, and
+   * the answer is given there — with a name, and for an acceptance a statement
+   * ticked. The letter says so, because "I only opened it" should never be a
+   * worry anybody has to have.
+   */
+  sendProposal(letter: ProposalLetter): Promise<void> {
+    const firm = headerSafe(letter.firmName) ?? "Your adviser";
+    const ref = headerSafe(letter.ref) ?? letter.ref;
+    const greeting = letter.greetingName === null ? "Hello," : `Dear ${letter.greetingName},`;
+    const validity =
+      letter.validUntil === null ? null : `It is valid until ${longDay(letter.validUntil)}.`;
+    const replyTo = letter.preparedBy ?? firm;
+    const intro =
+      `${firm} has sent you a proposal for ${letter.clientName}: ${letter.title} (${letter.ref}). ` +
+      `The PDF is attached.`;
+
+    const text = [
+      greeting,
+      ``,
+      ...(letter.note === null ? [] : [letter.note, ``]),
+      intro + (validity === null ? "" : ` ${validity}`),
+      ``,
+      `To accept it, open:`,
+      letter.acceptUrl,
+      ``,
+      `To decline it, open:`,
+      letter.declineUrl,
+      ``,
+      `Each link opens the proposal in your browser and asks you to confirm with your`,
+      `name. Nothing is decided by opening it.`,
+      ``,
+      `Questions? Reply to this email and it reaches ${replyTo}.`,
+      ``,
+      ...(letter.preparedBy === null ? [] : [letter.preparedBy]),
+      firm,
+    ].join("\n");
+
+    return this.transport.send({
+      to: letter.to,
+      fromName: firm,
+      ...(letter.replyTo === null ? {} : { replyTo: letter.replyTo }),
+      subject: `Proposal ${ref} from ${firm}`,
+      text,
+      html: page([
+        paragraph(esc(greeting)),
+        ...(letter.note === null ? [] : [paragraph(multiline(letter.note))]),
+        paragraph(
+          `<strong>${esc(firm)}</strong> has sent you a proposal for ${esc(letter.clientName)}: ` +
+            `${esc(letter.title)} (${esc(letter.ref)}). <strong>The PDF is attached.</strong>` +
+            (validity === null ? "" : ` ${esc(validity)}`),
+        ),
+        buttons([
+          { url: letter.acceptUrl, label: "Accept proposal", primary: true },
+          { url: letter.declineUrl, label: "Decline", primary: false },
+        ]),
+        paragraph(
+          `Each button opens the proposal in your browser and asks you to confirm with your ` +
+            `name. <strong>Nothing is decided by opening it.</strong>`,
+        ),
+        paragraph(`Questions? Reply to this email and it reaches ${esc(replyTo)}.`),
+        paragraph(
+          (letter.preparedBy === null ? "" : `${esc(letter.preparedBy)}<br>`) + esc(firm),
+        ),
+        fallback(letter.viewUrl),
+      ]),
+      attachments: [
+        {
+          filename: letter.pdf.filename,
+          contentType: "application/pdf",
+          content: letter.pdf.bytes,
+        },
+      ],
+    });
+  }
+
+  /**
+   * The colleague who prepared a proposal hears the moment the client answers
+   * on its link (0085) — who, which way, when, and why on a decline. It goes to
+   * somebody at the firm, so it names the product rather than the firm.
+   */
+  sendDecisionNotice(notice: DecisionNotice): Promise<void> {
+    const accepted = notice.decision === "accepted";
+    const verb = accepted ? "accepted" : "declined";
+    const client = headerSafe(notice.clientName) ?? "The client";
+    const ref = headerSafe(notice.ref) ?? notice.ref;
+    const when = readableInstant(notice.decidedAt);
+    const headline =
+      `${notice.signerName} ${verb} proposal ${notice.ref} (${notice.title}) for ` +
+      `${notice.clientName}, on the proposal's link, at ${when}.`;
+    const reason = accepted
+      ? null
+      : notice.declinedReason === null
+        ? "They gave no reason."
+        : `The reason they gave: "${notice.declinedReason}"`;
+    const next = accepted
+      ? "The next step is the engagement letter: the proposal's page writes one up from this quote."
+      : null;
+
+    const text = [
+      headline,
+      ...(reason === null ? [] : [``, reason]),
+      ``,
+      `Open the proposal:`,
+      notice.proposalUrl,
+      ...(next === null ? [] : [``, next]),
+    ].join("\n");
+
+    return this.transport.send({
+      to: notice.to,
+      subject: `${client} ${verb} ${ref}`,
+      text,
+      html: page([
+        paragraph(esc(headline)),
+        ...(reason === null ? [] : [paragraph(esc(reason))]),
+        button(notice.proposalUrl, "Open the proposal"),
+        ...(next === null ? [] : [paragraph(esc(next))]),
+        fallback(notice.proposalUrl),
+      ]),
+    });
+  }
 }
 
 /**
@@ -443,6 +602,28 @@ function button(url: string, label: string): string {
     `color:#ffffff;text-decoration:none;border-radius:6px;font-weight:600">${esc(label)}</a>` +
     `</p>`
   );
+}
+
+/**
+ * Two buttons on one line — Accept and Decline. The second is outlined rather
+ * than filled, so the letter has one obvious next step and a second that is
+ * plainly there, never hidden.
+ */
+function buttons(
+  items: readonly { readonly url: string; readonly label: string; readonly primary: boolean }[],
+): string {
+  const one = (b: { url: string; label: string; primary: boolean }): string =>
+    `<a href="${esc(b.url)}" style="display:inline-block;padding:10px 18px;margin:0 8px 8px 0;` +
+    (b.primary
+      ? `background:#7a1c2e;color:#ffffff;border:1px solid #7a1c2e;`
+      : `background:#ffffff;color:#7a1c2e;border:1px solid #7a1c2e;`) +
+    `text-decoration:none;border-radius:6px;font-weight:600">${esc(b.label)}</a>`;
+  return `<p style="margin:0 0 8px">${items.map(one).join("")}</p>`;
+}
+
+/** A colleague's own words, escaped, with their line breaks kept. */
+function multiline(s: string): string {
+  return esc(s).replace(/\r?\n/g, "<br>");
 }
 
 /** The link in full, because a button is not copyable and some clients do not

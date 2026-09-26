@@ -20,11 +20,29 @@
 // Dubai or Delaware by somebody for whom a bare symbol is ambiguous or simply
 // unfamiliar. A three-letter ISO code is unambiguous everywhere, and a firm that
 // wants the symbol can now have it by changing this one function.
-import { readClauseBody } from "../../domain/config/model";
+import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { DocumentKind } from "../../domain/filestore/model";
-import type { RenderableDocument, RenderableImage, Section } from "../../domain/render/model";
+import type {
+  BillingFrequency,
+  BlockKind,
+  OutOfPocketEstimate,
+} from "../../domain/document/model";
+import { resolveTerms } from "../../domain/document/model";
+import type { FeeGroup, LetterLayout } from "../../domain/engagement/model";
+import { planAnnexure } from "../../domain/engagement/annexure";
+import type { AnnexurePlan, PlanLine } from "../../domain/engagement/annexure";
+import { planProposal } from "../../domain/proposal/document";
+import type { ProposalPlan } from "../../domain/proposal/document";
+import type {
+  CoverLine,
+  Flow,
+  RenderableDocument,
+  RenderableImage,
+  Section,
+  SignatureBlock,
+} from "../../domain/render/model";
 import { isDrawableImage } from "../../domain/render/model";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
@@ -32,7 +50,7 @@ import { isoInstant, utcDayOf } from "./instant";
 
 /** What this source can describe. Anything else is refused BY NAME rather than
  *  producing an empty document. */
-const RENDERABLE: readonly DocumentKind[] = ["engagement_letter", "invoice"];
+const RENDERABLE: readonly DocumentKind[] = ["engagement_letter", "invoice", "proposal"];
 
 interface LetterRow {
   /** Whose letter this is. Read for FILING the rendered PDF, never drawn on
@@ -40,9 +58,20 @@ interface LetterRow {
   party_id: string;
   ref: string;
   title: string;
+  /** Which layout it prints in (0083) — decides everything below the head. */
+  layout: LetterLayout;
   jurisdiction: string;
   currency: string;
   background: string | null;
+  advance_required: boolean;
+  advance_amount: string | null;
+  /** The person it is written to, by name — the Annexure letter's addressee
+   *  and salutation. */
+  addressee_name: string | null;
+  /** The firm signatory's address, printed under their name on the Annexure
+   *  letter's cover — "you may reach out to the undersigned". A read-time join,
+   *  like the name, so an erased account stops resolving. */
+  firm_signatory_email: string | null;
   issued_on: string | null;
   effective_from: string | null;
   signed_at: string | null;
@@ -177,13 +206,202 @@ export class PostgresRenderSource implements RenderSource {
   }): Promise<DescribedDocument | null> {
     if (input.kind === "engagement_letter") return this.letter(input.tenantId, input.subjectRef);
     if (input.kind === "invoice") return this.invoice(input.tenantId, input.subjectRef);
+    if (input.kind === "proposal") return this.proposal(input.tenantId, input.subjectRef);
     return null;
+  }
+
+  /**
+   * THE FIRM'S "PROPOSAL FOR SERVICES" (0084): a cover, then Background, the
+   * in-scope services, the work in sections by the firm's own Dept, the
+   * Summary of Fees and the Notes.
+   *
+   * Every word is the firm's or the client's own except the headings of the
+   * firm's template and the sentences that restate a TERM the proposal holds —
+   * a fee, an out-of-pocket range, the day it lapses. `planProposal` decides
+   * the structure and is tested without a page.
+   */
+  private async proposal(tenantId: string, proposalId: string): Promise<DescribedDocument | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<ProposalHeadRow[]>`
+        SELECT p.party_id, p.ref, p.title, p.currency, p.valid_until::text, p.background,
+               p.issuing_entity_party_id,
+               ${db.unsafe(utcDayOf("p.sent_at", "sent_on"))},
+               ${db.unsafe(utcDayOf("p.created_at", "created_on"))},
+               client.display_name AS client_name,
+               entity.display_name AS entity_name,
+               addressee.display_name AS addressee_name,
+               -- Read-time joins, like the letter's signatory: an erased
+               -- account stops resolving and the cover then names nobody.
+               preparer.display_name AS preparer_name,
+               preparer.email::text AS preparer_email
+        FROM crm.proposal p
+        JOIN core.party client ON client.id = p.party_id
+        JOIN core.party entity ON entity.id = p.issuing_entity_party_id
+        LEFT JOIN core.party addressee ON addressee.id = p.addressed_to_party_id
+        LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
+        WHERE p.id = ${proposalId}
+      `;
+      if (!row) return null;
+
+      const lines = await db<ProposalLineRow[]>`
+        SELECT l.id, l.position, l.description, l.billing_frequency, l.pricing_note,
+               l.scope_override, l.client_obligations_override, l.volume_limits_override,
+               l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
+               l.oop_currency,
+               CASE WHEN l.unit_amount IS NULL THEN NULL
+                    ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
+               END AS line_total,
+               entity.display_name AS subject,
+               v.body AS service_body
+        FROM crm.proposal_line l
+        JOIN config.version v ON v.id = l.service_version_id
+        -- LEFT: a proposal line may name no company — a prospect may hold none.
+        LEFT JOIN core.party entity ON entity.id = l.entity_party_id
+        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
+        ORDER BY l.position
+      `;
+
+      // The firm's Depts, retired ones included: a quote pinned to a Dept the
+      // firm has since retired still names it.
+      const depts = await db<{ code: string; name: string; sort_order: number }[]>`
+        SELECT code, name, sort_order FROM tenancy.service_axis WHERE axis = 'dept'
+      `;
+
+      const blocks = await db<BlockRow[]>`
+        SELECT kind, body, is_heading
+        FROM crm.document_block
+        WHERE proposal_id = ${proposalId} AND removed_at IS NULL
+        ORDER BY sort_order
+      `;
+
+      const plan = planProposal({
+        depts: depts.map((d) => ({ code: d.code, name: d.name, sortOrder: d.sort_order })),
+        lines: lines.map((l) => {
+          const service = readServiceBody(l.service_body);
+          return {
+            id: l.id,
+            position: l.position,
+            // The PINNED version's code and Dept — what the catalogue said when
+            // the service was quoted.
+            ref: service.ref,
+            deptCode: service.module,
+            description: l.description,
+            subject: l.subject,
+            // OVERRIDE ELSE THE PINNED CATALOGUE — the proposal screen's own
+            // resolution, so the page and the PDF cannot differ.
+            terms: resolveTerms(
+              {
+                scope: l.scope_override,
+                clientObligations: l.client_obligations_override,
+                volumeLimits: l.volume_limits_override,
+                exclusions: l.exclusions_override,
+              },
+              service,
+            ),
+            billingFrequency: l.billing_frequency,
+            net: l.line_total,
+            pricingNote: l.pricing_note,
+            oopEstimate:
+              l.oop_estimate_min === null || l.oop_estimate_max === null || l.oop_currency === null
+                ? null
+                : { min: l.oop_estimate_min, max: l.oop_estimate_max, currency: l.oop_currency },
+          };
+        }),
+      });
+
+      const byKind = (kind: BlockKind): BlockRow[] => blocks.filter((b) => b.kind === kind);
+      const notes = [
+        ...noteFlow("Team Deployment", byKind("team")),
+        ...noteFlow("General scope exclusions", byKind("exclusion")),
+        ...noteFlow("Commercials", byKind("commercial")),
+      ];
+
+      const issuedOn = row.sent_on ?? row.created_on;
+      const cover = await this.brandImage(db, tenantId, row.issuing_entity_party_id, "proposal_cover");
+
+      const preparedBy: CoverLine[] = [];
+      if (row.preparer_name !== null) preparedBy.push({ text: row.preparer_name, bold: true });
+      preparedBy.push({ text: row.entity_name, bold: true });
+      if (row.preparer_email !== null) preparedBy.push({ text: row.preparer_email, bold: false });
+
+      const document: RenderableDocument = {
+        documentTitle: "Proposal",
+        reference: row.ref,
+        issuer: { name: row.entity_name, lines: [] },
+        recipient: { name: row.client_name, lines: [] },
+        recipientLabel: "Prepared for",
+        meta: [],
+        sections: [],
+        table: null,
+        totals: [],
+        // No footer: the firm's template carries none, and every page after the
+        // cover already names the reference beside the logo.
+        footer: null,
+        proposal: {
+          cover: {
+            artwork: cover,
+            title: "Proposal for Services",
+            subtitle: row.title,
+            preparedFor: [
+              ...(row.addressee_name === null ? [] : [{ text: row.addressee_name, bold: true }]),
+              { text: row.client_name, bold: true },
+            ],
+            preparedBy,
+          },
+          running: `${row.ref}  ·  ${longDate(issuedOn)}`,
+          flow: [
+            ...(row.background === null || row.background.trim() === ""
+              ? []
+              : [heading(1, "Background"), paragraph(row.background)]),
+            ...inScopeFlow(plan),
+            ...proposalSectionsFlow(plan, row.currency),
+            ...proposalFeesFlow(plan, row.currency),
+            ...(row.valid_until === null
+              ? []
+              : [paragraph(`This proposal is valid until ${longDate(row.valid_until)}.`, true)]),
+            ...(notes.length === 0 ? [] : [heading(1, "Notes"), ...notes]),
+          ],
+        },
+        logo: await this.brandImage(db, tenantId, row.issuing_entity_party_id, "logo"),
+        issuedOn,
+      };
+      return { document, partyId: row.party_id };
+    });
+  }
+
+  /**
+   * One of the issuing entity's marks in force now — its logo or its proposal
+   * cover — or null. "In force now" is the right question for a proposal: it
+   * is an offer, re-rendered whenever the firm presses the button, and never
+   * evidence the way a signed letter's pinned signature is. A media type the
+   * renderer cannot draw is skipped rather than refused (the upload refuses
+   * it now; older rows may hold anything).
+   */
+  private async brandImage(
+    db: Db,
+    tenantId: string,
+    entityPartyId: string,
+    kind: "logo" | "proposal_cover",
+  ): Promise<RenderableImage | null> {
+    const [row] = await db<LogoRow[]>`
+      SELECT v.media_type, v.storage_key
+      FROM files.brand_asset b
+      JOIN files.document_version v ON v.id = b.document_version_id
+      WHERE b.entity_party_id = ${entityPartyId} AND b.kind = ${kind} AND b.is_active
+    `;
+    if (!row || !isDrawableImage(row.media_type)) return null;
+    const bytes = await this.readBlob({ tenantId, storageKey: row.storage_key });
+    if (bytes === null) return null;
+    return { bytes, mediaType: row.media_type };
   }
 
   private async letter(tenantId: string, letterId: string): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<LetterRow[]>`
-        SELECT el.party_id, el.ref, el.title, el.jurisdiction, el.currency, el.background,
+        SELECT el.party_id, el.ref, el.title, el.layout, el.jurisdiction, el.currency,
+               el.background, el.advance_required, el.advance_amount::text,
+               addressee.display_name AS addressee_name,
+               signatory.email::text AS firm_signatory_email,
                el.issued_on::text, el.effective_from::text,
                ${db.unsafe(isoInstant("el.signed_at", "signed_at"))},
                el.signed_by_name, el.signed_by_title, el.firm_signatory_title,
@@ -201,9 +419,15 @@ export class PostgresRenderSource implements RenderSource {
         JOIN core.party entity ON entity.id = el.issuing_entity_party_id
         LEFT JOIN core.legal_entity le ON le.party_id = entity.id
         LEFT JOIN tenancy.user_account signatory ON signatory.id = el.firm_signatory_user_id
+        LEFT JOIN core.party addressee ON addressee.id = el.addressed_to_party_id
         WHERE el.id = ${letterId}
       `;
       if (!row) return null;
+
+      // THE LAYOUT DECIDES THE DOCUMENT (0083). Everything below this branch is
+      // the classic letter exactly as it was, because a letter issued in it
+      // must re-render as the document its client holds.
+      if (row.layout === "annexure") return this.annexureLetter(db, tenantId, letterId, row);
 
       const lines = await db<LetterLineRow[]>`
         SELECT l.description, l.quantity::text, l.unit_amount::text,
@@ -382,6 +606,213 @@ export class PostgresRenderSource implements RenderSource {
     });
   }
 
+  /**
+   * THE FIRM'S OWN FORMAT (0083): a cover letter, Annexure 1 — scope,
+   * deliverables and fees — and Annexure 2, the terms.
+   *
+   * What goes WHERE follows the firm's template (the MyDojo letter of July 2026)
+   * and every word on it is the firm's or the client's own: the cover and
+   * acceptance paragraphs are the letter's own blocks, the scope is each line's
+   * four blocks, the fee groups are the letter's sections. The only sentences
+   * this product writes are the ones that restate a TERM the letter already
+   * holds — the advance, an out-of-pocket range, which companies a service is
+   * for — because a term that is hashed and frozen and absent from the PDF is
+   * exactly the failure the terms join above was built to end.
+   */
+  private async annexureLetter(
+    db: Db,
+    tenantId: string,
+    letterId: string,
+    row: LetterRow,
+  ): Promise<DescribedDocument> {
+    const lines = await db<AnnexureLineRow[]>`
+      SELECT l.id, l.position, l.fee_group_id, l.entity_party_id,
+             entity.display_name AS entity_name, l.service_version_id, l.description,
+             l.billing_frequency, l.effective_from::text, l.pricing_note,
+             l.scope_override, l.client_obligations_override, l.volume_limits_override,
+             l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
+             l.oop_currency,
+             CASE WHEN l.unit_amount IS NULL THEN NULL
+                  ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
+             END AS line_total,
+             v.body AS service_body
+      FROM crm.engagement_letter_line l
+      JOIN core.party entity ON entity.id = l.entity_party_id
+      JOIN config.version v ON v.id = l.service_version_id
+      WHERE l.engagement_letter_id = ${letterId} AND l.removed_at IS NULL
+      ORDER BY l.position
+    `;
+
+    const groups = await db<AnnexureGroupRow[]>`
+      SELECT id, tenant_id, engagement_letter_id, position, title, billing_frequency,
+             amount::text, currency, payment_terms, fee_description, intro, deliverables,
+             client_obligations
+      FROM crm.engagement_letter_fee_group
+      WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+      ORDER BY position
+    `;
+
+    const blocks = await db<BlockRow[]>`
+      SELECT kind, body, is_heading
+      FROM crm.document_block
+      WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+      ORDER BY sort_order
+    `;
+
+    // As pinned, exactly as the classic letter reads them.
+    const clauses = await db<ClauseRow[]>`
+      SELECT v.body
+      FROM crm.engagement_letter_clause c
+      JOIN config.version v ON v.id = c.clause_version_id
+      WHERE c.engagement_letter_id = ${letterId}
+      ORDER BY c.position
+    `;
+
+    const plan = planAnnexure({
+      letterEffectiveFrom: row.effective_from,
+      feeGroups: groups.map(toFeeGroup),
+      lines: lines.map(
+        (l): PlanLine => ({
+          id: l.id,
+          position: l.position,
+          feeGroupId: l.fee_group_id,
+          entityPartyId: l.entity_party_id,
+          entityName: l.entity_name,
+          serviceVersionId: l.service_version_id,
+          description: l.description,
+          // OVERRIDE ELSE THE PINNED CATALOGUE — the same resolution the
+          // letter's own screen shows, so the page and the PDF cannot differ.
+          terms: resolveTerms(
+            {
+              scope: l.scope_override,
+              clientObligations: l.client_obligations_override,
+              volumeLimits: l.volume_limits_override,
+              exclusions: l.exclusions_override,
+            },
+            readServiceBody(l.service_body),
+          ),
+          billingFrequency: l.billing_frequency,
+          effectiveFrom: l.effective_from,
+          net: l.line_total,
+          pricingNote: l.pricing_note,
+          oopEstimate:
+            l.oop_estimate_min === null || l.oop_estimate_max === null || l.oop_currency === null
+              ? null
+              : { min: l.oop_estimate_min, max: l.oop_estimate_max, currency: l.oop_currency },
+        }),
+      ),
+    });
+
+    const byKind = (kind: BlockKind): BlockRow[] => blocks.filter((b) => b.kind === kind);
+
+    // The companies the client signs for besides itself — every company a line
+    // is for, in the order the letter lists them.
+    const others: string[] = [];
+    for (const l of lines) {
+      if (l.entity_party_id !== row.party_id && !others.includes(l.entity_name)) {
+        others.push(l.entity_name);
+      }
+    }
+
+    const firm: SignatureBlock | null =
+      row.firm_signatory_title === null
+        ? null
+        : {
+            heading: `For ${row.entity_name}`,
+            lines: [row.firm_signatory_name ?? "", row.firm_signatory_title, row.firm_signatory_email ?? ""]
+              .filter((l) => l.trim() !== ""),
+            // Pinned at send, never looked up now (0081) — the classic letter's
+            // rule, for the same reason.
+            image: await this.signature(db, tenantId, row.firm_signature_version_id),
+            signAnchor: null,
+            dateAnchor: null,
+          };
+
+    const document: RenderableDocument = {
+      documentTitle: row.title,
+      reference: row.ref,
+      issuer: {
+        name: row.entity_name,
+        lines: [row.entity_jurisdiction === null ? "" : `Registered in ${row.entity_jurisdiction}`]
+          .filter((l) => l !== ""),
+      },
+      recipient: { name: row.client_name, lines: [] },
+      recipientLabel: "To",
+      meta: [],
+      sections: [],
+      table: null,
+      totals: [],
+      footer: row.signed_by_name === null
+        ? row.entity_name
+        : `${row.entity_name}   ·   signed by ${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
+      annexureLetter: {
+        cover: {
+          dateLine: `Dated ${longDate(row.issued_on ?? row.created_on)}`,
+          addressee: [row.addressee_name, row.client_name].filter((l): l is string => l !== null),
+          subject:
+            `Subject: ${row.title}` +
+            (row.effective_from === null
+              ? ""
+              : ` — period commencing ${longDate(row.effective_from)}`),
+          salutation:
+            row.addressee_name === null ? "Dear Sir or Madam," : `Dear ${row.addressee_name},`,
+          body: blockFlow(byKind("cover"), false),
+          closing: "Yours sincerely,",
+          firm,
+          acceptanceHeading: "Acceptance",
+          acceptance: blockFlow(byKind("acceptance"), false),
+          client: {
+            // WHO the client signs for, which is every company a line is for:
+            // G0.1 makes a group's work one line per company, and a signature
+            // that named only the parent would bind the parent alone.
+            heading:
+              `Accepted for and on behalf of ${row.client_name}` +
+              (others.length === 0 ? "" : `, for itself and on behalf of ${andList(others)}`),
+            lines: [
+              row.signed_by_name === null
+                ? "Name and capacity"
+                : `${row.signed_by_name}${row.signed_by_title === null ? "" : `, ${row.signed_by_title}`}`,
+            ],
+            signAnchor: CLIENT_SIGN_ANCHOR,
+            dateAnchor: CLIENT_DATE_ANCHOR,
+          },
+        },
+        annexures: [
+          {
+            label: "Annexure 1",
+            title: "Scope of Services, Deliverables & Fees",
+            flow: [
+              ...(row.background === null || row.background.trim() === ""
+                ? []
+                : [heading(1, "Background"), paragraph(row.background)]),
+              ...scopeFlow(plan),
+              ...feesFlow(plan, row),
+              ...titledBlocks("Commercials", byKind("commercial")),
+              ...titledBlocks("Team deployment", byKind("team")),
+              ...titledBlocks("General scope exclusions", byKind("exclusion")),
+            ],
+          },
+          {
+            label: "Annexure 2",
+            title: "Standard Terms & Conditions",
+            flow:
+              clauses.length === 0
+                ? [paragraph("No terms have been added to this letter yet.", true)]
+                : clauses.flatMap((c, i) => {
+                    const clause = readClauseBody(c.body);
+                    // NUMBERED, because "clause 8" is how a term is referred to
+                    // in the conversation where it matters.
+                    return [heading(2, `${String(i + 1)}. ${clause.title}`), paragraph(clause.text)];
+                  }),
+          },
+        ],
+      },
+      logo: await this.logo(db, tenantId, letterId, "engagement_letter"),
+      issuedOn: row.issued_on ?? row.created_on,
+    };
+    return { document, partyId: row.party_id };
+  }
+
   private async invoice(tenantId: string, invoiceId: string): Promise<DescribedDocument | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<InvoiceRow[]>`
@@ -542,3 +973,381 @@ const BLOCK_HEADINGS: Readonly<Record<string, string>> = {
   commercial: "Commercial terms",
   team: "The team",
 };
+
+// ── The Annexure letter's pieces (0083) ─────────────────────────────────────
+
+interface AnnexureLineRow {
+  id: string;
+  position: number;
+  fee_group_id: string | null;
+  entity_party_id: string;
+  entity_name: string;
+  service_version_id: string;
+  description: string;
+  billing_frequency: BillingFrequency | null;
+  effective_from: string | null;
+  pricing_note: string | null;
+  scope_override: string | null;
+  client_obligations_override: string | null;
+  volume_limits_override: string | null;
+  exclusions_override: string | null;
+  oop_estimate_min: string | null;
+  oop_estimate_max: string | null;
+  oop_currency: string | null;
+  line_total: string | null;
+  service_body: Record<string, unknown>;
+}
+
+interface AnnexureGroupRow {
+  id: string;
+  tenant_id: string;
+  engagement_letter_id: string;
+  position: number;
+  title: string;
+  billing_frequency: BillingFrequency;
+  amount: string;
+  currency: string;
+  payment_terms: string | null;
+  fee_description: string | null;
+  intro: string | null;
+  deliverables: string | null;
+  client_obligations: string | null;
+}
+
+function toFeeGroup(g: AnnexureGroupRow): FeeGroup {
+  return {
+    id: g.id,
+    tenantId: g.tenant_id,
+    engagementLetterId: g.engagement_letter_id,
+    position: g.position,
+    title: g.title,
+    billingFrequency: g.billing_frequency,
+    amount: g.amount,
+    currency: g.currency,
+    paymentTerms: g.payment_terms,
+    feeDescription: g.fee_description,
+    intro: g.intro,
+    deliverables: g.deliverables,
+    clientObligations: g.client_obligations,
+  };
+}
+
+function heading(level: 1 | 2 | 3, text: string): Flow {
+  return { kind: "heading", level, text };
+}
+
+function paragraph(text: string, muted = false): Flow {
+  return { kind: "paragraph", text, muted };
+}
+
+/** "A", "A and B", "A, B and C" — how a letter names the companies it covers. */
+function andList(names: readonly string[]): string {
+  if (names.length <= 1) return names.join("");
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1] ?? ""}`;
+}
+
+/** "For A, B and C." — ended with a full stop unless the last name already
+ *  carries one ("MyDojo, Inc."), which would otherwise print twice. */
+function forCompanies(names: readonly string[]): string {
+  const list = andList(names);
+  return `For ${list}${list.endsWith(".") ? "" : "."}`;
+}
+
+/**
+ * The firm's own prose, as the Annexure letter prints it: a heading block is a
+ * heading; every other line is a PARAGRAPH of the cover letter and the
+ * acceptance, and an ITEM of a list everywhere else — which is how the firm's
+ * template writes its commercials, its team and its exclusions.
+ */
+function blockFlow(rows: readonly BlockRow[], asList: boolean): Flow[] {
+  return rows.map((b) => {
+    if (b.is_heading) return heading(2, b.body);
+    if (!asList) return paragraph(b.body);
+    // A bullet, and its own later lines indented to hang under it.
+    const [first = "", ...rest] = b.body.split("\n");
+    return paragraph([`- ${first}`, ...rest.map((l) => `  ${l}`)].join("\n"));
+  });
+}
+
+function titledBlocks(title: string, rows: readonly BlockRow[]): Flow[] {
+  return rows.length === 0 ? [] : [heading(1, title), ...blockFlow(rows, true)];
+}
+
+/** Every section and every numbered service in it. */
+function scopeFlow(plan: AnnexurePlan): Flow[] {
+  const out: Flow[] = [];
+  for (const s of plan.sections) {
+    const group = s.group;
+    out.push(heading(1, `${s.code}. ${s.title}`));
+    if (s.entityNames !== null) out.push(paragraph(forCompanies(s.entityNames), true));
+    if (group !== null && group.intro !== null) out.push(paragraph(group.intro));
+    for (const item of s.items) {
+      out.push(heading(2, `${item.code}. ${item.description}`));
+      if (item.entityNames !== null) out.push(paragraph(forCompanies(item.entityNames), true));
+      if (item.beginsOn !== null) out.push(paragraph(`Begins ${longDate(item.beginsOn)}.`, true));
+      const t = item.terms;
+      if (t.scope.text !== null) out.push(paragraph(t.scope.text));
+      if (t.volumeLimits.text !== null) out.push(heading(3, "Volume limits"), paragraph(t.volumeLimits.text));
+      if (t.clientObligations.text !== null) {
+        out.push(heading(3, "Client's responsibilities"), paragraph(t.clientObligations.text));
+      }
+      if (t.exclusions.text !== null) out.push(heading(3, "Exclusions"), paragraph(t.exclusions.text));
+      if (item.oopEstimate !== null) out.push(paragraph(outOfPocket(item.oopEstimate), true));
+    }
+    if (group !== null && group.deliverables !== null) {
+      out.push(heading(3, "Deliverables"), paragraph(group.deliverables));
+    }
+    if (group !== null && group.clientObligations !== null) {
+      out.push(heading(3, "Client's responsibilities"), paragraph(group.clientObligations));
+    }
+  }
+  return out;
+}
+
+/** The out-of-pocket range, restated: it is a term the client signs for. */
+function outOfPocket(o: OutOfPocketEstimate): string {
+  return (
+    `Out-of-pocket expenses: approximately ${money(o.min, o.currency)} to ` +
+    `${money(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`
+  );
+}
+
+const PER_PERIOD: Readonly<Record<string, string>> = {
+  monthly: " per month",
+  quarterly: " per quarter",
+  annually: " per year",
+};
+
+/** The Summary of Fees: one row per fee group, one per line priced on its own. */
+function feesFlow(plan: AnnexurePlan, row: LetterRow): Flow[] {
+  const out: Flow[] = [heading(1, "Summary of Fees")];
+  if (plan.fees.length === 0) {
+    out.push(paragraph("No services have been added to this letter yet.", true));
+  } else {
+    out.push({
+      kind: "table",
+      table: {
+        columns: [
+          { label: "Section", align: "left", weight: 1.2 },
+          { label: "Description", align: "left", weight: 5 },
+          { label: "Frequency", align: "left", weight: 2.3 },
+          { label: "Fee", align: "left", weight: 2.7 },
+        ],
+        rows: plan.fees.map((f) => {
+          const frequency =
+            f.billingFrequency === null
+              ? "Not stated"
+              : (FREQUENCY_LABELS[f.billingFrequency] ?? f.billingFrequency);
+          // A start date only means something for a fee that recurs.
+          const recurring = f.billingFrequency !== null && f.billingFrequency !== "one_time";
+          const starts =
+            recurring && f.startsOn !== null ? `; starting from ${longDate(f.startsOn)}` : "";
+          // An unpriced line prints its REASON, never a blank or a zero (G1.6).
+          const fee =
+            f.amount === null
+              ? (f.pricingNote ?? "To be agreed")
+              : `${money(f.amount, row.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
+                (f.paymentTerms === null ? "" : `\n(${f.paymentTerms})`);
+          return [f.code, f.description, `${frequency}${starts}`, fee];
+        }),
+      },
+    });
+  }
+  // THE ADVANCE, which the classic letter never printed: it is in the content
+  // hash and it gates the work, so it belongs on the page the client signs.
+  if (row.advance_required && row.advance_amount !== null) {
+    out.push({
+      kind: "figures",
+      rows: [
+        {
+          label: "Advance, payable before work begins",
+          value: money(row.advance_amount, row.currency),
+          emphasis: true,
+        },
+      ],
+    });
+  }
+  return out;
+}
+
+// ── The proposal's pieces (0084) ────────────────────────────────────────────
+
+interface ProposalHeadRow {
+  /** Whose proposal this is — for FILING the PDF, never drawn on it. */
+  party_id: string;
+  ref: string;
+  title: string;
+  currency: string;
+  valid_until: string | null;
+  background: string | null;
+  issuing_entity_party_id: string;
+  sent_on: string | null;
+  created_on: string;
+  client_name: string;
+  entity_name: string;
+  addressee_name: string | null;
+  preparer_name: string | null;
+  preparer_email: string | null;
+}
+
+interface ProposalLineRow {
+  id: string;
+  position: number;
+  description: string;
+  billing_frequency: BillingFrequency | null;
+  pricing_note: string | null;
+  scope_override: string | null;
+  client_obligations_override: string | null;
+  volume_limits_override: string | null;
+  exclusions_override: string | null;
+  oop_estimate_min: string | null;
+  oop_estimate_max: string | null;
+  oop_currency: string | null;
+  line_total: string | null;
+  /** The company the line is for, by name, or null. */
+  subject: string | null;
+  service_body: Record<string, unknown>;
+}
+
+/**
+ * Money as the firm's proposal prints it: "INR 50,000" — whole amounts without
+ * a fraction, which a quote in round figures always is — and "INR 50,000.50"
+ * when there is one. Still the ISO code (see the file header), still never a
+ * JavaScript number.
+ */
+function wholeMoney(amount: string, currency: string): string {
+  const whole = /^-?\d+(\.0+)?$/.test(amount);
+  const formatted = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  }).format(amount as unknown as number);
+  return `${currency} ${formatted}`;
+}
+
+/** The firm's own words for how often a fee falls due, as its proposal writes
+ *  them — "Yearly", where the letter says "Annually". */
+const PROPOSAL_FREQUENCY: Readonly<Record<string, string>> = {
+  one_time: "One-time",
+  monthly: "Monthly",
+  quarterly: "Quarterly",
+  annually: "Yearly",
+  custom: "Custom",
+};
+
+/** "H3: INR 50,000 Yearly" — what one service costs. An unpriced line prints
+ *  its REASON, never a blank or a zero (G1.6); a priced line keeps its note. */
+function proposalFee(
+  item: ProposalPlan["sections"][number]["items"][number],
+  currency: string,
+): string {
+  if (item.net === null) return item.pricingNote ?? "To be agreed";
+  const frequency =
+    item.billingFrequency === null ? "" : ` ${PROPOSAL_FREQUENCY[item.billingFrequency] ?? ""}`;
+  const note = item.pricingNote === null ? "" : ` (${item.pricingNote})`;
+  return `${wholeMoney(item.net, currency)}${frequency.trimEnd()}${note}`;
+}
+
+/** A service as the proposal names it, with its company when that says
+ *  something (rule 3 of `planProposal`). */
+function namedService(item: ProposalPlan["sections"][number]["items"][number]): string {
+  return item.subject === null ? item.description : `${item.description} — ${item.subject}`;
+}
+
+/** "In-scope processes / services": every service, under its section's letter. */
+function inScopeFlow(plan: ProposalPlan): Flow[] {
+  const rows = plan.sections.flatMap((s) => s.items.map((i) => `${s.code}. ${namedService(i)}`));
+  if (rows.length === 0) return [];
+  return [heading(1, "In-scope processes / services"), paragraph(rows.join("\n"))];
+}
+
+/** Each Dept's section: what the firm undertakes, service by service, and the
+ *  fee for each. */
+function proposalSectionsFlow(plan: ProposalPlan, currency: string): Flow[] {
+  const out: Flow[] = [];
+  for (const section of plan.sections) {
+    out.push(heading(1, `${section.code}. ${section.title}`));
+    // The firm's own label, in a product that serves more than one firm: its
+    // template says "10x's Responsibilities", and whose they are is the issuing
+    // company named on the cover.
+    out.push(heading(3, "Our responsibilities:"));
+    for (const item of section.items) {
+      out.push(heading(2, `${item.code}. ${item.description}`));
+      if (item.subject !== null) out.push(paragraph(forCompanies([item.subject]), true));
+      const t = item.terms;
+      if (t.scope.text !== null) out.push(paragraph(t.scope.text));
+      if (t.volumeLimits.text !== null) out.push(heading(3, "Volume limits"), paragraph(t.volumeLimits.text));
+      if (t.clientObligations.text !== null) {
+        out.push(heading(3, "Client's responsibilities"), paragraph(t.clientObligations.text));
+      }
+      if (t.exclusions.text !== null) out.push(heading(3, "Exclusions"), paragraph(t.exclusions.text));
+      if (item.oopEstimate !== null) {
+        const o = item.oopEstimate;
+        out.push(
+          paragraph(
+            `Out-of-pocket expenses: approximately ${wholeMoney(o.min, o.currency)} to ` +
+              `${wholeMoney(o.max, o.currency)}, reimbursed at actuals and not part of the fee.`,
+            true,
+          ),
+        );
+      }
+      out.push({ kind: "paragraph", lead: "Fees", text: `${item.code}: ${proposalFee(item, currency)}` });
+    }
+  }
+  return out;
+}
+
+/** The Summary of Fees: one row per service, with both of its codes. */
+function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
+  const rows = plan.sections.flatMap((s) =>
+    s.items.map((i) => [
+      s.code,
+      i.code,
+      namedService(i),
+      i.billingFrequency === null
+        ? "Not stated"
+        : (PROPOSAL_FREQUENCY[i.billingFrequency] ?? i.billingFrequency),
+      // The fee alone: the frequency has its own column here.
+      i.net === null ? (i.pricingNote ?? "To be agreed") : wholeMoney(i.net, currency),
+    ]),
+  );
+  if (rows.length === 0) {
+    return [
+      heading(1, "Summary of Fees"),
+      paragraph("No services have been added to this proposal yet.", true),
+    ];
+  }
+  return [
+    heading(1, "Summary of Fees"),
+    {
+      kind: "table",
+      table: {
+        columns: [
+          { label: "Section", align: "left", weight: 1.3 },
+          { label: "Sub Section", align: "left", weight: 1.5 },
+          { label: "Description", align: "left", weight: 5 },
+          { label: "Frequency", align: "left", weight: 1.9 },
+          { label: "Fees", align: "left", weight: 2.3 },
+        ],
+        rows,
+      },
+    },
+  ];
+}
+
+/**
+ * One of the Notes — the firm's team, exclusions or commercials — or nothing
+ * when the proposal carries none. A heading line of the firm's is printed as
+ * the sentence that introduces the list ("The scope of work does not include
+ * following-"); every other line is an item of it.
+ */
+function noteFlow(title: string, rows: readonly BlockRow[]): Flow[] {
+  if (rows.length === 0) return [];
+  return [
+    heading(1, title),
+    ...rows.map((b) => {
+      if (b.is_heading) return paragraph(b.body);
+      const [first = "", ...rest] = b.body.split("\n");
+      return paragraph([`- ${first}`, ...rest.map((l) => `  ${l}`)].join("\n"));
+    }),
+  ];
+}

@@ -13,10 +13,13 @@ import type {
 } from "../../domain/document/model";
 import type {
   Proposal,
+  ProposalDecision,
   ProposalLine,
   ProposalStatus,
   ProposalTotals,
 } from "../../domain/proposal/model";
+import type { ClientStructure } from "../../domain/party/model";
+import type { Actor } from "../../domain/ledger/model";
 
 
 /**
@@ -45,7 +48,12 @@ export interface PartyStanding {
   findParty(
     tenantId: string,
     partyId: string,
-  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
+  ): Promise<{
+    readonly displayName: string;
+    readonly archivedAt: string | null;
+    /** "Prepared for" names a PERSON (0084), the letter's addressee rule. */
+    readonly kind: "organization" | "person";
+  } | null>;
 }
 
 export interface DocumentIdentity {
@@ -92,6 +100,26 @@ export interface NewProposal {
   /** ISO date (YYYY-MM-DD). A day, not an instant — see the note on Proposal. */
   readonly fxRateDate: string;
   readonly validUntil: string | null;
+  /** The Background paragraph (0084). Blank has already become null. */
+  readonly background: string | null;
+  /** The person at the client it is prepared for — already held to the
+   *  client's structure by the service. */
+  readonly addressedToPartyId: string | null;
+  /** The colleague the cover names — the drafter, unless the caller named one. */
+  readonly preparedByUserId: string | null;
+}
+
+/**
+ * What a draft's head may be changed to (0084). ABSENT means "leave it"; NULL
+ * means "clear it" — which is why each field is `T | null | undefined` rather
+ * than optional alone. Title is never cleared: a proposal always has one.
+ */
+export interface ProposalRevision {
+  readonly title?: string | undefined;
+  readonly validUntil?: string | null | undefined;
+  readonly background?: string | null | undefined;
+  readonly addressedToPartyId?: string | null | undefined;
+  readonly preparedByUserId?: string | null | undefined;
 }
 
 export interface NewProposalLine {
@@ -151,6 +179,184 @@ export interface ProposalRecord {
     readonly displayName: string | null;
     readonly email: string;
   } | null;
+  /** The person it is prepared for, by NAME (0084). Null when none is named.
+   *  `email` is that person's email identifier in the firm's records, when
+   *  they have one — where Send offers to email it (0085). */
+  readonly addressee: {
+    readonly id: string;
+    readonly displayName: string;
+    readonly email: string | null;
+  } | null;
+  /** The colleague the cover names, with the address it prints (0084). The
+   *  email is the discriminator — an account may have no display name. */
+  readonly preparedBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
+  /** The firm's own name — what an email from it is signed and sent as. */
+  readonly firmName: string;
+  /** The PDF of record (0085), once a sent proposal has one. */
+  readonly sentPdf: FiledPdf | null;
+  /** Every email bib sent it in, newest first (0085). */
+  readonly emails: readonly ProposalEmailRecord[];
+  /** The evidence behind an answer the CLIENT gave on the link (0085). Null
+   *  when it is unanswered, and when a colleague recorded the answer. */
+  readonly clientDecision: ClientDecisionRecord | null;
+}
+
+// ── The proposal by email, and the client's own answer (0085) ────────────────
+
+/** A rendered proposal, filed in the document store. `contentHash` is its
+ *  fingerprint — the lower-case SHA-256 every stored file carries. */
+export interface FiledPdf {
+  readonly documentId: string;
+  readonly versionId: string;
+  readonly contentHash: string;
+  readonly filename: string;
+}
+
+/** An email bib sent a proposal in, as the repository keeps it. */
+export interface ProposalEmail {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly toEmail: string;
+  readonly note: string | null;
+  readonly pdfVersionId: string;
+  readonly sentBy: string | null;
+  readonly sentAt: string;
+}
+
+export interface NewProposalEmail extends ProposalEmail {
+  /** The digest of the link this email carried — never the link. */
+  readonly linkDigest: string;
+}
+
+/** An email as the proposal page lists it. */
+export interface ProposalEmailRecord {
+  readonly id: string;
+  readonly to: string;
+  readonly note: string | null;
+  readonly sentAt: string;
+  /** Who pressed the button. Null for a system actor or an erased account. */
+  readonly sentBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
+  /** The fingerprint of the PDF it attached. */
+  readonly pdfContentHash: string;
+}
+
+/**
+ * The CLIENT's answer and the evidence behind it, written in the same
+ * statement that moves the status — see `ProposalRepository.recordClientAnswer`.
+ */
+export interface NewClientAnswer {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly decision: ProposalDecision;
+  /** Why, on a decline. Null on an acceptance, which the 0022 CHECK insists on. */
+  readonly declinedReason: string | null;
+  readonly signerName: string;
+  /** The sentence they ticked — an acceptance's, and only an acceptance's. */
+  readonly statement: string | null;
+  /** Which of bib's emails carried the link, when one did. */
+  readonly emailId: string | null;
+  readonly pdfVersionId: string | null;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+  readonly decidedAt: string;
+}
+
+/** The evidence behind an answer the client gave, as a colleague reads it. */
+export interface ClientDecisionRecord {
+  readonly decision: ProposalDecision;
+  readonly signerName: string;
+  readonly statement: string | null;
+  readonly decidedAt: string;
+  readonly ipAddress: string | null;
+  readonly userAgent: string | null;
+  /** Where bib emailed the link that was used. Null when the link reached
+   *  the client some other way. */
+  readonly emailedTo: string | null;
+  /** The PDF of record when they answered. */
+  readonly pdf: FiledPdf | null;
+}
+
+/**
+ * The letter a client receives with the proposal attached.
+ *
+ * Everything the adapter needs to write it and nothing it would have to look
+ * up: the use case resolves the names, the addresses and the links, and the
+ * adapter decides how the letter reads — the split `Mailer` already has.
+ */
+export interface ProposalLetter {
+  readonly to: string;
+  /** The colleague who prepared it, so a reply reaches a person. Null sends
+   *  replies to the From address. */
+  readonly replyTo: string | null;
+  /** Who the email is FROM, by name, and who signs it. */
+  readonly firmName: string;
+  readonly preparedBy: string | null;
+  /** Whom it greets — the person it was prepared for — or null. */
+  readonly greetingName: string | null;
+  readonly clientName: string;
+  readonly ref: string;
+  readonly title: string;
+  /** A day (YYYY-MM-DD), or null for an offer with no end date. */
+  readonly validUntil: string | null;
+  /** The colleague's own words, above the standard letter. */
+  readonly note: string | null;
+  readonly viewUrl: string;
+  readonly acceptUrl: string;
+  readonly declineUrl: string;
+  readonly pdf: { readonly filename: string; readonly bytes: Uint8Array };
+}
+
+/** The email a colleague gets when the client answers on the link. */
+export interface DecisionNotice {
+  readonly to: string;
+  readonly clientName: string;
+  readonly ref: string;
+  readonly title: string;
+  readonly decision: ProposalDecision;
+  readonly signerName: string;
+  /** An ISO instant. */
+  readonly decidedAt: string;
+  readonly declinedReason: string | null;
+  readonly proposalUrl: string;
+}
+
+/**
+ * Sending the two letters. `SmtpMailer` satisfies it structurally beside the
+ * identity letters, so one adapter still owns everything an email says.
+ */
+export interface ProposalMailer {
+  /** Rejects if the mail server did not take it. */
+  sendProposal(letter: ProposalLetter): Promise<void>;
+  sendDecisionNotice(notice: DecisionNotice): Promise<void>;
+}
+
+/**
+ * The proposal as a PDF, through the document store — the same render and the
+ * same filing `POST /documents/render` does, so the PDF of record is an
+ * ordinary document on the proposal's page.
+ */
+export interface ProposalPdfs {
+  /** Render the proposal as it stands and file it. */
+  file(tenantId: string, proposalId: string, actor: Actor): Promise<FiledPdf>;
+  bytes(tenantId: string, pdf: FiledPdf): Promise<Uint8Array>;
+}
+
+/** The two addresses a letter links to, from the deployment's own origin. */
+export interface ProposalLinks {
+  /** The client's page for a share token. */
+  shareUrl(token: string): string;
+  /** A colleague's page for a proposal. */
+  staffUrl(proposalId: string): string;
 }
 
 /**
@@ -356,6 +562,17 @@ export interface SharedProposalRecord {
     readonly oopEstimate: OutOfPocketEstimate | null;
   }[];
   readonly totals: ProposalTotals;
+  /**
+   * The answer given ON THIS PAGE, by name (0085) — so the page can say who
+   * accepted it and when. Null when unanswered, and when a colleague recorded
+   * the answer: that record names a colleague, and a colleague is the firm's
+   * business, not the reader's. The address and browser stay with the firm.
+   */
+  readonly answer: {
+    readonly decision: ProposalDecision;
+    readonly signerName: string;
+    readonly decidedAt: string;
+  } | null;
 }
 
 /**
@@ -385,6 +602,10 @@ export interface SharedProposalBlock {
  */
 export interface SharedProposal extends SharedProposalRecord {
   readonly blocks: readonly SharedProposalBlock[];
+  /** The sentence an acceptance ticks, word for word (0085). The page shows
+   *  THIS text rather than composing its own, so what was shown is what is
+   *  recorded — see `acceptanceStatement`. */
+  readonly acceptanceStatement: string;
 }
 
 /**
@@ -458,6 +679,67 @@ export interface ProposalRepository {
     approvedByUserId: string,
     at: string,
   ): Promise<Proposal>;
+
+  /**
+   * Change a DRAFT's head (0084). The WHERE clause repeats `status = 'draft'`,
+   * so a proposal sent between the service's read and this write is not
+   * changed — null comes back, and the service says it is no longer a draft.
+   */
+  revise(tenantId: string, proposalId: string, change: ProposalRevision): Promise<Proposal | null>;
+
+  // ── 0085 ──────────────────────────────────────────────────────────────────
+
+  /** Which proposal a share link opens, inside the tenant its token named. */
+  findIdByShareDigest(tenantId: string, digest: string): Promise<string | null>;
+
+  /**
+   * Pin the PDF of record — ONCE. Returns the version that IS pinned
+   * afterwards: this one, or the one a concurrent caller pinned first, which
+   * then stands. A pinned PDF is never replaced.
+   */
+  pinSentPdf(tenantId: string, proposalId: string, versionId: string): Promise<string>;
+
+  /** A filed PDF by its version, with the document it belongs to. */
+  findPdf(tenantId: string, versionId: string): Promise<FiledPdf | null>;
+
+  recordEmail(email: NewProposalEmail): Promise<ProposalEmail>;
+
+  /** The email of bib's that carried this link, if one did. */
+  findEmailByLink(tenantId: string, proposalId: string, digest: string): Promise<ProposalEmail | null>;
+
+  /**
+   * Record the CLIENT's answer: the status, its date and a decline's reason,
+   * and the evidence row — in ONE transaction, and only while the proposal is
+   * still `sent`. Returns null when it is not (answered a moment ago in another
+   * tab, or expired), so two answers cannot both land and the second cannot
+   * overwrite the first.
+   */
+  recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null>;
+}
+
+/**
+ * The client's structure on a day — whom a proposal may be prepared for
+ * (F-10-1, 0084). The letter's port, stated again here so neither use case
+ * imports the other; the relationship repository satisfies both, so the two
+ * documents accept exactly the same people.
+ */
+export interface ClientStructureDirectory {
+  structureOf(tenantId: string, clientPartyId: string, onDay: string): Promise<ClientStructure>;
+}
+
+/** Which zone the firm keeps its calendar in — "today", for the day that
+ *  structure is read on. `PostgresFirmTimeZone` satisfies it. */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * Whether an account is an active member of this firm's STAFF — who may be
+ * named as having prepared a proposal. The membership adapter satisfies it, as
+ * it does the lead pipeline's identical question.
+ */
+export interface StaffDirectory {
+  isActiveStaff(tenantId: string, userId: string): Promise<boolean>;
 }
 
 /**

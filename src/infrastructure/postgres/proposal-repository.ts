@@ -18,13 +18,18 @@ import { readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
+  FiledPdf,
+  NewClientAnswer,
   NewProposal,
+  NewProposalEmail,
   NewProposalLine,
   PinnedService,
+  ProposalEmail,
   ProposalFilters,
   ProposalLineRecord,
   ProposalRecord,
   ProposalRepository,
+  ProposalRevision,
   ProposalSummary,
   SharedProposalRecord,
 } from "../../usecase/proposal/ports";
@@ -50,7 +55,27 @@ interface ProposalRow {
   last_viewed_at: Date | null;
   view_count: number;
   declined_reason: string | null;
+  background: string | null;
+  addressed_to_party_id: string | null;
+  prepared_by_user_id: string | null;
+  sent_pdf_version_id: string | null;
 }
+
+/**
+ * Every column of the proposal row, in one place (0084 added three, and the
+ * list appeared in six statements — a column added to five of them is a field
+ * that reads as null on whichever one nobody happened to open). `PROPOSAL_COLUMNS_P`
+ * is the same list qualified for the joined reads.
+ */
+const PROPOSAL_COLUMN_NAMES = [
+  "id", "tenant_id", "ref", "party_id", "issuing_entity_party_id", "lead_id", "title", "status",
+  "currency", "fx_rate", "fx_rate_date", "valid_until", "sent_at", "decided_at",
+  "discount_approved_by", "discount_approved_at", "first_viewed_at", "last_viewed_at",
+  "view_count", "declined_reason", "background", "addressed_to_party_id", "prepared_by_user_id",
+  "sent_pdf_version_id",
+] as const;
+const PROPOSAL_COLUMNS = PROPOSAL_COLUMN_NAMES.join(", ");
+const PROPOSAL_COLUMNS_P = PROPOSAL_COLUMN_NAMES.map((c) => `p.${c}`).join(", ");
 
 interface LineRow {
   id: string;
@@ -116,6 +141,10 @@ function toProposal(r: ProposalRow): Proposal {
     lastViewedAt: r.last_viewed_at?.toISOString() ?? null,
     viewCount: r.view_count,
     declinedReason: r.declined_reason,
+    background: r.background,
+    addressedToPartyId: r.addressed_to_party_id,
+    preparedByUserId: r.prepared_by_user_id,
+    sentPdfVersionId: r.sent_pdf_version_id,
   };
 }
 
@@ -184,16 +213,14 @@ export class PostgresProposalRepository implements ProposalRepository {
       const [row] = await db<ProposalRow[]>`
         INSERT INTO crm.proposal
           (id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title,
-           currency, fx_rate, fx_rate_date, valid_until)
+           currency, fx_rate, fx_rate_date, valid_until,
+           background, addressed_to_party_id, prepared_by_user_id)
         VALUES
           (${p.id}, ${p.tenantId}, ${p.ref}, ${p.partyId}, ${p.issuingEntityPartyId},
            ${p.leadId}, ${p.title},
-           ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil})
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
-                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
-                  view_count,
-                  declined_reason
+           ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil},
+           ${p.background}, ${p.addressedToPartyId}, ${p.preparedByUserId})
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
       if (!row) throw new Error("proposal insert returned no row");
       return toProposal(row);
@@ -203,11 +230,7 @@ export class PostgresProposalRepository implements ProposalRepository {
   async findById(tenantId: string, proposalId: string): Promise<Proposal | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<ProposalRow[]>`
-        SELECT id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
-               currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-               discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
-                  view_count,
-                  declined_reason
+        SELECT ${db.unsafe(PROPOSAL_COLUMNS)}
         FROM crm.proposal WHERE id = ${proposalId}
       `;
       return row ? toProposal(row) : null;
@@ -222,27 +245,110 @@ export class PostgresProposalRepository implements ProposalRepository {
           issuer_display_name: string;
           approver_display_name: string | null;
           approver_email: string | null;
+          addressee_display_name: string | null;
+          addressee_email: string | null;
+          preparer_display_name: string | null;
+          preparer_email: string | null;
+          firm_name: string;
+          pdf_document_id: string | null;
+          pdf_content_hash: string | null;
+          pdf_filename: string | null;
         })[]
       >`
-        SELECT p.id, p.tenant_id, p.ref, p.party_id, p.issuing_entity_party_id, p.lead_id,
-               p.title, p.status, p.currency,
-               p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
-               p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.last_viewed_at, p.view_count, p.declined_reason,
+        SELECT ${db.unsafe(PROPOSAL_COLUMNS_P)},
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                approver.display_name AS approver_display_name,
-               approver.email AS approver_email
+               approver.email AS approver_email,
+               addressee.display_name AS addressee_display_name,
+               addressee_email.value AS addressee_email,
+               preparer.display_name AS preparer_display_name,
+               preparer.email::text AS preparer_email,
+               firm.name AS firm_name,
+               pdf.document_id AS pdf_document_id,
+               pdf.content_hash AS pdf_content_hash,
+               pdf.filename AS pdf_filename
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the
         -- column is NOT NULL and carries the tenant, so a proposal with no
         -- resolvable issuer is corruption rather than a state to render.
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
+        JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN tenancy.user_account approver ON approver.id = p.discount_approved_by
+        -- The cover's two names (0084), read-time joins: an erased account
+        -- stops resolving and the cover then names nobody.
+        LEFT JOIN core.party addressee ON addressee.id = p.addressed_to_party_id
+        -- Where Send offers to email it (0085): that person's email identifier
+        -- in force today, the primary one first. An offer, never a default the
+        -- colleague cannot see — the address is in the box before they press.
+        LEFT JOIN LATERAL (
+          SELECT i.value::text AS value
+          FROM core.party_identifier i
+          WHERE i.party_id = p.addressed_to_party_id
+            AND i.type = 'email'
+            AND (i.valid_to IS NULL OR i.valid_to >= current_date)
+          ORDER BY i.is_primary DESC, i.created_at DESC
+          LIMIT 1
+        ) addressee_email ON true
+        LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
+        -- The PDF of record (0085), once pinned.
+        LEFT JOIN files.document_version pdf ON pdf.id = p.sent_pdf_version_id
         WHERE p.id = ${proposalId}
       `;
       if (!head) return null;
+
+      // Every email bib sent it in (0085), newest first, with the fingerprint
+      // of the PDF each one attached.
+      const emails = await db<
+        {
+          id: string;
+          to_email: string;
+          note: string | null;
+          sent_at: Date;
+          sent_by: string | null;
+          sender_display_name: string | null;
+          sender_email: string | null;
+          pdf_content_hash: string;
+        }[]
+      >`
+        SELECT e.id, e.to_email, e.note, e.sent_at, e.sent_by,
+               sender.display_name AS sender_display_name,
+               sender.email::text AS sender_email,
+               v.content_hash AS pdf_content_hash
+        FROM crm.proposal_email e
+        JOIN files.document_version v ON v.id = e.pdf_version_id
+        LEFT JOIN tenancy.user_account sender ON sender.id = e.sent_by
+        WHERE e.proposal_id = ${proposalId}
+        ORDER BY e.sent_at DESC, e.created_at DESC
+      `;
+
+      // The CLIENT's answer and its evidence (0085). Absent when unanswered,
+      // and when a colleague recorded the answer.
+      const [answer] = await db<
+        {
+          decision: "accepted" | "rejected";
+          signer_name: string;
+          statement: string | null;
+          decided_at: Date;
+          ip_address: string | null;
+          user_agent: string | null;
+          emailed_to: string | null;
+          pdf_version_id: string | null;
+          pdf_document_id: string | null;
+          pdf_content_hash: string | null;
+          pdf_filename: string | null;
+        }[]
+      >`
+        SELECT d.decision, d.signer_name, d.statement, d.decided_at, d.ip_address, d.user_agent,
+               e.to_email AS emailed_to,
+               v.id AS pdf_version_id, v.document_id AS pdf_document_id,
+               v.content_hash AS pdf_content_hash, v.filename AS pdf_filename
+        FROM crm.proposal_client_decision d
+        LEFT JOIN crm.proposal_email e ON e.id = d.email_id
+        LEFT JOIN files.document_version v ON v.id = d.pdf_version_id
+        WHERE d.proposal_id = ${proposalId}
+      `;
 
       // The lines, each with the catalogue version it was PINNED to — its code,
       // its Dept, its SLA, its scope blocks and its list price AS THEY WERE,
@@ -331,6 +437,70 @@ export class PostgresProposalRepository implements ProposalRepository {
                 displayName: head.approver_display_name,
                 email: head.approver_email,
               },
+        addressee:
+          head.addressed_to_party_id === null || head.addressee_display_name === null
+            ? null
+            : {
+                id: head.addressed_to_party_id,
+                displayName: head.addressee_display_name,
+                email: head.addressee_email,
+              },
+        preparedBy:
+          head.prepared_by_user_id === null || head.preparer_email === null
+            ? null
+            : {
+                userId: head.prepared_by_user_id,
+                displayName: head.preparer_display_name,
+                email: head.preparer_email,
+              },
+        firmName: head.firm_name,
+        sentPdf:
+          head.sent_pdf_version_id === null ||
+          head.pdf_document_id === null ||
+          head.pdf_content_hash === null ||
+          head.pdf_filename === null
+            ? null
+            : {
+                documentId: head.pdf_document_id,
+                versionId: head.sent_pdf_version_id,
+                contentHash: head.pdf_content_hash,
+                filename: head.pdf_filename,
+              },
+        emails: emails.map((e) => ({
+          id: e.id,
+          to: e.to_email,
+          note: e.note,
+          sentAt: e.sent_at.toISOString(),
+          sentBy:
+            e.sent_by === null || e.sender_email === null
+              ? null
+              : { userId: e.sent_by, displayName: e.sender_display_name, email: e.sender_email },
+          pdfContentHash: e.pdf_content_hash,
+        })),
+        clientDecision:
+          answer === undefined
+            ? null
+            : {
+                decision: answer.decision,
+                signerName: answer.signer_name,
+                statement: answer.statement,
+                decidedAt: answer.decided_at.toISOString(),
+                ipAddress: answer.ip_address,
+                userAgent: answer.user_agent,
+                emailedTo: answer.emailed_to,
+                pdf:
+                  answer.pdf_version_id === null ||
+                  answer.pdf_document_id === null ||
+                  answer.pdf_content_hash === null ||
+                  answer.pdf_filename === null
+                    ? null
+                    : {
+                        documentId: answer.pdf_document_id,
+                        versionId: answer.pdf_version_id,
+                        contentHash: answer.pdf_content_hash,
+                        filename: answer.pdf_filename,
+                      },
+              },
       };
     });
   }
@@ -350,11 +520,7 @@ export class PostgresProposalRepository implements ProposalRepository {
           unpriced_line_count: string;
         })[]
       >`
-        SELECT p.id, p.tenant_id, p.ref, p.party_id, p.issuing_entity_party_id, p.lead_id,
-               p.title, p.status, p.currency,
-               p.fx_rate, p.fx_rate_date, p.valid_until, p.sent_at, p.decided_at,
-               p.discount_approved_by, p.discount_approved_at,
-               p.first_viewed_at, p.last_viewed_at, p.view_count, p.declined_reason,
+        SELECT ${db.unsafe(PROPOSAL_COLUMNS_P)},
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross, t.discount, t.net, coalesce(t.line_count, 0) AS line_count,
@@ -484,11 +650,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                -- status it belongs to would be refused by the constraint.
                declined_reason = ${declinedReason}
          WHERE id = ${proposalId}
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
-                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
-                  view_count,
-                  declined_reason
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-transition`);
       return toProposal(row);
@@ -528,13 +690,19 @@ export class PostgresProposalRepository implements ProposalRepository {
           discount: string | null;
           net: string | null;
           unpriced_line_count: string | null;
+          answer_decision: "accepted" | "rejected" | null;
+          answer_signer_name: string | null;
+          answer_decided_at: Date | null;
         }[]
       >`
         SELECT p.id, p.ref, p.title, p.status, p.currency, p.valid_until, p.sent_at,
                firm.name AS firm_name,
                issuer.display_name AS issuer_display_name,
                party.display_name AS party_display_name,
-               t.gross, t.discount, t.net, t.unpriced_line_count
+               t.gross, t.discount, t.net, t.unpriced_line_count,
+               answer.decision AS answer_decision,
+               answer.signer_name AS answer_signer_name,
+               answer.decided_at AS answer_decided_at
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- The recipient is told which of our companies is offering. It is not
@@ -543,6 +711,10 @@ export class PostgresProposalRepository implements ProposalRepository {
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
         JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
+        -- The answer given on this page, by name and date (0085). The address
+        -- and browser in the same row are the firm's, not the reader's, and are
+        -- not selected here.
+        LEFT JOIN crm.proposal_client_decision answer ON answer.proposal_id = p.id
         WHERE p.share_token_digest = ${digest}
       `;
       if (!head) return null;
@@ -617,6 +789,16 @@ export class PostgresProposalRepository implements ProposalRepository {
           // go wrong.
           unpricedLineCount: Number(head.unpriced_line_count ?? 0),
         },
+        answer:
+          head.answer_decision === null ||
+          head.answer_signer_name === null ||
+          head.answer_decided_at === null
+            ? null
+            : {
+                decision: head.answer_decision,
+                signerName: head.answer_signer_name,
+                decidedAt: head.answer_decided_at.toISOString(),
+              },
       };
     });
   }
@@ -660,13 +842,177 @@ export class PostgresProposalRepository implements ProposalRepository {
         UPDATE crm.proposal
            SET discount_approved_by = ${approvedByUserId}, discount_approved_at = ${at}
          WHERE id = ${proposalId}
-        RETURNING id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title, status,
-                  currency, fx_rate, fx_rate_date, valid_until, sent_at, decided_at,
-                  discount_approved_by, discount_approved_at, first_viewed_at, last_viewed_at,
-                  view_count,
-                  declined_reason
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
       if (!row) throw new Error(`proposal ${proposalId} vanished mid-approval`);
+      return toProposal(row);
+    });
+  }
+
+  async revise(
+    tenantId: string,
+    proposalId: string,
+    change: ProposalRevision,
+  ): Promise<Proposal | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // One statement, each column kept unless the change names it. "Names it"
+      // is a separate boolean per field because NULL is a real value here —
+      // clearing the background is a change, not an absence of one.
+      const has = (k: keyof ProposalRevision): boolean => change[k] !== undefined;
+      const [row] = await db<ProposalRow[]>`
+        UPDATE crm.proposal
+           SET title = CASE WHEN ${has("title")} THEN ${change.title ?? null} ELSE title END,
+               valid_until = CASE WHEN ${has("validUntil")} THEN ${change.validUntil ?? null}::date
+                                  ELSE valid_until END,
+               background = CASE WHEN ${has("background")} THEN ${change.background ?? null}
+                                 ELSE background END,
+               addressed_to_party_id = CASE WHEN ${has("addressedToPartyId")}
+                                            THEN ${change.addressedToPartyId ?? null}::uuid
+                                            ELSE addressed_to_party_id END,
+               prepared_by_user_id = CASE WHEN ${has("preparedByUserId")}
+                                          THEN ${change.preparedByUserId ?? null}::uuid
+                                          ELSE prepared_by_user_id END
+         -- A draft only, repeated here: a proposal sent since the service read
+         -- it is left exactly as the client received it.
+         WHERE id = ${proposalId} AND status = 'draft'
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
+      `;
+      return row ? toProposal(row) : null;
+    });
+  }
+
+  // ── 0085: the proposal by email, and the client's own answer ─────────────
+
+  async findIdByShareDigest(tenantId: string, digest: string): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ id: string }[]>`
+        SELECT id FROM crm.proposal WHERE share_token_digest = ${digest}
+      `;
+      return row?.id ?? null;
+    });
+  }
+
+  async pinSentPdf(tenantId: string, proposalId: string, versionId: string): Promise<string> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // `coalesce` keeps whatever is pinned already: the FIRST render to arrive
+      // is the record, and one racing it a moment later is handed that one back
+      // rather than replacing a file somebody may already have been sent.
+      const [row] = await db<{ sent_pdf_version_id: string }[]>`
+        UPDATE crm.proposal
+           SET sent_pdf_version_id = coalesce(sent_pdf_version_id, ${versionId}::uuid)
+         WHERE id = ${proposalId}
+        RETURNING sent_pdf_version_id
+      `;
+      if (!row) throw new Error(`proposal ${proposalId} vanished while its PDF was pinned`);
+      return row.sent_pdf_version_id;
+    });
+  }
+
+  async findPdf(tenantId: string, versionId: string): Promise<FiledPdf | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<
+        { id: string; document_id: string; content_hash: string; filename: string }[]
+      >`
+        SELECT id, document_id, content_hash, filename
+        FROM files.document_version WHERE id = ${versionId}
+      `;
+      return row
+        ? {
+            documentId: row.document_id,
+            versionId: row.id,
+            contentHash: row.content_hash,
+            filename: row.filename,
+          }
+        : null;
+    });
+  }
+
+  async recordEmail(email: NewProposalEmail): Promise<ProposalEmail> {
+    return withTenant(this.app, email.tenantId, async (db) => {
+      await db`
+        INSERT INTO crm.proposal_email
+          (id, tenant_id, proposal_id, to_email, note, pdf_version_id, link_digest, sent_by, sent_at)
+        VALUES
+          (${email.id}, ${email.tenantId}, ${email.proposalId}, ${email.toEmail}, ${email.note},
+           ${email.pdfVersionId}, ${email.linkDigest}, ${email.sentBy}, ${email.sentAt})
+      `;
+      return {
+        id: email.id,
+        tenantId: email.tenantId,
+        proposalId: email.proposalId,
+        toEmail: email.toEmail,
+        note: email.note,
+        pdfVersionId: email.pdfVersionId,
+        sentBy: email.sentBy,
+        sentAt: email.sentAt,
+      };
+    });
+  }
+
+  async findEmailByLink(
+    tenantId: string,
+    proposalId: string,
+    digest: string,
+  ): Promise<ProposalEmail | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<
+        {
+          id: string;
+          tenant_id: string;
+          proposal_id: string;
+          to_email: string;
+          note: string | null;
+          pdf_version_id: string;
+          sent_by: string | null;
+          sent_at: Date;
+        }[]
+      >`
+        SELECT id, tenant_id, proposal_id, to_email, note, pdf_version_id, sent_by, sent_at
+        FROM crm.proposal_email
+        WHERE proposal_id = ${proposalId} AND link_digest = ${digest}
+        ORDER BY sent_at DESC
+        LIMIT 1
+      `;
+      return row
+        ? {
+            id: row.id,
+            tenantId: row.tenant_id,
+            proposalId: row.proposal_id,
+            toEmail: row.to_email,
+            note: row.note,
+            pdfVersionId: row.pdf_version_id,
+            sentBy: row.sent_by,
+            sentAt: row.sent_at.toISOString(),
+          }
+        : null;
+    });
+  }
+
+  async recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null> {
+    return withTenant(this.app, answer.tenantId, async (db) => {
+      // ONLY WHILE IT IS SENT, in the statement that moves it. A second answer
+      // from another tab reads `sent` in the service a moment before the first
+      // lands; without this WHERE it would overwrite the first answer and then
+      // fail on the evidence row's UNIQUE, leaving a status nobody's evidence
+      // backs. Same columns `setStatus` moves, in one statement, for its reason.
+      const [row] = await db<ProposalRow[]>`
+        UPDATE crm.proposal
+           SET status = ${answer.decision},
+               decided_at = ${answer.decidedAt}::timestamptz,
+               declined_reason = ${answer.declinedReason}
+         WHERE id = ${answer.proposalId} AND status = 'sent'
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
+      `;
+      if (!row) return null;
+      await db`
+        INSERT INTO crm.proposal_client_decision
+          (id, tenant_id, proposal_id, decision, signer_name, statement, email_id,
+           pdf_version_id, ip_address, user_agent, decided_at)
+        VALUES
+          (${answer.id}, ${answer.tenantId}, ${answer.proposalId}, ${answer.decision},
+           ${answer.signerName}, ${answer.statement}, ${answer.emailId}, ${answer.pdfVersionId},
+           ${answer.ipAddress}, ${answer.userAgent}, ${answer.decidedAt})
+      `;
       return toProposal(row);
     });
   }

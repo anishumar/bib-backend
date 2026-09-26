@@ -90,15 +90,29 @@ export class NodemailerTransport implements MailTransport {
   }
 
   private async sendOrThrow(letter: Letter): Promise<void> {
+    // A letter may send under its own display name — a proposal goes out as
+    // the FIRM (0085) — but never from its own address: the address is the
+    // one this relay authenticates.
+    const name = letter.fromName ?? this.from.name;
     await this.mailer.sendMail({
       // The name is optional and the address never is. nodemailer quotes the
       // display name itself, which is what keeps a comma or a quote in a firm's
       // name from breaking the header.
-      from: this.from.name === null ? this.from.address : { name: this.from.name, address: this.from.address },
+      from: name === null ? this.from.address : { name, address: this.from.address },
       to: letter.to,
+      ...(letter.replyTo === undefined ? {} : { replyTo: letter.replyTo }),
       subject: letter.subject,
       text: letter.text,
       html: letter.html,
+      ...(letter.attachments === undefined
+        ? {}
+        : {
+            attachments: letter.attachments.map((a) => ({
+              filename: a.filename,
+              contentType: a.contentType,
+              content: Buffer.from(a.content),
+            })),
+          }),
     });
   }
 }

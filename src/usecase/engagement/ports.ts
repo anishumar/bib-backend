@@ -20,7 +20,9 @@ import type {
   EngagementLetter,
   EngagementState,
   EngagementStatus,
+  FeeGroup,
   LetterClause,
+  LetterLayout,
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
@@ -178,6 +180,9 @@ export interface NewLetter {
   readonly proposalId: string | null;
   readonly jurisdiction: string;
   readonly title: string;
+  /** Which layout it prints in — always the current one for a new letter
+   *  (`CURRENT_LETTER_LAYOUT`), named here rather than left to a default. */
+  readonly layout: LetterLayout;
   readonly currency: CurrencyCode;
   readonly fxRate: Amount;
   readonly fxRateDate: string;
@@ -223,6 +228,68 @@ export interface NewLetterLine {
   readonly exclusionsOverride: string | null;
   readonly oopEstimate: OutOfPocketEstimate | null;
   readonly pricingNote: string | null;
+  /** The fee group that prices it, checked to be a live group ON THIS LETTER
+   *  before it gets here. A grouped line's `unitAmount` is null and its
+   *  discount zero. */
+  readonly feeGroupId: string | null;
+}
+
+/** A fee group to write onto a draft (0083). Its position is assigned by the
+ *  adapter, after the letter's last live group, in the same statement. */
+export interface NewFeeGroup {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly engagementLetterId: string;
+  readonly currency: CurrencyCode;
+  readonly title: string;
+  readonly billingFrequency: BillingFrequency;
+  readonly amount: Amount;
+  readonly paymentTerms: string | null;
+  readonly feeDescription: string | null;
+  readonly intro: string | null;
+  readonly deliverables: string | null;
+  readonly clientObligations: string | null;
+}
+
+/** What an edit may change. Absent leaves a field as it is; for the prose,
+ *  null clears it. Already validated by the use case. */
+export interface FeeGroupEdit {
+  readonly title?: string | undefined;
+  readonly billingFrequency?: BillingFrequency | undefined;
+  readonly amount?: Amount | undefined;
+  readonly paymentTerms?: string | null | undefined;
+  readonly feeDescription?: string | null | undefined;
+  readonly intro?: string | null | undefined;
+  readonly deliverables?: string | null | undefined;
+  readonly clientObligations?: string | null | undefined;
+}
+
+/**
+ * Moving a line into or out of a fee group, with the price it has afterwards.
+ *
+ * All four fields together because they are one fact: into a group, the line
+ * gives up its price (null, zero discount); out of one, it takes a price or a
+ * reason. Written in one statement, so no reader ever sees a line that is in a
+ * group AND priced — the state `el_line_grouped_is_unpriced_chk` exists to
+ * refuse.
+ */
+export interface LinePricing {
+  readonly feeGroupId: string | null;
+  readonly unitAmount: Amount | null;
+  readonly discountPercent: Amount;
+  readonly pricingNote: string | null;
+}
+
+/**
+ * A fee group as a screen and the renderer read it: the row, its section
+ * letter, and the live lines it covers.
+ */
+export interface FeeGroupRecord {
+  readonly group: FeeGroup;
+  /** "A", "B", … — its rank among the letter's LIVE groups (`sectionCode`). */
+  readonly code: string;
+  /** The live lines this fee pays for, in line order. */
+  readonly lineIds: readonly string[];
 }
 
 export interface NewLetterClause {
@@ -342,6 +409,10 @@ export interface LetterRecord {
    *  screen showing the agreement cannot answer. */
   readonly supersededBy: { readonly id: string; readonly ref: string } | null;
   readonly lines: readonly LetterLineRecord[];
+  /** The letter's live FEE GROUPS (0083), in section order. Each group's fee is
+   *  counted ONCE in the totals below, and its lines are not counted as
+   *  unpriced — the group is their price. */
+  readonly feeGroups: readonly FeeGroupRecord[];
   readonly clauses: readonly LetterClauseRecord[];
   readonly totals: {
     readonly gross: Amount;
@@ -550,6 +621,26 @@ export interface EngagementRepository {
   addLine(l: NewLetterLine): Promise<LetterLine>;
   removeLine(tenantId: string, letterId: string, lineId: string): Promise<void>;
   listLines(tenantId: string, letterId: string): Promise<readonly LetterLine[]>;
+  /** Into a fee group, or out of one — see `LinePricing`. */
+  setLinePricing(
+    tenantId: string,
+    letterId: string,
+    lineId: string,
+    pricing: LinePricing,
+  ): Promise<LetterLine>;
+
+  addFeeGroup(g: NewFeeGroup): Promise<FeeGroup>;
+  editFeeGroup(
+    tenantId: string,
+    letterId: string,
+    groupId: string,
+    edit: FeeGroupEdit,
+  ): Promise<FeeGroup>;
+  /** Strike a group off a draft. The caller has already checked it covers no
+   *  live line; `trg_el_fee_group_keeps_its_lines` refuses it regardless. */
+  removeFeeGroup(tenantId: string, letterId: string, groupId: string): Promise<void>;
+  /** The letter's LIVE groups, in position order. */
+  listFeeGroups(tenantId: string, letterId: string): Promise<readonly FeeGroup[]>;
 
   addClause(c: NewLetterClause): Promise<LetterClause>;
   listClauses(tenantId: string, letterId: string): Promise<readonly LetterClause[]>;
@@ -994,4 +1085,21 @@ export interface BillableEngagement {
   readonly status: string;
   readonly effectiveFrom: string;
   readonly endsOn: string | null;
+  /**
+   * The FEE GROUP that prices this engagement, or null (0083).
+   *
+   * When it is set, `unitAmount` is null for a different reason from "as
+   * mutually agreed": the price is the GROUP's, one fee for every engagement
+   * in it. A screen must not prefill that fee per engagement — four engagements
+   * of a USD 5,000 retainer are billed 5,000, not 20,000.
+   */
+  readonly feeGroup: {
+    readonly id: string;
+    readonly code: string;
+    readonly title: string;
+    readonly amount: string;
+    readonly billingFrequency: string;
+    /** How many live engagements' worth of work the fee covers. */
+    readonly lineCount: number;
+  } | null;
 }

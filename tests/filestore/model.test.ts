@@ -85,7 +85,10 @@ describe("the closed sets agree with the database", () => {
   });
 
   it("brand asset kinds", () => {
-    expect(checkMembers("  kind                text NOT NULL CHECK")).toEqual(
+    // 0084 widened this one for the proposal cover, by dropping 0037's CHECK
+    // and adding a NAMED one — so the needle is that name, which 0037 never
+    // stated (its constraint was auto-named), and the newest carrier wins.
+    expect(checkMembers("ADD CONSTRAINT brand_asset_kind_check")).toEqual(
       [...BRAND_ASSET_KINDS].sort(),
     );
   });

@@ -12,12 +12,24 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
+import { BLOCK_KIND_VALUES } from "./document";
 import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { EngagementService } from "../../usecase/engagement/service";
-import type { EngagementRecord, LetterSummary, LetterView } from "../../usecase/engagement/ports";
-import type { EngagementState, EngagementStatus, LetterStatus } from "../../domain/engagement/model";
+import type {
+  EngagementRecord,
+  FeeGroupRecord,
+  LetterSummary,
+  LetterView,
+} from "../../usecase/engagement/ports";
+import type {
+  EngagementState,
+  EngagementStatus,
+  LetterLayout,
+  LetterLine,
+  LetterStatus,
+} from "../../domain/engagement/model";
 import type { BillingFrequency } from "../../domain/document/model";
 
 export interface EngagementDeps {
@@ -31,6 +43,10 @@ export const LETTER_STATUS_VALUES = [
   "signed",
   "withdrawn",
 ] as const satisfies readonly LetterStatus[];
+
+/** The two layouts a letter prints in (0083). Every letter drafted now is
+ *  `annexure`; `classic` is the one every letter issued before it went out in. */
+export const LETTER_LAYOUT_VALUES = ["classic", "annexure"] as const satisfies readonly LetterLayout[];
 
 export const ENGAGEMENT_STATUS_VALUES = [
   "pending_advance",
@@ -183,6 +199,11 @@ const LetterSchema = z
     jurisdiction: JurisdictionSchema,
     title: z.string(),
     status: z.enum(LETTER_STATUS_VALUES),
+    /** Which layout the PDF prints in (0083). `annexure` — a cover letter,
+     *  Annexure 1 (scope, deliverables, a summary of fees by section) and
+     *  Annexure 2 (the terms) — for every letter drafted now; `classic` for the
+     *  letters issued before it, which must re-render as the client holds them. */
+    layout: z.enum(LETTER_LAYOUT_VALUES),
     currency: CurrencySchema,
     fxRate: RateSchema.nullable(),
     fxRateDate: DaySchema,
@@ -258,8 +279,44 @@ const LetterLineSchema = z
     /** Out-of-pocket expenses, separate from the fee and never in the totals.
      *  Redacted with the money. */
     oopEstimate: OopEstimateSchema.nullable(),
+    /** The FEE GROUP that prices this line, or null for a line priced on its
+     *  own (0083). A grouped line has no price of its own — `priced` is false
+     *  and the group's fee is what it costs. */
+    feeGroupId: z.string().uuid().nullable(),
   })
   .openapi("EngagementLetterLine");
+
+/**
+ * ONE FEE FOR SEVERAL SERVICES — a section of the letter's Annexure 1 (0083).
+ *
+ * The money — the fee and how it is paid — is redacted by the fee axis like a
+ * line's price. The title and the section's prose are not: they say what the
+ * firm undertook, which is the work.
+ */
+const FeeGroupSchema = z
+  .object({
+    id: z.string().uuid(),
+    /** "A", "B", … — its rank among the letter's live groups; the section's
+     *  letter on the PDF. */
+    code: z.string(),
+    position: z.number().int(),
+    title: z.string(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    /** PER BILLING PERIOD. Null when redacted. */
+    amount: AmountSchema.nullable(),
+    currency: CurrencySchema,
+    /** "40% advance, 60% on completion". Redacted with the money. */
+    paymentTerms: z.string().nullable(),
+    /** What the Summary of Fees prints for this row. Null prints the title and
+     *  the services it covers. */
+    feeDescription: z.string().nullable(),
+    intro: z.string().nullable(),
+    deliverables: z.string().nullable(),
+    clientObligations: z.string().nullable(),
+    /** The live lines this fee pays for, in line order. */
+    lineIds: z.array(z.string().uuid()),
+  })
+  .openapi("EngagementLetterFeeGroup");
 
 /** A term, as it was PINNED. Not redacted by the fee axis: what the firm
  *  undertook is the work, not the money. */
@@ -304,7 +361,7 @@ const LetterClauseSchema = z
 const DocumentBlockSchema = z
   .object({
     id: z.string().uuid(),
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string(),
     isHeading: z.boolean(),
     sortOrder: z.number().int(),
@@ -409,6 +466,9 @@ const LetterRecordSchema = z
     supersedes: DocumentRefSchema.nullable(),
     supersededBy: DocumentRefSchema.nullable(),
     lines: z.array(LetterLineSchema),
+    /** The live fee groups, in section order (0083). Each group's fee is in the
+     *  totals once; its lines are not counted as unpriced. */
+    feeGroups: z.array(FeeGroupSchema),
     clauses: z.array(LetterClauseSchema),
     blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
@@ -506,10 +566,60 @@ const AddLineRequest = z
     /** Out-of-pocket expenses: a range in its own currency, reimbursed at
      *  actuals. */
     oopEstimate: OopEstimateSchema.optional(),
-    /** WHY there is no amount — REQUIRED when `unitAmount` is omitted. */
+    /** WHY there is no amount — REQUIRED when `unitAmount` is omitted, unless
+     *  the line is in a fee group. */
     pricingNote: z.string().min(1).optional(),
+    feeGroupId: z.string().uuid().optional().openapi({
+      description:
+        "The FEE GROUP that prices this service (0083). The line then carries no price of its " +
+        "own: omit `unitAmount` and leave the discount at 0 — the group's fee already pays for " +
+        "it, and a price on both would charge twice.",
+    }),
   })
   .openapi("AddEngagementLetterLineRequest");
+
+const FeeGroupRequest = z
+  .object({
+    title: z.string().min(1).max(200),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    /** PER BILLING PERIOD — 5000 on a monthly group is 5,000 a month. */
+    amount: AmountSchema,
+    paymentTerms: z.string().max(500).optional(),
+    feeDescription: z.string().max(2000).optional(),
+    intro: z.string().max(20000).optional(),
+    deliverables: z.string().max(20000).optional(),
+    clientObligations: z.string().max(20000).optional(),
+  })
+  .openapi("FeeGroupRequest");
+
+/** Every field optional. An absent one is left as it is; an EMPTY string
+ *  clears a prose field, which a null would say less clearly on a form. */
+const EditFeeGroupRequest = z
+  .object({
+    title: z.string().min(1).max(200).optional(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    amount: AmountSchema.optional(),
+    paymentTerms: z.string().max(500).optional(),
+    feeDescription: z.string().max(2000).optional(),
+    intro: z.string().max(20000).optional(),
+    deliverables: z.string().max(20000).optional(),
+    clientObligations: z.string().max(20000).optional(),
+  })
+  .openapi("EditFeeGroupRequest");
+
+const LinePricingRequest = z
+  .object({
+    feeGroupId: z.string().uuid().nullable().openapi({
+      description:
+        "The fee group to price this service, or null to price it on its own. Into a group, " +
+        "the line GIVES UP its price, discount and pricing note. On its own, it needs " +
+        "`unitAmount` or a `pricingNote` saying why it has none.",
+    }),
+    unitAmount: AmountSchema.optional(),
+    discountPercent: AmountSchema.optional(),
+    pricingNote: z.string().min(1).optional(),
+  })
+  .openapi("LinePricingRequest");
 
 const AddClauseRequest = z
   .object({ clauseVersionId: z.string().uuid() })
@@ -629,6 +739,26 @@ const BillableEngagementSchema = z
     }),
     effectiveFrom: DaySchema,
     endsOn: DaySchema.nullable(),
+    feeGroup: z
+      .object({
+        id: z.string().uuid(),
+        /** The section letter it prints under — "B". */
+        code: z.string(),
+        title: z.string(),
+        /** The GROUP's fee per period, for every engagement in it together.
+         *  Null when redacted. */
+        amount: AmountSchema.nullable(),
+        billingFrequency: z.string(),
+        lineCount: z.number().int(),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "The fee group that prices this engagement (0083), or null. When set, `unitAmount` " +
+          "is null because the price is the GROUP's — one fee for every engagement in it — and " +
+          "a screen must not prefill that fee per engagement: four engagements of a USD 5,000 " +
+          "retainer are billed 5,000, not 20,000.",
+      }),
   })
   .openapi("BillableEngagement");
 
@@ -829,6 +959,89 @@ const removeLineRoute = createRoute({
   },
 });
 
+const LetterGroupParams = z.object({ letterId: z.string().uuid(), groupId: z.string().uuid() });
+
+const addFeeGroupRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/fee-groups",
+  tags: ["engagement-letters"],
+  summary: "Add a fee group — one fee for several services",
+  description:
+    "A section of the letter's Annexure 1 and the ONE fee it charges (0083): \"B. Ongoing " +
+    "recurring services — USD 5,000 per month\" for accounting, tax and payroll across four " +
+    "companies. Services are put in it when they are added (`feeGroupId`) or afterwards (`PUT " +
+    "…/lines/{lineId}/pricing`), and then carry no price of their own. In the letter's " +
+    "currency, always. Draft only.",
+  request: {
+    params: z.object({ letterId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: FeeGroupRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: FeeGroupSchema } } },
+    400: errorResponse("No title, an amount that is not one, or an unknown billing frequency"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("The letter is no longer a draft"),
+  },
+});
+
+const editFeeGroupRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/engagement-letters/{letterId}/fee-groups/{groupId}",
+  tags: ["engagement-letters"],
+  summary: "Change a fee group's terms while the letter is a draft",
+  request: {
+    params: LetterGroupParams,
+    body: { content: { "application/json": { schema: EditFeeGroupRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: FeeGroupSchema } } },
+    400: errorResponse("A blank title, an amount that is not one, or an unknown frequency"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter or fee group at this firm"),
+    409: errorResponse("The letter is no longer a draft"),
+  },
+});
+
+const removeFeeGroupRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/engagement-letters/{letterId}/fee-groups/{groupId}",
+  tags: ["engagement-letters"],
+  summary: "Strike a fee group off a draft",
+  description:
+    "Refused while the group still prices a service: struck off, it would leave that service " +
+    "with no price and no reason. Move the services out first.",
+  request: { params: LetterGroupParams },
+  responses: {
+    204: { description: "Struck off" },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter or fee group at this firm"),
+    409: errorResponse("The letter is not a draft, or the group still covers services"),
+  },
+});
+
+const linePricingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/engagement-letters/{letterId}/lines/{lineId}/pricing",
+  tags: ["engagement-letters"],
+  summary: "Price a service by a fee group, or on its own",
+  request: {
+    params: z.object({ letterId: z.string().uuid(), lineId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: LinePricingRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Repriced", content: { "application/json": { schema: LetterLineSchema } } },
+    400: errorResponse("A grouped line sent with a price, or a line on its own sent with none"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter, line or fee group at this firm"),
+    409: errorResponse("The letter is no longer a draft"),
+  },
+});
+
 const addClauseRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/clauses",
@@ -986,6 +1199,7 @@ function toLetterBody(
     jurisdiction: letter.jurisdiction,
     title: letter.title,
     status: letter.status,
+    layout: letter.layout,
     currency: letter.currency,
     fxRate: fees ? letter.fxRate : null,
     fxRateDate: letter.fxRateDate,
@@ -1127,7 +1341,9 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       billingFrequency: l.line.billingFrequency,
       pricingNote: l.line.pricingNote,
       oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
+      feeGroupId: l.line.feeGroupId,
     })),
+    feeGroups: record.feeGroups.map((g) => toFeeGroupBody(g, fees)),
     // NOT redacted. What the firm undertook is the work, and somebody delivering
     // it needs the scope and the limits even when they may not see the fee.
     clauses: record.clauses.map((c) => ({
@@ -1165,6 +1381,76 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
     },
     engagements: record.engagements.map(toEngagementBody),
     signing: toSigningBody(record.signing),
+  };
+}
+
+/** A fee group, field by field. The fee and how it is paid are money and go
+ *  with the fee axis; the title and prose are the work and do not. */
+function toFeeGroupBody(g: FeeGroupRecord, fees: boolean): z.infer<typeof FeeGroupSchema> {
+  return {
+    id: g.group.id,
+    code: g.code,
+    position: g.group.position,
+    title: g.group.title,
+    billingFrequency: g.group.billingFrequency,
+    amount: fees ? g.group.amount : null,
+    currency: g.group.currency,
+    paymentTerms: fees ? g.group.paymentTerms : null,
+    feeDescription: g.group.feeDescription,
+    intro: g.group.intro,
+    deliverables: g.group.deliverables,
+    clientObligations: g.group.clientObligations,
+    lineIds: [...g.lineIds],
+  };
+}
+
+/**
+ * A line as a WRITE echoes it: what the line itself says, with the joins the
+ * write path does not make (`entity`, `service`, `net`) reported as absent
+ * rather than faked. The read route fills them in.
+ */
+function toLineEchoBody(line: LetterLine, fees: boolean): z.infer<typeof LetterLineSchema> {
+  return {
+    id: line.id,
+    entityPartyId: line.entityPartyId,
+    // Null, not fetched: this is the write's echo, and the name comes back
+    // on the next read. Honest about the join rather than pretending to it.
+    entity: null,
+    serviceVersionId: line.serviceVersionId,
+    service: null,
+    // Same as `service`: the catalogue's half of the four blocks needs the
+    // pinned body, which is a join the write path does not make. What the
+    // LINE wrote is reported as written, so `tailored` is exactly right and
+    // the read route fills in the fallback.
+    terms: {
+      scope: { text: line.scopeOverride, tailored: line.scopeOverride !== null },
+      clientObligations: {
+        text: line.clientObligationsOverride,
+        tailored: line.clientObligationsOverride !== null,
+      },
+      volumeLimits: {
+        text: line.volumeLimitsOverride,
+        tailored: line.volumeLimitsOverride !== null,
+      },
+      exclusions: {
+        text: line.exclusionsOverride,
+        tailored: line.exclusionsOverride !== null,
+      },
+    },
+    description: line.description,
+    position: line.position,
+    quantity: line.quantity,
+    unitAmount: fees ? line.unitAmount : null,
+    priced: line.unitAmount !== null,
+    currency: line.currency,
+    discountPercent: fees ? line.discountPercent : null,
+    net: null,
+    effectiveFrom: line.effectiveFrom,
+    jurisdiction: line.jurisdiction,
+    billingFrequency: line.billingFrequency,
+    pricingNote: line.pricingNote,
+    oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
+    feeGroupId: line.feeGroupId,
   };
 }
 
@@ -1246,6 +1532,8 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
         engagements: engagements.map((e) => ({
           ...e,
           unitAmount: fees ? e.unitAmount : null,
+          feeGroup:
+            e.feeGroup === null ? null : { ...e.feeGroup, amount: fees ? e.feeGroup.amount : null },
         })),
       },
       200,
@@ -1275,51 +1563,65 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const { letterId } = c.req.valid("param");
     const body = c.req.valid("json");
     const line = await deps.service.addLine({ tenantId: s.tenantId, letterId, ...body });
-    const fees = seesFees(c.get("principal"));
+    return c.json(toLineEchoBody(line, seesFees(c.get("principal"))), 201);
+  });
+
+  app.openapi(linePricingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, lineId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const line = await deps.service.setLinePricing({ tenantId: s.tenantId, letterId, lineId, ...body });
+    return c.json(toLineEchoBody(line, seesFees(c.get("principal"))), 200);
+  });
+
+  // A group's LETTER and its lines are the read model's (`code`, `lineIds`), so
+  // a write reads the letter back and answers with the group as the page will
+  // show it — the arrangement `…/signature-request` already has.
+  const groupAsRead = async (
+    tenantId: string,
+    letterId: string,
+    groupId: string,
+    fees: boolean,
+  ): Promise<z.infer<typeof FeeGroupSchema>> => {
+    const view = await deps.service.describe(tenantId, letterId);
+    const record = view.feeGroups.find((g) => g.group.id === groupId);
+    if (record === undefined) {
+      throw new Error(`fee group ${groupId} was written and is not on letter ${letterId}`);
+    }
+    return toFeeGroupBody(record, fees);
+  };
+
+  app.openapi(addFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const group = await deps.service.addFeeGroup(s.tenantId, letterId, body);
     return c.json(
-      {
-        id: line.id,
-        entityPartyId: line.entityPartyId,
-        // Null, not fetched: this is the write's echo, and the name comes back
-        // on the next read. Honest about the join rather than pretending to it.
-        entity: null,
-        serviceVersionId: line.serviceVersionId,
-        service: null,
-        // Same as `service`: the catalogue's half of the four blocks needs the
-        // pinned body, which is a join the write path does not make. What the
-        // LINE wrote is reported as written, so `tailored` is exactly right and
-        // the read route fills in the fallback.
-        terms: {
-          scope: { text: line.scopeOverride, tailored: line.scopeOverride !== null },
-          clientObligations: {
-            text: line.clientObligationsOverride,
-            tailored: line.clientObligationsOverride !== null,
-          },
-          volumeLimits: {
-            text: line.volumeLimitsOverride,
-            tailored: line.volumeLimitsOverride !== null,
-          },
-          exclusions: {
-            text: line.exclusionsOverride,
-            tailored: line.exclusionsOverride !== null,
-          },
-        },
-        description: line.description,
-        position: line.position,
-        quantity: line.quantity,
-        unitAmount: fees ? line.unitAmount : null,
-        priced: line.unitAmount !== null,
-        currency: line.currency,
-        discountPercent: fees ? line.discountPercent : null,
-        net: null,
-        effectiveFrom: line.effectiveFrom,
-        jurisdiction: line.jurisdiction,
-        billingFrequency: line.billingFrequency,
-        pricingNote: line.pricingNote,
-        oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
-      },
+      await groupAsRead(s.tenantId, letterId, group.id, seesFees(c.get("principal"))),
       201,
     );
+  });
+
+  app.openapi(editFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, groupId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.editFeeGroup(s.tenantId, letterId, groupId, body);
+    return c.json(
+      await groupAsRead(s.tenantId, letterId, groupId, seesFees(c.get("principal"))),
+      200,
+    );
+  });
+
+  app.openapi(removeFeeGroupRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, groupId } = c.req.valid("param");
+    await deps.service.removeFeeGroup(s.tenantId, letterId, groupId);
+    return c.body(null, 204);
   });
 
   app.openapi(removeLineRoute, async (c) => {

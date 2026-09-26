@@ -175,7 +175,7 @@ export class BrandAssetNotDrawable extends FileStoreError {
   constructor(kind: string, mediaType: string) {
     super(
       "BRAND_ASSET_NOT_DRAWABLE",
-      `A ${kind} is drawn onto every document this entity issues, and the renderer can only ` +
+      `A ${kind.replace(/_/g, " ")} is drawn onto the documents this entity issues, and the renderer can only ` +
         `draw PNG and JPEG — ${JSON.stringify(mediaType)} cannot be. Upload a .png or .jpg. ` +
         `A signature needs a transparent background, so PNG is the one to use for that.`,
     );

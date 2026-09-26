@@ -40,7 +40,85 @@ export type ProposalErrorCode =
   | "INVALID_FX_RATE"
   | "INVALID_CURRENCY"
   | "PARTY_ARCHIVED"
-  | "ISSUER_NOT_A_FIRM_ENTITY";
+  | "ISSUER_NOT_A_FIRM_ENTITY"
+  | "ADDRESSEE_NOT_A_PERSON"
+  | "ADDRESSEE_NOT_LINKED"
+  | "PREPARER_NOT_STAFF"
+  | "NOTHING_TO_REVISE"
+  | "INVALID_RECIPIENT"
+  | "NOT_OUT_FOR_ANSWER"
+  | "EMAIL_UNAVAILABLE"
+  | "SIGNER_NAME_REQUIRED"
+  | "ACCEPTANCE_NOT_CONFIRMED"
+  | "ALREADY_ANSWERED";
+
+// ── The proposal by email, and the client's own answer (0085) ────────────────
+//
+// The last three are read by a CLIENT, on the link's page, not by a colleague:
+// they are written to the person holding the proposal, and say nothing about
+// how the firm runs its records.
+
+/** The address a colleague typed is not one. */
+export class InvalidRecipient extends ProposalError {
+  constructor(to: string) {
+    super(
+      "INVALID_RECIPIENT",
+      `${JSON.stringify(to)} is not an email address. Type the client's address in full, like ` +
+        `name@company.com.`,
+    );
+  }
+}
+
+/** Emailing again, or a new link, asks for a proposal that is still OUT. */
+export class NotOutForAnswer extends ProposalError {
+  constructor(status: string) {
+    super(
+      "NOT_OUT_FOR_ANSWER",
+      `This proposal is ${status}. Only a sent proposal the client has not answered can be ` +
+        `emailed again or given a new link.`,
+    );
+  }
+}
+
+/** The process this ran in holds no mailer — the worker, which never sends. */
+export class EmailUnavailable extends ProposalError {
+  constructor() {
+    super(
+      "EMAIL_UNAVAILABLE",
+      "This process has no mail transport, so it cannot email a proposal. Sending is the " +
+        "API's; the worker composes the proposal service only to read quotes.",
+    );
+  }
+}
+
+export class SignerNameRequired extends ProposalError {
+  constructor() {
+    super(
+      "SIGNER_NAME_REQUIRED",
+      "Type your full name. It is recorded with your answer, so the firm knows who gave it.",
+    );
+  }
+}
+
+export class AcceptanceNotConfirmed extends ProposalError {
+  constructor() {
+    super(
+      "ACCEPTANCE_NOT_CONFIRMED",
+      "Tick the box to confirm you accept this proposal on your company's behalf.",
+    );
+  }
+}
+
+/** A second answer. The first one stands — an answer is final. */
+export class AlreadyAnswered extends ProposalError {
+  constructor(status: "accepted" | "rejected") {
+    super(
+      "ALREADY_ANSWERED",
+      `This proposal has already been ${status === "accepted" ? "accepted" : "declined"}, and ` +
+        `that answer stands. If something has changed, reply to the firm's email.`,
+    );
+  }
+}
 
 /** The client, or the company a line is for, was archived (0305). Restore it
  *  first; a new document may not name a party the firm put away. */
@@ -52,6 +130,54 @@ export class ProposalPartyArchived extends ProposalError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+/** "Prepared for" names a PERSON at the client (0084) — the letter's rule. */
+export class ProposalAddresseeNotAPerson extends ProposalError {
+  constructor(displayName: string) {
+    super(
+      "ADDRESSEE_NOT_A_PERSON",
+      `${displayName} is a company, and a proposal is prepared for a person at the client. ` +
+        `Leave "Prepared for" blank to prepare it for the company itself.`,
+    );
+  }
+}
+
+/** The person holds no recorded role at the client or any company under it —
+ *  the same structure read the letter's addressee is held to (F-10-1). */
+export class ProposalAddresseeNotLinked extends ProposalError {
+  constructor(person: string, client: string) {
+    super(
+      "ADDRESSEE_NOT_LINKED",
+      `${person} has no recorded role at ${client} or any of its companies, so the proposal ` +
+        `cannot be prepared for them. Record them on ${client}'s client page as a director, ` +
+        `authorised signatory, employee or shareholder first, or choose somebody who is.`,
+    );
+  }
+}
+
+/** "Prepared by" is a colleague: an active STAFF member of this firm. The key
+ *  points at a GLOBAL account table, so the database would accept a stranger. */
+export class PreparerNotStaff extends ProposalError {
+  constructor(userId: string) {
+    super(
+      "PREPARER_NOT_STAFF",
+      `The account ${userId} is not an active member of staff at this firm, so the proposal ` +
+        `cannot say they prepared it. Choose a colleague from the firm's roster.`,
+    );
+  }
+}
+
+/** A revision that names nothing to change — refused rather than recorded as
+ *  an edit that changed nothing. */
+export class NothingToRevise extends ProposalError {
+  constructor() {
+    super(
+      "NOTHING_TO_REVISE",
+      "Nothing to change: send at least one of title, validUntil, background, " +
+        "addressedToPartyId or preparedByUserId.",
     );
   }
 }

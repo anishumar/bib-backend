@@ -110,10 +110,26 @@ const setRoute = createRoute({
 
 // ── The prose blocks (G1.7) ─────────────────────────────────────────────────
 
+/**
+ * The block vocabulary on the wire — the domain's closed set as zod needs it, a
+ * literal tuple. ONE copy, exported to the letter and proposal surfaces, which
+ * return blocks too: it was spelled out seven times across three files, and
+ * 0083's two new kinds would otherwise have been seven edits with nothing to
+ * say one had been missed. `cover` and `acceptance` are a LETTER's only — the
+ * service refuses them on a proposal, and so does the database.
+ */
+export const BLOCK_KIND_VALUES = [
+  "exclusion",
+  "commercial",
+  "team",
+  "cover",
+  "acceptance",
+] as const satisfies readonly BlockKind[];
+
 const StandardBlockSchema = z
   .object({
     id: z.string().uuid(),
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string(),
     /** A section title rather than an item — the team block is a table with
      *  headings, and without this it goes back into one text blob. */
@@ -134,7 +150,7 @@ const StandardBlocksResponse = z
 
 const AddStandardBlockRequest = z
   .object({
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string().min(1).max(4000),
     isHeading: z.boolean().optional(),
     sortOrder: z.number().int().min(1),
@@ -223,7 +239,7 @@ const editBlockRoute = createRoute({
 const DocumentBlockSchema = z
   .object({
     id: z.string().uuid(),
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string(),
     isHeading: z.boolean(),
     sortOrder: z.number().int(),
@@ -245,7 +261,7 @@ const AddDocumentBlockRequest = z
     /** Exactly one, mirroring the CHECK on `crm.document_block`. */
     proposalId: z.string().uuid().optional(),
     engagementLetterId: z.string().uuid().optional(),
-    kind: z.enum(["exclusion", "commercial", "team"]),
+    kind: z.enum(BLOCK_KIND_VALUES),
     body: z.string().min(1).max(4000),
     isHeading: z.boolean().optional(),
     sortOrder: z.number().int().min(1),

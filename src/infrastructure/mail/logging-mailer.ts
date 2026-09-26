@@ -9,8 +9,13 @@
 // it arrives.
 import type { Logger } from "../../platform/log";
 import type { Mailer } from "../../usecase/identity/ports";
+import type {
+  DecisionNotice,
+  ProposalLetter,
+  ProposalMailer,
+} from "../../usecase/proposal/ports";
 
-export class LoggingMailer implements Mailer {
+export class LoggingMailer implements Mailer, ProposalMailer {
   constructor(private readonly log: Logger) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -77,6 +82,33 @@ export class LoggingMailer implements Mailer {
         "accounts. It is the third of the four that is never acceptable in public, and " +
         "`validateServer` refuses to boot a production-like environment with this mailer " +
         "wired for exactly that reason.",
+    );
+    return Promise.resolve();
+  }
+
+  sendProposal(letter: ProposalLetter): Promise<void> {
+    this.log.warn(
+      {
+        to: letter.to,
+        replyTo: letter.replyTo,
+        ref: letter.ref,
+        viewUrl: letter.viewUrl,
+        acceptUrl: letter.acceptUrl,
+        declineUrl: letter.declineUrl,
+        pdf: `${letter.pdf.filename} (${String(letter.pdf.bytes.byteLength)} bytes)`,
+      },
+      "proposal NOT emailed — the logging mailer is registered. Open acceptUrl or declineUrl to " +
+        "answer it as the client would. NOTE: the person on the other end of `to` is a CLIENT " +
+        "who has been told nothing, and the page records this as sent to them.",
+    );
+    return Promise.resolve();
+  }
+
+  sendDecisionNotice(notice: DecisionNotice): Promise<void> {
+    this.log.warn(
+      { to: notice.to, ref: notice.ref, decision: notice.decision, proposalUrl: notice.proposalUrl },
+      "proposal answer notice NOT emailed — the logging mailer is registered. The colleague " +
+        "who prepared it will see the answer on the proposal's page, and nowhere else.",
     );
     return Promise.resolve();
   }

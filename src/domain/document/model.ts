@@ -325,15 +325,43 @@ export function outOfPocketProblem(
 // line at a time.
 
 /**
- * Which of the three lists a line belongs to. Also the values in the `kind`
- * CHECK on both block tables (migration 0025) — one vocabulary, two enforcers.
+ * Which list a line belongs to. Also the values in the `kind` CHECK on both
+ * block tables (0025, widened by 0083) — one vocabulary, two enforcers.
+ *
+ * `cover` and `acceptance` (0083) are the Annexure letter's own prose: the
+ * paragraphs its cover letter opens with, and what the client accepts under
+ * before signing. LETTER-ONLY — see `LETTER_ONLY_BLOCK_KINDS`.
  */
-export type BlockKind = "exclusion" | "commercial" | "team";
+export type BlockKind = "exclusion" | "commercial" | "team" | "cover" | "acceptance";
 
-export const BLOCK_KINDS: readonly BlockKind[] = ["exclusion", "commercial", "team"];
+/** In the order a document's screen lists them. The three every document
+ *  carries come first; the two only a letter carries are appended, so a
+ *  document seeded before 0083 lists exactly as it did. */
+export const BLOCK_KINDS: readonly BlockKind[] = [
+  "exclusion",
+  "commercial",
+  "team",
+  "cover",
+  "acceptance",
+];
 
 export function isBlockKind(v: string): v is BlockKind {
   return (BLOCK_KINDS as readonly string[]).includes(v);
+}
+
+/**
+ * The kinds only an ENGAGEMENT LETTER carries (0083). A proposal has no cover
+ * letter and nobody signs one to accept it, so these are never copied onto a
+ * proposal and never written onto one — `document_block_letter_only_kinds_chk`
+ * says the same to any writer.
+ */
+export const LETTER_ONLY_BLOCK_KINDS: readonly BlockKind[] = ["cover", "acceptance"];
+
+/** The kinds a document of this type may carry. */
+export function blockKindsFor(document: DocumentType): readonly BlockKind[] {
+  return document === "engagement_letter"
+    ? BLOCK_KINDS
+    : BLOCK_KINDS.filter((k) => !LETTER_ONLY_BLOCK_KINDS.includes(k));
 }
 
 /** One line of the firm's STANDARD set — what it maintains, not what any
@@ -408,8 +436,12 @@ export interface DocumentBlock {
 export function blocksFor(
   standard: readonly StandardBlock[],
   jurisdiction: string,
+  document: DocumentType,
 ): readonly StandardBlock[] {
+  // A proposal never carries the letter's cover or acceptance (0083).
+  const kinds = blockKindsFor(document);
   return standard
+    .filter((b) => kinds.includes(b.kind))
     .filter((b) => b.isActive && (b.jurisdiction === null || b.jurisdiction === jurisdiction))
     .slice()
     .sort(

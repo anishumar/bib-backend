@@ -46,9 +46,17 @@ import {
   EntityOutsideClient,
   IssuerNotAFirmEntity,
   QuoteOfAnotherClient,
+  FeeGroupEmpty,
+  FeeGroupNotEmpty,
+  FeeGroupNotFound,
+  FeeGroupTitleRequired,
+  GroupedLinePriced,
+  InvalidAmount,
+  LineNotPriced,
 } from "../../src/domain/engagement/errors";
 import type { BillingFrequency } from "../../src/domain/document/model";
 import {
+  CURRENT_LETTER_LAYOUT,
   canonicalContent,
   engagementState,
   isDay,
@@ -831,6 +839,7 @@ describe("what the signature commits to", () => {
         firmSignatoryTitle: null,
       },
       lines: [],
+      feeGroups: [],
       clauses: [],
     };
     const elsewhere = {
@@ -1252,6 +1261,7 @@ describe("what the signature commits to", () => {
       exclusionsOverride: null as string | null,
       oopEstimate: null as { min: string; max: string; currency: string } | null,
       pricingNote: null as string | null,
+      feeGroupId: null as string | null,
     };
     const base = {
       letter: {
@@ -1272,6 +1282,18 @@ describe("what the signature commits to", () => {
         firmSignatoryTitle: "Director",
       },
       lines: [line],
+      feeGroups: [] as {
+        id: string;
+        position: number;
+        title: string;
+        billingFrequency: BillingFrequency;
+        amount: string;
+        paymentTerms: string | null;
+        feeDescription: string | null;
+        intro: string | null;
+        deliverables: string | null;
+        clientObligations: string | null;
+      }[],
       clauses: [],
     };
 
@@ -2041,5 +2063,304 @@ describe("who a letter names beside the client (F-10-1)", () => {
     s.clock.set(new Date("2026-07-01T20:00:00Z"));
     await s.service.structureFor(TENANT, PARTY);
     expect(s.structure.days).toEqual(["2026-07-02"]);
+  });
+});
+
+// ── Fee groups — one fee for several services (0083) ──────────────────────
+
+describe("fee groups (0083)", () => {
+  async function withGroup(
+    s: ReturnType<typeof setup>,
+  ): Promise<{ id: string; groupId: string }> {
+    const id = await draft(s);
+    const group = await s.service.addFeeGroup(TENANT, id, {
+      title: "Ongoing recurring services",
+      billingFrequency: "monthly",
+      amount: "5000",
+    });
+    return { id, groupId: group.id };
+  }
+
+  function groupedLine(id: string, groupId: string, entity = ENTITY_A): Parameters<EngagementService["addLine"]>[0] {
+    return {
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: entity,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      discountPercent: "0",
+      feeGroupId: groupId,
+    };
+  }
+
+  it("drafts every new letter in the firm's Annexure layout", async () => {
+    // "Switch everyone" (2026-09-26): the layout is stated on the row by the
+    // service rather than left to the column's default.
+    const s = setup();
+    const id = await draft(s);
+    expect(CURRENT_LETTER_LAYOUT).toBe("annexure");
+    expect((await s.letters.findLetter(TENANT, id))?.layout).toBe("annexure");
+  });
+
+  it("prices a grouped service by the group, and needs no pricing note for it", async () => {
+    const s = setup();
+    const { id, groupId } = await withGroup(s);
+    const line = await s.service.addLine(groupedLine(id, groupId));
+    expect([line.feeGroupId, line.unitAmount, line.pricingNote]).toEqual([groupId, null, null]);
+  });
+
+  it("refuses a grouped service with a price or a discount of its own — it would be charged twice", async () => {
+    const s = setup();
+    const { id, groupId } = await withGroup(s);
+    await expect(
+      s.service.addLine({ ...groupedLine(id, groupId), unitAmount: "100" }),
+    ).rejects.toBeInstanceOf(GroupedLinePriced);
+    await expect(
+      s.service.addLine({ ...groupedLine(id, groupId), discountPercent: "10" }),
+    ).rejects.toBeInstanceOf(GroupedLinePriced);
+  });
+
+  it("refuses a group that is not on this letter", async () => {
+    const s = setup();
+    const other = await withGroup(s);
+    const id = await draft(s);
+    await expect(s.service.addLine(groupedLine(id, other.groupId))).rejects.toBeInstanceOf(
+      FeeGroupNotFound,
+    );
+  });
+
+  it("needs a title, a fee and a period it is billed on", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const base = { title: "Retainer", billingFrequency: "monthly", amount: "5000" };
+    await expect(s.service.addFeeGroup(TENANT, id, { ...base, title: "  " })).rejects.toBeInstanceOf(
+      FeeGroupTitleRequired,
+    );
+    await expect(s.service.addFeeGroup(TENANT, id, { ...base, amount: "5,000" })).rejects.toBeInstanceOf(
+      InvalidAmount,
+    );
+    await expect(
+      s.service.addFeeGroup(TENANT, id, { ...base, billingFrequency: "fortnightly" }),
+    ).rejects.toBeInstanceOf(InvalidLineBillingFrequency);
+  });
+
+  it("holds a group to the letter's currency and numbers the sections from A", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const a = await s.service.addFeeGroup(TENANT, id, {
+      title: "One-time initial activities",
+      billingFrequency: "one_time",
+      amount: "40000",
+    });
+    const b = await s.service.addFeeGroup(TENANT, id, {
+      title: "Ongoing recurring services",
+      billingFrequency: "monthly",
+      amount: "5000",
+    });
+    expect(a.currency).toBe("INR");
+    const view = await s.service.describe(TENANT, id);
+    expect(view.feeGroups.map((g) => [g.code, g.group.id])).toEqual([
+      ["A", a.id],
+      ["B", b.id],
+    ]);
+  });
+
+  it("edits a group's terms, and a blank clears a piece of its prose", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const group = await s.service.addFeeGroup(TENANT, id, {
+      title: "Retainer",
+      billingFrequency: "monthly",
+      amount: "5000",
+      paymentTerms: "Monthly in advance",
+      intro: "Applies across the group.",
+    });
+    const edited = await s.service.editFeeGroup(TENANT, id, group.id, {
+      amount: "6000",
+      paymentTerms: "",
+    });
+    expect([edited.amount, edited.paymentTerms, edited.intro, edited.title]).toEqual([
+      "6000",
+      null,
+      "Applies across the group.",
+      "Retainer",
+    ]);
+  });
+
+  it("will not strike out a group that still prices a service", async () => {
+    const s = setup();
+    const { id, groupId } = await withGroup(s);
+    await s.service.addLine(groupedLine(id, groupId));
+    await expect(s.service.removeFeeGroup(TENANT, id, groupId)).rejects.toBeInstanceOf(
+      FeeGroupNotEmpty,
+    );
+    const empty = await s.service.addFeeGroup(TENANT, id, {
+      title: "Spare",
+      billingFrequency: "custom",
+      amount: "1",
+    });
+    await s.service.removeFeeGroup(TENANT, id, empty.id);
+    expect((await s.service.describe(TENANT, id)).feeGroups).toHaveLength(1);
+  });
+
+  it("moves a service into a group, giving up its price, and out again, needing one", async () => {
+    const s = setup();
+    const { id, groupId } = await withGroup(s);
+    await completeTerms(s, id);
+    const line = (await s.letters.listLines(TENANT, id))[0];
+    if (line === undefined) throw new Error("no line");
+
+    const grouped = await s.service.setLinePricing({
+      tenantId: TENANT,
+      letterId: id,
+      lineId: line.id,
+      feeGroupId: groupId,
+    });
+    expect([grouped.feeGroupId, grouped.unitAmount, grouped.discountPercent]).toEqual([
+      groupId,
+      null,
+      "0",
+    ]);
+
+    await expect(
+      s.service.setLinePricing({ tenantId: TENANT, letterId: id, lineId: line.id, feeGroupId: null }),
+    ).rejects.toBeInstanceOf(LineNotPriced);
+    const alone = await s.service.setLinePricing({
+      tenantId: TENANT,
+      letterId: id,
+      lineId: line.id,
+      feeGroupId: null,
+      pricingNote: "As mutually agreed",
+    });
+    expect([alone.feeGroupId, alone.unitAmount, alone.pricingNote]).toEqual([
+      null,
+      null,
+      "As mutually agreed",
+    ]);
+  });
+
+  it("refuses to send a letter with a group that covers nothing", async () => {
+    const s = setup();
+    const { id } = await withGroup(s);
+    await completeTerms(s, id);
+    await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(FeeGroupEmpty);
+  });
+
+  it("counts the group's fee once in the letter's totals, and its services are not unpriced", async () => {
+    const s = setup();
+    const { id, groupId } = await withGroup(s);
+    await s.service.addLine(groupedLine(id, groupId, ENTITY_A));
+    await s.service.addLine(groupedLine(id, groupId, ENTITY_B));
+    await completeTerms(s, id);
+    const view = await s.service.describe(TENANT, id);
+    // 5,000 for the group + 12 × 2,000 for the line priced on its own.
+    expect(view.totals.net).toBe("29000.0000");
+    expect(view.totals.unpricedLineCount).toBe(0);
+    expect(view.feeGroups[0]?.lineIds).toHaveLength(2);
+  });
+
+  it("changes nothing on a letter that has gone out", async () => {
+    const s = setup();
+    const id = await signedLetter(s);
+    await expect(
+      s.service.addFeeGroup(TENANT, id, { title: "Late", billingFrequency: "monthly", amount: "1" }),
+    ).rejects.toBeInstanceOf(LetterNotEditable);
+  });
+
+  it("signs the groups with the rest of the terms", async () => {
+    // Two letters identical but for how a group prices them must hash apart:
+    // the retainer IS a term.
+    const hashOf = async (amount: string): Promise<string | null> => {
+      const s = setup();
+      const { id, groupId } = await withGroup(s);
+      await s.service.editFeeGroup(TENANT, id, groupId, { amount });
+      await s.service.addLine(groupedLine(id, groupId));
+      await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+      await s.service.send(TENANT, id, ACTOR);
+      const signed = await s.service.sign(
+        { tenantId: TENANT, letterId: id, signedByName: "Priya Menon" },
+        ACTOR,
+      );
+      return signed.letter.signedContentHash;
+    };
+    expect(await hashOf("5000")).not.toBe(await hashOf("5500"));
+  });
+});
+
+describe("what the signature commits to, for a fee group (0083)", () => {
+  const letter = {
+    ref: "EL-2026-0001",
+    issuingEntityPartyId: SEEDED_FIRM_ENTITY,
+    jurisdiction: "US",
+    title: "MyDojo",
+    currency: "USD",
+    fxRate: "1",
+    advanceRequired: false,
+    advanceAmount: null,
+    background: null,
+    addressedToPartyId: null,
+    issuedOn: null,
+    supersedesId: null,
+    effectiveFrom: null,
+    firmSignatoryUserId: null,
+    firmSignatoryTitle: null,
+  };
+  const line = (position: number, feeGroupId: string | null): Parameters<typeof canonicalContent>[0]["lines"][number] => ({
+    position,
+    entityPartyId: ENTITY_A,
+    serviceVersionId: GST,
+    description: "Accounting",
+    quantity: "1",
+    unitAmount: feeGroupId === null ? "100" : null,
+    discountPercent: "0",
+    effectiveFrom: null,
+    jurisdiction: null,
+    billingFrequency: "monthly",
+    scopeOverride: null,
+    clientObligationsOverride: null,
+    volumeLimitsOverride: null,
+    exclusionsOverride: null,
+    oopEstimate: null,
+    pricingNote: null,
+    feeGroupId,
+  });
+  const group = (id: string, position: number, amount = "5000"): Parameters<typeof canonicalContent>[0]["feeGroups"][number] => ({
+    id,
+    position,
+    title: "Ongoing recurring services",
+    billingFrequency: "monthly",
+    amount,
+    paymentTerms: null,
+    feeDescription: null,
+    intro: null,
+    deliverables: null,
+    clientObligations: null,
+  });
+
+  it("renders a letter with no groups exactly as it did before 0083", () => {
+    // DocuSign verifies a completed envelope against this string, so a letter
+    // sent before the deploy and signed after it must render the same at both
+    // moments: one head row, one row per line, one per clause, and nothing new.
+    const rendered = canonicalContent({ letter, lines: [line(1, null)], feeGroups: [], clauses: [] });
+    expect(rendered.split("\n")).toHaveLength(2);
+    expect(rendered).not.toContain("feegroup");
+    // The seventeen fields G1.6 left a line row with — 0083 added none to it.
+    expect(rendered.split("\n")[1]?.split("\t")).toHaveLength(17);
+  });
+
+  it("commits to the fee, and to which services each fee covers", () => {
+    const base = {
+      letter,
+      lines: [line(1, "g1"), line(2, "g1"), line(3, "g2")],
+      feeGroups: [group("g1", 1), group("g2", 2, "900")],
+      clauses: [],
+    };
+    const rendered = canonicalContent(base);
+    const moved = { ...base, lines: [line(1, "g1"), line(2, "g2"), line(3, "g2")] };
+    const repriced = { ...base, feeGroups: [group("g1", 1, "5500"), group("g2", 2, "900")] };
+    expect(canonicalContent(moved)).not.toBe(rendered);
+    expect(canonicalContent(repriced)).not.toBe(rendered);
+    expect(canonicalContent({ ...base })).toBe(rendered);
   });
 });

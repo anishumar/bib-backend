@@ -789,6 +789,17 @@ describe("every route is accounted for", () => {
     // for unknown / expired / used / wrong-purpose — and the REQUEST route
     // adds a constant-time floor, so it cannot be enumerated with a stopwatch
     // either. An eighth needs an argument at least this good.
+    //
+    // THE EIGHTH AND NINTH ARE THE CLIENT'S ANSWER TO A PROPOSAL AND ITS PDF
+    // (0085), added with their own paragraph — read it on PUBLIC_PATHS. In
+    // short: the user decided the client answers the proposal bib emails them,
+    // and the person answering will never hold a session. The PDF route reads
+    // the file the email already carried, under the share link's own
+    // properties. The answer route WRITES, bounded to the one act the link was
+    // sent to invite: yes or no, once, while the offer stands, as a POST with a
+    // typed name (and a ticked statement to accept) that a link scanner cannot
+    // make — with the evidence kept. A tenth needs an argument at least this
+    // good.
     expect([...PUBLIC_PATHS].sort()).toEqual([
       "/api/v1/auth/login",
       "/api/v1/auth/magic-link",
@@ -797,7 +808,28 @@ describe("every route is accounted for", () => {
       "/api/v1/auth/password-reset/confirm",
       "/api/v1/portal-invites/accept",
       "/api/v1/proposals/shared",
+      "/api/v1/proposals/shared/answer",
+      "/api/v1/proposals/shared/pdf",
     ]);
+  });
+
+  it("the client's answer and PDF routes answer without a session — not shadowed by {proposalId}", async () => {
+    // A 404 for an unknown token, on the routes' own merits. A 401 would mean
+    // the request fell into a staff route's template — `/proposals/{id}/…` —
+    // and a client holding a real link would be told to sign in.
+    for (const path of ["/api/v1/proposals/shared/answer", "/api/v1/proposals/shared/pdf"]) {
+      const res = await app().request(path, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          token: "not-a-real-token",
+          decision: "accepted",
+          signerName: "Priya Raman",
+          confirmed: true,
+        }),
+      });
+      expect(res.status, path).toBe(404);
+    }
   });
 
   it("the share link route is reachable without a session, and only that one", async () => {

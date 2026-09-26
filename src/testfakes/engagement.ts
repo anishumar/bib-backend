@@ -12,10 +12,12 @@ import { FakeClock } from "./clock";
 import type {
   Engagement,
   EngagementLetter,
+  FeeGroup,
   LetterClause,
   LetterLine,
   LetterStatus,
 } from "../domain/engagement/model";
+import { sectionCode } from "../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
@@ -25,13 +27,16 @@ import type {
   ContentHasher,
   ESignProvider,
   EngagementRepository,
+  FeeGroupEdit,
   FirmSignatory,
   FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
   LetterRecord,
   LetterSummary,
+  LinePricing,
   NewEngagement,
+  NewFeeGroup,
   NewLetter,
   NewLetterClause,
   NewLetterLine,
@@ -61,6 +66,8 @@ export class FakeEngagementRepo implements EngagementRepository {
   readonly lines: (LetterLine & { removed: boolean })[] = [];
   readonly clauses: LetterClause[] = [];
   readonly engagements: Engagement[] = [];
+  /** Fee groups, struck-off ones included — the table keeps them too (0083). */
+  readonly feeGroups: (FeeGroup & { removed: boolean })[] = [];
   /**
    * Clause bodies this fake should return INSTEAD of the library's, keyed by
    * version id. Empty in every test, and it exists for the case where a test
@@ -104,6 +111,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       jurisdiction: l.jurisdiction,
       title: l.title,
       status: "draft",
+      layout: l.layout,
       currency: l.currency,
       fxRate: l.fxRate,
       fxRateDate: l.fxRateDate,
@@ -162,10 +170,95 @@ export class FakeEngagementRepo implements EngagementRepository {
       exclusionsOverride: l.exclusionsOverride,
       oopEstimate: l.oopEstimate,
       pricingNote: l.pricingNote,
+      feeGroupId: l.feeGroupId,
       removed: false,
     };
     this.lines.push(row);
     return Promise.resolve(strip(row));
+  }
+
+  setLinePricing(
+    _tenantId: string,
+    letterId: string,
+    lineId: string,
+    pricing: LinePricing,
+  ): Promise<LetterLine> {
+    const index = this.lines.findIndex(
+      (l) => l.id === lineId && l.engagementLetterId === letterId && !l.removed,
+    );
+    const current = this.lines[index];
+    if (current === undefined) throw new Error(`fake: no live line ${lineId}`);
+    // The same one-statement write the adapter makes: group and price move
+    // together, so no reader sees a line that is both.
+    const updated = { ...current, ...pricing };
+    this.lines[index] = updated;
+    return Promise.resolve(strip(updated));
+  }
+
+  addFeeGroup(g: NewFeeGroup): Promise<FeeGroup> {
+    const live = this.feeGroups.filter(
+      (x) => x.engagementLetterId === g.engagementLetterId && !x.removed,
+    );
+    const row = {
+      id: g.id,
+      tenantId: g.tenantId,
+      engagementLetterId: g.engagementLetterId,
+      // After the last LIVE group, as the adapter numbers it.
+      position: live.reduce((max, x) => Math.max(max, x.position), 0) + 1,
+      title: g.title,
+      billingFrequency: g.billingFrequency,
+      amount: g.amount,
+      currency: g.currency,
+      paymentTerms: g.paymentTerms,
+      feeDescription: g.feeDescription,
+      intro: g.intro,
+      deliverables: g.deliverables,
+      clientObligations: g.clientObligations,
+      removed: false,
+    };
+    this.feeGroups.push(row);
+    return Promise.resolve(stripGroup(row));
+  }
+
+  editFeeGroup(
+    _tenantId: string,
+    letterId: string,
+    groupId: string,
+    edit: FeeGroupEdit,
+  ): Promise<FeeGroup> {
+    const index = this.feeGroups.findIndex(
+      (g) => g.id === groupId && g.engagementLetterId === letterId && !g.removed,
+    );
+    const current = this.feeGroups[index];
+    if (current === undefined) throw new Error(`fake: no live fee group ${groupId}`);
+    // `undefined` is "not mentioned" — the adapter's CASE, spelled out.
+    const updated = {
+      ...current,
+      ...(edit.title === undefined ? {} : { title: edit.title }),
+      ...(edit.billingFrequency === undefined ? {} : { billingFrequency: edit.billingFrequency }),
+      ...(edit.amount === undefined ? {} : { amount: edit.amount }),
+      ...(edit.paymentTerms === undefined ? {} : { paymentTerms: edit.paymentTerms }),
+      ...(edit.feeDescription === undefined ? {} : { feeDescription: edit.feeDescription }),
+      ...(edit.intro === undefined ? {} : { intro: edit.intro }),
+      ...(edit.deliverables === undefined ? {} : { deliverables: edit.deliverables }),
+      ...(edit.clientObligations === undefined
+        ? {}
+        : { clientObligations: edit.clientObligations }),
+    };
+    this.feeGroups[index] = updated;
+    return Promise.resolve(stripGroup(updated));
+  }
+
+  removeFeeGroup(_tenantId: string, letterId: string, groupId: string): Promise<void> {
+    const group = this.feeGroups.find(
+      (g) => g.id === groupId && g.engagementLetterId === letterId && !g.removed,
+    );
+    if (group) group.removed = true;
+    return Promise.resolve();
+  }
+
+  listFeeGroups(tenantId: string, letterId: string): Promise<readonly FeeGroup[]> {
+    return Promise.resolve(this.liveGroups(tenantId, letterId).map(stripGroup));
   }
 
   removeLine(_tenantId: string, letterId: string, lineId: string): Promise<void> {
@@ -323,6 +416,9 @@ export class FakeEngagementRepo implements EngagementRepository {
         const line = this.lines.find((l) => l.id === e.engagementLetterLineId);
         const letter = this.letters.find((l) => l.id === e.engagementLetterId);
         if (!line || !letter) return null;
+        const groups = this.liveGroups(tenantId, letter.id);
+        const rank = groups.findIndex((g) => g.id === line.feeGroupId);
+        const group = groups[rank];
         const row: BillableEngagement = {
           engagementId: e.id,
           entityPartyId: e.entityPartyId,
@@ -335,10 +431,24 @@ export class FakeEngagementRepo implements EngagementRepository {
           pricingNote: line.pricingNote,
           currency: line.currency,
           discountPercent: line.discountPercent,
-          billingFrequency: line.billingFrequency,
+          // The group's period for a grouped line, as the adapter coalesces it.
+          billingFrequency: group?.billingFrequency ?? line.billingFrequency,
           status: e.status,
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
+          feeGroup:
+            group === undefined
+              ? null
+              : {
+                  id: group.id,
+                  code: sectionCode(rank),
+                  title: group.title,
+                  amount: group.amount,
+                  billingFrequency: group.billingFrequency,
+                  lineCount: this.liveLines(tenantId, letter.id).filter(
+                    (l) => l.feeGroupId === group.id,
+                  ).length,
+                },
         };
         return row;
       })
@@ -351,6 +461,7 @@ export class FakeEngagementRepo implements EngagementRepository {
     if (letter === null) return null;
     const lines = this.liveLines(tenantId, letterId);
     const clauses = await this.listClauses(tenantId, letterId);
+    const groups = this.liveGroups(tenantId, letterId);
     return {
       letter,
       party: {
@@ -390,6 +501,11 @@ export class FakeEngagementRepo implements EngagementRepository {
             l.tenantId === tenantId && l.supersedesId === letter.id && l.status !== "withdrawn",
         )?.id ?? null,
       ),
+      feeGroups: groups.map((g, i) => ({
+        group: stripGroup(g),
+        code: sectionCode(i),
+        lineIds: lines.filter((l) => l.feeGroupId === g.id).map((l) => l.id),
+      })),
       // The entity name resolves through the same map the client's does — the
       // fake stands in for the join the Postgres adapter actually makes.
       lines: lines.map((l) => ({
@@ -428,7 +544,7 @@ export class FakeEngagementRepo implements EngagementRepository {
           courts: body.courts,
         };
       }),
-      totals: totals(lines, letter.currency),
+      totals: totals(lines, groups, letter.currency),
       engagements: this.engagements.filter((e) => e.engagementLetterId === letterId),
     };
   }
@@ -454,7 +570,7 @@ export class FakeEngagementRepo implements EngagementRepository {
             displayName:
               this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
           },
-          totals: totals(lines, letter.currency),
+          totals: totals(lines, this.liveGroups(tenantId, letter.id), letter.currency),
           lineCount: lines.length,
         };
       }),
@@ -466,6 +582,12 @@ export class FakeEngagementRepo implements EngagementRepository {
     if (letterId === null) return null;
     const letter = this.letters.find((l) => l.tenantId === tenantId && l.id === letterId);
     return letter === undefined ? null : { id: letter.id, ref: letter.ref };
+  }
+
+  private liveGroups(tenantId: string, letterId: string): (FeeGroup & { removed: boolean })[] {
+    return this.feeGroups
+      .filter((g) => g.tenantId === tenantId && g.engagementLetterId === letterId && !g.removed)
+      .sort((a, b) => a.position - b.position);
   }
 
   private liveLines(tenantId: string, letterId: string): (LetterLine & { removed: boolean })[] {
@@ -927,17 +1049,20 @@ function net(
 }
 
 function totals(
-  lines: readonly Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent">[],
+  lines: readonly Pick<LetterLine, "unitAmount" | "quantity" | "discountPercent" | "feeGroupId">[],
+  groups: readonly Pick<FeeGroup, "amount">[],
   currency: string,
 ): LetterRecord["totals"] {
-  let gross = 0n;
-  let n = 0n;
+  // Each group's fee once, as the adapter's cross join adds it (0083).
+  let gross = groups.reduce((sum, g) => sum + scaled(g.amount), 0n);
+  let n = gross;
   let unpriced = 0;
   for (const line of lines) {
     const lineGross = grossOf(line);
     const lineNet = netScaled(line);
     if (lineGross === null || lineNet === null) {
-      unpriced += 1;
+      // A grouped line is priced by its group, not left out.
+      if (line.feeGroupId === null) unpriced += 1;
       continue;
     }
     gross += lineGross;
@@ -988,6 +1113,11 @@ function pinnedServiceOf(
 function strip(l: LetterLine & { removed: boolean }): LetterLine {
   const { removed: _removed, ...line } = l;
   return line;
+}
+
+function stripGroup(g: FeeGroup & { removed: boolean }): FeeGroup {
+  const { removed: _removed, ...group } = g;
+  return group;
 }
 
 /**

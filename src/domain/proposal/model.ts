@@ -153,6 +153,34 @@ export interface Proposal {
    * accepted proposal reads as fact to whoever finds it.
    */
   readonly declinedReason: string | null;
+  /**
+   * The firm's paragraph about the client's business — the proposal's
+   * BACKGROUND (0084), and the same prose a letter carries. Null when nobody
+   * has written one, and then the document leaves the heading out rather than
+   * printing it over nothing.
+   */
+  readonly background: string | null;
+  /**
+   * The PERSON at the client this is prepared for, printed on the cover above
+   * the client's own name (0084). A person in the client's structure (F-10-1),
+   * or null — a proposal to a company with no named contact yet is ordinary.
+   */
+  readonly addressedToPartyId: string | null;
+  /**
+   * The colleague the cover names under "Prepared by" (0084) — whoever drafted
+   * it, unless a draft was handed to somebody else. Null only on a proposal
+   * drafted by no person, or whose drafter's account no longer resolves.
+   */
+  readonly preparedByUserId: string | null;
+  /**
+   * THE PDF OF RECORD (0085) — the one rendered file the client was sent: the
+   * email's attachment, the link's download, and what an answer is recorded
+   * against. Pinned the first time a SENT proposal needs its PDF and never
+   * re-rendered after, because a render reads the firm's brand assets as they
+   * stand today. Null on a draft, and on a sent proposal nothing has asked for
+   * a PDF of yet.
+   */
+  readonly sentPdfVersionId: string | null;
 }
 
 /**
@@ -402,4 +430,37 @@ export function needsDiscountApproval(
   maxPercent: Amount | null,
 ): boolean {
   return comparePercent(largestDiscount(lines), maxPercent ?? "0") > 0;
+}
+
+// ── The proposal by email, and the client's own answer (0085) ────────────────
+
+/**
+ * Whether a string is an email address — the shape the database holds a
+ * recipient to (`crm.proposal_email.to_email`), stated once here so the
+ * refusal a colleague reads is this use case's and not a CHECK's.
+ *
+ * Deliberately loose: something@something.something. Whether a mailbox exists
+ * is the mail server's to say, and a stricter pattern refuses real addresses.
+ */
+export function isEmailAddress(v: string): boolean {
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(v);
+}
+
+/** How long a name the client types may be. A person's full name, with room. */
+export const SIGNER_NAME_MAX = 200;
+
+/** How long the colleague's own note above the standard letter may be. */
+export const EMAIL_NOTE_MAX = 2000;
+
+/**
+ * THE SENTENCE AN ACCEPTANCE TICKS — word for word, beside the box on the
+ * link's page, and stored with the answer.
+ *
+ * One function, so the page and the record cannot disagree: the page shows the
+ * text the API sent it, and the API records the text it composed here. It names
+ * the CLIENT, because a person accepting a quote for a company is accepting it
+ * on that company's behalf, and the tick is what says so.
+ */
+export function acceptanceStatement(ref: string, clientName: string): string {
+  return `I accept proposal ${ref} on behalf of ${clientName}.`;
 }

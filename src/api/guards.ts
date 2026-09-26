@@ -83,6 +83,7 @@ export interface AppEnv {
  *   · it arrives in the BODY, not the path, so it does not land in access logs,
  *     browser history or a Referer header
  *   · it is READ-ONLY: the recipient cannot accept, reject or change anything
+ *     THROUGH IT — answering is `…/shared/answer`, its own entry below (0085)
  *   · it answers one way for malformed, unknown and withdrawn, so it cannot be
  *     used to enumerate anything
  *   · being in this set puts it in the tight rate-limit bucket automatically —
@@ -153,6 +154,38 @@ export const PUBLIC_PATHS: ReadonlySet<string> = new Set([
   // writes one.
   "/api/v1/auth/password-reset",
   "/api/v1/auth/password-reset/confirm",
+  // ── THE EIGHTH AND NINTH: THE CLIENT ANSWERS THE PROPOSAL (0085) ─────────
+  //
+  // Decided 2026-09-26 (user): bib emails the proposal and the client accepts
+  // or declines it themselves. The share link's paragraph above said the link
+  // was read-only and that letting a client answer on it was "a bigger decision
+  // than this task" — this is that decision, taken by the person whose it was,
+  // and these are the two routes it needs. They are the first entries that are
+  // not about a session at all, and they are here because the person they
+  // serve will never have one: a proposal goes to somebody who is not yet a
+  // client.
+  //
+  // `…/shared/pdf` READS: the PDF of record, the same file the email attached.
+  // It is the share link's own argument unchanged — a bearer capability the
+  // firm handed out on purpose, 256-bit, digest at rest, its tenant inside it,
+  // in the BODY, one answer for malformed / unknown / withdrawn — and it serves
+  // nothing the email did not already carry.
+  //
+  // `…/shared/answer` WRITES, and what bounds the write is the argument:
+  //   · the act is the one the firm sent the link to invite — yes or no — and
+  //     nothing else: no price, line, date or wording can change through it;
+  //   · ONCE, while the offer stands: the status is terminal, the repository
+  //     moves it only while it is still `sent`, and expiry is enforced here as
+  //     on every other path;
+  //   · it is a POST with a typed NAME, and an acceptance needs a statement
+  //     ticked — so the scanners that open every link in an email, which a
+  //     GET-to-accept would have handed the decision to, cannot give it;
+  //   · what it records is EVIDENCE: the name, the statement word for word, the
+  //     email and PDF, the address and browser, in an erasable row — and the
+  //     firm's own colleague still records answers given any other way.
+  // A tenth entry needs an argument at least this good.
+  "/api/v1/proposals/shared/answer",
+  "/api/v1/proposals/shared/pdf",
 ]);
 
 /**

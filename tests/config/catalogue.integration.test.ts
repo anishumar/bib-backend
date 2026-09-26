@@ -35,12 +35,14 @@ import { PostgresMembershipRepository } from "../../src/infrastructure/postgres/
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { PostgresIdentifierRepository } from "../../src/infrastructure/postgres/identifier-repository";
 import { PostgresRelationshipRepository } from "../../src/infrastructure/postgres/relationship-repository";
+import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-timezone-repository";
 import { PostgresProposalRepository } from "../../src/infrastructure/postgres/proposal-repository";
 import { PostgresEventStore } from "../../src/infrastructure/postgres/event-repository";
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PartyService } from "../../src/usecase/party/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
+import { FAKE_PROPOSAL_LINKS, UNWIRED_PROPOSAL_PDFS } from "../../src/testfakes/proposal";
 import { DocumentService } from "../../src/usecase/document/service";
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import {
@@ -94,6 +96,13 @@ const proposals = new ProposalService({
   parties: new PostgresPartyRepository(app),
   documents,
   shareTokens: new RandomTokenFactory(),
+  structure: new PostgresRelationshipRepository(app),
+  timeZones: new PostgresFirmTimeZone(app),
+  staff: new PostgresMembershipRepository(app),
+  // Nothing here emails a proposal (0085's own test does).
+  mailer: null,
+  pdfs: UNWIRED_PROPOSAL_PDFS,
+  links: FAKE_PROPOSAL_LINKS,
   ids: systemIds,
   clock: systemClock,
   events: ledger,

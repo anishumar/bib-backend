@@ -517,7 +517,7 @@ export class FileStoreService {
   }): Promise<DocumentRecord> {
     const subjectKind = this.requireSubjectKind(input.subjectKind);
     if (!this.deps.renderSource.supports(input.kind)) {
-      throw new NotRenderable(input.kind, ["engagement_letter", "invoice"]);
+      throw new NotRenderable(input.kind, ["engagement_letter", "invoice", "proposal"]);
     }
 
     const source = await this.deps.renderSource.describe({
@@ -603,7 +603,8 @@ export class FileStoreService {
   }
 
   /**
-   * Put a logo, signature or letterhead in force for one of the firm's entities.
+   * Put a logo, signature, letterhead or proposal cover in force for one of the
+   * firm's entities.
    *
    * Supersedes rather than edits: the mark in force when a document was issued
    * stays readable, which is the same argument `is_active` carries on the grade
@@ -623,8 +624,9 @@ export class FileStoreService {
     // onto every document the entity issues, and the renderer can embed PNG and
     // JPEG only; anything else stored fine and then disappeared from every
     // letter and invoice with nothing saying so. The letterhead is exempt on
-    // purpose — it is legitimately a PDF and nothing draws it as an image.
-    if ((input.kind === "logo" || input.kind === "signature") && !isDrawableImage(version.mediaType)) {
+    // purpose — it is legitimately a PDF and nothing draws it as an image. The
+    // proposal cover (0084) is not: it IS the first page of every proposal.
+    if (input.kind !== "letterhead" && !isDrawableImage(version.mediaType)) {
       throw new BrandAssetNotDrawable(input.kind, version.mediaType);
     }
 

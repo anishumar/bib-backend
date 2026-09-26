@@ -142,6 +142,110 @@ export interface SignatureBlock {
   readonly dateAnchor: string | null;
 }
 
+// ── The Annexure letter (0083) ───────────────────────────────────────────────
+//
+// The firm's own engagement-letter format: a cover letter on page one, then
+// Annexure 1 (scope, deliverables and fees) and Annexure 2 (the terms), each on
+// a page of its own. Still STRUCTURE only — which headings, which paragraphs, in
+// what order — and nothing about how big anything is.
+
+/**
+ * One piece of an annexure's running text, drawn in order.
+ *
+ * A heading's LEVEL is its place in the document's outline — 1 is a section of
+ * an annexure ("B. Ongoing recurring services"), 2 is one service inside it
+ * ("B1. Accounting / CAS"), 3 is a labelled part of one ("Exclusions") — never a
+ * size. A paragraph keeps the firm's own line breaks, and a line that starts
+ * with "- ", "• " or "* " is a bullet.
+ */
+export type Flow =
+  | { readonly kind: "heading"; readonly level: 1 | 2 | 3; readonly text: string }
+  | {
+      readonly kind: "paragraph";
+      readonly text: string;
+      readonly muted?: boolean | undefined;
+      /**
+       * A LABEL run into the paragraph's first line in the heading weight —
+       * the proposal's "Fees H3: INR 50,000 Yearly" (0084). A label and not a
+       * heading, because it is read as part of the sentence it starts.
+       */
+      readonly lead?: string | undefined;
+    }
+  | { readonly kind: "table"; readonly table: LineTable }
+  | { readonly kind: "figures"; readonly rows: readonly TotalRow[] };
+
+export interface Annexure {
+  /** "Annexure 1". */
+  readonly label: string;
+  /** "Scope of Services, Deliverables & Fees". */
+  readonly title: string;
+  readonly flow: readonly Flow[];
+}
+
+/** Page one: a letter, from the firm to the client, with both signatures. */
+export interface CoverLetter {
+  readonly dateLine: string;
+  /** The person, then the organization, one per line. */
+  readonly addressee: readonly string[];
+  readonly subject: string;
+  readonly salutation: string;
+  /** The firm's own cover paragraphs. */
+  readonly body: readonly Flow[];
+  readonly closing: string;
+  /** The firm's block, once the letter has gone out carrying one. */
+  readonly firm: SignatureBlock | null;
+  readonly acceptanceHeading: string;
+  /** What the client accepts under — the firm's own acceptance paragraphs. */
+  readonly acceptance: readonly Flow[];
+  readonly client: SignatureBlock;
+}
+
+export interface AnnexureLetter {
+  readonly cover: CoverLetter;
+  readonly annexures: readonly Annexure[];
+}
+
+// ── The proposal (0084) ─────────────────────────────────────────────────────
+//
+// The firm's "Proposal For Services": a COVER — the firm's own artwork, full
+// page, with who it is prepared for and by printed over it — then the proposal
+// itself under the firm's logo. Still structure only: WHERE on the artwork the
+// two names go, how big anything is and what colour a heading takes are the
+// renderer's.
+
+/** One line of a name block on the cover. */
+export interface CoverLine {
+  readonly text: string;
+  /** A name is bold; an address or an email is not. */
+  readonly bold: boolean;
+}
+
+export interface ProposalCover {
+  /**
+   * The issuing entity's cover artwork (brand asset `proposal_cover`), drawn
+   * over the whole first page. Null is ordinary — a firm that has uploaded
+   * none gets a plain cover the renderer draws, headed with `title`.
+   */
+  readonly artwork: RenderableImage | null;
+  /** What a plain cover is headed — "Proposal for Services". The artwork
+   *  carries its own, so this prints only without one. */
+  readonly title: string;
+  /** Printed under the title on a plain cover: the proposal's own title. */
+  readonly subtitle: string;
+  /** "Prepared for:" — the person, then the client. */
+  readonly preparedFor: readonly CoverLine[];
+  /** "Prepared by:" — the colleague, the firm's company, the email. */
+  readonly preparedBy: readonly CoverLine[];
+}
+
+export interface ProposalDocument {
+  readonly cover: ProposalCover;
+  /** The small line opposite the logo on every page after the cover — the
+   *  reference and the date, which is how a client refers to it. */
+  readonly running: string;
+  readonly flow: readonly Flow[];
+}
+
 export interface RenderableDocument {
   /** "Engagement Letter", "Tax Invoice" — what the page is headed. */
   readonly documentTitle: string;
@@ -172,6 +276,20 @@ export interface RenderableDocument {
   /** Signature blocks after the totals. Absent on a document nobody signs —
    *  an invoice — and then nothing is drawn, so its bytes do not move. */
   readonly signatures?: readonly SignatureBlock[] | undefined;
+  /**
+   * The letter in the firm's Annexure format (0083) — when present, the
+   * document IS this: a cover letter and its annexures are drawn, and
+   * `sections`, `table`, `totals`, `terms` and `signatures` are not (the source
+   * leaves them empty). Absent on every classic letter and every invoice, whose
+   * bytes therefore do not move.
+   */
+  readonly annexureLetter?: AnnexureLetter | undefined;
+  /**
+   * The proposal (0084) — when present, the document IS this: a cover and the
+   * proposal's flow, and nothing else is drawn. Absent on every letter and
+   * invoice, whose bytes therefore do not move.
+   */
+  readonly proposal?: ProposalDocument | undefined;
   readonly logo: RenderableImage | null;
   /**
    * The instant the document was ISSUED, as an ISO date.

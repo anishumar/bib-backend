@@ -709,7 +709,12 @@ export function mapError(err: unknown): MappedError {
       // G1.6's line detail joins them, the two about an unpriced line included:
       // "no price and no reason" and "a discount off no price" are both things
       // the caller SENT, not states the proposal is in, and both are fixed by
-      // sending something different.
+      // sending something different. So do 0084's: the wrong KIND of party or
+      // account for the cover — a company where a person belongs, somebody who
+      // does not work here — each fixed by naming another, and a revision that
+      // names nothing to change. And 0085's three: an address that is not one,
+      // and — on the client's own page — an answer with no name typed or an
+      // acceptance with the statement left unticked.
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -724,6 +729,12 @@ export function mapError(err: unknown): MappedError {
       case "NOT_A_SERVICE":
       case "SERVICE_NOT_PUBLISHED":
       case "ISSUER_NOT_A_FIRM_ENTITY":
+      case "ADDRESSEE_NOT_A_PERSON":
+      case "PREPARER_NOT_STAFF":
+      case "NOTHING_TO_REVISE":
+      case "INVALID_RECIPIENT":
+      case "SIGNER_NAME_REQUIRED":
+      case "ACCEPTANCE_NOT_CONFIRMED":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // SHARE_LINK_UNKNOWN sits with these on purpose: a link that is
       // malformed, one that is unknown, and one whose proposal has gone all
@@ -736,7 +747,12 @@ export function mapError(err: unknown): MappedError {
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The proposal is not in the state this call assumed." None is a
       // malformed request and resending changes nothing — DISCOUNT_NEEDS_APPROVAL
-      // in particular is answered by a person, not by a retry.
+      // in particular is answered by a person, not by a retry. ADDRESSEE_NOT_LINKED
+      // (0084) is the letter's reading: nothing about the request is wrong — the
+      // person's role at the client is missing from the firm's own records.
+      // NOT_OUT_FOR_ANSWER and ALREADY_ANSWERED (0085) read the same way:
+      // emailing a proposal nobody can answer any more, and a second answer to
+      // one already answered, are both about where the proposal has got to.
       case "NOT_A_DRAFT":
       case "EMPTY_PROPOSAL":
       case "INVALID_TRANSITION":
@@ -745,7 +761,15 @@ export function mapError(err: unknown): MappedError {
       case "APPROVAL_NOT_NEEDED":
       case "ALREADY_APPROVED":
       case "PARTY_ARCHIVED":
+      case "ADDRESSEE_NOT_LINKED":
+      case "NOT_OUT_FOR_ANSWER":
+      case "ALREADY_ANSWERED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Reachable only from a process composed with no mailer — the worker,
+      // which never sends. Said plainly rather than as a 500, the render
+      // module's NOT_RENDERABLE habit.
+      case "EMAIL_UNAVAILABLE":
+        return { status: 501, code: "NOT_IMPLEMENTED", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -766,7 +790,10 @@ export function mapError(err: unknown): MappedError {
       // firm's, a quote to this client, a person rather than a company. Its sibling QUOTE_NAMES_NO_ENTITY is
       // deliberately NOT here: nothing about that request is wrong — the quote
       // is for a prospect holding no entity, which is a fact in the firm's own
-      // records and is fixed there.
+      // records and is fixed there. 0083's three are the same kind of answer: a
+      // fee group with no title, a grouped line sent with a price of its own,
+      // and a line priced on its own sent with none — each fixed by sending a
+      // different body.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -785,6 +812,9 @@ export function mapError(err: unknown): MappedError {
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "QUOTE_OF_ANOTHER_CLIENT":
       case "ADDRESSEE_NOT_A_PERSON":
+      case "FEE_GROUP_TITLE_REQUIRED":
+      case "GROUPED_LINE_PRICED":
+      case "LINE_NOT_PRICED":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -797,6 +827,7 @@ export function mapError(err: unknown): MappedError {
       case "CLAUSE_NOT_FOUND":
       case "ENGAGEMENT_NOT_FOUND":
       case "QUOTE_NOT_FOUND":
+      case "FEE_GROUP_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // "The letter is not in the state this call assumed." None is a malformed
       // request and resending changes nothing — LETTER_NOT_EDITABLE on a SIGNED
@@ -814,7 +845,9 @@ export function mapError(err: unknown): MappedError {
       // recording the acceptance, by adding lines, or by naming the entity.
       // F-10-1's two here are answered in the firm's OWN RECORDS the same way:
       // the company or the person may really be the client's, and what is
-      // missing is the relationship on the client's page that says so.
+      // missing is the relationship on the client's page that says so. 0083's
+      // two — a fee group still covering services, a letter sent with a group
+      // covering none — are the letter's STATE, answered by moving services.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -834,6 +867,8 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_ARCHIVED":
       case "ADDRESSEE_NOT_LINKED":
       case "ENTITY_OUTSIDE_CLIENT":
+      case "FEE_GROUP_NOT_EMPTY":
+      case "FEE_GROUP_EMPTY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -880,6 +915,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_JURISDICTION":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVALID_BLOCK_KIND":
+      case "LETTER_ONLY_BLOCK_KIND":
       case "BLANK_BLOCK_BODY":
       case "INVALID_SORT_ORDER":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
