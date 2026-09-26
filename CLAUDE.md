@@ -2160,7 +2160,9 @@ template alone when the rule CROSSES into producing dates, because the partner h
 a question and is owed the result of their answer. `createRule` deliberately does not: somebody
 writing a rule types the formula first and the March carve-out second, so generating on the first
 save fills a year of calendar from a half-written rule. A brand-new rule is what the nightly sweep
-is for. Neither path raises tasks or flags anything missed — those are the sweep's, and having
+is for. (Since T6.16 that holds for a rule written in the LIBRARY only; one written in the
+catalogue for a service fills the calendar at once, see its section.) Neither path raises tasks or
+flags anything missed — those are the sweep's, and having
 them fall out of a config edit would let a partner correcting a typo put work on somebody's desk.
 
 **Every rule write returns a `RuleEffect`** — `restated` / `locked` / `spawned` — and both
@@ -2248,8 +2250,9 @@ a pack cannot make one.
 So `coverageOf` has a fifth answer, `unconfirmed`, and only `generating` generates — in the
 domain predicate, in `listGenerating`, in `gaps` (reason `rules_unconfirmed`) and in
 `obligation-coverage.ts`, which `coverage.integration.test.ts` runs against one database. **A
-rule the firm WRITES is created `confirmed`** (it is the firm's own statement of the law, and a
-brand-new rule is still what the nightly sweep is for); **a rule a pack SEEDS is not**, and
+rule the firm WRITES is created `confirmed`** (it is the firm's own statement of the law; one
+written in the library is on no service and generates nothing, and one written in the catalogue
+for a service fills the calendar at once, see T6.16); **a rule a pack SEEDS is not**, and
 confirming it is what turns the calendar on for it, exactly as answering a formula does. **Since
 T6.16 confirming is not enough, and that is the rest of the 2026-09-18 fix**: the 98 filings came
 from rules that named NO service, which read as "every service". A rule now reaches a client only
@@ -2344,11 +2347,18 @@ because the schema before 0309 cannot keep one off the calendar.
 has a formula, is not event-driven, is for the entity's country, governs the period, AND a live link
 joins its chain to the engagement's pinned service. `coverageOf(t, linkedServices)` gained
 `unlinked` (asked before `unconfirmed`: adding a pack row to a service is also what confirms it),
-`generatesFor` is the per-engagement form, and `listGenerating` (chains with a live link, with the
+`generatesFor` STATES the per-engagement form (nothing in production calls it; the generator asks
+`generatesDates` and lets `subjectsFor` join the link, so its domain tests are not tests of the
+generator, and its doc says which are), and `listGenerating` (chains with a live link, with the
 count), `subjectsFor` (joins the link; its LEFT joins became inner, since nothing reaches an
 engagement except through its service), `gaps` and `obligation-coverage.ts` all restate it;
 `coverage.integration.test.ts` runs them against one database. T6.13's two coverage questions now
-give one answer (the switch is gone, the port keeps both, see its open question below).
+give one answer (the switch is gone, the port keeps both, see its open question below), and
+`FakeObligationCoverage` keeps ONE set for the same reason: its second set let a work-item test
+pass against "covered but not a filing", which the adapter can no longer produce. The obligation
+fakes also refuse what 0309's keys refuse (a successor's id as a lineage, an entry that is not a
+service) by the constraint's name, and a rule store handed links with no link store wired refuses
+rather than answering success with nothing linked, which is what `makeFakes()` did.
 
 **TWO SERVICES, ONE ROW PER PERIOD, ON A CHOSEN ENGAGEMENT.** A client holding two services that
 carry one filing is two subjects for one entity. The generator sorts subjects by `effective_from`
@@ -2364,13 +2374,37 @@ row's engagement pins it) on this chain. `mayBeWithdrawn` in the domain names th
 untouched (`work_item_id`, `filed_on`, `resolved_at` all null, the handover's three columns),
 upcoming on the FIRM's day (`dayInZone`, passed in as a date and never `CURRENT_DATE`), not
 waiting on a decision, not settled. The second half is the SQL's: no other ACTIVE engagement of the
-same entity whose service still has a live link. Everything else is KEPT and counted by reason
+same entity whose service still has a live link AND which had started by the row's statutory date.
+That last clause is the generator's own floor (`statutoryDueOn < subject.effectiveFrom` skips a
+subject), and it was missing until review: `active` with a future `effective_from` is a real state
+(`pending_start`), so a signed engagement starting in December counted as cover for September's
+return, which was kept and moved onto an engagement the generator would never have given it, and
+nothing withdrew it afterwards. Cover in the removal and a proposal in the generator are now one
+answer. Everything else is KEPT and counted by reason
 (`keptStarted`, `keptPastDue`, `keptCoveredElsewhere`; settled history is not counted, it would
 drown the number), and an untouched row another service still covers is RE-POINTED to that
 service's engagement, so the task it raises is routed by the service that owes it. The UPDATE
 repeats every condition, so a task raised between the read and the write keeps its filing.
 `withdrawn_at` / `withdrawn_by_user_id` / `withdrawn_reason` (a closed set, `service_unlinked`),
 and a CHECK that a withdrawn row is untouched, a wall under every guard.
+
+**THE TWO WRITERS OF A CHAIN'S CALENDAR TAKE TURNS ON ITS ROOT RULE (found in review,
+2026-09-26).** A removal and the generator's write each read the other's work at READ COMMITTED
+with nothing making one wait, and two orders left filings LIVE under no link, which nothing
+withdraws (the generator only restores): two removals of one filing from two services at once, each
+counting the other's uncommitted link as cover, so one moved the rows onto the other's engagement
+and the other found nothing there; and a removal landing while the generator's insert ran, which
+had read the link as live and wrote rows the removal could not see. So both take one row lock
+FIRST, in its own statement, and read after it (`obligation-chain-lock.ts`, T6.15's
+`step-lines.ts` argument): the chain's ROOT `obligation_template` row, one per chain however many
+services carry it. The removal takes `FOR NO KEY UPDATE` before anything else; `createIfAbsent`
+takes `FOR SHARE` on every chain its proposals name, in id order, before either statement, so
+sweeps never wait for each other and `STILL_LINKED` is asked after any removal has committed.
+Neither blocks a foreign-key check on the rule. Locking the chain's links instead is several rows
+in whatever order the insert's plan reads them, which deadlocks a sweep against a removal.
+`service-filings.integration.test.ts` forces both interleavings (it holds the calendar rows, or an
+uncommitted row holding October's key, so the first writer parks mid-way) and asserts the second
+WAITS; with the lock turned off both leave live filings under no link.
 
 **EVERY READER LEAVES A WITHDRAWN ROW OUT**, and each is a test in
 `service-filings.integration.test.ts`, several watched go red with the filter removed: the calendar
@@ -2403,7 +2437,17 @@ that follows runs in its own transaction and must see it), confirms a rule whose
 is `unconfirmed` through `applyUpdate` (one `obligation_rule.updated`, `statusFrom`/`statusTo`, its
 crossing spawn switched off so the count is recorded once), then spawns for the whole CHAIN, not one
 row (a predecessor still governs reach-back periods), and records `obligation_rule.linked` with the
-counts. A rule still waiting on a formula is linked and NOT confirmed: there is no date to confirm.
+counts. **The counts are THIS service's clients'** (review): the chain is still filled whole, so
+rows the sweep had not yet produced for ANOTHER service's clients are written too, but a row counts
+only when the engagement it lands on bought this service (`CalendarSubject.serviceEntryId`,
+`SpawnedInstance.engagementId`); otherwise "14 filings added for 1 company", on the screen and on
+the link's permanent event, could be 14 filings for a client of a different service. **The event
+is written in `finally`**: the link is committed before the confirm and the fill, a retry answers
+"already on this service" and records nothing, so a fill that throws would have left a link the
+ledger never heard of. A failed fill records `calendarFilled: false` and no counts (never a zero
+nobody measured) and the error still reaches the caller; `createRule` does the same for
+`obligation_rule.created` and its links. A rule still waiting on a formula is linked and NOT
+confirmed: there is no date to confirm.
 Adding twice writes nothing twice. **A rule WRITTEN for a service fills the calendar at once**
 (`createRule` with `serviceEntryIds`, links in the same transaction as the rule), reversing T6.4's
 "writing a rule does not generate" for that path only: the catalogue's "Write a new filing" is the

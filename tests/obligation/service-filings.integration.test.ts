@@ -24,6 +24,12 @@
 //   6. 0309's walls, each by the constraint that refuses it; and the
 //      migration's data move and its down, round-tripped inside a transaction
 //      that is rolled back.
+//   7. (review) Another service covers a filing only from the day its
+//      engagement starts, which is the generator's own floor: the periods
+//      before a signed-but-not-started engagement are withdrawn, not moved.
+//   8. (review) A removal and the generator's write take turns on the
+//      chain's root rule: two removals at once, and a removal during a write,
+//      each forced by holding a transaction open, and the second WAITS.
 //
 // Run with:  npm run test:integration
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
