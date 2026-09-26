@@ -36,7 +36,7 @@ without wiping, and REFUSES if the firm is already there rather than quietly
 making a second one: two firms holding those addresses turns every sign-in into
 "Choose a firm".
 
-`demo:verify` reads the firm back and asserts 71 facts about it — the account
+`demo:verify` reads the firm back and asserts 73 facts about it — the account
 teams, the calendar, the ladder, every refusal, and every one of the deliberate
 problems. **A write being accepted is not the same as the firm coming out
 right**, which is why it is a second command: a rule can be valid and generate

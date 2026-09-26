@@ -580,20 +580,27 @@ step "$SHIPPED shipped India rules on file — most are waiting on a fact, which
 # any test - both rules were valid, both generated, and nothing was refused.
 #
 # What a real firm does is exactly what the product is built for. A partner
-# goes down the 57 shipped rules, confirms the ones checked against the statute
-# and sets the lead time the firm actually works to. That is the "waiting on a
-# fact" screen doing its job, and it is what this does.
-confirm() {
-  local name=$1 lead=$2 id
+# goes down the 57 shipped rules, sets the lead time the firm actually works to,
+# and adds each filing to the SERVICE that owes it (T6.16). Since 0309 a rule
+# reaches a client only through a service in the catalogue, and adding an
+# unconfirmed one there confirms it in the same act, so this is also the
+# partner confirming the four dates. Before T6.16 this PATCHed status alone and
+# the rule, on no service, reached every engagement of every company: Cobalt
+# Logistics carried TDS returns it never bought.
+entry_id() { as partner "$API/api/v1/config/service/$1" | pick "d['entry']['id']"; }
+file_under() {
+  local name=$1 svc=$2 lead=$3 id sid
   id=$(as partner "$API/api/v1/obligation-rules" | pick "next(r['id'] for r in d['rules'] if r['name'] == '$name')")
-  aspat partner "$API/api/v1/obligation-rules/$id" -d "{\"status\":\"confirmed\",\"leadTimeDays\":$lead}" | ok
-  step "$name - confirmed by the partner, work starts T-$lead"
+  aspat partner "$API/api/v1/obligation-rules/$id" -d "{\"leadTimeDays\":$lead}" | ok
+  sid=$(entry_id "$svc")
+  asp partner "$API/api/v1/services/$sid/filings" -d "{\"ruleId\":\"$id\"}" | ok
+  step "$name - added to $svc, which confirms it; work starts T-$lead"
 }
-confirm "GSTR-3B"                  6
-confirm "GSTR-1"                   6
-confirm "TDS deposit"              4
-confirm "Quarterly TDS statements" 10
-warn "the other 53 stay UNCONFIRMED - every calendar row dated from them says so."
+file_under "GSTR-3B"                  gst-monthly   6
+file_under "GSTR-1"                   gst-monthly   6
+file_under "TDS deposit"              tds-quarterly 4
+file_under "Quarterly TDS statements" tds-quarterly 10
+warn "the other 53 stay UNCONFIRMED and on no service - they add nothing to the calendar, and the rules screen says so."
 
 # ── Pipeline, quote, letter ──────────────────────────────────────────────────
 

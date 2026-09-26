@@ -1394,12 +1394,24 @@ RULES=$(curl -s -b $J/partner.txt $API/api/v1/obligation-rules)
 # A NEW FIRM IS NEVER LOOKING AT AN EMPTY RULES SCREEN. Fifty-seven rules from
 # the firm's own applicability sheet arrive with the tenant — ten that produce
 # dates, and forty-seven that say, by name, what they are still waiting for.
+#
+# "Ten that produce dates" is ten with a FORMULA, counted as the pack counts
+# them. It was counted as coverage == "generating", which stopped being true of
+# any pack row on 2026-09-18 (they seed unconfirmed) and is doubly untrue since
+# T6.16: a rule generates only once the catalogue puts it on a service.
 COUNTS=$(python3 -c '
 import sys, json
 rs = json.load(sys.stdin)["rules"]
-gen = [r for r in rs if r["coverage"] == "generating"]
-print("%d/%d" % (len(rs), len(gen)))' <<< "$RULES")
+dated = [r for r in rs if r["dueRule"] is not None and r["recurrence"] != "event"]
+print("%d/%d" % (len(rs), len(dated)))' <<< "$RULES")
 chk "a new firm is seeded with the India pack" "57/10" "$COUNTS"
+# ON NO SERVICE, so NONE generates (T6.16, decision 1). Read from the same
+# response: the budget has no request to spare, and none is needed.
+UNUSED=$(python3 -c '
+import sys, json
+rs = json.load(sys.stdin)["rules"]
+print("yes" if all(r["usedIn"] == [] and r["coverage"] != "generating" for r in rs) else "no")' <<< "$RULES")
+chk "…and none is on a service, so none generates yet" yes "$UNUSED"
 # EVERY ONE OF THEM UNCONFIRMED, India included: the dates came from a previous
 # vendor's document, not from a partner ticking them against the statute.
 UNCONF=$(python3 -c '
