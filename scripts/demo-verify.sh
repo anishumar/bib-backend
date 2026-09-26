@@ -218,9 +218,9 @@ CAL=$(as partner "$API/api/v1/calendar")
 # 60, where it was 100 before T6.16, and the drop is the fix. On no service the
 # four rules reached every engagement of both companies, so Cobalt Logistics,
 # which buys only GST, carried TDS deposits and TDS statements as well: eight
-# rule-and-company pairs. On their services they are six (Foods owes all four,
-# Logistics the two GST returns), about fifteen months of each monthly one and
-# five quarters of the quarterly: roughly 80, and 60 leaves room for the floor.
+# rule-and-company pairs, which last measured 93 (2026-09-25, already under the
+# old 100). On their services they are six (Foods owes all four, Logistics the
+# two GST returns); the same months give roughly 73, and 60 leaves room.
 at_least "filings generated"       60  "$(pick "len(d['rows'])" <<< "$CAL")"
 # PER ENTITY, never per client. G0.1: a group of two companies files two sets of
 # returns, and a calendar showing one is the bug that rule exists to stop.
