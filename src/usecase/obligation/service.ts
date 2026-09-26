@@ -104,6 +104,7 @@ import type {
   RestatedInstance,
   RuleServiceLinkRepository,
   ServiceDirectory,
+  ServiceRef,
   TemplateEdit,
   TemplateRecord,
   TenantDirectory,
@@ -704,8 +705,8 @@ export class ObligationService {
     tenantId: string,
     serviceEntryId: string,
   ): Promise<readonly RuleView[]> {
-    const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
-    if (key === null) throw new ServiceNotFound(serviceEntryId);
+    const found = await this.deps.services.findService(tenantId, serviceEntryId);
+    if (found === null) throw new ServiceNotFound(serviceEntryId);
     return (await this.filings(tenantId)).filter((r) =>
       r.usedIn.some((u) => u.serviceEntryId === serviceEntryId),
     );
@@ -747,11 +748,11 @@ export class ObligationService {
     // composite key refuses the same thing as a wall. Asked for twice is
     // asked for once.
     const serviceEntryIds = [...new Set(input.serviceEntryIds ?? [])];
-    const serviceKeys = new Map<string, string>();
+    const servicesNamed = new Map<string, ServiceRef>();
     for (const serviceEntryId of serviceEntryIds) {
-      const key = await this.deps.services.serviceKey(input.tenantId, serviceEntryId);
-      if (key === null) throw new ServiceNotFound(serviceEntryId);
-      serviceKeys.set(serviceEntryId, key);
+      const found = await this.deps.services.findService(input.tenantId, serviceEntryId);
+      if (found === null) throw new ServiceNotFound(serviceEntryId);
+      servicesNamed.set(serviceEntryId, found);
     }
     const byUserId = userOf(actor);
 
@@ -845,7 +846,11 @@ export class ObligationService {
             lineageId: created.lineageId,
             ruleId: created.id,
             serviceEntryId,
-            serviceKey: serviceKeys.get(serviceEntryId) ?? null,
+            serviceKey: servicesNamed.get(serviceEntryId)?.key ?? null,
+            // The service's NAME as well as its key, so /audit can say "added to
+            // Monthly Accounting" rather than a key (a business fact, like the
+            // rule's own name; resolved at the write, as the event's words).
+            serviceName: servicesNamed.get(serviceEntryId)?.name ?? null,
             name: created.name,
             confirmed: false,
             onCreate: true,
@@ -1283,8 +1288,8 @@ export class ObligationService {
     const { tenantId, serviceEntryId } = input;
     const given = await this.deps.templates.findById(tenantId, input.ruleId);
     if (!given) throw new TemplateNotFound(input.ruleId);
-    const serviceKey = await this.deps.services.serviceKey(tenantId, serviceEntryId);
-    if (serviceKey === null) throw new ServiceNotFound(serviceEntryId);
+    const found = await this.deps.services.findService(tenantId, serviceEntryId);
+    if (found === null) throw new ServiceNotFound(serviceEntryId);
 
     const lineageId = given.lineageId;
     let current = currentOf(await this.deps.templates.chain(tenantId, lineageId)) ?? given;
@@ -1339,7 +1344,10 @@ export class ObligationService {
           lineageId,
           ruleId: current.id,
           serviceEntryId,
-          serviceKey,
+          serviceKey: found.key,
+          // Named at the write, so /audit reads "added to Monthly Accounting"
+          // and says so even after the service is renamed or retired.
+          serviceName: found.name,
           name: current.name,
           confirmed,
           // Counts only, like every rule write's effect, and only THIS
@@ -1388,8 +1396,8 @@ export class ObligationService {
     const { tenantId, serviceEntryId } = input;
     const given = await this.deps.templates.findById(tenantId, input.ruleId);
     if (!given) throw new TemplateNotFound(input.ruleId);
-    const serviceKey = await this.deps.services.serviceKey(tenantId, serviceEntryId);
-    if (serviceKey === null) throw new ServiceNotFound(serviceEntryId);
+    const found = await this.deps.services.findService(tenantId, serviceEntryId);
+    if (found === null) throw new ServiceNotFound(serviceEntryId);
 
     const lineageId = given.lineageId;
     const current = currentOf(await this.deps.templates.chain(tenantId, lineageId)) ?? given;
@@ -1422,7 +1430,8 @@ export class ObligationService {
         lineageId,
         ruleId: current.id,
         serviceEntryId,
-        serviceKey,
+        serviceKey: found.key,
+        serviceName: found.name,
         name: current.name,
         // COUNTS, not a verb per row: see `obligation_rule.unlinked` in the
         // registry. Which filings came off is on each row.

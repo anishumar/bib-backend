@@ -31,15 +31,37 @@ export interface RawUsedIn {
 }
 
 /**
+ * A catalogue service's NAME, for a `config.entry` row aliased `entry`: the
+ * PUBLISHED version's, else the newest version's, null for an entry with no
+ * version at all. A link hangs off the entry, and a service that has only ever
+ * had a draft can carry filings.
+ *
+ * One definition, used by `usedInSql` below and by the `ServiceDirectory` the
+ * link and unlink events are named from (`config-repository.ts`), so the
+ * library, a card and /audit cannot name one service two ways. A constant
+ * fragment with no parameters, which is what makes `db.unsafe` safe to put it
+ * in.
+ */
+export function serviceNameSql(entry: string): string {
+  return `coalesce(
+               (SELECT pv.body->>'name' FROM config.version pv
+                 WHERE pv.entry_id = ${entry}.id AND pv.tenant_id = ${entry}.tenant_id
+                   AND pv.status = 'published'
+                 ORDER BY pv.version DESC LIMIT 1),
+               (SELECT nv.body->>'name' FROM config.version nv
+                 WHERE nv.entry_id = ${entry}.id AND nv.tenant_id = ${entry}.tenant_id
+                 ORDER BY nv.version DESC LIMIT 1)
+             )`;
+}
+
+/**
  * The live links on a chain, NAMED, as one jsonb array — for a row aliased
  * `outer` carrying `tenant_id` and `lineage_id`.
  *
  * One definition, used by the library's list and by `usedIn` below, so the
- * two cannot disagree about which name a service is shown by. The name is the
- * PUBLISHED version's, else the newest version's: a link hangs off the entry,
- * and a service that has only ever had a draft can carry filings. It is a
- * constant fragment with no parameters, which is what makes `db.unsafe` safe
- * to put it in.
+ * two cannot disagree about which name a service is shown by (`serviceNameSql`).
+ * It is a constant fragment with no parameters, which is what makes
+ * `db.unsafe` safe to put it in.
  */
 export function usedInSql(outer: string): string {
   return `(
@@ -47,15 +69,7 @@ export function usedInSql(outer: string): string {
     FROM (
       SELECT l.service_entry_id,
              e.key AS service_key,
-             coalesce(
-               (SELECT pv.body->>'name' FROM config.version pv
-                 WHERE pv.entry_id = e.id AND pv.tenant_id = e.tenant_id
-                   AND pv.status = 'published'
-                 ORDER BY pv.version DESC LIMIT 1),
-               (SELECT nv.body->>'name' FROM config.version nv
-                 WHERE nv.entry_id = e.id AND nv.tenant_id = e.tenant_id
-                 ORDER BY nv.version DESC LIMIT 1)
-             ) AS service_name,
+             ${serviceNameSql("e")} AS service_name,
              ${isoInstant("l.linked_at", "linked_at")}
       FROM delivery.obligation_rule_service l
       JOIN config.entry e ON e.id = l.service_entry_id AND e.tenant_id = l.tenant_id

@@ -42,6 +42,7 @@ import type {
   RestoredInstance,
   RuleServiceLinkRepository,
   ServiceDirectory,
+  ServiceRef,
   SpawnedInstance,
   SupersedeResult,
   TemplatePatch,
@@ -871,8 +872,9 @@ export class FakeObligationServices implements ServiceDirectory {
    *  service with no version reads. */
   readonly names = new Map<string, string>();
 
-  serviceKey(_tenantId: string, entryId: string): Promise<string | null> {
-    return Promise.resolve(this.keys.get(entryId) ?? null);
+  findService(_tenantId: string, entryId: string): Promise<ServiceRef | null> {
+    const key = this.keys.get(entryId);
+    return Promise.resolve(key === undefined ? null : { key, name: this.names.get(entryId) ?? null });
   }
 }
 

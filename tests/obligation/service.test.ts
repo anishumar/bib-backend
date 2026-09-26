@@ -24,7 +24,7 @@ import {
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
-import type { Actor } from "../../src/domain/ledger/model";
+import { findPiiKey, type Actor } from "../../src/domain/ledger/model";
 
 const FIRM = "00000000-0000-4000-8000-0000000000f1";
 const OTHER_FIRM = "00000000-0000-4000-8000-0000000000f2";
@@ -2057,5 +2057,63 @@ describe("a rule row carries its chain read on the firm's today", () => {
     const utc = await supersedeFromSeptember(harness({ now: "2026-08-31T20:00:00Z", zone: "UTC" }));
     expect(utc.row?.inForceToday?.template.id).toBe(utc.rule.id);
     expect(utc.row?.nextChange?.template.id).toBe(utc.successor.id);
+  });
+});
+
+// ── T6.16 follow-up: /audit names the SERVICE a filing was added to ─────────
+
+describe("the link and unlink events name the service, as it read at the write", () => {
+  it("adding a filing records the service's name beside its key", async () => {
+    const h = harness();
+    await h.service.seedDefaultStates(FIRM, ACTOR);
+    await h.service.seedIndiaRulePack(FIRM, ACTOR);
+    h.services.keys.set(SERVICE, "monthly-accounting");
+    h.services.names.set(SERVICE, "Monthly Accounting");
+    const gstr3b = h.templates.rows.find((r) => r.name === "GSTR-3B");
+    if (!gstr3b) throw new Error("no GSTR-3B in the pack");
+
+    await h.service.linkRule({ tenantId: FIRM, serviceEntryId: SERVICE, ruleId: gstr3b.id }, ACTOR);
+    const linked = h.events.recorded.find((e) => e.verb === "obligation_rule.linked");
+    expect(linked?.payload).toMatchObject({
+      serviceEntryId: SERVICE,
+      serviceKey: "monthly-accounting",
+      serviceName: "Monthly Accounting",
+      name: "GSTR-3B",
+    });
+    // A business fact, like the rule's own name: the ledger's personal-data
+    // scan has nothing to say about it.
+    expect(findPiiKey(linked?.payload)).toBeNull();
+
+    // Named at the WRITE: renaming the service later does not rewrite what
+    // the ledger said it was called when the filing was added.
+    h.services.names.set(SERVICE, "Accounting and Close");
+    await h.service.unlinkRule({ tenantId: FIRM, serviceEntryId: SERVICE, ruleId: gstr3b.id }, ACTOR);
+    const unlinked = h.events.recorded.find((e) => e.verb === "obligation_rule.unlinked");
+    expect(unlinked?.payload).toMatchObject({
+      serviceKey: "monthly-accounting",
+      serviceName: "Accounting and Close",
+    });
+    expect(findPiiKey(unlinked?.payload)).toBeNull();
+    expect(linked?.payload).toMatchObject({ serviceName: "Monthly Accounting" });
+  });
+
+  it("a filing WRITTEN for a service names it on its link event too", async () => {
+    const h = harness();
+    h.services.names.set(SERVICE, "GST Compliance");
+    await firmWithGst(h);
+    const linked = h.events.recorded.filter((e) => e.verb === "obligation_rule.linked");
+    expect(linked).toHaveLength(1);
+    expect(linked[0]?.payload).toMatchObject({
+      serviceKey: "gst-filing",
+      serviceName: "GST Compliance",
+      onCreate: true,
+    });
+  });
+
+  it("a service with no version at all is named null, and the reader falls back to its key", async () => {
+    const h = harness();
+    await firmWithGst(h);
+    const linked = h.events.recorded.find((e) => e.verb === "obligation_rule.linked");
+    expect(linked?.payload).toMatchObject({ serviceKey: "gst-filing", serviceName: null });
   });
 });

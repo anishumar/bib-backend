@@ -980,14 +980,24 @@ export interface WorkItemRaiser {
   ): Promise<string>;
 }
 
-/** Checking that a filing is being added to a service the firm actually has.
- *  The catalogue lives in the config registry and this use case must not
- *  import it. */
+/** A catalogue SERVICE as this module names it: the entry's key, and the name
+ *  a person reads. The name is the PUBLISHED version's, else the newest
+ *  version's, the same derivation `usedIn` shows, so an event and the library
+ *  cannot name one service two ways; null only for an entry with no version at
+ *  all, which then reads by its key. */
+export interface ServiceRef {
+  readonly key: string;
+  readonly name: string | null;
+}
+
+/** Checking that a filing is being added to a service the firm actually has,
+ *  and what to call it. The catalogue lives in the config registry and this
+ *  use case must not import it. */
 export interface ServiceDirectory {
-  /** The entry's key, or null if there is no SERVICE entry with that id. The
-   *  kind is checked here as a sentence and by 0309's composite key as a
-   *  wall. */
-  serviceKey(tenantId: string, entryId: string): Promise<string | null>;
+  /** The entry's key and name, or null if there is no SERVICE entry with that
+   *  id. The kind is checked here as a sentence and by 0309's composite key
+   *  as a wall. */
+  findService(tenantId: string, entryId: string): Promise<ServiceRef | null>;
 }
 
 export interface TenantDirectory {

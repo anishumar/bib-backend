@@ -330,6 +330,16 @@ describe("linking a filing to a service puts it on the calendar, once per period
     const record = (await service.listRules(tenantId)).find((r) => r.template.id === gstr3b);
     expect(record?.usedIn.map((u) => u.serviceEntryId)).toEqual([gst, full]);
     expect(record?.usedIn.every((u) => u.serviceName !== null && u.linkedAt.endsWith("Z"))).toBe(true);
+
+    // And the link's event NAMES the service, from the real catalogue row and
+    // by the name the library shows (T6.16 follow-up: /audit prints it).
+    const linked = events.recorded.filter((e) => e.verb === "obligation_rule.linked").at(-1);
+    expect(linked?.payload).toMatchObject({
+      serviceEntryId: full,
+      serviceKey: `full-compliance-${stamp}`,
+      serviceName: record?.usedIn.find((u) => u.serviceEntryId === full)?.serviceName,
+    });
+    expect(linked?.payload["serviceName"]).toBe(`full-compliance-${stamp}`);
   });
 
   it("a filing on BOTH services from the start lands on the EARLIEST engagement, by rule", async () => {
@@ -412,6 +422,14 @@ describe("removing a filing from a service withdraws what it no longer owes, and
 
     withdrawnRow = off[0]?.id ?? "";
     expect(withdrawnRow).not.toBe("");
+
+    // The removal's event names the service it came off, from the real row.
+    const unlinked = events.recorded.filter((e) => e.verb === "obligation_rule.unlinked").at(-1);
+    expect(unlinked?.payload).toMatchObject({
+      serviceEntryId: gst,
+      serviceKey: `gst-monthly-${stamp}`,
+      serviceName: `gst-monthly-${stamp}`,
+    });
   });
 
   it("removing it again changes nothing", async () => {
@@ -1045,5 +1063,38 @@ describe("two writers of one filing's calendar take turns (review)", () => {
     // Every upcoming one it wrote came off with the service, and was counted.
     expect(ahead.filter((r) => r.withdrawn_at === null)).toEqual([]);
     expect(effect.withdrawn).toBe(ahead.length);
+  });
+});
+
+describe("a service's name, as the link and unlink events record it (T6.16 follow-up)", () => {
+  const directory = new PostgresConfigRepository(app);
+
+  it("is the PUBLISHED version's name while a newer draft says otherwise, the draft's with nothing published, and nothing for a role", async () => {
+    const svc = await serviceEntry(`named-${stamp}`);
+    await owner`
+      INSERT INTO config.version (tenant_id, entry_id, version, body)
+      VALUES (${tenantId}, ${svc.entryId}, 2, ${owner.json({ name: "A draft name" })})
+    `;
+    expect(await directory.findService(tenantId, svc.entryId)).toEqual({
+      key: `named-${stamp}`,
+      name: `named-${stamp}`,
+    });
+
+    const [draftOnly] = await owner<{ id: string }[]>`
+      INSERT INTO config.entry (tenant_id, kind, key) VALUES (${tenantId}, 'service', ${`draft-${stamp}`})
+      RETURNING id
+    `;
+    if (!draftOnly) throw new Error("entry seed failed");
+    await owner`
+      INSERT INTO config.version (tenant_id, entry_id, version, body)
+      VALUES (${tenantId}, ${draftOnly.id}, 1, ${owner.json({ name: "Payroll, being drafted" })})
+    `;
+    expect(await directory.findService(tenantId, draftOnly.id)).toEqual({
+      key: `draft-${stamp}`,
+      name: "Payroll, being drafted",
+    });
+
+    // Not a service: no answer, which the use case refuses as SERVICE_NOT_FOUND.
+    expect(await directory.findService(tenantId, roleEntry)).toBeNull();
   });
 });

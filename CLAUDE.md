@@ -2476,7 +2476,13 @@ nothing, as decision 1 says.
 **Counts on the rule's events, a verb per row only where the generator writes.** `obligation_rule.
 linked` / `unlinked` carry ids and counts (the handover's and restate's arrangement: which filings
 came off is on each row), `obligation.restored` is per row (the generator's own writes are always
-per row).
+per row). **Both also carry `serviceName` since the follow-up (2026-09-26)**, beside `serviceKey`,
+so /audit reads "added to Monthly Accounting" and not a key: a business fact like the rule's own
+`name`, not personal data, resolved AT THE WRITE by `ServiceDirectory.findService` (renamed from
+`serviceKey`; it returns `{key, name}`) with the same derivation `usedIn` shows (`serviceNameSql`
+in `obligation-link-repository.ts`: the published version's name, else the newest version's, null
+for an entry with no version). Events written before it have no `serviceName`, and a reader falls
+back to the key.
 
 **Routes**: `GET /api/v1/obligation-filings` (one row per chain, the rule in force, with `usedIn`:
 the catalogue's single read), `GET /api/v1/services/{serviceEntryId}/filings`, `POST
