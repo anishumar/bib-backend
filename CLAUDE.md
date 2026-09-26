@@ -2485,6 +2485,20 @@ the catalogue's single read), `GET /api/v1/services/{serviceEntryId}/filings`, `
 `tenant:admin`. Rule rows carry `lineageId` and `usedIn: [{serviceEntryId, serviceKey,
 serviceName, linkedAt}]` from ONE query; `serviceEntryId` is gone from every rule write.
 
+**A CARD SHOWS WHAT TODAY'S FILINGS ARE DUE ON, NOT THE CHAIN'S NEWEST ROW (follow-up,
+2026-09-26).** The catalogue's row for a chain is its open-ended row (`currentOf`, what a link
+judges), and after "the law changed from April 2027" that is the SUCCESSOR: the card said
+September was due on the 22nd while the calendar, correctly, dated it the 20th. So every rule row
+on all three reads (`/obligation-rules`, `/obligation-filings`, `/services/{id}/filings`) carries
+its CHAIN read on the FIRM's today (`dayInZone`, once per request): `inForceToday`, the row whose
+window governs the period containing today, and `nextChange`, the row that takes over after it,
+each `{ruleId, effectiveFrom, effectiveTo, dueRule, unresolvedReason, exceptions}` (a successor
+inherits no exceptions, so each carries its own). The domain answers it (`chainOnDay`) in the
+generator's own terms, `periodsBetween` over that one day and `governsPeriod` on the period START,
+with no new date arithmetic, so a mid-quarter cutover waits for the quarter exactly as the
+generator does; the generator is untouched. `ObligationService` returns `RuleView`
+(`TemplateRecord` plus the two), and the handler maps both field by field.
+
 **DECIDED (the user, 2026-09-26): a link skips a per-period task only when the service has no
 process of its own.** T6.13 skipped a recurring engagement's per-period umbrella task wherever the
 calendar dated its service's filings (the service IS its filings), and the catalogue invites a

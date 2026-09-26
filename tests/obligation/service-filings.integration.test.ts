@@ -573,6 +573,14 @@ describe("the law changes, and the filing comes back", () => {
     const record = (await service.listRules(tenantId)).find((r) => r.template.id === successor);
     expect(record?.usedIn.map((u) => u.serviceEntryId)).toEqual([full]);
     expect((await service.filingsForService(tenantId, full)).map((r) => r.template.id)).toContain(successor);
+    // And what the card says is DUE today is the predecessor, off the real
+    // list: the firm's today (30 August) is before the November cutover, so
+    // the successor is the change ahead, not the rule in force (T6.16
+    // follow-up).
+    const card = (await service.filingsForService(tenantId, full)).find((r) => r.template.id === successor);
+    expect(card?.inForceToday?.template.id).toBe(gstr3b);
+    expect(card?.nextChange?.template).toMatchObject({ id: successor, effectiveFrom: CUTOVER });
+    expect(card?.nextChange?.template.dueRule?.dueDayOfMonth).toBe(11);
   });
 
   it("adding it back restores the SAME rows in place, re-dated by the rule that governs each period", async () => {

@@ -19,6 +19,7 @@
 // is worse than a sweep that stops, because a stopped sweep gets noticed.
 import {
   addDays,
+  chainOnDay,
   coverageOf,
   daysBetween,
   DEFAULT_OBLIGATION_STATES,
@@ -294,6 +295,31 @@ export interface UnlinkEffect {
   readonly keptStarted: number;
   readonly keptPastDue: number;
   readonly keptCoveredElsewhere: number;
+}
+
+/** One row of a chain, with its own exceptions: what a screen needs to say
+ *  in words when a filing is due under that row. */
+export interface ChainRowView {
+  readonly template: ObligationTemplate;
+  readonly exceptions: readonly DueRuleException[];
+}
+
+/**
+ * A rule row as the library and the catalogue read it (T6.16 follow-up,
+ * 2026-09-26): the row itself, plus its CHAIN read on the firm's today.
+ *
+ * `inForceToday` is the row governing the period that contains the firm's
+ * today (`chainOnDay`: `periodsBetween` and `governsPeriod`, the generator's
+ * own terms), and `nextChange` the row that takes over after it. Both are the
+ * chain's, so every row of one chain carries the same two, as it carries the
+ * same `usedIn`. They exist because the chain's open-ended row is what a
+ * screen showed, and after a law change from April 2027 that is the
+ * successor: the card said September was due on the new day while the
+ * calendar dated it on the old one.
+ */
+export interface RuleView extends TemplateRecord {
+  readonly inForceToday: ChainRowView | null;
+  readonly nextChange: ChainRowView | null;
 }
 
 /** The row IN FORCE of a chain: the one with no end, else the latest. The
@@ -600,9 +626,34 @@ export class ObligationService {
   // ── writing rules ────────────────────────────────────────────────────────
 
   /** The library: every rule row, predecessors and retired ones included, each
-   *  with the services its chain is used in. */
-  async listRules(tenantId: string): Promise<readonly TemplateRecord[]> {
-    return this.deps.templates.list(tenantId);
+   *  with the services its chain is used in, and its chain read on the firm's
+   *  today (`RuleView`). */
+  async listRules(tenantId: string): Promise<readonly RuleView[]> {
+    const rows = await this.deps.templates.list(tenantId);
+    const today = await this.firmDay(tenantId);
+    const byChain = new Map<string, TemplateRecord[]>();
+    for (const r of rows) {
+      const list = byChain.get(r.template.lineageId) ?? [];
+      list.push(r);
+      byChain.set(r.template.lineageId, list);
+    }
+    // One reading per CHAIN, on ONE day for the whole list: a page that asked
+    // the clock per row could straddle midnight and show two chains on two
+    // different days.
+    const onDay = new Map<string, { inForceToday: ChainRowView | null; nextChange: ChainRowView | null }>();
+    for (const [lineageId, chain] of byChain) {
+      const { governing, next } = chainOnDay(chain.map((r) => r.template), today);
+      const view = (t: ObligationTemplate | null): ChainRowView | null => {
+        if (t === null) return null;
+        const record = chain.find((r) => r.template.id === t.id);
+        return { template: t, exceptions: record?.exceptions ?? [] };
+      };
+      onDay.set(lineageId, { inForceToday: view(governing), nextChange: view(next) });
+    }
+    return rows.map((r) => ({
+      ...r,
+      ...(onDay.get(r.template.lineageId) ?? { inForceToday: null, nextChange: null }),
+    }));
   }
 
   /**
@@ -619,16 +670,21 @@ export class ObligationService {
    *
    * Derived from the library's own query rather than a second statement, so
    * the two screens cannot disagree about a rule.
+   *
+   * The row returned is the chain's open-ended one, the row a link judges
+   * (`currentOf`). What its filings are DUE on today is `inForceToday`, which
+   * after a law change taking effect later is its predecessor, and the change
+   * is `nextChange`: a card shows those two, never this row's formula alone.
    */
-  async filings(tenantId: string): Promise<readonly TemplateRecord[]> {
-    const rows = await this.deps.templates.list(tenantId);
-    const byChain = new Map<string, TemplateRecord[]>();
+  async filings(tenantId: string): Promise<readonly RuleView[]> {
+    const rows = await this.listRules(tenantId);
+    const byChain = new Map<string, RuleView[]>();
     for (const r of rows) {
       const list = byChain.get(r.template.lineageId) ?? [];
       list.push(r);
       byChain.set(r.template.lineageId, list);
     }
-    const out: TemplateRecord[] = [];
+    const out: RuleView[] = [];
     for (const chain of byChain.values()) {
       const inForce = currentOf(
         [...chain].sort((a, b) =>
@@ -647,7 +703,7 @@ export class ObligationService {
   async filingsForService(
     tenantId: string,
     serviceEntryId: string,
-  ): Promise<readonly TemplateRecord[]> {
+  ): Promise<readonly RuleView[]> {
     const key = await this.deps.services.serviceKey(tenantId, serviceEntryId);
     if (key === null) throw new ServiceNotFound(serviceEntryId);
     return (await this.filings(tenantId)).filter((r) =>

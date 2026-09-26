@@ -22,7 +22,8 @@ import {
   type ObligationState,
   type ResolutionOption,
 } from "../../domain/obligation/model";
-import type { TemplateRecord } from "../../usecase/obligation/ports";
+import type { ChainRowView, RuleView } from "../../usecase/obligation/service";
+import type { ObligationTemplate } from "../../domain/obligation/model";
 import { scopeOf } from "../scope";
 
 export interface ObligationDeps {
@@ -119,6 +120,55 @@ const ExceptionSchema = z
   })
   .openapi("ObligationException");
 
+// ── A chain read on the firm's today (T6.16 follow-up) ───────────────────────
+//
+// After "the law changed from April 2027", the chain's open-ended row is the
+// successor, and a card showing its formula told a partner September was due
+// on the new day while the calendar dated it on the old one. So every rule row
+// also carries the row whose window governs the period containing the FIRM's
+// today, and the row that takes over next, in one shape.
+
+const ChainRowFields = {
+  ruleId: z.string().uuid().openapi({
+    description:
+      "The rule row this is. Any rule id of the chain is accepted by the link, unlink and " +
+      "library routes.",
+  }),
+  effectiveTo: z.string().nullable().openapi({
+    description:
+      "The first period start this row does NOT govern, or null when nothing replaces it.",
+  }),
+  dueRule: DueRuleSchema.nullable().openapi({
+    description:
+      "When a filing under this row is due, in the same shape as the rule's own dueRule. Null " +
+      "while the date cannot be worked out yet; unresolvedReason then says why.",
+  }),
+  unresolvedReason: z.string().nullable(),
+  exceptions: z.array(ExceptionSchema).openapi({
+    description: "This row's own exceptions, such as March's TDS. A successor does not inherit them.",
+  }),
+};
+
+const InForceTodaySchema = z
+  .object({
+    ...ChainRowFields,
+    effectiveFrom: z.string().nullable().openapi({
+      description: "The first period start this row governs; null means from the beginning.",
+    }),
+  })
+  .openapi("ObligationRuleInForceToday");
+
+const NextChangeSchema = z
+  .object({
+    ...ChainRowFields,
+    effectiveFrom: z.string().openapi({
+      description:
+        "The first period start the new row governs, as YYYY-MM-DD: the day to name in " +
+        "'From April 2027: the 22nd of the following month'.",
+    }),
+  })
+  .openapi("ObligationRuleNextChange");
+
 const RuleSchema = z
   .object({
     id: z.string().uuid(),
@@ -182,6 +232,19 @@ const RuleSchema = z
     }),
     coverage: Coverage,
     exceptions: z.array(ExceptionSchema),
+    inForceToday: InForceTodaySchema.nullable().openapi({
+      description:
+        "The row of this rule's CHAIN whose window governs the period containing the firm's " +
+        "today (the firm's own time zone): the rule today's filings are due under, which is " +
+        "what a screen shows as the due date. The same on every row of one chain. Differs from " +
+        "this row after a law change that takes effect later, when this row is the successor. " +
+        "Null when no row governs today yet, for a chain written to start later.",
+    }),
+    nextChange: NextChangeSchema.nullable().openapi({
+      description:
+        "The row that takes over after today's period, when a law change has been recorded for " +
+        "a later day. Null when nothing changes.",
+    }),
     instanceCount: z.number().int().openapi({
       description:
         "How many calendar rows this rule has produced, ever, including any taken off the " +
@@ -355,8 +418,56 @@ const CoverageGapSchema = z
   })
   .openapi("CoverageGap");
 
-function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
+function exceptionsToWire(v: ChainRowView["exceptions"]): z.infer<typeof ExceptionSchema>[] {
+  return v.map((e) => ({
+    periodEndMonth: e.periodEndMonth,
+    kind: e.kind,
+    dueMonthOffset: e.dueMonthOffset,
+    dueDayOfMonth: e.dueDayOfMonth,
+    dueDaysAfter: e.dueDaysAfter,
+    note: e.note,
+  }));
+}
+
+function dueRuleToWire(t: ObligationTemplate): z.infer<typeof DueRuleSchema> | null {
+  return t.dueRule
+    ? {
+        kind: t.dueRule.kind,
+        dueMonthOffset: t.dueRule.dueMonthOffset,
+        dueDayOfMonth: t.dueRule.dueDayOfMonth,
+        dueDaysAfter: t.dueRule.dueDaysAfter,
+      }
+    : null;
+}
+
+function chainRowToWire(v: ChainRowView) {
+  return {
+    ruleId: v.template.id,
+    effectiveTo: v.template.effectiveTo,
+    dueRule: dueRuleToWire(v.template),
+    unresolvedReason: v.template.unresolvedReason,
+    exceptions: exceptionsToWire(v.exceptions),
+  };
+}
+
+/** A just-written rule the list could not find, which nothing that deletes a
+ *  rule can cause (nothing does). Its chain is not read, so the day's reading
+ *  is null rather than invented. */
+function unread(rule: ObligationTemplate): RuleView {
+  return {
+    template: rule,
+    exceptions: [],
+    usedIn: [],
+    instanceCount: 0,
+    inForceToday: null,
+    nextChange: null,
+  };
+}
+
+function ruleToWire(r: RuleView): z.infer<typeof RuleSchema> {
   const t = r.template;
+  const today = r.inForceToday;
+  const next = r.nextChange;
   return {
     id: t.id,
     lineageId: t.lineageId,
@@ -375,14 +486,7 @@ function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
     authority: t.authority,
     recurrence: t.recurrence,
     fiscalYearStartMonth: t.fiscalYearStartMonth,
-    dueRule: t.dueRule
-      ? {
-          kind: t.dueRule.kind,
-          dueMonthOffset: t.dueRule.dueMonthOffset,
-          dueDayOfMonth: t.dueRule.dueDayOfMonth,
-          dueDaysAfter: t.dueRule.dueDaysAfter,
-        }
-      : null,
+    dueRule: dueRuleToWire(t),
     unresolvedReason: t.unresolvedReason,
     leadTimeDays: t.leadTimeDays,
     rulePack: t.rulePack,
@@ -395,14 +499,15 @@ function ruleToWire(r: TemplateRecord): z.infer<typeof RuleSchema> {
     // disagree about what a rule is doing. The link count is the chain's, from
     // the same query.
     coverage: coverageOf(t, r.usedIn.length),
-    exceptions: r.exceptions.map((e) => ({
-      periodEndMonth: e.periodEndMonth,
-      kind: e.kind,
-      dueMonthOffset: e.dueMonthOffset,
-      dueDayOfMonth: e.dueDayOfMonth,
-      dueDaysAfter: e.dueDaysAfter,
-      note: e.note,
-    })),
+    exceptions: exceptionsToWire(r.exceptions),
+    inForceToday:
+      today === null ? null : { ...chainRowToWire(today), effectiveFrom: today.template.effectiveFrom },
+    // A next row always opens on a day (`chainOnDay` picks it by its start),
+    // so a null start here is not a change anybody recorded.
+    nextChange:
+      next === null || next.template.effectiveFrom === null
+        ? null
+        : { ...chainRowToWire(next), effectiveFrom: next.template.effectiveFrom },
     instanceCount: r.instanceCount,
   };
 }
@@ -1246,7 +1351,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
+          record ?? unread(rule),
         ),
         effect,
       },
@@ -1285,7 +1390,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     );
     return c.json(
       {
-        rule: ruleToWire(record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 }),
+        rule: ruleToWire(record ?? unread(rule)),
         effect: {
           linked: effect.linked,
           confirmed: effect.confirmed,
@@ -1311,7 +1416,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     );
     return c.json(
       {
-        rule: ruleToWire(record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 }),
+        rule: ruleToWire(record ?? unread(rule)),
         effect: {
           unlinked: effect.unlinked,
           withdrawn: effect.withdrawn,
@@ -1341,7 +1446,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
+          record ?? unread(rule),
         ),
         effect,
       },
@@ -1375,7 +1480,7 @@ export function registerObligationRoutes(app: OpenAPIHono<AppEnv>, deps: Obligat
     return c.json(
       {
         rule: ruleToWire(
-          record ?? { template: rule, exceptions: [], usedIn: [], instanceCount: 0 },
+          record ?? unread(rule),
         ),
         effect,
       },

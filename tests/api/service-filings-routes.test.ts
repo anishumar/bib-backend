@@ -261,3 +261,57 @@ describe("the rule routes no longer link anything (decision 3)", () => {
     expect(w.instances.rows).toHaveLength(0);
   });
 });
+
+describe("every rule row carries its chain read on the firm's today (T6.16 follow-up)", () => {
+  const FIELDS = ["dueRule", "effectiveFrom", "effectiveTo", "exceptions", "ruleId", "unresolvedReason"];
+
+  it("after a law change from April 2027: today's row, and the change, field by field, on all three reads", async () => {
+    const w = await world();
+    await w.call("POST", `/api/v1/services/${GST}/filings`, { ruleId: w.gstr3b.id });
+    const superseded = await w.call("POST", `/api/v1/obligation-rules/${w.gstr3b.id}/supersede`, {
+      effectiveFrom: "2027-04-01",
+      rulePack: "gst-in@2027.04",
+      dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 22, dueDaysAfter: null },
+    });
+    expect(superseded.status).toBe(201);
+    const successorId = (superseded.body["rule"] as { id: string }).id;
+
+    const reads = [
+      ((await w.call("GET", "/api/v1/obligation-filings")).body["filings"] as Record<string, unknown>[]),
+      ((await w.call("GET", `/api/v1/services/${GST}/filings`)).body["filings"] as Record<string, unknown>[]),
+      ((await w.call("GET", "/api/v1/obligation-rules")).body["rules"] as Record<string, unknown>[]),
+    ];
+    for (const rows of reads) {
+      const mine = rows.filter((r) => r["lineageId"] === w.gstr3b.lineageId);
+      expect(mine.length).toBeGreaterThan(0);
+      for (const row of mine) {
+        const today = row["inForceToday"] as Record<string, unknown>;
+        const next = row["nextChange"] as Record<string, unknown>;
+        expect(Object.keys(today).sort()).toEqual(FIELDS);
+        expect(Object.keys(next).sort()).toEqual(FIELDS);
+        expect(today).toMatchObject({
+          ruleId: w.gstr3b.id,
+          effectiveTo: "2027-04-01",
+          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20, dueDaysAfter: null },
+        });
+        expect(next).toMatchObject({
+          ruleId: successorId,
+          effectiveFrom: "2027-04-01",
+          effectiveTo: null,
+          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 22, dueDaysAfter: null },
+          exceptions: [],
+        });
+      }
+    }
+    // The catalogue's row is still the successor: it is what a link judges.
+    expect(reads[0]?.find((r) => r["lineageId"] === w.gstr3b.lineageId)?.["id"]).toBe(successorId);
+  });
+
+  it("answers today's row and no change on a chain nobody has amended", async () => {
+    const w = await world();
+    const r = await w.call("GET", "/api/v1/obligation-filings");
+    const row = (r.body["filings"] as Record<string, unknown>[]).find((f) => f["id"] === w.gstr3b.id);
+    expect(row?.["inForceToday"]).toMatchObject({ ruleId: w.gstr3b.id, effectiveFrom: null, effectiveTo: null });
+    expect(row?.["nextChange"]).toBeNull();
+  });
+});

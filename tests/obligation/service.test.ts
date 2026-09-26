@@ -34,7 +34,8 @@ const SERVICE = "00000000-0000-4000-8000-00000000c001";
 const ACTOR: Actor = { type: "human", id: "00000000-0000-4000-8000-000000000001" };
 const TODAY = "2026-08-30";
 
-function harness() {
+/** `now` and `zone` set the firm's day; every other test runs on TODAY in UTC. */
+function harness(opts: { readonly now?: string; readonly zone?: string } = {}) {
   const templates = new FakeObligationTemplateRepo();
   const exceptions = new FakeObligationExceptionRepo();
   templates.exceptions = exceptions;
@@ -69,7 +70,7 @@ function harness() {
   instances.engagements = calendarSource;
 
   const service = new ObligationService({
-    timeZones: new FakeFirmTimeZone(),
+    timeZones: new FakeFirmTimeZone(opts.zone),
     templates,
     exceptions,
     states,
@@ -82,7 +83,7 @@ function harness() {
     workItems,
     tenants,
     ids,
-    clock: { now: () => new Date(`${TODAY}T00:00:00Z`) },
+    clock: { now: () => new Date(opts.now ?? `${TODAY}T00:00:00Z`) },
     events,
   });
 
@@ -1965,5 +1966,96 @@ describe("a service lists its compliance filings, and a filing is written once (
         [{ id: "00000000-0000-4000-8000-00000000b0b4", serviceEntryId: SERVICE, byUserId: null }],
       ),
     ).rejects.toThrow(/no link store/);
+  });
+});
+
+// ── T6.16 follow-up: what a card shows is what TODAY's filings are due on ────
+
+describe("a rule row carries its chain read on the firm's today", () => {
+  it("names the rule itself, with no change ahead, on a chain nobody has amended", async () => {
+    const h = harness();
+    const rule = await firmWithGst(h);
+    const [row] = await h.service.filings(FIRM);
+    expect(row?.inForceToday?.template.id).toBe(rule.id);
+    expect(row?.nextChange).toBeNull();
+  });
+
+  it("after a law change from a LATER day, today is still the old rule and the change is next", async () => {
+    // The card showed the chain's open-ended row, the SUCCESSOR, and so told
+    // the firm September was due on the 22nd while the calendar dated it the
+    // 20th. The row a link judges stays the successor; what is due today is
+    // the predecessor, with its own March exception, and the change is next.
+    const h = harness();
+    const rule = await firmWithGst(h);
+    await h.service.addException(
+      FIRM,
+      rule.id,
+      { periodEndMonth: 3, kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 30, note: "March" },
+      ACTOR,
+    );
+    const { rule: successor } = await h.service.supersedeRule(
+      FIRM,
+      rule.id,
+      {
+        effectiveFrom: "2027-04-01",
+        rulePack: "gst-in@2027.04",
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 22, dueDaysAfter: null },
+      },
+      ACTOR,
+    );
+
+    const [row] = await h.service.filings(FIRM);
+    expect(row?.template.id).toBe(successor.id);
+    expect(row?.inForceToday?.template).toMatchObject({
+      id: rule.id,
+      effectiveTo: "2027-04-01",
+      dueRule: { dueDayOfMonth: 20 },
+    });
+    expect(row?.inForceToday?.exceptions.map((e) => e.periodEndMonth)).toEqual([3]);
+    expect(row?.nextChange?.template).toMatchObject({
+      id: successor.id,
+      effectiveFrom: "2027-04-01",
+      dueRule: { dueDayOfMonth: 22 },
+    });
+    expect(row?.nextChange?.exceptions).toEqual([]);
+
+    // The library reads the same chain the same way on BOTH of its rows.
+    const rows = await h.service.listRules(FIRM);
+    expect(rows).toHaveLength(2);
+    for (const r of rows) {
+      expect(r.inForceToday?.template.id).toBe(rule.id);
+      expect(r.nextChange?.template.id).toBe(successor.id);
+    }
+    // And the service's own card, which is the same list filtered.
+    const [card] = await h.service.filingsForService(FIRM, SERVICE);
+    expect(card?.inForceToday?.template.id).toBe(rule.id);
+  });
+
+  it("cuts today on the FIRM's calendar: at 20:00 UTC on 31 August it is already September in Kolkata", async () => {
+    const supersedeFromSeptember = async (h: H) => {
+      const rule = await firmWithGst(h);
+      const { rule: successor } = await h.service.supersedeRule(
+        FIRM,
+        rule.id,
+        {
+          effectiveFrom: "2026-09-01",
+          rulePack: "gst-in@2026.09",
+          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 11, dueDaysAfter: null },
+        },
+        ACTOR,
+      );
+      const [row] = await h.service.filings(FIRM);
+      return { rule, successor, row };
+    };
+
+    const kolkata = await supersedeFromSeptember(
+      harness({ now: "2026-08-31T20:00:00Z", zone: "Asia/Kolkata" }),
+    );
+    expect(kolkata.row?.inForceToday?.template.id).toBe(kolkata.successor.id);
+    expect(kolkata.row?.nextChange).toBeNull();
+
+    const utc = await supersedeFromSeptember(harness({ now: "2026-08-31T20:00:00Z", zone: "UTC" }));
+    expect(utc.row?.inForceToday?.template.id).toBe(utc.rule.id);
+    expect(utc.row?.nextChange?.template.id).toBe(utc.successor.id);
   });
 });

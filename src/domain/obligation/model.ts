@@ -331,6 +331,56 @@ export function governsPeriod(t: ObligationTemplate, periodStart: IsoDate): bool
   return true;
 }
 
+/** A chain read on one day: the row governing that day's period, and the row
+ *  that takes over next. Either may be null. */
+export interface ChainOnDay<T extends ObligationTemplate> {
+  readonly governing: T | null;
+  readonly next: T | null;
+}
+
+/**
+ * Which row of a chain governs the period containing `day`, and which row
+ * takes over after it (T6.16 follow-up, 2026-09-26).
+ *
+ * ── THE ROW "IN FORCE" IS NOT THE ROW TODAY'S RETURNS ARE DUE ON ──────────
+ *
+ * After a partner records "from April 2027 the law says the 22nd", the chain's
+ * open-ended row is the SUCCESSOR, and a screen showing that row told the firm
+ * September's return was due on the 22nd while the calendar (correctly) still
+ * dated it the 20th. What a partner checks a filing against is the rule that
+ * governs the period being filed NOW, and, separately, what changes and when.
+ *
+ * Asked in the generator's own terms, never with new date arithmetic: the
+ * period containing `day` is `periodsBetween` over that one day, and a row
+ * governs it by `governsPeriod`, tested against the period START (August's
+ * return is August's law). A row's own recurrence is used, so a chain whose
+ * rows disagree cannot borrow a period shape from its neighbour. An
+ * event-driven rule has no period; its "period" is the day itself, which is
+ * when an event happening today would be judged.
+ *
+ * `governing` is null when no row's window covers the day (a chain written to
+ * start later), and `next` is then the row that starts it. `next` is the
+ * earliest row whose window OPENS after the day's period begins, which is the
+ * one a screen means by "from April 2027".
+ */
+export function chainOnDay<T extends ObligationTemplate>(
+  chain: readonly T[],
+  day: IsoDate,
+): ChainOnDay<T> {
+  const periodStart = (t: T): IsoDate =>
+    periodsBetween(t.recurrence, t.fiscalYearStartMonth, day, day)[0]?.start ?? day;
+  // Oldest window first, so two rows claiming one period (which 0057's
+  // half-open windows are there to prevent) resolve to the later one, as the
+  // chain's own order would.
+  const ordered = [...chain].sort((a, b) =>
+    (a.effectiveFrom ?? "").localeCompare(b.effectiveFrom ?? "") || a.id.localeCompare(b.id),
+  );
+  const governing = ordered.filter((t) => governsPeriod(t, periodStart(t))).at(-1) ?? null;
+  const next =
+    ordered.find((t) => t.effectiveFrom !== null && t.effectiveFrom > periodStart(t)) ?? null;
+  return { governing, next };
+}
+
 // ── the state an obligation is in ──────────────────────────────────────────
 
 /**

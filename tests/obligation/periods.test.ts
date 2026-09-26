@@ -16,6 +16,7 @@
 import { describe, expect, it } from "vitest";
 import {
   addDays,
+  chainOnDay,
   coverageOf,
   daysInMonth,
   generatesFor,
@@ -487,5 +488,65 @@ describe("which filing removing a rule from a service may take off the calendar 
     expect(
       mayBeWithdrawn({ ...untouched, withdrawnAt: "2026-09-20T00:00:00.000Z" }, open, TODAY),
     ).toBe(false);
+  });
+});
+
+describe("which row of a chain governs TODAY's period, and what changes next (T6.16 follow-up)", () => {
+  // GSTR-3B, due the 20th, and the law changing to the 22nd from April 2027:
+  // the predecessor is closed at the cutover and the successor opens there.
+  const before = rule({ id: "a", lineageId: "a", effectiveTo: "2027-04-01" });
+  const after = rule({
+    id: "b",
+    lineageId: "a",
+    supersedesId: "a",
+    effectiveFrom: "2027-04-01",
+    dueRule: dayOfMonth(1, 22),
+  });
+
+  it("is the predecessor while today's period is before the cutover, with the successor next", () => {
+    // The row with no end is the SUCCESSOR, and showing it said September's
+    // return was due on the 22nd while the calendar dated it the 20th.
+    const on = chainOnDay([after, before], "2026-09-26");
+    expect(on.governing?.id).toBe("a");
+    expect(on.next?.id).toBe("b");
+  });
+
+  it("is the successor from the cutover, with nothing next", () => {
+    const on = chainOnDay([before, after], "2027-04-01");
+    expect(on.governing?.id).toBe("b");
+    expect(on.next).toBeNull();
+  });
+
+  it("judges the PERIOD containing the day, never the day, so a cutover mid-quarter waits for the quarter", () => {
+    // A quarterly rule changing from 15 August: today's quarter (Jul-Sep in
+    // India) began before it, so the old rule governs it and the new one is
+    // next. Testing the day would have handed the quarter over mid-way.
+    const q1 = rule({ id: "q1", lineageId: "q1", recurrence: "quarterly", effectiveTo: "2026-08-15" });
+    const q2 = rule({
+      id: "q2",
+      lineageId: "q1",
+      recurrence: "quarterly",
+      effectiveFrom: "2026-08-15",
+    });
+    const on = chainOnDay([q1, q2], "2026-09-26");
+    expect(on.governing?.id).toBe("q1");
+    expect(on.next?.id).toBe("q2");
+  });
+
+  it("is one row with nothing next on a chain nobody has amended", () => {
+    const only = rule();
+    expect(chainOnDay([only], "2026-09-26")).toEqual({ governing: only, next: null });
+  });
+
+  it("governs nothing today on a chain written to start later, and names that start as next", () => {
+    const later = rule({ id: "l", lineageId: "l", effectiveFrom: "2027-04-01" });
+    expect(chainOnDay([later], "2026-09-26")).toEqual({ governing: null, next: later });
+  });
+
+  it("reads an event-driven rule on the day itself, since it has no period", () => {
+    const old = rule({ id: "e1", lineageId: "e1", recurrence: "event", effectiveTo: "2026-10-01" });
+    const upcoming = rule({ id: "e2", lineageId: "e1", recurrence: "event", effectiveFrom: "2026-10-01" });
+    expect(chainOnDay([old, upcoming], "2026-09-30")).toEqual({ governing: old, next: upcoming });
+    expect(chainOnDay([old, upcoming], "2026-10-01")).toEqual({ governing: upcoming, next: null });
   });
 });
