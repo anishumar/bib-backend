@@ -535,18 +535,99 @@ describe("which row of a chain governs TODAY's period, and what changes next (T6
 
   it("is one row with nothing next on a chain nobody has amended", () => {
     const only = rule();
-    expect(chainOnDay([only], "2026-09-26")).toEqual({ governing: only, next: null });
+    expect(chainOnDay([only], "2026-09-26")).toEqual({
+      governing: only,
+      next: null,
+      nextFirstPeriod: null,
+    });
   });
 
   it("governs nothing today on a chain written to start later, and names that start as next", () => {
     const later = rule({ id: "l", lineageId: "l", effectiveFrom: "2027-04-01" });
-    expect(chainOnDay([later], "2026-09-26")).toEqual({ governing: null, next: later });
+    expect(chainOnDay([later], "2026-09-26")).toEqual({
+      governing: null,
+      next: later,
+      nextFirstPeriod: "2027-04-01",
+    });
   });
 
   it("reads an event-driven rule on the day itself, since it has no period", () => {
     const old = rule({ id: "e1", lineageId: "e1", recurrence: "event", effectiveTo: "2026-10-01" });
     const upcoming = rule({ id: "e2", lineageId: "e1", recurrence: "event", effectiveFrom: "2026-10-01" });
-    expect(chainOnDay([old, upcoming], "2026-09-30")).toEqual({ governing: old, next: upcoming });
-    expect(chainOnDay([old, upcoming], "2026-10-01")).toEqual({ governing: upcoming, next: null });
+    expect(chainOnDay([old, upcoming], "2026-09-30")).toEqual({
+      governing: old,
+      next: upcoming,
+      nextFirstPeriod: "2026-10-01",
+    });
+    expect(chainOnDay([old, upcoming], "2026-10-01")).toEqual({
+      governing: upcoming,
+      next: null,
+      nextFirstPeriod: null,
+    });
+  });
+
+  // ── WHEN the next row takes over: the first period it GOVERNS (review) ──
+  //
+  // A row's `effectiveFrom` is the day the change was recorded from, and the
+  // supersede form takes any day. A quarterly, half-yearly or annual rule cut
+  // over on a 1st that is not a period start does not take over on that 1st:
+  // `governsPeriod` tests the period START, so the period already running
+  // stays with the old row. The card said "From August 2026" in September
+  // while the Jul-Sep quarter was still due under the old rule.
+
+  it("names the first QUARTER the new row governs, not a cutover mid-quarter", () => {
+    const q1 = rule({ id: "q1", lineageId: "q1", recurrence: "quarterly", effectiveTo: "2026-08-01" });
+    const q2 = rule({ id: "q2", lineageId: "q1", recurrence: "quarterly", effectiveFrom: "2026-08-01" });
+    const on = chainOnDay([q1, q2], "2026-09-26");
+    expect(on.governing?.id).toBe("q1");
+    expect(on.next?.id).toBe("q2");
+    expect(on.nextFirstPeriod).toBe("2026-10-01");
+  });
+
+  it("names the first financial YEAR the new row governs for an annual rule cut over in January", () => {
+    const y1 = rule({ id: "y1", lineageId: "y1", recurrence: "annual", effectiveTo: "2027-01-01" });
+    const y2 = rule({ id: "y2", lineageId: "y1", recurrence: "annual", effectiveFrom: "2027-01-01" });
+    const on = chainOnDay([y1, y2], "2026-09-26");
+    expect(on.next?.id).toBe("y2");
+    // January to March 2027 is still FY2026-27, under the old rule.
+    expect(on.nextFirstPeriod).toBe("2027-04-01");
+  });
+
+  it("names the cutover itself when it IS a period start, and the next month for one mid-month", () => {
+    expect(chainOnDay([before, after], "2026-09-26").nextFirstPeriod).toBe("2027-04-01");
+    const m1 = rule({ id: "m1", lineageId: "m1", effectiveTo: "2027-04-15" });
+    const m2 = rule({ id: "m2", lineageId: "m1", effectiveFrom: "2027-04-15" });
+    expect(chainOnDay([m1, m2], "2026-09-26").nextFirstPeriod).toBe("2027-05-01");
+  });
+
+  it("skips a row whose window governs no period at all, and names the row that does take over", () => {
+    // Amended from 1 August, then amended again from 1 September before the
+    // first one ever governed a quarter: [1 Aug, 1 Sep) holds no quarter start.
+    const q1 = rule({ id: "q1", lineageId: "q1", recurrence: "quarterly", effectiveTo: "2026-08-01" });
+    const brief = rule({
+      id: "q2",
+      lineageId: "q1",
+      recurrence: "quarterly",
+      effectiveFrom: "2026-08-01",
+      effectiveTo: "2026-09-01",
+    });
+    const q3 = rule({ id: "q3", lineageId: "q1", recurrence: "quarterly", effectiveFrom: "2026-09-01" });
+    const on = chainOnDay([q1, brief, q3], "2026-07-15");
+    expect(on.governing?.id).toBe("q1");
+    expect(on.next?.id).toBe("q3");
+    expect(on.nextFirstPeriod).toBe("2026-10-01");
+  });
+
+  it("reads retired rows by their window like any other: what each row DOES is its coverage", () => {
+    // The generator dates nothing under a retired row, so the chain read must
+    // not hide one: a retired successor still ends the old row's periods, and
+    // leaving it out would say the 20th goes on for ever. The wire carries
+    // each row's coverage beside it, and the screens say "retired" from that.
+    const retiredAfter = { ...after, isActive: false };
+    const on = chainOnDay([before, retiredAfter], "2026-09-26");
+    expect(on.governing?.id).toBe("a");
+    expect(on.next?.id).toBe("b");
+    const retiredBefore = { ...before, isActive: false };
+    expect(chainOnDay([retiredBefore, after], "2026-09-26").governing?.id).toBe("a");
   });
 });

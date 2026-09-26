@@ -320,7 +320,15 @@ export interface ChainRowView {
  */
 export interface RuleView extends TemplateRecord {
   readonly inForceToday: ChainRowView | null;
-  readonly nextChange: ChainRowView | null;
+  readonly nextChange: NextChangeView | null;
+}
+
+/** The row that takes over, and WHEN: the start of the first period it
+ *  governs (`chainOnDay`'s `nextFirstPeriod`). Not its `effectiveFrom`, which
+ *  is the day the change was recorded from and can fall inside a period the
+ *  old row still governs (review, 2026-09-26). */
+export interface NextChangeView extends ChainRowView {
+  readonly firstPeriodStart: string;
 }
 
 /** The row IN FORCE of a chain: the one with no end, else the latest. The
@@ -641,15 +649,26 @@ export class ObligationService {
     // One reading per CHAIN, on ONE day for the whole list: a page that asked
     // the clock per row could straddle midnight and show two chains on two
     // different days.
-    const onDay = new Map<string, { inForceToday: ChainRowView | null; nextChange: ChainRowView | null }>();
+    const onDay = new Map<
+      string,
+      { inForceToday: ChainRowView | null; nextChange: NextChangeView | null }
+    >();
     for (const [lineageId, chain] of byChain) {
-      const { governing, next } = chainOnDay(chain.map((r) => r.template), today);
-      const view = (t: ObligationTemplate | null): ChainRowView | null => {
-        if (t === null) return null;
+      const { governing, next, nextFirstPeriod } = chainOnDay(
+        chain.map((r) => r.template),
+        today,
+      );
+      const view = (t: ObligationTemplate): ChainRowView => {
         const record = chain.find((r) => r.template.id === t.id);
         return { template: t, exceptions: record?.exceptions ?? [] };
       };
-      onDay.set(lineageId, { inForceToday: view(governing), nextChange: view(next) });
+      onDay.set(lineageId, {
+        inForceToday: governing === null ? null : view(governing),
+        nextChange:
+          next === null || nextFirstPeriod === null
+            ? null
+            : { ...view(next), firstPeriodStart: nextFirstPeriod },
+      });
     }
     return rows.map((r) => ({
       ...r,

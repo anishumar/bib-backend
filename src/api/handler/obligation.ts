@@ -136,16 +136,29 @@ const ChainRowFields = {
   }),
   effectiveTo: z.string().nullable().openapi({
     description:
-      "The first period start this row does NOT govern, or null when nothing replaces it.",
+      "The day this row stops, as recorded, or null when nothing replaces it. A period that " +
+      "STARTS on or after it is not this row's; one that started before it still is, so a " +
+      "quarter already running when the law changes stays with this row.",
   }),
   dueRule: DueRuleSchema.nullable().openapi({
     description:
       "When a filing under this row is due, in the same shape as the rule's own dueRule. Null " +
       "while the date cannot be worked out yet; unresolvedReason then says why.",
   }),
-  unresolvedReason: z.string().nullable(),
+  unresolvedReason: z.string().nullable().openapi({
+    description:
+      "Present exactly when this row has no due formula: what it is still waiting for, in the " +
+      "firm's own words, shown in place of a date.",
+  }),
   exceptions: z.array(ExceptionSchema).openapi({
     description: "This row's own exceptions, such as March's TDS. A successor does not inherit them.",
+  }),
+  coverage: Coverage.openapi({
+    description:
+      "What THIS row is doing, judged as the rule's own coverage is, with the chain's services: " +
+      "'generating' when the calendar dates the periods it governs, 'retired' when it dates " +
+      "none of them, and so on. After a law change it can differ from the rule's own coverage, " +
+      "which is the newest row's, so a screen saying what today's filings are doing reads this.",
   }),
 };
 
@@ -153,7 +166,9 @@ const InForceTodaySchema = z
   .object({
     ...ChainRowFields,
     effectiveFrom: z.string().nullable().openapi({
-      description: "The first period start this row governs; null means from the beginning.",
+      description:
+        "The day this row starts, as recorded; null means from the beginning. It governs the " +
+        "periods that START on or after it.",
     }),
   })
   .openapi("ObligationRuleInForceToday");
@@ -163,8 +178,15 @@ const NextChangeSchema = z
     ...ChainRowFields,
     effectiveFrom: z.string().openapi({
       description:
-        "The first period start the new row governs, as YYYY-MM-DD: the day to name in " +
-        "'From April 2027: the 22nd of the following month'.",
+        "The day the change was recorded to take effect from, as YYYY-MM-DD. It can fall inside " +
+        "a period the old row still governs; firstPeriodStart is when the new row takes over.",
+    }),
+    firstPeriodStart: z.string().openapi({
+      description:
+        "The start of the first period the new row governs, as YYYY-MM-DD, found the way the " +
+        "calendar dates periods: the day to name in 'From April 2027: the 22nd of the " +
+        "following month'. For a quarterly rule changed on 1 August it is 1 October, because " +
+        "the July to September quarter is still the old rule's.",
     }),
   })
   .openapi("ObligationRuleNextChange");
@@ -440,13 +462,17 @@ function dueRuleToWire(t: ObligationTemplate): z.infer<typeof DueRuleSchema> | n
     : null;
 }
 
-function chainRowToWire(v: ChainRowView) {
+/** One row of a chain. `linkedServices` is the CHAIN's link count, the same
+ *  `coverageOf` argument the rule's own coverage is judged with, so a row's
+ *  coverage and the rule's can differ only by the row. */
+function chainRowToWire(v: ChainRowView, linkedServices: number) {
   return {
     ruleId: v.template.id,
     effectiveTo: v.template.effectiveTo,
     dueRule: dueRuleToWire(v.template),
     unresolvedReason: v.template.unresolvedReason,
     exceptions: exceptionsToWire(v.exceptions),
+    coverage: coverageOf(v.template, linkedServices),
   };
 }
 
@@ -501,13 +527,22 @@ function ruleToWire(r: RuleView): z.infer<typeof RuleSchema> {
     coverage: coverageOf(t, r.usedIn.length),
     exceptions: exceptionsToWire(r.exceptions),
     inForceToday:
-      today === null ? null : { ...chainRowToWire(today), effectiveFrom: today.template.effectiveFrom },
+      today === null
+        ? null
+        : {
+            ...chainRowToWire(today, r.usedIn.length),
+            effectiveFrom: today.template.effectiveFrom,
+          },
     // A next row always opens on a day (`chainOnDay` picks it by its start),
     // so a null start here is not a change anybody recorded.
     nextChange:
       next === null || next.template.effectiveFrom === null
         ? null
-        : { ...chainRowToWire(next), effectiveFrom: next.template.effectiveFrom },
+        : {
+            ...chainRowToWire(next, r.usedIn.length),
+            effectiveFrom: next.template.effectiveFrom,
+            firstPeriodStart: next.firstPeriodStart,
+          },
     instanceCount: r.instanceCount,
   };
 }

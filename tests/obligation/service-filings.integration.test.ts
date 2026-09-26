@@ -599,6 +599,9 @@ describe("the law changes, and the filing comes back", () => {
     expect(card?.inForceToday?.template.id).toBe(gstr3b);
     expect(card?.nextChange?.template).toMatchObject({ id: successor, effectiveFrom: CUTOVER });
     expect(card?.nextChange?.template.dueRule?.dueDayOfMonth).toBe(11);
+    // A monthly cutover on the 1st is a period start, so it is when the new
+    // row takes over (review: a cutover inside a period waits for the next).
+    expect(card?.nextChange?.firstPeriodStart).toBe(CUTOVER);
   });
 
   it("adding it back restores the SAME rows in place, re-dated by the rule that governs each period", async () => {

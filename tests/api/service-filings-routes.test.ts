@@ -263,7 +263,35 @@ describe("the rule routes no longer link anything (decision 3)", () => {
 });
 
 describe("every rule row carries its chain read on the firm's today (T6.16 follow-up)", () => {
-  const FIELDS = ["dueRule", "effectiveFrom", "effectiveTo", "exceptions", "ruleId", "unresolvedReason"];
+  const FIELDS = [
+    "coverage",
+    "dueRule",
+    "effectiveFrom",
+    "effectiveTo",
+    "exceptions",
+    "ruleId",
+    "unresolvedReason",
+  ];
+  // The change also says the first period it governs (review, 2026-09-26).
+  const NEXT_FIELDS = [...FIELDS, "firstPeriodStart"].sort();
+
+  /** GSTR-3B on the GST service, then "the law changed" from `from`. */
+  async function amended(from: string, body: Record<string, unknown> = {}) {
+    const w = await world();
+    await w.call("POST", `/api/v1/services/${GST}/filings`, { ruleId: w.gstr3b.id });
+    const superseded = await w.call("POST", `/api/v1/obligation-rules/${w.gstr3b.id}/supersede`, {
+      effectiveFrom: from,
+      rulePack: "gst-in@2027.04",
+      dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 22, dueDaysAfter: null },
+      ...body,
+    });
+    expect(superseded.status).toBe(201);
+    const successorId = (superseded.body["rule"] as { id: string }).id;
+    const card = async () =>
+      ((await w.call("GET", "/api/v1/obligation-filings")).body["filings"] as Record<string, unknown>[])
+        .find((r) => r["lineageId"] === w.gstr3b.lineageId) as Record<string, Record<string, unknown>>;
+    return { w, successorId, card };
+  }
 
   it("after a law change from April 2027: today's row, and the change, field by field, on all three reads", async () => {
     const w = await world();
@@ -288,15 +316,18 @@ describe("every rule row carries its chain read on the firm's today (T6.16 follo
         const today = row["inForceToday"] as Record<string, unknown>;
         const next = row["nextChange"] as Record<string, unknown>;
         expect(Object.keys(today).sort()).toEqual(FIELDS);
-        expect(Object.keys(next).sort()).toEqual(FIELDS);
+        expect(Object.keys(next).sort()).toEqual(NEXT_FIELDS);
         expect(today).toMatchObject({
           ruleId: w.gstr3b.id,
           effectiveTo: "2027-04-01",
+          coverage: "generating",
           dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20, dueDaysAfter: null },
         });
         expect(next).toMatchObject({
           ruleId: successorId,
           effectiveFrom: "2027-04-01",
+          firstPeriodStart: "2027-04-01",
+          coverage: "generating",
           effectiveTo: null,
           dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 22, dueDaysAfter: null },
           exceptions: [],
@@ -313,5 +344,48 @@ describe("every rule row carries its chain read on the firm's today (T6.16 follo
     const row = (r.body["filings"] as Record<string, unknown>[]).find((f) => f["id"] === w.gstr3b.id);
     expect(row?.["inForceToday"]).toMatchObject({ ruleId: w.gstr3b.id, effectiveFrom: null, effectiveTo: null });
     expect(row?.["nextChange"]).toBeNull();
+  });
+
+  it("a cutover mid-month sends the day recorded AND the first period the new row governs", async () => {
+    // The card names `firstPeriodStart`: "From May 2027", never "15 April",
+    // because April's return is still April's law.
+    const { card } = await amended("2027-04-15");
+    const row = await card();
+    expect(row["inForceToday"]).toMatchObject({ effectiveTo: "2027-04-15" });
+    expect(row["nextChange"]).toMatchObject({
+      effectiveFrom: "2027-04-15",
+      firstPeriodStart: "2027-05-01",
+    });
+  });
+
+  it("says what TODAY's row is doing, which after a law change is not the newest row's standing", async () => {
+    // The successor waits on a fact; the predecessor, confirmed and on the
+    // service, is still putting this year's returns on the calendar. The pill
+    // reads today's coverage, so it must not come from the successor.
+    const { card } = await amended("2027-04-01", {
+      dueRule: null,
+      unresolvedReason: "The notification has not been published yet.",
+    });
+    const row = await card();
+    expect(row["coverage"]).toBe("needs_formula");
+    expect(row["inForceToday"]).toMatchObject({ coverage: "generating" });
+    expect(row["nextChange"]).toMatchObject({ coverage: "needs_formula", dueRule: null });
+  });
+
+  it("says a retired row is retired, on either side of the change", async () => {
+    // The generator dates nothing under a retired row: a retired successor
+    // means nothing is dated from April 2027, and a retired predecessor that
+    // nothing is dated today.
+    const { w, successorId, card } = await amended("2027-04-01");
+    expect((await w.call("PATCH", `/api/v1/obligation-rules/${successorId}`, { isActive: false })).status).toBe(200);
+    let row = await card();
+    expect(row["inForceToday"]).toMatchObject({ ruleId: w.gstr3b.id, coverage: "generating" });
+    expect(row["nextChange"]).toMatchObject({ ruleId: successorId, coverage: "retired" });
+
+    expect((await w.call("PATCH", `/api/v1/obligation-rules/${successorId}`, { isActive: true })).status).toBe(200);
+    expect((await w.call("PATCH", `/api/v1/obligation-rules/${w.gstr3b.id}`, { isActive: false })).status).toBe(200);
+    row = await card();
+    expect(row["inForceToday"]).toMatchObject({ ruleId: w.gstr3b.id, coverage: "retired" });
+    expect(row["nextChange"]).toMatchObject({ ruleId: successorId, coverage: "generating" });
   });
 });

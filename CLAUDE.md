@@ -2505,6 +2505,20 @@ with no new date arithmetic, so a mid-quarter cutover waits for the quarter exac
 generator does; the generator is untouched. `ObligationService` returns `RuleView`
 (`TemplateRecord` plus the two), and the handler maps both field by field.
 
+**Review of that read (2026-09-26) added two fields and one rule.** `nextChange.firstPeriodStart`
+is the start of the first period the new row GOVERNS (`firstPeriodGoverned`: the periods from the
+cutover, the first `governsPeriod` accepts), and it is the day a screen names. `effectiveFrom` is
+only the day the change was recorded from, and the supersede form takes any day: a quarterly rule
+changed on 1 August printed "From August 2026" in September while July to September was still due
+under the old rule, and an annual one changed on 1 January named a month still in the old
+financial year. `next` is picked by that first period too, so a row whose window holds no period
+start at all (amended twice before it ever governed a quarter) is never "the change". Both rows
+also carry `coverage`, `coverageOf` on THAT row with the chain's link count, because each row's
+standing is its own: after a change waiting on a fact the rule's own coverage (the newest row's)
+said "needs a formula" while the confirmed row before it was dating this year's returns, and a
+RETIRED row is read by its window like any other (the generator dates nothing under it; leaving it
+out would say the row before it goes on for ever), with `coverage: 'retired'` saying so.
+
 **DECIDED (the user, 2026-09-26): a link skips a per-period task only when the service has no
 process of its own.** T6.13 skipped a recurring engagement's per-period umbrella task wherever the
 calendar dated its service's filings (the service IS its filings), and the catalogue invites a

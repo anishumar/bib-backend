@@ -331,11 +331,44 @@ export function governsPeriod(t: ObligationTemplate, periodStart: IsoDate): bool
   return true;
 }
 
-/** A chain read on one day: the row governing that day's period, and the row
- *  that takes over next. Either may be null. */
+/** A chain read on one day: the row governing that day's period, the row
+ *  that takes over next, and the first period that row governs. Either row
+ *  may be null; `nextFirstPeriod` is set exactly when `next` is. */
 export interface ChainOnDay<T extends ObligationTemplate> {
   readonly governing: T | null;
   readonly next: T | null;
+  readonly nextFirstPeriod: IsoDate | null;
+}
+
+/**
+ * The start of the first period a row governs, or null when its window holds
+ * no period start at all (review of the T6.16 follow-ups, 2026-09-26).
+ *
+ * ── A ROW'S `effectiveFrom` IS NOT WHEN IT TAKES OVER ─────────────────────
+ *
+ * It is the day the change was recorded from, and the supersede form takes
+ * any day. `governsPeriod` tests the period START, so a quarterly rule cut
+ * over on 1 August does not govern the quarter that began on 1 July: its
+ * first period is October's. The card said "From August 2026" in September
+ * while July to September was still due under the old rule, and an annual
+ * rule cut over on 1 January named January although January to March is
+ * still the old financial year.
+ *
+ * Found in the generator's own terms: the periods from the cutover, and the
+ * first whose start the row governs. A period starts at most a year after
+ * any day, so a year and a day is always far enough to look. An event-driven
+ * rule has no period; its "period" is the day, as in `chainOnDay`.
+ */
+export function firstPeriodGoverned(t: ObligationTemplate): IsoDate | null {
+  if (t.effectiveFrom === null) return null;
+  if (t.recurrence === "event") return governsPeriod(t, t.effectiveFrom) ? t.effectiveFrom : null;
+  const periods = periodsBetween(
+    t.recurrence,
+    t.fiscalYearStartMonth,
+    t.effectiveFrom,
+    addDays(t.effectiveFrom, 366),
+  );
+  return periods.find((p) => governsPeriod(t, p.start))?.start ?? null;
 }
 
 /**
@@ -359,9 +392,17 @@ export interface ChainOnDay<T extends ObligationTemplate> {
  * when an event happening today would be judged.
  *
  * `governing` is null when no row's window covers the day (a chain written to
- * start later), and `next` is then the row that starts it. `next` is the
- * earliest row whose window OPENS after the day's period begins, which is the
- * one a screen means by "from April 2027".
+ * start later), and `next` is then the row that starts it. `next` is the row
+ * whose FIRST GOVERNED PERIOD (`firstPeriodGoverned`) comes soonest among the
+ * rows opening after the day's period begins, and `nextFirstPeriod` is that
+ * period's start: the day a screen means by "from April 2027". Picking by
+ * the cutover alone named a row whose window holds no period at all, and
+ * named the cutover's month for a change that waits for the next quarter.
+ *
+ * Windows only. A RETIRED row is read like any other, because the generator
+ * dates nothing under it and hiding it would say the row before it goes on
+ * for ever; what each row does is `coverageOf`, which the wire carries beside
+ * both (review, 2026-09-26).
  */
 export function chainOnDay<T extends ObligationTemplate>(
   chain: readonly T[],
@@ -376,9 +417,19 @@ export function chainOnDay<T extends ObligationTemplate>(
     (a.effectiveFrom ?? "").localeCompare(b.effectiveFrom ?? "") || a.id.localeCompare(b.id),
   );
   const governing = ordered.filter((t) => governsPeriod(t, periodStart(t))).at(-1) ?? null;
-  const next =
-    ordered.find((t) => t.effectiveFrom !== null && t.effectiveFrom > periodStart(t)) ?? null;
-  return { governing, next };
+  let next: T | null = null;
+  let nextFirstPeriod: IsoDate | null = null;
+  for (const t of ordered) {
+    if (t.effectiveFrom === null || t.effectiveFrom <= periodStart(t)) continue;
+    const first = firstPeriodGoverned(t);
+    if (first === null) continue;
+    // `<=`, so a tie goes to the later window, as `governing` does.
+    if (nextFirstPeriod === null || first <= nextFirstPeriod) {
+      next = t;
+      nextFirstPeriod = first;
+    }
+  }
+  return { governing, next, nextFirstPeriod };
 }
 
 // ── the state an obligation is in ──────────────────────────────────────────
