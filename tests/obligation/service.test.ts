@@ -595,24 +595,34 @@ describe("writing a rule", () => {
     expect(h.links.rows).toHaveLength(0);
   });
 
-  it("refuses a second rule with the same identity, and says how to revise", async () => {
+  it("refuses a second rule with the same identity, and points at the list it is already in", async () => {
     await firmWithGst(h);
-    await expect(
-      h.service.createRule(
-        {
-          tenantId: FIRM,
-          jurisdiction: "IN",
-          serviceEntryIds: [SERVICE],
-          name: "GSTR-3B",
-          recurrence: "monthly",
-          fiscalYearStartMonth: 4,
-          dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20 },
-          leadTimeDays: 0,
-          rulePack: "gst-in@2026.07",
-        },
-        ACTOR,
-      ),
-    ).rejects.toThrow(/add it under a NEW rule pack/);
+    const second = h.service.createRule(
+      {
+        tenantId: FIRM,
+        jurisdiction: "IN",
+        serviceEntryIds: [SERVICE],
+        name: "GSTR-3B",
+        recurrence: "monthly",
+        fiscalYearStartMonth: 4,
+        dueRule: { kind: "day_of_month", dueMonthOffset: 1, dueDayOfMonth: 20 },
+        leadTimeDays: 0,
+        rulePack: "gst-in@2026.07",
+      },
+      ACTOR,
+    );
+    // Since T6.16 the catalogue's "Write a new filing" reaches this, and the
+    // answer is the dropdown it exists for, not a new pack and a retirement
+    // (retiring would stop the filing on every other service carrying it).
+    const refused = await second.then(
+      () => null,
+      (e: unknown) => (e instanceof Error ? e.message : String(e)),
+    );
+    expect(refused).toMatch(/already holds a filing named "GSTR-3B" for IN companies/);
+    expect(refused).toMatch(/choose it from "Add a filing"/);
+    expect(refused).toMatch(/The law changed/);
+    expect(refused).not.toMatch(/retire/i);
+    expect(refused).not.toContain("\u2014");
   });
 
   it("creates a rule the firm writes as CONFIRMED — it is the firm's own statement", async () => {

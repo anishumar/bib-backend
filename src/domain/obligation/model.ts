@@ -265,7 +265,9 @@ export interface RuleServiceLink {
 }
 
 /**
- * THE GENERATION PREDICATE for one engagement, in the domain's own words.
+ * The generation predicate for one engagement, STATED in the domain's own
+ * words. Nothing in production calls it, and that is said here so nobody
+ * mistakes its tests for tests of the generator.
  *
  * A rule generates for an engagement exactly when it produces dates at all
  * (`generatesDates`: active, a formula, not event-driven, confirmed, linked to
@@ -274,10 +276,18 @@ export interface RuleServiceLink {
  * other half of the predicate and are asked of the entity and the period
  * (`governsPeriod`), not of the service.
  *
- * Every SQL reader restates the service half: `subjectsFor` and `gaps` in the
- * calendar adapter, `listGenerating`, and `obligation-coverage.ts` for the
- * work board. `coverage.integration.test.ts` runs them against one database so
- * a drift is a red build rather than a client with two tasks for one filing.
+ * The generator does not ask it per engagement: it asks `generatesDates` of
+ * each rule and lets `subjectsFor` join the link, because the engagements a
+ * rule reaches are one set-based statement and a function over an in-memory
+ * list is one row at a time. So the service half lives in SQL, restated by
+ * `subjectsFor` and `gaps` in the calendar adapter, `listGenerating`, and
+ * `obligation-coverage.ts` for the work board, and what guards the LIVE code
+ * is `coverage.integration.test.ts` (those readers against one database) and
+ * `service-filings.integration.test.ts` and `service.test.ts` (the generator
+ * over real SQL and over the fakes). The domain tests of this function pin
+ * the statement a reader of the SQL can check it against; they would stay
+ * green if the generator dropped its link test, which is why the tests above
+ * exist.
  *
  * An engagement whose pinned service cannot be resolved (`serviceEntryId`
  * null) is reached by nothing, which is the safe direction under decision 1:
