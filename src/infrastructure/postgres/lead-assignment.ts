@@ -140,6 +140,7 @@ export class PostgresRoundRobinAssignment implements AssignmentStrategy {
         WHERE t.id = ${lead.id} AND t.owner_user_id IS NULL
         RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
                   t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
+                  t.estimated_value, t.estimated_value_currency,
                   t.captured_at, t.closed_at
       `;
 
@@ -212,6 +213,7 @@ export class PostgresTerritoryAssignment implements AssignmentStrategy {
         WHERE t.id = ${lead.id} AND t.owner_user_id IS NULL
         RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
                   t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
+                  t.estimated_value, t.estimated_value_currency,
                   t.captured_at, t.closed_at
       `;
       return row ? { lead: toLead(row), policy: TERRITORY } : { lead, policy: null };

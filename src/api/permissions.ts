@@ -360,6 +360,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/leads"), "party:write" as const],
   [routeKey("POST", "/api/v1/leads/{leadId}/stage"), "party:write" as const],
   [routeKey("PUT", "/api/v1/leads/{leadId}/owner"), "party:write" as const],
+  [routeKey("PUT", "/api/v1/leads/{leadId}/details"), "party:write" as const],
 
   // PROPOSALS (T2.2) reuse the party permissions for their CRUD, for the same
   // reason the pipeline does: a proposal is a document about a party, and a role

@@ -18,6 +18,7 @@ import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { withTenant } from "../../src/db/tenant";
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
+import { PostgresDashboardRepository } from "../../src/infrastructure/postgres/dashboard-repository";
 import {
   FirstMatchAssignment,
   PostgresRoundRobinAssignment,
@@ -53,6 +54,7 @@ const service = new LeadService({
   leads,
   prospects: party,
   timeZones: new PostgresFirmTimeZone(app),
+  currency: new PostgresDashboardRepository(app),
   staff: new PostgresMembershipRepository(app),
   // The real rotation. The tenants below hold no memberships at all, so it
   // declines every capture here and these leads stay unassigned — which is what
@@ -461,6 +463,81 @@ describe("G3.1's columns hold when the service is bypassed", () => {
     expect(dump).not.toContain(REASON);
     expect(dump).not.toContain("Deloitte");
     expect(dump).toContain("lostReasonRecorded");
+  });
+});
+
+describe("0310: what a lead could be worth", () => {
+  /** A prospect nobody else in this file is using, with one open lead. */
+  async function freshLead(estimatedValue?: string): Promise<string> {
+    const captured = await service.capture(
+      {
+        tenantId: tenantA,
+        source: "referral",
+        title: "value check",
+        kind: "organization",
+        name: `Value Test ${String(nextSuffix())}`,
+        identifiers: [{ type: "email", value: `val-${stamp}-${String(nextSuffix())}@x.example` }],
+        jurisdiction: "SG",
+        ...(estimatedValue === undefined ? {} : { estimatedValue }),
+      },
+      SYSTEM_ACTOR,
+    );
+    return captured.lead.id;
+  }
+
+  it("round-trips an estimate as an exact decimal string in the firm's currency", async () => {
+    // 0.10 + 0.20 is the classic value a JS number cannot hold; it must come
+    // back exactly as numeric stored it.
+    const id = await freshLead("12345678901234.30");
+    const [record] = (await service.list(tenantA)).filter((r) => r.lead.id === id);
+    expect(record?.lead.estimatedValue).toEqual({ amount: "12345678901234.30", currency: "INR" });
+    expect(record?.lead.jurisdiction).toBe("SG");
+  });
+
+  it("sets, corrects and clears the country and the value in one statement", async () => {
+    const id = await freshLead();
+    const set = await service.setDetails(
+      { tenantId: tenantA, leadId: id, jurisdiction: "AE", estimatedValue: "500000" },
+      SYSTEM_ACTOR,
+    );
+    expect(set.estimatedValue).toEqual({ amount: "500000.00", currency: "INR" });
+    expect(set.jurisdiction).toBe("AE");
+
+    const cleared = await service.setDetails(
+      { tenantId: tenantA, leadId: id, jurisdiction: null, estimatedValue: null },
+      SYSTEM_ACTOR,
+    );
+    expect(cleared.estimatedValue).toBeNull();
+    expect(cleared.jurisdiction).toBeNull();
+
+    const verbs = (await ledger.forObject(tenantA, "lead", id)).map((r) => r.event.verb);
+    expect(verbs.filter((v) => v === "lead.details_changed")).toHaveLength(2);
+  });
+
+  it("refuses an amount with no currency, and a currency with no amount", async () => {
+    const id = await freshLead();
+    const noCurrency = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET estimated_value = 10 WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((noCurrency as { code?: string }).code).toBe("23514");
+    const noAmount = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET estimated_value_currency = 'INR' WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((noAmount as { code?: string }).code).toBe("23514");
+  });
+
+  it("refuses a negative estimate and a currency that is not ISO 4217", async () => {
+    const id = await freshLead();
+    const negative = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET estimated_value = -1, estimated_value_currency = 'INR'
+         WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((negative as { code?: string }).code).toBe("23514");
+    const lower = await withTenant(app, tenantA, (db) =>
+      db`UPDATE crm.lead SET estimated_value = 1, estimated_value_currency = 'inr'
+         WHERE id = ${id}`,
+    ).catch((e: unknown) => e);
+    expect((lower as { code?: string }).code).toBe("23514");
   });
 });
 

@@ -156,6 +156,7 @@ export const EVENT_VERBS = {
   "lead.merged":                 { objectType: "lead",                lane: "commercial", description: "A duplicate capture landed on an existing open lead instead of starting a rival one." },
   "lead.stage_changed":          { objectType: "lead",                lane: "commercial", description: "A lead moved through the pipeline. Reaching a terminal stage closes it." },
   "lead.owner_assigned":         { objectType: "lead",                lane: "commercial", description: "A lead was put on somebody's desk, or taken off it." },
+  "lead.details_changed":        { objectType: "lead",                lane: "commercial", description: "Where a prospect is, or what the opportunity could be worth, was set or corrected. Both sides of each travel in the payload: a country code and an amount name nobody." },
   "proposal.drafted":            { objectType: "proposal",            lane: "commercial", description: "A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out." },
   "proposal.discount_approved":  { objectType: "proposal",            lane: "commercial", description: "A discount past the firm's published limit was signed off, by somebody holding proposal:approve. The whole value of the record is WHO." },
   "proposal.sent":               { objectType: "proposal",            lane: "commercial", description: "A proposal was sent to a prospect." },

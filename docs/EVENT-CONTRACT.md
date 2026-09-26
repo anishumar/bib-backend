@@ -250,6 +250,7 @@ version is exactly what gets asked about afterwards.
 | `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. Payload carries `titleDiscarded` — WHETHER the capture's title was dropped, never the title itself, which names the counterparty and is sometimes a person's name (§3.4). The words go back to the caller on the response (`discardedTitle`) and are stored nowhere. |
 | `lead.stage_changed` | lead | A lead moved through the pipeline. Reaching a terminal stage closes it. |
 | `lead.owner_assigned` | lead | A lead was put on somebody's desk, or taken off it. |
+| `lead.details_changed` | lead | Where the prospect is (`jurisdictionFrom`/`jurisdictionTo`) or what the opportunity could be worth (`estimatedValueFrom`/`estimatedValueTo`, decimal strings, in `currency`) was set or corrected. Recorded only when one of them actually changed. Neither is personal data: a country code and an amount name nobody. It does NOT re-run assignment — moving a live lead is `lead.owner_assigned`, a person's act. |
 | `proposal.drafted` | proposal | A proposal was drafted for a party — the first row in its own timeline, and the only record of what was quoted before it went out. |
 | `proposal.discount_approved` | proposal | A discount past the firm's published limit was signed off by somebody holding `proposal:approve`. The whole value of the record is WHO. |
 | `proposal.sent` | proposal | A proposal was sent to a prospect. |

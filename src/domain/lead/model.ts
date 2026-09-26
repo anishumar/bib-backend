@@ -127,6 +127,15 @@ export interface Lead {
    * of this product that did not record a jurisdiction.
    */
   readonly jurisdiction: string | null;
+  /**
+   * What the opportunity could be worth — an ESTIMATE, not a quote (0310).
+   *
+   * Null is ordinary: nobody knows the value when a prospect first phones in,
+   * and a capture must never be refused for it. The currency travels with the
+   * amount, and the service writes the firm's reporting currency, so every lead
+   * in a firm compares with every other and a value filter means something.
+   */
+  readonly estimatedValue: LeadValue | null;
   readonly notes: string | null;
   /**
    * Why it did not close won, in the closer's own words.
@@ -144,6 +153,38 @@ export interface Lead {
   readonly lostReason: string | null;
   readonly capturedAt: string;
   readonly closedAt: string | null;
+}
+
+/** An amount and its currency. The amount is a DECIMAL STRING, never a JS
+ *  number — the product-wide money rule. */
+export interface LeadValue {
+  readonly amount: string;
+  readonly currency: string;
+}
+
+/**
+ * The shape an estimate is accepted in: up to sixteen whole digits and two
+ * decimal places, no sign, no separators — what `numeric(18,2)` holds exactly.
+ * "5,00,000" and "5e5" are refused rather than guessed at, because a value a
+ * person typed wrong and the system reinterpreted is worse than a refusal.
+ */
+const ESTIMATED_VALUE_PATTERN = /^\d{1,16}(?:\.\d{1,2})?$/;
+
+export function isEstimatedValue(v: string): boolean {
+  return ESTIMATED_VALUE_PATTERN.test(v);
+}
+
+/**
+ * The one spelling of an estimate: no leading zeros, exactly two places —
+ * what Postgres hands back from `numeric(18,2)`. Canonical BEFORE it is
+ * written, so "500000" and "500000.00" are one value to every comparison,
+ * including "did this edit change anything". Pure string work: the amount
+ * never passes through a JS number.
+ */
+export function normalizeEstimatedValue(v: string): string {
+  const [whole = "0", fraction = ""] = v.split(".");
+  const digits = whole.replace(/^0+(?=\d)/, "");
+  return `${digits}.${fraction.padEnd(2, "0")}`;
 }
 
 // ── Dedup ────────────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
+import { PostgresDashboardRepository } from "../../src/infrastructure/postgres/dashboard-repository";
 import {
   FirstMatchAssignment,
   PostgresRoundRobinAssignment,
@@ -66,6 +67,7 @@ const service = new LeadService({
   leads: new PostgresLeadRepository(app),
   prospects: party,
   timeZones: new PostgresFirmTimeZone(app),
+  currency: new PostgresDashboardRepository(app),
   staff: memberships,
   // What the SERVICE gets is the composite, in the order the composition root
   // wires it: territory first, rotation second. Every test in this file that
