@@ -677,6 +677,7 @@ export function mapError(err: unknown): MappedError {
       case "NO_CONTACT_DETAIL":
       case "BLANK_TITLE":
       case "INVALID_LEAD_JURISDICTION":
+      case "INVALID_ESTIMATED_VALUE":
       case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":

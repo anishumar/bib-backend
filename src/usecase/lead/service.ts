@@ -24,7 +24,13 @@ import { isJurisdiction } from "../../domain/document/model";
 import type { TerritoryRule } from "../../domain/lead/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
-import type { Lead, LeadSource, LeadStage, OwnerSource } from "../../domain/lead/model";
+import type {
+  Lead,
+  LeadSource,
+  LeadStage,
+  LeadValue,
+  OwnerSource,
+} from "../../domain/lead/model";
 import {
   DEDUP_IDENTIFIER_TYPES,
   LEAD_SOURCES,
@@ -33,10 +39,12 @@ import {
   canMoveStage,
   isAmbiguous,
   isDedupIdentifier,
+  isEstimatedValue,
   isLeadSource,
   isLeadStage,
   isTerminalStage,
   matchedParty,
+  normalizeEstimatedValue,
   recordsLostReason,
 } from "../../domain/lead/model";
 import type { DedupMatch } from "../../domain/lead/model";
@@ -51,6 +59,7 @@ import {
   LostReasonRequired,
   NoContactDetail,
   InvalidLeadJurisdiction,
+  InvalidEstimatedValue,
   LeadNotCallersToday,
   LeadPartyArchived,
   OwnerNotStaff,
@@ -59,6 +68,7 @@ import {
 import type {
   AssignmentOutcome,
   AssignmentStrategy,
+  FirmCurrency,
   TerritoryRules,
   LeadRecord,
   LeadRepository,
@@ -87,6 +97,8 @@ export interface Deps {
   /** The firm's zone — whose "today" a contact detail is dated from when the
    *  caller does not send its own. */
   readonly timeZones: FirmTimeZone;
+  /** The firm's reporting currency — what an estimate is written in. */
+  readonly currency: FirmCurrency;
   readonly events: EventSink;
 }
 
@@ -156,6 +168,25 @@ export interface CaptureLeadInput {
    * is why there is no wildcard rule.
    */
   readonly jurisdiction?: string | undefined;
+  /**
+   * What the opportunity could be worth, as a decimal string, in the firm's
+   * reporting currency. OPTIONAL for the same reason the country is: a capture
+   * is never refused for a number nobody knows yet. Like `notes`, a MERGE does
+   * not apply it — the live opportunity's figure was somebody's estimate.
+   */
+  readonly estimatedValue?: string | undefined;
+}
+
+/**
+ * The two facts the pipeline list sizes and filters on, set together. Both
+ * are REPLACED: null clears either one, because "we no longer know" is a real
+ * thing to say about a prospect's value.
+ */
+export interface SetLeadDetailsInput {
+  readonly tenantId: string;
+  readonly leadId: string;
+  readonly jurisdiction: string | null;
+  readonly estimatedValue: string | null;
 }
 
 export interface CaptureResult {
@@ -247,6 +278,7 @@ export class LeadService {
     // G1.8 applies to a clause's terms: this value is COMPARED — against a
     // territory rule — and "in" is what a comparison would get.
     const jurisdiction = this.parseJurisdiction(input.jurisdiction);
+    const estimate = this.parseEstimatedValue(input.estimatedValue ?? null);
 
     // Everything that can be refused without writing is refused first — a
     // capture that fails halfway leaves a party nobody asked for.
@@ -351,6 +383,7 @@ export class LeadService {
       ownerUserId: requestedOwner ?? null,
       notes: input.notes ?? null,
       jurisdiction,
+      estimatedValue: await this.priced(input.tenantId, estimate),
     });
 
     // ASSIGNMENT, and only when nobody named an owner. It runs AFTER the insert
@@ -478,6 +511,62 @@ export class LeadService {
   }
 
   /**
+   * Say where the prospect is and what the opportunity could be worth.
+   *
+   * Idempotent: a save that changes neither records nothing, because a form
+   * that PUTs what it was shown should not write an edit nobody made. Allowed
+   * on a CLOSED lead too, like the owner — correcting what a won deal was
+   * worth changes no pipeline state, and a lost one's value is the size of
+   * what got away, which is worth being right about.
+   *
+   * The COUNTRY does not re-run assignment. Territory decides whose desk a new
+   * lead lands on at capture; moving a live lead is `PUT .../owner`, a person's
+   * act, and a corrected country quietly reassigning somebody's prospect would
+   * be the rotation overruling a human decision.
+   */
+  async setDetails(input: SetLeadDetailsInput, actor: Actor): Promise<Lead> {
+    const jurisdiction =
+      input.jurisdiction === null ? null : this.parseJurisdiction(input.jurisdiction);
+    const estimate = this.parseEstimatedValue(input.estimatedValue);
+    const lead = await this.leadOrThrow(input.tenantId, input.leadId);
+    const estimatedValue = await this.priced(input.tenantId, estimate);
+
+    const sameCountry = lead.jurisdiction === jurisdiction;
+    const sameValue =
+      (lead.estimatedValue === null && estimatedValue === null) ||
+      (lead.estimatedValue !== null &&
+        estimatedValue !== null &&
+        lead.estimatedValue.amount === estimatedValue.amount &&
+        lead.estimatedValue.currency === estimatedValue.currency);
+    if (sameCountry && sameValue) return lead;
+
+    const saved = await this.deps.leads.setDetails(
+      input.tenantId,
+      lead.id,
+      jurisdiction,
+      estimatedValue,
+    );
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "lead.details_changed",
+      objectId: lead.id,
+      actor,
+      // Machine facts only: a country code and an amount name nobody. Both
+      // sides of each, so the timeline can say "value 3,00,000 -> 5,00,000"
+      // without anybody reconstructing what it was before.
+      payload: {
+        partyId: lead.partyId,
+        jurisdictionFrom: lead.jurisdiction,
+        jurisdictionTo: jurisdiction,
+        estimatedValueFrom: lead.estimatedValue?.amount ?? null,
+        estimatedValueTo: estimatedValue?.amount ?? null,
+        currency: estimatedValue?.currency ?? lead.estimatedValue?.currency ?? null,
+      },
+    });
+    return saved;
+  }
+
+  /**
    * The pipeline, newest first, optionally one stage of it.
    *
    * Returns the READ MODEL — each lead with the prospect it is about and the
@@ -581,6 +670,21 @@ export class LeadService {
     if (raw === undefined) return null;
     if (!isJurisdiction(raw)) throw new InvalidLeadJurisdiction(raw);
     return raw;
+  }
+
+  /** Absent stays absent; a malformed amount is refused rather than guessed
+   *  at, and a valid one is stored in its one canonical spelling. */
+  private parseEstimatedValue(raw: string | null): string | null {
+    if (raw === null) return null;
+    if (!isEstimatedValue(raw)) throw new InvalidEstimatedValue(raw);
+    return normalizeEstimatedValue(raw);
+  }
+
+  /** An amount becomes money: it is written in the firm's reporting currency,
+   *  so every estimate in a firm compares with every other. */
+  private async priced(tenantId: string, amount: string | null): Promise<LeadValue | null> {
+    if (amount === null) return null;
+    return { amount, currency: await this.deps.currency.reportingCurrency(tenantId) };
   }
 
   /** Whose desk covers where — the rule as a screen shows it. */

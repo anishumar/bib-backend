@@ -10,7 +10,14 @@ import type {
   PartyKind,
   Person,
 } from "../../domain/party/model";
-import type { AssignmentPolicy, TerritoryRule, Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import type {
+  AssignmentPolicy,
+  TerritoryRule,
+  Lead,
+  LeadSource,
+  LeadStage,
+  LeadValue,
+} from "../../domain/lead/model";
 
 export interface NewLead {
   readonly id: string;
@@ -26,6 +33,9 @@ export interface NewLead {
   /** Where the PROSPECT is, normalised and validated by the service. Null is
    *  ordinary — often nobody knows yet, and the rotation answers for it. */
   readonly jurisdiction: string | null;
+  /** The estimate, already validated and already carrying the firm's reporting
+   *  currency. Null when nobody said. */
+  readonly estimatedValue: LeadValue | null;
 }
 
 /**
@@ -89,6 +99,29 @@ export interface LeadRepository {
     lostReason: string | null,
   ): Promise<Lead>;
   setOwner(tenantId: string, leadId: string, ownerUserId: string | null): Promise<Lead>;
+  /**
+   * Where the prospect is and what the opportunity could be worth, written
+   * TOGETHER — the two facts the pipeline list sizes and filters on. Both are
+   * replaced: null clears either.
+   */
+  setDetails(
+    tenantId: string,
+    leadId: string,
+    jurisdiction: string | null,
+    estimatedValue: LeadValue | null,
+  ): Promise<Lead>;
+}
+
+/**
+ * The firm's reporting currency (0009) — what a lead's estimate is written in.
+ *
+ * One currency per firm is what makes the pipeline's value filter honest: a
+ * "more than 5,00,000" that compared rupees with dollars would be a number, not
+ * an answer. Satisfied structurally by the dashboard adapter, which already
+ * reads it, so there is one query for this fact rather than two.
+ */
+export interface FirmCurrency {
+  reportingCurrency(tenantId: string): Promise<string>;
 }
 
 /**

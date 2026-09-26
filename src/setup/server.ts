@@ -980,6 +980,9 @@ export function wire(cfg: Config, log: Logger): Wired {
     ]),
     territories: new PostgresTerritoryRules(pools.app),
     timeZones: new PostgresFirmTimeZone(pools.app),
+    // The firm's reporting currency, read by the adapter the dashboard already
+    // uses for it — satisfied structurally, one query for one fact.
+    currency: new PostgresDashboardRepository(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

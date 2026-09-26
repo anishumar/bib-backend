@@ -25,6 +25,7 @@ import {
   BlankTitle,
   InvalidSource,
   InvalidLeadJurisdiction,
+  InvalidEstimatedValue,
   InvalidStage,
   LeadClosed,
   LeadNotFound,
@@ -1313,5 +1314,135 @@ describe("the day a captured contact detail is in force from (item 4, 2026-09-25
     });
     expect(fakes.leads.rows).toEqual([]);
     expect(await fakes.party.findByIdentifier(TENANT, "pan", PAN)).toBeNull();
+  });
+});
+
+describe("0310 — a lead says where the prospect is and what it could be worth", () => {
+  it("captures an estimate in the firm's reporting currency, in one spelling", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(
+      capture({ jurisdiction: "SG", estimatedValue: "0500000" }),
+      ACTOR,
+    );
+    expect(lead.jurisdiction).toBe("SG");
+    // Canonical before it is written: no leading zero, two places — what
+    // numeric(18,2) hands back, so "did this change" compares like with like.
+    expect(lead.estimatedValue).toEqual({ amount: "500000.00", currency: "INR" });
+  });
+
+  it("captures with no estimate at all, because nobody knows one yet", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture(), ACTOR);
+    expect(lead.estimatedValue).toBeNull();
+  });
+
+  it.each(["5,00,000", "5e5", "-100", "12.345", "", " 100", "₹100"])(
+    "refuses %j as an estimate before anything is written",
+    async (bad) => {
+      const { service, leads, events } = setup();
+      await expect(
+        service.capture(capture({ estimatedValue: bad }), ACTOR),
+      ).rejects.toBeInstanceOf(InvalidEstimatedValue);
+      expect(leads.rows).toHaveLength(0);
+      expect(events.recorded).toHaveLength(0);
+    },
+  );
+
+  it("sets and corrects both facts, recording both sides of each", async () => {
+    const { service, events } = setup();
+    const { lead } = await service.capture(capture(), ACTOR);
+    const saved = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "AE", estimatedValue: "250000.5" },
+      ACTOR,
+    );
+    expect(saved.jurisdiction).toBe("AE");
+    expect(saved.estimatedValue).toEqual({ amount: "250000.50", currency: "INR" });
+
+    const last = events.recorded.at(-1);
+    expect(last?.verb).toBe("lead.details_changed");
+    expect(last?.payload).toMatchObject({
+      jurisdictionFrom: null,
+      jurisdictionTo: "AE",
+      estimatedValueFrom: null,
+      estimatedValueTo: "250000.50",
+      currency: "INR",
+    });
+  });
+
+  it("records nothing when a save changes nothing — the same value in another spelling included", async () => {
+    const { service, events } = setup();
+    const { lead } = await service.capture(
+      capture({ jurisdiction: "IN", estimatedValue: "100000" }),
+      ACTOR,
+    );
+    const before = events.recorded.length;
+    await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "IN", estimatedValue: "100000.00" },
+      ACTOR,
+    );
+    expect(events.recorded).toHaveLength(before);
+  });
+
+  it("clears either fact with null — 'we no longer know' is a real answer", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(
+      capture({ jurisdiction: "IN", estimatedValue: "100000" }),
+      ACTOR,
+    );
+    const cleared = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: null, estimatedValue: null },
+      ACTOR,
+    );
+    expect(cleared.jurisdiction).toBeNull();
+    expect(cleared.estimatedValue).toBeNull();
+  });
+
+  it("refuses a country that is not an upper-case ISO code, and an unknown lead", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture(), ACTOR);
+    await expect(
+      service.setDetails(
+        { tenantId: TENANT, leadId: lead.id, jurisdiction: "in", estimatedValue: null },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
+    await expect(
+      service.setDetails(
+        {
+          tenantId: TENANT,
+          leadId: "00000000-0000-4000-8000-00000000ffff",
+          jurisdiction: null,
+          estimatedValue: null,
+        },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(LeadNotFound);
+  });
+
+  it("is allowed on a closed lead — what a won deal was worth is worth being right about", async () => {
+    const { service } = setup();
+    const { lead } = await service.capture(capture(), ACTOR);
+    await service.moveStage({ tenantId: TENANT, leadId: lead.id, stage: "converted" }, ACTOR);
+    const saved = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "IN", estimatedValue: "750000" },
+      ACTOR,
+    );
+    expect(saved.estimatedValue?.amount).toBe("750000.00");
+  });
+
+  it("does not reassign the lead when its country changes", async () => {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF).add(TENANT, SPECIALIST);
+    const service = new LeadService(fakes);
+    await service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "AE", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    const { lead } = await service.capture(capture({ ownerUserId: STAFF }), ACTOR);
+    const saved = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "AE", estimatedValue: null },
+      ACTOR,
+    );
+    expect(saved.ownerUserId).toBe(STAFF);
   });
 });

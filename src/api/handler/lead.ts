@@ -44,6 +44,13 @@ export const STAGE_VALUES = [
   "abandoned",
 ] as const satisfies readonly LeadStage[];
 
+/** An estimate on the wire: a DECIMAL STRING, never a number — what
+ *  `numeric(18,2)` holds exactly. The service says why a bad one is refused. */
+const EstimateAmountSchema = z
+  .string()
+  .regex(/^\d{1,16}(?:\.\d{1,2})?$/)
+  .openapi({ example: "500000" });
+
 // ── Response schemas ────────────────────────────────────────────────────────
 
 const LeadSchema = z
@@ -74,6 +81,18 @@ const LeadSchema = z
         "rotation covers it. It is also the answer a proposal drafted from this lead needs " +
         "for `clientJurisdiction`, which decides which of the firm's entities contracts.",
     }),
+    estimatedValue: z
+      .object({
+        amount: z.string().openapi({ description: "A decimal string, two places." }),
+        currency: z.string().length(3),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "What the opportunity could be worth: an ESTIMATE written at capture or later, not a " +
+          "quote (the quote is the proposal). In the firm's reporting currency, so every lead " +
+          "in a firm compares with every other. Null when nobody has said.",
+      }),
     capturedAt: z.string(),
     closedAt: z.string().nullable(),
   })
@@ -190,6 +209,12 @@ const CaptureLeadBody = z
         "knows at capture, and a capture is never refused for it. Demanded in canonical case " +
         "rather than normalised, because it is compared against the firm's territory rules.",
     }),
+    estimatedValue: EstimateAmountSchema.optional().openapi({
+      description:
+        "What the opportunity could be worth, as a decimal string with no commas or currency " +
+        "sign, in the firm's reporting currency. Optional. Like `notes`, a capture that MERGES " +
+        "onto a live opportunity does not apply it.",
+    }),
   })
   .openapi("CaptureLeadRequest");
 
@@ -216,6 +241,23 @@ const AssignOwnerBody = z
     ownerUserId: z.string().uuid().nullable(),
   })
   .openapi("AssignLeadOwnerRequest");
+
+const SetDetailsBody = z
+  .object({
+    // Both REQUIRED and both nullable: this is the whole of the two facts, and
+    // null is an instruction ("we no longer know"), not an omission.
+    jurisdiction: z.string().length(2).nullable().openapi({
+      description:
+        "Where the prospect is, ISO 3166-1 alpha-2 in UPPER CASE, or null for not known. " +
+        "Changing it does NOT reassign the lead: territory decides a desk at capture only.",
+    }),
+    estimatedValue: EstimateAmountSchema.nullable().openapi({
+      description:
+        "What the opportunity could be worth, as a decimal string in the firm's reporting " +
+        "currency, or null for not known.",
+    }),
+  })
+  .openapi("SetLeadDetailsRequest");
 
 // ── Routes ────────────────────────────────────────────────────────────────
 
@@ -356,6 +398,27 @@ const assignOwnerRoute = createRoute({
   },
 });
 
+const setDetailsRoute = createRoute({
+  method: "put",
+  path: "/api/v1/leads/{leadId}/details",
+  tags: ["lead"],
+  summary: "Say where the prospect is and what the opportunity could be worth",
+  description:
+    "Replaces both. Idempotent: sending what the lead already says records nothing. Allowed " +
+    "on a closed lead, because correcting what a deal was worth changes no pipeline state.",
+  request: {
+    params: LeadParam,
+    body: { content: { "application/json": { schema: SetDetailsBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: LeadSchema } } },
+    400: errorResponse("Not a country code in upper case, or not a plain amount"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write parties"),
+    404: errorResponse("No such lead in this firm"),
+  },
+});
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /**
@@ -389,6 +452,10 @@ function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
     notes: lead.notes,
     lostReason: lead.lostReason,
     jurisdiction: lead.jurisdiction,
+    estimatedValue:
+      lead.estimatedValue === null
+        ? null
+        : { amount: lead.estimatedValue.amount, currency: lead.estimatedValue.currency },
     capturedAt: lead.capturedAt,
     closedAt: lead.closedAt,
   };
@@ -514,6 +581,18 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
       await deps.service.assignOwner({ tenantId: s.tenantId, leadId, ownerUserId }, s.actor),
       200,
     );
+  });
+
+  app.openapi(setDetailsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { leadId } = c.req.valid("param");
+    const { jurisdiction, estimatedValue } = c.req.valid("json");
+    const saved = await deps.service.setDetails(
+      { tenantId: s.tenantId, leadId, jurisdiction, estimatedValue },
+      s.actor,
+    );
+    return c.json(toLeadBody(saved), 200);
   });
   app.openapi(listTerritoryRoute, async (c) => {
     const s = scopeOf(c.get("principal"));

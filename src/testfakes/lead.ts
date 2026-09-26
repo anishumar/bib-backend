@@ -15,12 +15,13 @@
 // database properties, proven against real Postgres in
 // tests/lead/pipeline.integration.test.ts.
 import { FakeClock } from "./clock";
-import type { Lead, LeadStage, TerritoryRule } from "../domain/lead/model";
+import type { Lead, LeadStage, LeadValue, TerritoryRule } from "../domain/lead/model";
 import type { PartyKind } from "../domain/party/model";
 import { isOpen } from "../domain/lead/model";
 import type {
   AssignmentOutcome,
   AssignmentStrategy,
+  FirmCurrency,
   NewTerritoryRule,
   TerritoryRules,
   LeadRecord,
@@ -52,6 +53,7 @@ export class FakeLeadRepo implements LeadRepository {
       partyId: l.partyId,
       source: l.source,
       jurisdiction: l.jurisdiction,
+      estimatedValue: l.estimatedValue,
       stage: "new",
       ownerUserId: l.ownerUserId,
       notes: l.notes,
@@ -134,6 +136,17 @@ export class FakeLeadRepo implements LeadRepository {
     return Promise.resolve(this.replace(tenantId, leadId, (r) => ({ ...r, ownerUserId })));
   }
 
+  setDetails(
+    tenantId: string,
+    leadId: string,
+    jurisdiction: string | null,
+    estimatedValue: LeadValue | null,
+  ): Promise<Lead> {
+    return Promise.resolve(
+      this.replace(tenantId, leadId, (r) => ({ ...r, jurisdiction, estimatedValue })),
+    );
+  }
+
   private replace(tenantId: string, leadId: string, change: (r: Lead) => Lead): Lead {
     const index = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === leadId);
     const current = this.rows[index];
@@ -141,6 +154,21 @@ export class FakeLeadRepo implements LeadRepository {
     const next = change(current);
     this.rows[index] = next;
     return next;
+  }
+}
+
+/** The firm's reporting currency. INR unless a test sets another, which is
+ *  what 0009 backfilled every firm to. */
+export class FakeFirmCurrency implements FirmCurrency {
+  private readonly byTenant = new Map<string, string>();
+
+  set(tenantId: string, currency: string): this {
+    this.byTenant.set(tenantId, currency);
+    return this;
+  }
+
+  reportingCurrency(tenantId: string): Promise<string> {
+    return Promise.resolve(this.byTenant.get(tenantId) ?? "INR");
   }
 }
 
@@ -337,6 +365,8 @@ export function makeLeadFakes(): Deps & {
   party: PartyService;
   /** UTC unless a test sets the firm's zone. */
   timeZones: FakeFirmTimeZone;
+  /** INR unless a test sets the firm's currency. */
+  currency: FakeFirmCurrency;
   clock: FakeClock;
 } {
   const ids = new FakeIds();
@@ -381,6 +411,7 @@ export function makeLeadFakes(): Deps & {
     territory,
     territories,
     timeZones: new FakeFirmTimeZone(),
+    currency: new FakeFirmCurrency(),
     ids,
     clock: new FakeClock(new Date("2026-03-01T10:00:00Z")),
     events,

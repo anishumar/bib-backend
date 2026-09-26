@@ -25,6 +25,7 @@ export type LeadErrorCode =
   | "LOST_REASON_NOT_APPLICABLE"
   | "BLANK_TITLE"
   | "INVALID_LEAD_JURISDICTION"
+  | "INVALID_ESTIMATED_VALUE"
   | "PARTY_ARCHIVED"
   | "NOT_CALLERS_TODAY";
 
@@ -183,6 +184,17 @@ export class InvalidLeadJurisdiction extends LeadError {
       `${JSON.stringify(given)} is not a jurisdiction. Give an ISO 3166-1 alpha-2 code in ` +
         `upper case ("IN", "AE", "US"), or leave it out — an unknown country is a real answer ` +
         `and the assignment rotation covers it.`,
+    );
+  }
+}
+
+export class InvalidEstimatedValue extends LeadError {
+  constructor(given: string) {
+    super(
+      "INVALID_ESTIMATED_VALUE",
+      `${JSON.stringify(given)} is not an amount. Give a plain number with at most two decimal ` +
+        `places and no commas or currency sign ("500000" or "125000.50"), or leave it out. ` +
+        `An unknown value is a real answer.`,
     );
   }
 }
