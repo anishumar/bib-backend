@@ -46,7 +46,7 @@ import type {
 import { isDrawableImage } from "../../domain/render/model";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/model";
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
-import { isoInstant, utcDayOf } from "./instant";
+import { isoInstant, utcDayOf, zoneDayOf } from "./instant";
 
 /** What this source can describe. Anything else is refused BY NAME rather than
  *  producing an empty document. */
@@ -225,8 +225,10 @@ export class PostgresRenderSource implements RenderSource {
       const [row] = await db<ProposalHeadRow[]>`
         SELECT p.party_id, p.ref, p.title, p.currency, p.valid_until::text, p.background,
                p.issuing_entity_party_id,
-               ${db.unsafe(utcDayOf("p.sent_at", "sent_on"))},
-               ${db.unsafe(utcDayOf("p.created_at", "created_on"))},
+               -- The FIRM's day (T6.18): a proposal sent at 02:15 in Delhi is
+               -- dated that day, not the UTC day before.
+               ${db.unsafe(zoneDayOf("p.sent_at", "firm.time_zone", "sent_on"))},
+               ${db.unsafe(zoneDayOf("p.created_at", "firm.time_zone", "created_on"))},
                client.display_name AS client_name,
                entity.display_name AS entity_name,
                addressee.display_name AS addressee_name,
@@ -237,6 +239,7 @@ export class PostgresRenderSource implements RenderSource {
         FROM crm.proposal p
         JOIN core.party client ON client.id = p.party_id
         JOIN core.party entity ON entity.id = p.issuing_entity_party_id
+        JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN core.party addressee ON addressee.id = p.addressed_to_party_id
         LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
         WHERE p.id = ${proposalId}
@@ -259,6 +262,23 @@ export class PostgresRenderSource implements RenderSource {
         LEFT JOIN core.party entity ON entity.id = l.entity_party_id
         WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
         ORDER BY l.position
+      `;
+
+      // THE MONEY PER FREQUENCY (T6.18, D8), summed by the database from the
+      // same per-line view the staff read's `totalsByFrequency` comes from, so
+      // the paper and the screen print one set of figures.
+      const byFrequency = await db<
+        { frequency: string | null; net: string | null; unpriced: number }[]
+      >`
+        SELECT l.billing_frequency AS frequency, sum(a.net)::text AS net,
+               (count(*) FILTER (WHERE l.unit_amount IS NULL))::int AS unpriced
+        FROM crm.proposal_line l
+        JOIN crm.proposal_line_amount a ON a.id = l.id
+        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
+        GROUP BY l.billing_frequency
+        ORDER BY coalesce(array_position(
+                   ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
+                   l.billing_frequency::text), 99)
       `;
 
       // The firm's Depts, retired ones included: a quote pinned to a Dept the
@@ -356,6 +376,7 @@ export class PostgresRenderSource implements RenderSource {
             ...inScopeFlow(plan),
             ...proposalSectionsFlow(plan, row.currency),
             ...proposalFeesFlow(plan, row.currency),
+            ...proposalTotalsFlow(byFrequency, row.currency),
             ...(row.valid_until === null
               ? []
               : [paragraph(`This proposal is valid until ${longDate(row.valid_until)}.`, true)]),
@@ -1332,6 +1353,32 @@ function proposalFeesFlow(plan: ProposalPlan, currency: string): Flow[] {
       },
     },
   ];
+}
+
+/**
+ * The fees per billing frequency, under the Summary of Fees (T6.18, D8) —
+ * "INR 50,000 Monthly + INR 1,25,000 Yearly + INR 15,000 One-time", never one
+ * mixed net that adds a monthly fee to a one-time one. Summed by the database;
+ * a line with no price is counted beside the figures rather than read as zero.
+ */
+function proposalTotalsFlow(
+  rows: readonly { frequency: string | null; net: string | null; unpriced: number }[],
+  currency: string,
+): Flow[] {
+  const priced = rows.filter((r) => r.net !== null);
+  const unpriced = rows.reduce((n, r) => n + r.unpriced, 0);
+  if (priced.length === 0) return [];
+  const figures = priced.map((r) => {
+    const amount = wholeMoney(r.net ?? "0", currency);
+    return r.frequency === null
+      ? `${amount} (frequency not stated)`
+      : `${amount} ${PROPOSAL_FREQUENCY[r.frequency] ?? r.frequency}`;
+  });
+  const tail =
+    unpriced === 0
+      ? ""
+      : `, plus ${String(unpriced)} service${unpriced === 1 ? "" : "s"} as mutually agreed`;
+  return [{ kind: "paragraph", lead: "Total", text: `${figures.join(" + ")}${tail}` }];
 }
 
 /**

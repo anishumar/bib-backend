@@ -13,7 +13,7 @@ import type { Db } from "../../db/pool";
 import { VIEW_DEDUPE_MINUTES } from "../../domain/proposal/model";
 import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
-import { utcDayOf } from "./instant";
+import { zoneDayOf } from "./instant";
 import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
@@ -287,8 +287,8 @@ export class PostgresProposalRepository implements ProposalRepository {
                issuer_le.jurisdiction AS issuer_jurisdiction,
                addressee_phone.value AS addressee_phone,
                -- The day the PDF's running header prints (0084): sent, else
-               -- drafted, as a UTC day — the render source's own expression.
-               ${db.unsafe(utcDayOf("coalesce(p.sent_at, p.created_at)", "issued_on"))}
+               -- drafted, as the FIRM's day — the render source's own expression.
+               ${db.unsafe(zoneDayOf("coalesce(p.sent_at, p.created_at)", "firm.time_zone", "issued_on"))}
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the

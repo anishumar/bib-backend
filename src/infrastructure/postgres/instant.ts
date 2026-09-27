@@ -97,3 +97,13 @@ export function isoInstant(expr: string, alias?: string): string {
 export function utcDayOf(expr: string, alias: string): string {
   return `(${expr} AT TIME ZONE 'UTC')::date::text AS ${alias}`;
 }
+
+/**
+ * The DAY a `timestamptz` falls on in the FIRM's zone (`tenancy.tenant.time_zone`,
+ * 0071) — what a document it dates should print. A proposal sent at 02:15 in
+ * Delhi is dated that day, not the UTC day before (T6.18). `zoneExpr` is a SQL
+ * expression naming the zone, typically `firm.time_zone` off a join.
+ */
+export function zoneDayOf(expr: string, zoneExpr: string, alias: string): string {
+  return `(${expr} AT TIME ZONE ${zoneExpr})::date::text AS ${alias}`;
+}

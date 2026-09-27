@@ -263,6 +263,8 @@ describe("the proposal as the firm's own document", () => {
       "#1 Summary of Fees",
       "A | H3 | Transfer pricing audit — Form 3CEB | Yearly | INR 50,000\n" +
         "B | C2 | TDS/TCS — quarterly returns | Quarterly | INR 25,000",
+      // Per billing frequency, never one mixed net (T6.18, D8).
+      "[Total] INR 25,000 Quarterly + INR 50,000 Yearly",
       "This proposal is valid until 31 October 2026.",
       "#1 Notes",
       "#1 Team Deployment",
@@ -400,6 +402,34 @@ describe("the columns 0084 added", () => {
     });
     expect(running.endsWith(printed)).toBe(true);
     expect(view.addressee?.phone).toMatch(/^\+9198\d{8}$/);
+  });
+
+  it("is dated on the FIRM's day, on the page and on the read alike (T6.18)", async () => {
+    const id = await nexusProposal();
+    // Drafted at 02:30 in Delhi on 28 September: still the 27th in UTC.
+    await owner`UPDATE crm.proposal SET created_at = '2026-09-27T21:00:00Z' WHERE id = ${id}`;
+    await owner`UPDATE tenancy.tenant SET time_zone = 'Asia/Kolkata' WHERE id = ${tenant}`;
+    try {
+      const view = await proposals.describe(tenant, id);
+      expect(view.issuedOn).toBe("2026-09-28");
+      const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
+      expect(described?.document.proposal?.running).toMatch(/· {2}28 September 2026$/);
+    } finally {
+      await owner`UPDATE tenancy.tenant SET time_zone = 'UTC' WHERE id = ${tenant}`;
+    }
+  });
+
+  it("prints what a total leaves out: an unpriced service is counted, not read as zero", async () => {
+    const id = await nexusProposal();
+    const line = (await proposals.describe(tenant, id)).lines[1];
+    await proposals.updateLine(
+      { tenantId: tenant, proposalId: id, lineId: line?.line.id ?? "", unitAmount: null, pricingNote: "As mutually agreed" },
+      SYSTEM_ACTOR,
+    );
+    const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
+    expect(texts(described?.document.proposal?.flow ?? [])).toContain(
+      "[Total] INR 50,000 Yearly, plus 1 service as mutually agreed",
+    );
   });
 
   it("an unpriced line and a line with no frequency each get their own row, counted", async () => {
