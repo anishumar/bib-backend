@@ -836,6 +836,12 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/territory-rules"), "config:read" as const],
   [routeKey("POST", "/api/v1/territory-rules"), "tenant:admin" as const],
 
+  // T6.18: the firm's own companies. READ on party:read, because every author
+  // of a proposal picks an issuer from this list; WRITE on tenant:admin, like
+  // the rule that names them.
+  [routeKey("GET", "/api/v1/firm-entities"), "party:read" as const],
+  [routeKey("POST", "/api/v1/firm-entities"), "tenant:admin" as const],
+  [routeKey("PATCH", "/api/v1/firm-entities/{entityPartyId}"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/firm-entities/preferences"), "config:read" as const],
   [routeKey("POST", "/api/v1/firm-entities/preferences"), "tenant:admin" as const],
 

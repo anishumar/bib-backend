@@ -206,6 +206,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `party.created` | party | An organization or person party was created. |
 | `party.archived` | party | A party was put away — hidden from pickers and lists. NOT a delete: parties are permanent, the row still resolves by id forever, and every document pointing at it still renders. Refused while a lead, proposal, engagement letter, letter line or engagement still points at it (migration 0035) — a DELETED lead, proposal or letter does not count (0086). |
 | `party.unarchived` | party | An archived party was brought back into the pickers and lists. |
+| `firm_entity.edited` | party | One of the firm's OWN companies had its name, entity type or registered address changed (T6.18). Payload: `fields` (which of `name`, `entityType`, `registeredAddress` changed) — never the name or the address, which the row keeps. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
 | `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |

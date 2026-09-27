@@ -247,7 +247,8 @@ export class ProseEdited extends ProposalError {
     super(
       "PROSE_EDITED",
       `${String(editedCount)} line${editedCount === 1 ? "" : "s"} of this proposal's exclusions, ` +
-        `commercials or team ${editedCount === 1 ? "was" : "were"} edited for this client, and ` +
+        `commercials or team ${editedCount === 1 ? "was" : "were"} edited or written for this ` +
+        `client, and ` +
         `changing the issuer replaces the prose with ${issuerName}'s standard set. Send ` +
         `replaceEditedProse: true to replace ${editedCount === 1 ? "it" : "them"} anyway, or keep ` +
         `the issuer.`,

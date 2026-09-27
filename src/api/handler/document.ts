@@ -17,10 +17,17 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { DocumentService } from "../../usecase/document/service";
+import type { FirmEntityService, FirmEntityView } from "../../usecase/document/firm-entities";
 import type { BlockKind, DocumentBlock, StandardBlock } from "../../domain/document/model";
+import {
+  REGISTERED_ADDRESS_LINE_MAX,
+  REGISTERED_ADDRESS_MAX_LINES,
+} from "../../domain/document/model";
 
 export interface DocumentDeps {
   readonly service: DocumentService;
+  /** The firm's own companies (T6.18). */
+  readonly firmEntities: FirmEntityService;
 }
 
 /** ISO 3166-1 alpha-2, or the wildcard that answers for every country the firm
@@ -107,6 +114,150 @@ const setRoute = createRoute({
     404: errorResponse("No such party at this firm"),
   },
 });
+
+// ── The firm's own companies (T6.18) ────────────────────────────────────────
+
+/** A registered address as the firm writes it: the lines it prints, in order. */
+const RegisteredAddressSchema = z
+  .object({
+    lines: z
+      .array(z.string().max(REGISTERED_ADDRESS_LINE_MAX))
+      .max(REGISTERED_ADDRESS_MAX_LINES),
+  })
+  .openapi("RegisteredAddress");
+
+const FirmEntitySchema = z
+  .object({
+    partyId: z.string().uuid(),
+    name: z.string(),
+    /** Where it is registered. Null for a company with no registration
+     *  recorded — every firm's seeded one, until somebody records it. */
+    jurisdiction: z.string().length(2).nullable(),
+    entityType: z.string().nullable(),
+    /** Stored, not printed yet (D15). */
+    registeredAddress: RegisteredAddressSchema.nullable(),
+    /** The organization the firm itself is. */
+    isFirmSelf: z.boolean(),
+    /** The client countries the firm's rule sends to this company. */
+    routedCountries: z.array(z.string()),
+    /** Whether it answers for every country the firm has no company in (`*`). */
+    isFallback: z.boolean(),
+    /** The currency a document it issues starts in (D1): IN INR, AE AED, SG SGD,
+     *  US USD, anything else the firm's reporting currency. The one copy of
+     *  that table — a screen reads it here rather than keeping its own. */
+    defaultCurrency: z.string().length(3),
+  })
+  .openapi("FirmEntity");
+
+const FirmEntitiesResponse = z
+  .object({
+    /** The firm's reporting currency: a document in any other currency needs
+     *  an exchange rate back to this one. */
+    reportingCurrency: z.string().length(3),
+    entities: z.array(FirmEntitySchema),
+  })
+  .openapi("FirmEntitiesResponse");
+
+const CreateFirmEntityRequest = z
+  .object({
+    name: z.string().min(1).max(300),
+    /** Where it is registered — two letters. It becomes the company that
+     *  issues to clients in that country. */
+    jurisdiction: z.string().length(2),
+    /** "Private Limited", "FZE", "Pte. Ltd.", "Inc." — the firm's words. */
+    entityType: z.string().min(1).max(100),
+    registeredAddress: RegisteredAddressSchema.optional(),
+  })
+  .openapi("CreateFirmEntityRequest");
+
+const EditFirmEntityRequest = z
+  .object({
+    name: z.string().min(1).max(300).optional(),
+    entityType: z.string().min(1).max(100).optional(),
+    /** Null clears it. */
+    registeredAddress: RegisteredAddressSchema.nullable().optional(),
+    /** Only for a company with no country recorded yet (send entityType with
+     *  it). A company that has one does not move: JURISDICTION_FIXED. */
+    jurisdiction: z.string().length(2).optional(),
+  })
+  .openapi("EditFirmEntityRequest");
+
+const listEntitiesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/firm-entities",
+  tags: ["firm-entities"],
+  summary: "The firm's own companies",
+  description:
+    "Every company that can issue the firm's documents: the firm itself and each company the " +
+    "firm's rule names for a country. With where each is registered, which client countries " +
+    "it issues for, and the currency its documents start in.",
+  responses: {
+    200: {
+      description: "The firm's companies",
+      content: { "application/json": { schema: FirmEntitiesResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const createEntityRoute = createRoute({
+  method: "post",
+  path: "/api/v1/firm-entities",
+  tags: ["firm-entities"],
+  summary: "Add one of the firm's own companies",
+  description:
+    "Creates the organization, registers it in its country and makes it the company that " +
+    "issues to clients there — in one transaction, with the usual events (party.created, " +
+    "legal_entity.registered, firm_entity_preference.set). Refused while another of the " +
+    "firm's companies already issues for that country.",
+  request: {
+    body: { content: { "application/json": { schema: CreateFirmEntityRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Added", content: { "application/json": { schema: FirmEntitySchema } } },
+    400: errorResponse("A blank name or type, a country code that is not one, or an address too long"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    409: errorResponse("Another of the firm's companies already issues for that country"),
+  },
+});
+
+const editEntityRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/firm-entities/{entityPartyId}",
+  tags: ["firm-entities"],
+  summary: "Change one of the firm's own companies",
+  description:
+    "Its name, entity type and registered address — and, for a company with no country " +
+    "recorded yet, where it is registered.",
+  request: {
+    params: z.object({ entityPartyId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: EditFirmEntityRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: FirmEntitySchema } } },
+    400: errorResponse("Nothing to change, or a value that cannot be stored"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("Not one of the firm's own companies"),
+    409: errorResponse("A company already registered in a country does not move"),
+  },
+});
+
+function toFirmEntityBody(e: FirmEntityView): z.infer<typeof FirmEntitySchema> {
+  return {
+    partyId: e.partyId,
+    name: e.name,
+    jurisdiction: e.jurisdiction,
+    entityType: e.entityType,
+    registeredAddress: e.registeredAddress === null ? null : { lines: [...e.registeredAddress.lines] },
+    isFirmSelf: e.isFirmSelf,
+    routedCountries: [...e.routedCountries],
+    isFallback: e.isFallback,
+    defaultCurrency: e.defaultCurrency,
+  };
+}
 
 // ── The prose blocks (G1.7) ─────────────────────────────────────────────────
 
@@ -336,6 +487,48 @@ const removeDocBlockRoute = createRoute({
 });
 
 export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentDeps): void {
+  app.openapi(listEntitiesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { reportingCurrency, entities } = await deps.firmEntities.list(s.tenantId);
+    return c.json({ reportingCurrency, entities: entities.map(toFirmEntityBody) }, 200);
+  });
+
+  app.openapi(createEntityRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const created = await deps.firmEntities.create(
+      {
+        tenantId: s.tenantId,
+        name: body.name,
+        jurisdiction: body.jurisdiction,
+        entityType: body.entityType,
+        registeredAddress: body.registeredAddress,
+      },
+      s.actor,
+    );
+    return c.json(toFirmEntityBody(created), 201);
+  });
+
+  app.openapi(editEntityRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const saved = await deps.firmEntities.edit(
+      {
+        tenantId: s.tenantId,
+        partyId: c.req.valid("param").entityPartyId,
+        name: body.name,
+        entityType: body.entityType,
+        registeredAddress: body.registeredAddress,
+        jurisdiction: body.jurisdiction,
+      },
+      s.actor,
+    );
+    return c.json(toFirmEntityBody(saved), 200);
+  });
+
   app.openapi(listRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);

@@ -24,7 +24,12 @@ export type DocumentErrorCode =
   | "DOCUMENT_BLOCK_NOT_FOUND"
   | "BLOCKS_ALREADY_SEEDED"
   | "DOCUMENT_BLOCK_FROZEN"
-  | "DOCUMENT_DELETED";
+  | "DOCUMENT_DELETED"
+  | "NOT_A_FIRM_ENTITY"
+  | "INVALID_FIRM_ENTITY"
+  | "COUNTRY_ALREADY_SERVED"
+  | "JURISDICTION_FIXED"
+  | "NOTHING_TO_CHANGE_ON_ENTITY";
 
 /**
  * The firm has published no entity that could issue this document.
@@ -68,6 +73,65 @@ export class FirmEntityNotFound extends DocumentError {
       `No party ${JSON.stringify(partyId)} at this firm, so it cannot be named as the entity ` +
         `that issues documents. The firm's own entities are parties in its own book — create ` +
         `the organization first.`,
+    );
+  }
+}
+
+// ── The firm's own companies (T6.18) ───────────────────────────────────────
+
+/** A party of this firm that is not one of the firm's OWN companies — a client,
+ *  say. Answered as not found: from this route's side, it is not there. */
+export class NotAFirmEntity extends DocumentError {
+  constructor(displayName: string) {
+    super(
+      "NOT_A_FIRM_ENTITY",
+      `${displayName} is not one of the firm's own companies. Our companies are the firm itself ` +
+        `and each company the firm has said issues documents for a country.`,
+    );
+  }
+}
+
+/** A name, type, country or address the firm cannot store as typed. */
+export class InvalidFirmEntity extends DocumentError {
+  constructor(reason: string) {
+    super("INVALID_FIRM_ENTITY", `This company cannot be saved: ${reason}.`);
+  }
+}
+
+/**
+ * A new company for a country another of the firm's companies already issues
+ * for. Creating it would silently move every future client there to the new
+ * one; that is a decision, and it has its own route.
+ */
+export class CountryAlreadyServed extends DocumentError {
+  constructor(country: string, current: string) {
+    super(
+      "COUNTRY_ALREADY_SERVED",
+      `${current} already issues the firm's documents for clients in ${country}, and each of ` +
+        `the firm's companies here is the one for its own country: adding a second company ` +
+        `registered in ${country} would take those clients from ${current} without anybody ` +
+        `deciding it. If ${current} is being replaced, change its name and details instead.`,
+    );
+  }
+}
+
+/** A company does not move country: its registration is what its documents,
+ *  its law and its currency follow from. */
+export class JurisdictionFixed extends DocumentError {
+  constructor(name: string, jurisdiction: string) {
+    super(
+      "JURISDICTION_FIXED",
+      `${name} is registered in ${jurisdiction}, and a company does not move country. If the ` +
+        `firm has a company registered somewhere else, add it as a new company.`,
+    );
+  }
+}
+
+export class NothingToChangeOnEntity extends DocumentError {
+  constructor() {
+    super(
+      "NOTHING_TO_CHANGE_ON_ENTITY",
+      "Nothing to change: send at least one of name, entityType, registeredAddress or jurisdiction.",
     );
   }
 }

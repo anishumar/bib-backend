@@ -6,6 +6,7 @@ import type {
   DocumentBlock,
   DocumentType,
   FirmEntityPreference,
+  RegisteredAddress,
   StandardBlock,
 } from "../../domain/document/model";
 
@@ -165,4 +166,71 @@ export interface DocumentBlockRepository {
    *  grant, so this is the repository's own concern to express honestly — see
    *  the adapter. */
   remove(tenantId: string, id: string): Promise<void>;
+}
+
+// ── The firm's own companies (T6.18) ────────────────────────────────────────
+
+/**
+ * One of the firm's OWN companies, as the "Our companies" screen and the
+ * builder's issuer picker show it — `crm.is_firm_entity`'s list (the firm
+ * itself, and every company a preference row names), with where each is
+ * registered and which client countries it issues for.
+ */
+export interface FirmEntityRecord {
+  readonly partyId: string;
+  readonly name: string;
+  /** Where it is registered — null for a company with no legal-entity row. */
+  readonly jurisdiction: string | null;
+  readonly entityType: string | null;
+  readonly registeredAddress: RegisteredAddress | null;
+  /** The organization the firm itself is (`is_firm_self`). */
+  readonly isFirmSelf: boolean;
+  /** The client countries the firm's rule sends to it, `*` left out. */
+  readonly routedCountries: readonly string[];
+  /** Whether it answers for every country the firm has no company in (`*`). */
+  readonly isFallback: boolean;
+}
+
+/** A new company of the firm's, with the preference row that makes it the
+ *  issuer for its own country — written in ONE transaction. */
+export interface NewFirmEntity {
+  readonly partyId: string;
+  readonly tenantId: string;
+  readonly name: string;
+  readonly jurisdiction: string;
+  readonly entityType: string;
+  readonly registeredAddress: RegisteredAddress | null;
+  readonly preferenceId: string;
+}
+
+/** A change to one of the firm's companies. `register` records the country of
+ *  a company that has none yet — a company does not move country after. */
+export interface FirmEntityChange {
+  readonly name?: string | undefined;
+  readonly entityType?: string | undefined;
+  readonly registeredAddress?: RegisteredAddress | null | undefined;
+  readonly register?: { readonly jurisdiction: string; readonly entityType: string } | undefined;
+}
+
+export interface FirmEntityRepository {
+  list(tenantId: string): Promise<readonly FirmEntityRecord[]>;
+  /** One of the firm's companies, or null for any other party or none. */
+  find(tenantId: string, partyId: string): Promise<FirmEntityRecord | null>;
+  /** Any party's name, for the refusal that says it is not one of ours. */
+  partyName(tenantId: string, partyId: string): Promise<string | null>;
+  /** The firm's reporting currency (`tenancy.tenant`), for `defaultCurrency`. */
+  reportingCurrency(tenantId: string): Promise<string>;
+  /** The company the firm's rule sends a client country to, if one does. */
+  issuerForCountry(
+    tenantId: string,
+    country: string,
+  ): Promise<{ readonly partyId: string; readonly name: string } | null>;
+  /**
+   * The party, the organization, the legal entity and the preference row, in
+   * ONE transaction — a company half-created would be an organization with no
+   * country, or one no rule names, and would sit in the client list. Returns
+   * false, having written nothing, when another company took the country first.
+   */
+  create(e: NewFirmEntity): Promise<boolean>;
+  edit(tenantId: string, partyId: string, change: FirmEntityChange): Promise<void>;
 }

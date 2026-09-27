@@ -451,3 +451,66 @@ export function blocksFor(
         a.id.localeCompare(b.id),
     );
 }
+
+// ── The firm's own companies (T6.18) ────────────────────────────────────────
+
+/**
+ * The currency a document issued by one of the firm's companies defaults to,
+ * from where that company is registered (D1): IN→INR, AE→AED, SG→SGD, US→USD,
+ * and anything else — or a company with no registration recorded — the firm's
+ * reporting currency.
+ *
+ * ONE function, served on `GET /firm-entities` as `defaultCurrency`, so the
+ * builder never keeps a second copy of the table. A DEFAULT: a draft's currency
+ * is still whatever its author chose while it quotes nothing.
+ */
+export const ENTITY_CURRENCY: Readonly<Record<string, string>> = {
+  IN: "INR",
+  AE: "AED",
+  SG: "SGD",
+  US: "USD",
+};
+
+export function defaultCurrencyFor(jurisdiction: string | null, reportingCurrency: string): string {
+  if (jurisdiction === null) return reportingCurrency;
+  return ENTITY_CURRENCY[jurisdiction] ?? reportingCurrency;
+}
+
+/**
+ * A company's registered address, as the firm writes it: the LINES it prints,
+ * top to bottom — "605 Geddes Street", "Wilmington, Delaware 19805", "USA".
+ *
+ * `core.legal_entity.registered_address` has been free-form jsonb since 0002
+ * and nothing wrote it. Lines rather than street/city/postcode fields because
+ * the four countries the firm is registered in do not agree on the fields, and
+ * what the address is FOR is to be printed as the firm spells it. Stored, not
+ * printed yet (D15).
+ */
+export interface RegisteredAddress {
+  readonly lines: readonly string[];
+}
+
+export const REGISTERED_ADDRESS_MAX_LINES = 8;
+export const REGISTERED_ADDRESS_LINE_MAX = 200;
+
+/** Read the stored jsonb back in the shape above, or null for anything else —
+ *  a row written before this shape existed is not guessed at. */
+export function readRegisteredAddress(raw: unknown): RegisteredAddress | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const lines = (raw as { lines?: unknown }).lines;
+  if (!Array.isArray(lines) || !lines.every((l): l is string => typeof l === "string")) return null;
+  return { lines };
+}
+
+/** Why an address cannot be stored, or null when it can. Blank lines are
+ *  dropped by the caller first; what remains must say something. */
+export function registeredAddressProblem(address: RegisteredAddress): string | null {
+  if (address.lines.length === 0) return "an address needs at least one line";
+  if (address.lines.length > REGISTERED_ADDRESS_MAX_LINES) {
+    return `an address has at most ${String(REGISTERED_ADDRESS_MAX_LINES)} lines`;
+  }
+  if (address.lines.some((l) => l.length > REGISTERED_ADDRESS_LINE_MAX)) {
+    return `each address line is at most ${String(REGISTERED_ADDRESS_LINE_MAX)} characters`;
+  }
+  return null;
+}

@@ -135,6 +135,21 @@ describe("changing a draft's issuer (T6.18, D9)", () => {
     expect(event?.payload).toMatchObject({ editedLinesReplaced: 1 });
   });
 
+  it("counts a line written by hand for this client as edited too", async () => {
+    const s = await setup();
+    const id = await draftIndian(s);
+    await s.prose.addBlock({
+      tenantId: TENANT,
+      owner: { kind: "proposal", id },
+      kind: "exclusion",
+      body: "Your Singapore subsidiary is out of scope.",
+      sortOrder: 1,
+    });
+    await expect(
+      s.service.revise({ tenantId: TENANT, proposalId: id, issuingEntityPartyId: UAE }, ACTOR),
+    ).rejects.toMatchObject({ code: "PROSE_EDITED", editedCount: 1 });
+  });
+
   it("refuses a company that is not one of the firm's own", async () => {
     const s = await setup();
     const id = await draftIndian(s);

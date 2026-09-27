@@ -30,6 +30,13 @@ import type {
   StandardBlockRepository,
 } from "../usecase/document/ports";
 import type { Deps } from "../usecase/document/service";
+import type {
+  FirmEntityChange,
+  FirmEntityRecord,
+  FirmEntityRepository,
+  NewFirmEntity,
+} from "../usecase/document/ports";
+import { FirmEntityService } from "../usecase/document/firm-entities";
 import { DocumentService } from "../usecase/document/service";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
@@ -316,5 +323,103 @@ export function makeDocumentIdentity(): {
     firmEntities: fakes.preferences,
     blocks: fakes.blocks,
     standardBlocks: fakes.standardBlocks,
+  };
+}
+
+/**
+ * The firm's own companies in memory (T6.18). Starts with the firm itself —
+ * every firm has that organization — named for the `*` fallback and registered
+ * nowhere, which is the real state of a new tenant.
+ */
+export class FakeFirmEntityRepo implements FirmEntityRepository {
+  readonly entities: FirmEntityRecord[] = [
+    {
+      partyId: SEEDED_FIRM_ENTITY,
+      name: "The Firm Itself",
+      jurisdiction: null,
+      entityType: null,
+      registeredAddress: null,
+      isFirmSelf: true,
+      routedCountries: [],
+      isFallback: true,
+    },
+  ];
+  /** Parties of the firm that are NOT its companies — a client, say. */
+  readonly otherParties = new Map<string, string>();
+  reportingCurrencyCode = "INR";
+  /** Makes the next `create` lose the race for its country. */
+  loseNextRace = false;
+
+  list(): Promise<readonly FirmEntityRecord[]> {
+    return Promise.resolve([...this.entities]);
+  }
+
+  find(_tenantId: string, partyId: string): Promise<FirmEntityRecord | null> {
+    return Promise.resolve(this.entities.find((e) => e.partyId === partyId) ?? null);
+  }
+
+  partyName(_tenantId: string, partyId: string): Promise<string | null> {
+    const entity = this.entities.find((e) => e.partyId === partyId);
+    return Promise.resolve(entity?.name ?? this.otherParties.get(partyId) ?? null);
+  }
+
+  reportingCurrency(): Promise<string> {
+    return Promise.resolve(this.reportingCurrencyCode);
+  }
+
+  issuerForCountry(
+    _tenantId: string,
+    country: string,
+  ): Promise<{ readonly partyId: string; readonly name: string } | null> {
+    const e = this.entities.find((x) => x.routedCountries.includes(country));
+    return Promise.resolve(e === undefined ? null : { partyId: e.partyId, name: e.name });
+  }
+
+  create(e: NewFirmEntity): Promise<boolean> {
+    if (this.loseNextRace) {
+      this.loseNextRace = false;
+      return Promise.resolve(false);
+    }
+    this.entities.push({
+      partyId: e.partyId,
+      name: e.name,
+      jurisdiction: e.jurisdiction,
+      entityType: e.entityType,
+      registeredAddress: e.registeredAddress,
+      isFirmSelf: false,
+      routedCountries: [e.jurisdiction],
+      isFallback: false,
+    });
+    return Promise.resolve(true);
+  }
+
+  edit(_tenantId: string, partyId: string, change: FirmEntityChange): Promise<void> {
+    const at = this.entities.findIndex((e) => e.partyId === partyId);
+    const current = this.entities[at];
+    if (current === undefined) throw new Error(`fake: no firm entity ${partyId}`);
+    this.entities[at] = {
+      ...current,
+      ...(change.name === undefined ? {} : { name: change.name }),
+      ...(change.register === undefined
+        ? {}
+        : { jurisdiction: change.register.jurisdiction, entityType: change.register.entityType }),
+      ...(change.entityType === undefined ? {} : { entityType: change.entityType }),
+      ...(change.registeredAddress === undefined ? {} : { registeredAddress: change.registeredAddress }),
+    };
+    return Promise.resolve();
+  }
+}
+
+export function makeFirmEntityFakes(): {
+  service: FirmEntityService;
+  firmEntities: FakeFirmEntityRepo;
+  events: RecordingEventSink;
+} {
+  const firmEntities = new FakeFirmEntityRepo();
+  const events = new RecordingEventSink();
+  return {
+    service: new FirmEntityService({ firmEntities, ids: new FakeIds(), events }),
+    firmEntities,
+    events,
   };
 }

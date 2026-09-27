@@ -951,11 +951,19 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "INVALID_JURISDICTION":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // T6.18's two about the firm's own companies are things the caller sent:
+      // a name, type, country or address that cannot be stored, and a change
+      // naming nothing.
       case "INVALID_BLOCK_KIND":
       case "LETTER_ONLY_BLOCK_KIND":
       case "BLANK_BLOCK_BODY":
       case "INVALID_SORT_ORDER":
+      case "INVALID_FIRM_ENTITY":
+      case "NOTHING_TO_CHANGE_ON_ENTITY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // NOT_A_FIRM_ENTITY (T6.18): a party of the firm's, but not one of its own
+      // companies — from the Our companies route's side, not there.
+      case "NOT_A_FIRM_ENTITY":
       case "FIRM_ENTITY_NOT_FOUND":
       case "STANDARD_BLOCK_NOT_FOUND":
       case "DOCUMENT_BLOCK_NOT_FOUND":
@@ -967,7 +975,11 @@ export function mapError(err: unknown): MappedError {
       // DOCUMENT_BLOCK_FROZEN is a CONFLICT and not a FORBIDDEN: the caller is
       // permitted, the request is well formed, and it is the STATE of the
       // document that refuses — resending it changes nothing. DOCUMENT_DELETED
-      // (0087) is the same answer about a draft deleted as a mistake.
+      // (0087) is the same answer about a draft deleted as a mistake. T6.18's
+      // two are the firm's own configuration answering: a country another of
+      // its companies already issues for, and a company that does not move.
+      case "COUNTRY_ALREADY_SERVED":
+      case "JURISDICTION_FIXED":
       case "NO_ISSUING_ENTITY":
       case "BLOCKS_ALREADY_SEEDED":
       case "DOCUMENT_BLOCK_FROZEN":

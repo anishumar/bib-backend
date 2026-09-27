@@ -130,7 +130,7 @@ import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
-import { makeDocumentFakes } from "../../src/testfakes/document";
+import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import {
@@ -503,7 +503,10 @@ function deps(): RouterDeps {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions }),
     },
-    document: { service: new DocumentService(makeDocumentFakes()) },
+    document: {
+      service: new DocumentService(makeDocumentFakes()),
+      firmEntities: makeFirmEntityFakes().service,
+    },
     dashboard: {
       service: new DashboardService({ dashboards: new FakeDashboardRepo() }),
       authz: new AuthzService({ permissions: permissions }),

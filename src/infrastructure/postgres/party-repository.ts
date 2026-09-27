@@ -63,6 +63,51 @@ interface LegalEntityRow {
   status: LegalEntityStatus;
 }
 
+/**
+ * The party and its organization row, on a connection the caller holds.
+ *
+ * Exported for the one writer that must create an organization in the same
+ * transaction as other rows — one of the firm's own companies with its
+ * registration and the rule that names it (T6.18) — so the statements still
+ * live in this file.
+ */
+export async function insertOrganization(db: Db, o: NewOrganization): Promise<Organization> {
+  await db`
+    INSERT INTO core.party (id, tenant_id, kind, display_name)
+    VALUES (${o.partyId}, ${o.tenantId}, 'organization', ${o.displayName})
+  `;
+  const [row] = await db<OrgRow[]>`
+    INSERT INTO core.organization (party_id, tenant_id, legal_name, trade_name, industry, website)
+    VALUES (${o.partyId}, ${o.tenantId}, ${o.legalName}, ${o.tradeName}, ${o.industry}, ${o.website})
+    RETURNING party_id, tenant_id, legal_name, trade_name, industry, website, is_firm_self
+  `;
+  if (!row) throw new Error("organization insert returned no row");
+  return toOrg(row);
+}
+
+/** The legal-entity row, on a connection the caller holds — see above. */
+export async function insertLegalEntity(db: Db, e: NewLegalEntity): Promise<LegalEntity> {
+  // Hand postgres.js the raw object via db.json so it serialises ONCE — a
+  // pre-stringified value plus a ::jsonb cast double-encodes into a JSON
+  // string scalar. null stays a SQL NULL.
+  const address =
+    e.registeredAddress === null
+      ? null
+      : db.json(e.registeredAddress as Parameters<typeof db.json>[0]);
+  const [row] = await db<LegalEntityRow[]>`
+    INSERT INTO core.legal_entity
+      (party_id, tenant_id, jurisdiction, entity_type, incorporated_on, financial_year_end, registered_address)
+    VALUES
+      (${e.partyId}, ${e.tenantId}, ${e.jurisdiction}, ${e.entityType},
+       ${e.incorporatedOn}, ${e.financialYearEnd}, ${address})
+    RETURNING party_id, tenant_id, jurisdiction, entity_type,
+              incorporated_on::text AS incorporated_on, financial_year_end,
+              registered_address, status
+  `;
+  if (!row) throw new Error("legal_entity insert returned no row");
+  return toLegalEntity(row);
+}
+
 function toParty(r: PartyRow): Party {
   return {
     id: r.id,
@@ -119,19 +164,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   constructor(private readonly app: Db) {}
 
   async createOrganization(o: NewOrganization): Promise<Organization> {
-    return withTenant(this.app, o.tenantId, async (db) => {
-      await db`
-        INSERT INTO core.party (id, tenant_id, kind, display_name)
-        VALUES (${o.partyId}, ${o.tenantId}, 'organization', ${o.displayName})
-      `;
-      const [row] = await db<OrgRow[]>`
-        INSERT INTO core.organization (party_id, tenant_id, legal_name, trade_name, industry, website)
-        VALUES (${o.partyId}, ${o.tenantId}, ${o.legalName}, ${o.tradeName}, ${o.industry}, ${o.website})
-        RETURNING party_id, tenant_id, legal_name, trade_name, industry, website, is_firm_self
-      `;
-      if (!row) throw new Error("organization insert returned no row");
-      return toOrg(row);
-    });
+    return withTenant(this.app, o.tenantId, (db) => insertOrganization(db, o));
   }
 
   async createPerson(p: NewPerson): Promise<Person> {
@@ -151,27 +184,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   }
 
   async addLegalEntity(e: NewLegalEntity): Promise<LegalEntity> {
-    return withTenant(this.app, e.tenantId, async (db) => {
-      // Hand postgres.js the raw object via db.json so it serialises ONCE — a
-      // pre-stringified value plus a ::jsonb cast double-encodes into a JSON
-      // string scalar. null stays a SQL NULL.
-      const address =
-        e.registeredAddress === null
-          ? null
-          : db.json(e.registeredAddress as Parameters<typeof db.json>[0]);
-      const [row] = await db<LegalEntityRow[]>`
-        INSERT INTO core.legal_entity
-          (party_id, tenant_id, jurisdiction, entity_type, incorporated_on, financial_year_end, registered_address)
-        VALUES
-          (${e.partyId}, ${e.tenantId}, ${e.jurisdiction}, ${e.entityType},
-           ${e.incorporatedOn}, ${e.financialYearEnd}, ${address})
-        RETURNING party_id, tenant_id, jurisdiction, entity_type,
-                  incorporated_on::text AS incorporated_on, financial_year_end,
-                  registered_address, status
-      `;
-      if (!row) throw new Error("legal_entity insert returned no row");
-      return toLegalEntity(row);
-    });
+    return withTenant(this.app, e.tenantId, (db) => insertLegalEntity(db, e));
   }
 
   /**

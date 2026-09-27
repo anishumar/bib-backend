@@ -588,7 +588,9 @@ export class ProposalService {
       const owner = { kind: "proposal" as const, id: proposal.id };
       const registered = await this.deps.documents.issuerJurisdiction(input.tenantId, newIssuer);
       const current = await this.deps.documents.listBlocks(input.tenantId, owner);
-      editedReplaced = current.filter((b) => b.isEdited).length;
+      // Written for this client either way: a house line reworded, or a line
+      // added by hand that no standard row stands behind.
+      editedReplaced = current.filter((b) => b.isEdited || b.sourceId === null).length;
       if (editedReplaced > 0 && input.replaceEditedProse !== true) {
         throw new ProseEdited(editedReplaced, registered.displayName);
       }

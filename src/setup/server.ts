@@ -91,6 +91,7 @@ import {
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
+import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
 import { PostgresDocumentStoreRepository } from "../infrastructure/postgres/document-store-repository";
 import { Sha256ByteDigest } from "../infrastructure/storage/filesystem-blob-store";
@@ -159,6 +160,7 @@ import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
 import { DocumentService } from "../usecase/document/service";
+import { FirmEntityService } from "../usecase/document/firm-entities";
 import { IdentityService } from "../usecase/identity/service";
 import type { TenancyDeps } from "../api/handler/tenancy";
 import { devHeaderResolver, firstOf, sessionResolver } from "../api/principal";
@@ -1236,7 +1238,16 @@ export function wire(cfg: Config, log: Logger): Wired {
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
-        document: { service: documents },
+        document: {
+          service: documents,
+          // The firm's own companies (T6.18): created in one transaction, so
+          // an adapter of their own over the party and preference tables.
+          firmEntities: new FirmEntityService({
+            firmEntities: new PostgresFirmEntityRepository(pools.app),
+            ids: systemIds,
+            events: ledger,
+          }),
+        },
         invoice: { service: invoices, dunning, authz },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
