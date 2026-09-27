@@ -47,6 +47,7 @@ import {
   InvalidSortOrder,
   LetterOnlyBlockKind,
   NoIssuingEntity,
+  NotAFirmEntity,
   StandardBlockNotFound,
 } from "../../domain/document/errors";
 import type {
@@ -189,9 +190,15 @@ export class DocumentService {
   // ── The prose blocks (G1.7) ──────────────────────────────────────────────
 
   /** The firm's standard set, retired lines included — the screen that
-   *  maintains it has to show what it stopped printing. */
-  async listStandardBlocks(tenantId: string): Promise<readonly StandardBlock[]> {
-    return this.deps.standardBlocks.list(tenantId);
+   *  maintains it has to show what it stopped printing. With a company named
+   *  (T6.18), that company's own lines only: the screen's tab for it. */
+  async listStandardBlocks(
+    tenantId: string,
+    issuingEntityPartyId?: string,
+  ): Promise<readonly StandardBlock[]> {
+    const rows = await this.deps.standardBlocks.list(tenantId);
+    if (issuingEntityPartyId === undefined) return rows;
+    return rows.filter((b) => b.issuingEntityPartyId === issuingEntityPartyId);
   }
 
   async addStandardBlock(
@@ -202,6 +209,8 @@ export class DocumentService {
       readonly isHeading?: boolean | undefined;
       readonly sortOrder: number;
       readonly jurisdiction?: string | null | undefined;
+      /** One of the firm's companies (T6.18); absent or null is the default set. */
+      readonly issuingEntityPartyId?: string | null | undefined;
     },
     actor: Actor,
   ): Promise<StandardBlock> {
@@ -209,6 +218,10 @@ export class DocumentService {
     const body = this.bodyOrThrow(input.body);
     this.sortOrderOrThrow(input.sortOrder);
     const jurisdiction = this.blockJurisdictionOrThrow(input.jurisdiction ?? null);
+    const issuingEntityPartyId = await this.blockIssuerOrThrow(
+      input.tenantId,
+      input.issuingEntityPartyId ?? null,
+    );
 
     const saved = await this.deps.standardBlocks.add({
       id: this.deps.ids.newId(),
@@ -218,6 +231,7 @@ export class DocumentService {
       isHeading: input.isHeading ?? false,
       sortOrder: input.sortOrder,
       jurisdiction,
+      issuingEntityPartyId,
     });
 
     await this.deps.events.recordEvent({
@@ -234,6 +248,7 @@ export class DocumentService {
         kind: saved.kind,
         sortOrder: saved.sortOrder,
         jurisdiction: saved.jurisdiction,
+        issuingEntityPartyId: saved.issuingEntityPartyId,
         isHeading: saved.isHeading,
         isActive: saved.isActive,
       },
@@ -267,6 +282,9 @@ export class DocumentService {
       ...(edit.jurisdiction === undefined
         ? {}
         : { jurisdiction: this.blockJurisdictionOrThrow(edit.jurisdiction) }),
+      ...(edit.issuingEntityPartyId === undefined
+        ? {}
+        : { issuingEntityPartyId: await this.blockIssuerOrThrow(tenantId, edit.issuingEntityPartyId) }),
       ...(edit.isActive === undefined ? {} : { isActive: edit.isActive }),
     };
 
@@ -280,11 +298,24 @@ export class DocumentService {
         kind: saved.kind,
         sortOrder: saved.sortOrder,
         jurisdiction: saved.jurisdiction,
+        issuingEntityPartyId: saved.issuingEntityPartyId,
         isHeading: saved.isHeading,
         isActive: saved.isActive,
       },
     });
     return saved;
+  }
+
+  /**
+   * A standard line's company (T6.18): one of the FIRM's own, or null for the
+   * default set. A client named here would put the firm's terms under a
+   * client's name, which is the mistake F-10-1 closed for issuers.
+   */
+  private async blockIssuerOrThrow(tenantId: string, partyId: string | null): Promise<string | null> {
+    if (partyId === null) return null;
+    if (await this.deps.preferences.isFirmEntity(tenantId, partyId)) return partyId;
+    const party = await this.deps.preferences.findEntity(tenantId, partyId);
+    throw party === null ? new FirmEntityNotFound(partyId) : new NotAFirmEntity(party.displayName);
   }
 
   /**
@@ -304,11 +335,14 @@ export class DocumentService {
     tenantId: string,
     owner: BlockOwner,
     jurisdiction: string,
+    /** The document's issuing company (T6.18): its own lines, per kind, where
+     *  it has any. Null reads the default set alone. */
+    issuingEntityPartyId: string | null = null,
   ): Promise<readonly DocumentBlock[]> {
     const existing = await this.deps.blocks.list(tenantId, owner);
     if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
 
-    const rows = await this.standardProse(tenantId, owner, jurisdiction);
+    const rows = await this.standardProse(tenantId, owner, jurisdiction, issuingEntityPartyId);
     if (rows.length === 0) return [];
     return this.deps.blocks.addMany(rows);
   }
@@ -326,9 +360,15 @@ export class DocumentService {
     tenantId: string,
     owner: BlockOwner,
     jurisdiction: string,
+    issuingEntityPartyId: string | null = null,
   ): Promise<readonly NewDocumentBlock[]> {
     const standard = await this.deps.standardBlocks.list(tenantId);
-    const chosen = blocksFor(standard, normalizeJurisdiction(jurisdiction), owner.kind);
+    const chosen = blocksFor(
+      standard,
+      normalizeJurisdiction(jurisdiction),
+      owner.kind,
+      issuingEntityPartyId,
+    );
 
     // Renumbered from 1 WITHIN EACH KIND rather than carrying the standard set's
     // own numbers across. The standard list is not contiguous — a firm inserts

@@ -112,6 +112,9 @@ export interface DocumentIdentity {
     tenantId: string,
     owner: { readonly kind: "engagement_letter"; readonly id: string },
     jurisdiction: string,
+    /** The issuing company (T6.18): its own standard lines, per kind, where it
+     *  has any, and the firm's default ones where it has none. */
+    issuingEntityPartyId: string,
   ): Promise<unknown>;
   /**
    * What this document's prose says NOW — the copy it owns, not the firm's

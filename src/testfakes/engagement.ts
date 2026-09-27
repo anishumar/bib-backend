@@ -58,6 +58,7 @@ import type {
 import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
 import { RecordingEventSink } from "./ledger";
+import type { DocumentService } from "../usecase/document/service";
 import { makeDocumentIdentity } from "./document";
 import type { FakePreferenceRepo } from "./document";
 
@@ -998,6 +999,9 @@ export function makeEngagementFakes(): Deps & {
   quotes: FakeAcceptedQuotes;
   /** The firm's issuing-entity rule, so a test can change it or empty it. */
   firmEntities: FakePreferenceRepo;
+  /** The same DocumentService `documents` is, as the SERVICE — so a test can
+   *  write the firm's standard prose a letter is seeded from (T6.18). */
+  prose: DocumentService;
   /** Who binds the firm, so a test can name one — or leave nobody. */
   firm: FakeFirmSignatory;
   events: RecordingEventSink;
@@ -1016,6 +1020,7 @@ export function makeEngagementFakes(): Deps & {
     letters,
     library,
     documents: identity.documents,
+    prose: identity.documents,
     parties: new FakePartyStanding(),
     structure: new FakeClientStructure(),
     timeZones: new FakeFirmTimeZone(),

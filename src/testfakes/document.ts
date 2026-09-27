@@ -117,9 +117,14 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
     );
   }
 
-  findEntity(_tenantId: string, partyId: string): Promise<FirmEntity | null> {
-    const name = this.partyNames.get(partyId);
-    return Promise.resolve(name === undefined ? null : this.entityOf(partyId));
+  findEntity(tenantId: string, partyId: string): Promise<FirmEntity | null> {
+    // A party the rule names exists — the preference row's key says so — even
+    // when a test gave it no name.
+    const known =
+      this.partyNames.has(partyId) ||
+      partyId === this.firmSelfPartyId ||
+      this.rowsFor(tenantId).some((r) => r.firmEntityPartyId === partyId);
+    return Promise.resolve(known ? this.entityOf(partyId) : null);
   }
 
   /** One place the two maps are read together, so a name without a
@@ -209,6 +214,9 @@ export class FakeStandardBlockRepo implements StandardBlockRepository {
       // same distinction the adapter's CASE expression exists for, kept here so
       // the fake cannot disagree with it.
       ...(e.jurisdiction === undefined ? {} : { jurisdiction: e.jurisdiction }),
+      ...(e.issuingEntityPartyId === undefined
+        ? {}
+        : { issuingEntityPartyId: e.issuingEntityPartyId }),
       ...(e.isActive === undefined ? {} : { isActive: e.isActive }),
     };
     this.rows[at] = row;

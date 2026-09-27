@@ -92,6 +92,9 @@ export interface DocumentIdentity {
     tenantId: string,
     owner: { readonly kind: "proposal"; readonly id: string },
     jurisdiction: string,
+    /** The issuing company (T6.18): its own standard lines, per kind, where it
+     *  has any, and the firm's default lines where it has none. */
+    issuingEntityPartyId: string,
   ): Promise<unknown>;
   /**
    * What this document's prose says NOW — the copy it owns, not the firm's
@@ -111,6 +114,7 @@ export interface DocumentIdentity {
     tenantId: string,
     owner: { readonly kind: "proposal"; readonly id: string },
     jurisdiction: string,
+    issuingEntityPartyId: string,
   ): Promise<readonly ProseLine[]>;
   /** One of the firm's companies by name, and where it is registered — null
    *  when it has no legal-entity record. */

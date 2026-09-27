@@ -48,6 +48,7 @@ interface StandardBlockRow {
   is_heading: boolean;
   sort_order: number;
   jurisdiction: string | null;
+  issuing_entity_party_id: string | null;
   is_active: boolean;
 }
 
@@ -60,12 +61,14 @@ function toStandardBlock(r: StandardBlockRow): StandardBlock {
     isHeading: r.is_heading,
     sortOrder: r.sort_order,
     jurisdiction: r.jurisdiction,
+    issuingEntityPartyId: r.issuing_entity_party_id,
     isActive: r.is_active,
   };
 }
 
 const STANDARD_COLUMNS =
-  "id, tenant_id, kind, body, is_heading, sort_order, jurisdiction, is_active";
+  "id, tenant_id, kind, body, is_heading, sort_order, jurisdiction, issuing_entity_party_id, " +
+  "is_active";
 
 export class PostgresStandardBlockRepository implements StandardBlockRepository {
   constructor(private readonly app: Db) {}
@@ -79,7 +82,7 @@ export class PostgresStandardBlockRepository implements StandardBlockRepository 
         -- what the firm stopped printing, and "where did this line on a letter
         -- come from" has to resolve for a document issued while it was live.
         -- The filtering that matters is blocksFor() in the domain, at COPY time.
-        ORDER BY kind, sort_order, id
+        ORDER BY kind, issuing_entity_party_id NULLS FIRST, sort_order, id
       `;
       return rows.map(toStandardBlock);
     });
@@ -99,9 +102,9 @@ export class PostgresStandardBlockRepository implements StandardBlockRepository 
     return withTenant(this.app, b.tenantId, async (db) => {
       const [row] = await db<StandardBlockRow[]>`
         INSERT INTO crm.standard_document_block
-          (id, tenant_id, kind, body, is_heading, sort_order, jurisdiction)
+          (id, tenant_id, kind, body, is_heading, sort_order, jurisdiction, issuing_entity_party_id)
         VALUES (${b.id}, ${b.tenantId}, ${b.kind}, ${b.body}, ${b.isHeading}, ${b.sortOrder},
-                ${b.jurisdiction})
+                ${b.jurisdiction}, ${b.issuingEntityPartyId})
         RETURNING ${db.unsafe(STANDARD_COLUMNS)}
       `;
       if (!row) throw new Error("standard document block insert returned no row");
@@ -124,6 +127,10 @@ export class PostgresStandardBlockRepository implements StandardBlockRepository 
                jurisdiction = CASE WHEN ${e.jurisdiction !== undefined}
                                    THEN ${e.jurisdiction ?? null}::text
                                    ELSE jurisdiction END,
+               -- The same flag, for the same reason: NULL is the default set.
+               issuing_entity_party_id = CASE WHEN ${e.issuingEntityPartyId !== undefined}
+                                              THEN ${e.issuingEntityPartyId ?? null}::uuid
+                                              ELSE issuing_entity_party_id END,
                is_active    = COALESCE(${e.isActive ?? null}, is_active)
          WHERE id = ${id}
         RETURNING ${db.unsafe(STANDARD_COLUMNS)}

@@ -289,6 +289,10 @@ const StandardBlockSchema = z
     /** NULL prints everywhere; a code prints only on documents written for that
      *  country. "Exclusive of GST" on a UAE proposal is the mistake it stops. */
     jurisdiction: z.string().length(2).nullable(),
+    /** Which of the firm's own companies this line belongs to (T6.18), or null
+     *  for the firm-wide default set. A document takes its issuer's own lines
+     *  of a kind when the issuer has any, and the default lines otherwise. */
+    issuingEntityPartyId: z.string().uuid().nullable(),
     /** Retired, never deleted. A line the firm moved on from stays readable,
      *  because documents issued while it was in force copied it. */
     isActive: z.boolean(),
@@ -306,6 +310,8 @@ const AddStandardBlockRequest = z
     isHeading: z.boolean().optional(),
     sortOrder: z.number().int().min(1),
     jurisdiction: z.string().length(2).nullable().optional(),
+    /** One of the firm's own companies (T6.18); absent or null is the default set. */
+    issuingEntityPartyId: z.string().uuid().nullable().optional(),
   })
   .openapi("AddStandardDocumentBlockRequest");
 
@@ -317,6 +323,8 @@ const EditStandardBlockRequest = z
     /** `null` sets it back to "print everywhere", which is a real edit and a
      *  different thing from leaving the field out. */
     jurisdiction: z.string().length(2).nullable().optional(),
+    /** `null` moves the line to the default set (T6.18). */
+    issuingEntityPartyId: z.string().uuid().nullable().optional(),
     isActive: z.boolean().optional(),
   })
   .openapi("EditStandardDocumentBlockRequest");
@@ -329,7 +337,11 @@ const listBlocksRoute = createRoute({
   description:
     "The set COPIED onto each new proposal and engagement letter. Editing it changes the next " +
     "document and never one already issued. Retired lines are included: a document issued " +
-    "while one was live copied it, and 'where did this line come from' has to resolve.",
+    "while one was live copied it, and 'where did this line come from' has to resolve. With " +
+    "`issuingEntityPartyId`, that company's own lines only (T6.18).",
+  request: {
+    query: z.object({ issuingEntityPartyId: z.string().uuid().optional() }),
+  },
   responses: {
     200: {
       description: "The standard set",
@@ -353,6 +365,7 @@ const addBlockRoute = createRoute({
     400: errorResponse("Not a block kind, a blank body, or a bad sort order"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("The company named is not one of the firm's own"),
   },
 });
 
@@ -373,7 +386,7 @@ const editBlockRoute = createRoute({
     400: errorResponse("A blank body or a bad sort order"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
-    404: errorResponse("No such standard block at this firm"),
+    404: errorResponse("No such standard block at this firm, or the company named is not one of the firm's own"),
   },
 });
 
@@ -576,7 +589,8 @@ export function registerDocumentRoutes(app: OpenAPIHono<AppEnv>, deps: DocumentD
   app.openapi(listBlocksRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const blocks = await deps.service.listStandardBlocks(s.tenantId);
+    const { issuingEntityPartyId } = c.req.valid("query");
+    const blocks = await deps.service.listStandardBlocks(s.tenantId, issuingEntityPartyId);
     return c.json({ blocks: blocks.map(toStandardBlockBody) }, 200);
   });
 
@@ -650,6 +664,7 @@ function toStandardBlockBody(b: StandardBlock): {
   isHeading: boolean;
   sortOrder: number;
   jurisdiction: string | null;
+  issuingEntityPartyId: string | null;
   isActive: boolean;
 } {
   return {
@@ -659,6 +674,7 @@ function toStandardBlockBody(b: StandardBlock): {
     isHeading: b.isHeading,
     sortOrder: b.sortOrder,
     jurisdiction: b.jurisdiction,
+    issuingEntityPartyId: b.issuingEntityPartyId,
     isActive: b.isActive,
   };
 }

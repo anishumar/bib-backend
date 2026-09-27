@@ -103,6 +103,8 @@ export interface NewStandardBlock {
   readonly isHeading: boolean;
   readonly sortOrder: number;
   readonly jurisdiction: string | null;
+  /** One of the firm's companies (T6.18), or null for the default set. */
+  readonly issuingEntityPartyId: string | null;
 }
 
 export interface StandardBlockEdit {
@@ -110,6 +112,8 @@ export interface StandardBlockEdit {
   readonly isHeading?: boolean | undefined;
   readonly sortOrder?: number | undefined;
   readonly jurisdiction?: string | null | undefined;
+  /** `null` moves it to the default set — a real edit, like `jurisdiction`. */
+  readonly issuingEntityPartyId?: string | null | undefined;
   readonly isActive?: boolean | undefined;
 }
 

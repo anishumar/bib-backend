@@ -178,6 +178,7 @@ describe("blocksFor — which lines a document written for a country gets", () =
     isHeading: false,
     sortOrder: 1,
     jurisdiction: null,
+    issuingEntityPartyId: null,
     isActive: true,
     ...over,
   });
@@ -422,8 +423,8 @@ describe("the cover letter and the acceptance (0083)", () => {
 
   it("are filtered by the rule itself, not only by the service", () => {
     const standard: StandardBlock[] = [
-      { id: "c", tenantId: TENANT, kind: "cover", body: "x", isHeading: false, sortOrder: 1, jurisdiction: null, isActive: true },
-      { id: "e", tenantId: TENANT, kind: "exclusion", body: "y", isHeading: false, sortOrder: 1, jurisdiction: null, isActive: true },
+      { id: "c", tenantId: TENANT, kind: "cover", body: "x", isHeading: false, sortOrder: 1, jurisdiction: null, issuingEntityPartyId: null, isActive: true },
+      { id: "e", tenantId: TENANT, kind: "exclusion", body: "y", isHeading: false, sortOrder: 1, jurisdiction: null, issuingEntityPartyId: null, isActive: true },
     ];
     expect(blocksFor(standard, "IN", "proposal").map((b) => b.id)).toEqual(["e"]);
     expect(blocksFor(standard, "IN", "engagement_letter").map((b) => b.id)).toEqual(["e", "c"]);

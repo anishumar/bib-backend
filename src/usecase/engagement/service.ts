@@ -536,10 +536,12 @@ export class EngagementService {
     // stores its OWN jurisdiction, chosen at drafting, so unlike a proposal
     // there is always an answer here — and a letter is the document where
     // getting it wrong is expensive.
+    // Whose lines: the issuing company's own where it has any (T6.18, D5).
     await this.deps.documents.seedBlocks(
       letter.tenantId,
       { kind: "engagement_letter", id: letter.id },
       letter.jurisdiction,
+      letter.issuingEntityPartyId,
     );
 
     await this.deps.events.recordEvent({

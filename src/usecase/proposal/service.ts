@@ -481,16 +481,23 @@ export class ProposalService {
     // row exists, because the blocks hang off it; before the event, because a
     // drafted proposal is one that already says what the firm always says.
     //
-    // The jurisdiction is the CLIENT's when it is known, and `*` when it is
-    // not. That is not a shrug: `blocksFor` copies an unscoped line always and
-    // a scoped line only for its own country, so an unknown country takes the
-    // lines that are true everywhere and leaves out the ones that might not be.
-    // The alternative — copying everything — is how "exclusive of GST" reaches
-    // a UAE proposal.
+    // WHOSE lines and WHICH country's (T6.18). The ISSUER's own standard
+    // lines where it has any of a kind, the firm's default ones where it has
+    // none (D5). The country is the CLIENT's when it is known, else where the
+    // issuer is registered, else `*` — `blocksFor` copies an unscoped line
+    // always and a scoped one only for its own country, so an unknown country
+    // takes the lines that are true everywhere. Before T6.18 an unknown client
+    // country was always `*`, and the builder never sends one, so an Indian
+    // company's India-only lines never reached a proposal it issued.
+    const registered = await this.deps.documents.issuerJurisdiction(
+      proposal.tenantId,
+      issuingEntityPartyId,
+    );
     await this.deps.documents.seedBlocks(
       proposal.tenantId,
       { kind: "proposal", id: proposal.id },
-      input.clientJurisdiction ?? ANY_JURISDICTION,
+      this.proseJurisdiction(input.clientJurisdiction, registered.jurisdiction),
+      issuingEntityPartyId,
     );
 
     await this.deps.events.recordEvent({
@@ -598,6 +605,7 @@ export class ProposalService {
         input.tenantId,
         owner,
         this.proseJurisdiction(input.clientJurisdiction, registered.jurisdiction),
+        newIssuer,
       );
       change.issuingEntityPartyId = newIssuer;
     }

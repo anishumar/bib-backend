@@ -380,6 +380,11 @@ export interface StandardBlock {
    *  country. "All fees are exclusive of GST as applicable" is wrong on a UAE
    *  proposal, which is a mistake the firm already caught in its own template. */
   readonly jurisdiction: string | null;
+  /**
+   * Which of the firm's OWN companies this line belongs to (T6.18, 0312), or
+   * null for the firm-wide DEFAULT set. See `blocksFor` for how the two meet.
+   */
+  readonly issuingEntityPartyId: string | null;
   /** Retired, never deleted — the same distinction `staff_grade` draws. A line
    *  the firm has moved on from stays readable, because documents issued while
    *  it was in force copied it and a reader asking where a line came from needs
@@ -437,12 +442,34 @@ export function blocksFor(
   standard: readonly StandardBlock[],
   jurisdiction: string,
   document: DocumentType,
+  /**
+   * WHICH COMPANY ISSUES THE DOCUMENT (T6.18, D5), and the rule is PER KIND:
+   * when that company has ANY active line of a kind, its lines are the
+   * document's set of that kind; otherwise the default (null) lines are. So a
+   * UAE company that wrote its own exclusions and nothing else gets its own
+   * exclusions and the firm's default commercials and team. Another company's
+   * lines never reach it. Null reads the default set alone.
+   *
+   * The jurisdiction filter then applies INSIDE whichever set was chosen: a
+   * company's own line scoped to a country prints only there, like any other.
+   */
+  issuingEntityPartyId: string | null = null,
 ): readonly StandardBlock[] {
   // A proposal never carries the letter's cover or acceptance (0083).
   const kinds = blockKindsFor(document);
-  return standard
-    .filter((b) => kinds.includes(b.kind))
-    .filter((b) => b.isActive && (b.jurisdiction === null || b.jurisdiction === jurisdiction))
+  const live = standard.filter((b) => kinds.includes(b.kind) && b.isActive);
+  const ownKinds = new Set(
+    live
+      .filter((b) => issuingEntityPartyId !== null && b.issuingEntityPartyId === issuingEntityPartyId)
+      .map((b) => b.kind),
+  );
+  return live
+    .filter((b) =>
+      ownKinds.has(b.kind)
+        ? b.issuingEntityPartyId === issuingEntityPartyId
+        : b.issuingEntityPartyId === null,
+    )
+    .filter((b) => b.jurisdiction === null || b.jurisdiction === jurisdiction)
     .slice()
     .sort(
       (a, b) =>
