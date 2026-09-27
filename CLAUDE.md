@@ -394,13 +394,18 @@ Two rules that came out of it, and both are now enforced by tests:
 - Idempotency by derived id (`platform/ids.ts` `derivedId`) on external callbacks.
 - PII stays out of any append-only log (erasability).
 - **Nothing is hard-deleted, and nothing in `core` is soft-deleted either.** `bib_app` holds
-  no DELETE grant on a single table in this database, so removal is impossible at the
-  database level rather than merely unimplemented. The only soft deletes in the product are
+  no DELETE grant on any business table in this database, so removal is impossible at the
+  database level rather than merely unimplemented. (It may delete from exactly four tables,
+  none of them a record of the firm's business: checklist lines and task dependencies (0051),
+  which carry no history of their own, and dead sessions and sign-in links (0075).) The soft
+  deletes in the product are
   `removed_at` on `crm.proposal_line`, `crm.engagement_letter_line`, `crm.document_block` and
-  `crm.engagement_letter_fee_group` (0083) — all four the same thing, a line struck off a
-  document before it went out (a fee group is a row of the letter's Summary of Fees). A fifth
-  needs the same argument: it is a LINE OF A DOCUMENT, removed while that document was a draft.
-  Every state transition writes an event naming its actor.
+  `crm.engagement_letter_fee_group` (0083) — a line struck off a document before it went out —
+  and, since 0086, `deleted_at` on `crm.lead`, `crm.proposal` and `crm.engagement_letter`: a
+  WHOLE document struck off before it went out, and the lead it would have come from. Both rest
+  on one argument, and another needs the same one: it was never OFFERED to anybody, and nothing
+  rests on it. See "Deleting a mistake" below. Every state transition writes an event naming
+  its actor.
 
 **Parties are permanent — there is no `deleted_at` in `core` and there never will be (G0.3).**
 A client created by mistake is ARCHIVED, not removed: `core.party.archived_at` (migration 0035)
@@ -412,7 +417,8 @@ party by id ALWAYS returns it, archived or not — that asymmetry is the whole d
 why this is one column on one table rather than `deleted_at` across `core` behind a filter every
 read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
 proposal, a proposal line's entity, an engagement letter, a letter line's entity or an engagement
-still points at the party, and the refusal names them. A trigger rather than a service check
+still points at the party, and the refusal names them — a lead, proposal or letter DELETED as a
+mistake (0086), and a line of one, does not count. A trigger rather than a service check
 because an import or an agent walks straight past a service, and it costs nothing on ordinary
 writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
 a rename fires nothing. **Read that guard as "you cannot put away a client you are still working
@@ -434,6 +440,86 @@ the party by id, never by name, because it reaches a server log. NOT covered, de
 firm's own issuing entity, a letter's care-of person, and the delivery tables, which are produced
 from an engagement that already cannot exist for an archived party. The client import already
 refused an archived company ("Unarchive it first").
+
+## Deleting a mistake — a lead, a draft proposal, a draft letter (0086)
+
+**Decided 2026-09-27 (user): something created by mistake can be DELETED while nothing depends on
+it and it has not left the firm, and a deletion HIDES rather than erases** — "gone from every list,
+picker and count; the audit log notes who deleted it". Every other way this product puts something
+away records a BUSINESS OUTCOME (`lost`, `abandoned`, `rejected`, `expired`, `withdrawn`,
+`cancelled`), and a mistake is none of them: a test lead closed as `lost` is a lost deal that never
+existed — the very number the missing DELETE grant protects — and a mistaken draft proposal had no
+way out at all, since a draft can only become `sent`. What had no word was **there was no
+prospect, there was no offer.**
+
+**Two columns, not a status**: `deleted_at` + `deleted_by_user_id` on `crm.lead`, `crm.proposal`
+and `crm.engagement_letter`. A deleted row KEEPS the stage or status it had — a deletion is not an
+outcome, so it adds no value to any vocabulary that metrics, filters and screens enumerate — and:
+
+- **leaves every list and everything that counts one**: the pipeline (any stage filter), the quotes,
+  the letters, the rotation's desk load (`lead-assignment.ts`), `lead_one_open_per_party` and
+  `findOpenForParty` (a deleted open lead must not merge a new capture into the mistake, nor hold
+  the client's slot for ever), `el_one_live_successor_per_letter`, `findSuccessor` and the page's
+  `supersededBy` (a deleted draft replacement must not leave a signed letter unreplaceable), and
+  the party archive guard. **A new read of these tables must decide what a deleted row means to it**
+  — that is the cost of hiding over erasing, stated so it is paid on purpose;
+- **still resolves by id**, and says so — the ledger holds events against its id for ever, and the
+  page shows who deleted it and when;
+- **is FINAL**, like a withdrawn document link (0302): a trigger refuses any change to a deleted
+  row, and the services refuse first (`liveLeadOrThrow`, `draftOrThrow`, `editableOrThrow`, and
+  `withdraw` and `decide`, each checking deletion BEFORE status — a deleted row is always a draft,
+  and "only a draft can be changed" would be the wrong sentence to meet). **So are its lines,
+  clauses, fee groups and prose (0087)**, and that half was found by walking the page: the
+  document's PROSE is written by the document use case, which never asks about the document it
+  belongs to, so a deleted draft's exclusions were still editable. `crm.refuse_change_under_deleted_document()`
+  sits on all five child tables, checks the row's old parent and its new one, and raises
+  **55000** (`object_not_in_prerequisite_state`, used nowhere else) so the block adapter can say
+  `DOCUMENT_DELETED` rather than the signed freeze's 23001 sentence about superseding a letter
+  nobody sent. There is no Restore: bringing one back is a decision nobody has taken, and when it
+  is taken it is a migration relaxing the guards, on purpose.
+
+**When it is allowed** — one pure rule per aggregate (`leadDeletionBlock`,
+`proposalDeletionBlock`, `letterDeletionBlock`), one refusal per answer (`*DeletionRefusal` in the
+errors file), and a guard trigger per table that is the wall for the writers that are not the
+service:
+
+| | Deletable when | Refused with |
+|---|---|---|
+| lead | never converted; no LIVE proposal drafted from it; already `lost`/`abandoned` → an administrator only | `LEAD_CONVERTED`, `LEAD_HAS_PROPOSALS` (409), `CLOSED_LEAD_NEEDS_ADMIN` (403) |
+| proposal | a `draft`; no LIVE letter cites it | `PROPOSAL_NOT_DELETABLE`, `PROPOSAL_CITED_BY_LETTER` (409) |
+| letter | a `draft` — nothing can depend on one | `LETTER_NOT_DELETABLE` (409; a sent letter is WITHDRAWN, a signed one superseded) |
+
+"Live" means not deleted, so **deleting in order always works**: the letter, then the quote it cites,
+then the lead. The closed-lead rule is about WHO — it changes the pipeline's numbers — so it is the
+service's (the handler asks `AuthzService.can(principal, "tenant:admin")`, the fee axis's shape),
+and the trigger allows the row. A deletion changes nothing else in the same statement (the trigger
+compares the rest of the row), or one UPDATE could convert a lead and delete it at once past a
+guard that reads the row as it was.
+
+**The page is told before anybody presses** ("a caller is told what it may do"): each detail read —
+`GET /leads/{id}` (its own `LeadView`, because a pipeline row is never deleted), `GET
+/proposals/{id}`, `GET /engagement-letters/{id}` — carries `deletedBy` and `deleteRefusal`, the very
+code and sentence the DELETE would be refused with, or null when it would work. `party:write` is
+not in it; `/auth/me` already says that.
+
+**Nothing new may point at a deleted row** — 0305's rule for an archived client, from the other
+side: a proposal is not drafted from a deleted lead (`LEAD_DELETED` in the proposal family, through
+the narrow `LeadStanding` port the lead repository satisfies structurally), and a letter does not
+cite a deleted quote (`QUOTE_DELETED`, checked BEFORE `QUOTE_NOT_ACCEPTED`, which would send
+somebody to accept a mistake). Triggers under both, `check_violation`, ids only in the message.
+
+**Three verbs, `lead.deleted`, `proposal.deleted`, `engagement_letter.deleted`.** Payloads carry the
+party and the stage or reference, never a title (§3.4). Three routes, `DELETE` on the resource, on
+`party:write` — whoever may make the mistake may take it back. **A proposal or letter reference is
+not reused**; a reference may gap, and this is one honest reason.
+
+**Deliberately not here** — the plan's later phases, each needing its own decision: a client or
+contact made by mistake (still ARCHIVED, G0.3; 0086 only stops a deleted lead or draft blocking
+that), a mistyped identifier (`findByValue` ignores `valid_to`, so today a PAN on the wrong client
+is stuck there), which references count as ONGOING work for the archive guard in general, a
+catalogue service or other config entry nobody used, and Restore. **An invoice is never deleted**:
+its number is drawn from the gapless GST series when the DRAFT is created, so cancelling is the
+only honest answer (T3.4).
 
 ## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
 

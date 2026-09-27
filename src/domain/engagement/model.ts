@@ -54,6 +54,26 @@ export function isEditable(status: LetterStatus): boolean {
 }
 
 /**
+ * Why this letter may NOT be deleted, or null when it may (0086).
+ *
+ * Only a DRAFT, and nothing else is needed: nothing can depend on a draft
+ * letter — an engagement needs a signature, a signature request needs a send,
+ * and only a SIGNED letter is superseded. A letter the client has seen is
+ * withdrawn; a signed one is the record of what they agreed.
+ */
+export type LetterDeletionBlock =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "not_draft"; readonly status: LetterStatus };
+
+export function letterDeletionBlock(
+  letter: Pick<EngagementLetter, "status" | "deletedAt">,
+): LetterDeletionBlock | null {
+  if (letter.deletedAt !== null) return { kind: "deleted" };
+  if (letter.status !== "draft") return { kind: "not_draft", status: letter.status };
+  return null;
+}
+
+/**
  * Which layout a letter PRINTS in (0083).
  *
  * `classic` is the one-page-flow document every letter issued before 0083 went
@@ -247,6 +267,20 @@ export interface EngagementLetter {
    * same agreement drawn with a re-scanned signature is the same agreement.
    */
   readonly firmSignatureVersionId: string | null;
+
+  // ── Deleted as a mistake (0086) ───────────────────────────────────────────
+
+  /**
+   * When this DRAFT was deleted as made by mistake, or null — before it went out
+   * for signature, so no client ever saw it. Not `withdrawn`, which is a letter
+   * the client HAS seen and the firm pulled. Off the list of letters, still
+   * readable by id, and FINAL. Never a term: absent from `canonicalContent`, and
+   * a signed letter can never carry one (the freeze, 0019, covers it).
+   */
+  readonly deletedAt: string | null;
+  /** Who deleted it, for the page. The ledger's `engagement_letter.deleted`
+   *  names the actor either way. */
+  readonly deletedByUserId: string | null;
 }
 
 export interface LetterLine {

@@ -692,12 +692,24 @@ export function mapError(err: unknown): MappedError {
       // PARTY_ARCHIVED (0305) joins them: the party is there and the request
       // is well formed; what refuses it is that the firm put this client away,
       // and it is answered by restoring them.
+      //
+      // 0086's three join them: a lead already deleted, one that was converted,
+      // and one a live proposal was drafted from. Each is where the lead has
+      // got to, answered by capturing afresh or by deleting the proposal first.
       case "AMBIGUOUS_MATCH":
       case "LEAD_CLOSED":
       case "SAME_STAGE":
       case "OWNER_NOT_STAFF":
       case "PARTY_ARCHIVED":
+      case "LEAD_DELETED":
+      case "LEAD_CONVERTED":
+      case "LEAD_HAS_PROPOSALS":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // FORBIDDEN, on maker != checker's reasoning: the request is well formed
+      // and the lead may be deleted — by an administrator. What refuses it is
+      // who the caller is, and retrying with a different body changes nothing.
+      case "CLOSED_LEAD_NEEDS_ADMIN":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }
@@ -754,6 +766,11 @@ export function mapError(err: unknown): MappedError {
       // NOT_OUT_FOR_ANSWER and ALREADY_ANSWERED (0085) read the same way:
       // emailing a proposal nobody can answer any more, and a second answer to
       // one already answered, are both about where the proposal has got to.
+      // 0086's four read the same way: a draft already deleted, a proposal that
+      // went out and so cannot be, one a live letter still cites, and a lead
+      // deleted as a mistake that a new proposal named — answered by drafting
+      // afresh, answering the client, deleting the letter first, or capturing
+      // a real lead.
       case "NOT_A_DRAFT":
       case "EMPTY_PROPOSAL":
       case "INVALID_TRANSITION":
@@ -765,6 +782,10 @@ export function mapError(err: unknown): MappedError {
       case "ADDRESSEE_NOT_LINKED":
       case "NOT_OUT_FOR_ANSWER":
       case "ALREADY_ANSWERED":
+      case "PROPOSAL_DELETED":
+      case "PROPOSAL_NOT_DELETABLE":
+      case "PROPOSAL_CITED_BY_LETTER":
+      case "LEAD_DELETED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Reachable only from a process composed with no mailer — the worker,
       // which never sends. Said plainly rather than as a 500, the render
@@ -849,6 +870,9 @@ export function mapError(err: unknown): MappedError {
       // missing is the relationship on the client's page that says so. 0083's
       // two — a fee group still covering services, a letter sent with a group
       // covering none — are the letter's STATE, answered by moving services.
+      // 0086's three too: a draft already deleted, a letter that went out and
+      // so is withdrawn or superseded instead, and a quote deleted as a mistake
+      // that a letter tried to cite.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -870,6 +894,9 @@ export function mapError(err: unknown): MappedError {
       case "ENTITY_OUTSIDE_CLIENT":
       case "FEE_GROUP_NOT_EMPTY":
       case "FEE_GROUP_EMPTY":
+      case "LETTER_DELETED":
+      case "LETTER_NOT_DELETABLE":
+      case "QUOTE_DELETED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -930,10 +957,12 @@ export function mapError(err: unknown): MappedError {
       // the call that adds it.
       // DOCUMENT_BLOCK_FROZEN is a CONFLICT and not a FORBIDDEN: the caller is
       // permitted, the request is well formed, and it is the STATE of the
-      // document that refuses — resending it changes nothing.
+      // document that refuses — resending it changes nothing. DOCUMENT_DELETED
+      // (0087) is the same answer about a draft deleted as a mistake.
       case "NO_ISSUING_ENTITY":
       case "BLOCKS_ALREADY_SEEDED":
       case "DOCUMENT_BLOCK_FROZEN":
+      case "DOCUMENT_DELETED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

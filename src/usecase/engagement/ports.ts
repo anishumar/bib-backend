@@ -2,6 +2,7 @@
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
+import type { EngagementErrorCode } from "../../domain/engagement/errors";
 import type { ClientStructure } from "../../domain/party/model";
 import type {
   BillingBasis,
@@ -432,6 +433,13 @@ export interface LetterRecord {
    *  repository read them; the service narrows each one against the clock
    *  before it leaves the use case — see `LetterView`. */
   readonly engagements: readonly Engagement[];
+  /** Who deleted it, when it was deleted as a mistake (0086) and the account
+   *  still resolves. */
+  readonly deletedBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
 }
 
 /**
@@ -468,6 +476,12 @@ export interface LetterView extends Omit<LetterRecord, "engagements"> {
    * an agreement missing its exclusions.
    */
   readonly blocks: readonly DocumentBlock[];
+  /**
+   * Why Delete would be refused right now (0086), in the words a DELETE would
+   * be refused with — or null when it would work, which for a letter means a
+   * live draft. The page offers the button only when it will work.
+   */
+  readonly deleteRefusal: { readonly code: EngagementErrorCode; readonly message: string } | null;
 }
 
 /**
@@ -670,10 +684,23 @@ export interface EngagementRepository {
     firm: FirmSignatureRecord | null,
   ): Promise<EngagementLetter>;
 
-  /** The live letter that supersedes this one, if any. Read before drafting a
-   *  replacement so that a second one is refused by name rather than by a
-   *  unique index surfacing as a 500. */
+  /** The live letter that supersedes this one, if any — not withdrawn, and not
+   *  deleted as a mistake (0086), the predicate the one-live-successor index
+   *  holds. Read before drafting a replacement so that a second one is refused
+   *  by name rather than by a unique index surfacing as a 500. */
   findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null>;
+
+  /**
+   * Mark a DRAFT deleted as made by mistake (0086), or return null when it was
+   * not one any more — sent, or deleted by somebody else a moment ago. The WHERE
+   * clause repeats `status = 'draft' AND deleted_at IS NULL`, so the transition
+   * is its own lock and the log gets one `engagement_letter.deleted`.
+   */
+  markDeleted(
+    tenantId: string,
+    letterId: string,
+    deletedByUserId: string | null,
+  ): Promise<EngagementLetter | null>;
 
   /**
    * THE FAN-OUT, and it is one transaction on purpose.
@@ -1023,6 +1050,9 @@ export interface QuotedProposalHeader {
   readonly currency: string;
   readonly fxRate: string;
   readonly fxRateDate: string;
+  /** Set when the quote was deleted as made by mistake (0086): it was never
+   *  offered, so no letter may be drafted from it or cite it. */
+  readonly deletedAt: string | null;
 }
 
 export interface QuotedProposal {

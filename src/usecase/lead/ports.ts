@@ -18,6 +18,7 @@ import type {
   LeadStage,
   LeadValue,
 } from "../../domain/lead/model";
+import type { LeadErrorCode } from "../../domain/lead/errors";
 
 export interface NewLead {
   readonly id: string;
@@ -67,8 +68,37 @@ export interface LeadRecord {
   } | null;
 }
 
+/**
+ * ONE lead as its own page shows it: the record, and who deleted it (0086).
+ *
+ * Its own type rather than a field on `LeadRecord`, because a pipeline row is
+ * never deleted — the list leaves deleted leads out — and a column that is null
+ * on every row a list can return is a join the list pays for and never uses.
+ */
+export interface LeadDetail extends LeadRecord {
+  readonly deletedBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
+}
+
+/**
+ * A lead's own page: the detail, and whether Delete would work for THIS caller
+ * (0086). "A caller is told what it may do": the page offers the button only
+ * when it will work, and otherwise shows the very sentence a DELETE would be
+ * refused with, so nobody presses it to find out.
+ */
+export interface LeadView extends LeadDetail {
+  /** Why Delete would be refused right now, or null when it would work. The
+   *  caller's `party:write` is not part of it — `/auth/me` already says that. */
+  readonly deleteRefusal: { readonly code: LeadErrorCode; readonly message: string } | null;
+}
+
 export interface LeadRepository {
   create(l: NewLead): Promise<Lead>;
+  /** Deleted or not: this is the read every rule about a lead starts from, and
+   *  "it was deleted" is one of the answers. */
   findById(tenantId: string, leadId: string): Promise<Lead | null>;
   /**
    * The party's OPEN lead, if it has one — the merge target.
@@ -78,10 +108,31 @@ export interface LeadRepository {
    */
   findOpenForParty(tenantId: string, partyId: string): Promise<Lead | null>;
   /** The pipeline, newest first, with the people each lead refers to. Filtered
-   *  by stage when one is named. */
+   *  by stage when one is named. A DELETED lead is never in it (0086). */
   list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]>;
-  /** One lead, with the same joins. */
-  findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null>;
+  /** One lead, with the same joins — deleted or not, because a link to a lead
+   *  must still open, and say what happened to it. */
+  findRecord(tenantId: string, leadId: string): Promise<LeadDetail | null>;
+  /**
+   * The references of the LIVE proposals drafted from this lead — what stops it
+   * being deleted (0086). A deleted proposal is not one: deleting in order, the
+   * quote and then the lead, always works.
+   */
+  liveProposalRefs(tenantId: string, leadId: string): Promise<readonly string[]>;
+  /**
+   * Mark the lead deleted, or return null when it already was.
+   *
+   * `AND deleted_at IS NULL` makes the transition its own lock, the way the
+   * party archive does: two people pressing Delete at once get one deletion and
+   * one refusal, never two `lead.deleted` rows in a log that cannot be
+   * corrected. The rest of the rule is the trigger's (`trg_lead_guard_deletion`),
+   * which the service has already asked about by name.
+   */
+  markDeleted(
+    tenantId: string,
+    leadId: string,
+    deletedByUserId: string | null,
+  ): Promise<Lead | null>;
   /**
    * Moves the stage, closed_at and lost_reason TOGETHER, so no two of them can
    * disagree — the database CHECKs are the backstop, not the mechanism.

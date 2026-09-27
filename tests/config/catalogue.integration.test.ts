@@ -25,6 +25,7 @@
 //
 // NOTE ON CLEANUP: published config versions cannot be deleted, by any role —
 // that is the property, not an oversight. Tenants are uniquely named per run.
+import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
@@ -94,6 +95,7 @@ const proposals = new ProposalService({
   catalogue: configRepository,
   policies: configRepository,
   parties: new PostgresPartyRepository(app),
+  leads: new PostgresLeadRepository(app),
   documents,
   shareTokens: new RandomTokenFactory(),
   structure: new PostgresRelationshipRepository(app),

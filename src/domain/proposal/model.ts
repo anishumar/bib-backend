@@ -181,6 +181,16 @@ export interface Proposal {
    * a PDF of yet.
    */
   readonly sentPdfVersionId: string | null;
+  /**
+   * When this DRAFT was deleted as made by mistake (0086), or null — before it
+   * went out, so no client ever held it. Off the list of quotes, still readable
+   * by id, and FINAL: a deleted draft never changes again. Its reference is not
+   * reused, and a gap in the series is one of the honest reasons for one.
+   */
+  readonly deletedAt: string | null;
+  /** Who deleted it, for the page. The ledger's `proposal.deleted` names the
+   *  actor either way. */
+  readonly deletedByUserId: string | null;
 }
 
 /**
@@ -367,6 +377,30 @@ export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean
   if (isTerminal(from)) return false;
   if (from === "draft") return to === "sent";
   return to === "accepted" || to === "rejected" || to === "expired";
+}
+
+/**
+ * Why this proposal may NOT be deleted, or null when it may (0086).
+ *
+ * Only a DRAFT is deleted: once sent, the client holds the document and it is
+ * something to answer, not a mistake to take back. And not while a live
+ * engagement letter cites it — delete that draft letter first if it was a
+ * mistake too, so deleting in order, the letter and then the quote, always
+ * works.
+ */
+export type ProposalDeletionBlock =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "not_draft"; readonly status: ProposalStatus }
+  | { readonly kind: "letters"; readonly refs: readonly string[] };
+
+export function proposalDeletionBlock(
+  proposal: Pick<Proposal, "status" | "deletedAt">,
+  citingLetterRefs: readonly string[],
+): ProposalDeletionBlock | null {
+  if (proposal.deletedAt !== null) return { kind: "deleted" };
+  if (proposal.status !== "draft") return { kind: "not_draft", status: proposal.status };
+  if (citingLetterRefs.length > 0) return { kind: "letters", refs: citingLetterRefs };
+  return null;
 }
 
 /**

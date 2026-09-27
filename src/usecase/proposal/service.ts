@@ -42,6 +42,7 @@ import {
   largestDiscount,
   needsDiscountApproval,
   parseShareToken,
+  proposalDeletionBlock,
 } from "../../domain/proposal/model";
 import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import { readServiceBody } from "../../domain/config/model";
@@ -91,6 +92,9 @@ import {
   InvalidRecipient,
   NotOutForAnswer,
   SignerNameRequired,
+  ProposalDeleted,
+  ProposalLeadDeleted,
+  proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
 import { dayInZone } from "../../domain/scheduler/zone";
 import type {
@@ -98,6 +102,7 @@ import type {
   DocumentIdentity,
   FiledPdf,
   FirmTimeZone,
+  LeadStanding,
   PartyStanding,
   PolicyDirectory,
   ProposalFilters,
@@ -127,6 +132,8 @@ export interface Deps {
   readonly documents: DocumentIdentity;
   /** Whether a client or an entity has been archived (0305). */
   readonly parties: PartyStanding;
+  /** Whether the lead a proposal is drafted from was deleted (0086). */
+  readonly leads: LeadStanding;
   /** Mints the share link and hashes it. Only the digest is ever stored. */
   readonly shareTokens: ShareLinkTokens;
   /** The client's structure — whom "Prepared for" may name (F-10-1, 0084). */
@@ -337,6 +344,12 @@ export class ProposalService {
     }
     // Before the reference is drawn, so a refusal spends no number (0305).
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    // A lead deleted as a mistake gains no proposal (0086): there was never a
+    // prospect to offer it to. A lead that does not exist is the foreign key's.
+    if (input.leadId !== undefined) {
+      const lead = await this.deps.leads.findById(input.tenantId, input.leadId);
+      if (lead !== null && lead.deletedAt !== null) throw new ProposalLeadDeleted();
+    }
     // The two names on the cover (0084), before the number too.
     if (input.addressedToPartyId !== undefined) {
       await this.requireContact(input.tenantId, input.partyId, input.addressedToPartyId);
@@ -633,7 +646,66 @@ export class ProposalService {
       kind: "proposal",
       id: proposalId,
     });
-    return { ...record, blocks };
+    // Whether Delete would work (0086), asked only of a live draft: nothing
+    // else can be deleted, and saying why needs no query.
+    const { proposal } = record;
+    const citing =
+      proposal.status === "draft" && proposal.deletedAt === null
+        ? await this.deps.proposals.liveLetterRefs(tenantId, proposalId)
+        : [];
+    const block = proposalDeletionBlock(proposal, citing);
+    const refusal = block === null ? null : proposalDeletionRefusal(proposal.ref, block);
+    return {
+      ...record,
+      blocks,
+      deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
+    };
+  }
+
+  /**
+   * Delete a DRAFT made by mistake (0086) — off the list of quotes, still
+   * readable by id, and final.
+   *
+   * Only a draft: once sent, the client holds the document, and it is answered
+   * or it expires. Not while a live letter cites it. The reference is not
+   * reused — a proposal reference may gap, and this is one of the reasons. The
+   * trigger under this (`trg_proposal_guard_deletion`) holds the same rule for
+   * the writers that do not come through here.
+   */
+  async delete(tenantId: string, proposalId: string, actor: Actor): Promise<Proposal> {
+    const proposal = await this.findOrThrow(tenantId, proposalId);
+    const citing =
+      proposal.status === "draft" && proposal.deletedAt === null
+        ? await this.deps.proposals.liveLetterRefs(tenantId, proposalId)
+        : [];
+    const block = proposalDeletionBlock(proposal, citing);
+    if (block !== null) throw proposalDeletionRefusal(proposal.ref, block);
+
+    const deleted = await this.deps.proposals.markDeleted(
+      tenantId,
+      proposalId,
+      actor.type === "human" ? actor.id : null,
+    );
+    if (deleted === null) {
+      // Sent, or deleted by somebody else, between the read and the write: the
+      // WHERE clause refused it, and the proposal as it now stands says which.
+      const current = await this.findOrThrow(tenantId, proposalId);
+      const late = proposalDeletionBlock(current, []);
+      throw late === null
+        ? new ProposalDeleted(current.ref)
+        : proposalDeletionRefusal(current.ref, late);
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "proposal.deleted",
+      objectId: proposal.id,
+      actor,
+      // The reference and the party — never the title, which is routinely
+      // "Acme Ltd — FY26 audit" and this log cannot be erased.
+      payload: { ref: proposal.ref, partyId: proposal.partyId },
+    });
+    return deleted;
   }
 
   async list(tenantId: string, filters: ProposalFilters): Promise<readonly ProposalSummary[]> {
@@ -1006,6 +1078,7 @@ export class ProposalService {
   ): Promise<Proposal> {
     if (!isProposalDecision(decision)) throw new InvalidDecision(decision);
     const proposal = await this.findOrThrow(tenantId, proposalId);
+    if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
 
     const today = this.deps.clock.now().toISOString();
     if (proposal.status === "sent" && isPastValidity(proposal.validUntil, today)) {
@@ -1260,6 +1333,9 @@ export class ProposalService {
    *  draft. One place, so a method added later cannot forget it. */
   private async draftOrThrow(tenantId: string, proposalId: string): Promise<Proposal> {
     const proposal = await this.findOrThrow(tenantId, proposalId);
+    // Deleted first: a deleted proposal is always a draft (0086), and "only a
+    // draft can be changed" would be the wrong sentence to meet.
+    if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
     if (proposal.status !== "draft") throw new NotADraft(proposal.status);
     return proposal;
   }

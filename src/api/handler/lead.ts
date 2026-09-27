@@ -17,10 +17,15 @@ import { scopeOf } from "../scope";
 import { IdentifierTypeSchema } from "./party";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
 import type { LeadService } from "../../usecase/lead/service";
-import type { LeadRecord } from "../../usecase/lead/ports";
+import type { LeadRecord, LeadView } from "../../usecase/lead/ports";
+import type { AuthzService } from "../../usecase/authz/service";
+import type { Principal } from "../../platform/callctx";
 
 export interface LeadDeps {
   readonly service: LeadService;
+  /** Whether the caller administers the firm — the one question deleting a
+   *  lead asks about WHO (0086), answered the way fee visibility is. */
+  readonly authz: AuthzService;
 }
 
 // The closed sets live in the domain; zod needs literal tuples, so `satisfies`
@@ -95,6 +100,13 @@ const LeadSchema = z
       }),
     capturedAt: z.string(),
     closedAt: z.string().nullable(),
+    deletedAt: z.string().nullable().openapi({
+      description:
+        "When this lead was DELETED as entered by mistake (0086), or null. Not an outcome — " +
+        "lost and abandoned are what happened to a real prospect; this says there was none. " +
+        "A deleted lead is in no list and no count, still opens by id, and never changes again.",
+    }),
+    deletedByUserId: z.string().uuid().nullable(),
   })
   .openapi("Lead");
 
@@ -128,6 +140,45 @@ const LeadRecordSchema = z
       .nullable(),
   })
   .openapi("LeadRecord");
+
+/**
+ * One lead as its own page reads it (0086): the record, who deleted it, and
+ * whether Delete would work for THIS caller — the same sentence a DELETE would
+ * be refused with, so a screen offers the button only when it will work.
+ */
+const LeadViewSchema = z
+  .object({
+    lead: LeadSchema,
+    party: z.object({
+      id: z.string().uuid(),
+      kind: z.enum(["organization", "person"]),
+      displayName: z.string(),
+    }),
+    owner: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string().email(),
+      })
+      .nullable(),
+    deletedBy: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string().email(),
+      })
+      .nullable()
+      .openapi({ description: "Who deleted it, when it was deleted and the account still resolves." }),
+    deleteRefusal: z
+      .object({ code: z.string(), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why DELETE /api/v1/leads/{leadId} would be refused right now, in its own words — or " +
+          "null when it would work. Says nothing about `party:write`, which /auth/me already does.",
+      }),
+  })
+  .openapi("LeadView");
 
 const CaptureResultSchema = z
   .object({
@@ -347,8 +398,10 @@ const getRoute = createRoute({
   request: { params: LeadParam },
   responses: {
     200: {
-      description: "The lead, with the prospect and the owner",
-      content: { "application/json": { schema: LeadRecordSchema } },
+      description:
+        "The lead, with the prospect and the owner — deleted or not, because a link must still " +
+        "open — and whether it could be deleted now",
+      content: { "application/json": { schema: LeadViewSchema } },
     },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not read parties"),
@@ -419,6 +472,32 @@ const setDetailsRoute = createRoute({
   },
 });
 
+const deleteRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/leads/{leadId}",
+  tags: ["lead"],
+  summary: "Delete a lead entered by mistake",
+  description:
+    "Takes the lead out of the pipeline and every count; it still opens by id, says it was " +
+    "deleted, and never changes again (0086). NOT a stage: lost and abandoned are what happened " +
+    "to a real prospect, and this says there was none. Refused once converted, while a live " +
+    "proposal was drafted from it, and — for anybody who does not administer the firm — once " +
+    "it has been closed as lost or abandoned, because that changes the pipeline's numbers. " +
+    "GET /api/v1/leads/{leadId} says in advance whether this would work.",
+  request: { params: LeadParam },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: LeadSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse(
+      "The role may not write parties, or the lead is closed and the caller does not administer the firm",
+    ),
+    404: errorResponse("No such lead in this firm"),
+    409: errorResponse(
+      "The lead was converted, a live proposal was drafted from it, or it was already deleted",
+    ),
+  },
+});
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 /**
@@ -440,6 +519,17 @@ function toRecordBody(record: LeadRecord): z.infer<typeof LeadRecordSchema> {
   };
 }
 
+function toViewBody(view: LeadView): z.infer<typeof LeadViewSchema> {
+  return {
+    ...toRecordBody(view),
+    deletedBy: view.deletedBy === null ? null : { ...view.deletedBy },
+    deleteRefusal:
+      view.deleteRefusal === null
+        ? null
+        : { code: view.deleteRefusal.code, message: view.deleteRefusal.message },
+  };
+}
+
 function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
   return {
     id: lead.id,
@@ -458,6 +548,8 @@ function toLeadBody(lead: Lead): z.infer<typeof LeadSchema> {
         : { amount: lead.estimatedValue.amount, currency: lead.estimatedValue.currency },
     capturedAt: lead.capturedAt,
     closedAt: lead.closedAt,
+    deletedAt: lead.deletedAt,
+    deletedByUserId: lead.deletedByUserId,
   };
 }
 
@@ -532,6 +624,12 @@ const setTerritoryRoute = createRoute({
 });
 
 export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): void {
+  // Whether the caller administers the firm — asked, not required: it decides
+  // only whether a CLOSED lead may be deleted (0086). No principal is no
+  // session, which `scopeOf` has refused before this is ever asked.
+  const administers = async (principal: Principal | null): Promise<boolean> =>
+    principal !== null && (await deps.authz.can(principal, "tenant:admin"));
+
   app.openapi(captureRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -555,21 +653,26 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
   });
 
   app.openapi(getRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
-    return c.json(toRecordBody(await deps.service.get(s.tenantId, leadId)), 200);
+    const view = await deps.service.get(s.tenantId, leadId, await administers(principal));
+    return c.json(toViewBody(view), 200);
   });
 
+  // Field by field, like every other lead on the wire: these two forwarded the
+  // domain object, which shipped whatever it happened to hold.
   app.openapi(moveStageRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
     const { stage, lostReason } = c.req.valid("json");
-    return c.json(
-      await deps.service.moveStage({ tenantId: s.tenantId, leadId, stage, lostReason }, s.actor),
-      200,
+    const moved = await deps.service.moveStage(
+      { tenantId: s.tenantId, leadId, stage, lostReason },
+      s.actor,
     );
+    return c.json(toLeadBody(moved), 200);
   });
 
   app.openapi(assignOwnerRoute, async (c) => {
@@ -577,10 +680,27 @@ export function registerLeadRoutes(app: OpenAPIHono<AppEnv>, deps: LeadDeps): vo
     if (!s.ok) return c.json(s.deny, s.status);
     const { leadId } = c.req.valid("param");
     const { ownerUserId } = c.req.valid("json");
-    return c.json(
-      await deps.service.assignOwner({ tenantId: s.tenantId, leadId, ownerUserId }, s.actor),
-      200,
+    const assigned = await deps.service.assignOwner(
+      { tenantId: s.tenantId, leadId, ownerUserId },
+      s.actor,
     );
+    return c.json(toLeadBody(assigned), 200);
+  });
+
+  app.openapi(deleteRoute, async (c) => {
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { leadId } = c.req.valid("param");
+    const deleted = await deps.service.delete(
+      {
+        tenantId: s.tenantId,
+        leadId,
+        callerAdministers: await administers(principal),
+      },
+      s.actor,
+    );
+    return c.json(toLeadBody(deleted), 200);
   });
 
   app.openapi(setDetailsRoute, async (c) => {

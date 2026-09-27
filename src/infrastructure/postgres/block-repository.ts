@@ -11,7 +11,7 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { BlockKind, DocumentBlock, StandardBlock } from "../../domain/document/model";
 import { isBlockKind } from "../../domain/document/model";
-import { DocumentBlockFrozen } from "../../domain/document/errors";
+import { DocumentBlockFrozen, DocumentDeleted } from "../../domain/document/errors";
 import type {
   BlockOwner,
   DocumentBlockEdit,
@@ -175,9 +175,14 @@ function toDocumentBlock(r: DocumentBlockRow): DocumentBlock {
  * had found it, because until a screen called them nothing ever did.
  */
 function asFrozen(err: unknown): never {
-  if (typeof err === "object" && err !== null && (err as { code?: unknown }).code === "23001") {
-    throw new DocumentBlockFrozen();
-  }
+  const code = typeof err === "object" && err !== null ? (err as { code?: unknown }).code : null;
+  if (code === "23001") throw new DocumentBlockFrozen();
+  // SQLSTATE 55000, `object_not_in_prerequisite_state` — what
+  // `crm.refuse_change_under_deleted_document()` (0087) raises when the proposal
+  // or letter this block belongs to was deleted as a mistake, and what nothing
+  // else in this database raises. Its own code, so a deleted DRAFT is never told
+  // it is signed.
+  if (code === "55000") throw new DocumentDeleted();
   throw err;
 }
 

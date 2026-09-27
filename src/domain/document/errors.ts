@@ -23,7 +23,8 @@ export type DocumentErrorCode =
   | "STANDARD_BLOCK_NOT_FOUND"
   | "DOCUMENT_BLOCK_NOT_FOUND"
   | "BLOCKS_ALREADY_SEEDED"
-  | "DOCUMENT_BLOCK_FROZEN";
+  | "DOCUMENT_BLOCK_FROZEN"
+  | "DOCUMENT_DELETED";
 
 /**
  * The firm has published no entity that could issue this document.
@@ -168,6 +169,24 @@ export class DocumentBlockFrozen extends DocumentError {
         `the change, not just this code. The exclusions a client agreed to are part of what ` +
         `they agreed to. Draft a new letter that supersedes it; the old one stays readable ` +
         `as what was actually signed.`,
+    );
+  }
+}
+
+/**
+ * A block on a proposal or letter that was DELETED as made by mistake (0086).
+ *
+ * `crm.refuse_change_under_deleted_document()` (0087) is what refuses it, with
+ * its own SQLSTATE so the adapter can tell it from the signed freeze above —
+ * which would otherwise have sent somebody to supersede a letter nobody ever
+ * sent. Like that one, this class only puts our sentence round the wall.
+ */
+export class DocumentDeleted extends DocumentError {
+  constructor() {
+    super(
+      "DOCUMENT_DELETED",
+      `This draft was deleted as made by mistake, so its wording no longer changes — a deleted ` +
+        `draft is final. If the work is real after all, draft a new one.`,
     );
   }
 }

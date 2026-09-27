@@ -37,6 +37,7 @@ import {
   isDay,
   isEditable,
   isJurisdiction,
+  letterDeletionBlock,
   mayActivate,
   normalizeJurisdiction,
   resolveEffectiveFrom,
@@ -97,6 +98,9 @@ import {
   FeeGroupTitleRequired,
   GroupedLinePriced,
   LineNotPriced,
+  LetterDeleted,
+  QuoteDeleted,
+  letterDeletionRefusal,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
@@ -620,6 +624,9 @@ export class EngagementService {
     const found = await this.deps.quotes.findQuote(input.tenantId, input.proposalId);
     if (found === null) throw new QuoteNotFound(input.proposalId);
     const quote = found.proposal;
+    // Deleted first: a deleted quote is always a draft (0086), and "record the
+    // acceptance first" would send somebody to accept a mistake.
+    if (quote.deletedAt !== null) throw new QuoteDeleted(quote.ref);
     if (quote.status !== "accepted") throw new QuoteNotAccepted(quote.ref, quote.status);
     if (found.lines.length === 0) throw new QuoteHasNoLines(quote.ref);
 
@@ -809,6 +816,8 @@ export class EngagementService {
   ): Promise<void> {
     const found = await this.deps.quotes.findQuote(tenantId, proposalId);
     if (found === null) throw new QuoteNotFound(proposalId);
+    // A quote deleted as a mistake gains no letter citing it (0086).
+    if (found.proposal.deletedAt !== null) throw new QuoteDeleted(found.proposal.ref);
     if (found.proposal.partyId === clientPartyId) return;
     throw new QuoteOfAnotherClient(
       found.proposal.ref,
@@ -1273,6 +1282,10 @@ export class EngagementService {
       id: letterId,
     });
     const request = await this.deps.signatures.findForLetter(tenantId, letterId);
+    // Whether Delete would work (0086). Nothing depends on a draft letter, so
+    // the letter alone answers it.
+    const block = letterDeletionBlock(record.letter);
+    const refusal = block === null ? null : letterDeletionRefusal(record.letter.ref, block);
     return {
       ...record,
       engagements: this.withState(record.engagements),
@@ -1282,7 +1295,48 @@ export class EngagementService {
         sends: this.deps.dispatch !== null,
         request,
       },
+      deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
     };
+  }
+
+  /**
+   * Delete a DRAFT made by mistake (0086) — off the list of letters, still
+   * readable by id, and final.
+   *
+   * Only a draft: a letter the client has seen is WITHDRAWN, which keeps the
+   * record that it was offered, and a signed one is the agreement itself.
+   * Nothing can depend on a draft letter, so there is nothing else to ask. The
+   * trigger under this (`trg_el_guard_deletion`) holds the same rule for the
+   * writers that do not come through here.
+   */
+  async delete(tenantId: string, letterId: string, actor: Actor): Promise<EngagementLetter> {
+    const letter = await this.findOrThrow(tenantId, letterId);
+    const block = letterDeletionBlock(letter);
+    if (block !== null) throw letterDeletionRefusal(letter.ref, block);
+
+    const deleted = await this.deps.letters.markDeleted(
+      tenantId,
+      letterId,
+      actor.type === "human" ? actor.id : null,
+    );
+    if (deleted === null) {
+      // Sent, or deleted by somebody else, between the read and the write: the
+      // WHERE clause refused it, and the letter as it now stands says which.
+      const current = await this.findOrThrow(tenantId, letterId);
+      const late = letterDeletionBlock(current);
+      throw late === null
+        ? new LetterDeleted(current.ref)
+        : letterDeletionRefusal(current.ref, late);
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "engagement_letter.deleted",
+      objectId: letter.id,
+      actor,
+      payload: { ref: letter.ref, partyId: letter.partyId },
+    });
+    return deleted;
   }
 
   async list(tenantId: string, filters: LetterFilters): Promise<readonly LetterSummary[]> {
@@ -1690,6 +1744,9 @@ export class EngagementService {
    */
   async withdraw(tenantId: string, letterId: string, actor: Actor): Promise<EngagementLetter> {
     const letter = await this.findOrThrow(tenantId, letterId);
+    // A deleted draft is final (0086): it was never offered, so there is
+    // nothing to pull.
+    if (letter.deletedAt !== null) throw new LetterDeleted(letter.ref);
     const request = await this.deps.signatures.findForLetter(tenantId, letterId);
     const dispatch = this.deps.dispatch;
     if (
@@ -1983,6 +2040,9 @@ export class EngagementService {
    *  added later cannot forget the rule. */
   private async editableOrThrow(tenantId: string, letterId: string): Promise<EngagementLetter> {
     const letter = await this.findOrThrow(tenantId, letterId);
+    // Deleted first: a deleted letter is always a draft (0086), and "only a
+    // draft can be changed" would be the wrong sentence to meet.
+    if (letter.deletedAt !== null) throw new LetterDeleted(letter.ref);
     if (!isEditable(letter.status)) throw new LetterNotEditable(letter.status);
     return letter;
   }

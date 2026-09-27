@@ -25,6 +25,7 @@ import { resolveTerms } from "../domain/document/model";
 import type {
   DecisionNotice,
   FiledPdf,
+  LeadStanding,
   NewClientAnswer,
   NewProposal,
   NewProposalEmail,
@@ -108,6 +109,8 @@ export class FakeProposalRepo implements ProposalRepository {
       addressedToPartyId: p.addressedToPartyId,
       preparedByUserId: p.preparedByUserId,
       sentPdfVersionId: null,
+      deletedAt: null,
+      deletedByUserId: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -383,6 +386,16 @@ export class FakeProposalRepo implements ProposalRepository {
           pdf: a.pdfVersionId === null ? null : (this.pdfs.get(a.pdfVersionId) ?? null),
         };
       })(),
+      deletedBy:
+        proposal.deletedByUserId === null
+          ? null
+          : {
+              userId: proposal.deletedByUserId,
+              displayName: this.accounts.get(proposal.deletedByUserId)?.displayName ?? null,
+              email:
+                this.accounts.get(proposal.deletedByUserId)?.email ??
+                `${proposal.deletedByUserId}@example.test`,
+            },
     };
   }
 
@@ -390,6 +403,7 @@ export class FakeProposalRepo implements ProposalRepository {
     const matching = this.rows.filter(
       (p) =>
         p.tenantId === tenantId &&
+        p.deletedAt === null &&
         (filters.status === undefined || p.status === filters.status) &&
         (filters.partyId === undefined || p.partyId === filters.partyId),
     );
@@ -412,6 +426,41 @@ export class FakeProposalRepo implements ProposalRepository {
         };
       }),
     );
+  }
+
+  // ── 0086 ────────────────────────────────────────────────────────────────
+
+  /** The live letters citing each proposal. The adapter reads
+   *  `crm.engagement_letter`; a test states them with `citeFrom`. */
+  private readonly citing = new Map<string, string[]>();
+
+  citeFrom(proposalId: string, letterRef: string): this {
+    this.citing.set(proposalId, [...(this.citing.get(proposalId) ?? []), letterRef]);
+    return this;
+  }
+
+  liveLetterRefs(_tenantId: string, proposalId: string): Promise<readonly string[]> {
+    return Promise.resolve([...(this.citing.get(proposalId) ?? [])].sort());
+  }
+
+  /** The adapter's WHERE clause: a draft, not yet deleted — else null. */
+  markDeleted(
+    tenantId: string,
+    proposalId: string,
+    deletedByUserId: string | null,
+  ): Promise<Proposal | null> {
+    const index = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === proposalId);
+    const current = this.rows[index];
+    if (!current || current.status !== "draft" || current.deletedAt !== null) {
+      return Promise.resolve(null);
+    }
+    const next: Proposal = {
+      ...current,
+      deletedAt: "2026-06-01T09:30:00.000Z",
+      deletedByUserId,
+    };
+    this.rows[index] = next;
+    return Promise.resolve(next);
   }
 
   // ── 0085 ────────────────────────────────────────────────────────────────
@@ -625,9 +674,36 @@ export const FAKE_PROPOSAL_LINKS: ProposalLinks = {
   staffUrl: (proposalId) => `https://app.example.test/proposals/${proposalId}`,
 };
 
+/**
+ * Which leads were deleted as mistakes (0086) — all a proposal asks of a lead.
+ * An unknown lead reads as absent, which the foreign key answers for real.
+ */
+export class FakeLeadStanding implements LeadStanding {
+  readonly live = new Set<string>();
+  readonly deleted = new Set<string>();
+
+  capture(leadId: string): this {
+    this.live.add(leadId);
+    return this;
+  }
+
+  delete(leadId: string): this {
+    this.live.delete(leadId);
+    this.deleted.add(leadId);
+    return this;
+  }
+
+  findById(_tenantId: string, leadId: string): Promise<{ readonly deletedAt: string | null } | null> {
+    if (this.deleted.has(leadId)) return Promise.resolve({ deletedAt: "2026-06-01T08:00:00.000Z" });
+    return Promise.resolve(this.live.has(leadId) ? { deletedAt: null } : null);
+  }
+}
+
 export function makeProposalFakes(): Deps & {
   /** Which parties are archived; empty unless a test archives one (0305). */
   parties: FakePartyStanding;
+  /** Which leads were deleted (0086); empty unless a test deletes one. */
+  leads: FakeLeadStanding;
   proposals: FakeProposalRepo;
   catalogue: FakeServiceCatalogue;
   policies: FakePolicyDirectory;
@@ -667,6 +743,7 @@ export function makeProposalFakes(): Deps & {
     catalogue,
     policies: new FakePolicyDirectory(),
     parties: new FakePartyStanding(),
+    leads: new FakeLeadStanding(),
     documents: identity.documents,
     prose: identity.documents,
     firmEntities: identity.firmEntities,

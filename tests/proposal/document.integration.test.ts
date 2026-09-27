@@ -15,6 +15,7 @@
 //   schema's to refuse or allow, for every writer.
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
+import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
@@ -82,6 +83,7 @@ const proposals = new ProposalService({
   catalogue: configRepository,
   policies: configRepository,
   parties: new PostgresPartyRepository(app),
+  leads: new PostgresLeadRepository(app),
   documents,
   shareTokens: new RandomTokenFactory(),
   structure: new PostgresRelationshipRepository(app),

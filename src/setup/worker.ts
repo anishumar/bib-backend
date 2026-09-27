@@ -94,6 +94,7 @@ import { proposalLinks, proposalPdfs } from "./proposal-delivery";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
+import { PostgresLeadRepository } from "../infrastructure/postgres/lead-repository";
 import {
   PostgresDocumentBlockRepository,
   PostgresStandardBlockRepository,
@@ -546,6 +547,9 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       catalogue: configRepository,
       policies: configRepository,
       parties: workerParties,
+      // The worker only reads quotes and never drafts one, but the service's
+      // deps are whole: one adapter, the same question the API asks.
+      leads: new PostgresLeadRepository(pools.app),
       documents,
       shareTokens: new RandomTokenFactory(),
       structure: new PostgresRelationshipRepository(pools.app),

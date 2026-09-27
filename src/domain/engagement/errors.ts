@@ -1,3 +1,5 @@
+import type { LetterDeletionBlock } from "./model";
+
 // Sentinel errors — the closed vocabulary of ways engagement letters fail.
 // Owned here in the domain; the api layer maps them to HTTP status codes.
 // Match with `instanceof`, never by string.
@@ -13,6 +15,9 @@ export class EngagementError extends Error {
 }
 
 export type EngagementErrorCode =
+  | "LETTER_DELETED"
+  | "LETTER_NOT_DELETABLE"
+  | "QUOTE_DELETED"
   | "LETTER_NOT_FOUND"
   | "LETTER_LINE_NOT_FOUND"
   | "LETTER_NOT_EDITABLE"
@@ -633,5 +638,59 @@ export class LineNotPriced extends EngagementError {
         `"pricingNote" saying why it has none ("As mutually agreed"). Outside a fee group ` +
         `nothing else on the letter says what it costs.`,
     );
+  }
+}
+
+// ── Deleting a draft made by mistake (0086) ──────────────────────────────────
+
+/** A deleted draft is final. Every change to one lands here, and so does a
+ *  second delete or a withdrawal. */
+export class LetterDeleted extends EngagementError {
+  constructor(ref: string) {
+    super(
+      "LETTER_DELETED",
+      `${ref} was deleted as made by mistake, and a deleted draft is final: nothing about it ` +
+        `changes again. If the engagement is real after all, draft a new letter.`,
+    );
+  }
+}
+
+export class LetterNotDeletable extends EngagementError {
+  constructor(ref: string, status: string) {
+    super(
+      "LETTER_NOT_DELETABLE",
+      status === "signed"
+        ? `${ref} is signed, and a signed letter is the record of what the client agreed to, so ` +
+          `it is never deleted. Draft a new letter that supersedes it instead.`
+        : `${ref} is ${status}, and only a draft that never went out can be deleted. ` +
+          (status === "sent"
+            ? `The client has it; withdraw it instead, which keeps the record that it was offered.`
+            : `It stays on record as ${status}.`),
+    );
+  }
+}
+
+/** A letter may not cite a proposal that was deleted (0086) — it was never
+ *  offered to anybody. */
+export class QuoteDeleted extends EngagementError {
+  constructor(ref: string) {
+    super(
+      "QUOTE_DELETED",
+      `${ref} was deleted as made by mistake, so a letter cannot be drafted from it or cite it. ` +
+        `Draft the letter on its own, or from the quote that was really offered.`,
+    );
+  }
+}
+
+/**
+ * The refusal a block means — ONE sentence for the DELETE that is refused and
+ * for the letter's page, which shows it where the button would be.
+ */
+export function letterDeletionRefusal(ref: string, block: LetterDeletionBlock): EngagementError {
+  switch (block.kind) {
+    case "deleted":
+      return new LetterDeleted(ref);
+    case "not_draft":
+      return new LetterNotDeletable(ref, block.status);
   }
 }
