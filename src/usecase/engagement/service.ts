@@ -101,6 +101,7 @@ import {
   LetterDeleted,
   QuoteDeleted,
   letterDeletionRefusal,
+  EngagementError,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
@@ -1252,6 +1253,61 @@ export class EngagementService {
       engagementLetterId: letterId,
       clauseVersionId,
     });
+  }
+
+  /**
+   * EVERY STANDARD TERM THAT FITS, in one call (T6.18, D6) — "Add all standard
+   * terms for <entity>".
+   *
+   * Each published clause goes through `addClause` exactly as if it had been
+   * added by hand, so the same rules decide: it must apply to the letter's
+   * country, and its governing law and courts must be the ISSUER's
+   * (`refuseForeignTerms`). What those rules refuse is not an error here but a
+   * line in `skipped` with the refusal's own sentence, because "these did not
+   * fit, and why" is the answer a person adding a whole set needs. A clause
+   * already on the letter, in any version, is skipped too — never a second copy.
+   * Draft only, like `addClause`.
+   */
+  async addStandardClauses(
+    tenantId: string,
+    letterId: string,
+  ): Promise<{
+    readonly added: readonly { readonly clauseKey: string; readonly clauseVersionId: string; readonly title: string }[];
+    readonly skipped: readonly { readonly clauseKey: string; readonly reason: string }[];
+  }> {
+    await this.editableOrThrow(tenantId, letterId);
+    const onLetter = new Set<string>();
+    for (const c of await this.deps.letters.listClauses(tenantId, letterId)) {
+      const pinned = await this.deps.library.readPinnedVersion(tenantId, c.clauseVersionId);
+      if (pinned !== null) onLetter.add(pinned.key);
+    }
+
+    const added: { clauseKey: string; clauseVersionId: string; title: string }[] = [];
+    const skipped: { clauseKey: string; reason: string }[] = [];
+    // IN ORDER, one at a time: a clause's position is taken from what is
+    // already on the letter.
+    for (const clause of await this.deps.library.publishedClauses(tenantId)) {
+      if (onLetter.has(clause.key)) {
+        skipped.push({ clauseKey: clause.key, reason: "Already on this letter." });
+        continue;
+      }
+      try {
+        await this.addClause(tenantId, letterId, clause.versionId);
+      } catch (err) {
+        if (!(err instanceof EngagementError)) throw err;
+        // The letter itself stopped being editable mid-way: that is not about
+        // this clause, and the caller must hear it as the refusal it is.
+        if (err.code === "LETTER_NOT_EDITABLE" || err.code === "LETTER_DELETED") throw err;
+        skipped.push({ clauseKey: clause.key, reason: err.message });
+        continue;
+      }
+      added.push({
+        clauseKey: clause.key,
+        clauseVersionId: clause.versionId,
+        title: readClauseBody(clause.body).title,
+      });
+    }
+    return { added, skipped };
   }
 
   /**

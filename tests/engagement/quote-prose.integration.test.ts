@@ -168,3 +168,63 @@ describe("a letter from a quote carries the quote's prose (T6.18, D11)", () => {
     expect(row?.n).toBe(7);
   });
 });
+
+// ── T6.18 · D6 — every standard term that fits, in one call ─────────────────
+//
+// Through the real clause library (config.entry / config.version) and the
+// same `addClause` rules: a term for another country is skipped, a term naming
+// a law that is not the issuer's is skipped, each with the sentence adding it
+// by hand would have been refused with, and a second call adds nothing twice.
+describe("adding all the issuer's standard terms at once (T6.18, D6)", () => {
+  it("adds what fits the letter's country and the issuer's law, and says why it skipped the rest", async () => {
+    const india = (await c.party.createOrganization({ tenantId: tenant, legalName: "Terms India Pvt Ltd" }, SYSTEM_ACTOR)).partyId;
+    await c.party.registerLegalEntity(
+      { tenantId: tenant, organizationPartyId: india, jurisdiction: "IN", entityType: "private_limited" },
+      SYSTEM_ACTOR,
+    );
+    await c.documents.setPreference({ tenantId: tenant, clientJurisdiction: "IN", firmEntityPartyId: india }, SYSTEM_ACTOR);
+    for (const [key, body] of [
+      ["scope", { title: "Scope of work", text: "The firm performs the services above.", jurisdictions: [] }],
+      ["liability-ae", { title: "Liability (UAE)", text: "As UAE law permits.", jurisdictions: ["AE"] }],
+      ["law-in", {
+        title: "Governing law",
+        text: "Indian law, Delhi courts.",
+        jurisdictions: [],
+        governingLaw: { jurisdiction: "IN", text: "the laws of the Republic of India" },
+        courts: { jurisdiction: "IN", text: "the courts at New Delhi" },
+      }],
+      ["law-us", {
+        title: "Governing law (US)",
+        text: "Delaware law.",
+        jurisdictions: [],
+        governingLaw: { jurisdiction: "US", text: "the laws of the State of Delaware" },
+        courts: { jurisdiction: "US", text: "the courts of Delaware" },
+      }],
+    ] as const) {
+      await c.config.define({ tenantId: tenant, kind: "clause", key, body: { ...body } }, SYSTEM_ACTOR);
+      await c.config.publish({ tenantId: tenant, kind: "clause", key, version: 1 }, SYSTEM_ACTOR);
+    }
+
+    const letter = await letters.draft(
+      { tenantId: tenant, partyId: client, issuingEntityPartyId: india, jurisdiction: "IN", title: "Terms", currency: "INR", fxRate: "1", fxRateDate: "2026-09-28", advanceRequired: false },
+      SYSTEM_ACTOR,
+    );
+    const first = await letters.addStandardClauses(tenant, letter.id);
+    expect(first.added.map((a) => a.clauseKey)).toEqual(["law-in", "scope"]);
+    // In key order, the library's own.
+    expect(first.skipped.map((k) => k.clauseKey)).toEqual(["law-us", "liability-ae"]);
+    expect(first.skipped[0]?.reason).toMatch(/governing law|courts/i);
+
+    const [row] = await c.owner<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM crm.engagement_letter_clause WHERE engagement_letter_id = ${letter.id}
+    `;
+    expect(row?.n).toBe(2);
+
+    const again = await letters.addStandardClauses(tenant, letter.id);
+    expect(again.added).toEqual([]);
+    expect(again.skipped.filter((k) => k.reason === "Already on this letter.").map((k) => k.clauseKey)).toEqual([
+      "law-in",
+      "scope",
+    ]);
+  });
+});

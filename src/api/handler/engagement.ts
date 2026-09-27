@@ -1089,6 +1089,41 @@ const addClauseRoute = createRoute({
   },
 });
 
+const StandardClausesResponse = z
+  .object({
+    /** What went on, in the order it went on. */
+    added: z.array(
+      z.object({ clauseKey: z.string(), clauseVersionId: z.string().uuid(), title: z.string() }),
+    ),
+    /** What did not, each with the sentence adding it by hand would have been
+     *  refused with — another country, another law than the issuer's, or
+     *  already on the letter. */
+    skipped: z.array(z.object({ clauseKey: z.string(), reason: z.string() })),
+  })
+  .openapi("StandardClausesAdded");
+
+const addStandardClausesRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/clauses/standard",
+  tags: ["engagement-letters"],
+  summary: "Put every standard term that fits on the letter",
+  description:
+    "T6.18 (D6): every published clause that applies to the letter's country and whose " +
+    "governing law and courts are the issuing company's, by the same rules as adding one by " +
+    "hand; clauses already on the letter are skipped. A draft only.",
+  request: { params: z.object({ letterId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "What was added and what was skipped, and why",
+      content: { "application/json": { schema: StandardClausesResponse } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("The letter is no longer a draft, or was deleted"),
+  },
+});
+
 const SendRequest = z
   .object({
     signer: z
@@ -1690,6 +1725,24 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const { clauseVersionId } = c.req.valid("json");
     await deps.service.addClause(s.tenantId, letterId, clauseVersionId);
     return c.body(null, 204);
+  });
+
+  app.openapi(addStandardClausesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const result = await deps.service.addStandardClauses(s.tenantId, letterId);
+    return c.json(
+      {
+        added: result.added.map((a) => ({
+          clauseKey: a.clauseKey,
+          clauseVersionId: a.clauseVersionId,
+          title: a.title,
+        })),
+        skipped: result.skipped.map((k) => ({ clauseKey: k.clauseKey, reason: k.reason })),
+      },
+      200,
+    );
   });
 
   app.openapi(sendRoute, async (c) => {

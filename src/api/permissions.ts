@@ -474,6 +474,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "party:write" as const,
   ],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses/standard"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
   // A draft made by mistake (0086), on the permission that withdraws one: the

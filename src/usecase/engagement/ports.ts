@@ -777,6 +777,18 @@ export interface ClauseLibrary {
     readonly version: number;
     readonly body: Record<string, unknown>;
   } | null>;
+  /**
+   * Every clause with a version in force now, by key (T6.18, D6) — what "add
+   * all standard terms" offers a letter. Only the published version: a draft
+   * was never in force, and an archived one has been replaced.
+   */
+  publishedClauses(tenantId: string): Promise<
+    readonly {
+      readonly versionId: string;
+      readonly key: string;
+      readonly body: Record<string, unknown>;
+    }[]
+  >;
 }
 
 /**

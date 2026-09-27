@@ -260,6 +260,19 @@ export class PostgresConfigRepository
     });
   }
 
+  /** The clause library's terms in force now (T6.18) — `listPublished`'s read,
+   *  narrowed to what a letter pins. */
+  async publishedClauses(
+    tenantId: string,
+  ): Promise<readonly { versionId: string; key: string; body: Record<string, unknown> }[]> {
+    const entries = await this.listPublished(tenantId, "clause");
+    return entries.flatMap((e) =>
+      e.published === null
+        ? []
+        : [{ versionId: e.published.id, key: e.entry.key, body: e.published.body }],
+    );
+  }
+
   async listVersions(tenantId: string, entryId: string): Promise<readonly ConfigVersion[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<VersionRow[]>`

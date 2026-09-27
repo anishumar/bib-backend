@@ -694,6 +694,17 @@ export class FakeClauseLibrary implements ClauseLibrary {
   } | null> {
     return Promise.resolve(this.versions.get(versionId) ?? null);
   }
+
+  publishedClauses(): Promise<
+    readonly { readonly versionId: string; readonly key: string; readonly body: Record<string, unknown> }[]
+  > {
+    return Promise.resolve(
+      [...this.versions.entries()]
+        .filter(([, v]) => v.kind === "clause" && v.status === "published")
+        .map(([versionId, v]) => ({ versionId, key: v.key, body: v.body }))
+        .sort((a, b) => a.key.localeCompare(b.key)),
+    );
+  }
 }
 
 /**
