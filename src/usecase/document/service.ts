@@ -348,6 +348,56 @@ export class DocumentService {
   }
 
   /**
+   * Seed a document that CARRIES another's prose (T6.18, D11) — a letter
+   * drafted from the quote the client accepted.
+   *
+   * The quote's live exclusions, commercial notes and team lines are copied as
+   * they stand on the quote — bodies, headings and order — because that is what
+   * the client accepted, edits and hand-written lines included. Re-seeding them
+   * from the standard set threw that away. The kinds a quote never carries
+   * (the letter's cover and acceptance) come from the standard set for the
+   * issuer, as on any new letter. A kind the quote carries none of stays empty:
+   * the client accepted a quote without it.
+   *
+   * A copied line keeps pointing at its standard row only when it was not
+   * changed on the quote. One edited or written there comes across with no
+   * source, so the letter's screen marks it as this client's rather than
+   * calling it standard wording it is not.
+   */
+  async seedBlocksCarrying(
+    tenantId: string,
+    owner: BlockOwner,
+    jurisdiction: string,
+    issuingEntityPartyId: string | null,
+    from: BlockOwner,
+  ): Promise<readonly DocumentBlock[]> {
+    const existing = await this.deps.blocks.list(tenantId, owner);
+    if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
+
+    const carriedKinds = blockKindsFor(from.kind);
+    const carried = (await this.deps.blocks.list(tenantId, from))
+      .filter((b) => carriedKinds.includes(b.kind))
+      .map(
+        (b): NewDocumentBlock => ({
+          id: this.deps.ids.newId(),
+          tenantId,
+          owner,
+          kind: b.kind,
+          body: b.body,
+          isHeading: b.isHeading,
+          sortOrder: b.sortOrder,
+          sourceId: b.isEdited ? null : b.sourceId,
+        }),
+      );
+    const standard = (
+      await this.standardProse(tenantId, owner, jurisdiction, issuingEntityPartyId)
+    ).filter((b) => !carriedKinds.includes(b.kind));
+    const rows = [...carried, ...standard];
+    if (rows.length === 0) return [];
+    return this.deps.blocks.addMany(rows);
+  }
+
+  /**
    * The firm's standard set as it would land on this document — chosen by
    * `blocksFor`, renumbered, given ids — WITHOUT writing it.
    *

@@ -436,6 +436,20 @@ export class EngagementService {
   constructor(private readonly deps: Deps) {}
 
   async draft(input: DraftLetterInput, actor: Actor): Promise<EngagementLetter> {
+    return (await this.draftLetter(input, actor, null)).letter;
+  }
+
+  /**
+   * Drafting, with the one thing a letter from a quote does differently: its
+   * prose is the QUOTE's (T6.18, D11) rather than the standard set's.
+   * `carryFrom` is that quote, or null for an ordinary draft. Answers with how
+   * many of the quote's lines came across.
+   */
+  private async draftLetter(
+    input: DraftLetterInput,
+    actor: Actor,
+    carryFrom: string | null,
+  ): Promise<{ readonly letter: EngagementLetter; readonly proseCarried: number }> {
     const jurisdiction = normalizeJurisdiction(input.jurisdiction);
     if (!isJurisdiction(jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
 
@@ -536,13 +550,28 @@ export class EngagementService {
     // stores its OWN jurisdiction, chosen at drafting, so unlike a proposal
     // there is always an answer here — and a letter is the document where
     // getting it wrong is expensive.
-    // Whose lines: the issuing company's own where it has any (T6.18, D5).
-    await this.deps.documents.seedBlocks(
-      letter.tenantId,
-      { kind: "engagement_letter", id: letter.id },
-      letter.jurisdiction,
-      letter.issuingEntityPartyId,
-    );
+    // Whose lines: the issuing company's own where it has any (T6.18, D5) —
+    // or, for a letter from a quote, the quote's own as the client accepted
+    // them, with only the cover and acceptance from the standard set (D11).
+    const owner = { kind: "engagement_letter" as const, id: letter.id };
+    let proseCarried = 0;
+    if (carryFrom === null) {
+      await this.deps.documents.seedBlocks(
+        letter.tenantId,
+        owner,
+        letter.jurisdiction,
+        letter.issuingEntityPartyId,
+      );
+    } else {
+      const seeded = await this.deps.documents.seedBlocksCarrying(
+        letter.tenantId,
+        owner,
+        letter.jurisdiction,
+        letter.issuingEntityPartyId,
+        { kind: "proposal", id: carryFrom },
+      );
+      proseCarried = seeded.filter((b) => b.kind !== "cover" && b.kind !== "acceptance").length;
+    }
 
     await this.deps.events.recordEvent({
       tenantId: letter.tenantId,
@@ -572,7 +601,7 @@ export class EngagementService {
         effectiveFrom: letter.effectiveFrom,
       },
     });
-    return letter;
+    return { letter, proseCarried };
   }
 
   /**
@@ -658,7 +687,7 @@ export class EngagementService {
       await this.requireInStructure(input.tenantId, quote.partyId, entity, structure);
     }
 
-    const letter = await this.draft(
+    const { letter, proseCarried } = await this.draftLetter(
       {
         tenantId: input.tenantId,
         partyId: quote.partyId,
@@ -681,6 +710,7 @@ export class EngagementService {
         effectiveFrom: input.effectiveFrom,
       },
       actor,
+      quote.id,
     );
 
     const lines: LetterLine[] = [];
@@ -745,6 +775,9 @@ export class EngagementService {
         // Whether a person had to state the country, or the quote answered it.
         jurisdictionStated: input.jurisdiction !== undefined,
         defaultEntityUsed: input.defaultEntityPartyId !== undefined,
+        // How many of the quote's exclusion, commercial and team lines came
+        // across as the client accepted them (T6.18, D11).
+        proseLinesCarried: proseCarried,
       },
     });
 

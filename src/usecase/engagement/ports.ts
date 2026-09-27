@@ -117,6 +117,18 @@ export interface DocumentIdentity {
     issuingEntityPartyId: string,
   ): Promise<unknown>;
   /**
+   * Seed a letter drafted from a quote (T6.18, D11): the QUOTE's exclusions,
+   * commercial notes and team lines as the client accepted them, and the
+   * cover and acceptance from the issuer's standard set. Returns what landed.
+   */
+  seedBlocksCarrying(
+    tenantId: string,
+    owner: { readonly kind: "engagement_letter"; readonly id: string },
+    jurisdiction: string,
+    issuingEntityPartyId: string,
+    from: { readonly kind: "proposal"; readonly id: string },
+  ): Promise<readonly DocumentBlock[]>;
+  /**
    * What this document's prose says NOW — the copy it owns, not the firm's
    * standard set. A struck-off line is not returned.
    */
