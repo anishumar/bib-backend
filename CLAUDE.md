@@ -1196,6 +1196,49 @@ written from. Its limit, stated: a deliberate foreign choice (English law under 
 neutral arbitral seat) is now unrepresentable. Making the exception representable belongs on the
 LETTER and is a decision nobody has taken.
 
+### Whose prose, whose companies, and why one currency stayed (T6.18, 0312)
+
+**The standard prose is per ISSUING COMPANY, inheriting a default.**
+`crm.standard_document_block.issuing_entity_party_id` is null for the firm-wide default set and a
+company's id for that company's own lines. The rule is `blocksFor`'s, and it is PER KIND: when the
+company issuing a document has any ACTIVE line of a kind, its own lines are the document's set of
+that kind; otherwise the default lines are. Another company's lines never reach it, and the
+`jurisdiction` filter applies inside whichever set was chosen. So a UAE company that writes its own
+exclusions and nothing else prints its exclusions and the firm's default commercials and team.
+Seeding passes the issuer: a PROPOSAL's country is the client's when known, else where the issuer is
+registered, else `*` — before this a UI-made proposal was always `*` and a country-scoped line never
+reached it — and a LETTER uses its issuer and its own country. **Changing a draft's issuer replaces
+its prose with the new company's set** (D9), struck off and written in the same transaction as the
+issuer (`insertDocumentBlocks` / `strikeDocumentBlocks` are exported from `block-repository.ts` for
+exactly that), and refused with `PROSE_EDITED` while a line was edited or written for the client
+unless the caller says `replaceEditedProse`. **A letter drafted from a quote carries the quote's
+prose** (D11): its exclusions, commercials and team as the client accepted them, with only the
+letter-only cover and acceptance from the standard set; a line changed on the quote comes across
+with no `sourceId`, so the letter does not call it standard wording.
+
+**"One of the firm's companies" is still `crm.is_firm_entity`** — the firm itself, or a company a
+preference row names — and `/firm-entities` is that list as a screen reads it, with where each is
+registered, the countries the rule sends to it and `defaultCurrency` from `defaultCurrencyFor`
+(IN INR, AE AED, SG SGD, US USD, else the reporting currency: ONE copy, the frontend keeps none).
+Creating one is the organization, its `core.legal_entity` row and the preference row for its own
+country in ONE transaction (`PostgresFirmEntityRepository`, reusing the party adapter's exported
+`insertOrganization` / `insertLegalEntity`), because a half-created company is an organization with
+no role sitting in the CLIENT list; the three usual events are recorded after. A country another
+company already issues for is refused (`COUNTRY_ALREADY_SERVED`) rather than silently re-routed, and
+a company's registered country never moves (`JURISDICTION_FIXED`). `registered_address` is
+`{ "lines": [...] }` — the lines the firm prints, because the four countries do not agree on fields —
+stored and not printed yet (D15).
+
+**One document, one issuer, one currency — deliberately kept** (D1). The lines are held to the
+document's currency by a composite key (0011), the firm invoices a client from one company, and a
+quote in one currency is what CPQ tools and the firm's own proposal do. What moved is that a DRAFT's
+currency can change while it quotes nothing: 0312 made the line key `ON UPDATE CASCADE`, since a
+line struck off a draft (never offered to anybody) used to pin the currency for ever; the service
+still refuses a new currency over a live line (`CURRENCY_LOCKED_BY_LINES`). Totals are read PER
+BILLING FREQUENCY (`totalsByFrequency`, and the PDF's Summary of Fees now ends with the same figures)
+because one net that adds a monthly fee to a one-time one is not a number a reader should be shown.
+A multi-currency document would be a new model, not a relaxation of this one.
+
 ## The Annexure letter, and one fee for several services (0083)
 
 The firm's own engagement-letter format (10X Global's MyDojo letter, July 2026) is a different
