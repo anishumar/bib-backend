@@ -764,9 +764,24 @@ export function wire(cfg: Config, log: Logger): Wired {
     // the work already waiting on a fallback desk. The work item service is
     // built above, so this is an ordinary call and not a cycle; a closure all
     // the same, so the port stays in this use case's own words.
+    //
+    // A FAILURE IS LOGGED HERE, because this is its only trace. The use case
+    // swallows it on purpose (the assignment stands, and the answer says
+    // `caughtUp: null`), and a use case holds no logger, so without this line
+    // "the SPOC was named and none of the work moved" had nothing to read
+    // afterwards. Rethrown, so the use case still answers null.
     work: {
-      catchUp: (tenantId, clientPartyId, actor): Promise<CaughtUpWork> =>
-        workItems.catchUpClient(tenantId, clientPartyId, actor),
+      catchUp: async (tenantId, clientPartyId, actor): Promise<CaughtUpWork> => {
+        try {
+          return await workItems.catchUpClient(tenantId, clientPartyId, actor);
+        } catch (err) {
+          log.error(
+            { err, tenantId, clientPartyId },
+            "catch-up after an account-team assignment failed; the client's waiting work stayed where it was",
+          );
+          throw err;
+        }
+      },
     },
   });
 

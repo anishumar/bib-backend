@@ -2244,7 +2244,9 @@ hand out (or with nobody) and naming the SPOC afterwards moved none of it.
 event are written (satisfied in `setup/server.ts` with `WorkItemService.catchUpClient`; neither use
 case imports the other), and the assign route answers `caughtUp: { moves: [{ userId, tasks, steps
 }] }`, `null` when moving failed. **The assignment stands either way**: it is the firm's record of
-who looks after the client, and a failure to tidy old work must not undo it.
+who looks after the client, and a failure to tidy old work must not undo it. The failure is logged
+at `error` where the port is wired (`setup/server.ts`, with the tenant and the client), since the
+use case swallows it and holds no logger.
 
 **WHAT MOVES is only work nobody has decided about** (`listCatchUpCandidates`): the client's ENGINE
 work (an engagement's task, or a filing's through `obligation_instance`; a task raised by hand has

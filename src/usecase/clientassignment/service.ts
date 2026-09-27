@@ -281,6 +281,8 @@ export class ClientAssignmentService {
       // Deliberately swallowed, and reported as `null` rather than a zero
       // nobody measured: see `AssignOutcome.caughtUp`. Each task the catch-up
       // did move before failing is on its own row and its own ledger event.
+      // The failure itself is logged where the port is wired
+      // (`setup/server.ts`): a use case holds no logger.
       caughtUp = null;
     }
     return { assignment: created, caughtUp };
