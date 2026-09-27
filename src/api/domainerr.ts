@@ -597,6 +597,7 @@ export function mapError(err: unknown): MappedError {
       case "REVIEW_REJECTION_NEEDS_NOTE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "WORK_ITEM_NOT_FOUND":
+      case "ROUTING_LETTER_NOT_FOUND":
       case "WORK_ITEM_CLIENT_NOT_FOUND":
       case "STATE_NOT_FOUND":
       case "PRIORITY_NOT_FOUND":

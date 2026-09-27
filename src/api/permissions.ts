@@ -428,6 +428,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // page already gives anybody who may see the client.
   [routeKey("GET", "/api/v1/parties/{partyId}/structure"), "party:read" as const],
   [routeKey("GET", "/api/v1/engagement-letters/{letterId}"), "party:read" as const],
+  // Whose desk its work will land on (T6.17): names the firm's own staff, as
+  // the letter and the account team already do, to anybody who may read them.
+  [routeKey("GET", "/api/v1/engagement-letters/{letterId}/routing"), "party:read" as const],
   [routeKey("POST", "/api/v1/engagement-letters"), "party:write" as const],
 
   // Writing an accepted quote up as a letter (T3.5b). `party:write`, the same

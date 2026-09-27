@@ -25,6 +25,8 @@ import { withTenant } from "../../db/tenant";
 import type {
   EngagementWork,
   EngagementWorkSource,
+  LetterWorkLine,
+  LetterWorkSource,
 } from "../../usecase/workitem/ports";
 
 interface WorkRow {
@@ -91,6 +93,57 @@ export class PostgresEngagementWorkSource implements EngagementWorkSource {
         WHERE e.id = ANY(${db.array(engagementIds as string[])}::uuid[])
       `;
       return rows.map(toWork);
+    });
+  }
+}
+
+/**
+ * An UNSIGNED letter's lines, for the routing preview on its Send (T6.17).
+ *
+ * The same two facts `workFor` hands the router once the letter is signed,
+ * read the same way: the CLIENT is the letter's party, and the Dept is the
+ * LIVE published version's `module` (the note at the top of this file). The
+ * preview is only worth showing if it names the desk the work will really
+ * land on, so the two joins must not drift apart.
+ */
+export class PostgresLetterWorkSource implements LetterWorkSource {
+  constructor(private readonly app: Db) {}
+
+  async linesOf(
+    tenantId: string,
+    letterId: string,
+  ): Promise<{ readonly clientPartyId: string; readonly lines: readonly LetterWorkLine[] } | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const letters = await db<{ party_id: string }[]>`
+        SELECT party_id FROM crm.engagement_letter WHERE id = ${letterId}
+      `;
+      const letter = letters[0];
+      if (!letter) return null;
+      const rows = await db<
+        { line_id: string; service_name: string | null; description: string; dept_code: string | null }[]
+      >`
+        SELECT ln.id AS line_id,
+               pinned.body ->> 'name' AS service_name,
+               ln.description,
+               live.body ->> 'module' AS dept_code
+        FROM crm.engagement_letter_line ln
+        LEFT JOIN config.version pinned
+          ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+        LEFT JOIN config.version live
+          ON live.entry_id = pinned.entry_id
+         AND live.tenant_id = pinned.tenant_id
+         AND live.status = 'published'
+        WHERE ln.engagement_letter_id = ${letterId}
+        ORDER BY ln.position, ln.id
+      `;
+      return {
+        clientPartyId: letter.party_id,
+        lines: rows.map((r) => ({
+          lineId: r.line_id,
+          name: r.service_name ?? r.description,
+          deptCode: r.dept_code,
+        })),
+      };
     });
   }
 }

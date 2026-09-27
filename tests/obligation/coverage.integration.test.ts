@@ -44,6 +44,7 @@ import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import {
   FakeEngagementWork,
+  FakeLetterWork,
   FakeObligationFiling,
   FakeReviewPermissions,
   FakeReviewPolicies,
@@ -55,7 +56,10 @@ import {
   FakeWorkItemRepo,
   FakeWorkItemStaff,
   FakeWorkVocabularyRepo,
+  FakeJobStepHandover,
+  FakeWorkOwnerDirectory,
 } from "../../src/testfakes/workitem";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
 
 const cfg = load();
@@ -491,11 +495,15 @@ async function monthTasks(engagementIds: readonly string[], versionId: string): 
     clients: new FakeWorkItemClients(),
     staff: new FakeWorkItemStaff(),
     spocs: new FakeSpocDirectory(),
+    owners: new FakeWorkOwnerDirectory(),
+    jobSteps: new FakeJobStepHandover(),
+    timeZones: new FakeFirmTimeZone(),
     axes: new FakeWorkAxes(),
     policies: new FakeReviewPolicies(),
     reviewers: new FakeReviewers(),
     permissions: new FakeReviewPermissions(),
     engagements,
+    letters: new FakeLetterWork(),
     obligations: coverage,
     filings: new FakeObligationFiling(),
     ids,

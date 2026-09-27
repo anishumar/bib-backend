@@ -87,6 +87,7 @@ import {
   FakeAssignmentStaff,
   FakeClientAssignmentRepo,
   FakeClientDirectory,
+  FakeClientWorkCatchUp,
 } from "../../src/testfakes/clientassignment";
 import { ClientImportService } from "../../src/usecase/clientimport/service";
 import {
@@ -151,6 +152,7 @@ import {
 } from "../../src/testfakes/identity";
 import {
   FakeEngagementWork,
+  FakeLetterWork,
   FakeObligationCoverage,
   FakeObligationFiling,
   FakeReviewPermissions,
@@ -163,6 +165,8 @@ import {
   FakeWorkItemRepo,
   FakeWorkItemStaff,
   FakeWorkVocabularyRepo,
+  FakeJobStepHandover,
+  FakeWorkOwnerDirectory,
 } from "../../src/testfakes/workitem";
 import { WorkItemService, WorkVocabularyService } from "../../src/usecase/workitem/service";
 import { ObligationVocabularyService } from "../../src/usecase/obligation/vocabulary";
@@ -356,11 +360,15 @@ function deps(): RouterDeps {
           clients: new FakeWorkItemClients(),
           staff: new FakeWorkItemStaff(),
           spocs: new FakeSpocDirectory(),
+          owners: new FakeWorkOwnerDirectory(),
+          jobSteps: new FakeJobStepHandover(),
+          timeZones: new FakeFirmTimeZone(),
           axes: new FakeWorkAxes(),
           policies: new FakeReviewPolicies(),
           reviewers: new FakeReviewers(),
           permissions: new FakeReviewPermissions(),
           engagements: new FakeEngagementWork(),
+          letters: new FakeLetterWork(),
           obligations: new FakeObligationCoverage(),
           filings: new FakeObligationFiling(),
           ids: new FakeIds(),
@@ -383,6 +391,7 @@ function deps(): RouterDeps {
         ids: makeFakes().ids,
         clock: new FakeClock(new Date("2026-08-30T00:00:00.000Z")),
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
+        work: new FakeClientWorkCatchUp(),
         events: makeFakes().events,
       }),
     },

@@ -176,6 +176,17 @@ const WorkItemSchema = z
   })
   .openapi("WorkItem");
 
+/** The task, and how many of its job's steps went with it (2026-09-27). */
+const AssignResponse = WorkItemSchema.extend({
+  stepsHandedOver: z.number().int().nonnegative().openapi({
+    description:
+      "How many of the job's steps moved to the new owner with the task: the steps nobody " +
+      "held, or that the task's previous owner held, which the process lets the new owner " +
+      "do. Zero when the task has no job, when it was taken off a desk, or when another " +
+      "open task of the same job is on somebody else's desk.",
+  }),
+}).openapi("AssignedWorkItem");
+
 const ChecklistItemSchema = z
   .object({
     id: z.string().uuid(),
@@ -733,7 +744,7 @@ const assignRoute = createRoute({
     body: { content: { "application/json": { schema: AssignRequest } }, required: true },
   },
   responses: {
-    200: { description: "Assigned", content: { "application/json": { schema: WorkItemSchema } } },
+    200: { description: "Assigned", content: { "application/json": { schema: AssignResponse } } },
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item at this firm"),
@@ -927,6 +938,70 @@ const pendingChecksRoute = createRoute({
   },
 });
 
+// ── where an unsigned letter's work will land (T6.17) ─────────────────────────
+
+const LetterRoutingSchema = z
+  .object({
+    letterId: z.string().uuid(),
+    clientPartyId: z.string().uuid().openapi({
+      description: "The letter's client: whose account team decides the answer.",
+    }),
+    onDate: IsoDate.openapi({
+      description:
+        "The firm's day the owner rule was asked on. A forecast: the work is routed again, " +
+        "on its own day, when the signed letter becomes work.",
+    }),
+    depts: z.array(
+      z.object({
+        deptCode: z.string().nullable().openapi({
+          description: "The Dept the lines' services are filed under; null for none.",
+        }),
+        deptName: z.string().nullable().openapi({
+          description: "The firm's name for it; null when the code is not one of its Depts.",
+        }),
+        lines: z.array(z.object({ lineId: z.string().uuid(), name: z.string() })),
+        how: z.enum(["spoc", "key_manager", "partner"]).nullable().openapi({
+          description:
+            "Which rung of the owner rule takes the work: the client's SPOC for the Dept, " +
+            "else the client's Key Manager, else the person who signs for the firm, to hand " +
+            "out. Null when nobody could be named.",
+        }),
+        userId: z.string().uuid().nullable(),
+        ownerName: z.string().nullable(),
+        reason: z.enum(["no_spoc", "no_dept", "unknown_dept"]).nullable().openapi({
+          description:
+            "Why the SPOC rung was passed: no SPOC for the Dept on this client, the service " +
+            "is filed under no Dept, or it names a Dept the firm does not have. Null when a " +
+            "SPOC takes it.",
+        }),
+      }),
+    ),
+  })
+  .openapi("LetterRouting");
+
+const letterRoutingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/engagement-letters/{letterId}/routing",
+  tags: ["work"],
+  summary: "Whose desk an engagement letter's work will land on",
+  description:
+    "The owner rule asked for each Dept the letter's lines are filed under, as it will be " +
+    "asked when the signed letter becomes work: the client's SPOC for the Dept, else the " +
+    "client's Key Manager, else the person who signs for the firm, to hand out. For the " +
+    "warning above Send (T6.17): a WARNING, never a refusal, so the sender can name a SPOC " +
+    "on the client's page while it still changes where the work goes.",
+  request: { params: z.object({ letterId: z.string().uuid() }) },
+  responses: {
+    200: {
+      description: "The routing, one row per Dept",
+      content: { "application/json": { schema: LetterRoutingSchema } },
+    },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read parties"),
+    404: errorResponse("No such engagement letter at this firm"),
+  },
+});
+
 // ── the firm's own vocabulary ───────────────────────────────────────────────
 
 const vocabularyRoute = createRoute({
@@ -1043,6 +1118,30 @@ const updatePriorityRoute = createRoute({
 });
 
 export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemDeps): void {
+  app.openapi(letterRoutingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const r = await deps.service.routingForLetter(s.tenantId, letterId);
+    return c.json(
+      {
+        letterId: r.letterId,
+        clientPartyId: r.clientPartyId,
+        onDate: r.onDate,
+        depts: r.depts.map((d) => ({
+          deptCode: d.deptCode,
+          deptName: d.deptName,
+          lines: d.lines.map((l) => ({ lineId: l.lineId, name: l.name })),
+          how: d.how,
+          userId: d.userId,
+          ownerName: d.ownerName,
+          reason: d.reason,
+        })),
+      },
+      200,
+    );
+  });
+
   app.openapi(boardRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1153,8 +1252,11 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     if (!s.ok) return c.json(s.deny, s.status);
     const { workItemId } = c.req.valid("param");
     const { assigneeUserId } = c.req.valid("json");
-    await deps.service.assign({ tenantId: s.tenantId, workItemId, assigneeUserId }, s.actor);
-    return c.json(toWire(await readBack(deps, s.tenantId, workItemId)), 200);
+    const { stepsHandedOver } = await deps.service.assign(
+      { tenantId: s.tenantId, workItemId, assigneeUserId },
+      s.actor,
+    );
+    return c.json({ ...toWire(await readBack(deps, s.tenantId, workItemId)), stepsHandedOver }, 200);
   });
 
   app.openapi(addChecklistRoute, async (c) => {
@@ -1416,4 +1518,5 @@ export const workItemRoutes = {
   updateState: updateStateRoute,
   createPriority: createPriorityRoute,
   updatePriority: updatePriorityRoute,
+  letterRouting: letterRoutingRoute,
 } as const;

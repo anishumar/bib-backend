@@ -19,6 +19,7 @@ import type {
   WorkItemRecord,
 } from "../../domain/workitem/model";
 import type {
+  CatchUpCandidate,
   NewWorkItem,
   WorkItemFilter,
   WorkItemPatch,
@@ -420,6 +421,108 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
       `;
       if (!row) throw new Error(`work_item ${workItemId} vanished between the read and the write`);
       return toItem(row);
+    });
+  }
+
+  /**
+   * The catch-up's candidates (T6.17). Every clause is one of the port's
+   * conditions, and each is what keeps a person's decision standing:
+   *
+   *   - ENGINE WORK: an engagement's task, or a filing's (an obligation row
+   *     points at it). A task somebody raised by hand has neither.
+   *   - NOT STARTED: in a state the firm marks as its starting one, which is
+   *     never terminal (0051's CHECK on the vocabulary).
+   *   - THE ROUTER'S NOTE: any note but the one a person leaves when they take
+   *     a task off a desk. A person moving a task writes NULL over the note, so
+   *     a hand-moved task has none and is not read at all.
+   *
+   * The Dept comes from the engagement: the task's own, or for a filing's
+   * task the one its obligation is owed under, which is where
+   * `raiseForObligation` read it.
+   */
+  async listCatchUpCandidates(
+    tenantId: string,
+    clientPartyId: string,
+    exceptNote: string,
+  ): Promise<readonly CatchUpCandidate[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<
+        {
+          id: string;
+          job_id: string | null;
+          assignee_user_id: string | null;
+          assignment_note: string;
+          engagement_id: string | null;
+          is_filing: boolean;
+          due_on: string | null;
+        }[]
+      >`
+        SELECT w.id, w.job_id, w.assignee_user_id, w.assignment_note,
+               coalesce(w.engagement_id, o.engagement_id) AS engagement_id,
+               (o.id IS NOT NULL) AS is_filing,
+               w.due_on::text AS due_on
+        FROM delivery.work_item w
+        JOIN delivery.work_item_state s
+          ON s.id = w.state_id AND s.tenant_id = w.tenant_id
+        -- One obligation per task is what the generator writes; the column is
+        -- not unique (0053), so the first one answers rather than duplicating
+        -- the task.
+        LEFT JOIN LATERAL (
+          SELECT oi.id, oi.engagement_id
+            FROM delivery.obligation_instance oi
+           WHERE oi.work_item_id = w.id AND oi.tenant_id = w.tenant_id
+           ORDER BY oi.period_start
+           LIMIT 1
+        ) o ON true
+        WHERE w.client_party_id = ${clientPartyId}
+          AND s.is_initial
+          AND NOT s.is_terminal
+          AND w.assignment_note IS NOT NULL
+          AND w.assignment_note <> ${exceptNote}
+          AND (w.engagement_id IS NOT NULL OR o.id IS NOT NULL)
+        ORDER BY w.due_on NULLS LAST, w.created_at, w.id
+        LIMIT ${MAX_LIST_ROWS}
+      `;
+      return rows.map((r) => ({
+        workItemId: r.id,
+        jobId: r.job_id,
+        assigneeUserId: r.assignee_user_id,
+        assignmentNote: r.assignment_note,
+        engagementId: r.engagement_id,
+        isFiling: r.is_filing,
+        dueOn: r.due_on,
+      }));
+    });
+  }
+
+  /**
+   * The catch-up's write (T6.17), refused by its own WHERE when anything it
+   * was decided on has changed: the holder, the note, or the task having left
+   * its starting state. `IS NOT DISTINCT FROM`, because either side may be
+   * NULL and `=` would then match nothing, refusing every task on nobody's
+   * desk.
+   */
+  async reroute(
+    tenantId: string,
+    workItemId: string,
+    expected: { readonly assigneeUserId: string | null; readonly note: string | null },
+    next: { readonly assigneeUserId: string; readonly note: string | null },
+  ): Promise<WorkItem | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<ItemRow[]>`
+        UPDATE delivery.work_item w
+        SET assignee_user_id = ${next.assigneeUserId},
+            assignment_note = ${next.note}
+        WHERE w.id = ${workItemId}
+          AND w.assignee_user_id IS NOT DISTINCT FROM ${expected.assigneeUserId}::uuid
+          AND w.assignment_note IS NOT DISTINCT FROM ${expected.note}::text
+          AND EXISTS (
+            SELECT 1 FROM delivery.work_item_state s
+             WHERE s.id = w.state_id AND s.tenant_id = w.tenant_id AND s.is_initial
+          )
+        RETURNING ${db.unsafe(COLUMNS)}
+      `;
+      return row ? toItem(row) : null;
     });
   }
 

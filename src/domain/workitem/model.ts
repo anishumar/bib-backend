@@ -498,10 +498,12 @@ export interface SpocCandidate {
  *
  *   ONE SPOC — assigned. The case the firm described, and the common one.
  *
- *   NONE — unassigned, with a note naming the Dept. Falling back to the Key
- *   Manager was considered and refused: it is a rule the firm never gave, and
- *   it would hide the real problem (nobody has recorded a SPOC) behind a
- *   plausible answer that somebody would then have to un-do.
+ *   NONE — no SPOC, with a note naming the Dept. From 2026-08-30 that left the
+ *   work on nobody's desk, because falling back to the Key Manager was a rule
+ *   the firm never gave. The firm has now given one (Shrestha, 2026-09-27):
+ *   work always has an owner. So this function still answers "none", and
+ *   `resolveOwner` below is what takes that answer to the Key Manager and then
+ *   to the partner who signs for the firm.
  *
  *   MORE THAN ONE — TURN-TAKING (Shrestha, 2026-09-25). G3.2 deliberately
  *   allows several per Dept (leave cover, a joint SPOC on a group, a
@@ -536,6 +538,201 @@ export function resolveAssignee(
   // EARLIER candidate on a tie, so the directory's order is the tie-break.
   const next = spocs.reduce((best, s) => (s.routed < best.routed ? s : best), first);
   return { userId: next.userId, note: null };
+}
+
+/** Which rung of the owner rule named the person. `null` on an outcome means
+ *  nobody could be named at all. Goes on the ledger as `how`, so it is a
+ *  closed vocabulary and never a name. */
+export type OwnerSource = "spoc" | "key_manager" | "partner";
+
+/** Somebody the owner rule may hand work to: an ACTIVE member of the firm's
+ *  staff. The adapters filter; this type is what they hand over. */
+export interface OwnerPerson {
+  readonly userId: string;
+  readonly displayName: string | null;
+}
+
+/**
+ * Why the SPOC lookup could not even be asked. Distinct from "asked, and the
+ * client has nobody for that Dept", which is `noLookup: null` with no SPOCs:
+ * each has its own fix, and the note says which.
+ */
+export type NoSpocLookup =
+  /** The service is filed under no Dept. */
+  | { readonly kind: "no_dept" }
+  /** The service names a Dept code the firm does not have. */
+  | { readonly kind: "unknown_dept"; readonly code: string }
+  /** A JOB holding work for several Depts (possible when the firm keeps a
+   *  client's work together): no one Dept's SPOC can take all of it. */
+  | { readonly kind: "several_depts"; readonly names: readonly string[] };
+
+/** Everything the owner rule reads, gathered by whoever is asking. The task
+ *  router and the job's step desk gather it differently (a task has one
+ *  service, a job may have several) and decide it with the SAME function. */
+export interface OwnerFacts {
+  /** The Dept or team the work belongs to, as a person reads it. */
+  readonly deptName: string | null;
+  readonly noLookup: NoSpocLookup | null;
+  /** The SPOCs in force for that Dept on this client, active staff only. */
+  readonly spocs: readonly SpocCandidate[];
+  /** The client's Key Manager in force that day, if an active member of staff. */
+  readonly keyManager: OwnerPerson | null;
+  /** The person who signs for the firm (`/admin/firm`), if an active member of staff. */
+  readonly partner: OwnerPerson | null;
+}
+
+export interface OwnerOutcome extends AssignmentOutcome {
+  readonly how: OwnerSource | null;
+}
+
+/**
+ * WHO OWNS A PIECE OF WORK WHEN IT IS CREATED (Shrestha, 2026-09-27).
+ *
+ * Work always has an owner. Unassigned work is work nobody looks at, and the
+ * firm's rule is a ladder with one answer at each rung:
+ *
+ *   1. The client's SPOC for the work's Dept (`resolveAssignee`, turn-taking
+ *      and all). The ordinary case, and the only one with no note.
+ *   2. No SPOC: the client's Key Manager, who owns the whole relationship.
+ *   3. No Key Manager either: the person who signs for the firm.
+ *   4. Nobody at all: unassigned, and the note says which three things are
+ *      missing.
+ *
+ * A fallback owner is there to HAND THE WORK OUT, not to do it, and the note
+ * says so. That is what answers this codebase's old objection to a fallback,
+ * that a wrong assignee is worse than none because it sits on a desk whose
+ * owner believes it is not theirs: the owner is told, on the row, why it came
+ * to them and what to do with it. Handing the task on takes the job's steps
+ * with it (`OrchestratorService.adoptUnheldSteps`), so handing it out is one
+ * act and not eleven.
+ *
+ * Pure, and the ONE statement of the ladder. The task router and the job's
+ * step desk both call it, so a task and its steps can no longer land on
+ * different desks because they asked two different questions, which is the
+ * bug that made this function (2026-09-27: with the firm keeping a client's
+ * work together, every job's steps went to nobody while its task went to the
+ * SPOC).
+ *
+ * The note names PEOPLE, so it is prose on an erasable row and never in a
+ * ledger payload; `how` is what the ledger keeps.
+ */
+export function resolveOwner(facts: OwnerFacts): OwnerOutcome {
+  if (facts.noLookup === null && facts.spocs.length > 0) {
+    const picked = resolveAssignee(facts.spocs, facts.deptName);
+    return { userId: picked.userId, note: picked.note, how: "spoc" };
+  }
+  const why = whyNoSpoc(facts);
+  const fix = howToRouteIt(facts);
+  if (facts.keyManager !== null) {
+    return {
+      userId: facts.keyManager.userId,
+      how: "key_manager",
+      note: `${why}, so it came to the client's Key Manager to hand out.${fix}`,
+    };
+  }
+  if (facts.partner !== null) {
+    const who = facts.partner.displayName ?? "the person who signs for the firm";
+    return {
+      userId: facts.partner.userId,
+      how: "partner",
+      note:
+        `${why} and the client has no Key Manager, so it came to ${who}, who signs for ` +
+        `the firm, to hand out.${fix}`,
+    };
+  }
+  return {
+    userId: null,
+    how: null,
+    note:
+      `${why}, the client has no Key Manager, and the firm has not named who signs for it, ` +
+      `so nobody could be given this. Name a SPOC or a Key Manager on the client's page, ` +
+      `or hand it to somebody here.`,
+  };
+}
+
+/**
+ * The note a task carries when a PERSON took it off a desk and left it with
+ * nobody (`WorkItemService.assign` with no assignee). One constant, because
+ * the catch-up below must tell it apart from the router's own "nobody could
+ * be given this": a person deciding a task should sit unassigned is a
+ * decision, and the router re-deciding it would overrule them. Worded as it
+ * has been since T3.1, so rows written before this constant match it.
+ */
+export const TAKEN_OFF_BY_HAND_NOTE = "Taken off a desk by hand; nobody has it now.";
+
+/** Where a task the owner rule placed sits now, as the catch-up reads it. */
+export interface PlacedTask {
+  readonly assigneeUserId: string | null;
+  readonly assignmentNote: string | null;
+}
+
+/** What the catch-up does to one task: nothing, move it, or keep the desk and
+ *  correct the sentence on it. */
+export type CatchUpDecision =
+  | { readonly kind: "move"; readonly userId: string; readonly how: OwnerSource; readonly note: string | null }
+  | { readonly kind: "renote"; readonly note: string | null };
+
+/**
+ * THE CATCH-UP (T6.17, Shrestha 2026-09-27): the account team was named after
+ * the work was created, so ask the owner rule again and say what changes.
+ *
+ * Called only on a task the ROUTER placed and nobody has decided on since (on
+ * a fallback desk with its note, or on nobody's with the router's note), and
+ * only while it has not been started: the caller's read guarantees that, and
+ * this is the rule about what the new answer means.
+ *
+ *   - The rule names nobody: nothing. Work is never taken OFF a desk by this;
+ *     a Key Manager who has left leaves the task where it is for somebody to
+ *     hand out, which is what the note on it already says.
+ *   - The rule names somebody else: the task MOVES to them, with the new
+ *     rung's note (none, when it is the SPOC).
+ *   - The rule names the person who already holds it, by another rung (the
+ *     Key Manager is now also the Dept's SPOC): the desk stays and only the
+ *     sentence changes, because "no SPOC is recorded" would now be false.
+ */
+export function catchUpMove(task: PlacedTask, now: OwnerOutcome): CatchUpDecision | null {
+  if (now.userId === null || now.how === null) return null;
+  if (now.userId !== task.assigneeUserId) {
+    return { kind: "move", userId: now.userId, how: now.how, note: now.note };
+  }
+  return now.note === task.assignmentNote ? null : { kind: "renote", note: now.note };
+}
+
+function whyNoSpoc(facts: OwnerFacts): string {
+  const lookup = facts.noLookup;
+  if (lookup === null) {
+    return `No SPOC is recorded for ${facts.deptName ?? "this service's Dept"} on this client`;
+  }
+  switch (lookup.kind) {
+    case "no_dept":
+      return "This service is not filed under a Dept, so it has no SPOC";
+    case "unknown_dept":
+      return `The service names Dept ${JSON.stringify(lookup.code)}, which is not one of this firm's Depts, so it has no SPOC`;
+    case "several_depts":
+      return `This job holds work for ${joinNames(lookup.names)}, so no one Dept's SPOC can take all of it`;
+  }
+}
+
+/** The sentence that stops it happening again, where there is one. A job
+ *  spanning several Depts has none: handing it out IS the answer. */
+function howToRouteIt(facts: OwnerFacts): string {
+  const lookup = facts.noLookup;
+  if (lookup === null) {
+    return ` Naming a SPOC for ${facts.deptName ?? "that Dept"} on the client's page sends work like this straight to them.`;
+  }
+  switch (lookup.kind) {
+    case "no_dept":
+      return " Setting a Dept on the service in the catalogue sends work like this to its SPOC.";
+    case "unknown_dept":
+      return " Add that Dept on the structure screen or correct the service.";
+    case "several_depts":
+      return "";
+  }
+}
+
+function joinNames(names: readonly string[]): string {
+  if (names.length <= 1) return names[0] ?? "several Depts";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1] ?? ""}`;
 }
 
 /**

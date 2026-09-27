@@ -15,6 +15,9 @@ import {
   initialState,
   priorityOrder,
   resolveAssignee,
+  resolveOwner,
+  catchUpMove,
+  TAKEN_OFF_BY_HAND_NOTE,
   stateOrder,
   wouldCycle,
 } from "../../src/domain/workitem/model";
@@ -166,10 +169,9 @@ describe("routing a filing to the client's Dept SPOC", () => {
     expect(out.note).toBeNull();
   });
 
-  it("leaves it unassigned when the client has no SPOC for that Dept", () => {
-    // Falling back to the Key Manager was considered and refused: it is a rule
-    // the firm never gave, and it would hide the real problem behind a
-    // plausible answer somebody would then have to un-do.
+  it("names nobody when the client has no SPOC for that Dept", () => {
+    // This rung only. Since 2026-09-27 `resolveOwner` takes this answer on to
+    // the Key Manager and the signing partner (tested below).
     const out = resolveAssignee([], "FRC");
     expect(out.userId).toBeNull();
     expect(out.note).toContain("FRC");
@@ -190,8 +192,8 @@ describe("routing a filing to the client's Dept SPOC", () => {
   });
 
   it("assigns rather than annotates when it takes a turn", () => {
-    // The note is what UNASSIGNED work says about itself, and the schema
-    // refuses one beside a name (`work_item_note_only_when_unassigned`).
+    // A SPOC's desk needs no explanation. The note is for work that is
+    // unassigned, or on a fallback owner's desk (`resolveOwner`).
     const out = resolveAssignee([spoc("priya"), spoc("anand")], "TRC");
     expect(out.userId).not.toBeNull();
     expect(out.note).toBeNull();
@@ -379,5 +381,108 @@ describe("the vocabulary's own order", () => {
   it("renders priorities most urgent first", () => {
     const priorities = [priority({ id: "low", rank: 4 }), priority({ id: "top", rank: 1 })];
     expect(priorityOrder(priorities).map((p) => p.id)).toEqual(["top", "low"]);
+  });
+});
+
+describe("the owner rule: SPOC, then Key Manager, then the person who signs for the firm (2026-09-27)", () => {
+  const km = { userId: "kavya", displayName: "Kavya Nair" };
+  const partner = { userId: "sid", displayName: "Siddharth Kohli" };
+  const facts = (over: Partial<Parameters<typeof resolveOwner>[0]> = {}) => ({
+    deptName: "Financial Reporting and Compliance",
+    noLookup: null,
+    spocs: [],
+    keyManager: null,
+    partner: null,
+    ...over,
+  });
+
+  it("gives it to the SPOC and says nothing when there is one, whoever else exists", () => {
+    const out = resolveOwner(facts({ spocs: [spoc("priya")], keyManager: km, partner }));
+    expect(out).toEqual({ userId: "priya", note: null, how: "spoc" });
+  });
+
+  it("gives it to the Key Manager to hand out when there is no SPOC, and says why and how to stop it", () => {
+    const out = resolveOwner(facts({ keyManager: km, partner }));
+    expect(out.userId).toBe("kavya");
+    expect(out.how).toBe("key_manager");
+    expect(out.note).toContain("No SPOC is recorded for Financial Reporting and Compliance");
+    expect(out.note).toContain("Key Manager to hand out");
+    expect(out.note).toContain("Naming a SPOC");
+  });
+
+  it("gives it to the person who signs for the firm, by name, when there is no Key Manager either", () => {
+    const out = resolveOwner(facts({ partner }));
+    expect(out.userId).toBe("sid");
+    expect(out.how).toBe("partner");
+    expect(out.note).toContain("the client has no Key Manager");
+    expect(out.note).toContain("Siddharth Kohli, who signs for the firm");
+    // A signatory with no display name is still described, never a blank.
+    expect(resolveOwner(facts({ partner: { userId: "sid", displayName: null } })).note).toContain(
+      "the person who signs for the firm, who signs for the firm",
+    );
+  });
+
+  it("names nobody only when all three are missing, and says which three", () => {
+    const out = resolveOwner(facts());
+    expect(out).toMatchObject({ userId: null, how: null });
+    expect(out.note).toContain("the client has no Key Manager");
+    expect(out.note).toContain("has not named who signs for it");
+  });
+
+  it("does not ask the SPOCs of a Dept it could not look up", () => {
+    // A job holding FRC and TRC work has no one Dept, so even a SPOC handed in
+    // is not asked: the Key Manager takes it, with no "name a SPOC" advice,
+    // because handing it out IS the answer.
+    const out = resolveOwner(
+      facts({
+        noLookup: { kind: "several_depts", names: ["Financial Reporting and Compliance", "Tax"] },
+        spocs: [spoc("priya")],
+        keyManager: km,
+      }),
+    );
+    expect(out.userId).toBe("kavya");
+    expect(out.note).toContain("work for Financial Reporting and Compliance and Tax");
+    expect(out.note).not.toContain("Naming a SPOC");
+  });
+
+  it("says what is wrong with the SERVICE when the service is the reason", () => {
+    expect(resolveOwner(facts({ noLookup: { kind: "no_dept" }, keyManager: km })).note).toContain(
+      "not filed under a Dept",
+    );
+    expect(
+      resolveOwner(facts({ noLookup: { kind: "unknown_dept", code: "FRX" }, keyManager: km })).note,
+    ).toContain('Dept "FRX", which is not one of this firm\'s Depts');
+  });
+});
+
+describe("catchUpMove: what asking the owner rule again means for one waiting task (T6.17)", () => {
+  const KM_NOTE = "No SPOC is recorded for FRC on this client, so it came to the client's Key Manager to hand out.";
+
+  it("moves the task when the rule now names somebody else, with that rung's note", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "priya", how: "spoc", note: null }),
+    ).toEqual({ kind: "move", userId: "priya", how: "spoc", note: null });
+    expect(
+      catchUpMove({ assigneeUserId: null, assignmentNote: "nobody" }, { userId: "ravi", how: "key_manager", note: KM_NOTE }),
+    ).toEqual({ kind: "move", userId: "ravi", how: "key_manager", note: KM_NOTE });
+  });
+
+  it("never takes a task off a desk: a rule that names nobody leaves it where it is", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: null, how: null, note: "nobody" }),
+    ).toBeNull();
+  });
+
+  it("keeps the desk and corrects only the sentence when the same person now holds it by another rung", () => {
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "ravi", how: "spoc", note: null }),
+    ).toEqual({ kind: "renote", note: null });
+    expect(
+      catchUpMove({ assigneeUserId: "ravi", assignmentNote: KM_NOTE }, { userId: "ravi", how: "key_manager", note: KM_NOTE }),
+    ).toBeNull();
+  });
+
+  it("keeps the hand-unassign sentence as it has read since T3.1, so rows written before the constant still match it", () => {
+    expect(TAKEN_OFF_BY_HAND_NOTE).toBe("Taken off a desk by hand; nobody has it now.");
   });
 });

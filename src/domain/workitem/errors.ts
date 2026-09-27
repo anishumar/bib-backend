@@ -33,6 +33,7 @@ export type WorkItemErrorCode =
   | "LAST_DEFAULT_PRIORITY"
   | "CONFLICTING_STATE_FLAGS"
   | "WORK_ITEM_NOT_FOUND"
+  | "ROUTING_LETTER_NOT_FOUND"
   | "WORK_ITEM_CLIENT_NOT_FOUND"
   | "WORK_ITEM_CLIENT_ARCHIVED"
   | "WORK_ITEM_TITLE_REQUIRED"
@@ -195,6 +196,13 @@ export class ConflictingStateFlags extends WorkItemError {
 export class WorkItemNotFound extends WorkItemError {
   constructor(ref: string) {
     super("WORK_ITEM_NOT_FOUND", `No work item ${JSON.stringify(ref)} at this firm`);
+  }
+}
+
+/** The letter whose routing was asked about is not at this firm (T6.17). */
+export class RoutingLetterNotFound extends WorkItemError {
+  constructor(ref: string) {
+    super("ROUTING_LETTER_NOT_FOUND", `No engagement letter ${JSON.stringify(ref)} at this firm`);
   }
 }
 

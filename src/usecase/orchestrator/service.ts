@@ -97,6 +97,8 @@ import type { PermissionSource } from "../authz/ports";
 import type { FirmTimeZone, StepDeskResolver } from "./ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { bandLabel, withinBand } from "../../domain/orchestrator/model";
+import { resolveOwner } from "../../domain/workitem/model";
+import type { OwnerSource } from "../../domain/workitem/model";
 import type { StepBand } from "../../domain/orchestrator/model";
 import {
   NotStaffHere,
@@ -977,6 +979,66 @@ export class OrchestratorService {
     return moved;
   }
 
+  /**
+   * A job's steps follow its task (2026-09-27): the `JobStepHandover` the work
+   * item use case calls when a task is put on somebody's desk.
+   *
+   * The owner rule hands a job's TASK to its Key Manager or signing partner
+   * when the client has no SPOC, and that person is usually outside the
+   * steps' band, so the steps start on nobody's desk. Handing the task on is
+   * the act that hands the job out, so it moves every human step that is not
+   * settled and is held by NOBODY or by the task's PREVIOUS owner, to the new
+   * owner, wherever the step's band admits them. A step somebody else took
+   * stays theirs: they chose it. A step outside the new owner's band stays
+   * where it is, for the job page's hand-over.
+   *
+   * Each move is a `job.step_assigned` row with `how: "with_task"`, so "why
+   * is this step on Kavya's desk" has an answer that is not "somebody handed
+   * it over". Returns how many moved. A job or a person that cannot be found
+   * moves nothing and says so with a zero: the task's own move has already
+   * happened and must not be undone by its steps.
+   */
+  async adoptUnheldSteps(
+    tenantId: string,
+    jobId: string,
+    fromUserId: string | null,
+    toUserId: string,
+    actor: Actor,
+  ): Promise<number> {
+    const job = await this.deps.jobs.findById(tenantId, jobId);
+    if (!job) return 0;
+    const who = (await this.deps.checkers.activeStaff(tenantId)).find((m) => m.userId === toUserId);
+    if (!who) return 0;
+    let moved = 0;
+    for (const step of await this.deps.steps.listForJob(tenantId, jobId)) {
+      if (step.executor !== "human") continue;
+      if (step.status === "done" || step.status === "skipped" || step.status === "failed") continue;
+      const held = step.assigneeUserId;
+      if (held === toUserId) continue;
+      if (held !== null && held !== fromUserId) continue;
+      const band = await this.bandOf(tenantId, job, step.stepKey);
+      if (band !== null && !withinBand(who.gradeRank, band)) continue;
+      // Refused in SQL on a step that settled since the read: null back, and
+      // the step is simply not counted.
+      const after = await this.deps.steps.assign(tenantId, step.id, toUserId);
+      if (!after) continue;
+      moved += 1;
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "job.step_assigned",
+        objectId: job.id,
+        actor,
+        payload: {
+          stepKey: step.stepKey,
+          assigneeUserId: toUserId,
+          previousAssigneeUserId: held,
+          how: "with_task",
+        },
+      });
+    }
+    return moved;
+  }
+
   /** Every open step on one person's desk, across the firm's jobs. */
   async myOpenSteps(tenantId: string, userId: string): Promise<readonly JobStep[]> {
     return this.deps.steps.listOpenForUser(tenantId, userId);
@@ -1619,19 +1681,32 @@ export class OrchestratorService {
     template: ResolvedTemplate,
     actor: Actor,
   ): Promise<readonly JobStep[]> {
-    // WHOSE DESK, BY DEFAULT (0301): the Dept SPOC on this client, when they
-    // are inside the step's band. Outside it — an Analyst's step on a client
-    // whose SPOC is a Director — the step starts on nobody's desk and the job
-    // page says so, rather than routing work to somebody the process says
-    // should not do it. The umbrella task already goes to the same person.
-    // The assignment window is a pair of DATE columns, and the day a job opens
-    // is the firm's day (0071), not Greenwich's.
+    // WHOSE DESK, BY DEFAULT (0301, then 2026-09-27): the job's owner under
+    // `resolveOwner`, the ladder the job's task is routed by (SPOC, Key
+    // Manager, the person who signs for the firm), when that person is inside
+    // the step's band. Outside it (a Key Manager who is a Director, on an
+    // Analyst's step) the step starts on nobody's desk and the job page says
+    // so, rather than routing work to somebody the process says should not do
+    // it: that owner holds the job's TASK, and handing the task on takes these
+    // steps with it (`adoptUnheldSteps`). The assignment window is a pair of
+    // DATE columns, and the day a job opens is the firm's day (0071).
     const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
-    const spoc = await this.deps.desks.spocFor(tenantId, job.id, today);
-    const spocRank =
-      spoc === null
+    const facts = await this.deps.desks.ownerFactsFor(tenantId, job.id, today);
+    const ladder = resolveOwner(facts);
+    // WHOEVER HOLDS THE JOB'S TASK FIRST. A month's task exists from the
+    // period's start and its steps only from the period's end, so the task may
+    // already have been handed out; the steps follow that, and are recorded as
+    // going with the task unless the ladder would have named the same person.
+    const holder = facts.taskHolder;
+    const owner: { readonly userId: string | null; readonly how: OwnerSource | "with_task" | null } =
+      holder === null
+        ? ladder
+        : { userId: holder.userId, how: holder.userId === ladder.userId ? ladder.how : "with_task" };
+    const ownerId = owner.userId;
+    const ownerRank =
+      ownerId === null
         ? null
-        : ((await this.deps.checkers.activeStaff(tenantId)).find((m) => m.userId === spoc)?.gradeRank ?? null);
+        : ((await this.deps.checkers.activeStaff(tenantId)).find((m) => m.userId === ownerId)?.gradeRank ?? null);
     const rows: NewJobStep[] = template.steps.map((s) => ({
       // DERIVED from the job and the step key, so a redelivered message builds
       // the same ids and the insert conflicts instead of duplicating. Same
@@ -1643,7 +1718,7 @@ export class OrchestratorService {
       label: s.label,
       executor: s.executor,
       assigneeUserId:
-        s.executor === "human" && spoc !== null && withinBand(spocRank, s.performer) ? spoc : null,
+        s.executor === "human" && ownerId !== null && withinBand(ownerRank, s.performer) ? ownerId : null,
     }));
     const result = await this.deps.steps.createAllIfAbsent(rows);
     if (result.created) {
@@ -1661,7 +1736,12 @@ export class OrchestratorService {
           verb: "job.step_assigned",
           objectId: job.id,
           actor,
-          payload: { stepKey: r.stepKey, assigneeUserId: r.assigneeUserId, previousAssigneeUserId: null, how: "spoc" },
+          payload: {
+            stepKey: r.stepKey,
+            assigneeUserId: r.assigneeUserId,
+            previousAssigneeUserId: null,
+            how: owner.how ?? "spoc",
+          },
         });
       }
     }

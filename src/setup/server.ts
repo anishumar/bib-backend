@@ -69,7 +69,10 @@ import {
 } from "../infrastructure/postgres/obligation-instance-repository";
 import { PostgresRuleServiceLinkRepository } from "../infrastructure/postgres/obligation-link-repository";
 import { PostgresObligationCoverage } from "../infrastructure/postgres/obligation-coverage";
-import { PostgresEngagementWorkSource } from "../infrastructure/postgres/engagement-work-source";
+import {
+  PostgresEngagementWorkSource,
+  PostgresLetterWorkSource,
+} from "../infrastructure/postgres/engagement-work-source";
 import {
   PostgresServiceAxisRepository,
   PostgresWorkSplitSetting,
@@ -128,6 +131,7 @@ import { ConfigService } from "../usecase/config/service";
 import { StaffGradeService } from "../usecase/staffgrade/service";
 import { ServiceAxisService } from "../usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../usecase/clientassignment/service";
+import type { CaughtUpWork } from "../usecase/clientassignment/ports";
 import { ClientImportService } from "../usecase/clientimport/service";
 import type { PortalMemberFinder } from "../usecase/clientimport/ports";
 import { PortalAccessService } from "../usecase/portalaccess/service";
@@ -145,6 +149,7 @@ import { SchedulerService } from "../usecase/scheduler/service";
 import { OrchestratorService } from "../usecase/orchestrator/service";
 import { PostgresJobStepRepository } from "../infrastructure/postgres/job-step-repository";
 import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-resolver";
+import { PostgresWorkOwnerDirectory } from "../infrastructure/postgres/work-owner";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { NoAgentsBuiltYet } from "../infrastructure/agent/no-agents";
 import { PostgresStepApprovalRepository } from "../infrastructure/postgres/step-approval-repository";
@@ -266,11 +271,28 @@ export function wire(cfg: Config, log: Logger): Wired {
     clients: partyRepository,
     staff: memberships,
     spocs: new PostgresClientAssignmentRepository(pools.app),
+    // THE OWNER RULE'S LATER RUNGS (2026-09-27): the client's Key Manager,
+    // then the person who signs for the firm, when there is no SPOC.
+    owners: new PostgresWorkOwnerDirectory(pools.app),
+    // The firm's day, which a spawned task's owner is looked up on: the same
+    // day the job's steps ask on (2026-09-27).
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // A task's unheld steps go with it when it is handed on. The same kind of
+    // cycle as `filings`, broken the same way: the orchestrator is built
+    // further down, and nothing calls this before a request.
+    jobSteps: {
+      adoptUnheldSteps: (tenantId, jobId, from, to, actor): Promise<number> =>
+        orchestrator.adoptUnheldSteps(tenantId, jobId, from, to, actor),
+    },
     axes: serviceAxisRepository,
     policies: configRepository,
     reviewers: memberships,
     permissions: configRepository,
     engagements: new PostgresEngagementWorkSource(pools.app),
+    // The routing preview on an unsigned letter's Send (T6.17): its lines read
+    // the way `engagements` reads the signed letter's, so the warning names the
+    // desk the work will really land on.
+    letters: new PostgresLetterWorkSource(pools.app),
     // T3.2. Where a compliance rule already covers an engagement, the CALENDAR
     // puts a task on somebody's desk once per period and this must not add a
     // thirteenth that can never be completed. Derived rather than configured —
@@ -738,6 +760,29 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
     timeZones: new PostgresFirmTimeZone(pools.app),
     events: ledger,
+    // THE CATCH-UP (T6.17): naming somebody on a client's account team moves
+    // the work already waiting on a fallback desk. The work item service is
+    // built above, so this is an ordinary call and not a cycle; a closure all
+    // the same, so the port stays in this use case's own words.
+    //
+    // A FAILURE IS LOGGED HERE, because this is its only trace. The use case
+    // swallows it on purpose (the assignment stands, and the answer says
+    // `caughtUp: null`), and a use case holds no logger, so without this line
+    // "the SPOC was named and none of the work moved" had nothing to read
+    // afterwards. Rethrown, so the use case still answers null.
+    work: {
+      catchUp: async (tenantId, clientPartyId, actor): Promise<CaughtUpWork> => {
+        try {
+          return await workItems.catchUpClient(tenantId, clientPartyId, actor);
+        } catch (err) {
+          log.error(
+            { err, tenantId, clientPartyId },
+            "catch-up after an account-team assignment failed; the client's waiting work stayed where it was",
+          );
+          throw err;
+        }
+      },
+    },
   });
 
   // GATE 4's writer (G3.4). 0059 built the wall — `crm.portal_access`,

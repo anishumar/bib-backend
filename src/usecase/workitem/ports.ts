@@ -12,6 +12,7 @@
 import type { Actor } from "../../domain/ledger/model";
 import type {
   ChecklistItem,
+  OwnerPerson,
   SpocCandidate,
   WorkItem,
   WorkItemApproval,
@@ -357,6 +358,37 @@ export interface WorkItemRepository {
     note: string | null,
   ): Promise<WorkItem>;
 
+  /**
+   * The CATCH-UP's candidates (T6.17): this client's tasks the router placed
+   * and nobody has decided on since. Engine work only (an engagement's task
+   * or a filing's), not finished and not started (the firm's starting
+   * state), and carrying a note that is not `exceptNote`. A note on an
+   * assigned row is the router's, about the fallback desk it chose (0311);
+   * on an unassigned row it is the router's "nobody could be given this",
+   * unless it is `exceptNote`, the sentence a PERSON leaves when they take a
+   * task off a desk. A task the SPOC holds carries no note and is not here:
+   * nothing on its row tells it apart from one a person handed over.
+   */
+  listCatchUpCandidates(
+    tenantId: string,
+    clientPartyId: string,
+    exceptNote: string,
+  ): Promise<readonly CatchUpCandidate[]>;
+
+  /**
+   * Move a task the catch-up re-decided, ONLY if nobody has touched it since
+   * it was read: same holder, same note, still in a starting state. Null when
+   * any of that changed, which the caller reads as "somebody else decided",
+   * never as an error: a colleague handing it out, or starting it, between
+   * the read and this write wins.
+   */
+  reroute(
+    tenantId: string,
+    workItemId: string,
+    expected: { readonly assigneeUserId: string | null; readonly note: string | null },
+    next: { readonly assigneeUserId: string; readonly note: string | null },
+  ): Promise<WorkItem | null>;
+
   // ── the checklist ────────────────────────────────────────────────────────
   listChecklist(tenantId: string, workItemId: string): Promise<readonly ChecklistItem[]>;
   addChecklistItem(item: {
@@ -507,6 +539,95 @@ export interface SpocDirectory {
     axisId: string,
     onDate: string,
   ): Promise<readonly SpocCandidate[]>;
+}
+
+/**
+ * The two rungs of the owner rule after the SPOC (2026-09-27): the client's
+ * Key Manager, and the person who signs for the firm. Both answer with an
+ * ACTIVE member of staff or nothing, because a Key Manager who has left the
+ * firm, or a signatory whose access was revoked, is nobody to hand work to,
+ * and the next rung is then the honest answer.
+ *
+ * `onDate` for the Key Manager is the same day the SPOC was looked up on, so
+ * the two rungs answer about one day. The signatory is a column on the firm
+ * and has no day.
+ */
+export interface WorkOwnerDirectory {
+  keyManagerFor(tenantId: string, clientPartyId: string, onDate: string): Promise<OwnerPerson | null>;
+  signingPartner(tenantId: string): Promise<OwnerPerson | null>;
+}
+
+/**
+ * The firm's own timezone (0071): which calendar day it is for the firm when
+ * the engine creates work, the day the work's owner is looked up on
+ * (2026-09-27). The job's steps ask on the same day, so a task and its steps
+ * are decided about one day. `PostgresFirmTimeZone` satisfies it, as it does
+ * every other use case's.
+ */
+export interface WorkItemTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * A task's steps follow the task (2026-09-27). When a fallback owner hands a
+ * job's task to somebody, the steps nobody holds go with it, so handing a job
+ * out is one act. Declared here because the work item use case and the
+ * orchestrator must not import each other; `setup/` satisfies it with the
+ * orchestrator's own method, the arrangement `ObligationFiling` has.
+ *
+ * Returns how many steps moved, for the caller to report.
+ */
+export interface JobStepHandover {
+  adoptUnheldSteps(
+    tenantId: string,
+    jobId: string,
+    fromUserId: string | null,
+    toUserId: string,
+    actor: Actor,
+  ): Promise<number>;
+}
+
+/** One task the catch-up may re-decide. See `listCatchUpCandidates`. */
+export interface CatchUpCandidate {
+  readonly workItemId: string;
+  readonly jobId: string | null;
+  readonly assigneeUserId: string | null;
+  readonly assignmentNote: string;
+  /**
+   * The engagement whose service names the Dept: the task's own, or for a
+   * filing's task the one its obligation is owed under (a filing's task is
+   * never linked to its engagement directly, 0053). Null when neither has one.
+   */
+  readonly engagementId: string | null;
+  /** A filing's task (T3.2). Its owner was asked on its DUE date, not the day
+   *  it was raised, and the catch-up asks the same way. */
+  readonly isFiling: boolean;
+  readonly dueOn: string | null;
+}
+
+/** One line of an engagement letter, as the routing preview needs it. */
+export interface LetterWorkLine {
+  readonly lineId: string;
+  /** The service's name as signed, else what the line says. */
+  readonly name: string;
+  /** The LIVE service's Dept code, read exactly as `EngagementWorkSource` reads
+   *  it for the task the line will become. Null when filed under none. */
+  readonly deptCode: string | null;
+}
+
+/**
+ * What an engagement letter will become work for, before it is signed
+ * (T6.17's Send warning). The CLIENT is the letter's party and the Dept is the
+ * live service's `module`, the two facts `EngagementWorkSource` hands the
+ * router once the letter is signed. Read the same way on purpose: a preview
+ * that joined differently would promise one desk and deliver another.
+ */
+export interface LetterWorkSource {
+  /** Null when there is no such letter at this firm. */
+  linesOf(
+    tenantId: string,
+    letterId: string,
+  ): Promise<{ readonly clientPartyId: string; readonly lines: readonly LetterWorkLine[] } | null>;
 }
 
 /** A Dept or delivery team, as this use case needs it. */

@@ -1,6 +1,7 @@
 // In-memory port fakes for client ownership (G3.2). `implements` the ports the
 // Postgres adapters carry, so a compile error here is the same compile error
 // production would get.
+import type { Actor } from "../domain/ledger/model";
 import type {
   AssignmentRole,
   ClientAssignment,
@@ -11,9 +12,11 @@ import { isInForceOn } from "../domain/clientassignment/model";
 import type {
   AssignableAxisDirectory,
   AssignableAxisRow,
+  CaughtUpWork,
   ClientAssignmentRepository,
   ClientDirectory,
   ClientPartyRow,
+  ClientWorkCatchUp,
   HandoverClose,
   NewClientAssignment,
   StaffDirectory,
@@ -218,5 +221,22 @@ export class FakeAssignableAxes implements AssignableAxisDirectory {
 
   findById(_tenantId: string, axisId: string): Promise<AssignableAxisRow | null> {
     return Promise.resolve(this.rows.get(axisId) ?? null);
+  }
+}
+
+/**
+ * The catch-up (T6.17), faked: it records who asked about which client and
+ * answers with whatever the test put in `answer`, or throws `failWith` so a
+ * test can see the assignment stand when moving the old work fails.
+ */
+export class FakeClientWorkCatchUp implements ClientWorkCatchUp {
+  readonly calls: { tenantId: string; clientPartyId: string }[] = [];
+  answer: CaughtUpWork = { moves: [] };
+  failWith: Error | null = null;
+
+  catchUp(tenantId: string, clientPartyId: string, _actor: Actor): Promise<CaughtUpWork> {
+    this.calls.push({ tenantId, clientPartyId });
+    if (this.failWith !== null) return Promise.reject(this.failWith);
+    return Promise.resolve(this.answer);
   }
 }

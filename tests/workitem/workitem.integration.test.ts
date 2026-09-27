@@ -166,6 +166,7 @@ afterAll(async () => {
   await owner`DELETE FROM delivery.work_item_state WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM delivery.work_item_priority WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM core.party WHERE tenant_id IN ${owner(t)}`;
+  await owner`DELETE FROM tenancy.membership WHERE tenant_id IN ${owner(t)}`;
   await owner`DELETE FROM tenancy.user_account WHERE id IN ${owner([ids.priya, ids.anand])}`;
   await owner`DELETE FROM tenancy.tenant WHERE slug IN ${owner([slugA, slugB])}`;
   await Promise.all([owner.end(), app.end()]);
@@ -406,23 +407,27 @@ describe("what the firm may and may not do to its own vocabulary", () => {
 });
 
 describe("the assignment note", () => {
-  it("may sit on an unassigned row and not on an assigned one", async () => {
-    // The difference between "not got to yet" and "the router found two SPOCs
-    // and would not guess" — and a stale sentence beside a name would be worse
-    // than no sentence at all.
+  it("may sit on an unassigned row, and since 0311 beside a name too", async () => {
+    // 0051 refused a note beside a name. The owner rule (2026-09-27) puts work
+    // with no SPOC on the Key Manager's or the signing partner's desk, and the
+    // note is what tells that person it came to them to hand out; 0311 dropped
+    // the CHECK so the router can write both. A hand move still clears it
+    // (`setAssignee` writes NULL), so the note is always the router's.
     const id = await raise(ids.tenantA, vocabA);
     await asTenant(ids.tenantA, async (tx) => {
       await tx`
-        UPDATE delivery.work_item SET assignment_note = 'FRC has 2 SPOCs' WHERE id = ${id}
+        UPDATE delivery.work_item SET assignment_note = 'No SPOC for FRC' WHERE id = ${id}
       `;
     });
-    await expect(
-      asTenant(ids.tenantA, async (tx) => {
-        await tx`
-          UPDATE delivery.work_item SET assignee_user_id = ${ids.priya} WHERE id = ${id}
-        `;
-      }),
-    ).rejects.toThrow(/note_only_when_unassigned|violates check/i);
+    await asTenant(ids.tenantA, async (tx) => {
+      await tx`
+        UPDATE delivery.work_item SET assignee_user_id = ${ids.priya} WHERE id = ${id}
+      `;
+    });
+    const [row] = await owner<{ assignee_user_id: string | null; assignment_note: string | null }[]>`
+      SELECT assignee_user_id, assignment_note FROM delivery.work_item WHERE id = ${id}
+    `;
+    expect(row).toEqual({ assignee_user_id: ids.priya, assignment_note: "No SPOC for FRC" });
   });
 });
 
@@ -681,6 +686,13 @@ describe("two SPOCs on one Dept take turns (2026-09-25)", () => {
                (${ids.tenantA}, ${ids.clientA}, 'spoc', ${dept.id}, ${ids.anand}, '2026-03-01')
       `;
     });
+    // Both are ACTIVE STAFF of the firm: since 2026-09-27 the SPOC read skips
+    // anybody who is not (a SPOC who left is nobody to route work to).
+    await owner`
+      INSERT INTO tenancy.membership (tenant_id, user_id, audience, role)
+      VALUES (${ids.tenantA}, ${ids.priya}, 'STAFF', 'associate'),
+             (${ids.tenantA}, ${ids.anand}, 'STAFF', 'associate')
+    `;
     const directory = new PostgresClientAssignmentRepository(app);
     // Earlier cases in this file already put tasks on Priya's desk, so the
     // assertion is on the DELTA rather than an absolute.
