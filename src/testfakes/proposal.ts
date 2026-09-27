@@ -26,6 +26,7 @@ import type {
   DecisionNotice,
   FiledPdf,
   LeadStanding,
+  LineEdit,
   NewClientAnswer,
   NewProposal,
   NewProposalEmail,
@@ -148,7 +149,8 @@ export class FakeProposalRepo implements ProposalRepository {
     );
   }
 
-  addLine(l: NewProposalLine): Promise<ProposalLine> {
+  addLine(l: NewProposalLine, lapseDiscountApproval = false): Promise<ProposalLine> {
+    if (lapseDiscountApproval) this.lapseApproval(l.tenantId, l.proposalId);
     const live = this.lines.filter((x) => x.proposalId === l.proposalId && !x.removed);
     const row = {
       id: l.id,
@@ -174,6 +176,35 @@ export class FakeProposalRepo implements ProposalRepository {
     };
     this.lines.push(row);
     return Promise.resolve(stripRemoved(row));
+  }
+
+  /** The adapter's WHERE: a live line of a draft that was not deleted, else
+   *  null — and the lapse in the same step, as the adapter's transaction. */
+  updateLine(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    edit: LineEdit,
+    lapseDiscountApproval: boolean,
+  ): Promise<ProposalLine | null> {
+    const proposal = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
+    const index = this.lines.findIndex(
+      (l) => l.tenantId === tenantId && l.proposalId === proposalId && l.id === lineId && !l.removed,
+    );
+    const current = this.lines[index];
+    if (proposal?.status !== "draft" || proposal.deletedAt !== null || current === undefined) {
+      return Promise.resolve(null);
+    }
+    const next = { ...current, ...edit };
+    this.lines[index] = next;
+    if (lapseDiscountApproval) this.lapseApproval(tenantId, proposalId);
+    return Promise.resolve(stripRemoved(next));
+  }
+
+  private lapseApproval(tenantId: string, proposalId: string): void {
+    this.replace(tenantId, proposalId, (p) =>
+      p.status === "draft" ? { ...p, discountApprovedBy: null, discountApprovedAt: null } : p,
+    );
   }
 
   removeLine(_tenantId: string, proposalId: string, lineId: string): Promise<void> {

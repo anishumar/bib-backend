@@ -727,7 +727,8 @@ export function mapError(err: unknown): MappedError {
       // does not work here — each fixed by naming another, and a revision that
       // names nothing to change. And 0085's three: an address that is not one,
       // and — on the client's own page — an answer with no name typed or an
-      // acceptance with the statement left unticked.
+      // acceptance with the statement left unticked. T6.18's line edit adds two
+      // more the caller sent: a change naming nothing, and a description emptied.
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -745,6 +746,8 @@ export function mapError(err: unknown): MappedError {
       case "ADDRESSEE_NOT_A_PERSON":
       case "PREPARER_NOT_STAFF":
       case "NOTHING_TO_REVISE":
+      case "NOTHING_TO_CHANGE_ON_LINE":
+      case "INVALID_LINE_DESCRIPTION":
       case "INVALID_RECIPIENT":
       case "SIGNER_NAME_REQUIRED":
       case "ACCEPTANCE_NOT_CONFIRMED":

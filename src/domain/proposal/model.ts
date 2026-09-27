@@ -466,6 +466,33 @@ export function needsDiscountApproval(
   return comparePercent(largestDiscount(lines), maxPercent ?? "0") > 0;
 }
 
+/**
+ * Whether a sign-off already on a draft stops covering it once one line's
+ * discount moves from `before` to `after` (T6.18).
+ *
+ * An approval is a partner saying yes to the discounts the draft carried THEN.
+ * Before lines could be edited that was the whole story: `send` asks for an
+ * approval only when none is recorded, so a discount raised past the limit
+ * after the sign-off went out unapproved. It LAPSES, rather than the edit being
+ * refused, because refusing leaves the author no way to fix the quote short of
+ * a new one, and a lapse costs one more press by somebody holding
+ * `proposal:approve`.
+ *
+ * Only a RAISE past the limit lapses it. Lowering a discount, or raising one
+ * that stays within the firm's limit, changes nothing anybody signed off. A
+ * new line is a raise from "0". `maxPercent` null is zero, as everywhere.
+ */
+export function discountApprovalLapses(
+  approved: boolean,
+  before: Amount,
+  after: Amount,
+  maxPercent: Amount | null,
+): boolean {
+  if (!approved) return false;
+  if (comparePercent(after, before) <= 0) return false;
+  return comparePercent(after, maxPercent ?? "0") > 0;
+}
+
 // ── The proposal by email, and the client's own answer (0085) ────────────────
 
 /**

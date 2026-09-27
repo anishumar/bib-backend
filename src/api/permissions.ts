@@ -399,6 +399,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PATCH", "/api/v1/proposals/{proposalId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
+  [routeKey("PATCH", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
   // A draft made by mistake (0086), on the permission that drafts one — the
   // whole document struck off before it went out, as a line is above.
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}"), "party:write" as const],

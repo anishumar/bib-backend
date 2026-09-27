@@ -20,6 +20,7 @@ import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import type {
   FiledPdf,
+  LineEdit,
   NewClientAnswer,
   NewProposal,
   NewProposalEmail,
@@ -569,8 +570,9 @@ export class PostgresProposalRepository implements ProposalRepository {
     });
   }
 
-  async addLine(l: NewProposalLine): Promise<ProposalLine> {
+  async addLine(l: NewProposalLine, lapseDiscountApproval = false): Promise<ProposalLine> {
     return withTenant(this.app, l.tenantId, async (db) => {
+      if (lapseDiscountApproval) await lapseApproval(db, l.proposalId);
       // The position is assigned HERE, under the same statement that inserts,
       // rather than computed by the caller and passed down: two people adding a
       // line to one draft would otherwise race for the same number and one of
@@ -614,6 +616,59 @@ export class PostgresProposalRepository implements ProposalRepository {
         ],
       );
       if (!row) throw new Error("proposal line insert returned no row");
+      return toLine(row);
+    });
+  }
+
+  async updateLine(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    edit: LineEdit,
+    lapseDiscountApproval: boolean,
+  ): Promise<ProposalLine | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // A live line of a live DRAFT, repeated in the WHERE: a proposal sent or
+      // deleted since the use case read it is left exactly as it stands, and
+      // null comes back rather than a changed row the client never saw.
+      const [row] = await db.unsafe<LineRow[]>(
+        `
+        UPDATE crm.proposal_line l
+           SET description = $4, quantity = $5, unit_amount = $6, discount_percent = $7,
+               jurisdiction = $8, billing_frequency = $9, scope_override = $10,
+               client_obligations_override = $11, volume_limits_override = $12,
+               exclusions_override = $13, oop_estimate_min = $14, oop_estimate_max = $15,
+               oop_currency = $16, pricing_note = $17
+          FROM crm.proposal p
+         WHERE l.id = $1 AND l.proposal_id = $2 AND l.tenant_id = $3 AND l.removed_at IS NULL
+           AND p.id = l.proposal_id AND p.status = 'draft' AND p.deleted_at IS NULL
+        RETURNING ${LINE_COLUMNS.split(",").map((c) => `l.${c.trim()}`).join(", ")}
+      `,
+        [
+          lineId,
+          proposalId,
+          tenantId,
+          edit.description,
+          edit.quantity,
+          edit.unitAmount,
+          edit.discountPercent,
+          edit.jurisdiction,
+          edit.billingFrequency,
+          edit.scopeOverride,
+          edit.clientObligationsOverride,
+          edit.volumeLimitsOverride,
+          edit.exclusionsOverride,
+          edit.oopEstimate?.min ?? null,
+          edit.oopEstimate?.max ?? null,
+          edit.oopEstimate?.currency ?? null,
+          edit.pricingNote,
+        ],
+      );
+      if (!row) return null;
+      // In the SAME transaction: an approval can never be read as covering a
+      // discount it was not given for, even for the instant between two
+      // statements.
+      if (lapseDiscountApproval) await lapseApproval(db, proposalId);
       return toLine(row);
     });
   }
@@ -1075,6 +1130,19 @@ export class PostgresProposalRepository implements ProposalRepository {
       return row ? toProposal(row) : null;
     });
   }
+}
+
+/**
+ * Clear a DRAFT's discount sign-off (T6.18) — both columns, as the 0011 CHECK
+ * holds them together. Only a draft: a sent proposal's approval is part of
+ * what went out.
+ */
+async function lapseApproval(db: Db, proposalId: string): Promise<void> {
+  await db`
+    UPDATE crm.proposal
+       SET discount_approved_by = NULL, discount_approved_at = NULL
+     WHERE id = ${proposalId} AND status = 'draft'
+  `;
 }
 
 /**

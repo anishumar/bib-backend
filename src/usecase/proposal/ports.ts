@@ -170,6 +170,31 @@ export interface NewProposalLine {
 }
 
 /**
+ * A line as an edit leaves it (T6.18) — every changeable column, already merged
+ * with what the line said and validated as a whole by the use case, because the
+ * rules are about COMBINATIONS (no price needs a reason, no price takes no
+ * discount) and the database CHECKs judge the row, not the change.
+ *
+ * Not here, on purpose: the pin, the entity, the position and the currency. A
+ * different service is a different line (remove this one, add that one); the
+ * currency is the proposal's and moves only with it.
+ */
+export interface LineEdit {
+  readonly description: string;
+  readonly quantity: Amount;
+  readonly unitAmount: Amount | null;
+  readonly discountPercent: Amount;
+  readonly jurisdiction: string | null;
+  readonly billingFrequency: BillingFrequency | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  readonly pricingNote: string | null;
+}
+
+/**
  * A proposal with everything a screen renders it from.
  *
  * The joined read model this codebase learnt to build the first time (see
@@ -660,12 +685,31 @@ export interface ProposalRepository {
   describe(tenantId: string, proposalId: string): Promise<ProposalRecord | null>;
   list(tenantId: string, filters: ProposalFilters): Promise<readonly ProposalSummary[]>;
 
-  addLine(l: NewProposalLine): Promise<ProposalLine>;
+  /** `lapseDiscountApproval` as for `updateLine`: a line added past the limit
+   *  after the sign-off clears it, in the same transaction (T6.18). */
+  addLine(l: NewProposalLine, lapseDiscountApproval?: boolean): Promise<ProposalLine>;
   /** Soft: sets removed_at. Nothing deletes a line — what the firm considered
    *  offering and pulled is part of the record. */
   removeLine(tenantId: string, proposalId: string, lineId: string): Promise<void>;
   /** The live lines, in document order. */
   listLines(tenantId: string, proposalId: string): Promise<readonly ProposalLine[]>;
+
+  /**
+   * Write an edit to a live line of a DRAFT (T6.18), and — when
+   * `lapseDiscountApproval` — clear the proposal's discount sign-off in the
+   * SAME transaction, so a raised discount can never sit under an approval
+   * given for the old one.
+   *
+   * Null when the WHERE clause refused it: the proposal was sent or deleted, or
+   * the line removed, between the use case's read and this write.
+   */
+  updateLine(
+    tenantId: string,
+    proposalId: string,
+    lineId: string,
+    edit: LineEdit,
+    lapseDiscountApproval: boolean,
+  ): Promise<ProposalLine | null>;
 
   /**
    * Move the status and stamp whichever date goes with it, in one statement, so

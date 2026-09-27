@@ -637,6 +637,31 @@ const AddLineRequest = z
   .openapi("AddProposalLineRequest");
 
 /**
+ * An edit to one line of a DRAFT (T6.18). Every field optional — absent leaves
+ * it as it is — and `null` is each field's own "undo": the four overrides go
+ * back to the pinned catalogue version's words, `billingFrequency` back to the
+ * service's recurrence, `unitAmount` to "as mutually agreed" (send a
+ * `pricingNote` with it), and the rest are cleared. The same names as adding a
+ * line, so a screen maps one form onto both.
+ */
+const UpdateLineRequest = z
+  .object({
+    description: z.string().max(2000).optional(),
+    quantity: AmountSchema.optional(),
+    unitAmount: AmountSchema.nullable().optional(),
+    discountPercent: AmountSchema.optional(),
+    jurisdiction: JurisdictionSchema.nullable().optional(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
+    scopeOverride: z.string().max(20000).nullable().optional(),
+    clientObligationsOverride: z.string().max(20000).nullable().optional(),
+    volumeLimitsOverride: z.string().max(20000).nullable().optional(),
+    exclusionsOverride: z.string().max(20000).nullable().optional(),
+    oopEstimate: OopEstimateSchema.nullable().optional(),
+    pricingNote: z.string().max(2000).nullable().optional(),
+  })
+  .openapi("UpdateProposalLineRequest");
+
+/**
  * The token arrives in a BODY, not in the path.
  *
  * A share token is a bearer capability, and a path lands in access logs, error
@@ -802,6 +827,34 @@ const addLineRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
     409: errorResponse("The proposal is no longer a draft"),
+  },
+});
+
+const updateLineRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/proposals/{proposalId}/lines/{lineId}",
+  tags: ["proposals"],
+  summary: "Change a line on a draft",
+  description:
+    "Its fee, quantity, discount, billing frequency, pricing note, country, out-of-pocket range " +
+    "and its four scope blocks — judged by the rules for adding one, on the line as it will " +
+    "be (T6.18). A null override puts back the catalogue's words. A discount raised past the " +
+    "firm's limit after a sign-off lapses the sign-off, so the draft needs approving again. " +
+    "Answers with the whole proposal, so a screen gets the new totals in the same round trip.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid(), lineId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: UpdateLineRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: ProposalRecordSchema } } },
+    400: errorResponse(
+      "Nothing to change, an amount or discount that is not one, no price and no reason, a " +
+        "discount on an unpriced line, or a country code that is not one",
+    ),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal, or no such live line on it"),
+    409: errorResponse("The proposal is no longer a draft, or was deleted"),
   },
 });
 
@@ -1342,7 +1395,7 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
     const body = c.req.valid("json");
-    const line = await deps.service.addLine({ tenantId: s.tenantId, proposalId, ...body });
+    const line = await deps.service.addLine({ tenantId: s.tenantId, proposalId, ...body }, s.actor);
     const fees = seesFees(c.get("principal"));
     return c.json(
       {
@@ -1389,6 +1442,35 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
       },
       201,
     );
+  });
+
+  app.openapi(updateLineRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId, lineId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.updateLine(
+      {
+        tenantId: s.tenantId,
+        proposalId,
+        lineId,
+        description: body.description,
+        quantity: body.quantity,
+        unitAmount: body.unitAmount,
+        discountPercent: body.discountPercent,
+        jurisdiction: body.jurisdiction,
+        billingFrequency: body.billingFrequency,
+        scopeOverride: body.scopeOverride,
+        clientObligationsOverride: body.clientObligationsOverride,
+        volumeLimitsOverride: body.volumeLimitsOverride,
+        exclusionsOverride: body.exclusionsOverride,
+        oopEstimate: body.oopEstimate,
+        pricingNote: body.pricingNote,
+      },
+      s.actor,
+    );
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(removeLineRoute, async (c) => {

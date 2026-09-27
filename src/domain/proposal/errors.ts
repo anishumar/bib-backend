@@ -51,6 +51,8 @@ export type ProposalErrorCode =
   | "ADDRESSEE_NOT_LINKED"
   | "PREPARER_NOT_STAFF"
   | "NOTHING_TO_REVISE"
+  | "NOTHING_TO_CHANGE_ON_LINE"
+  | "INVALID_LINE_DESCRIPTION"
   | "INVALID_RECIPIENT"
   | "NOT_OUT_FOR_ANSWER"
   | "EMAIL_UNAVAILABLE"
@@ -184,6 +186,30 @@ export class NothingToRevise extends ProposalError {
       "NOTHING_TO_REVISE",
       "Nothing to change: send at least one of title, validUntil, background, " +
         "addressedToPartyId or preparedByUserId.",
+    );
+  }
+}
+
+/** A line edit that names nothing to change (T6.18) — refused rather than
+ *  answered as an edit that changed nothing. */
+export class NothingToChangeOnLine extends ProposalError {
+  constructor() {
+    super(
+      "NOTHING_TO_CHANGE_ON_LINE",
+      "Nothing to change on this line: send at least one of description, quantity, unitAmount, " +
+        "discountPercent, billingFrequency, pricingNote, jurisdiction, oopEstimate, " +
+        "scopeOverride, clientObligationsOverride, volumeLimitsOverride or exclusionsOverride.",
+    );
+  }
+}
+
+/** A line's description is what the client reads for it, so it cannot be blank. */
+export class InvalidLineDescription extends ProposalError {
+  constructor() {
+    super(
+      "INVALID_LINE_DESCRIPTION",
+      "A line's description is what the client reads for it, so it cannot be blank. Type what " +
+        "the work is, or leave the description out of the change to keep it as it is.",
     );
   }
 }

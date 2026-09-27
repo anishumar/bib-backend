@@ -25,6 +25,7 @@
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
+import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type {
   Proposal,
@@ -36,6 +37,7 @@ import {
   acceptanceStatement,
   canTransition,
   composeShareToken,
+  discountApprovalLapses,
   isEmailAddress,
   isPastValidity,
   isProposalDecision,
@@ -71,6 +73,8 @@ import {
   InvalidTransition,
   InvalidUnitAmount,
   LineNotFound,
+  NothingToChangeOnLine,
+  InvalidLineDescription,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
   NotADraft,
@@ -319,6 +323,55 @@ export interface AddLineInput {
   readonly pricingNote?: string | undefined;
 }
 
+/**
+ * An edit to one line of a draft (T6.18). ABSENT leaves a field as it is;
+ * NULL means something per field, and each is the natural "undo":
+ *
+ *   - the four overrides: back to the pinned catalogue version's words;
+ *   - `billingFrequency`: back to the pinned service's recurrence;
+ *   - `unitAmount`: "as mutually agreed" — `pricingNote` is then required;
+ *   - `pricingNote`, `jurisdiction`, `oopEstimate`: cleared.
+ *
+ * Blank prose is null too, as on adding a line: an override typed as "" is
+ * somebody emptying the box, which reads as "print the standard words".
+ */
+export interface UpdateLineInput {
+  readonly tenantId: string;
+  readonly proposalId: string;
+  readonly lineId: string;
+  readonly description?: string | undefined;
+  readonly quantity?: string | undefined;
+  readonly unitAmount?: string | null | undefined;
+  readonly discountPercent?: string | undefined;
+  readonly jurisdiction?: string | null | undefined;
+  readonly billingFrequency?: string | null | undefined;
+  readonly scopeOverride?: string | null | undefined;
+  readonly clientObligationsOverride?: string | null | undefined;
+  readonly volumeLimitsOverride?: string | null | undefined;
+  readonly exclusionsOverride?: string | null | undefined;
+  readonly oopEstimate?:
+    | { readonly min: string; readonly max: string; readonly currency: string }
+    | null
+    | undefined;
+  readonly pricingNote?: string | null | undefined;
+}
+
+/** The fields of `UpdateLineInput` that are a change, as opposed to its address. */
+const LINE_EDIT_FIELDS = [
+  "description",
+  "quantity",
+  "unitAmount",
+  "discountPercent",
+  "jurisdiction",
+  "billingFrequency",
+  "scopeOverride",
+  "clientObligationsOverride",
+  "volumeLimitsOverride",
+  "exclusionsOverride",
+  "oopEstimate",
+  "pricingNote",
+] as const satisfies readonly (keyof UpdateLineInput)[];
+
 export class ProposalService {
   constructor(private readonly deps: Deps) {}
 
@@ -528,31 +581,16 @@ export class ProposalService {
     }
   }
 
-  async addLine(input: AddLineInput): Promise<ProposalLine> {
+  async addLine(input: AddLineInput, actor: Actor = SYSTEM_ACTOR): Promise<ProposalLine> {
     const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
     if (input.entityPartyId !== undefined) {
       await this.refuseArchived(input.tenantId, input.entityPartyId, "entity");
     }
 
-    if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
-      throw new InvalidQuantity(input.quantity);
-    }
-    // THE UNPRICED LINE. Absent is a real answer — "as mutually agreed" — and
-    // the two rules that go with it are here rather than only in the CHECKs
-    // (0023) so a caller is told what to send instead of reading a constraint
-    // name out of a 500.
+    checkQuantity(input.quantity);
     const unitAmount = input.unitAmount ?? null;
-    if (unitAmount !== null && !isAmount(unitAmount)) throw new InvalidUnitAmount(unitAmount);
     const pricingNote = blankToNull(input.pricingNote);
-    if (unitAmount === null && pricingNote === null) throw new UnpricedLineNeedsReason();
-    if (!isAmount(input.discountPercent) || Number(input.discountPercent) > 100) {
-      throw new InvalidDiscount(input.discountPercent);
-    }
-    // A percentage off "as mutually agreed" is not a number — and it would
-    // reach `largestDiscount` and hold the whole proposal at the approval gate.
-    if (unitAmount === null && Number(input.discountPercent) !== 0) {
-      throw new UnpricedLineHasDiscount(input.discountPercent);
-    }
+    checkPricing(unitAmount, pricingNote, input.discountPercent);
 
     const jurisdiction = this.lineJurisdiction(input.jurisdiction);
     const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
@@ -568,7 +606,11 @@ export class ProposalService {
     if (pinned.kind !== "service") throw new NotAService(input.serviceVersionId, pinned.kind);
     if (pinned.status === "draft") throw new ServiceNotPublished(input.serviceVersionId);
 
-    return this.deps.proposals.addLine({
+    // A new line is a discount raised from nothing: past the limit after a
+    // sign-off, the sign-off no longer covers the draft (T6.18).
+    const lapse = await this.approvalLapses(proposal, "0", input.discountPercent);
+
+    const line = await this.deps.proposals.addLine({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       proposalId: proposal.id,
@@ -598,6 +640,138 @@ export class ProposalService {
       exclusionsOverride: blankToNull(input.exclusionsOverride),
       oopEstimate,
       pricingNote,
+    }, lapse.lapses);
+    if (lapse.lapses) await this.recordLapse(proposal, line, lapse.limit, actor);
+    return line;
+  }
+
+  /**
+   * Change a line already on a DRAFT (T6.18) — its fee, how often it is billed,
+   * its wording, its four scope blocks — without pulling it and quoting it
+   * again, which lost its place and its pin.
+   *
+   * The same rules as adding one, judged on the line AS IT WILL BE: the change
+   * merged over what the line says now, so "no price" and "no reason" cannot
+   * each be allowed on their own and meet on the row. The currency is the
+   * proposal's and is not a field here. The discount limit is checked the way
+   * `send` checks it: a line past it simply needs a sign-off before sending,
+   * and a sign-off already given LAPSES when this raises a discount past the
+   * limit (`discountApprovalLapses`), in the same transaction as the edit.
+   *
+   * No event for the edit itself, like adding or removing a line: a draft being
+   * written is not a transition. A lapsed sign-off IS one, and is recorded.
+   */
+  async updateLine(input: UpdateLineInput, actor: Actor): Promise<ProposalLine> {
+    const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
+    if (LINE_EDIT_FIELDS.every((f) => input[f] === undefined)) throw new NothingToChangeOnLine();
+    const lines = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
+    const current = lines.find((l) => l.id === input.lineId);
+    if (current === undefined) throw new LineNotFound(input.lineId);
+
+    let description = current.description;
+    if (input.description !== undefined) {
+      description = input.description.trim();
+      if (description === "") throw new InvalidLineDescription();
+    }
+    const quantity = input.quantity ?? current.quantity;
+    checkQuantity(quantity);
+    const unitAmount = input.unitAmount === undefined ? current.unitAmount : input.unitAmount;
+    const pricingNote =
+      input.pricingNote === undefined ? current.pricingNote : blankToNull(input.pricingNote ?? undefined);
+    const discountPercent = input.discountPercent ?? current.discountPercent;
+    checkPricing(unitAmount, pricingNote, discountPercent);
+
+    const jurisdiction =
+      input.jurisdiction === undefined
+        ? current.jurisdiction
+        : this.lineJurisdiction(input.jurisdiction ?? undefined);
+    const oopEstimate =
+      input.oopEstimate === undefined
+        ? current.oopEstimate
+        : this.outOfPocket(input.oopEstimate ?? undefined);
+
+    // Null is "back to what the service says", read off the SAME pin the line
+    // was quoted from — never today's catalogue.
+    let billingFrequency = current.billingFrequency;
+    if (input.billingFrequency === null) {
+      const pinned = await this.deps.catalogue.readPinnedVersion(
+        input.tenantId,
+        current.serviceVersionId,
+      );
+      billingFrequency = pinned === null ? null : readServiceBody(pinned.body).recurrence;
+    } else if (input.billingFrequency !== undefined) {
+      billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    }
+
+    const override = (next: string | null | undefined, now: string | null): string | null =>
+      next === undefined ? now : blankToNull(next ?? undefined);
+
+    const lapse = await this.approvalLapses(proposal, current.discountPercent, discountPercent);
+    const updated = await this.deps.proposals.updateLine(
+      input.tenantId,
+      input.proposalId,
+      input.lineId,
+      {
+        description,
+        quantity,
+        unitAmount,
+        discountPercent,
+        jurisdiction,
+        billingFrequency,
+        scopeOverride: override(input.scopeOverride, current.scopeOverride),
+        clientObligationsOverride: override(
+          input.clientObligationsOverride,
+          current.clientObligationsOverride,
+        ),
+        volumeLimitsOverride: override(input.volumeLimitsOverride, current.volumeLimitsOverride),
+        exclusionsOverride: override(input.exclusionsOverride, current.exclusionsOverride),
+        oopEstimate,
+        pricingNote,
+      },
+      lapse.lapses,
+    );
+    if (updated === null) {
+      // Sent, deleted or pulled between the read above and the write: the
+      // proposal as it now stands says which.
+      await this.draftOrThrow(input.tenantId, input.proposalId);
+      throw new LineNotFound(input.lineId);
+    }
+    if (lapse.lapses) await this.recordLapse(proposal, updated, lapse.limit, actor);
+    return updated;
+  }
+
+  /** Whether moving one line's discount from `before` to `after` lapses the
+   *  draft's sign-off, and the limit it was judged against — read LIVE, the
+   *  way `send` reads it. The policy is asked only when there is a sign-off. */
+  private async approvalLapses(
+    proposal: Proposal,
+    before: string,
+    after: string,
+  ): Promise<{ readonly lapses: boolean; readonly limit: string | null }> {
+    if (proposal.discountApprovedAt === null) return { lapses: false, limit: null };
+    const limit = await this.deps.policies.maxDiscountPercent(proposal.tenantId);
+    return { lapses: discountApprovalLapses(true, before, after, limit), limit };
+  }
+
+  private async recordLapse(
+    proposal: Proposal,
+    line: ProposalLine,
+    limit: string | null,
+    actor: Actor,
+  ): Promise<void> {
+    await this.deps.events.recordEvent({
+      tenantId: proposal.tenantId,
+      verb: "proposal.discount_approval_lapsed",
+      objectId: proposal.id,
+      actor,
+      // Who had signed off, and the two numbers that undid it — the record
+      // somebody reads when asking why a quote needed approving twice.
+      payload: {
+        previouslyApprovedByUserId: proposal.discountApprovedBy,
+        lineId: line.id,
+        discountPercent: line.discountPercent,
+        limitPercent: limit,
+      },
     });
   }
 
@@ -1379,6 +1553,35 @@ export class ProposalService {
  * the catalogue's words", so a caller clearing the box gets the catalogue back
  * rather than a document with an empty heading on it.
  */
+/** A quantity is a positive decimal string. */
+function checkQuantity(quantity: string): void {
+  if (!isAmount(quantity) || Number(quantity) <= 0) throw new InvalidQuantity(quantity);
+}
+
+/**
+ * THE UNPRICED LINE's two rules, and the discount's range — on a line being
+ * added and on one being edited, judged on the line as it will be. Absent is a
+ * real answer ("as mutually agreed"), and the rules are here rather than only in
+ * the CHECKs (0023) so a caller is told what to send instead of reading a
+ * constraint name out of a 500.
+ */
+function checkPricing(
+  unitAmount: string | null,
+  pricingNote: string | null,
+  discountPercent: string,
+): void {
+  if (unitAmount !== null && !isAmount(unitAmount)) throw new InvalidUnitAmount(unitAmount);
+  if (unitAmount === null && pricingNote === null) throw new UnpricedLineNeedsReason();
+  if (!isAmount(discountPercent) || Number(discountPercent) > 100) {
+    throw new InvalidDiscount(discountPercent);
+  }
+  // A percentage off "as mutually agreed" is not a number — and it would
+  // reach `largestDiscount` and hold the whole proposal at the approval gate.
+  if (unitAmount === null && Number(discountPercent) !== 0) {
+    throw new UnpricedLineHasDiscount(discountPercent);
+  }
+}
+
 function blankToNull(value: string | undefined): string | null {
   const trimmed = value?.trim() ?? "";
   return trimmed === "" ? null : trimmed;
