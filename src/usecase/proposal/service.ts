@@ -75,6 +75,9 @@ import {
   LineNotFound,
   NothingToChangeOnLine,
   InvalidLineDescription,
+  CurrencyLockedByLines,
+  InvalidCurrencyChange,
+  ProseEdited,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
   NotADraft,
@@ -120,6 +123,7 @@ import type {
   ProposalRevision,
   ProposalView,
   ProposalSummary,
+  ProseLine,
   ServiceCatalogue,
   ShareLinkTokens,
   SharedProposal,
@@ -267,6 +271,22 @@ export interface ReviseProposalInput {
   readonly background?: string | null | undefined;
   readonly addressedToPartyId?: string | null | undefined;
   readonly preparedByUserId?: string | null | undefined;
+  /**
+   * T6.18: another of the FIRM's companies to issue this draft. Its prose is
+   * replaced with that company's standard set (D9) — refused with
+   * `PROSE_EDITED` while any line was edited for this client, unless
+   * `replaceEditedProse` says to go ahead.
+   */
+  readonly issuingEntityPartyId?: string | undefined;
+  readonly replaceEditedProse?: boolean | undefined;
+  /** Where the client is, for which country's standard lines the new prose
+   *  takes — as on drafting. Absent: where the new issuer is registered. */
+  readonly clientJurisdiction?: string | undefined;
+  /** T6.18: the money, all three together. The currency changes only while the
+   *  draft quotes nothing; the rate and its day may be corrected any time. */
+  readonly currency?: string | undefined;
+  readonly fxRate?: string | undefined;
+  readonly fxRateDate?: string | undefined;
 }
 
 /**
@@ -508,7 +528,7 @@ export class ProposalService {
    * a transition. What went out is recorded by `proposal.sent` and by the PDF
    * the store keeps.
    */
-  async revise(input: ReviseProposalInput): Promise<Proposal> {
+  async revise(input: ReviseProposalInput, actor: Actor = SYSTEM_ACTOR): Promise<Proposal> {
     const proposal = await this.draftOrThrow(input.tenantId, input.proposalId);
     const change: {
       title?: string;
@@ -516,6 +536,10 @@ export class ProposalService {
       background?: string | null;
       addressedToPartyId?: string | null;
       preparedByUserId?: string | null;
+      issuingEntityPartyId?: string;
+      currency?: string;
+      fxRate?: string;
+      fxRateDate?: string;
     } = {};
     if (input.title !== undefined) change.title = input.title.trim();
     if (input.validUntil !== undefined) change.validUntil = input.validUntil;
@@ -530,13 +554,118 @@ export class ProposalService {
       if (input.preparedByUserId !== null) await this.requireStaff(input.tenantId, input.preparedByUserId);
       change.preparedByUserId = input.preparedByUserId;
     }
+
+    // THE MONEY (T6.18). Three fields or none: a rate belongs to one currency on
+    // one day. A different currency only while nothing is quoted — every line
+    // is priced in the document's currency and the key would relabel it.
+    const money = [input.currency, input.fxRate, input.fxRateDate];
+    if (money.some((v) => v !== undefined)) {
+      if (money.some((v) => v === undefined)) throw new InvalidCurrencyChange();
+      const currency = normalizeCurrency(input.currency ?? "");
+      if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(input.currency ?? "");
+      const fxRate = input.fxRate ?? "";
+      if (!isExchangeRate(fxRate) || Number(fxRate) <= 0) throw new InvalidFxRate(fxRate);
+      if (currency !== proposal.currency) {
+        const live = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
+        if (live.length > 0) throw new CurrencyLockedByLines(live.length, proposal.currency);
+      }
+      change.currency = currency;
+      change.fxRate = fxRate;
+      change.fxRateDate = input.fxRateDate ?? "";
+    }
+
+    // THE ISSUER (T6.18, D9). One of the firm's own companies; its standard
+    // prose replaces the draft's, and what was edited for this client is not
+    // thrown away without the caller saying so.
+    let prose: readonly ProseLine[] | null = null;
+    let editedReplaced = 0;
+    const newIssuer = input.issuingEntityPartyId;
+    if (newIssuer !== undefined && newIssuer !== proposal.issuingEntityPartyId) {
+      if (!(await this.deps.documents.isFirmEntity(input.tenantId, newIssuer))) {
+        const named = await this.deps.parties.findParty(input.tenantId, newIssuer);
+        throw new ProposalIssuerNotAFirmEntity(named?.displayName ?? newIssuer);
+      }
+      const owner = { kind: "proposal" as const, id: proposal.id };
+      const registered = await this.deps.documents.issuerJurisdiction(input.tenantId, newIssuer);
+      const current = await this.deps.documents.listBlocks(input.tenantId, owner);
+      editedReplaced = current.filter((b) => b.isEdited).length;
+      if (editedReplaced > 0 && input.replaceEditedProse !== true) {
+        throw new ProseEdited(editedReplaced, registered.displayName);
+      }
+      prose = await this.deps.documents.standardProse(
+        input.tenantId,
+        owner,
+        this.proseJurisdiction(input.clientJurisdiction, registered.jurisdiction),
+      );
+      change.issuingEntityPartyId = newIssuer;
+    }
+
     if (Object.keys(change).length === 0) throw new NothingToRevise();
 
     const revision: ProposalRevision = change;
-    const revised = await this.deps.proposals.revise(input.tenantId, input.proposalId, revision);
-    // Sent between the read above and the write: the WHERE clause refused it.
-    if (revised === null) throw new NotADraft((await this.findOrThrow(input.tenantId, input.proposalId)).status);
+    const revised = await this.deps.proposals.revise(
+      input.tenantId,
+      input.proposalId,
+      revision,
+      prose,
+    );
+    if (revised === null) {
+      // Sent or deleted between the read above and the write, or a line was
+      // quoted a moment ago under a currency change: the WHERE refused it, and
+      // the proposal as it now stands says which.
+      await this.draftOrThrow(input.tenantId, input.proposalId);
+      const live = await this.deps.proposals.listLines(input.tenantId, input.proposalId);
+      throw new CurrencyLockedByLines(live.length, proposal.currency);
+    }
+
+    // The ledger records who would contract and in what money — a commercial
+    // and legal fact even on a draft. Titles and names stay out.
+    if (change.issuingEntityPartyId !== undefined) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "proposal.issuer_changed",
+        objectId: proposal.id,
+        actor,
+        payload: {
+          fromIssuingEntityPartyId: proposal.issuingEntityPartyId,
+          toIssuingEntityPartyId: change.issuingEntityPartyId,
+          proseReplaced: true,
+          editedLinesReplaced: editedReplaced,
+        },
+      });
+    }
+    if (
+      change.currency !== undefined &&
+      (change.currency !== proposal.currency ||
+        change.fxRate !== proposal.fxRate ||
+        change.fxRateDate !== proposal.fxRateDate)
+    ) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "proposal.currency_changed",
+        objectId: proposal.id,
+        actor,
+        payload: {
+          fromCurrency: proposal.currency,
+          toCurrency: revised.currency,
+          fromFxRate: proposal.fxRate,
+          toFxRate: revised.fxRate,
+          fxRateDate: revised.fxRateDate,
+        },
+      });
+    }
     return revised;
+  }
+
+  /**
+   * Which country's standard lines a proposal's prose takes: the CLIENT's when
+   * it is known, else where the ISSUER is registered, else `*` — the lines that
+   * are true everywhere. `blocksFor` copies an unscoped line always and a scoped
+   * one only for its own country, so an unknown country is the safe direction.
+   */
+  private proseJurisdiction(client: string | undefined, issuer: string | null): string {
+    if (client !== undefined && client.trim() !== "") return normalizeJurisdiction(client);
+    return issuer ?? ANY_JURISDICTION;
   }
 
   /** "Prepared for" is a PERSON with a recorded role in the client's structure

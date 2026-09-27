@@ -14,6 +14,7 @@ import { VIEW_DEDUPE_MINUTES } from "../../domain/proposal/model";
 import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
 import { utcDayOf } from "./instant";
+import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
@@ -34,6 +35,7 @@ import type {
   ProposalRepository,
   ProposalRevision,
   ProposalSummary,
+  ProseLine,
   SharedProposalRecord,
 } from "../../usecase/proposal/ports";
 
@@ -1010,6 +1012,7 @@ export class PostgresProposalRepository implements ProposalRepository {
     tenantId: string,
     proposalId: string,
     change: ProposalRevision,
+    prose: readonly ProseLine[] | null = null,
   ): Promise<Proposal | null> {
     return withTenant(this.app, tenantId, async (db) => {
       // One statement, each column kept unless the change names it. "Names it"
@@ -1028,13 +1031,42 @@ export class PostgresProposalRepository implements ProposalRepository {
                                             ELSE addressed_to_party_id END,
                prepared_by_user_id = CASE WHEN ${has("preparedByUserId")}
                                           THEN ${change.preparedByUserId ?? null}::uuid
-                                          ELSE prepared_by_user_id END
-         -- A draft only, repeated here: a proposal sent since the service read
-         -- it is left exactly as the client received it.
-         WHERE id = ${proposalId} AND status = 'draft'
+                                          ELSE prepared_by_user_id END,
+               issuing_entity_party_id = CASE WHEN ${has("issuingEntityPartyId")}
+                                              THEN ${change.issuingEntityPartyId ?? null}::uuid
+                                              ELSE issuing_entity_party_id END,
+               -- The currency cascades to the lines through their key (0312):
+               -- only lines struck off this draft, because the WHERE below
+               -- refuses a new currency while any line is live.
+               currency = CASE WHEN ${has("currency")} THEN ${change.currency ?? null}
+                               ELSE currency END,
+               fx_rate = CASE WHEN ${has("fxRate")} THEN ${change.fxRate ?? null}::numeric
+                              ELSE fx_rate END,
+               fx_rate_date = CASE WHEN ${has("fxRateDate")} THEN ${change.fxRateDate ?? null}::date
+                                   ELSE fx_rate_date END
+         -- A live draft only, repeated here: a proposal sent or deleted since the
+         -- service read it is left exactly as it stands.
+         WHERE id = ${proposalId} AND status = 'draft' AND deleted_at IS NULL
+           -- And a new currency only over no live line, for the same reason: a
+           -- line quoted a moment ago is priced in the old one.
+           AND (${change.currency ?? null}::text IS NULL
+                OR currency = ${change.currency ?? null}
+                OR NOT EXISTS (SELECT 1 FROM crm.proposal_line l
+                               WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL))
         RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
-      return row ? toProposal(row) : null;
+      if (!row) return null;
+      // THE NEW ISSUER'S PROSE, in the same transaction (T6.18, D9): the old
+      // lines struck off, the new company's standard set written in their place.
+      if (prose !== null) {
+        const owner = { kind: "proposal" as const, id: proposalId };
+        await strikeDocumentBlocks(db, owner);
+        await insertDocumentBlocks(
+          db,
+          prose.map((p) => ({ ...p, tenantId, owner })),
+        );
+      }
+      return toProposal(row);
     });
   }
 

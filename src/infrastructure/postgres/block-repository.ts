@@ -190,6 +190,47 @@ const BLOCK_COLUMNS =
   "id, tenant_id, kind, body, is_heading, sort_order, source_id, " +
   "(updated_at > created_at) AS is_edited";
 
+/**
+ * The INSERT of a document's prose, on a connection the caller already holds.
+ *
+ * Exported for the one writer that must put prose in the same transaction as
+ * something else — a draft's new issuer and that company's standard set
+ * (T6.18, D9) — so the statement still lives in one file.
+ */
+export async function insertDocumentBlocks(
+  db: Db,
+  blocks: readonly NewDocumentBlock[],
+): Promise<readonly DocumentBlock[]> {
+  if (blocks.length === 0) return [];
+  const rows = await db<DocumentBlockRow[]>`
+    INSERT INTO crm.document_block ${db(
+      blocks.map((b) => ({
+        id: b.id,
+        tenant_id: b.tenantId,
+        proposal_id: b.owner.kind === "proposal" ? b.owner.id : null,
+        engagement_letter_id: b.owner.kind === "engagement_letter" ? b.owner.id : null,
+        kind: b.kind,
+        body: b.body,
+        is_heading: b.isHeading,
+        sort_order: b.sortOrder,
+        source_id: b.sourceId,
+      })),
+    )}
+    RETURNING ${db.unsafe(BLOCK_COLUMNS)}
+  `.catch(asFrozen);
+  return rows.map(toDocumentBlock);
+}
+
+/** Strike every live line off a document, on a connection the caller holds.
+ *  `removed_at`, never a delete — there is no DELETE grant. */
+export async function strikeDocumentBlocks(db: Db, owner: BlockOwner): Promise<void> {
+  await db`
+    UPDATE crm.document_block SET removed_at = now()
+    WHERE removed_at IS NULL
+      AND ${owner.kind === "proposal" ? db`proposal_id` : db`engagement_letter_id`} = ${owner.id}
+  `.catch(asFrozen);
+}
+
 export class PostgresDocumentBlockRepository implements DocumentBlockRepository {
   constructor(private readonly app: Db) {}
 
@@ -230,25 +271,7 @@ export class PostgresDocumentBlockRepository implements DocumentBlockRepository 
   async addMany(blocks: readonly NewDocumentBlock[]): Promise<readonly DocumentBlock[]> {
     const first = blocks[0];
     if (first === undefined) return [];
-    return withTenant(this.app, first.tenantId, async (db) => {
-      const rows = await db<DocumentBlockRow[]>`
-        INSERT INTO crm.document_block ${db(
-          blocks.map((b) => ({
-            id: b.id,
-            tenant_id: b.tenantId,
-            proposal_id: b.owner.kind === "proposal" ? b.owner.id : null,
-            engagement_letter_id: b.owner.kind === "engagement_letter" ? b.owner.id : null,
-            kind: b.kind,
-            body: b.body,
-            is_heading: b.isHeading,
-            sort_order: b.sortOrder,
-            source_id: b.sourceId,
-          })),
-        )}
-        RETURNING ${db.unsafe(BLOCK_COLUMNS)}
-      `.catch(asFrozen);
-      return rows.map(toDocumentBlock);
-    });
+    return withTenant(this.app, first.tenantId, (db) => insertDocumentBlocks(db, blocks));
   }
 
   async add(b: NewDocumentBlock): Promise<DocumentBlock> {

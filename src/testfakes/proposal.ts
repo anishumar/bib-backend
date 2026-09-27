@@ -43,6 +43,7 @@ import type {
   ProposalRepository,
   ProposalRevision,
   ProposalSummary,
+  ProseLine,
   ServiceCatalogue,
   SharedProposalRecord,
 } from "../usecase/proposal/ports";
@@ -52,11 +53,11 @@ import { FakeTokenFactory } from "./identity";
 import { RecordingEventSink } from "./ledger";
 import { makeDocumentIdentity } from "./document";
 import type { DocumentService } from "../usecase/document/service";
-import type { FakePreferenceRepo } from "./document";
+import type { FakeDocumentBlockRepo, FakePreferenceRepo } from "./document";
 
 export class FakeProposalRepo implements ProposalRepository {
   readonly rows: Proposal[] = [];
-  readonly lines: (ProposalLine & { removed: boolean })[] = [];
+  readonly lines: (Omit<ProposalLine, "currency"> & { currency: string; removed: boolean })[] = [];
   /**
    * The catalogue the pins resolve against, so `describe` returns the PINNED
    * service the way the Postgres adapter's join does instead of a null that
@@ -131,13 +132,45 @@ export class FakeProposalRepo implements ProposalRepository {
   /** The firm's Depts and delivery teams, as `tenancy.service_axis` holds them. */
   readonly axes: { axis: "dept" | "team"; code: string; name: string; sortOrder: number }[] = [];
 
-  revise(tenantId: string, proposalId: string, change: ProposalRevision): Promise<Proposal | null> {
+  /** The document fakes' block store, so a new issuer's prose is written in the
+   *  same step as the issuer, as the adapter's transaction does (T6.18). */
+  blocks: FakeDocumentBlockRepo | null = null;
+
+  async revise(
+    tenantId: string,
+    proposalId: string,
+    change: ProposalRevision,
+    prose: readonly ProseLine[] | null = null,
+  ): Promise<Proposal | null> {
     const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
-    // The adapter's WHERE clause: a proposal no longer a draft is not touched.
-    if (current?.status !== "draft") return Promise.resolve(null);
+    // The adapter's WHERE clause: a live draft only, and a new currency only
+    // over no live line.
+    if (current?.status !== "draft" || current.deletedAt !== null) return Promise.resolve(null);
+    if (
+      change.currency !== undefined &&
+      change.currency !== current.currency &&
+      this.liveLines(tenantId, proposalId).length > 0
+    ) {
+      return Promise.resolve(null);
+    }
+    if (prose !== null && this.blocks !== null) {
+      const owner = { kind: "proposal" as const, id: proposalId };
+      for (const b of this.blocks.rows) {
+        if (b.owner.kind === "proposal" && b.owner.id === proposalId) b.removed = true;
+      }
+      await this.blocks.addMany(prose.map((p) => ({ ...p, tenantId, owner })));
+    }
+    // The currency cascades to every line, struck-off ones included (0312).
+    if (change.currency !== undefined) {
+      for (const l of this.lines) if (l.proposalId === proposalId) l.currency = change.currency;
+    }
     return Promise.resolve(
       this.replace(tenantId, proposalId, (p) => ({
         ...p,
+        issuingEntityPartyId: change.issuingEntityPartyId ?? p.issuingEntityPartyId,
+        currency: change.currency ?? p.currency,
+        fxRate: change.fxRate ?? p.fxRate,
+        fxRateDate: change.fxRateDate ?? p.fxRateDate,
         title: change.title ?? p.title,
         validUntil: change.validUntil === undefined ? p.validUntil : change.validUntil,
         background: change.background === undefined ? p.background : change.background,
@@ -796,6 +829,7 @@ export function makeProposalFakes(): Deps & {
   const catalogue = new FakeServiceCatalogue();
   const proposals = new FakeProposalRepo();
   proposals.catalogue = catalogue;
+  proposals.blocks = identity.blocks;
   return {
     proposals,
     catalogue,

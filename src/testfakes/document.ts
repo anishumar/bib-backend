@@ -305,7 +305,16 @@ export function makeDocumentFakes(): Deps & {
 export function makeDocumentIdentity(): {
   documents: DocumentService;
   firmEntities: FakePreferenceRepo;
+  /** What each document says — shared with a fake that writes prose in the
+   *  same step as something else, as the Postgres adapter does (T6.18). */
+  blocks: FakeDocumentBlockRepo;
+  standardBlocks: FakeStandardBlockRepo;
 } {
   const fakes = makeDocumentFakes();
-  return { documents: new DocumentService(fakes), firmEntities: fakes.preferences };
+  return {
+    documents: new DocumentService(fakes),
+    firmEntities: fakes.preferences,
+    blocks: fakes.blocks,
+    standardBlocks: fakes.standardBlocks,
+  };
 }

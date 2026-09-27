@@ -101,6 +101,34 @@ export interface DocumentIdentity {
     tenantId: string,
     owner: { readonly kind: "proposal"; readonly id: string },
   ): Promise<readonly DocumentBlock[]>;
+  /**
+   * The firm's standard prose as it WOULD land on this document, composed but
+   * not written (T6.18) — what replaces a draft's prose when its issuer
+   * changes, written by the proposal's own adapter in the same transaction as
+   * the new issuer.
+   */
+  standardProse(
+    tenantId: string,
+    owner: { readonly kind: "proposal"; readonly id: string },
+    jurisdiction: string,
+  ): Promise<readonly ProseLine[]>;
+  /** One of the firm's companies by name, and where it is registered — null
+   *  when it has no legal-entity record. */
+  issuerJurisdiction(
+    tenantId: string,
+    firmEntityPartyId: string,
+  ): Promise<{ readonly displayName: string; readonly jurisdiction: string | null }>;
+}
+
+/** One line of prose, ready to be written onto a document. */
+export interface ProseLine {
+  readonly id: string;
+  readonly kind: DocumentBlock["kind"];
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  /** The standard line it was copied from. */
+  readonly sourceId: string | null;
 }
 
 export interface NewProposal {
@@ -139,6 +167,12 @@ export interface ProposalRevision {
   readonly background?: string | null | undefined;
   readonly addressedToPartyId?: string | null | undefined;
   readonly preparedByUserId?: string | null | undefined;
+  /** T6.18: which of the firm's companies issues it, and in what money. The
+   *  three money fields travel together. */
+  readonly issuingEntityPartyId?: string | undefined;
+  readonly currency?: CurrencyCode | undefined;
+  readonly fxRate?: Amount | undefined;
+  readonly fxRateDate?: string | undefined;
 }
 
 export interface NewProposalLine {
@@ -825,7 +859,18 @@ export interface ProposalRepository {
    * so a proposal sent between the service's read and this write is not
    * changed — null comes back, and the service says it is no longer a draft.
    */
-  revise(tenantId: string, proposalId: string, change: ProposalRevision): Promise<Proposal | null>;
+  revise(
+    tenantId: string,
+    proposalId: string,
+    change: ProposalRevision,
+    /**
+     * T6.18 (D9): when the issuer changes, the draft's live prose is struck off
+     * and THESE lines written in its place, in the SAME transaction as the new
+     * issuer — so a draft can never say one company in its head and another's
+     * standard terms below it. Null leaves the prose alone.
+     */
+    prose?: readonly ProseLine[] | null,
+  ): Promise<Proposal | null>;
 
   // ── 0085 ──────────────────────────────────────────────────────────────────
 

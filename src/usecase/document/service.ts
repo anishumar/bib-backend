@@ -308,16 +308,34 @@ export class DocumentService {
     const existing = await this.deps.blocks.list(tenantId, owner);
     if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
 
+    const rows = await this.standardProse(tenantId, owner, jurisdiction);
+    if (rows.length === 0) return [];
+    return this.deps.blocks.addMany(rows);
+  }
+
+  /**
+   * The firm's standard set as it would land on this document — chosen by
+   * `blocksFor`, renumbered, given ids — WITHOUT writing it.
+   *
+   * The seam T6.18 needed: changing a draft's issuer replaces its prose, and
+   * the proposal's own adapter writes that in the same transaction as the new
+   * issuer (D9), so the rows are composed here, where the rule lives, and
+   * written there.
+   */
+  async standardProse(
+    tenantId: string,
+    owner: BlockOwner,
+    jurisdiction: string,
+  ): Promise<readonly NewDocumentBlock[]> {
     const standard = await this.deps.standardBlocks.list(tenantId);
     const chosen = blocksFor(standard, normalizeJurisdiction(jurisdiction), owner.kind);
-    if (chosen.length === 0) return [];
 
     // Renumbered from 1 WITHIN EACH KIND rather than carrying the standard set's
     // own numbers across. The standard list is not contiguous — a firm inserts
     // between two lines and retires others — and a document that prints
     // exclusions 1, 4, 5 has a reader wondering what 2 and 3 said.
     const next = new Map<BlockKind, number>();
-    const rows: NewDocumentBlock[] = chosen.map((b) => {
+    return chosen.map((b): NewDocumentBlock => {
       const order = (next.get(b.kind) ?? 0) + 1;
       next.set(b.kind, order);
       return {
@@ -331,7 +349,6 @@ export class DocumentService {
         sourceId: b.id,
       };
     });
-    return this.deps.blocks.addMany(rows);
   }
 
   listBlocks(tenantId: string, owner: BlockOwner): Promise<readonly DocumentBlock[]> {

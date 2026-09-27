@@ -728,7 +728,8 @@ export function mapError(err: unknown): MappedError {
       // names nothing to change. And 0085's three: an address that is not one,
       // and — on the client's own page — an answer with no name typed or an
       // acceptance with the statement left unticked. T6.18's line edit adds two
-      // more the caller sent: a change naming nothing, and a description emptied.
+      // more the caller sent: a change naming nothing, and a description emptied —
+      // and a currency sent without its rate and the rate's day.
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -747,6 +748,7 @@ export function mapError(err: unknown): MappedError {
       case "PREPARER_NOT_STAFF":
       case "NOTHING_TO_REVISE":
       case "NOTHING_TO_CHANGE_ON_LINE":
+      case "INVALID_CURRENCY_CHANGE":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_RECIPIENT":
       case "SIGNER_NAME_REQUIRED":
@@ -773,7 +775,9 @@ export function mapError(err: unknown): MappedError {
       // went out and so cannot be, one a live letter still cites, and a lead
       // deleted as a mistake that a new proposal named — answered by drafting
       // afresh, answering the client, deleting the letter first, or capturing
-      // a real lead.
+      // a real lead. T6.18's two read the same way: a currency change under live
+      // lines (answered by removing them) and an issuer change that would
+      // replace prose edited for this client (answered by saying so).
       case "NOT_A_DRAFT":
       case "EMPTY_PROPOSAL":
       case "INVALID_TRANSITION":
@@ -789,6 +793,8 @@ export function mapError(err: unknown): MappedError {
       case "PROPOSAL_NOT_DELETABLE":
       case "PROPOSAL_CITED_BY_LETTER":
       case "LEAD_DELETED":
+      case "CURRENCY_LOCKED_BY_LINES":
+      case "PROSE_EDITED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Reachable only from a process composed with no mailer — the worker,
       // which never sends. Said plainly rather than as a 500, the render

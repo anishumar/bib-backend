@@ -666,6 +666,20 @@ const ReviseProposalRequest = z
     background: z.string().max(4000).nullable().optional(),
     addressedToPartyId: z.string().uuid().nullable().optional(),
     preparedByUserId: z.string().uuid().nullable().optional(),
+    /** T6.18: another of the firm's own companies to issue this draft. Its
+     *  prose is replaced with that company's standard set (D9); refused with
+     *  PROSE_EDITED while a line was edited for this client, unless
+     *  `replaceEditedProse` is true. */
+    issuingEntityPartyId: z.string().uuid().optional(),
+    replaceEditedProse: z.boolean().optional(),
+    /** Where the client is, for which country's standard lines the new
+     *  issuer's prose takes. Absent: where the new issuer is registered. */
+    clientJurisdiction: JurisdictionSchema.optional(),
+    /** T6.18: the money — all three together. The currency changes only while
+     *  the draft has no live line (CURRENCY_LOCKED_BY_LINES). */
+    currency: CurrencySchema.optional(),
+    fxRate: RateSchema.optional(),
+    fxRateDate: DaySchema.optional(),
   })
   .openapi("ReviseProposalRequest");
 
@@ -859,8 +873,11 @@ const reviseRoute = createRoute({
   summary: "Change a draft proposal's head",
   description:
     "Its title, how long it is valid, its Background, and the two names its cover prints — " +
-    "who it is prepared for and who prepared it (0084). A draft only: once sent, the client " +
-    "holds what it said. Answers with the whole proposal, names resolved.",
+    "who it is prepared for and who prepared it (0084). Since T6.18 also which of the firm's " +
+    "companies issues it (its prose is replaced with that company's standard set, in the same " +
+    "transaction) and its currency and rate (the currency only while no line is quoted). A " +
+    "draft only: once sent, the client holds what it said. Answers with the whole proposal, " +
+    "names resolved.",
   request: {
     params: z.object({ proposalId: z.string().uuid() }),
     body: { content: { "application/json": { schema: ReviseProposalRequest } }, required: true },
@@ -874,7 +891,11 @@ const reviseRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
-    409: errorResponse("Not a draft, or the person named has no recorded role at this client"),
+    409: errorResponse(
+      "Not a draft, the person named has no recorded role at this client, a new currency " +
+        "under live lines (CURRENCY_LOCKED_BY_LINES), or an issuer change that would replace " +
+        "prose edited for this client (PROSE_EDITED, naming the count)",
+    ),
   },
 });
 
@@ -1501,15 +1522,24 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
     const body = c.req.valid("json");
-    await deps.service.revise({
-      tenantId: s.tenantId,
-      proposalId,
-      title: body.title,
-      validUntil: body.validUntil,
-      background: body.background,
-      addressedToPartyId: body.addressedToPartyId,
-      preparedByUserId: body.preparedByUserId,
-    });
+    await deps.service.revise(
+      {
+        tenantId: s.tenantId,
+        proposalId,
+        title: body.title,
+        validUntil: body.validUntil,
+        background: body.background,
+        addressedToPartyId: body.addressedToPartyId,
+        preparedByUserId: body.preparedByUserId,
+        issuingEntityPartyId: body.issuingEntityPartyId,
+        replaceEditedProse: body.replaceEditedProse,
+        clientJurisdiction: body.clientJurisdiction,
+        currency: body.currency,
+        fxRate: body.fxRate,
+        fxRateDate: body.fxRateDate,
+      },
+      s.actor,
+    );
     const record = await deps.service.describe(s.tenantId, proposalId);
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });

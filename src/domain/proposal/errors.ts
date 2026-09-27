@@ -52,6 +52,9 @@ export type ProposalErrorCode =
   | "PREPARER_NOT_STAFF"
   | "NOTHING_TO_REVISE"
   | "NOTHING_TO_CHANGE_ON_LINE"
+  | "CURRENCY_LOCKED_BY_LINES"
+  | "INVALID_CURRENCY_CHANGE"
+  | "PROSE_EDITED"
   | "INVALID_LINE_DESCRIPTION"
   | "INVALID_RECIPIENT"
   | "NOT_OUT_FOR_ANSWER"
@@ -199,6 +202,55 @@ export class NothingToChangeOnLine extends ProposalError {
       "Nothing to change on this line: send at least one of description, quantity, unitAmount, " +
         "discountPercent, billingFrequency, pricingNote, jurisdiction, oopEstimate, " +
         "scopeOverride, clientObligationsOverride, volumeLimitsOverride or exclusionsOverride.",
+    );
+  }
+}
+
+/**
+ * A draft's currency changes only while it quotes nothing (T6.18, D1): every
+ * line is priced in the document's currency and held to it by a key, so a new
+ * currency under live lines would relabel their prices without converting them.
+ */
+export class CurrencyLockedByLines extends ProposalError {
+  constructor(lineCount: number, currency: string) {
+    super(
+      "CURRENCY_LOCKED_BY_LINES",
+      `This draft already quotes ${String(lineCount)} service${lineCount === 1 ? "" : "s"} in ` +
+        `${currency}, and every line is priced in the document's currency. Remove ` +
+        `${lineCount === 1 ? "it" : "them"} first, then change the currency and quote again, or ` +
+        `keep ${currency}.`,
+    );
+  }
+}
+
+/** The currency, its rate and the rate's day travel together. */
+export class InvalidCurrencyChange extends ProposalError {
+  constructor() {
+    super(
+      "INVALID_CURRENCY_CHANGE",
+      "Send currency, fxRate and fxRateDate together: the rate back to the firm's reporting " +
+        "currency belongs to one currency on one day, and half of it is not a rate.",
+    );
+  }
+}
+
+/**
+ * Changing the issuer replaces the draft's prose with the new company's
+ * standard set (T6.18, D9), and some of the lines it would replace were
+ * written for this client. Asked first, never done silently.
+ */
+export class ProseEdited extends ProposalError {
+  constructor(
+    readonly editedCount: number,
+    issuerName: string,
+  ) {
+    super(
+      "PROSE_EDITED",
+      `${String(editedCount)} line${editedCount === 1 ? "" : "s"} of this proposal's exclusions, ` +
+        `commercials or team ${editedCount === 1 ? "was" : "were"} edited for this client, and ` +
+        `changing the issuer replaces the prose with ${issuerName}'s standard set. Send ` +
+        `replaceEditedProse: true to replace ${editedCount === 1 ? "it" : "them"} anyway, or keep ` +
+        `the issuer.`,
     );
   }
 }
