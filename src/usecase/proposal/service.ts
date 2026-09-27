@@ -101,6 +101,8 @@ import {
   proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { planProposal } from "../../domain/proposal/document";
+import type { ProposalPlan } from "../../domain/proposal/document";
 import type {
   ClientStructureDirectory,
   DocumentIdentity,
@@ -832,6 +834,7 @@ export class ProposalService {
     return {
       ...record,
       blocks,
+      document: planOf(record),
       deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
     };
   }
@@ -1553,6 +1556,31 @@ export class ProposalService {
  * the catalogue's words", so a caller clearing the box gets the catalogue back
  * rather than a document with an empty heading on it.
  */
+/**
+ * The document's structure, from the SAME `planProposal` the PDF's render
+ * source calls, over the same inputs: the PINNED version's code and Dept, the
+ * line's company by name, and the firm's Depts retired ones included. The
+ * money is the view's; the plan carries it but nothing reads it off the plan.
+ */
+function planOf(record: ProposalRecord): ProposalPlan {
+  return planProposal({
+    depts: record.depts,
+    lines: record.lines.map((l) => ({
+      id: l.line.id,
+      position: l.line.position,
+      ref: l.service?.ref ?? null,
+      deptCode: l.service?.module ?? null,
+      description: l.line.description,
+      subject: l.entity?.displayName ?? null,
+      terms: l.terms,
+      billingFrequency: l.line.billingFrequency,
+      net: l.net,
+      pricingNote: l.line.pricingNote,
+      oopEstimate: l.line.oopEstimate,
+    })),
+  });
+}
+
 /** A quantity is a positive decimal string. */
 function checkQuantity(quantity: string): void {
   if (!isAmount(quantity) || Number(quantity) <= 0) throw new InvalidQuantity(quantity);

@@ -13,6 +13,7 @@ import type { Db } from "../../db/pool";
 import { VIEW_DEDUPE_MINUTES } from "../../domain/proposal/model";
 import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
+import { utcDayOf } from "./instant";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
@@ -261,6 +262,9 @@ export class PostgresProposalRepository implements ProposalRepository {
           pdf_filename: string | null;
           deleter_display_name: string | null;
           deleter_email: string | null;
+          issuer_jurisdiction: string | null;
+          addressee_phone: string | null;
+          issued_on: string;
         })[]
       >`
         SELECT ${db.unsafe(PROPOSAL_COLUMNS_P)},
@@ -277,13 +281,21 @@ export class PostgresProposalRepository implements ProposalRepository {
                pdf.content_hash AS pdf_content_hash,
                pdf.filename AS pdf_filename,
                deleter.display_name AS deleter_display_name,
-               deleter.email::text AS deleter_email
+               deleter.email::text AS deleter_email,
+               issuer_le.jurisdiction AS issuer_jurisdiction,
+               addressee_phone.value AS addressee_phone,
+               -- The day the PDF's running header prints (0084): sent, else
+               -- drafted, as a UTC day — the render source's own expression.
+               ${db.unsafe(utcDayOf("coalesce(p.sent_at, p.created_at)", "issued_on"))}
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the
         -- column is NOT NULL and carries the tenant, so a proposal with no
         -- resolvable issuer is corruption rather than a state to render.
         JOIN core.party issuer ON issuer.id = p.issuing_entity_party_id
+        -- Where that company is registered (T6.18). LEFT: the fallback entity
+        -- every firm is seeded with has no legal-entity row.
+        LEFT JOIN core.legal_entity issuer_le ON issuer_le.party_id = p.issuing_entity_party_id
         JOIN tenancy.tenant firm ON firm.id = p.tenant_id
         LEFT JOIN tenancy.user_account approver ON approver.id = p.discount_approved_by
         -- The cover's two names (0084), read-time joins: an erased account
@@ -301,6 +313,17 @@ export class PostgresProposalRepository implements ProposalRepository {
           ORDER BY i.is_primary DESC, i.created_at DESC
           LIMIT 1
         ) addressee_email ON true
+        -- The same person's phone, the same way — what "Send on WhatsApp"
+        -- opens a chat with (T6.18).
+        LEFT JOIN LATERAL (
+          SELECT i.value::text AS value
+          FROM core.party_identifier i
+          WHERE i.party_id = p.addressed_to_party_id
+            AND i.type = 'phone'
+            AND (i.valid_to IS NULL OR i.valid_to >= current_date)
+          ORDER BY i.is_primary DESC, i.created_at DESC
+          LIMIT 1
+        ) addressee_phone ON true
         LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
         -- The PDF of record (0085), once pinned.
         LEFT JOIN files.document_version pdf ON pdf.id = p.sent_pdf_version_id
@@ -407,6 +430,44 @@ export class PostgresProposalRepository implements ProposalRepository {
         FROM crm.proposal_totals WHERE proposal_id = ${proposalId}
       `;
 
+      // THE MONEY PER FREQUENCY (T6.18, D8), added by the database from the same
+      // per-line view the document total comes from. `sum` skips an unpriced
+      // line's NULL, and the count beside it says so. Reading order: monthly
+      // first, lines that state no frequency last.
+      const byFrequency = await db<
+        {
+          frequency: BillingFrequency | null;
+          net: string | null;
+          line_count: string;
+          unpriced_line_count: string;
+        }[]
+      >`
+        SELECT l.billing_frequency AS frequency,
+               sum(a.net)::text AS net,
+               count(*) AS line_count,
+               count(*) FILTER (WHERE l.unit_amount IS NULL) AS unpriced_line_count
+        FROM crm.proposal_line l
+        JOIN crm.proposal_line_amount a ON a.id = l.id
+        WHERE l.proposal_id = ${proposalId} AND l.removed_at IS NULL
+        GROUP BY l.billing_frequency
+        ORDER BY coalesce(array_position(
+                   ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
+                   l.billing_frequency::text), 99)
+      `;
+
+      // The firm's Depts and delivery teams, retired rows included — the render
+      // source's read, so a line's Dept name and a section's letter are the
+      // PDF's.
+      const axes = await db<
+        { axis: "dept" | "team"; code: string; name: string; sort_order: number }[]
+      >`
+        SELECT axis, code, name, sort_order FROM tenancy.service_axis
+      `;
+      const axisName = (axis: "dept" | "team", code: string | null) =>
+        code === null
+          ? null
+          : { code, name: axes.find((a) => a.axis === axis && a.code === code)?.name ?? null };
+
       return {
         proposal: toProposal(head),
         party: { id: head.party_id, displayName: head.party_display_name },
@@ -414,14 +475,32 @@ export class PostgresProposalRepository implements ProposalRepository {
           id: head.issuing_entity_party_id,
           displayName: head.issuer_display_name,
         },
-        lines: lines.map(
-          (r): ProposalLineRecord => ({
+        issuer: {
+          partyId: head.issuing_entity_party_id,
+          name: head.issuer_display_name,
+          jurisdiction: head.issuer_jurisdiction,
+        },
+        issuedOn: head.issued_on,
+        totalsByFrequency: byFrequency.map((f) => ({
+          frequency: f.frequency,
+          net: f.net ?? "0",
+          lineCount: Number(f.line_count),
+          unpricedLineCount: Number(f.unpriced_line_count),
+        })),
+        depts: axes
+          .filter((a) => a.axis === "dept")
+          .map((a) => ({ code: a.code, name: a.name, sortOrder: a.sort_order })),
+        lines: lines.map((r): ProposalLineRecord => {
+          const service = toPinnedService(r.service_key, r.service_version, r.service_body);
+          return {
             line: toLine(r),
             entity:
               r.entity_party_id === null || r.entity_display_name === null
                 ? null
                 : { id: r.entity_party_id, displayName: r.entity_display_name },
-            service: toPinnedService(r.service_key, r.service_version, r.service_body),
+            service,
+            dept: axisName("dept", service.module),
+            team: axisName("team", service.group),
             // OVERRIDE ELSE CATALOGUE, resolved once, by the domain — never by
             // this adapter and never by a screen. The catalogue's half comes
             // out of the SAME pinned body the join already read, so the words
@@ -436,8 +515,8 @@ export class PostgresProposalRepository implements ProposalRepository {
               readServiceBody(r.service_body),
             ),
             net: r.net,
-          }),
-        ),
+          };
+        }),
         totals: toTotals(totals, head.currency),
         // email is the discriminator, not the id: an account always has an
         // address and may have no name.
@@ -456,6 +535,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                 id: head.addressed_to_party_id,
                 displayName: head.addressee_display_name,
                 email: head.addressee_email,
+                phone: head.addressee_phone,
               },
         preparedBy:
           head.prepared_by_user_id === null || head.preparer_email === null
@@ -1186,6 +1266,7 @@ function toPinnedService(
     name: stored.name === "" ? key : stored.name,
     module: stored.module,
     group: stored.group,
+    jurisdictions: stored.jurisdictions,
     billingBasis: stored.billingBasis,
     recurrence: stored.recurrence,
     slaDays: stored.slaDays,

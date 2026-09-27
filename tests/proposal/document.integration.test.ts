@@ -310,7 +310,12 @@ describe("the columns 0084 added", () => {
     expect(view.proposal.background).toMatch(/^Nexus Fintech is a leading company/);
     // `email` is Priya's email identifier when the firm holds one (0085) —
     // this test records none.
-    expect(view.addressee).toEqual({ id: priya, displayName: "Priya Sharma", email: null });
+    expect(view.addressee).toEqual({
+      id: priya,
+      displayName: "Priya Sharma",
+      email: null,
+      phone: null,
+    });
     expect(view.preparedBy).toEqual({
       userId: preparer,
       displayName: "Siddharth Kohli",
@@ -336,6 +341,91 @@ describe("the columns 0084 added", () => {
       SELECT background FROM crm.proposal WHERE id = ${id}
     `;
     expect(row?.background).toBeNull();
+  });
+
+  it("the staff read carries the PDF's own plan, the money per frequency and the issuer (T6.18)", async () => {
+    const id = await nexusProposal();
+    // A phone for the person it is prepared for — what "Send on WhatsApp" opens.
+    await party.addIdentifier(
+      {
+        tenantId: tenant,
+        partyId: priya,
+        type: "phone",
+        // Unique per run: the tenant's identifiers are deduplicated.
+        value: `+91 98${stamp.slice(-8).replace(/\D/g, "7").padEnd(8, "7")}`,
+        isPrimary: true,
+        validFrom: "2024-01-01",
+      },
+      SYSTEM_ACTOR,
+    );
+    const view = await proposals.describe(tenant, id);
+    const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
+    const flow = described?.document.proposal?.flow ?? [];
+
+    // THE PLAN IS THE PDF'S: every section heading and every service heading the
+    // render prints, in its order, is the read's `document`.
+    const pdfHeadings = texts(flow).filter((t) => /^#[12] [A-Z]\d*\./.test(t));
+    const readHeadings = view.document.sections.flatMap((section) => [
+      `#1 ${section.code}. ${section.title}`,
+      ...section.items.map((item) => `#2 ${item.code}. ${item.description}`),
+    ]);
+    expect(readHeadings).toEqual(pdfHeadings);
+    expect(view.document.sections.map((s) => s.code)).toEqual(["A", "B"]);
+    expect(view.document.sections[0]?.items[0]?.lineId).toBe(view.lines[0]?.line.id);
+
+    // Per line: the Dept by the firm's own name, "Offered in", the catalogue code.
+    expect(view.lines.map((l) => l.dept)).toEqual([
+      { code: "FRC", name: "Financial Reporting & Compliance" },
+      { code: "TRC", name: "Transactions & Regulatory Compliance" },
+    ]);
+    expect(view.lines.map((l) => l.service?.ref)).toEqual(["H3", "C2"]);
+    expect(view.lines[0]?.service?.jurisdictions).toEqual([]);
+
+    // THE MONEY PER FREQUENCY, added by the database, in reading order.
+    expect(view.totalsByFrequency).toEqual([
+      { frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { frequency: "annually", net: "50000.0000", lineCount: 1, unpricedLineCount: 0 },
+    ]);
+
+    // The issuer, and where it is registered: the seeded fallback has no
+    // legal-entity row, so the answer is null rather than a guess.
+    expect(view.issuer).toMatchObject({ name: "10x Global Private Limited", jurisdiction: null });
+    // The day the PDF's running header prints.
+    const running = described?.document.proposal?.running ?? "";
+    const printed = new Date(`${view.issuedOn}T00:00:00Z`).toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+    expect(running.endsWith(printed)).toBe(true);
+    expect(view.addressee?.phone).toMatch(/^\+9198\d{8}$/);
+  });
+
+  it("an unpriced line and a line with no frequency each get their own row, counted", async () => {
+    const id = await nexusProposal();
+    const line = (await proposals.describe(tenant, id)).lines[0];
+    await proposals.updateLine(
+      {
+        tenantId: tenant,
+        proposalId: id,
+        lineId: line?.line.id ?? "",
+        unitAmount: null,
+        pricingNote: "As mutually agreed",
+        billingFrequency: "quarterly",
+      },
+      SYSTEM_ACTOR,
+    );
+    const view = await proposals.describe(tenant, id);
+    expect(view.totalsByFrequency).toEqual([
+      { frequency: "quarterly", net: "25000.0000", lineCount: 2, unpricedLineCount: 1 },
+    ]);
+    await owner`UPDATE crm.proposal_line SET billing_frequency = NULL WHERE id = ${line?.line.id ?? ""}`;
+    const after = await proposals.describe(tenant, id);
+    expect(after.totalsByFrequency).toEqual([
+      { frequency: "quarterly", net: "25000.0000", lineCount: 1, unpricedLineCount: 0 },
+      { frequency: null, net: "0", lineCount: 1, unpricedLineCount: 1 },
+    ]);
   });
 
   it("refuses blank Background prose for every writer", async () => {

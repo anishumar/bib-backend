@@ -20,6 +20,7 @@ import type {
   ProposalTotals,
 } from "../../domain/proposal/model";
 import type { ClientStructure } from "../../domain/party/model";
+import type { ProposalDept, ProposalPlan } from "../../domain/proposal/document";
 import type { Actor } from "../../domain/ledger/model";
 
 
@@ -215,6 +216,39 @@ export interface ProposalRecord {
   /** Which of the firm's own entities is offering it, by NAME — this is what a
    *  letterhead prints, and a uuid prints as nothing. */
   readonly issuingEntity: { readonly id: string; readonly displayName: string };
+  /**
+   * The same company with the country it is registered in (T6.18) — what the
+   * builder's country chips and currency default start from. `jurisdiction` is
+   * null for a firm entity with no `core.legal_entity` row (the fallback every
+   * firm is seeded with has none).
+   */
+  readonly issuer: {
+    readonly partyId: string;
+    readonly name: string;
+    readonly jurisdiction: string | null;
+  };
+  /**
+   * The day the document is dated — when it was sent, else when it was drafted,
+   * as a UTC day. The PDF's running header prints this one (0084), so the
+   * preview does not compute its own.
+   */
+  readonly issuedOn: string;
+  /**
+   * THE MONEY PER BILLING FREQUENCY (T6.18, D8) — summed by the database, one
+   * row per frequency the live lines carry, in reading order (monthly,
+   * quarterly, annually, one-time, custom, then lines that state none).
+   *
+   * `totals.net` adds a monthly fee to a one-time one, which is a number no
+   * reader should be shown as "the total"; this is what the document and the
+   * builder print instead. `unpricedLineCount` is per row, for `totals`' reason.
+   */
+  readonly totalsByFrequency: readonly FrequencyTotal[];
+  /**
+   * The firm's Depts as `tenancy.service_axis` holds them, retired ones
+   * included — what `planProposal` letters the sections by, read the way the
+   * PDF's render source reads them.
+   */
+  readonly depts: readonly ProposalDept[];
   /** Who signed off an over-limit discount, for a screen that has to show it.
    *  Null when nobody has. */
   readonly approvedBy: {
@@ -229,6 +263,9 @@ export interface ProposalRecord {
     readonly id: string;
     readonly displayName: string;
     readonly email: string | null;
+    /** That person's phone identifier, the primary one first — what "Send on
+     *  WhatsApp" opens a chat with (T6.18, D13). */
+    readonly phone: string | null;
   } | null;
   /** The colleague the cover names, with the address it prints (0084). The
    *  email is the discriminator — an account may have no display name. */
@@ -253,6 +290,16 @@ export interface ProposalRecord {
     readonly displayName: string | null;
     readonly email: string;
   } | null;
+}
+
+/** One row of `ProposalRecord.totalsByFrequency`. */
+export interface FrequencyTotal {
+  /** Null for the lines that state no billing frequency. */
+  readonly frequency: BillingFrequency | null;
+  /** gross − discount of the PRICED lines at this frequency, from `numeric`. */
+  readonly net: Amount;
+  readonly lineCount: number;
+  readonly unpricedLineCount: number;
 }
 
 // ── The proposal by email, and the client's own answer (0085) ────────────────
@@ -427,6 +474,13 @@ export interface ProposalLinks {
 export interface ProposalView extends ProposalRecord {
   readonly blocks: readonly DocumentBlock[];
   /**
+   * How the document is ORGANISED — its sections and the code each service
+   * prints under (T6.18) — from the SAME `planProposal` the PDF is rendered
+   * from, over the same inputs, so the in-app preview cannot letter a section
+   * differently from the file the client receives.
+   */
+  readonly document: ProposalPlan;
+  /**
    * Why Delete would be refused right now (0086), in the words a DELETE would
    * be refused with — or null when it would work. "A caller is told what it may
    * do": the page offers the button only when it will work.
@@ -465,9 +519,10 @@ export interface ProposalView extends ProposalRecord {
  *
  * DELIBERATELY ABSENT: the catalogue's `description` (the LINE carries the words
  * the client actually reads, and a firm tailors them per document — printing the
- * catalogue's beside them is two descriptions and no rule about which wins),
- * `category`, and `jurisdictions` (both are for FINDING a service in the
- * catalogue, not for printing one on a document).
+ * catalogue's beside them is two descriptions and no rule about which wins) and
+ * `category`. `jurisdictions` was absent for the same reason until T6.18: the
+ * builder shows a quoted line under the country chip it was picked from, and
+ * that needs "Offered in" off the pin rather than a catalogue call per line.
  */
 export interface PinnedService {
   /** The registry key and the version number — the pin, as a person cites it.
@@ -483,6 +538,8 @@ export interface PinnedService {
    *  dimensions, never a hierarchy (see `ServiceBody.group`). */
   readonly module: string | null;
   readonly group: string | null;
+  /** Where the service is offered — ISO codes, empty meaning everywhere. */
+  readonly jurisdictions: readonly string[];
   /** What `unitAmount` and `listPrice` are PER — per hour, per month, per item,
    *  or for the whole engagement. Without it an amount on a document is a number
    *  with no unit. Null only for a stored body that somehow has none. */
@@ -518,6 +575,14 @@ export interface ProposalLineRecord {
    *  gone, which the composite foreign key makes impossible; the type is honest
    *  about the join anyway. */
   readonly service: PinnedService | null;
+  /**
+   * The pinned version's Dept and delivery team, with the names the firm keeps
+   * for them in `tenancy.service_axis` (retired rows included, as the PDF reads
+   * them). Null when the service names none; `name` null when the firm keeps no
+   * row for the code, which the document then prints as the code itself.
+   */
+  readonly dept: { readonly code: string; readonly name: string | null } | null;
+  readonly team: { readonly code: string; readonly name: string | null } | null;
   /**
    * THE FOUR SCOPE BLOCKS, RESOLVED — this line's override where it has one,
    * the pinned catalogue version's words where it does not, and a flag saying

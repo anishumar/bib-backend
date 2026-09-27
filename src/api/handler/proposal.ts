@@ -110,7 +110,13 @@ const OopEstimateSchema = z
  * heading.
  */
 const ResolvedTermSchema = z
-  .object({ text: z.string().nullable(), tailored: z.boolean() })
+  .object({
+    text: z.string().nullable(),
+    tailored: z.boolean(),
+    /** The pinned catalogue version's words for this block — what "Back to
+     *  standard" puts back (T6.18). Equal to `text` when `tailored` is false. */
+    standard: z.string().nullable(),
+  })
   .openapi("ResolvedTerm");
 
 const DocumentTermsSchema = z
@@ -153,6 +159,8 @@ const PinnedServiceSchema = z
     /** The revenue axis and the delivery axis. Independent dimensions. */
     module: z.string().nullable(),
     group: z.string().nullable(),
+    /** Where the service is offered, ISO codes — empty means everywhere (T6.18). */
+    jurisdictions: z.array(z.string()),
     /** What the amounts are PER — per hour, per month, per item, or for the
      *  whole engagement. */
     billingBasis: z.string().nullable(),
@@ -243,6 +251,47 @@ const ProposalSchema = z
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
 
+const AxisRefSchema = z
+  .object({ code: z.string(), name: z.string().nullable() })
+  .openapi("ServiceAxisRef");
+
+/** One row of the money per billing frequency (T6.18, D8). */
+const FrequencyTotalSchema = z
+  .object({
+    /** Null for the lines that state no billing frequency. */
+    frequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    /** Summed by the database. Redacted by the fee axis. */
+    net: AmountSchema.nullable(),
+    lineCount: z.number().int(),
+    /** Lines at this frequency with no price, which `net` does not cover. */
+    unpricedLineCount: z.number().int(),
+  })
+  .openapi("ProposalFrequencyTotal");
+
+/** How the document is organised — the PDF's own plan (T6.18). */
+const ProposalPlanSchema = z
+  .object({
+    sections: z.array(
+      z.object({
+        /** "A", "B", … by rank among the Depts this proposal uses. */
+        code: z.string(),
+        /** The Dept's name, or "Services" / "Other services". */
+        title: z.string(),
+        items: z.array(
+          z.object({
+            lineId: z.string().uuid(),
+            /** "H3", or "A1" for a service with no code of its own. */
+            code: z.string(),
+            description: z.string(),
+            /** The company, when the document names one beside the service. */
+            subject: z.string().nullable(),
+          }),
+        ),
+      }),
+    ),
+  })
+  .openapi("ProposalPlan");
+
 const ProposalLineSchema = z
   .object({
     id: z.string().uuid(),
@@ -255,6 +304,10 @@ const ProposalLineSchema = z
     // 22,500" needs to be able to say which catalogue version it is quoting.
     serviceVersionId: z.string().uuid(),
     service: PinnedServiceSchema.nullable(),
+    /** The service's Dept and delivery team, by the firm's own names (T6.18).
+     *  `name` is null when the firm keeps no row for the code. */
+    dept: AxisRefSchema.nullable(),
+    team: AxisRefSchema.nullable(),
     /** THE FOUR SCOPE BLOCKS, RESOLVED: this line's override where it has one,
      *  the pinned catalogue version's words where it does not, and which of the
      *  two won. `service` above still carries the catalogue's own words, so an
@@ -380,6 +433,20 @@ const ProposalRecordSchema = z
     party: PartyRefSchema,
     /** The issuing entity by NAME — a letterhead prints a name, not a uuid. */
     issuingEntity: PartyRefSchema,
+    /** The same company with where it is registered (T6.18). `jurisdiction` is
+     *  null for a firm entity with no legal-entity record. */
+    issuer: z.object({
+      partyId: z.string().uuid(),
+      name: z.string(),
+      jurisdiction: z.string().nullable(),
+    }),
+    /** The day the document is dated — sent, else drafted — as the PDF prints it. */
+    issuedOn: DaySchema,
+    /** The money per billing frequency, summed by the database (D8): what a
+     *  reader is shown instead of one net that adds monthly to one-time. */
+    totalsByFrequency: z.array(FrequencyTotalSchema),
+    /** Sections and codes, from the SAME plan the PDF is rendered from. */
+    document: ProposalPlanSchema,
     lines: z.array(ProposalLineSchema),
     blocks: z.array(DocumentBlockSchema),
     totals: TotalsSchema,
@@ -392,6 +459,9 @@ const ProposalRecordSchema = z
         id: z.string().uuid(),
         displayName: z.string(),
         email: z.string().nullable(),
+        /** Their phone identifier, the primary one first — what "Send on
+         *  WhatsApp" opens a chat with (T6.18). */
+        phone: z.string().nullable(),
       })
       .nullable(),
     /** "Prepared by", with the address the cover prints (0084). The email is
@@ -1137,6 +1207,7 @@ function toPinnedServiceBody(
     name: service.name,
     module: service.module,
     group: service.group,
+    jurisdictions: [...service.jurisdictions],
     billingBasis: service.billingBasis,
     recurrence: service.recurrence,
     slaDays: service.slaDays,
@@ -1168,6 +1239,56 @@ function toTotalsBody(
   };
 }
 
+/**
+ * One line of the read, field by field. The four scope blocks carry the
+ * catalogue's own words beside what prints, so "Back to standard" can show what
+ * it will put back without a catalogue call.
+ */
+function toLineBody(
+  l: ProposalView["lines"][number],
+  fees: boolean,
+): z.infer<typeof ProposalLineSchema> {
+  const term = (
+    resolved: ProposalView["lines"][number]["terms"]["scope"],
+    standard: string | null,
+  ): z.infer<typeof ResolvedTermSchema> => ({
+    text: resolved.text,
+    tailored: resolved.tailored,
+    standard,
+  });
+  return {
+    id: l.line.id,
+    entityPartyId: l.line.entityPartyId,
+    entity: l.entity === null ? null : { ...l.entity },
+    serviceVersionId: l.line.serviceVersionId,
+    service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
+    dept: l.dept === null ? null : { code: l.dept.code, name: l.dept.name },
+    team: l.team === null ? null : { code: l.team.code, name: l.team.name },
+    terms: {
+      scope: term(l.terms.scope, l.service?.scope ?? null),
+      clientObligations: term(l.terms.clientObligations, l.service?.clientObligations ?? null),
+      volumeLimits: term(l.terms.volumeLimits, l.service?.volumeLimits ?? null),
+      exclusions: term(l.terms.exclusions, l.service?.exclusions ?? null),
+    },
+    description: l.line.description,
+    position: l.line.position,
+    // Quantity is not money. "Three registrations" is what the work IS, and a
+    // delivery associate needs it.
+    quantity: l.line.quantity,
+    unitAmount: fees ? l.line.unitAmount : null,
+    // Computed BEFORE the redaction, from the line itself: it is what makes
+    // the null above readable.
+    priced: l.line.unitAmount !== null,
+    currency: l.line.currency,
+    discountPercent: fees ? l.line.discountPercent : null,
+    net: fees ? l.net : null,
+    jurisdiction: l.line.jurisdiction,
+    billingFrequency: l.line.billingFrequency,
+    pricingNote: l.line.pricingNote,
+    oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
+  };
+}
+
 function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof ProposalRecordSchema> {
   return {
     proposal: toProposalBody(record.proposal, fees),
@@ -1176,30 +1297,32 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       id: record.issuingEntity.id,
       displayName: record.issuingEntity.displayName,
     },
-    lines: record.lines.map((l) => ({
-      id: l.line.id,
-      entityPartyId: l.line.entityPartyId,
-      entity: l.entity === null ? null : { ...l.entity },
-      serviceVersionId: l.line.serviceVersionId,
-      service: l.service === null ? null : toPinnedServiceBody(l.service, fees),
-      terms: { ...l.terms },
-      description: l.line.description,
-      position: l.line.position,
-      // Quantity is not money. "Three registrations" is what the work IS, and a
-      // delivery associate needs it.
-      quantity: l.line.quantity,
-      unitAmount: fees ? l.line.unitAmount : null,
-      // Computed BEFORE the redaction, from the line itself: it is what makes
-      // the null above readable.
-      priced: l.line.unitAmount !== null,
-      currency: l.line.currency,
-      discountPercent: fees ? l.line.discountPercent : null,
-      net: fees ? l.net : null,
-      jurisdiction: l.line.jurisdiction,
-      billingFrequency: l.line.billingFrequency,
-      pricingNote: l.line.pricingNote,
-      oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
+    issuer: {
+      partyId: record.issuer.partyId,
+      name: record.issuer.name,
+      jurisdiction: record.issuer.jurisdiction,
+    },
+    issuedOn: record.issuedOn,
+    totalsByFrequency: record.totalsByFrequency.map((t) => ({
+      frequency: t.frequency,
+      net: fees ? t.net : null,
+      lineCount: t.lineCount,
+      unpricedLineCount: t.unpricedLineCount,
     })),
+    // Structure only — codes, titles, companies. No money travels on it.
+    document: {
+      sections: record.document.sections.map((section) => ({
+        code: section.code,
+        title: section.title,
+        items: section.items.map((item) => ({
+          lineId: item.lineId,
+          code: item.code,
+          description: item.description,
+          subject: item.subject,
+        })),
+      })),
+    },
+    lines: record.lines.map((l) => toLineBody(l, fees)),
     // NOT redacted by the fee axis. What the firm will and will NOT do is the
     // work, and somebody delivering it needs the exclusions even when they may
     // not see the money.
@@ -1221,6 +1344,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
             id: record.addressee.id,
             displayName: record.addressee.displayName,
             email: record.addressee.email,
+            phone: record.addressee.phone,
           },
     preparedBy:
       record.preparedBy === null
@@ -1396,52 +1520,13 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const { proposalId } = c.req.valid("param");
     const body = c.req.valid("json");
     const line = await deps.service.addLine({ tenantId: s.tenantId, proposalId, ...body }, s.actor);
-    const fees = seesFees(c.get("principal"));
-    return c.json(
-      {
-        id: line.id,
-        entityPartyId: line.entityPartyId,
-        // Same as `service` below: a name the write path did not join for.
-        entity: null,
-        serviceVersionId: line.serviceVersionId,
-        // The pinned service is a join the write path does not do; the read
-        // route carries it. Null here says "not loaded", which is what it is.
-        service: null,
-        // Same as `service`: resolving the four blocks needs the pinned body,
-        // which is a join the write path does not make. The line's own
-        // overrides are what it wrote, so they are reported as written and
-        // `tailored` is exactly right; the catalogue's fallback is null here
-        // and the read route is what fills it in.
-        terms: {
-          scope: { text: line.scopeOverride, tailored: line.scopeOverride !== null },
-          clientObligations: {
-            text: line.clientObligationsOverride,
-            tailored: line.clientObligationsOverride !== null,
-          },
-          volumeLimits: {
-            text: line.volumeLimitsOverride,
-            tailored: line.volumeLimitsOverride !== null,
-          },
-          exclusions: {
-            text: line.exclusionsOverride,
-            tailored: line.exclusionsOverride !== null,
-          },
-        },
-        description: line.description,
-        position: line.position,
-        quantity: line.quantity,
-        unitAmount: fees ? line.unitAmount : null,
-        priced: line.unitAmount !== null,
-        currency: line.currency,
-        discountPercent: fees ? line.discountPercent : null,
-        net: null,
-        jurisdiction: line.jurisdiction,
-        billingFrequency: line.billingFrequency,
-        pricingNote: line.pricingNote,
-        oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
-      },
-      201,
-    );
+    // The line as the READ carries it (T6.18) — pinned service, Dept, resolved
+    // scope with the catalogue's words and its net — rather than the write's
+    // half-filled echo, so a builder can render the row it just added.
+    const record = await deps.service.describe(s.tenantId, proposalId);
+    const added = record.lines.find((l) => l.line.id === line.id);
+    if (added === undefined) throw new Error(`line ${line.id} is not on the proposal it was added to`);
+    return c.json(toLineBody(added, seesFees(c.get("principal"))), 201);
   });
 
   app.openapi(updateLineRoute, async (c) => {

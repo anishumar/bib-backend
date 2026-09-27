@@ -124,6 +124,12 @@ export class FakeProposalRepo implements ProposalRepository {
   /** Email identifiers for the people a test names under "Prepared for" —
    *  what Send offers to email it to (0085). */
   readonly partyEmails = new Map<string, string>();
+  /** Their phone identifiers — what "Send on WhatsApp" opens (T6.18). */
+  readonly partyPhones = new Map<string, string>();
+  /** Where the firm's companies are registered, as `core.legal_entity` says. */
+  readonly partyJurisdictions = new Map<string, string>();
+  /** The firm's Depts and delivery teams, as `tenancy.service_axis` holds them. */
+  readonly axes: { axis: "dept" | "team"; code: string; name: string; sortOrder: number }[] = [];
 
   revise(tenantId: string, proposalId: string, change: ProposalRevision): Promise<Proposal | null> {
     const current = this.rows.find((r) => r.tenantId === tenantId && r.id === proposalId);
@@ -333,8 +339,20 @@ export class FakeProposalRepo implements ProposalRepository {
         displayName:
           this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
       },
+      issuer: {
+        partyId: proposal.issuingEntityPartyId,
+        name: this.partyNames.get(proposal.issuingEntityPartyId) ?? proposal.issuingEntityPartyId,
+        jurisdiction: this.partyJurisdictions.get(proposal.issuingEntityPartyId) ?? null,
+      },
+      issuedOn: (proposal.sentAt ?? "2026-06-01T09:00:00.000Z").slice(0, 10),
+      totalsByFrequency: totalsByFrequencyOf(lines),
+      depts: this.axes
+        .filter((a) => a.axis === "dept")
+        .map((a) => ({ code: a.code, name: a.name, sortOrder: a.sortOrder })),
       lines: lines.map((l) => ({
         line: stripRemoved(l),
+        dept: this.axisOf("dept", pinnedServiceOf(this.catalogue, l.serviceVersionId)?.module ?? null),
+        team: this.axisOf("team", pinnedServiceOf(this.catalogue, l.serviceVersionId)?.group ?? null),
         // Null is a real answer here, not an unresolved join: a proposal line
         // may name no entity at all.
         entity:
@@ -369,6 +387,7 @@ export class FakeProposalRepo implements ProposalRepository {
               displayName:
                 this.partyNames.get(proposal.addressedToPartyId) ?? proposal.addressedToPartyId,
               email: this.partyEmails.get(proposal.addressedToPartyId) ?? null,
+              phone: this.partyPhones.get(proposal.addressedToPartyId) ?? null,
             },
       preparedBy:
         proposal.preparedByUserId === null
@@ -457,6 +476,14 @@ export class FakeProposalRepo implements ProposalRepository {
         };
       }),
     );
+  }
+
+  private axisOf(
+    axis: "dept" | "team",
+    code: string | null,
+  ): { code: string; name: string | null } | null {
+    if (code === null) return null;
+    return { code, name: this.axes.find((a) => a.axis === axis && a.code === code)?.name ?? null };
   }
 
   // ── 0086 ────────────────────────────────────────────────────────────────
@@ -874,6 +901,25 @@ function totalsOf(
   };
 }
 
+/** The adapter's GROUP BY, in its reading order, with this fake's exact sums. */
+function totalsByFrequencyOf(
+  lines: readonly Pick<ProposalLine, "unitAmount" | "quantity" | "discountPercent" | "billingFrequency">[],
+): ProposalRecord["totalsByFrequency"] {
+  const order = ["monthly", "quarterly", "annually", "one_time", "custom", null] as const;
+  return order.flatMap((frequency) => {
+    const at = lines.filter((l) => l.billingFrequency === frequency);
+    if (at.length === 0) return [];
+    let net = 0n;
+    let unpriced = 0;
+    for (const line of at) {
+      const lineNet = netScaled(line);
+      if (lineNet === null) unpriced += 1;
+      else net += lineNet;
+    }
+    return [{ frequency, net: fromScaled(net), lineCount: at.length, unpricedLineCount: unpriced }];
+  });
+}
+
 /**
  * A line's pinned catalogue row, read the way the Postgres adapter reads it:
  * through `readServiceBody`, the one reader for `kind='service'`.
@@ -896,6 +942,7 @@ function pinnedServiceOf(
     name: stored.name === "" ? row.key : stored.name,
     module: stored.module,
     group: stored.group,
+    jurisdictions: stored.jurisdictions,
     billingBasis: stored.billingBasis,
     recurrence: stored.recurrence,
     slaDays: stored.slaDays,

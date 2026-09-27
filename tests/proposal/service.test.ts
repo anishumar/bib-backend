@@ -1433,7 +1433,12 @@ describe("the cover's two names and the Background (0084)", () => {
     const view = await s.service.describe(TENANT, p.id);
     // `email` is that person's email identifier, when the firm holds one —
     // what Send offers to email it to (0085). This fake holds none.
-    expect(view.addressee).toEqual({ id: PRIYA, displayName: "Priya Sharma", email: null });
+    expect(view.addressee).toEqual({
+      id: PRIYA,
+      displayName: "Priya Sharma",
+      email: null,
+      phone: null,
+    });
     expect(view.preparedBy).toEqual({ userId: COLLEAGUE, displayName: "Siddharth Kohli", email: "sk@example.test" });
   });
 });
