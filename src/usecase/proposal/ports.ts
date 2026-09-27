@@ -2,6 +2,7 @@
 // are owned by the use case that needs them, stated in our vocabulary; adapters
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
+import type { ProposalErrorCode } from "../../domain/proposal/errors";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
 import type {
@@ -54,6 +55,23 @@ export interface PartyStanding {
     /** "Prepared for" names a PERSON (0084), the letter's addressee rule. */
     readonly kind: "organization" | "person";
   } | null>;
+}
+
+/**
+ * Whether the lead a proposal would be drafted from was deleted (0086) — a
+ * deleted lead gains no new proposal, 0305's rule for an archived client
+ * reached from the other side.
+ *
+ * Satisfied structurally by the lead repository's own read-one-by-id, which
+ * never hides a deleted lead, so the refusal can say what happened rather than
+ * "no such lead". The trigger `trg_proposal_lead_not_deleted` refuses the same
+ * reference underneath.
+ */
+export interface LeadStanding {
+  findById(
+    tenantId: string,
+    leadId: string,
+  ): Promise<{ readonly deletedAt: string | null } | null>;
 }
 
 export interface DocumentIdentity {
@@ -203,6 +221,13 @@ export interface ProposalRecord {
   /** The evidence behind an answer the CLIENT gave on the link (0085). Null
    *  when it is unanswered, and when a colleague recorded the answer. */
   readonly clientDecision: ClientDecisionRecord | null;
+  /** Who deleted it, when it was deleted as a mistake (0086) and the account
+   *  still resolves. */
+  readonly deletedBy: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
 }
 
 // ── The proposal by email, and the client's own answer (0085) ────────────────
@@ -376,6 +401,12 @@ export interface ProposalLinks {
  */
 export interface ProposalView extends ProposalRecord {
   readonly blocks: readonly DocumentBlock[];
+  /**
+   * Why Delete would be refused right now (0086), in the words a DELETE would
+   * be refused with — or null when it would work. "A caller is told what it may
+   * do": the page offers the button only when it will work.
+   */
+  readonly deleteRefusal: { readonly code: ProposalErrorCode; readonly message: string } | null;
 }
 
 /**
@@ -715,6 +746,27 @@ export interface ProposalRepository {
    * overwrite the first.
    */
   recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null>;
+
+  // ── 0086 ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The references of the LIVE engagement letters citing this proposal — what
+   * stops it being deleted. The same probe `trg_proposal_guard_deletion` makes,
+   * so the page's answer and the wall's cannot disagree.
+   */
+  liveLetterRefs(tenantId: string, proposalId: string): Promise<readonly string[]>;
+
+  /**
+   * Mark a DRAFT deleted, or return null when it was not one any more — sent,
+   * or deleted by somebody else a moment ago. The WHERE clause repeats
+   * `status = 'draft' AND deleted_at IS NULL`, so the transition is its own
+   * lock and the log gets one `proposal.deleted`, never two.
+   */
+  markDeleted(
+    tenantId: string,
+    proposalId: string,
+    deletedByUserId: string | null,
+  ): Promise<Proposal | null>;
 }
 
 /**

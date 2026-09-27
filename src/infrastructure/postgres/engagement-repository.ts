@@ -86,6 +86,8 @@ interface LetterRow {
   firm_signatory_title: string | null;
   firm_signature_version_id: string | null;
   firm_signed_at: Date | null;
+  deleted_at: Date | null;
+  deleted_by_user_id: string | null;
 }
 
 interface LineRow {
@@ -134,7 +136,8 @@ const LETTER_COLUMNS = `id, tenant_id, ref, party_id, issuing_entity_party_id, p
                         signature_method, signature_reference, signed_content_hash,
                         signed_by_title, withdrawn_at, background, addressed_to_party_id,
                         issued_on, supersedes_id, effective_from, firm_signatory_user_id,
-                        firm_signatory_title, firm_signed_at, firm_signature_version_id`;
+                        firm_signatory_title, firm_signed_at, firm_signature_version_id,
+                        deleted_at, deleted_by_user_id`;
 
 interface FeeGroupRow {
   id: string;
@@ -242,6 +245,8 @@ function toLetter(r: LetterRow): EngagementLetter {
     firmSignatoryTitle: r.firm_signatory_title,
     firmSignatureVersionId: r.firm_signature_version_id,
     firmSignedAt: r.firm_signed_at?.toISOString() ?? null,
+    deletedAt: r.deleted_at?.toISOString() ?? null,
+    deletedByUserId: r.deleted_by_user_id,
   };
 }
 
@@ -378,6 +383,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
           supersedes_ref: string | null;
           superseded_by_id: string | null;
           superseded_by_ref: string | null;
+          deleter_display_name: string | null;
+          deleter_email: string | null;
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
@@ -388,14 +395,16 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
-               l.firm_signed_at, l.firm_signature_version_id,
+               l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                addressee.display_name AS addressee_display_name,
                signatory.display_name AS firm_signatory_display_name,
                previous.ref AS supersedes_ref,
                successor.id  AS superseded_by_id,
-               successor.ref AS superseded_by_ref
+               successor.ref AS superseded_by_ref,
+               deleter.display_name AS deleter_display_name,
+               deleter.email::text AS deleter_email
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
         -- WHICH OF OUR COMPANIES is contracting, by name — the letterhead and
@@ -415,11 +424,15 @@ export class PostgresEngagementRepository implements EngagementRepository {
         -- LINEAGE, both directions. Backwards: which agreement this replaced.
         -- Forwards: whether this one is still the agreement — the question the
         -- screen showing a signed letter cannot otherwise answer. A withdrawn
-        -- successor does not count, which is exactly the predicate
-        -- el_one_live_successor_per_letter uses to keep it single.
+        -- successor does not count, and nor does a draft one deleted as a
+        -- mistake (0086) — exactly the predicate el_one_live_successor_per_letter
+        -- uses to keep it single.
         LEFT JOIN crm.engagement_letter previous ON previous.id = l.supersedes_id
         LEFT JOIN crm.engagement_letter successor
                ON successor.supersedes_id = l.id AND successor.status <> 'withdrawn'
+              AND successor.deleted_at IS NULL
+        -- Who deleted it (0086) — deleted or not, one letter always opens.
+        LEFT JOIN tenancy.user_account deleter ON deleter.id = l.deleted_by_user_id
         WHERE l.id = ${letterId}
       `;
       if (!head) return null;
@@ -564,6 +577,14 @@ export class PostgresEngagementRepository implements EngagementRepository {
           head.superseded_by_id === null || head.superseded_by_ref === null
             ? null
             : { id: head.superseded_by_id, ref: head.superseded_by_ref },
+        deletedBy:
+          head.deleted_by_user_id === null || head.deleter_email === null
+            ? null
+            : {
+                userId: head.deleted_by_user_id,
+                displayName: head.deleter_display_name,
+                email: head.deleter_email,
+              },
         feeGroups: groups.map(
           (g, i): FeeGroupRecord => ({
             group: toFeeGroup(g),
@@ -640,7 +661,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.signed_content_hash, l.signed_by_title, l.withdrawn_at,
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
-               l.firm_signed_at, l.firm_signature_version_id,
+               l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,
@@ -673,6 +694,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
         ) g ON true
         WHERE (${filters.status ?? null}::text IS NULL OR l.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR l.party_id = ${filters.partyId ?? null})
+          -- A deleted draft was never on the table (0086): not in the list,
+          -- under any status filter.
+          AND l.deleted_at IS NULL
         ORDER BY l.created_at DESC
         -- A CEILING, not pagination — see MAX_LIST_ROWS.
         LIMIT ${MAX_LIST_ROWS}
@@ -993,7 +1017,26 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db<LetterRow[]>`
         SELECT ${db.unsafe(LETTER_COLUMNS)}
         FROM crm.engagement_letter
-        WHERE supersedes_id = ${letterId} AND status <> 'withdrawn'
+        WHERE supersedes_id = ${letterId} AND status <> 'withdrawn' AND deleted_at IS NULL
+      `;
+      return row ? toLetter(row) : null;
+    });
+  }
+
+  async markDeleted(
+    tenantId: string,
+    letterId: string,
+    deletedByUserId: string | null,
+  ): Promise<EngagementLetter | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Only these two columns: `trg_el_guard_deletion` refuses a deletion that
+      // changes anything else, and the freeze refuses any change to a signed
+      // letter before it is even asked. `now()` belongs to this transaction.
+      const [row] = await db<LetterRow[]>`
+        UPDATE crm.engagement_letter
+           SET deleted_at = now(), deleted_by_user_id = ${deletedByUserId}
+         WHERE id = ${letterId} AND status = 'draft' AND deleted_at IS NULL
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       return row ? toLetter(row) : null;
     });

@@ -43,6 +43,7 @@ import {
   isLeadSource,
   isLeadStage,
   isTerminalStage,
+  leadDeletionBlock,
   matchedParty,
   normalizeEstimatedValue,
   recordsLostReason,
@@ -62,8 +63,10 @@ import {
   InvalidEstimatedValue,
   LeadNotCallersToday,
   LeadPartyArchived,
+  LeadDeleted,
   OwnerNotStaff,
   SameStage,
+  leadDeletionRefusal,
 } from "../../domain/lead/errors";
 import type {
   AssignmentOutcome,
@@ -72,6 +75,7 @@ import type {
   TerritoryRules,
   LeadRecord,
   LeadRepository,
+  LeadView,
   FirmTimeZone,
   ProspectDirectory,
   StaffDirectory,
@@ -246,6 +250,18 @@ export interface MoveStageInput {
    * exists to protect, so neither stage is the easy one.
    */
   readonly lostReason?: string | undefined;
+}
+
+export interface DeleteLeadInput {
+  readonly tenantId: string;
+  readonly leadId: string;
+  /**
+   * Whether the caller holds `tenant:admin` — asked by the handler of the
+   * authorisation service, the way fee visibility is. It decides one case only:
+   * a lead already closed as lost or abandoned, which is in the pipeline's
+   * numbers (see `leadDeletionBlock`).
+   */
+  readonly callerAdministers: boolean;
 }
 
 export interface AssignOwnerInput {
@@ -448,7 +464,7 @@ export class LeadService {
   async moveStage(input: MoveStageInput, actor: Actor): Promise<Lead> {
     const to = this.parseStage(input.stage);
     const lostReason = this.parseLostReason(to, input.lostReason);
-    const lead = await this.leadOrThrow(input.tenantId, input.leadId);
+    const lead = await this.liveLeadOrThrow(input.tenantId, input.leadId);
     if (lead.stage === to) throw new SameStage(lead.stage);
     if (!canMoveStage(lead.stage, to)) throw new LeadClosed(lead.id, lead.stage);
 
@@ -491,7 +507,7 @@ export class LeadService {
    * a legitimate act that changes no pipeline state.
    */
   async assignOwner(input: AssignOwnerInput, actor: Actor): Promise<Lead> {
-    const lead = await this.leadOrThrow(input.tenantId, input.leadId);
+    const lead = await this.liveLeadOrThrow(input.tenantId, input.leadId);
     if (lead.ownerUserId === input.ownerUserId) return lead;
     if (input.ownerUserId !== null) await this.requireStaff(input.tenantId, input.ownerUserId);
 
@@ -528,7 +544,7 @@ export class LeadService {
     const jurisdiction =
       input.jurisdiction === null ? null : this.parseJurisdiction(input.jurisdiction);
     const estimate = this.parseEstimatedValue(input.estimatedValue);
-    const lead = await this.leadOrThrow(input.tenantId, input.leadId);
+    const lead = await this.liveLeadOrThrow(input.tenantId, input.leadId);
     const estimatedValue = await this.priced(input.tenantId, estimate);
 
     const sameCountry = lead.jurisdiction === jurisdiction;
@@ -577,10 +593,66 @@ export class LeadService {
     return this.deps.leads.list(tenantId, stage === undefined ? null : this.parseStage(stage));
   }
 
-  async get(tenantId: string, leadId: string): Promise<LeadRecord> {
+  /**
+   * One lead — deleted or not, because a link to it must still open — with
+   * whether Delete would work for this caller, and if not, why (0086).
+   */
+  async get(tenantId: string, leadId: string, callerAdministers: boolean): Promise<LeadView> {
     const record = await this.deps.leads.findRecord(tenantId, leadId);
     if (!record) throw new LeadNotFound(leadId);
-    return record;
+    const block = leadDeletionBlock(
+      record.lead,
+      record.lead.deletedAt === null
+        ? await this.deps.leads.liveProposalRefs(tenantId, leadId)
+        : [],
+      callerAdministers,
+    );
+    const refusal = block === null ? null : leadDeletionRefusal(block);
+    return {
+      ...record,
+      deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
+    };
+  }
+
+  /**
+   * Delete a lead ENTERED BY MISTAKE (0086) — out of the pipeline and every
+   * count, still readable by id, and final.
+   *
+   * Not a stage, and deliberately not reachable through `moveStage`: `lost` and
+   * `abandoned` are what happened to a real prospect, and this says there was
+   * none. Refused once converted, while a live proposal was drafted from it,
+   * and — for anybody but an administrator — once it has been closed. The
+   * trigger under this (`trg_lead_guard_deletion`) holds the same rule for the
+   * writers that do not come through here.
+   */
+  async delete(input: DeleteLeadInput, actor: Actor): Promise<Lead> {
+    const lead = await this.leadOrThrow(input.tenantId, input.leadId);
+    const refs =
+      lead.deletedAt === null
+        ? await this.deps.leads.liveProposalRefs(input.tenantId, lead.id)
+        : [];
+    const block = leadDeletionBlock(lead, refs, input.callerAdministers);
+    if (block !== null) throw leadDeletionRefusal(block);
+
+    const deleted = await this.deps.leads.markDeleted(
+      input.tenantId,
+      lead.id,
+      actor.type === "human" ? actor.id : null,
+    );
+    // Somebody else deleted it between the read and the write: theirs stands,
+    // and one `lead.deleted` is all the log may ever hold.
+    if (deleted === null) throw new LeadDeleted();
+
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "lead.deleted",
+      objectId: lead.id,
+      actor,
+      // The party and how far it had got — machine facts. Never the title,
+      // which names the counterparty and can be a person's name (§3.4).
+      payload: { partyId: lead.partyId, stage: lead.stage },
+    });
+    return deleted;
   }
 
   // ── internals ──────────────────────────────────────────────────────────────
@@ -627,6 +699,14 @@ export class LeadService {
   private async leadOrThrow(tenantId: string, leadId: string): Promise<Lead> {
     const lead = await this.deps.leads.findById(tenantId, leadId);
     if (!lead) throw new LeadNotFound(leadId);
+    return lead;
+  }
+
+  /** Every CHANGE to a lead goes through here, so a method added later cannot
+   *  forget that a deleted lead is final (0086). */
+  private async liveLeadOrThrow(tenantId: string, leadId: string): Promise<Lead> {
+    const lead = await this.leadOrThrow(tenantId, leadId);
+    if (lead.deletedAt !== null) throw new LeadDeleted();
     return lead;
   }
 

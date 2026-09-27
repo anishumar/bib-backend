@@ -1,3 +1,5 @@
+import type { ProposalDeletionBlock } from "./model";
+
 // Sentinel errors — the closed vocabulary of ways quoting fails. Owned here in
 // the domain; the api layer maps them to HTTP status codes (domainerr.ts).
 // Match with `instanceof`, never by string.
@@ -15,6 +17,10 @@ export class ProposalError extends Error {
 }
 
 export type ProposalErrorCode =
+  | "PROPOSAL_DELETED"
+  | "PROPOSAL_NOT_DELETABLE"
+  | "PROPOSAL_CITED_BY_LETTER"
+  | "LEAD_DELETED"
   | "PROPOSAL_NOT_FOUND"
   | "LINE_NOT_FOUND"
   | "NOT_A_DRAFT"
@@ -456,5 +462,74 @@ export class InvalidQuoteCurrency extends ProposalError {
       `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, like ` +
         `"INR" or "AED".`,
     );
+  }
+}
+
+// ── Deleting a draft made by mistake (0086) ──────────────────────────────────
+
+/** A deleted draft is final. Every change to one lands here, and so does a
+ *  second delete. */
+export class ProposalDeleted extends ProposalError {
+  constructor(ref: string) {
+    super(
+      "PROPOSAL_DELETED",
+      `${ref} was deleted as made by mistake, and a deleted draft is final: nothing about it ` +
+        `changes again. If the work is real after all, draft a new proposal.`,
+    );
+  }
+}
+
+export class ProposalNotDeletable extends ProposalError {
+  constructor(ref: string, status: string) {
+    super(
+      "PROPOSAL_NOT_DELETABLE",
+      `${ref} is ${status}, and only a draft that never went out can be deleted. The client has ` +
+        `the document as it was sent, so it stays on record as what they were shown` +
+        (status === "sent" ? `; record their answer, or let it expire.` : `.`),
+    );
+  }
+}
+
+export class ProposalCitedByLetter extends ProposalError {
+  constructor(readonly letterRefs: readonly string[]) {
+    super(
+      "PROPOSAL_CITED_BY_LETTER",
+      (letterRefs.length === 1
+        ? `Engagement letter ${letterRefs.join("")} cites this proposal, `
+        : `Engagement letters ${letterRefs.join(", ")} cite this proposal, `) +
+        `so it cannot be deleted while ${letterRefs.length === 1 ? "that letter stands" : "they stand"}. ` +
+        `If ${letterRefs.length === 1 ? "the letter was" : "they were"} a mistake too, delete ` +
+        `${letterRefs.length === 1 ? "it" : "them"} first, from the letter's own page.`,
+    );
+  }
+}
+
+/** A proposal may not be drafted from a lead that was deleted (0086) — there
+ *  was never a prospect for it to be offered to. */
+export class ProposalLeadDeleted extends ProposalError {
+  constructor() {
+    super(
+      "LEAD_DELETED",
+      `That lead was deleted as entered by mistake, so a proposal cannot be drafted from it. ` +
+        `If the prospect is real, capture a new lead, or draft the proposal without one.`,
+    );
+  }
+}
+
+/**
+ * The refusal a block means — ONE sentence for the DELETE that is refused and
+ * for the proposal's page, which shows it where the button would be.
+ */
+export function proposalDeletionRefusal(
+  ref: string,
+  block: ProposalDeletionBlock,
+): ProposalError {
+  switch (block.kind) {
+    case "deleted":
+      return new ProposalDeleted(ref);
+    case "not_draft":
+      return new ProposalNotDeletable(ref, block.status);
+    case "letters":
+      return new ProposalCitedByLetter(block.refs);
   }
 }

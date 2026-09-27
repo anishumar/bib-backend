@@ -1559,6 +1559,7 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
         currency: "INR",
         fxRate: "1.0",
         fxRateDate: "2026-07-01",
+        deletedAt: null,
         ...over,
       },
       lines,
@@ -1922,6 +1923,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
         currency: "INR",
         fxRate: "1",
         fxRateDate: "2026-07-01",
+        deletedAt: null,
       },
       lines: [],
     });
@@ -2024,6 +2026,7 @@ describe("who a letter names beside the client (F-10-1)", () => {
         currency: "INR",
         fxRate: "1",
         fxRateDate: "2026-07-01",
+        deletedAt: null,
       },
       lines: [
         {

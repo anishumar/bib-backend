@@ -10,10 +10,10 @@
 // stops recording party.created — none of which the lead use case implements,
 // and all of which its correctness depends on.
 //
-// It does NOT enforce RLS, the one-open-lead-per-party index, or the CHECKs
-// that hold a title non-blank and a lost reason to an unwon stage: those are
-// database properties, proven against real Postgres in
-// tests/lead/pipeline.integration.test.ts.
+// It does NOT enforce RLS, the one-open-lead-per-party index, the CHECKs that
+// hold a title non-blank and a lost reason to an unwon stage, or the deletion
+// guard (0086): those are database properties, proven against real Postgres in
+// tests/lead/pipeline.integration.test.ts and tests/deletion/deletion.integration.test.ts.
 import { FakeClock } from "./clock";
 import type { Lead, LeadStage, LeadValue, TerritoryRule } from "../domain/lead/model";
 import type { PartyKind } from "../domain/party/model";
@@ -24,6 +24,7 @@ import type {
   FirmCurrency,
   NewTerritoryRule,
   TerritoryRules,
+  LeadDetail,
   LeadRecord,
   LeadRepository,
   NewLead,
@@ -62,6 +63,8 @@ export class FakeLeadRepo implements LeadRepository {
       lostReason: null,
       capturedAt: at,
       closedAt: null,
+      deletedAt: null,
+      deletedByUserId: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -75,8 +78,13 @@ export class FakeLeadRepo implements LeadRepository {
 
   findOpenForParty(tenantId: string, partyId: string): Promise<Lead | null> {
     return Promise.resolve(
-      this.rows.find((r) => r.tenantId === tenantId && r.partyId === partyId && isOpen(r.stage)) ??
-        null,
+      this.rows.find(
+        (r) =>
+          r.tenantId === tenantId &&
+          r.partyId === partyId &&
+          isOpen(r.stage) &&
+          r.deletedAt === null,
+      ) ?? null,
     );
   }
 
@@ -106,15 +114,66 @@ export class FakeLeadRepo implements LeadRepository {
   list(tenantId: string, stage: LeadStage | null): Promise<readonly LeadRecord[]> {
     return Promise.resolve(
       this.rows
-        .filter((r) => r.tenantId === tenantId && (stage === null || r.stage === stage))
+        .filter(
+          (r) =>
+            r.tenantId === tenantId &&
+            r.deletedAt === null &&
+            (stage === null || r.stage === stage),
+        )
         .sort((a, b) => b.capturedAt.localeCompare(a.capturedAt))
         .map((lead) => this.record(lead)),
     );
   }
 
-  findRecord(tenantId: string, leadId: string): Promise<LeadRecord | null> {
+  findRecord(tenantId: string, leadId: string): Promise<LeadDetail | null> {
     const lead = this.rows.find((r) => r.tenantId === tenantId && r.id === leadId);
-    return Promise.resolve(lead ? this.record(lead) : null);
+    if (!lead) return Promise.resolve(null);
+    const deleter = lead.deletedByUserId === null ? undefined : this.staff.get(lead.deletedByUserId);
+    return Promise.resolve({
+      ...this.record(lead),
+      deletedBy:
+        lead.deletedByUserId === null || deleter === undefined
+          ? null
+          : { userId: lead.deletedByUserId, displayName: deleter.displayName, email: deleter.email },
+    });
+  }
+
+  /** The references of the live proposals drafted from each lead. The real
+   *  adapter reads `crm.proposal`; a test states them with `draftFrom`. */
+  private readonly proposals = new Map<string, string[]>();
+
+  draftFrom(leadId: string, ref: string): this {
+    this.proposals.set(leadId, [...(this.proposals.get(leadId) ?? []), ref]);
+    return this;
+  }
+
+  /** The proposal was deleted too (0086): it no longer stands in the way. */
+  dropProposal(leadId: string, ref: string): this {
+    this.proposals.set(
+      leadId,
+      (this.proposals.get(leadId) ?? []).filter((r) => r !== ref),
+    );
+    return this;
+  }
+
+  liveProposalRefs(_tenantId: string, leadId: string): Promise<readonly string[]> {
+    return Promise.resolve([...(this.proposals.get(leadId) ?? [])].sort());
+  }
+
+  /** The adapter's `AND deleted_at IS NULL`: the transition is its own lock,
+   *  so a second delete gets null rather than a second stamp. */
+  markDeleted(
+    tenantId: string,
+    leadId: string,
+    deletedByUserId: string | null,
+  ): Promise<Lead | null> {
+    const current = this.rows.find((r) => r.tenantId === tenantId && r.id === leadId);
+    if (!current || current.deletedAt !== null) return Promise.resolve(null);
+    const at = new Date(EPOCH + this.tick * 1000).toISOString();
+    this.tick += 1;
+    return Promise.resolve(
+      this.replace(tenantId, leadId, (r) => ({ ...r, deletedAt: at, deletedByUserId })),
+    );
   }
 
   moveStage(

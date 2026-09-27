@@ -232,6 +232,12 @@ const ProposalSchema = z
     addressedToPartyId: z.string().uuid().nullable(),
     /** The colleague the cover names under "Prepared by" (0084). */
     preparedByUserId: z.string().uuid().nullable(),
+    deletedAt: z.string().nullable().openapi({
+      description:
+        "When this DRAFT was deleted as made by mistake (0086), or null. A deleted proposal is " +
+        "in no list, still opens by id, and never changes again; its reference is not reused.",
+    }),
+    deletedByUserId: z.string().uuid().nullable(),
   })
   .openapi("Proposal");
 
@@ -400,6 +406,17 @@ const ProposalRecordSchema = z
      *  when unanswered, and when a colleague recorded the answer — the History
      *  names that colleague. */
     clientDecision: ClientDecisionSchema.nullable(),
+    /** Who deleted it (0086), when it was and the account still resolves. */
+    deletedBy: ApproverSchema,
+    deleteRefusal: z
+      .object({ code: z.string(), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why DELETE /api/v1/proposals/{proposalId} would be refused right now, in its own " +
+          "words — or null when it would work (0086). Says nothing about `party:write`, which " +
+          "/auth/me already does.",
+      }),
   })
   .openapi("ProposalRecord");
 
@@ -788,6 +805,28 @@ const addLineRoute = createRoute({
   },
 });
 
+const deleteRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/proposals/{proposalId}",
+  tags: ["proposals"],
+  summary: "Delete a draft made by mistake",
+  description:
+    "Takes a DRAFT off the list of quotes; it still opens by id, says it was deleted, and never " +
+    "changes again (0086). Its reference is not reused. Refused once sent — the client holds " +
+    "the document — and while a live engagement letter cites it. GET " +
+    "/api/v1/proposals/{proposalId} says in advance whether this would work.",
+  request: { params: z.object({ proposalId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: ProposalSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse(
+      "The proposal is not a draft, a live engagement letter cites it, or it was already deleted",
+    ),
+  },
+});
+
 const removeLineRoute = createRoute({
   method: "delete",
   path: "/api/v1/proposals/{proposalId}/lines/{lineId}",
@@ -1016,6 +1055,8 @@ function toProposalBody(
     background: proposal.background,
     addressedToPartyId: proposal.addressedToPartyId,
     preparedByUserId: proposal.preparedByUserId,
+    deletedAt: proposal.deletedAt,
+    deletedByUserId: proposal.deletedByUserId,
   };
 }
 
@@ -1158,6 +1199,11 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
             emailedTo: record.clientDecision.emailedTo,
             pdf: record.clientDecision.pdf === null ? null : { ...record.clientDecision.pdf },
           },
+    deletedBy: record.deletedBy === null ? null : { ...record.deletedBy },
+    deleteRefusal:
+      record.deleteRefusal === null
+        ? null
+        : { code: record.deleteRefusal.code, message: record.deleteRefusal.message },
   };
 }
 
@@ -1263,6 +1309,14 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const { proposalId } = c.req.valid("param");
     const record = await deps.service.describe(s.tenantId, proposalId);
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(deleteRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const deleted = await deps.service.delete(s.tenantId, proposalId, s.actor);
+    return c.json(toProposalBody(deleted, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(reviseRoute, async (c) => {

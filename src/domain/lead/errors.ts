@@ -1,3 +1,5 @@
+import type { LeadDeletionBlock } from "./model";
+
 // Sentinel errors — the closed vocabulary of ways lead capture and pipeline
 // movement fail. Owned here in the domain; the api layer maps them to HTTP
 // status codes (domainerr.ts). Match with `instanceof`, never by string.
@@ -27,7 +29,11 @@ export type LeadErrorCode =
   | "INVALID_LEAD_JURISDICTION"
   | "INVALID_ESTIMATED_VALUE"
   | "PARTY_ARCHIVED"
-  | "NOT_CALLERS_TODAY";
+  | "NOT_CALLERS_TODAY"
+  | "LEAD_DELETED"
+  | "LEAD_CONVERTED"
+  | "CLOSED_LEAD_NEEDS_ADMIN"
+  | "LEAD_HAS_PROPOSALS";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`). */
 export class LeadNotCallersToday extends LeadError {
@@ -196,5 +202,76 @@ export class InvalidEstimatedValue extends LeadError {
         `places and no commas or currency sign ("500000" or "125000.50"), or leave it out. ` +
         `An unknown value is a real answer.`,
     );
+  }
+}
+
+// ── Deleting a lead entered by mistake (0086) ────────────────────────────────
+
+/** A deleted lead is final. Every change to one lands here, and so does a
+ *  second delete. */
+export class LeadDeleted extends LeadError {
+  constructor() {
+    // No date in the sentence: a day cut from an instant here would be
+    // Greenwich's, and the page shows `deletedAt` in the reader's own zone.
+    super(
+      "LEAD_DELETED",
+      `This lead was deleted as entered by mistake, and a deleted lead is final: nothing about ` +
+        `it changes again. If the prospect is real after all, capture a new lead.`,
+    );
+  }
+}
+
+export class ConvertedLeadNotDeletable extends LeadError {
+  constructor() {
+    super(
+      "LEAD_CONVERTED",
+      `This lead was converted, and a won deal is the record of a win rather than a mistake, ` +
+        `so it cannot be deleted.`,
+    );
+  }
+}
+
+/** A refusal about WHO, not about the lead — so 403, like maker != checker. */
+export class ClosedLeadNeedsAdmin extends LeadError {
+  constructor(stage: string) {
+    super(
+      "CLOSED_LEAD_NEEDS_ADMIN",
+      `This lead is already closed as ${stage}, so it is counted in the pipeline's numbers, and ` +
+        `only a firm administrator can take it out of them. If it was entered by mistake, ask an ` +
+        `administrator to delete it.`,
+    );
+  }
+}
+
+export class LeadHasProposals extends LeadError {
+  constructor(readonly refs: readonly string[]) {
+    super(
+      "LEAD_HAS_PROPOSALS",
+      (refs.length === 1
+        ? `Proposal ${refs.join("")} was drafted from this lead, `
+        : `Proposals ${refs.join(", ")} were drafted from this lead, `) +
+        `so it cannot be deleted while ${refs.length === 1 ? "that proposal stands" : "they stand"}. ` +
+        `If ${refs.length === 1 ? "it was" : "they were"} a mistake too, delete ` +
+        `${refs.length === 1 ? "it" : "them"} first, from the proposal's own page; if the prospect ` +
+        `is real, close the lead instead.`,
+    );
+  }
+}
+
+/**
+ * The refusal a block means — ONE sentence for both places a person meets it:
+ * the DELETE that is refused, and the lead's page, which shows it beside where
+ * the button would be so nobody has to press it to find out.
+ */
+export function leadDeletionRefusal(block: LeadDeletionBlock): LeadError {
+  switch (block.kind) {
+    case "deleted":
+      return new LeadDeleted();
+    case "converted":
+      return new ConvertedLeadNotDeletable();
+    case "closed":
+      return new ClosedLeadNeedsAdmin(block.stage);
+    case "proposals":
+      return new LeadHasProposals(block.refs);
   }
 }

@@ -14,6 +14,7 @@ import { VIEW_DEDUPE_MINUTES } from "../../domain/proposal/model";
 import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
+import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
 import { resolveTerms } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
@@ -59,6 +60,8 @@ interface ProposalRow {
   addressed_to_party_id: string | null;
   prepared_by_user_id: string | null;
   sent_pdf_version_id: string | null;
+  deleted_at: Date | null;
+  deleted_by_user_id: string | null;
 }
 
 /**
@@ -72,7 +75,7 @@ const PROPOSAL_COLUMN_NAMES = [
   "currency", "fx_rate", "fx_rate_date", "valid_until", "sent_at", "decided_at",
   "discount_approved_by", "discount_approved_at", "first_viewed_at", "last_viewed_at",
   "view_count", "declined_reason", "background", "addressed_to_party_id", "prepared_by_user_id",
-  "sent_pdf_version_id",
+  "sent_pdf_version_id", "deleted_at", "deleted_by_user_id",
 ] as const;
 const PROPOSAL_COLUMNS = PROPOSAL_COLUMN_NAMES.join(", ");
 const PROPOSAL_COLUMNS_P = PROPOSAL_COLUMN_NAMES.map((c) => `p.${c}`).join(", ");
@@ -145,6 +148,8 @@ function toProposal(r: ProposalRow): Proposal {
     addressedToPartyId: r.addressed_to_party_id,
     preparedByUserId: r.prepared_by_user_id,
     sentPdfVersionId: r.sent_pdf_version_id,
+    deletedAt: r.deleted_at?.toISOString() ?? null,
+    deletedByUserId: r.deleted_by_user_id,
   };
 }
 
@@ -253,6 +258,8 @@ export class PostgresProposalRepository implements ProposalRepository {
           pdf_document_id: string | null;
           pdf_content_hash: string | null;
           pdf_filename: string | null;
+          deleter_display_name: string | null;
+          deleter_email: string | null;
         })[]
       >`
         SELECT ${db.unsafe(PROPOSAL_COLUMNS_P)},
@@ -267,7 +274,9 @@ export class PostgresProposalRepository implements ProposalRepository {
                firm.name AS firm_name,
                pdf.document_id AS pdf_document_id,
                pdf.content_hash AS pdf_content_hash,
-               pdf.filename AS pdf_filename
+               pdf.filename AS pdf_filename,
+               deleter.display_name AS deleter_display_name,
+               deleter.email::text AS deleter_email
         FROM crm.proposal p
         JOIN core.party party ON party.id = p.party_id
         -- WHICH OF OUR COMPANIES is offering, by name. An inner join: the
@@ -294,6 +303,8 @@ export class PostgresProposalRepository implements ProposalRepository {
         LEFT JOIN tenancy.user_account preparer ON preparer.id = p.prepared_by_user_id
         -- The PDF of record (0085), once pinned.
         LEFT JOIN files.document_version pdf ON pdf.id = p.sent_pdf_version_id
+        -- Who deleted it (0086) — deleted or not, one proposal always opens.
+        LEFT JOIN tenancy.user_account deleter ON deleter.id = p.deleted_by_user_id
         WHERE p.id = ${proposalId}
       `;
       if (!head) return null;
@@ -501,6 +512,14 @@ export class PostgresProposalRepository implements ProposalRepository {
                         filename: answer.pdf_filename,
                       },
               },
+        deletedBy:
+          head.deleted_by_user_id === null || head.deleter_email === null
+            ? null
+            : {
+                userId: head.deleted_by_user_id,
+                displayName: head.deleter_display_name,
+                email: head.deleter_email,
+              },
       };
     });
   }
@@ -533,6 +552,9 @@ export class PostgresProposalRepository implements ProposalRepository {
         LEFT JOIN crm.proposal_totals t ON t.proposal_id = p.id
         WHERE (${filters.status ?? null}::text IS NULL OR p.status = ${filters.status ?? null})
           AND (${filters.partyId ?? null}::uuid IS NULL OR p.party_id = ${filters.partyId ?? null})
+          -- A deleted draft was never an offer (0086): not in the list, under
+          -- any status filter, and not in any count taken from it.
+          AND p.deleted_at IS NULL
         ORDER BY p.created_at DESC
       `;
       return rows.map(
@@ -1016,6 +1038,56 @@ export class PostgresProposalRepository implements ProposalRepository {
       return toProposal(row);
     });
   }
+
+  async liveLetterRefs(tenantId: string, proposalId: string): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // `trg_proposal_guard_deletion`'s own probe, so the page and the wall
+      // agree about which letters stand in the way.
+      const rows = await db<{ ref: string }[]>`
+        SELECT ref FROM crm.engagement_letter
+        WHERE proposal_id = ${proposalId} AND deleted_at IS NULL
+        ORDER BY ref
+      `;
+      return rows.map((r) => r.ref);
+    });
+  }
+
+  async markDeleted(
+    tenantId: string,
+    proposalId: string,
+    deletedByUserId: string | null,
+  ): Promise<Proposal | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Only these two columns: the trigger refuses a deletion that changes
+      // anything else. `now()` belongs to the transaction making the change.
+      const rows = await db<ProposalRow[]>`
+        UPDATE crm.proposal
+           SET deleted_at = now(), deleted_by_user_id = ${deletedByUserId}
+         WHERE id = ${proposalId} AND status = 'draft' AND deleted_at IS NULL
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
+      `.catch((err: unknown) => {
+        // A letter drafted citing it between the service's check and this
+        // statement: the wall caught what the check could not, and names it.
+        const letters = citedBy(err);
+        throw letters === null ? err : new ProposalCitedByLetter(letters);
+      });
+      const row = rows[0];
+      return row ? toProposal(row) : null;
+    });
+  }
+}
+
+/**
+ * The letters `trg_proposal_guard_deletion` named in its DETAIL, when its "a
+ * live letter cites it" case is what refused — SQLSTATE 23001 with a DETAIL is
+ * only ever that case on this table. Null for anything else, which the caller
+ * re-throws untouched.
+ */
+function citedBy(err: unknown): readonly string[] | null {
+  if (typeof err !== "object" || err === null) return null;
+  const { code, detail } = err as { code?: unknown; detail?: unknown };
+  if (code !== "23001" || typeof detail !== "string" || detail === "") return null;
+  return detail.split(", ");
 }
 
 /**

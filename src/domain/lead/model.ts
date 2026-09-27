@@ -153,6 +153,19 @@ export interface Lead {
   readonly lostReason: string | null;
   readonly capturedAt: string;
   readonly closedAt: string | null;
+  /**
+   * When this lead was DELETED as entered by mistake (0086), or null.
+   *
+   * Not an outcome, and not a fourth unwon stage: `lost` and `abandoned` are
+   * what happened to a real prospect, and this says there was none — which is
+   * why a deleted lead leaves the pipeline and every count rather than landing
+   * in the lost column. The row stays and resolves by id, and it is FINAL:
+   * nothing about a deleted lead changes again.
+   */
+  readonly deletedAt: string | null;
+  /** Who deleted it, for the page. The ledger's `lead.deleted` names the actor
+   *  either way; null only when nobody human did. */
+  readonly deletedByUserId: string | null;
 }
 
 /** An amount and its currency. The amount is a DECIMAL STRING, never a JS
@@ -255,6 +268,46 @@ export function isAmbiguous(match: DedupMatch): boolean {
 export function canMoveStage(from: LeadStage, to: LeadStage): boolean {
   if (isTerminalStage(from)) return false;
   return from !== to;
+}
+
+/**
+ * Why this lead may NOT be deleted, or null when it may (0086).
+ *
+ * A lead is deleted when it was ENTERED BY MISTAKE — a duplicate, a test, the
+ * wrong company — and the four answers below are the cases where that cannot be
+ * true, or cannot be decided by this caller:
+ *
+ *   deleted    — it already was, and a deletion is final.
+ *   converted  — a won deal is the record of a win, not a mistake.
+ *   closed     — already `lost` or `abandoned`, so it is IN the pipeline's
+ *                numbers; taking it out changes them, and that is an
+ *                administrator's call. Often exactly how a mistake was put away
+ *                while there was nothing else to do, which is why it is allowed
+ *                at all.
+ *   proposals  — a live proposal was drafted from it. Delete that first if it
+ *                was a mistake too; deleting in order always works.
+ *
+ * WHO before WHAT: a caller who may not delete a closed lead at all is told so
+ * before being sent to delete its proposals, which would not help them.
+ */
+export type LeadDeletionBlock =
+  | { readonly kind: "deleted" }
+  | { readonly kind: "converted" }
+  | { readonly kind: "closed"; readonly stage: LeadStage }
+  | { readonly kind: "proposals"; readonly refs: readonly string[] };
+
+export function leadDeletionBlock(
+  lead: Pick<Lead, "stage" | "deletedAt">,
+  liveProposalRefs: readonly string[],
+  callerAdministers: boolean,
+): LeadDeletionBlock | null {
+  if (lead.deletedAt !== null) return { kind: "deleted" };
+  if (lead.stage === "converted") return { kind: "converted" };
+  if (recordsLostReason(lead.stage) && !callerAdministers) {
+    return { kind: "closed", stage: lead.stage };
+  }
+  if (liveProposalRefs.length > 0) return { kind: "proposals", refs: liveProposalRefs };
+  return null;
 }
 
 // ── Assignment ───────────────────────────────────────────────────────────────

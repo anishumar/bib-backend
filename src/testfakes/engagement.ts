@@ -136,6 +136,8 @@ export class FakeEngagementRepo implements EngagementRepository {
       firmSignatoryTitle: null,
       firmSignatureVersionId: null,
       firmSignedAt: null,
+      deletedAt: null,
+      deletedByUserId: null,
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -333,9 +335,33 @@ export class FakeEngagementRepo implements EngagementRepository {
   findSuccessor(tenantId: string, letterId: string): Promise<EngagementLetter | null> {
     return Promise.resolve(
       this.letters.find(
-        (l) => l.tenantId === tenantId && l.supersedesId === letterId && l.status !== "withdrawn",
+        (l) =>
+          l.tenantId === tenantId &&
+          l.supersedesId === letterId &&
+          l.status !== "withdrawn" &&
+          l.deletedAt === null,
       ) ?? null,
     );
+  }
+
+  /** The adapter's WHERE clause: a draft, not yet deleted — else null. */
+  markDeleted(
+    tenantId: string,
+    letterId: string,
+    deletedByUserId: string | null,
+  ): Promise<EngagementLetter | null> {
+    const index = this.letters.findIndex((l) => l.tenantId === tenantId && l.id === letterId);
+    const current = this.letters[index];
+    if (!current || current.status !== "draft" || current.deletedAt !== null) {
+      return Promise.resolve(null);
+    }
+    const next: EngagementLetter = {
+      ...current,
+      deletedAt: "2026-06-01T09:30:00.000Z",
+      deletedByUserId,
+    };
+    this.letters[index] = next;
+    return Promise.resolve(next);
   }
 
   signAndFanOut(
@@ -498,7 +524,10 @@ export class FakeEngagementRepo implements EngagementRepository {
         tenantId,
         this.letters.find(
           (l) =>
-            l.tenantId === tenantId && l.supersedesId === letter.id && l.status !== "withdrawn",
+            l.tenantId === tenantId &&
+            l.supersedesId === letter.id &&
+            l.status !== "withdrawn" &&
+            l.deletedAt === null,
         )?.id ?? null,
       ),
       feeGroups: groups.map((g, i) => ({
@@ -546,6 +575,14 @@ export class FakeEngagementRepo implements EngagementRepository {
       }),
       totals: totals(lines, groups, letter.currency),
       engagements: this.engagements.filter((e) => e.engagementLetterId === letterId),
+      deletedBy:
+        letter.deletedByUserId === null
+          ? null
+          : {
+              userId: letter.deletedByUserId,
+              displayName: this.userNames.get(letter.deletedByUserId) ?? null,
+              email: `${letter.deletedByUserId}@example.test`,
+            },
     };
   }
 
@@ -553,6 +590,7 @@ export class FakeEngagementRepo implements EngagementRepository {
     const matching = this.letters.filter(
       (l) =>
         l.tenantId === tenantId &&
+        l.deletedAt === null &&
         (filters.status === undefined || l.status === filters.status) &&
         (filters.partyId === undefined || l.partyId === filters.partyId),
     );

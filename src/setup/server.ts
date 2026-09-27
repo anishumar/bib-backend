@@ -1007,6 +1007,10 @@ export function wire(cfg: Config, log: Logger): Wired {
     // An archived client is refused by name before a new proposal names it
     // (0305). The repository's read-one-by-id never hides the archive.
     parties: partyRepository,
+    // A lead deleted as a mistake gains no proposal (0086) — the lead
+    // repository's read-one-by-id never hides a deletion, so the refusal can
+    // say what happened.
+    leads: new PostgresLeadRepository(pools.app),
     // The reference series and the issuing-entity rule, behind quoting's own
     // narrow port. `DocumentService` satisfies it structurally, so neither
     // module imports the other — the same seam the catalogue arrives through.
@@ -1184,7 +1188,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         party: { service: party },
         ledger: { service: ledger },
         config: { service: config },
-        lead: { service: lead },
+        lead: { service: lead, authz },
         proposal: { service: proposal, authz },
         engagement: { service: engagement, authz },
         document: { service: documents },

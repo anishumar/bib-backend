@@ -369,6 +369,12 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/leads/{leadId}/stage"), "party:write" as const],
   [routeKey("PUT", "/api/v1/leads/{leadId}/owner"), "party:write" as const],
   [routeKey("PUT", "/api/v1/leads/{leadId}/details"), "party:write" as const],
+  // Deleting one entered by mistake (0086) is the same permission that
+  // captures one: whoever may put a mistake into the pipeline may take it out.
+  // The one case that is an administrator's — a lead already closed, and so in
+  // the pipeline's numbers — is decided in the service, because it turns on the
+  // LEAD, which a route table cannot see.
+  [routeKey("DELETE", "/api/v1/leads/{leadId}"), "party:write" as const],
 
   // PROPOSALS (T2.2) reuse the party permissions for their CRUD, for the same
   // reason the pipeline does: a proposal is a document about a party, and a role
@@ -393,6 +399,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("PATCH", "/api/v1/proposals/{proposalId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/lines"), "party:write" as const],
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}/lines/{lineId}"), "party:write" as const],
+  // A draft made by mistake (0086), on the permission that drafts one — the
+  // whole document struck off before it went out, as a line is above.
+  [routeKey("DELETE", "/api/v1/proposals/{proposalId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/send"), "party:write" as const],
   // A new link, and a new email with it (0085) — sending again, so Send's own
   // permission.
@@ -463,6 +472,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
+  // A draft made by mistake (0086), on the permission that withdraws one: the
+  // same person who may pull a letter the client has seen may strike off one
+  // nobody has.
+  [routeKey("DELETE", "/api/v1/engagement-letters/{letterId}"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],

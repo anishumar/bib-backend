@@ -546,7 +546,7 @@ describe("reading the pipeline", () => {
     // board shows differently from "somebody is".
     const { service } = setup();
     const captured = await service.capture(capture({ ownerUserId: null }), ACTOR);
-    const record = await service.get(TENANT, captured.lead.id);
+    const record = await service.get(TENANT, captured.lead.id, false);
     expect(record.owner).toBeNull();
   });
 
@@ -559,7 +559,7 @@ describe("a lead has a name of its own — G3.1's first acceptance", () => {
   it("keeps the title the capture gave it, distinct from the party's name", async () => {
     const { service } = setup();
     const { lead } = await service.capture(capture({ title: "GST registration, Pune plant" }), ACTOR);
-    const record = await service.get(TENANT, lead.id);
+    const record = await service.get(TENANT, lead.id, false);
 
     expect(record.lead.title).toBe("GST registration, Pune plant");
     // The point of the field: the list shows both, and they are not the same

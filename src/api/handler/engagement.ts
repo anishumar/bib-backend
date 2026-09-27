@@ -238,6 +238,13 @@ const LetterSchema = z
     firmSignatoryUserId: z.string().uuid().nullable(),
     firmSignatoryTitle: z.string().nullable(),
     firmSignedAt: z.string().nullable(),
+    deletedAt: z.string().nullable().openapi({
+      description:
+        "When this DRAFT was deleted as made by mistake (0086), or null. Not withdrawn, which " +
+        "is a letter the client has seen: a deleted letter is in no list, still opens by id, and " +
+        "never changes again.",
+    }),
+    deletedByUserId: z.string().uuid().nullable(),
   })
   .openapi("EngagementLetter");
 
@@ -474,6 +481,23 @@ const LetterRecordSchema = z
     totals: TotalsSchema,
     engagements: z.array(EngagementSchema),
     signing: SigningSchema,
+    /** Who deleted it (0086), when it was and the account still resolves. */
+    deletedBy: z
+      .object({
+        userId: z.string().uuid(),
+        displayName: z.string().nullable(),
+        email: z.string().email(),
+      })
+      .nullable(),
+    deleteRefusal: z
+      .object({ code: z.string(), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why DELETE /api/v1/engagement-letters/{letterId} would be refused right now, in its " +
+          "own words — or null when it would work (0086), which means a live draft. Says nothing " +
+          "about `party:write`, which /auth/me already does.",
+      }),
   })
   .openapi("EngagementLetterRecord");
 
@@ -1121,6 +1145,26 @@ const retrySignatureRoute = createRoute({
   },
 });
 
+const deleteRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/engagement-letters/{letterId}",
+  tags: ["engagement-letters"],
+  summary: "Delete a draft made by mistake",
+  description:
+    "Takes a DRAFT off the list of letters; it still opens by id, says it was deleted, and " +
+    "never changes again (0086). Its reference is not reused. A letter the client has seen is " +
+    "WITHDRAWN instead, which keeps the record that it was offered, and a signed one is never " +
+    "deleted. GET /api/v1/engagement-letters/{letterId} says in advance whether this would work.",
+  request: { params: z.object({ letterId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Deleted", content: { "application/json": { schema: LetterSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("The letter is not a draft, or it was already deleted"),
+  },
+});
+
 const withdrawRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/withdraw",
@@ -1225,6 +1269,8 @@ function toLetterBody(
     firmSignatoryUserId: letter.firmSignatoryUserId,
     firmSignatoryTitle: letter.firmSignatoryTitle,
     firmSignedAt: letter.firmSignedAt,
+    deletedAt: letter.deletedAt,
+    deletedByUserId: letter.deletedByUserId,
   };
 }
 
@@ -1381,6 +1427,11 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
     },
     engagements: record.engagements.map(toEngagementBody),
     signing: toSigningBody(record.signing),
+    deletedBy: record.deletedBy === null ? null : { ...record.deletedBy },
+    deleteRefusal:
+      record.deleteRefusal === null
+        ? null
+        : { code: record.deleteRefusal.code, message: record.deleteRefusal.message },
   };
 }
 
@@ -1659,6 +1710,14 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     await deps.service.retrySignatureRequest(s.tenantId, letterId, s.actor);
     const view = await deps.service.describe(s.tenantId, letterId);
     return c.json(toSigningBody(view.signing), 200);
+  });
+
+  app.openapi(deleteRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const deleted = await deps.service.delete(s.tenantId, letterId, s.actor);
+    return c.json(toLetterBody(deleted, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(withdrawRoute, async (c) => {

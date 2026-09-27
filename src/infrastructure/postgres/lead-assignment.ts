@@ -124,6 +124,9 @@ export class PostgresRoundRobinAssignment implements AssignmentStrategy {
           LEFT JOIN crm.lead l
             ON l.owner_user_id = m.user_id
            AND l.stage NOT IN ('converted', 'lost', 'abandoned')
+           -- A deleted lead was never a prospect (0086), so it is on nobody's
+           -- desk: counting it would starve whoever deleted the most mistakes.
+           AND l.deleted_at IS NULL
           WHERE m.audience = 'STAFF' AND m.is_active
           GROUP BY m.user_id
         ),
@@ -141,7 +144,7 @@ export class PostgresRoundRobinAssignment implements AssignmentStrategy {
         RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
                   t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
                   t.estimated_value, t.estimated_value_currency,
-                  t.captured_at, t.closed_at
+                  t.captured_at, t.closed_at, t.deleted_at, t.deleted_by_user_id
       `;
 
       // No row means the strategy DECLINED, and both ways of getting here are
@@ -214,7 +217,7 @@ export class PostgresTerritoryAssignment implements AssignmentStrategy {
         RETURNING t.id, t.tenant_id, t.title, t.party_id, t.source, t.stage,
                   t.owner_user_id, t.notes, t.lost_reason, t.jurisdiction,
                   t.estimated_value, t.estimated_value_currency,
-                  t.captured_at, t.closed_at
+                  t.captured_at, t.closed_at, t.deleted_at, t.deleted_by_user_id
       `;
       return row ? { lead: toLead(row), policy: TERRITORY } : { lead, policy: null };
     });
