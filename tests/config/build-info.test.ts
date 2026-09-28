@@ -8,10 +8,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { load } from "../../src/config/config";
 
 function stubBase(): void {
-  // The three variables with no default, so load() runs without a .env (CI).
+  // The four variables with no default, so load() runs without a .env (CI).
+  // BIB_INTERNAL_KEYS was missing: a checkout with a .env passed and CI, which
+  // has none, did not.
   vi.stubEnv("BIB_ENVIRONMENT", "development");
   vi.stubEnv("BIB_DATABASE_URL", "postgres://owner:secret@localhost:5434/bib");
   vi.stubEnv("BIB_APP_DATABASE_URL", "postgres://bib_app:secret@localhost:5434/bib");
+  vi.stubEnv(
+    "BIB_INTERNAL_KEYS",
+    '[{"name":"ci","key":"ci-internal-key-not-for-any-real-environment","capabilities":["tenant.provision"]}]',
+  );
 }
 
 describe("the build stamp (V0.2)", () => {
