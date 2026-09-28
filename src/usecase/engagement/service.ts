@@ -99,6 +99,13 @@ import {
   GroupedLinePriced,
   LineNotPriced,
   LetterDeleted,
+  NothingToRevise,
+  NothingToChangeOnLetterLine,
+  InvalidLetterLineDescription,
+  LetterInvalidCurrencyChange,
+  LetterCurrencyLocked,
+  LetterProseEdited,
+  TermsOnLetter,
   QuoteDeleted,
   letterDeletionRefusal,
   EngagementError,
@@ -106,6 +113,7 @@ import {
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { planAnnexure } from "../../domain/engagement/annexure";
 import type {
   ClauseLibrary,
   ContentHasher,
@@ -122,6 +130,8 @@ import type {
   FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
+  LetterProseLine,
+  LetterRevision,
   LetterSummary,
   LetterPdf,
   LetterView,
@@ -411,6 +421,82 @@ export interface LetterFromQuote {
   readonly lines: readonly LetterLine[];
   readonly skipped: readonly SkippedQuoteLine[];
 }
+
+/**
+ * A revision of a DRAFT letter's head (T6.18 S6) — what the letter builder's
+ * step 1 and the document's in-place edits send. Absent leaves a field as it
+ * is; null clears a nullable one.
+ */
+export interface ReviseLetterInput {
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly title?: string | undefined;
+  readonly background?: string | null | undefined;
+  readonly addressedToPartyId?: string | null | undefined;
+  readonly issuedOn?: string | null | undefined;
+  readonly effectiveFrom?: string | null | undefined;
+  readonly advanceRequired?: boolean | undefined;
+  readonly advanceAmount?: string | null | undefined;
+  /** The letter's country, which decides its terms and its wording. */
+  readonly jurisdiction?: string | undefined;
+  readonly issuingEntityPartyId?: string | undefined;
+  /** Replace wording edited or written for this client when the issuer or the
+   *  country changes (D9). Without it such a change is refused, naming how
+   *  many lines would go. */
+  readonly replaceEditedProse?: boolean | undefined;
+  /** All three or none. */
+  readonly currency?: string | undefined;
+  readonly fxRate?: string | undefined;
+  readonly fxRateDate?: string | undefined;
+}
+
+/**
+ * A change to one line of a DRAFT letter (T6.18 S6). The same names as adding
+ * one. Absent leaves a field as it is; null means "back to the default" — no
+ * fixed fee (then a pricing note is needed), the service's own recurrence, the
+ * letter's start date, the catalogue's words for a scope text.
+ */
+export interface UpdateLetterLineInput {
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly lineId: string;
+  readonly description?: string | undefined;
+  readonly entityPartyId?: string | undefined;
+  readonly quantity?: string | undefined;
+  readonly unitAmount?: string | null | undefined;
+  readonly discountPercent?: string | undefined;
+  readonly billingFrequency?: string | null | undefined;
+  readonly pricingNote?: string | null | undefined;
+  readonly effectiveFrom?: string | null | undefined;
+  readonly jurisdiction?: string | null | undefined;
+  readonly scopeOverride?: string | null | undefined;
+  readonly clientObligationsOverride?: string | null | undefined;
+  readonly volumeLimitsOverride?: string | null | undefined;
+  readonly exclusionsOverride?: string | null | undefined;
+  readonly oopEstimate?:
+    | { readonly min: string; readonly max: string; readonly currency: string }
+    | null
+    | undefined;
+}
+
+/** Every field a line change may name — "did it name anything" is asked of
+ *  exactly these. */
+const LETTER_LINE_FIELDS = [
+  "description",
+  "entityPartyId",
+  "quantity",
+  "unitAmount",
+  "discountPercent",
+  "billingFrequency",
+  "pricingNote",
+  "effectiveFrom",
+  "jurisdiction",
+  "scopeOverride",
+  "clientObligationsOverride",
+  "volumeLimitsOverride",
+  "exclusionsOverride",
+  "oopEstimate",
+] as const satisfies readonly (keyof UpdateLetterLineInput)[];
 
 export interface SignInput {
   readonly tenantId: string;
@@ -1206,6 +1292,279 @@ export class EngagementService {
     return estimate;
   }
 
+  /**
+   * Change what a DRAFT letter says about itself (T6.18 S6): its title,
+   * Background, addressee, dates and advance, and — while nothing is priced or
+   * no term is on it — its currency, its country and which of the firm's
+   * companies issues it.
+   *
+   * The builder's step 1 reopens a draft, and its preview edits the cover in
+   * place; before this a letter's head could be written only at drafting, so a
+   * typo in the subject line meant deleting the draft and starting again.
+   *
+   * A new ISSUER or COUNTRY replaces the letter's wording with that company's
+   * standard set for that country, in the same transaction (D9), and is refused
+   * while terms are on the letter: each was checked against the old issuer's
+   * law and the old country when it went on, and a term cannot be taken off.
+   * No event for the head itself, the same as the proposal's revise — a draft
+   * being written is not a transition. Who contracts, under whose law and in
+   * what money ARE recorded, because each is a commercial fact even on a draft.
+   */
+  async revise(input: ReviseLetterInput, actor: Actor): Promise<EngagementLetter> {
+    const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    const change: {
+      title?: string;
+      background?: string | null;
+      addressedToPartyId?: string | null;
+      issuedOn?: string | null;
+      effectiveFrom?: string | null;
+      advanceRequired?: boolean;
+      advanceAmount?: string | null;
+      jurisdiction?: string;
+      issuingEntityPartyId?: string;
+      currency?: string;
+      fxRate?: string;
+      fxRateDate?: string;
+    } = {};
+
+    if (input.title !== undefined) {
+      const title = input.title.trim();
+      if (title === "") throw new NothingToRevise();
+      change.title = title;
+    }
+    if (input.background !== undefined) change.background = blankToNull(input.background ?? undefined);
+    if (input.addressedToPartyId !== undefined) {
+      if (input.addressedToPartyId !== null) {
+        await this.requireContact(input.tenantId, letter.partyId, input.addressedToPartyId);
+      }
+      change.addressedToPartyId = input.addressedToPartyId;
+    }
+    for (const [field, key] of [
+      ["issue date", "issuedOn"],
+      ["effective date", "effectiveFrom"],
+    ] as const) {
+      const value = input[key];
+      if (value === undefined) continue;
+      if (value !== null && !isDay(value)) throw new InvalidDate(field, value);
+      change[key] = value;
+    }
+
+    // THE ADVANCE: its two columns move together, so both are always sent.
+    if (input.advanceRequired !== undefined || input.advanceAmount !== undefined) {
+      const required = input.advanceRequired ?? letter.advanceRequired;
+      const amount = required
+        ? (input.advanceAmount === undefined ? letter.advanceAmount : input.advanceAmount)
+        : null;
+      if (required && amount === null) throw new AdvanceAmountRequired();
+      if (amount !== null && !isAmount(amount)) throw new InvalidAmount("advance amount", amount);
+      change.advanceRequired = required;
+      change.advanceAmount = amount;
+    }
+
+    // THE MONEY: three fields or none, and a new currency only while nothing
+    // on the letter is priced in the old one.
+    const money = [input.currency, input.fxRate, input.fxRateDate];
+    if (money.some((v) => v !== undefined)) {
+      if (money.some((v) => v === undefined)) throw new LetterInvalidCurrencyChange();
+      const currency = normalizeCurrency(input.currency ?? "");
+      if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(input.currency ?? "");
+      const fxRate = input.fxRate ?? "";
+      if (!isExchangeRate(fxRate) || Number(fxRate) <= 0) {
+        throw new InvalidAmount("exchange rate", fxRate);
+      }
+      const fxRateDate = input.fxRateDate ?? "";
+      if (!isDay(fxRateDate)) throw new InvalidDate("rate date", fxRateDate);
+      if (currency !== letter.currency && (await this.deps.letters.pricesAnything(input.tenantId, letter.id))) {
+        throw new LetterCurrencyLocked(letter.currency);
+      }
+      change.currency = currency;
+      change.fxRate = fxRate;
+      change.fxRateDate = fxRateDate;
+    }
+
+    // WHO CONTRACTS, AND UNDER WHICH COUNTRY (D6, D9).
+    let jurisdiction = letter.jurisdiction;
+    if (input.jurisdiction !== undefined) {
+      jurisdiction = normalizeJurisdiction(input.jurisdiction);
+      if (!isJurisdiction(jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
+    }
+    const issuer = input.issuingEntityPartyId ?? letter.issuingEntityPartyId;
+    const moved = jurisdiction !== letter.jurisdiction || issuer !== letter.issuingEntityPartyId;
+    let prose: readonly LetterProseLine[] | null = null;
+    let editedReplaced = 0;
+    if (moved) {
+      if (issuer !== letter.issuingEntityPartyId) await this.requireFirmEntity(input.tenantId, issuer);
+      const terms = await this.deps.letters.listClauses(input.tenantId, letter.id);
+      if (terms.length > 0) {
+        throw new TermsOnLetter(terms.length, await this.nameOf(input.tenantId, letter.issuingEntityPartyId));
+      }
+      const owner = { kind: "engagement_letter" as const, id: letter.id };
+      const current = await this.deps.documents.listBlocks(input.tenantId, owner);
+      // Written for this client either way: a house line reworded, or one
+      // added by hand (or carried from the quote as edited there).
+      editedReplaced = current.filter((b) => b.isEdited || b.sourceId === null).length;
+      if (editedReplaced > 0 && input.replaceEditedProse !== true) {
+        throw new LetterProseEdited(editedReplaced, await this.nameOf(input.tenantId, issuer));
+      }
+      prose = await this.deps.documents.standardProse(input.tenantId, owner, jurisdiction, issuer);
+      if (jurisdiction !== letter.jurisdiction) change.jurisdiction = jurisdiction;
+      if (issuer !== letter.issuingEntityPartyId) change.issuingEntityPartyId = issuer;
+    }
+
+    if (Object.keys(change).length === 0) throw new NothingToRevise();
+
+    const revision: LetterRevision = change;
+    const revised = await this.deps.letters.revise(input.tenantId, letter.id, revision, prose);
+    if (revised === null) {
+      // Sent or deleted between the read above and the write, or a line was
+      // priced a moment ago under a currency change: the letter as it now
+      // stands says which.
+      await this.editableOrThrow(input.tenantId, letter.id);
+      throw new LetterCurrencyLocked(letter.currency);
+    }
+
+    if (moved) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "engagement_letter.issuer_changed",
+        objectId: letter.id,
+        actor,
+        payload: {
+          fromIssuingEntityPartyId: letter.issuingEntityPartyId,
+          toIssuingEntityPartyId: revised.issuingEntityPartyId,
+          fromJurisdiction: letter.jurisdiction,
+          toJurisdiction: revised.jurisdiction,
+          proseReplaced: true,
+          editedLinesReplaced: editedReplaced,
+        },
+      });
+    }
+    if (
+      change.currency !== undefined &&
+      (change.currency !== letter.currency ||
+        change.fxRate !== letter.fxRate ||
+        change.fxRateDate !== letter.fxRateDate)
+    ) {
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "engagement_letter.currency_changed",
+        objectId: letter.id,
+        actor,
+        payload: {
+          fromCurrency: letter.currency,
+          toCurrency: revised.currency,
+          fromFxRate: letter.fxRate,
+          toFxRate: revised.fxRate,
+          fxRateDate: revised.fxRateDate,
+        },
+      });
+    }
+    return revised;
+  }
+
+  /**
+   * Change a line already on a DRAFT letter (T6.18 S6) — its wording, its
+   * company, its fee, how often it is billed, when it starts, its scope texts —
+   * without pulling it and agreeing it again, which lost its place and its pin.
+   *
+   * The same rules as adding one, judged on the line AS IT WILL BE: the change
+   * merged over what the line says now, so "no price" and "no reason" cannot
+   * each be allowed on their own and meet on the row. A line in a SECTION keeps
+   * no price of its own; moving it in or out is `setLinePricing`'s. No event,
+   * like adding or removing a line: a draft being written is not a transition.
+   */
+  async updateLine(input: UpdateLetterLineInput): Promise<LetterLine> {
+    const letter = await this.editableOrThrow(input.tenantId, input.letterId);
+    if (LETTER_LINE_FIELDS.every((f) => input[f] === undefined)) {
+      throw new NothingToChangeOnLetterLine();
+    }
+    const current = (await this.deps.letters.listLines(input.tenantId, letter.id)).find(
+      (l) => l.id === input.lineId,
+    );
+    if (current === undefined) throw new LetterLineNotFound(input.lineId);
+
+    let description = current.description;
+    if (input.description !== undefined) {
+      description = input.description.trim();
+      if (description === "") throw new InvalidLetterLineDescription();
+    }
+
+    const entityPartyId = input.entityPartyId ?? current.entityPartyId;
+    if (entityPartyId !== current.entityPartyId) {
+      await this.refuseArchived(input.tenantId, entityPartyId, "entity");
+      await this.requireInStructure(input.tenantId, letter.partyId, entityPartyId);
+    }
+
+    const quantity = input.quantity ?? current.quantity;
+    if (!isAmount(quantity) || Number(quantity) <= 0) throw new InvalidAmount("quantity", quantity);
+
+    const unitAmount = input.unitAmount === undefined ? current.unitAmount : input.unitAmount;
+    const pricingNote = input.pricingNote === undefined ? current.pricingNote : input.pricingNote;
+    const discountPercent = input.discountPercent ?? current.discountPercent;
+    const priced = this.pricingOrThrow({
+      grouped: current.feeGroupId !== null,
+      unitAmount: unitAmount ?? undefined,
+      discountPercent,
+      pricingNote: pricingNote ?? undefined,
+    });
+
+    const effectiveFrom =
+      input.effectiveFrom === undefined ? current.effectiveFrom : input.effectiveFrom;
+    if (effectiveFrom !== null && !isDay(effectiveFrom)) {
+      throw new InvalidDate("effective date", effectiveFrom);
+    }
+    const jurisdiction =
+      input.jurisdiction === undefined
+        ? current.jurisdiction
+        : this.lineJurisdiction(input.jurisdiction ?? undefined);
+
+    // Null is "back to what the service says", read off the SAME pin the line
+    // was agreed from — never today's catalogue.
+    let billingFrequency = current.billingFrequency;
+    if (input.billingFrequency === null) {
+      const pinned = await this.deps.library.readPinnedVersion(
+        input.tenantId,
+        current.serviceVersionId,
+      );
+      billingFrequency = pinned === null ? null : readServiceBody(pinned.body).recurrence;
+    } else if (input.billingFrequency !== undefined) {
+      billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    }
+
+    const override = (next: string | null | undefined, now: string | null): string | null =>
+      next === undefined ? now : blankToNull(next ?? undefined);
+    const oopEstimate =
+      input.oopEstimate === undefined
+        ? current.oopEstimate
+        : this.outOfPocket(input.oopEstimate ?? undefined);
+
+    const updated = await this.deps.letters.updateLine(input.tenantId, letter.id, current.id, {
+      entityPartyId,
+      description,
+      quantity,
+      unitAmount: priced.unitAmount,
+      discountPercent,
+      effectiveFrom,
+      jurisdiction,
+      billingFrequency,
+      scopeOverride: override(input.scopeOverride, current.scopeOverride),
+      clientObligationsOverride: override(
+        input.clientObligationsOverride,
+        current.clientObligationsOverride,
+      ),
+      volumeLimitsOverride: override(input.volumeLimitsOverride, current.volumeLimitsOverride),
+      exclusionsOverride: override(input.exclusionsOverride, current.exclusionsOverride),
+      oopEstimate,
+      pricingNote: priced.pricingNote,
+    });
+    if (updated === null) {
+      // Sent, deleted or pulled between the read above and the write.
+      await this.editableOrThrow(input.tenantId, letter.id);
+      throw new LetterLineNotFound(input.lineId);
+    }
+    return updated;
+  }
+
   async removeLine(tenantId: string, letterId: string, lineId: string): Promise<void> {
     await this.editableOrThrow(tenantId, letterId);
     const lines = await this.deps.letters.listLines(tenantId, letterId);
@@ -1377,8 +1736,31 @@ export class EngagementService {
     // the letter alone answers it.
     const block = letterDeletionBlock(record.letter);
     const refusal = block === null ? null : letterDeletionRefusal(record.letter.ref, block);
+    // HOW ANNEXURE 1 IS ORGANISED, by the same function the PDF is drawn
+    // with (T6.18 S6), so the in-app preview letters and numbers exactly as the
+    // paper does.
+    const document = planAnnexure({
+      letterEffectiveFrom: record.letter.effectiveFrom,
+      feeGroups: record.feeGroups.map((g) => g.group),
+      lines: record.lines.map((l) => ({
+        id: l.line.id,
+        position: l.line.position,
+        feeGroupId: l.line.feeGroupId,
+        entityPartyId: l.line.entityPartyId,
+        entityName: l.entity?.displayName ?? l.line.entityPartyId,
+        serviceVersionId: l.line.serviceVersionId,
+        description: l.line.description,
+        terms: l.terms,
+        billingFrequency: l.line.billingFrequency,
+        effectiveFrom: l.line.effectiveFrom,
+        net: l.net,
+        pricingNote: l.line.pricingNote,
+        oopEstimate: l.line.oopEstimate,
+      })),
+    });
     return {
       ...record,
+      document,
       engagements: this.withState(record.engagements),
       blocks,
       signing: {

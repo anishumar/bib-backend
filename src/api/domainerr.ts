@@ -824,7 +824,8 @@ export function mapError(err: unknown): MappedError {
       // records and is fixed there. 0083's three are the same kind of answer: a
       // fee group with no title, a grouped line sent with a price of its own,
       // and a line priced on its own sent with none — each fixed by sending a
-      // different body.
+      // different body. T6.18 S6's four revision refusals too: a body naming
+      // nothing, a blank name, a currency sent without its rate.
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
@@ -846,6 +847,10 @@ export function mapError(err: unknown): MappedError {
       case "FEE_GROUP_TITLE_REQUIRED":
       case "GROUPED_LINE_PRICED":
       case "LINE_NOT_PRICED":
+      case "NOTHING_TO_REVISE":
+      case "NOTHING_TO_CHANGE_ON_LINE":
+      case "INVALID_LINE_DESCRIPTION":
+      case "INVALID_CURRENCY_CHANGE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -881,7 +886,9 @@ export function mapError(err: unknown): MappedError {
       // covering none — are the letter's STATE, answered by moving services.
       // 0086's three too: a draft already deleted, a letter that went out and
       // so is withdrawn or superseded instead, and a quote deleted as a mistake
-      // that a letter tried to cite.
+      // that a letter tried to cite. And T6.18 S6's three: a draft's lines
+      // priced in its currency, prose written for this client, terms chosen for
+      // its issuer's law.
       case "LETTER_NOT_EDITABLE":
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
@@ -906,6 +913,9 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_DELETED":
       case "LETTER_NOT_DELETABLE":
       case "QUOTE_DELETED":
+      case "CURRENCY_LOCKED_BY_LINES":
+      case "PROSE_EDITED":
+      case "TERMS_ON_LETTER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

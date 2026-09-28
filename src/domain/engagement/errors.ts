@@ -66,7 +66,114 @@ export type EngagementErrorCode =
   | "FEE_GROUP_NOT_EMPTY"
   | "FEE_GROUP_EMPTY"
   | "GROUPED_LINE_PRICED"
-  | "LINE_NOT_PRICED";
+  | "LINE_NOT_PRICED"
+  | "NOTHING_TO_REVISE"
+  | "NOTHING_TO_CHANGE_ON_LINE"
+  | "INVALID_LINE_DESCRIPTION"
+  | "INVALID_CURRENCY_CHANGE"
+  | "CURRENCY_LOCKED_BY_LINES"
+  | "PROSE_EDITED"
+  | "TERMS_ON_LETTER";
+
+// ── Revising a DRAFT letter (T6.18, S6) ────────────────────────────────────
+//
+// The letter builder reopens step 1 on a draft and edits the document in place,
+// so a draft's head and its lines can change after drafting. Every one of these
+// is a draft-only change; a sent letter is refused as LETTER_NOT_EDITABLE.
+
+/** A revision that names nothing to change. */
+export class NothingToRevise extends EngagementError {
+  constructor() {
+    super(
+      "NOTHING_TO_REVISE",
+      `Nothing to change: send at least one of the letter's title, Background, addressee, ` +
+        `dates, advance, country, issuer or currency.`,
+    );
+  }
+}
+
+/** A line change that names nothing to change. */
+export class NothingToChangeOnLetterLine extends EngagementError {
+  constructor() {
+    super(
+      "NOTHING_TO_CHANGE_ON_LINE",
+      `Nothing to change on this line: send at least one of its wording, company, quantity, ` +
+        `fee, discount, billing frequency, pricing note, start date or scope texts.`,
+    );
+  }
+}
+
+/** What a line is called is what the client reads for it. */
+export class InvalidLetterLineDescription extends EngagementError {
+  constructor() {
+    super(
+      "INVALID_LINE_DESCRIPTION",
+      `A service on a letter needs a name: it is what the client reads for it. Type the ` +
+        `service's name, or press Escape to keep what it said.`,
+    );
+  }
+}
+
+/** The currency, its rate and the rate's day travel together. */
+export class LetterInvalidCurrencyChange extends EngagementError {
+  constructor() {
+    super(
+      "INVALID_CURRENCY_CHANGE",
+      `A currency change sends the currency, the exchange rate and the day of the rate ` +
+        `together: a rate belongs to one currency on one day.`,
+    );
+  }
+}
+
+/**
+ * A new currency while the letter has lines or sections. Every line and every
+ * section fee is priced in the letter's currency by a composite key (0017,
+ * 0083), and a line pulled off a draft still holds its row.
+ */
+export class LetterCurrencyLocked extends EngagementError {
+  constructor(currency: string) {
+    super(
+      "CURRENCY_LOCKED_BY_LINES",
+      `This letter has already priced services or sections in ${currency}, and every figure on a ` +
+        `letter is in its own currency. Keep ${currency}, or delete this draft and start a new ` +
+        `letter in the other currency.`,
+    );
+  }
+}
+
+/** A new issuer or country would replace prose written for this client. */
+export class LetterProseEdited extends EngagementError {
+  constructor(
+    readonly editedCount: number,
+    issuerName: string,
+  ) {
+    super(
+      "PROSE_EDITED",
+      `${String(editedCount)} line${editedCount === 1 ? "" : "s"} of this letter's wording ` +
+        `${editedCount === 1 ? "was" : "were"} edited or written for this client, and the change ` +
+        `replaces the wording with ${issuerName}'s standard set. Send replaceEditedProse: true to ` +
+        `replace ${editedCount === 1 ? "it" : "them"} anyway, or keep the letter as it is.`,
+    );
+  }
+}
+
+/**
+ * A new issuer or country while terms are on the letter. Each term was checked
+ * against the issuer's law and the letter's country when it went on (G1.8), and
+ * a term cannot be taken off a letter, so moving either would leave terms on it
+ * that name the wrong law.
+ */
+export class TermsOnLetter extends EngagementError {
+  constructor(termCount: number, issuerName: string) {
+    super(
+      "TERMS_ON_LETTER",
+      `This letter already carries ${String(termCount)} term${termCount === 1 ? "" : "s"}, chosen ` +
+        `for ${issuerName}'s law and courts. A term cannot be taken off a letter, so the company ` +
+        `issuing it and its country stay as they are. To issue it from another company or for ` +
+        `another country, delete this draft and start a new letter.`,
+    );
+  }
+}
 
 /** The client, or the company a line is for, was archived (0305). A letter
  *  may not name a party the firm put away; restore it first. */

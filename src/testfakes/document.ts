@@ -99,8 +99,15 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
     };
     if (at === -1) this.rows.push(row);
     else this.rows[at] = row;
+    // 0313's trigger: naming a party in a routing row makes it a member, and
+    // moving the row away later never unmakes it.
+    this.members.add(`${p.tenantId}:${p.firmEntityPartyId}`);
     return Promise.resolve(row);
   }
+
+  /** `crm.firm_entity` (0313): who is the firm's, whatever the routing says.
+   *  `tenantId:partyId`. */
+  readonly members = new Set<string>();
 
   /**
    * The firm itself — `is_firm_self` — which stays one of the firm's own
@@ -108,11 +115,13 @@ export class FakePreferenceRepo implements FirmEntityPreferenceRepository {
    */
   firmSelfPartyId: string = SEEDED_FIRM_ENTITY;
 
-  /** `crm.is_firm_entity` (0306): the firm itself, or any issuer a preference
-   *  row names — the same two sources, read the same way. */
+  /** `crm.is_firm_entity` (0313): the firm itself, or a member — which a
+   *  routing row makes a party, and which moving the routing away does not
+   *  undo. The seeded fallback row counts as named. */
   isFirmEntity(tenantId: string, partyId: string): Promise<boolean> {
     return Promise.resolve(
       partyId === this.firmSelfPartyId ||
+        this.members.has(`${tenantId}:${partyId}`) ||
         this.rowsFor(tenantId).some((r) => r.firmEntityPartyId === partyId),
     );
   }

@@ -96,6 +96,11 @@ export interface AnnexureSection {
 export interface FeeRow {
   /** "B" for a group, "C1" for a line. */
   readonly code: string;
+  /** The group this row is, or null for a line's row. */
+  readonly feeGroupId: string | null;
+  /** The line this row is, or null for a group's row — so a screen can change
+   *  the fee where the Summary of Fees states it. */
+  readonly lineId: string | null;
   readonly description: string;
   readonly billingFrequency: BillingFrequency | null;
   /** When the fee starts, when every service it covers starts together and
@@ -160,6 +165,8 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
       const members = lines.filter((l) => inGroup(l) === group.id);
       fees.push({
         code: s.code,
+        feeGroupId: group.id,
+        lineId: null,
         description:
           group.feeDescription ??
           (s.items.length === 0
@@ -179,6 +186,8 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
         if (line === undefined) continue;
         fees.push({
           code: item.code,
+          feeGroupId: null,
+          lineId: line.id,
           // The company, when the letter covers several: one service for four
           // companies is four fees here, and four identical rows would read as
           // a mistake.

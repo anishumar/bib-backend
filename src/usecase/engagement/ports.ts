@@ -27,6 +27,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
+import type { AnnexurePlan } from "../../domain/engagement/annexure";
 
 
 /**
@@ -136,6 +137,90 @@ export interface DocumentIdentity {
     tenantId: string,
     owner: { readonly kind: "engagement_letter"; readonly id: string },
   ): Promise<readonly DocumentBlock[]>;
+  /**
+   * The firm's standard prose as it WOULD land on this letter, composed and
+   * not written (T6.18 S6) — what replaces a draft's wording when its issuer or
+   * its country changes, written by the letter's own adapter in the same
+   * transaction as the change (D9).
+   */
+  standardProse(
+    tenantId: string,
+    owner: { readonly kind: "engagement_letter"; readonly id: string },
+    jurisdiction: string,
+    issuingEntityPartyId: string,
+  ): Promise<readonly LetterProseLine[]>;
+}
+
+/** One line of prose, ready to be written onto a letter. */
+export interface LetterProseLine {
+  readonly id: string;
+  readonly kind: DocumentBlock["kind"];
+  readonly body: string;
+  readonly isHeading: boolean;
+  readonly sortOrder: number;
+  /** The standard line it was copied from. */
+  readonly sourceId: string | null;
+}
+
+/**
+ * What a revision of a DRAFT letter's head changes (T6.18 S6). Absent leaves a
+ * field as it is; null CLEARS a nullable one, which is a change and not an
+ * absence of one. The three money fields travel together, and the advance's
+ * two do.
+ */
+export interface LetterRevision {
+  readonly title?: string | undefined;
+  readonly background?: string | null | undefined;
+  readonly addressedToPartyId?: string | null | undefined;
+  readonly issuedOn?: string | null | undefined;
+  readonly effectiveFrom?: string | null | undefined;
+  readonly advanceRequired?: boolean | undefined;
+  readonly advanceAmount?: Amount | null | undefined;
+  readonly jurisdiction?: string | undefined;
+  readonly issuingEntityPartyId?: string | undefined;
+  readonly currency?: CurrencyCode | undefined;
+  readonly fxRate?: Amount | undefined;
+  readonly fxRateDate?: string | undefined;
+}
+
+/**
+ * A line of a DRAFT letter AS IT WILL BE after an edit (T6.18 S6): the change
+ * merged over what the line says now, so the adapter writes whole values and
+ * the rules were judged on the result.
+ */
+export interface LetterLineEdit {
+  readonly entityPartyId: string;
+  readonly description: string;
+  readonly quantity: Amount;
+  readonly unitAmount: Amount | null;
+  readonly discountPercent: Amount;
+  readonly effectiveFrom: string | null;
+  readonly jurisdiction: string | null;
+  readonly billingFrequency: BillingFrequency | null;
+  readonly scopeOverride: string | null;
+  readonly clientObligationsOverride: string | null;
+  readonly volumeLimitsOverride: string | null;
+  readonly exclusionsOverride: string | null;
+  readonly oopEstimate: OutOfPocketEstimate | null;
+  readonly pricingNote: string | null;
+}
+
+/**
+ * The letter's money PER BILLING FREQUENCY (T6.18, D8): one row per frequency,
+ * adding the lines priced on their own and each section's fee ONCE. Never one
+ * mixed net: a month's fee and a year's fee added together is a number nobody
+ * is ever billed. The proposal's field names (`FrequencyTotal`), so a screen
+ * says both documents' totals with one sentence: `lineCount` counts what the
+ * row covers — a line priced on its own, or a whole section, which is one fee —
+ * and `unpricedLineCount` the lines on their own that have no price ("as
+ * mutually agreed"), which the figure leaves out.
+ */
+export interface LetterFrequencyTotal {
+  /** Null for lines that state no billing frequency. */
+  readonly frequency: BillingFrequency | null;
+  readonly net: Amount;
+  readonly lineCount: number;
+  readonly unpricedLineCount: number;
 }
 
 /** The issuing entity, as the mismatch check needs it: what to call it, and
@@ -396,6 +481,11 @@ export interface EngagementRecord {
 export interface LetterRecord {
   readonly letter: EngagementLetter;
   readonly party: { readonly id: string; readonly displayName: string };
+  /** Where the issuing company is REGISTERED (T6.18 S6) — whose law its
+   *  terms may name. Null for a company with no registration recorded. */
+  readonly issuerJurisdiction: string | null;
+  /** The money per billing frequency (D8), summed by the database. */
+  readonly totalsByFrequency: readonly LetterFrequencyTotal[];
   /** Which of the firm's own entities is contracting, by NAME — this is what
    *  the letterhead and the signature block print. */
   readonly issuingEntity: { readonly id: string; readonly displayName: string };
@@ -469,6 +559,13 @@ export interface LetterRecord {
  */
 export interface LetterView extends Omit<LetterRecord, "engagements"> {
   readonly engagements: readonly EngagementRecord[];
+  /**
+   * How Annexure 1 is ORGANISED — its sections, numbered services and Summary
+   * of Fees — from the SAME `planAnnexure` the PDF is drawn from (T6.18 S6),
+   * so the in-app preview and the paper cannot disagree about which service is
+   * "B2" or what a fee row covers.
+   */
+  readonly document: AnnexurePlan;
   /**
    * How this letter is being signed. `provider` is the deployment's, so a
    * DRAFT's screen knows whether sending will ask for a signer; `request` is
@@ -650,6 +747,32 @@ export interface EngagementRepository {
   addLine(l: NewLetterLine): Promise<LetterLine>;
   removeLine(tenantId: string, letterId: string, lineId: string): Promise<void>;
   listLines(tenantId: string, letterId: string): Promise<readonly LetterLine[]>;
+  /**
+   * Change a live line of a DRAFT to what `edit` says (T6.18 S6). Null when
+   * the letter stopped being a live draft, or the line was pulled, between the
+   * service's read and this write.
+   */
+  updateLine(
+    tenantId: string,
+    letterId: string,
+    lineId: string,
+    edit: LetterLineEdit,
+  ): Promise<LetterLine | null>;
+  /**
+   * Revise a DRAFT's head (T6.18 S6), and when `prose` is given strike the
+   * letter's live wording and write those lines in its place in the SAME
+   * transaction (D9). Null when the letter is no longer a live draft, or a new
+   * currency meets a line or section already priced in the old one.
+   */
+  revise(
+    tenantId: string,
+    letterId: string,
+    change: LetterRevision,
+    prose: readonly LetterProseLine[] | null,
+  ): Promise<EngagementLetter | null>;
+  /** Whether any line or section row, live or pulled, holds the letter's
+   *  currency — a new currency needs none (their keys do not cascade). */
+  pricesAnything(tenantId: string, letterId: string): Promise<boolean>;
   /** Into a fee group, or out of one — see `LinePricing`. */
   setLinePricing(
     tenantId: string,

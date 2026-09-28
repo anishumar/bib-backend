@@ -15,6 +15,7 @@ import { withTenant } from "../../db/tenant";
 // showed up because nothing here runs west of Greenwich. `day.ts` carries the
 // measurement.
 import { toDay } from "./day";
+import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
 import type {
   Engagement,
   EngagementLetter,
@@ -37,8 +38,12 @@ import type {
   FirmSignatureRecord,
   LetterClauseRecord,
   LetterFilters,
+  LetterFrequencyTotal,
+  LetterLineEdit,
   LetterLineRecord,
+  LetterProseLine,
   LetterRecord,
+  LetterRevision,
   LetterSummary,
   LinePricing,
   NewEngagement,
@@ -385,6 +390,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           superseded_by_ref: string | null;
           deleter_display_name: string | null;
           deleter_email: string | null;
+          issuer_jurisdiction: string | null;
         })[]
       >`
         SELECT l.id, l.tenant_id, l.ref, l.party_id, l.issuing_entity_party_id,
@@ -404,7 +410,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
                successor.id  AS superseded_by_id,
                successor.ref AS superseded_by_ref,
                deleter.display_name AS deleter_display_name,
-               deleter.email::text AS deleter_email
+               deleter.email::text AS deleter_email,
+               issuer_le.jurisdiction AS issuer_jurisdiction
         FROM crm.engagement_letter l
         JOIN core.party party ON party.id = l.party_id
         -- WHICH OF OUR COMPANIES is contracting, by name — the letterhead and
@@ -412,6 +419,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
         -- NULL and carries the tenant, so an unresolvable issuer is corruption
         -- rather than a state to render.
         JOIN core.party issuer ON issuer.id = l.issuing_entity_party_id
+        -- Where that company is REGISTERED (T6.18 S6): whose law the letter's
+        -- terms may name. LEFT: every firm's seeded company has no row.
+        LEFT JOIN core.legal_entity issuer_le ON issuer_le.party_id = l.issuing_entity_party_id
         -- WHO the letter is written to, by name. LEFT: a letter addressed to no
         -- individual is ordinary, and the c/o organization is the client above.
         LEFT JOIN core.party addressee ON addressee.id = l.addressed_to_party_id
@@ -535,6 +545,39 @@ export class PostgresEngagementRepository implements EngagementRepository {
         ORDER BY position
       `;
 
+      // THE MONEY PER FREQUENCY (T6.18, D8), added by the database. A line
+      // priced on its own counts at its own frequency; a SECTION's fee counts
+      // ONCE at the section's, and its lines not at all (they carry no price of
+      // their own, 0083) - the same rule the one-figure totals above follow.
+      // `sum` skips an unpriced line's NULL and the count beside it says so.
+      const byFrequency = await db<
+        {
+          frequency: BillingFrequency | null;
+          net: string | null;
+          line_count: string;
+          unpriced_line_count: string;
+        }[]
+      >`
+        SELECT x.frequency,
+               sum(x.net)::text AS net,
+               count(*) AS line_count,
+               count(*) FILTER (WHERE x.net IS NULL) AS unpriced_line_count
+        FROM (
+          SELECT billing_frequency AS frequency,
+                 round(unit_amount * quantity * (1 - discount_percent / 100), 4) AS net
+          FROM crm.engagement_letter_line
+          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL AND fee_group_id IS NULL
+          UNION ALL
+          SELECT billing_frequency, amount
+          FROM crm.engagement_letter_fee_group
+          WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
+        ) x
+        GROUP BY x.frequency
+        ORDER BY coalesce(array_position(
+                   ARRAY['monthly', 'quarterly', 'annually', 'one_time', 'custom'],
+                   x.frequency::text), 99)
+      `;
+
       const engagements = await db<EngagementRow[]>`
         SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
                entity_party_id, status, activated_at, effective_from, ends_on
@@ -544,6 +587,15 @@ export class PostgresEngagementRepository implements EngagementRepository {
       return {
         letter: toLetter(head),
         party: { id: head.party_id, displayName: head.party_display_name },
+        issuerJurisdiction: head.issuer_jurisdiction,
+        totalsByFrequency: byFrequency.map(
+          (f): LetterFrequencyTotal => ({
+            frequency: f.frequency,
+            net: f.net ?? "0",
+            lineCount: Number(f.line_count),
+            unpricedLineCount: Number(f.unpriced_line_count),
+          }),
+        ),
         issuingEntity: {
           id: head.issuing_entity_party_id,
           displayName: head.issuer_display_name,
@@ -788,6 +840,128 @@ export class PostgresEngagementRepository implements EngagementRepository {
       return rows.map(toLine);
     });
   }
+  async updateLine(
+    tenantId: string,
+    letterId: string,
+    lineId: string,
+    edit: LetterLineEdit,
+  ): Promise<LetterLine | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Whole values, judged by the service on the line as it will be. The
+      // WHERE repeats "a live line of a live draft": a letter sent, deleted or
+      // the line pulled since the service read it is left exactly as it is.
+      const [row] = await db<LineRow[]>`
+        UPDATE crm.engagement_letter_line
+           SET entity_party_id = ${edit.entityPartyId},
+               description = ${edit.description},
+               quantity = ${edit.quantity},
+               unit_amount = ${edit.unitAmount}::numeric,
+               discount_percent = ${edit.discountPercent},
+               effective_from = ${edit.effectiveFrom}::date,
+               jurisdiction = ${edit.jurisdiction},
+               billing_frequency = ${edit.billingFrequency},
+               scope_override = ${edit.scopeOverride},
+               client_obligations_override = ${edit.clientObligationsOverride},
+               volume_limits_override = ${edit.volumeLimitsOverride},
+               exclusions_override = ${edit.exclusionsOverride},
+               oop_estimate_min = ${edit.oopEstimate?.min ?? null}::numeric,
+               oop_estimate_max = ${edit.oopEstimate?.max ?? null}::numeric,
+               oop_currency = ${edit.oopEstimate?.currency ?? null},
+               pricing_note = ${edit.pricingNote}
+         WHERE id = ${lineId} AND engagement_letter_id = ${letterId} AND removed_at IS NULL
+           AND EXISTS (SELECT 1 FROM crm.engagement_letter l
+                        WHERE l.id = ${letterId} AND l.status = 'draft' AND l.deleted_at IS NULL)
+        RETURNING ${db.unsafe(LINE_COLUMNS)}
+      `;
+      return row ? toLine(row) : null;
+    });
+  }
+
+  async revise(
+    tenantId: string,
+    letterId: string,
+    change: LetterRevision,
+    prose: readonly LetterProseLine[] | null,
+  ): Promise<EngagementLetter | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // One statement, each column kept unless the change names it - the
+      // proposal's `revise`, for the same reason: NULL is a real value here,
+      // and clearing the Background is a change, not an absence of one.
+      const has = (k: keyof LetterRevision): boolean => change[k] !== undefined;
+      const [row] = await db<LetterRow[]>`
+        UPDATE crm.engagement_letter
+           SET title = CASE WHEN ${has("title")} THEN ${change.title ?? null} ELSE title END,
+               background = CASE WHEN ${has("background")} THEN ${change.background ?? null}
+                                 ELSE background END,
+               addressed_to_party_id = CASE WHEN ${has("addressedToPartyId")}
+                                            THEN ${change.addressedToPartyId ?? null}::uuid
+                                            ELSE addressed_to_party_id END,
+               issued_on = CASE WHEN ${has("issuedOn")} THEN ${change.issuedOn ?? null}::date
+                                ELSE issued_on END,
+               effective_from = CASE WHEN ${has("effectiveFrom")}
+                                     THEN ${change.effectiveFrom ?? null}::date
+                                     ELSE effective_from END,
+               -- The advance's two columns move together (el_advance_is_coherent_chk),
+               -- and the service always sends both.
+               advance_required = CASE WHEN ${has("advanceRequired")}
+                                       THEN ${change.advanceRequired ?? false}
+                                       ELSE advance_required END,
+               advance_amount = CASE WHEN ${has("advanceRequired")}
+                                     THEN ${change.advanceAmount ?? null}::numeric
+                                     ELSE advance_amount END,
+               jurisdiction = CASE WHEN ${has("jurisdiction")} THEN ${change.jurisdiction ?? null}
+                                   ELSE jurisdiction END,
+               issuing_entity_party_id = CASE WHEN ${has("issuingEntityPartyId")}
+                                              THEN ${change.issuingEntityPartyId ?? null}::uuid
+                                              ELSE issuing_entity_party_id END,
+               currency = CASE WHEN ${has("currency")} THEN ${change.currency ?? null}
+                               ELSE currency END,
+               fx_rate = CASE WHEN ${has("fxRate")} THEN ${change.fxRate ?? null}::numeric
+                              ELSE fx_rate END,
+               fx_rate_date = CASE WHEN ${has("fxRateDate")} THEN ${change.fxRateDate ?? null}::date
+                                   ELSE fx_rate_date END
+         -- A live draft only, repeated here: a letter sent or deleted since the
+         -- service read it is left exactly as it stands.
+         WHERE id = ${letterId} AND status = 'draft' AND deleted_at IS NULL
+           -- A new currency over NO line or section row at all, live or pulled:
+           -- their keys to the letter's currency do not cascade (0017, 0083),
+           -- so the row a draft pulled a line off still holds the old one.
+           AND (${change.currency ?? null}::text IS NULL
+                OR currency = ${change.currency ?? null}
+                OR (NOT EXISTS (SELECT 1 FROM crm.engagement_letter_line x
+                                 WHERE x.engagement_letter_id = ${letterId})
+                    AND NOT EXISTS (SELECT 1 FROM crm.engagement_letter_fee_group g
+                                     WHERE g.engagement_letter_id = ${letterId})))
+        RETURNING ${db.unsafe(LETTER_COLUMNS)}
+      `;
+      if (!row) return null;
+      // THE NEW COMPANY'S OR COUNTRY'S WORDING, in the same transaction (D9):
+      // the old lines struck off, the standard set written in their place, so a
+      // draft can never name one company in its head and carry another's prose.
+      if (prose !== null) {
+        const owner = { kind: "engagement_letter" as const, id: letterId };
+        await strikeDocumentBlocks(db, owner);
+        await insertDocumentBlocks(
+          db,
+          prose.map((p) => ({ ...p, tenantId, owner })),
+        );
+      }
+      return toLetter(row);
+    });
+  }
+
+  async pricesAnything(tenantId: string, letterId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ priced: boolean }[]>`
+        SELECT EXISTS (SELECT 1 FROM crm.engagement_letter_line
+                        WHERE engagement_letter_id = ${letterId})
+            OR EXISTS (SELECT 1 FROM crm.engagement_letter_fee_group
+                        WHERE engagement_letter_id = ${letterId}) AS priced
+      `;
+      return row?.priced ?? false;
+    });
+  }
+
 
   /**
    * Into a fee group or out of one, with the price the line has afterwards —

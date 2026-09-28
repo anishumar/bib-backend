@@ -446,6 +446,81 @@ const SigningSchema = z
 /** A letter identified the way a person identifies one: by its reference. */
 const DocumentRefSchema = z.object({ id: z.string().uuid(), ref: z.string() });
 
+/**
+ * The letter's money PER BILLING FREQUENCY (T6.18, D8), summed by the
+ * database: lines priced on their own at their frequency, each section's fee
+ * once at the section's. The proposal's field names, so one sentence says both
+ * documents' totals.
+ */
+const LetterFrequencyTotalSchema = z
+  .object({
+    frequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    /** Null when redacted by the fee axis. */
+    net: AmountSchema.nullable(),
+    /** What the figure covers: lines priced on their own, and whole sections. */
+    lineCount: z.number().int(),
+    /** Lines on their own with no price ("as mutually agreed"), left out of
+     *  the figure. A count, not money: not redacted. */
+    unpricedLineCount: z.number().int(),
+  })
+  .openapi("LetterFrequencyTotal");
+
+/**
+ * HOW ANNEXURE 1 IS ORGANISED (T6.18 S6), from the SAME `planAnnexure` the PDF
+ * is drawn from: the sections in order (a fee group is a section; lines priced
+ * on their own come last as one more), each numbered service and the lines it
+ * prints for, and the Summary of Fees row by row. A screen draws the letter
+ * from this rather than re-deciding which service is "B2".
+ */
+const LetterDocumentSchema = z
+  .object({
+    sections: z.array(
+      z.object({
+        /** "B". */
+        code: z.string(),
+        title: z.string(),
+        /** The fee group this section IS, or null for the lines priced on
+         *  their own. Its fee and prose are in `feeGroups`. */
+        feeGroupId: z.string().uuid().nullable(),
+        /** The companies every service here is for, printed once under the
+         *  heading — or null when the letter should not say so here. */
+        entityNames: z.array(z.string()).nullable(),
+        items: z.array(
+          z.object({
+            /** "B1". */
+            code: z.string(),
+            description: z.string(),
+            /** The companies this one service is for, when the section mixes. */
+            entityNames: z.array(z.string()).nullable(),
+            /** Printed only when this service starts on a day of its own. */
+            beginsOn: DaySchema.nullable(),
+            /** The letter lines this item prints for — one per company. */
+            lineIds: z.array(z.string().uuid()),
+          }),
+        ),
+      }),
+    ),
+    fees: z.array(
+      z.object({
+        /** "B" for a whole section, "C1" for a line priced on its own. */
+        code: z.string(),
+        /** The section this row is, or null for a line's row. */
+        feeGroupId: z.string().uuid().nullable(),
+        /** The line this row is, or null for a section's row. */
+        lineId: z.string().uuid().nullable(),
+        description: z.string(),
+        billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+        startsOn: DaySchema.nullable(),
+        /** Null for a line with no price of its own, or when redacted. */
+        amount: AmountSchema.nullable(),
+        pricingNote: z.string().nullable(),
+        /** Redacted with the money. */
+        paymentTerms: z.string().nullable(),
+      }),
+    ),
+  })
+  .openapi("LetterDocumentPlan");
+
 const LetterRecordSchema = z
   .object({
     letter: LetterSchema,
@@ -453,6 +528,21 @@ const LetterRecordSchema = z
     /** The issuing entity by NAME — the letterhead and the signature block both
      *  print it. */
     issuingEntity: PartyRefSchema,
+    /**
+     * THE ISSUER WITH WHERE IT IS REGISTERED (T6.18 S6): whose law and courts
+     * a term on this letter may name (D6). A screen offering terms offers only
+     * those; `jurisdiction` is null for a company with no registration
+     * recorded, which the API refuses any law-naming term for.
+     */
+    issuer: z.object({
+      partyId: z.string().uuid(),
+      name: z.string(),
+      jurisdiction: z.string().nullable(),
+    }),
+    /** The money per billing frequency (D8), never one mixed net. */
+    totalsByFrequency: z.array(LetterFrequencyTotalSchema),
+    /** How Annexure 1 is organised, as the PDF prints it. */
+    document: LetterDocumentSchema,
     /** The addressee by NAME, care-of `party`. Null when the letter names no
      *  individual. */
     addressedTo: PartyRefSchema.nullable(),
@@ -560,6 +650,62 @@ const DraftLetterRequest = z
     }),
   })
   .openapi("DraftEngagementLetterRequest");
+
+/**
+ * A revision of a DRAFT letter's head (T6.18 S6). Every field optional; null
+ * clears a nullable one. The three money fields travel together.
+ */
+const ReviseLetterRequest = z
+  .object({
+    title: z.string().trim().min(1).max(300).optional(),
+    background: z.string().max(20000).nullable().optional(),
+    addressedToPartyId: z.string().uuid().nullable().optional(),
+    issuedOn: DaySchema.nullable().optional(),
+    effectiveFrom: DaySchema.nullable().optional(),
+    advanceRequired: z.boolean().optional(),
+    advanceAmount: AmountSchema.nullable().optional(),
+    jurisdiction: JurisdictionSchema.optional().openapi({
+      description:
+        "The letter's country, which decides its terms and its wording. Changing it (or the " +
+        "issuer) replaces the wording with the standard set for the new country and company, " +
+        "and is refused while terms are on the letter (TERMS_ON_LETTER).",
+    }),
+    issuingEntityPartyId: z.string().uuid().optional(),
+    replaceEditedProse: z.boolean().optional().openapi({
+      description:
+        "Replace wording edited or written for this client when the issuer or country changes. " +
+        "Without it such a change is refused with PROSE_EDITED, naming how many lines would go.",
+    }),
+    currency: CurrencySchema.optional(),
+    fxRate: RateSchema.optional(),
+    fxRateDate: DaySchema.optional(),
+  })
+  .openapi("ReviseEngagementLetterRequest");
+
+/**
+ * A change to one line of a DRAFT letter (T6.18 S6): the add-line fields, all
+ * optional. Null means "back to the default": no fixed fee (a pricing note is
+ * then required), the service's recurrence, the letter's start date, the
+ * catalogue's words for a scope text.
+ */
+const UpdateLetterLineRequest = z
+  .object({
+    description: z.string().max(500).optional(),
+    entityPartyId: z.string().uuid().optional(),
+    quantity: AmountSchema.optional(),
+    unitAmount: AmountSchema.nullable().optional(),
+    discountPercent: AmountSchema.optional(),
+    billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
+    pricingNote: z.string().max(2000).nullable().optional(),
+    effectiveFrom: DaySchema.nullable().optional(),
+    jurisdiction: JurisdictionSchema.nullable().optional(),
+    scopeOverride: z.string().max(20000).nullable().optional(),
+    clientObligationsOverride: z.string().max(20000).nullable().optional(),
+    volumeLimitsOverride: z.string().max(20000).nullable().optional(),
+    exclusionsOverride: z.string().max(20000).nullable().optional(),
+    oopEstimate: OopEstimateSchema.nullable().optional(),
+  })
+  .openapi("UpdateEngagementLetterLineRequest");
 
 const AddLineRequest = z
   .object({
@@ -983,6 +1129,55 @@ const removeLineRoute = createRoute({
   },
 });
 
+const reviseRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/engagement-letters/{letterId}",
+  tags: ["engagement-letters"],
+  summary: "Change a draft letter's head",
+  description:
+    "T6.18 S6. Its title, Background, addressee, dates and advance; its currency while nothing " +
+    "on it is priced; its country and issuing company while no term is on it, which replaces " +
+    "its wording with that company's standard set for that country (D9). A draft only. Answers " +
+    "with the whole letter, as GET reads it.",
+  request: {
+    params: z.object({ letterId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: ReviseLetterRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: LetterRecordSchema } } },
+    400: errorResponse("Nothing to change, a bad date or amount, or a currency without its rate"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse(
+      "Not a draft, a new currency over priced lines, wording written for the client, or terms on the letter",
+    ),
+  },
+});
+
+const updateLineRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/engagement-letters/{letterId}/lines/{lineId}",
+  tags: ["engagement-letters"],
+  summary: "Change a service already on a draft letter",
+  description:
+    "T6.18 S6. Its wording, company, quantity, fee, discount, billing frequency, pricing note, " +
+    "start date and scope texts, judged by the same rules as adding it. A service in a section " +
+    "has no price of its own; move it with `PUT …/pricing`. Answers with the whole letter.",
+  request: {
+    params: z.object({ letterId: z.string().uuid(), lineId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: UpdateLetterLineRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Changed", content: { "application/json": { schema: LetterRecordSchema } } },
+    400: errorResponse("Nothing to change, a blank name, or a price the rules refuse"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter or line at this firm"),
+    409: errorResponse("The letter is no longer a draft, or the company is not the client's"),
+  },
+});
+
 const LetterGroupParams = z.object({ letterId: z.string().uuid(), groupId: z.string().uuid() });
 
 const addFeeGroupRoute = createRoute({
@@ -1394,6 +1589,43 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       id: record.issuingEntity.id,
       displayName: record.issuingEntity.displayName,
     },
+    issuer: {
+      partyId: record.issuingEntity.id,
+      name: record.issuingEntity.displayName,
+      jurisdiction: record.issuerJurisdiction,
+    },
+    totalsByFrequency: record.totalsByFrequency.map((t) => ({
+      frequency: t.frequency,
+      net: fees ? t.net : null,
+      lineCount: t.lineCount,
+      unpricedLineCount: t.unpricedLineCount,
+    })),
+    document: {
+      sections: record.document.sections.map((sec) => ({
+        code: sec.code,
+        title: sec.title,
+        feeGroupId: sec.group === null ? null : sec.group.id,
+        entityNames: sec.entityNames === null ? null : [...sec.entityNames],
+        items: sec.items.map((item) => ({
+          code: item.code,
+          description: item.description,
+          entityNames: item.entityNames === null ? null : [...item.entityNames],
+          beginsOn: item.beginsOn,
+          lineIds: [...item.lineIds],
+        })),
+      })),
+      fees: record.document.fees.map((f) => ({
+        code: f.code,
+        feeGroupId: f.feeGroupId,
+        lineId: f.lineId,
+        description: f.description,
+        billingFrequency: f.billingFrequency,
+        startsOn: f.startsOn,
+        amount: fees ? f.amount : null,
+        pricingNote: f.pricingNote,
+        paymentTerms: fees ? f.paymentTerms : null,
+      })),
+    },
     addressedTo: record.addressedTo === null ? null : { ...record.addressedTo },
     firmSignatory: record.firmSignatory === null ? null : { ...record.firmSignatory },
     supersedes: record.supersedes === null ? null : { ...record.supersedes },
@@ -1639,6 +1871,26 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { letterId } = c.req.valid("param");
+    const record = await deps.service.describe(s.tenantId, letterId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(reviseRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.revise({ tenantId: s.tenantId, letterId, ...body }, s.actor);
+    const record = await deps.service.describe(s.tenantId, letterId);
+    return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(updateLineRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId, lineId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    await deps.service.updateLine({ tenantId: s.tenantId, letterId, lineId, ...body });
     const record = await deps.service.describe(s.tenantId, letterId);
     return c.json(toRecordBody(record, seesFees(c.get("principal"))), 200);
   });

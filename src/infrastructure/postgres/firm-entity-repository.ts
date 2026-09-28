@@ -1,7 +1,8 @@
 // The firm's OWN companies, in Postgres (T6.18).
 //
-// "One of the firm's companies" is `crm.is_firm_entity` (0306): the firm
-// itself, or a company some `crm.firm_entity_preference` row names. The list
+// "One of the firm's companies" is `crm.is_firm_entity`: the firm itself, or a
+// live member of `crm.firm_entity` (0313; before it, any company a routing row
+// named, which let a company vanish when its last country moved). The list
 // below reads exactly those two sources, so the Our companies screen, the
 // issuer picker and every refusal that asks the function agree about who is in.
 //
@@ -64,8 +65,8 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
         -- A picker, so a company the firm put away is not offered.
         WHERE p.archived_at IS NULL
         GROUP BY p.id, p.display_name, o.is_firm_self, le.jurisdiction, le.entity_type,
-                 le.registered_address
-        HAVING o.is_firm_self OR count(fp.id) > 0
+                 le.registered_address, m.id
+        HAVING o.is_firm_self OR m.id IS NOT NULL
         ORDER BY o.is_firm_self DESC, p.display_name
       `;
       return rows.map(toRecord);
@@ -77,8 +78,8 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
       const [row] = await db<FirmEntityRow[]>`${this.select(db)}
         WHERE p.id = ${partyId}
         GROUP BY p.id, p.display_name, o.is_firm_self, le.jurisdiction, le.entity_type,
-                 le.registered_address
-        HAVING o.is_firm_self OR count(fp.id) > 0
+                 le.registered_address, m.id
+        HAVING o.is_firm_self OR m.id IS NOT NULL
       `;
       return row ? toRecord(row) : null;
     });
@@ -140,6 +141,14 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
           registeredAddress:
             e.registeredAddress === null ? null : { lines: [...e.registeredAddress.lines] },
         });
+        // MEMBERSHIP FIRST (0313): the company is the firm's whatever the
+        // routing says afterwards, so moving its country away later cannot
+        // make it vanish.
+        await db`
+          INSERT INTO crm.firm_entity (tenant_id, party_id)
+          VALUES (${e.tenantId}, ${e.partyId})
+          ON CONFLICT (tenant_id, party_id) DO NOTHING
+        `;
         // NOT the preference upsert: this must never move a country another
         // company already issues for. A clash rolls the company back with it.
         const [pref] = await db<{ id: string }[]>`
@@ -191,8 +200,9 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
     });
   }
 
-  /** The shared head of both reads: `crm.is_firm_entity`'s two sources, with
-   *  the registration and the countries the rule sends to each company. */
+  /** The shared head of both reads: `crm.is_firm_entity`'s two sources (the
+   *  firm itself, and a live membership row), with the registration and the
+   *  countries the routing rule sends to each company, which may be none. */
   private select(db: Db) {
     return db`
       SELECT p.id AS party_id, p.display_name AS name, o.is_firm_self,
@@ -203,6 +213,7 @@ export class PostgresFirmEntityRepository implements FirmEntityRepository {
       FROM core.party p
       JOIN core.organization o ON o.party_id = p.id
       LEFT JOIN core.legal_entity le ON le.party_id = p.id
+      LEFT JOIN crm.firm_entity m ON m.party_id = p.id AND m.retired_at IS NULL
       LEFT JOIN crm.firm_entity_preference fp ON fp.firm_entity_party_id = p.id
     `;
   }

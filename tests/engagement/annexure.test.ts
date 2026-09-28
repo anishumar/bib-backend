@@ -195,6 +195,10 @@ describe("the Summary of Fees", () => {
     expect(plan.fees).toEqual([
       {
         code: "A",
+        // The row says which group it is, so a screen can change the fee
+        // where the Summary of Fees states it (T6.18 S6).
+        feeGroupId: "a",
+        lineId: null,
         description: "One-time scope for the group.",
         billingFrequency: "one_time",
         startsOn: "2026-07-01",

@@ -1239,6 +1239,27 @@ BILLING FREQUENCY (`totalsByFrequency`, and the PDF's Summary of Fees now ends w
 because one net that adds a monthly fee to a one-time one is not a number a reader should be shown.
 A multi-currency document would be a new model, not a relaxation of this one.
 
+**A company is the firm's by MEMBERSHIP (0313), not by routing.** `crm.firm_entity` holds one row
+per company the firm issues from, whatever `crm.firm_entity_preference` routes to it; before it,
+re-pointing a company's last country took it off every list with no way back. Three writers keep it
+whole: 0313's backfill, `POST /firm-entities` (same transaction as the company), and a trigger that
+makes any party a routing row names a member (the older way in, which `smoke.sh` and the fixtures
+use). Never deleted; `retired_at` is there for the day something retires one. `crm.is_firm_entity`
+is the firm itself OR a live member.
+
+**A draft LETTER changes in place (T6.18 S6)**, as a proposal does. `PATCH /engagement-letters/{id}`
+revises the head (title, Background, addressee, dates, advance), the currency while no line or
+section row exists at all (live or pulled: their keys to the letter's currency do not cascade, 0017 /
+0083), and the country and issuer while NO TERM is on it (`TERMS_ON_LETTER`: each term was checked
+against the old issuer's law, and a term cannot be taken off). A new issuer or country replaces the
+wording with that company's standard set for that country in the same transaction (D9,
+`PROSE_EDITED` unless `replaceEditedProse`). `PATCH …/lines/{lineId}` changes a line with the add
+rules judged on the line as it will be; a line a section pays for keeps no price. Both answer the
+whole letter. The read carries `issuer.jurisdiction` (whose law a term may name), `totalsByFrequency`
+(a section's fee once, at its frequency) and `document`, the PDF's own `planAnnexure` with each fee
+row's `lineId` / `feeGroupId`. The letter PDF itself is unchanged: its Summary of Fees prints no
+per-frequency total (a re-rendered annexure letter must read as the one its client holds).
+
 ## The Annexure letter, and one fee for several services (0083)
 
 The firm's own engagement-letter format (10X Global's MyDojo letter, July 2026) is a different

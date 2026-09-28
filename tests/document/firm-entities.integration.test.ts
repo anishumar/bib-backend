@@ -12,6 +12,7 @@ import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { PostgresFirmEntityRepository } from "../../src/infrastructure/postgres/firm-entity-repository";
 import { FirmEntityService } from "../../src/usecase/document/firm-entities";
 import { systemIds } from "../../src/platform/ids";
+import { withTenant } from "../../src/db/tenant";
 import { composeProposals } from "../proposal/compose-postgres";
 
 const c = composeProposals();
@@ -165,5 +166,79 @@ describe("the firm's own companies, against real Postgres (T6.18)", () => {
     });
     // The firm itself stops being the fallback, and stays one of the firm's.
     expect(after.entities.find((e) => e.partyId === firmSelf)).toMatchObject({ isFallback: false, isFirmSelf: true });
+  });
+});
+
+// 0313 · a company is the firm's by MEMBERSHIP, not by routing. Before it, a
+// company whose last country was pointed at another company stopped being the
+// firm's: it left every list and every picker, and nothing could bring it back.
+describe("a company stays the firm's with no country routed to it (0313)", () => {
+  it("re-pointing a company's last country away leaves it in the list, with no countries", async () => {
+    const { entities } = await service.list(tenant);
+    const asia = entities.find((e) => e.name === "Test Asia Pte. Ltd.");
+    const gulf = entities.find((e) => e.name === "Test Gulf FZE");
+    if (asia === undefined || gulf === undefined) throw new Error("fixture companies missing");
+    expect(asia.routedCountries).toEqual(["SG"]);
+
+    await c.documents.setPreference({ tenantId: tenant, clientJurisdiction: "SG", firmEntityPartyId: gulf.partyId }, SYSTEM_ACTOR);
+
+    const after = await service.list(tenant);
+    expect(after.entities.find((e) => e.partyId === asia.partyId)).toMatchObject({
+      name: "Test Asia Pte. Ltd.",
+      routedCountries: [],
+      isFallback: false,
+    });
+    const [row] = await c.owner<{ firm: boolean; members: number }[]>`
+      SELECT crm.is_firm_entity(${tenant}::uuid, ${asia.partyId}::uuid) AS firm,
+             (SELECT count(*)::int FROM crm.firm_entity
+               WHERE tenant_id = ${tenant} AND party_id = ${asia.partyId}) AS members
+    `;
+    expect(row).toEqual({ firm: true, members: 1 });
+
+    // And the way back is the ordinary one: route a country to it again.
+    await c.documents.setPreference({ tenantId: tenant, clientJurisdiction: "SG", firmEntityPartyId: asia.partyId }, SYSTEM_ACTOR);
+    expect((await service.list(tenant)).entities.find((e) => e.partyId === asia.partyId)?.routedCountries).toEqual(["SG"]);
+  });
+
+  it("routing a country to a party the older way makes it a member (the trigger)", async () => {
+    const partyId = crypto.randomUUID();
+    await withTenant(c.app, tenant, async (db) => {
+      await db`INSERT INTO core.party (id, tenant_id, kind, display_name)
+               VALUES (${partyId}, ${tenant}, 'organization', 'Test Routed Only Ltd')`;
+      await db`INSERT INTO core.organization (party_id, tenant_id, legal_name)
+               VALUES (${partyId}, ${tenant}, 'Test Routed Only Ltd')`;
+    });
+    expect(await repository.find(tenant, partyId)).toBeNull();
+    await c.documents.setPreference({ tenantId: tenant, clientJurisdiction: "FR", firmEntityPartyId: partyId }, SYSTEM_ACTOR);
+    expect(await repository.find(tenant, partyId)).toMatchObject({ routedCountries: ["FR"] });
+    const [row] = await c.owner<{ members: number }[]>`
+      SELECT count(*)::int AS members FROM crm.firm_entity WHERE tenant_id = ${tenant} AND party_id = ${partyId}
+    `;
+    expect(row?.members).toBe(1);
+  });
+
+  it("the app can neither delete a membership nor move it to another party", async () => {
+    const [m] = await c.owner<{ id: string }[]>`
+      SELECT id FROM crm.firm_entity WHERE tenant_id = ${tenant} AND party_id = ${firmSelf}
+    `;
+    if (m === undefined) throw new Error("the firm itself was not backfilled as a member");
+    await expect(
+      withTenant(c.app, tenant, (db) => db`DELETE FROM crm.firm_entity WHERE id = ${m.id}`),
+    ).rejects.toMatchObject({ code: "42501" });
+    await expect(
+      withTenant(c.app, tenant, (db) => db`UPDATE crm.firm_entity SET party_id = ${firmSelf} WHERE id = ${m.id}`),
+    ).rejects.toMatchObject({ code: "42501" });
+  });
+
+  it("another firm cannot see this firm's memberships", async () => {
+    const [other] = await c.owner<{ id: string }[]>`
+      INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+      VALUES (${`firm-entities-other-${stamp}`}, 'Firm Entities Other', 'INR') RETURNING id
+    `;
+    if (!other) throw new Error("could not create the second tenant");
+    const seen = await withTenant(c.app, other.id, (db) =>
+      db<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.firm_entity WHERE tenant_id = ${tenant}`,
+    );
+    expect(seen[0]?.n).toBe(0);
   });
 });

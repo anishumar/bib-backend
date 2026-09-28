@@ -20,6 +20,7 @@ import type {
 import { sectionCode } from "../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
+import type { BillingFrequency } from "../domain/document/model";
 import type {
   AcceptedQuoteDirectory,
   BillableEngagement,
@@ -32,7 +33,11 @@ import type {
   FirmSignatureImage,
   FirmSignatureRecord,
   LetterFilters,
+  LetterFrequencyTotal,
+  LetterLineEdit,
+  LetterProseLine,
   LetterRecord,
+  LetterRevision,
   LetterSummary,
   LinePricing,
   NewEngagement,
@@ -97,6 +102,9 @@ export class FakeEngagementRepo implements EngagementRepository {
    */
   catalogue: FakeClauseLibrary | null = null;
   partyNames = new Map<string, string>();
+  /** Where each of the firm's companies is registered, as the adapter's join
+   *  to `core.legal_entity` reads it. Unset is "no registration recorded". */
+  issuerJurisdictions = new Map<string, string>();
   /** The accounts behind a firm signatory, so the read model can join a name
    *  the way the Postgres adapter does. */
   userNames = new Map<string, string>();
@@ -272,6 +280,63 @@ export class FakeEngagementRepo implements EngagementRepository {
 
   listLines(tenantId: string, letterId: string): Promise<readonly LetterLine[]> {
     return Promise.resolve(this.liveLines(tenantId, letterId).map(strip));
+  }
+
+  /** The adapter's WHERE: a live line of a live draft, else null. */
+  updateLine(
+    tenantId: string,
+    letterId: string,
+    lineId: string,
+    edit: LetterLineEdit,
+  ): Promise<LetterLine | null> {
+    const letter = this.letters.find((l) => l.tenantId === tenantId && l.id === letterId);
+    if (letter === undefined || letter.status !== "draft" || letter.deletedAt !== null) {
+      return Promise.resolve(null);
+    }
+    const index = this.lines.findIndex(
+      (l) => l.id === lineId && l.engagementLetterId === letterId && !l.removed,
+    );
+    const current = this.lines[index];
+    if (current === undefined) return Promise.resolve(null);
+    const updated = { ...current, ...edit };
+    this.lines[index] = updated;
+    return Promise.resolve(strip(updated));
+  }
+
+  /** The adapter's WHERE: a live draft, and a new currency over no line or
+   *  section row at all; the prose replaced beside it is the document fake's. */
+  revise(
+    tenantId: string,
+    letterId: string,
+    change: LetterRevision,
+    _prose: readonly LetterProseLine[] | null,
+  ): Promise<EngagementLetter | null> {
+    const index = this.letters.findIndex((l) => l.tenantId === tenantId && l.id === letterId);
+    const current = this.letters[index];
+    if (current === undefined || current.status !== "draft" || current.deletedAt !== null) {
+      return Promise.resolve(null);
+    }
+    if (
+      change.currency !== undefined &&
+      change.currency !== current.currency &&
+      (this.lines.some((l) => l.engagementLetterId === letterId) ||
+        this.feeGroups.some((g) => g.engagementLetterId === letterId))
+    ) {
+      return Promise.resolve(null);
+    }
+    const defined = Object.fromEntries(
+      Object.entries(change).filter(([, v]) => v !== undefined),
+    ) as Partial<EngagementLetter>;
+    const updated: EngagementLetter = { ...current, ...defined };
+    this.letters[index] = updated;
+    return Promise.resolve(updated);
+  }
+
+  pricesAnything(_tenantId: string, letterId: string): Promise<boolean> {
+    return Promise.resolve(
+      this.lines.some((l) => l.engagementLetterId === letterId) ||
+        this.feeGroups.some((g) => g.engagementLetterId === letterId),
+    );
   }
 
   addClause(c: NewLetterClause): Promise<LetterClause> {
@@ -495,6 +560,8 @@ export class FakeEngagementRepo implements EngagementRepository {
         id: letter.partyId,
         displayName: this.partyNames.get(letter.partyId) ?? letter.partyId,
       },
+      issuerJurisdiction: this.issuerJurisdictions.get(letter.issuingEntityPartyId) ?? null,
+      totalsByFrequency: byFrequency(lines, groups),
       issuingEntity: {
         id: letter.issuingEntityPartyId,
         displayName: this.partyNames.get(letter.issuingEntityPartyId) ?? letter.issuingEntityPartyId,
@@ -1129,6 +1196,38 @@ function totals(
     currency,
     unpricedLineCount: unpriced,
   };
+}
+
+/** The adapter's per-frequency sum (T6.18 S6): lines priced on their own at
+ *  their frequency, each section's fee once at the section's, in reading order. */
+function byFrequency(
+  lines: readonly (LetterLine & { removed: boolean })[],
+  groups: readonly Pick<FeeGroup, "amount" | "billingFrequency">[],
+): LetterFrequencyTotal[] {
+  const order = ["monthly", "quarterly", "annually", "one_time", "custom"];
+  const rows = new Map<string, { frequency: BillingFrequency | null; net: bigint; lines: number; unpriced: number }>();
+  const add = (frequency: BillingFrequency | null, amount: bigint | null): void => {
+    const key = frequency ?? "";
+    const row = rows.get(key) ?? { frequency, net: 0n, lines: 0, unpriced: 0 };
+    row.lines += 1;
+    if (amount === null) row.unpriced += 1;
+    else row.net += amount;
+    rows.set(key, row);
+  };
+  for (const l of lines) if (l.feeGroupId === null) add(l.billingFrequency, netScaled(l));
+  for (const g of groups) add(g.billingFrequency, scaled(g.amount));
+  return [...rows.values()]
+    .sort((a, b) => {
+      const at = a.frequency === null ? 99 : order.indexOf(a.frequency);
+      const bt = b.frequency === null ? 99 : order.indexOf(b.frequency);
+      return at - bt;
+    })
+    .map((r) => ({
+      frequency: r.frequency,
+      net: unscaled(r.net),
+      lineCount: r.lines,
+      unpricedLineCount: r.unpriced,
+    }));
 }
 
 /**
