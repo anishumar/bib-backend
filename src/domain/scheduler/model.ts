@@ -295,6 +295,12 @@ function labelFor(start: string, recurrence: Recurrence, fiscalYearStartMonth: n
  *      taken to have gone live now — the same conservative reading a
  *      practice-management tool makes of a repeat whose start date is unset,
  *      and the one that never invents history.
+ *   5. THE END AND THE PAUSE (V2.3). A period that BEGINS after the
+ *      engagement's last day (`endsOn`) is not the firm's: ending on 30
+ *      September means no October job, while a month the firm served still
+ *      gets its job. A period that ENDED before the engagement last resumed
+ *      (`resumedOn`) fell inside a pause and never gets one; the month the
+ *      pause ended in does.
  *
  * Pure: every date arrives as an argument, so "a firm onboarded in September
  * with a client since 2024 gets September's job and not twenty months of
@@ -311,6 +317,10 @@ export interface PeriodPlan {
   readonly today: string;
   /** The turnaround after a period ends; null counts as zero for the floor. */
   readonly slaDays: number | null;
+  /** The engagement's last day of service, once it has been ended (V2.3). */
+  readonly endsOn: string | null;
+  /** The day it last resumed after a pause (V2.3). */
+  readonly resumedOn: string | null;
 }
 
 /** A hard ceiling on candidates: a hundred years of months. Far beyond any
@@ -330,7 +340,11 @@ export function periodsToMaterialise(plan: PeriodPlan): readonly Period[] {
   const turnaround = plan.slaDays ?? 0;
 
   return periodsFrom(plan.effectiveFrom, plan.recurrence, count, plan.fiscalYearStartMonth).filter(
-    (p) => p.start <= plan.today && addDays(p.end, turnaround) >= cutoff,
+    (p) =>
+      p.start <= plan.today &&
+      addDays(p.end, turnaround) >= cutoff &&
+      (plan.endsOn === null || p.start <= plan.endsOn) &&
+      (plan.resumedOn === null || p.end >= plan.resumedOn),
   );
 }
 

@@ -1,6 +1,7 @@
 // The seams invoicing needs from the world. Interfaces owned by this use case,
 // stated in its vocabulary; adapters in infrastructure/ implement them.
 import type { DunningBody } from "../../domain/config/model";
+import type { Actor } from "../../domain/ledger/model";
 import type {
   CreditNote,
   CreditReason,
@@ -340,6 +341,23 @@ export interface DunningRepository {
  */
 export interface DunningLadderSource {
   ladderFor(tenantId: string): Promise<DunningBody | null>;
+}
+
+/**
+ * THE ISSUED COPY (2026-09-29): the invoice's PDF, filed once as it is issued,
+ * with the client's name, the lines and the firm's brand as they stand at that
+ * moment. It is the copy of record (`hasCopyOfRecord`): nothing draws it
+ * again, so a client renamed next month does not change what INV/0004 says.
+ * Filed where every rendered document is, and shown to the client in their
+ * portal like any invoice.
+ *
+ * A closure over the document store in `setup/`, as a proposal's PDF is, so
+ * this use case never learns what a PDF is. It NEVER THROWS: the invoice is
+ * issued whatever happens to its paper. A failure is logged, and the invoice
+ * page then offers to make the copy, which shows the renderer's own refusal.
+ */
+export interface IssuedCopies {
+  file(tenantId: string, invoiceId: string, actor: Actor): Promise<void>;
 }
 
 /**

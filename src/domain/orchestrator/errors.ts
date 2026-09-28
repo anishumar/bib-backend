@@ -23,6 +23,7 @@ export class OrchestratorError extends Error {
 
 export type OrchestratorErrorCode =
   | "JOB_NOT_FOUND"
+  | "JOB_CLOSED"
   | "STEP_NOT_FOUND"
   | "NO_TEMPLATE_PUBLISHED"
   | "TEMPLATE_UNREADABLE"
@@ -94,6 +95,17 @@ export class NotStaffHere extends OrchestratorError {
 export class JobNotFound extends OrchestratorError {
   constructor(jobId: string) {
     super("JOB_NOT_FOUND", `No job ${JSON.stringify(jobId)} at this firm`);
+  }
+}
+
+/** The job is done or already cancelled, so there is nothing to cancel (V2.4). */
+export class JobClosed extends OrchestratorError {
+  constructor(jobId: string, status: string) {
+    super(
+      "JOB_CLOSED",
+      `Job ${JSON.stringify(jobId)} is ${status === "done" ? "finished" : "already cancelled"}, ` +
+        `so there is nothing to cancel.`,
+    );
   }
 }
 

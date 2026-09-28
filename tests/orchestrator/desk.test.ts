@@ -13,6 +13,7 @@ import {
   FakeTemplateSource,
   FakeTierSource,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -75,6 +76,7 @@ async function world(steps: readonly TemplateStep[], spoc: string | null, rungs:
   subjects.set(JOB, { workflowTemplateKey: "close", recurrence: "monthly", jurisdiction: "IN" });
   templates.publish(TENANT, "close", template(steps));
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks, jobs, steps: stepRepo, stepChecks: new FakeStepCheckRepo(stepRepo), templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),

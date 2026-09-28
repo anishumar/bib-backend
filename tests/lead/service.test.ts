@@ -31,6 +31,7 @@ import {
   LeadNotFound,
   LostReasonNotApplicable,
   LeadPartyArchived,
+  LeadMatchesOwnCompany,
   LostReasonRequired,
   NoContactDetail,
   OwnerNotStaff,
@@ -290,6 +291,42 @@ describe("a client the firm has ARCHIVED (0305)", () => {
     const result = await service.capture(capture(), ACTOR);
     expect(result.lead.partyId).toBe(partyId);
     expect(result.matchedExistingParty).toBe(true);
+  });
+});
+
+describe("contact details that are one of the firm's OWN companies (0313)", () => {
+  // The firm's own phone, email or PAN typed as a prospect's landed the lead
+  // on the firm's own company, and the firm became its own prospect.
+  async function ownCompanyMatched() {
+    const fakes = makeLeadFakes();
+    fakes.staff.add(TENANT, STAFF);
+    const org = await fakes.party.createOrganization(
+      { tenantId: TENANT, legalName: "10x Global FZE" },
+      ACTOR,
+    );
+    await fakes.party.addIdentifier(
+      { tenantId: TENANT, partyId: org.partyId, type: "pan", value: PAN, validFrom: "2026-01-01" },
+      ACTOR,
+    );
+    fakes.partyRepo.markOwnCompany(org.partyId);
+    return { fakes, service: new LeadService(fakes) };
+  }
+
+  it("refuses the capture by name, as the invoice's BILLS_THE_FIRM does", async () => {
+    const { service } = await ownCompanyMatched();
+    const err = await service.capture(capture(), ACTOR).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LeadMatchesOwnCompany);
+    expect((err as LeadMatchesOwnCompany).code).toBe("CLIENT_IS_OWN_COMPANY");
+    expect((err as Error).message).toMatch(/belong to 10x Global FZE, one of your own companies/);
+  });
+
+  it("writes nothing: no lead, no new contact detail, no event", async () => {
+    const { fakes, service } = await ownCompanyMatched();
+    const before = fakes.events.recorded.length;
+    await service.capture(capture(), ACTOR).catch(() => undefined);
+    expect(fakes.leads.rows).toEqual([]);
+    expect(await fakes.prospects.findByIdentifier(TENANT, "email", EMAIL)).toBeNull();
+    expect(fakes.events.recorded).toHaveLength(before);
   });
 });
 

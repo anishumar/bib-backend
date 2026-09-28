@@ -41,6 +41,7 @@ import { ASK_A_PERSON, decideFor } from "../../domain/agent/model";
 import type { ProposalOutcome } from "../../domain/agent/model";
 import {
   AwaitingCheck,
+  JobClosed,
   JobNotFound,
   NoTemplatePublished,
   CorrectionChangedNothing,
@@ -94,7 +95,7 @@ import {
 } from "../../domain/verification/errors";
 import type { Permission } from "../../domain/authz/model";
 import type { PermissionSource } from "../authz/ports";
-import type { FirmTimeZone, StepDeskResolver } from "./ports";
+import type { FirmTimeZone, JobTasks, StepDeskResolver } from "./ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { bandLabel, withinBand } from "../../domain/orchestrator/model";
 import { resolveOwner } from "../../domain/workitem/model";
@@ -122,6 +123,9 @@ import {
 import { ReviewPointNotFound, ReviewPointsOpen } from "../../domain/verification/errors";
 import type { StepCheckRepository } from "./ports";
 
+/** What a step withdrawn by a job's cancellation says on its row (V2.4). */
+export const JOB_CANCELLED_NOTE = "The job was cancelled.";
+
 export interface Deps {
   readonly jobs: JobRepository;
   readonly steps: JobStepRepository;
@@ -138,6 +142,8 @@ export interface Deps {
   readonly checkers: CheckerDirectory;
   /** Whose desk a job's steps default to (0301). */
   readonly desks: StepDeskResolver;
+  /** The job's tasks, closed when the job is cancelled (V2.4). */
+  readonly jobTasks: JobTasks;
   /** The ticks on a step's sub-steps and on a check's review points (T6.15). */
   readonly stepChecks: StepCheckRepository;
   /** Resolves a role to its permissions, so eligibility can require the same
@@ -517,6 +523,69 @@ export class OrchestratorService {
         (order.get(a.stepKey) ?? Number.MAX_SAFE_INTEGER) -
         (order.get(b.stepKey) ?? Number.MAX_SAFE_INTEGER),
     );
+  }
+
+  /**
+   * A person stops a job for good (V2.4).
+   *
+   * THREE THINGS LEAVE EVERY DESK, IN THIS ORDER. The job's open TASKS first,
+   * through the work-item module, because that is the one half that can refuse
+   * (a firm with no cancelled state) and it refuses before anything moves. Then
+   * the job row, guarded in the write so a job that finished a moment ago stays
+   * finished. Then its open STEPS, each skipped with a note: 0304 lets a step
+   * that had opened keep its start, so "this sat on my desk until the job was
+   * cancelled" stays readable, and every step read that means "on a desk"
+   * (pending, running, blocked) no longer sees it. A step already done stays
+   * done: that work happened. A check waiting on a step of a cancelled job
+   * leaves the checkers' queue by the queue's own read.
+   *
+   * The job's engagement links stay, so the recurring spawn never builds this
+   * period again: cancelling is "we are not doing this one", not "try later".
+   */
+  async cancelJob(
+    input: { readonly tenantId: string; readonly jobId: string },
+    actor: Actor,
+  ): Promise<{ readonly job: Job; readonly stepsWithdrawn: number; readonly tasksCancelled: number }> {
+    const { tenantId, jobId } = input;
+    const job = await this.deps.jobs.findById(tenantId, jobId);
+    if (!job) throw new JobNotFound(jobId);
+    if (job.status === "done" || job.status === "cancelled") throw new JobClosed(jobId, job.status);
+
+    const tasksCancelled = await this.deps.jobTasks.cancelOpenForJob(tenantId, jobId, actor);
+
+    const at = this.deps.clock.now().toISOString();
+    const cancelled = await this.deps.jobs.cancel(tenantId, jobId, at);
+    if (!cancelled) {
+      // Finished between the read and the write. Its tasks were cancelled on
+      // the strength of the read; say what the job is now.
+      const now = await this.deps.jobs.findById(tenantId, jobId);
+      throw new JobClosed(jobId, now?.status ?? "done");
+    }
+
+    const withdrawn: string[] = [];
+    for (const step of await this.deps.steps.listForJob(tenantId, jobId)) {
+      if (step.status !== "pending" && step.status !== "running" && step.status !== "blocked") continue;
+      const moved = await this.deps.steps.transition(tenantId, step.id, step.status, {
+        status: "skipped",
+        at,
+        outcomeNote: JOB_CANCELLED_NOTE,
+      });
+      if (moved) withdrawn.push(step.stepKey);
+    }
+
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "job.cancelled",
+      objectId: jobId,
+      actor,
+      payload: {
+        from: job.status,
+        stepKeys: withdrawn,
+        stepsWithdrawn: withdrawn.length,
+        tasksCancelled,
+      },
+    });
+    return { job: cancelled, stepsWithdrawn: withdrawn.length, tasksCancelled };
   }
 
   /**

@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import { FakeTenantDirectory } from "../../src/testfakes/scheduler";
-import { FakeFirmEntities, FakeInvoiceRepo } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, FakeInvoiceRepo, FakeIssuedCopies } from "../../src/testfakes/invoice";
 import { FakePartyStanding } from "../../src/testfakes/party";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -62,6 +62,7 @@ function setup(): {
     ids: new FakeIds(),
     clock,
     events,
+    issuedCopies: new FakeIssuedCopies(),
   });
   const service = new DunningService({
     timeZones: new FakeFirmTimeZone(),

@@ -28,6 +28,7 @@ export type WorkItemErrorCode =
   | "STATE_RETIRED"
   | "PRIORITY_RETIRED"
   | "NO_INITIAL_STATE"
+  | "NO_CANCELLED_STATE"
   | "NO_DEFAULT_PRIORITY"
   | "LAST_INITIAL_STATE"
   | "LAST_DEFAULT_PRIORITY"
@@ -143,6 +144,18 @@ export class NoInitialState extends WorkItemError {
         `state must be marked as the one new work begins in — the product seeds "Not Started" ` +
         `at every firm, so reaching this means it was un-marked and nothing was marked in its ` +
         `place. Set it on the work-vocabulary screen.`,
+    );
+  }
+}
+
+/** A job was cancelled and its task has nowhere to go (V2.4). */
+export class NoCancelledState extends WorkItemError {
+  constructor() {
+    super(
+      "NO_CANCELLED_STATE",
+      `This firm has no state for cancelled work, so the job's task cannot be closed. Add a ` +
+        `state that is finished but not a success (the product seeds "Cancelled"), or turn the ` +
+        `retired one back on, on the work-vocabulary screen.`,
     );
   }
 }

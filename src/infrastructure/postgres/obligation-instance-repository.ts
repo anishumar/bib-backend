@@ -762,16 +762,21 @@ export class PostgresCalendarSource implements CalendarSource {
       const rows = await db<
         {
           entity_party_id: string; engagement_id: string; effective_from: string;
-          service_entry_id: string;
+          service_entry_id: string; ends_on: string | null;
         }[]
       >`
         SELECT DISTINCT le.party_id AS entity_party_id, e.id AS engagement_id,
                e.effective_from::text AS effective_from,
-               pinned.entry_id AS service_entry_id
+               pinned.entry_id AS service_entry_id,
+               e.ends_on::text AS ends_on
         FROM core.legal_entity le
         JOIN crm.engagement e
           ON e.entity_party_id = le.party_id AND e.tenant_id = le.tenant_id
-         AND e.status = ${GENERATING_STATUS}
+         -- ACTIVE, and ENDED ones up to their last day (V2.3): the generator
+         -- stops each at ends_on, the floor's other end. A PAUSED one
+         -- generates nothing new until it resumes.
+         AND (e.status = ${GENERATING_STATUS}
+              OR (e.status IN ('completed', 'cancelled') AND e.ends_on IS NOT NULL))
         -- INNER from here down (T6.16). These were LEFT joins while a rule
         -- naming NO service reached every live engagement whatever it pinned;
         -- decision 1 ended that reading, so an engagement reaches a rule only
@@ -802,6 +807,7 @@ export class PostgresCalendarSource implements CalendarSource {
         engagementId: r.engagement_id,
         effectiveFrom: r.effective_from,
         serviceEntryId: r.service_entry_id,
+        endsOn: r.ends_on,
       }));
     });
   }

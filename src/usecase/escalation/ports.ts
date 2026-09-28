@@ -150,6 +150,9 @@ export interface EscalationRecord extends EscalationNoticeRow {
   /** Who is BILLED for the work. Null on a filing: an obligation is owed by the
    *  ENTITY and `delivery.obligation_instance` holds no client at all. */
   readonly clientName: string | null;
+  /** The same client by id, so a list can LINK it (V2.1's My day). Null
+   *  exactly where `clientName` is. */
+  readonly clientPartyId: string | null;
   /**
    * WHICH of the client's companies, when that is not the client itself.
    *

@@ -46,6 +46,10 @@ export type EngagementErrorCode =
   | "ALREADY_SUPERSEDED"
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_NOT_ACTIVE"
+  | "ENGAGEMENT_ENDED"
+  | "ENGAGEMENT_NOT_PAUSED"
+  | "END_REASON_REQUIRED"
+  | "INVALID_END_DATE"
   | "SIGNATURE_INCOMPLETE"
   | "SIGNER_UNAVAILABLE"
   | "SIGNATURE_REQUEST_NOT_PENDING"
@@ -56,6 +60,7 @@ export type EngagementErrorCode =
   | "QUOTE_JURISDICTION_UNCLEAR"
   | "QUOTE_NAMES_NO_ENTITY"
   | "PARTY_ARCHIVED"
+  | "CLIENT_IS_OWN_COMPANY"
   | "ISSUER_NOT_A_FIRM_ENTITY"
   | "QUOTE_OF_ANOTHER_CLIENT"
   | "ADDRESSEE_NOT_A_PERSON"
@@ -186,6 +191,18 @@ export class LetterPartyArchived extends EngagementError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+/** The client is one of the firm's own companies: the firm does not sign an
+ *  engagement letter with itself, as an invoice cannot bill it. */
+export class LetterClientIsOwnCompany extends EngagementError {
+  constructor(displayName: string) {
+    super(
+      "CLIENT_IS_OWN_COMPANY",
+      `${displayName} is one of your own companies, so it cannot be the client on an ` +
+        `engagement letter. Choose the client the letter is for.`,
     );
   }
 }
@@ -571,6 +588,56 @@ export class AlreadySuperseded extends EngagementError {
 export class EngagementNotFound extends EngagementError {
   constructor(id: string) {
     super("ENGAGEMENT_NOT_FOUND", `No engagement ${JSON.stringify(id)} at this firm`);
+  }
+}
+
+/** Ended already, so it cannot end, pause or resume (V2.3). A client who
+ *  comes back signs a new letter. */
+export class EngagementEnded extends EngagementError {
+  constructor(endsOn: string | null) {
+    super(
+      "ENGAGEMENT_ENDED",
+      `This engagement has already ended${endsOn === null ? "" : ` (last day ${endsOn})`}. ` +
+        `To take the client back, sign a new engagement letter.`,
+    );
+  }
+}
+
+/** Only running work can be paused (V2.3). */
+export class EngagementNotActive extends EngagementError {
+  constructor(status: string) {
+    super(
+      "ENGAGEMENT_NOT_ACTIVE",
+      status === "paused"
+        ? "This engagement is already paused."
+        : "This engagement has not started: it is waiting for its advance. Record the advance " +
+            "first, or end it.",
+    );
+  }
+}
+
+export class EngagementNotPaused extends EngagementError {
+  constructor() {
+    super("ENGAGEMENT_NOT_PAUSED", "This engagement is not paused, so there is nothing to resume.");
+  }
+}
+
+export class EndReasonRequired extends EngagementError {
+  constructor(max: number) {
+    super(
+      "END_REASON_REQUIRED",
+      `Say why the engagement is ending, in up to ${String(max)} characters.`,
+    );
+  }
+}
+
+export class InvalidEndDate extends EngagementError {
+  constructor(value: string) {
+    super(
+      "INVALID_END_DATE",
+      `${JSON.stringify(value)} is not a calendar day. Give the last day you serve the client, ` +
+        `as YYYY-MM-DD.`,
+    );
   }
 }
 

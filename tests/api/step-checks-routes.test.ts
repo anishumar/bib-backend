@@ -25,6 +25,7 @@ import {
   FakeStepDeskResolver,
   FakeTemplateSource,
   FakeTierSource,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import {
   FakeCheckerDirectory,
@@ -107,6 +108,7 @@ async function world() {
   subjects.set(JOB, { workflowTemplateKey: "close", recurrence: "monthly", jurisdiction: "IN" });
   templates.publish(TENANT, "close", { versionId: "v1", label: "Monthly close", steps: PROCESS });
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks, jobs, steps, stepChecks, templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),
@@ -145,7 +147,7 @@ async function world() {
     });
     await next();
   });
-  registerOrchestratorRoutes(app, { service, grades: { listGrades: () => Promise.resolve([]) } });
+  registerOrchestratorRoutes(app, { service, grades: { listGrades: () => Promise.resolve([]) }, jobs });
 
   const call = async (method: string, path: string, body?: unknown) => {
     const res = await app.request(path, {
@@ -162,7 +164,7 @@ async function world() {
     if (!c) throw new Error("no check is open");
     return c.approval.id;
   };
-  return { service, as, call, subStep, openCheckId };
+  return { service, as, call, subStep, openCheckId, jobs };
 }
 
 const refusal = (r: { body: Record<string, unknown> }) => r.body["error"] as { code: string; reason?: string; message: string };
@@ -298,5 +300,57 @@ describe("PUT /checks/{approvalId}/review-points/{itemKey}, and Approve", () => 
     const r = await w.call("PUT", `/api/v1/checks/${id}/review-points/r1`, { outcome: null });
     expect(r.status).toBe(409);
     expect(refusal(r)).toMatchObject({ code: "CONFLICT", reason: "APPROVAL_ALREADY_DECIDED" });
+  });
+});
+
+describe("GET /my-steps and GET /checks name the job each row belongs to (V2.1)", () => {
+  const ENGAGEMENT = "00000000-0000-4000-8000-0000000001e1";
+  const CLIENT = "00000000-0000-4000-8000-0000000001c1";
+
+  async function named() {
+    const w = await world();
+    await w.jobs.linkEngagements(TENANT, JOB, [ENGAGEMENT]);
+    w.jobs.serviceNames.set(ENGAGEMENT, "Monthly bookkeeping");
+    w.jobs.clientNames.set(ENGAGEMENT, "Kaveri Foods");
+    w.jobs.entityNames.set(ENGAGEMENT, "Kaveri Foods Private Limited");
+    w.jobs.clientPartyIds.set(JOB, CLIENT);
+    w.jobs.dueOns.set(JOB, "2026-10-10");
+    return w;
+  }
+
+  it("gives a step on the caller's desk its client, by id, and the day it is due", async () => {
+    const w = await named();
+    const r = await w.call("GET", "/api/v1/my-steps");
+    expect(r.status).toBe(200);
+    const [step] = r.body["steps"] as Record<string, unknown>[];
+    expect(step?.["job"]).toEqual({
+      clientPartyId: CLIENT,
+      clientName: "Kaveri Foods",
+      entityPartyId: null,
+      entityName: "Kaveri Foods Private Limited",
+      periodLabel: null,
+      services: ["Monthly bookkeeping"],
+      dueOn: "2026-10-10",
+    });
+  });
+
+  it("gives a check in the queue the same, so a checker's list can link the client", async () => {
+    const w = await named();
+    await w.subStep("collect", "s1", { outcome: "done" });
+    await w.subStep("collect", "s2", { outcome: "done" });
+    await w.call("POST", `/api/v1/jobs/${JOB}/steps/collect/complete`);
+    await w.call("POST", `/api/v1/jobs/${JOB}/steps/review/complete`);
+    w.as.user = ANAND;
+    const r = await w.call("GET", "/api/v1/checks");
+    expect(r.status).toBe(200);
+    const [check] = r.body["checks"] as Record<string, unknown>[];
+    expect(check?.["job"]).toMatchObject({ clientPartyId: CLIENT, clientName: "Kaveri Foods", dueOn: "2026-10-10" });
+  });
+
+  it("says null, not a blank client, for a job linked to no engagement", async () => {
+    const w = await world();
+    const r = await w.call("GET", "/api/v1/my-steps");
+    const [step] = r.body["steps"] as Record<string, unknown>[];
+    expect(step?.["job"]).toBeNull();
   });
 });

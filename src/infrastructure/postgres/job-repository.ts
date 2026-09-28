@@ -44,6 +44,10 @@ interface DetailRow {
   service_name: string | null;
   entity_name: string | null;
   client_name: string | null;
+  entity_party_id: string | null;
+  client_party_id: string | null;
+  period_label: string | null;
+  due_on: string | null;
 }
 
 interface ActivationRow {
@@ -63,6 +67,8 @@ interface RecurringRow {
   sla_days: string | null;
   body: Record<string, unknown> | null;
   linked_periods: string[];
+  ends_on: string | null;
+  resumed_on: string | null;
 }
 
 const COLUMNS =
@@ -233,8 +239,22 @@ export class PostgresJobRepository
           je.engagement_id,
           pinned.body->>'name' AS service_name,
           ent.display_name AS entity_name,
-          cl.display_name  AS client_name
+          cl.display_name  AS client_name,
+          ent.id           AS entity_party_id,
+          cl.id            AS client_party_id,
+          j.period_label,
+          -- What a step on this job is due by (V2.1): the earliest date among
+          -- the job's UNFINISHED tasks. Read as text, a DAY, never an instant.
+          (SELECT min(wi.due_on)::text
+             FROM delivery.work_item wi
+             JOIN delivery.work_item_state ws
+               ON ws.id = wi.state_id AND ws.tenant_id = wi.tenant_id
+            WHERE wi.job_id = je.job_id
+              AND wi.tenant_id = je.tenant_id
+              AND NOT ws.is_terminal) AS due_on
         FROM delivery.job_engagement je
+        JOIN delivery.job j
+          ON j.id = je.job_id AND j.tenant_id = je.tenant_id
         -- LEFT all the way down. The link row is the fact that this work is in
         -- this job; everything below it is only how to NAME it. A row that
         -- could not be named must still appear, blank, rather than vanish from
@@ -273,6 +293,10 @@ export class PostgresJobRepository
         out.set(r.job_id, {
           entityName: r.entity_name,
           clientName: r.client_name,
+          entityPartyId: r.entity_party_id,
+          clientPartyId: r.client_party_id,
+          periodLabel: r.period_label,
+          dueOn: r.due_on,
           services: [service],
         });
       }
@@ -380,6 +404,23 @@ export class PostgresJobRepository
     });
   }
 
+  async cancel(tenantId: string, jobId: string, at: string): Promise<Job | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // 0041's CHECK pairs `cancelled` with BOTH timestamps, so a job
+      // cancelled before it ever ran starts and finishes at the same instant:
+      // zero duration, which is what it had. No screen reads a job's start.
+      const [row] = await db<JobRow[]>`
+        UPDATE delivery.job SET
+          status      = 'cancelled',
+          started_at  = COALESCE(started_at, ${at}::timestamptz),
+          finished_at = ${at}::timestamptz
+        WHERE id = ${jobId} AND status NOT IN ('done', 'cancelled')
+        RETURNING ${db.unsafe(COLUMNS)}
+      `;
+      return row ? toJob(row) : null;
+    });
+  }
+
   // ── ActivationFeed ──────────────────────────────────────────────────────────
 
   /**
@@ -415,6 +456,16 @@ export class PostgresJobRepository
         -- which was not better -- it was the same fault, further downstream.
         JOIN crm.engagement e
           ON e.id = ev.object_id AND e.tenant_id = ev.tenant_id
+        -- NOBODY ARCHIVED (V2.4). A client the firm has put away gets no new
+        -- work, and neither does a company of it: the billed party and the
+        -- entity served are both asked. INNER, because an engagement always
+        -- names both.
+        JOIN core.party client
+          ON client.id = e.party_id AND client.tenant_id = e.tenant_id
+         AND client.archived_at IS NULL
+        JOIN core.party served
+          ON served.id = e.entity_party_id AND served.tenant_id = e.tenant_id
+         AND served.archived_at IS NULL
         -- LEFT from here down, and this half matters more. The line, the
         -- pinned version and the live body are needed only for the GROUPING
         -- facts, and a service that cannot be resolved -- unpublished since,
@@ -437,6 +488,9 @@ export class PostgresJobRepository
          AND live.tenant_id = pinned.tenant_id
          AND live.status = 'published'
         WHERE ev.verb = 'contract.activated'
+          -- STILL LIVE (V2.4). An engagement ended or paused before its job
+          -- was built owes no checklist: the activation is history.
+          AND e.status = 'active'
           -- RECURRING SERVICES TAKE THE OTHER ROUTE (T6.13). A pinned body
           -- that says monthly, quarterly or annually is owed a job PER PERIOD
           -- from activeRecurring, never the one-time checklist this feed
@@ -498,6 +552,9 @@ export class PostgresJobRepository
           e.entity_party_id,
           -- A DATE, read as text: the period arithmetic is calendar arithmetic.
           e.effective_from::text       AS effective_from,
+          -- The end and the last resume (V2.3), dates too.
+          e.ends_on::text              AS ends_on,
+          e.resumed_on::text           AS resumed_on,
           -- PINNED: terms of the letter the client signed.
           pinned.body ->> 'recurrence' AS recurrence,
           pinned.body ->> 'slaDays'    AS sla_days,
@@ -519,9 +576,20 @@ export class PostgresJobRepository
           ON live.entry_id = pinned.entry_id
          AND live.tenant_id = pinned.tenant_id
          AND live.status = 'published'
-        WHERE e.status = 'active'
+        -- NOBODY ARCHIVED (V2.4), as the one-time feed above asks.
+        JOIN core.party client
+          ON client.id = e.party_id AND client.tenant_id = e.tenant_id
+         AND client.archived_at IS NULL
+        JOIN core.party served
+          ON served.id = e.entity_party_id AND served.tenant_id = e.tenant_id
+         AND served.archived_at IS NULL
+        -- ACTIVE, and ENDED ones (V2.3): an engagement ended on 31 December
+        -- still owes October to December, and periodsToMaterialise stops it
+        -- at its last day. A paused one owes nothing new until it resumes.
+        WHERE (e.status = 'active' OR (e.status IN ('completed', 'cancelled') AND e.ends_on IS NOT NULL))
           AND pinned.body ->> 'recurrence' IN ('monthly', 'quarterly', 'annually')
-        ORDER BY e.effective_from, e.id
+        -- Active first, so ended ones never crowd running work out of the batch.
+        ORDER BY (e.status <> 'active'), e.effective_from, e.id
         LIMIT ${limit}
       `;
       return rows.map((r) => {
@@ -537,6 +605,8 @@ export class PostgresJobRepository
           recurrence: r.recurrence,
           slaDays: wholeDays(r.sla_days),
           linkedPeriods: r.linked_periods,
+          endsOn: r.ends_on,
+          resumedOn: r.resumed_on,
         };
       });
     });

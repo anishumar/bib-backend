@@ -89,6 +89,12 @@ export interface DescribedDocument {
   /** The client this record belongs to. Null only where the source genuinely
    *  has no party — no renderable kind is in that state today. */
   readonly partyId: string | null;
+  /**
+   * Whether the record has gone to the client: an invoice issued, a letter or
+   * a proposal sent. For an invoice or a letter it decides what a filed copy
+   * is (`hasCopyOfRecord`): a draft copy before, the copy of record after.
+   */
+  readonly isOut: boolean;
   /** Which of the firm's companies issues it — whose logo and cover the page
    *  carries, so a preview can say which company's brand is missing. */
   readonly issuingEntity?: { readonly partyId: string; readonly name: string } | undefined;

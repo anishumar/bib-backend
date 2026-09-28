@@ -14,6 +14,7 @@ import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { FileStoreError } from "../../src/domain/filestore/errors";
+import { CopyAlreadyMade } from "../../src/domain/render/errors";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
 const USER = "22222222-2222-2222-2222-222222222222";
@@ -486,25 +487,28 @@ describe("rendering one of the product's own records", () => {
     expect(record.latestVersion.filename).toBe("EL-2026-0007.pdf");
     expect(record.latestVersion.mediaType).toBe("application/pdf");
 
-    // Attached in the same act, so the letter's own page shows it.
+    // Attached in the same act, so the letter's own page shows it. The
+    // letter has gone out, so this first copy is its copy of record.
     const links = await service.linksOf(TENANT, record.document.id);
-    expect(links[0]?.link.role).toBe("rendered");
+    expect(links[0]?.link.role).toBe("copy_of_record");
     expect(events.recorded.some((e) => e.verb === "document.stored")).toBe(true);
   });
 
   it("re-rendering unchanged data produces the SAME bytes", async () => {
     // The property the whole engine choice rests on. Two documents, because
     // rendering twice is two acts — but ONE blob, because the store is
-    // content-addressed and the bytes are identical.
+    // content-addressed and the bytes are identical. A PROPOSAL, because an
+    // invoice or a letter that went out is filed only once (below).
     const { service, renderSource, blobs } = makeService();
-    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0008"));
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("PR-2026-0008"));
 
     const first = await service.render({
-      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      tenantId: TENANT, kind: "proposal", subjectKind: "proposal",
       subjectRef: ENGAGEMENT, actor,
     });
     const second = await service.render({
-      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      tenantId: TENANT, kind: "proposal", subjectKind: "proposal",
       subjectRef: ENGAGEMENT, actor,
     });
 
@@ -568,6 +572,139 @@ describe("rendering one of the product's own records", () => {
     });
 
     expect(record.document.partyId).toBeNull();
+  });
+});
+
+describe("the copy of record: an invoice or a letter is filed ONCE after it goes out (2026-09-29)", () => {
+  const INVOICE = "88888888-8888-4888-8888-888888888888";
+
+  it("the first copy after Issue is the copy of record, shown to the client", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0004"));
+    renderSource.parties.set(INVOICE, PARTY);
+
+    const record = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+
+    expect(record.document.isClientVisible).toBe(true);
+    expect(record.latestVersion.filename).toBe("INV/2026-27/0004.pdf");
+    const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
+    expect(listed.map((d) => d.role)).toEqual(["copy_of_record"]);
+  });
+
+  it("refuses a second copy BEFORE anything is drawn, and says how to correct an invoice", async () => {
+    // The bug it closes: rename the client, make the PDF again, and the same
+    // invoice number is a second document with a different name on it, in the
+    // client's own portal.
+    const { service, renderSource, documents, blobs } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0004"));
+    await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    renderSource.documents.set(INVOICE, {
+      ...aRenderableDocument("INV/2026-27/0004"),
+      recipient: { name: "Kaveri Foods Private Limited", lines: [] },
+    });
+
+    const second = service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    await expect(second).rejects.toBeInstanceOf(CopyAlreadyMade);
+    await expect(second).rejects.toThrow(/already has its issued copy, made on .*credit note/);
+    expect(documents.documents).toHaveLength(1);
+    expect(blobs.blobs.size).toBe(1);
+  });
+
+  it("a letter that went out is filed once too", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0012"));
+    await service.render({
+      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT, actor,
+    });
+    await expect(
+      service.render({
+        tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+        subjectRef: ENGAGEMENT, actor,
+      }),
+    ).rejects.toThrow(/already has its copy as sent/);
+  });
+
+  it("a DRAFT is printed as the firm's own draft copy, as often as asked, never shown to the client", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0005"));
+    renderSource.parties.set(INVOICE, PARTY);
+    renderSource.drafts.add(INVOICE);
+
+    const first = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+
+    expect(first.document.title).toBe("Draft Engagement Letter INV/2026-27/0005");
+    expect(first.document.isClientVisible).toBe(false);
+    expect(first.latestVersion.filename).toBe("INV/2026-27/0005-draft.pdf");
+    const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
+    expect(listed.map((d) => d.role)).toEqual(["draft_copy", "draft_copy"]);
+  });
+
+  it("draft copies do not count: once issued, its copy of record is still made", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0006"));
+    renderSource.drafts.add(INVOICE);
+    await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    renderSource.drafts.delete(INVOICE);
+
+    const ofRecord = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    expect(ofRecord.document.title).toBe("Engagement Letter INV/2026-27/0006");
+    const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
+    expect(listed.map((d) => d.role).sort()).toEqual(["copy_of_record", "draft_copy"]);
+  });
+
+  it("the copy of record cannot be taken off the invoice; a draft copy can", async () => {
+    // Taking it off would let the next render draw today's rows: the rename
+    // the copy of record exists to keep out, back through a side door.
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0007"));
+    renderSource.drafts.add(INVOICE);
+    const draft = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    renderSource.drafts.delete(INVOICE);
+    const ofRecord = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+
+    await expect(
+      service.withdraw({
+        tenantId: TENANT, documentId: ofRecord.document.id, subjectKind: "invoice", subjectRef: INVOICE, actor,
+      }),
+    ).rejects.toThrow(/is the copy the client was given, so it stays on the record/);
+    await service.withdraw({
+      tenantId: TENANT, documentId: draft.document.id, subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
+    expect(listed.map((d) => d.role)).toEqual(["copy_of_record"]);
+  });
+
+  it("a proposal is untouched: its record is pinned at Send, and its page may copy it again", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("PR-2026-0009"));
+    for (let i = 0; i < 2; i += 1) {
+      await service.render({
+        tenantId: TENANT, kind: "proposal", subjectKind: "proposal", subjectRef: ENGAGEMENT, actor,
+      });
+    }
+    const listed = await service.listForSubject(TENANT, "proposal", ENGAGEMENT);
+    expect(listed.map((d) => d.role)).toEqual(["rendered", "rendered"]);
   });
 });
 

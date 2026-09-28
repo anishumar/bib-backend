@@ -138,14 +138,25 @@ COPY --chown=node:node migrations ./migrations
 # dist/**/*.js as CommonJS and every entrypoint dies on its first import.
 COPY --chown=node:node package.json ./package.json
 
-# Stamped by the pipeline, which already passes --build-arg=COMMIT_SHA. A label
-# rather than an environment variable, because nothing in this codebase may read
-# process.env outside src/config and an unread variable would only invite
-# someone to read it. As a label it answers "which commit is this revision
-# running" from `docker inspect`, or from the digest alone, without starting the
-# container — which is the form the question takes during an incident.
+# Stamped by the pipeline, which passes --build-arg=COMMIT_SHA and
+# --build-arg=BUILD_TIME (cloudbuild.yaml). Twice over, for two readers:
+#
+# - the LABEL answers "which commit is this revision running" from `docker
+#   inspect`, or from the digest alone, without starting the container, which
+#   is the form the question takes during an incident;
+# - the ENV is read by src/config (BIB_BUILD_COMMIT, BIB_BUILD_TIME) and
+#   reported by GET /health, so a tester or a staff screen can ask the running
+#   API which build it is (V0.2) without access to the cloud console.
+#
+# An image built without the args (`gcloud builds submit --tag`, a bare
+# `docker build`) gets empty values, which /health reports as null rather than
+# as a guess.
 ARG COMMIT_SHA=""
+ARG BUILD_TIME=""
 LABEL org.opencontainers.image.revision="$COMMIT_SHA"
+LABEL org.opencontainers.image.created="$BUILD_TIME"
+ENV BIB_BUILD_COMMIT=$COMMIT_SHA
+ENV BIB_BUILD_TIME=$BUILD_TIME
 LABEL org.opencontainers.image.title="bib-backend"
 LABEL org.opencontainers.image.description="bib backend — one image, three entrypoints: dist/cmd/server.js, dist/cmd/worker.js, dist/cmd/migrate.js"
 

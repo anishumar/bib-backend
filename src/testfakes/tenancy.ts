@@ -116,6 +116,15 @@ export class FakeUserRepo implements UserRepository {
   findById(id: string): Promise<UserAccount | null> {
     return Promise.resolve(this.rows.find((r) => r.id === id) ?? null);
   }
+  setDisplayName(id: string, displayName: string): Promise<UserAccount | null> {
+    const index = this.rows.findIndex((r) => r.id === id);
+    const current = this.rows[index];
+    if (current === undefined) return Promise.resolve(null);
+    const updated: UserAccount = { ...current, displayName };
+    this.rows[index] = updated;
+    return Promise.resolve(updated);
+  }
+
   setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null> {
     const index = this.rows.findIndex((r) => r.id === id);
     const current = this.rows[index];

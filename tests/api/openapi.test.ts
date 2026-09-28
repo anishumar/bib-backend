@@ -3,6 +3,8 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { ReadinessService } from "../../src/usecase/readiness/service";
+import { FakeReadinessFacts } from "../../src/testfakes/readiness";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { describe, expect, it } from "vitest";
@@ -14,6 +16,7 @@ import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { EngagementLifecycleService } from "../../src/usecase/engagement/lifecycle";
 import { DocumentService } from "../../src/usecase/document/service";
 import { FileStoreService } from "../../src/usecase/filestore/service";
 import { DashboardService } from "../../src/usecase/dashboard/service";
@@ -45,6 +48,7 @@ import {
   FakeTemplateSource,
   FakeStepDeskResolver,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
@@ -129,7 +133,7 @@ import { makeLedgerFakes } from "../../src/testfakes/ledger";
 import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
@@ -312,7 +316,9 @@ function deps(): RouterDeps {
     staffGrades: { service: new StaffGradeService(makeFakes()) },
     orchestrator: {
       grades: { listGrades: () => Promise.resolve([]) },
+      jobs: { describeJobs: () => Promise.resolve(new Map()) },
       service: new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
@@ -502,10 +508,23 @@ function deps(): RouterDeps {
     engagement: {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions }),
+      lifecycle: new EngagementLifecycleService({
+        lifecycle: new FakeEngagementLifecycle(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
+      }),
     },
     document: {
       service: new DocumentService(makeDocumentFakes()),
       firmEntities: makeFirmEntityFakes().service,
+    },
+    readiness: {
+      service: new ReadinessService({
+        facts: new FakeReadinessFacts(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(new Date("2026-09-28T00:00:00.000Z")),
+      }),
     },
     dashboard: {
       service: new DashboardService({
@@ -625,7 +644,7 @@ const INTERNAL_CLIENTS = [
 ];
 const internal = { authorization: `Bearer ${INTERNAL_KEY}`, "content-type": "application/json" };
 
-function app() {
+function app(build: { commit: string | null; builtAt: string | null } = { commit: null, builtAt: null }) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalClients: INTERNAL_CLIENTS,
@@ -637,6 +656,7 @@ function app() {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build,
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: devPrincipal,
   });
@@ -666,6 +686,7 @@ describe("OpenAPI spec", () => {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
       principalOf: devPrincipal,
     }).request("/openapi.json");
@@ -674,6 +695,33 @@ describe("OpenAPI spec", () => {
 });
 
 describe("the spec and the wire agree", () => {
+  it("documents exactly the fields /health sends, and it names the build (V0.2)", async () => {
+    // /health is the one ops route in the spec: a staff screen reads which
+    // build is live through the generated client, so an undocumented field
+    // would be invisible there.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      paths: Record<string, { get: { responses: { 200: { content: { "application/json": {
+        schema: { properties: Record<string, unknown> };
+      } } } } } }>;
+    };
+    const documented = Object.keys(
+      spec.paths["/health"]?.get.responses[200].content["application/json"].schema.properties ?? {},
+    ).sort();
+
+    const stamped = app({ commit: "32fbca3c0d1e", builtAt: "2026-09-28T18:30:00Z" });
+    const res = await stamped.request("/health", { headers: { origin: "http://localhost:3000" } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(documented);
+    expect(body).toEqual({ status: "ok", commit: "32fbca3c0d1e", builtAt: "2026-09-28T18:30:00Z" });
+    // Read cross-origin by the staff screen, so the exact origin is allowed.
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+
+    // Unstamped is null, never a guess.
+    const bare = (await (await app().request("/health")).json()) as Record<string, unknown>;
+    expect(bare).toEqual({ status: "ok", commit: null, builtAt: null });
+  });
+
   it("documents exactly the fields /auth/me actually sends", async () => {
     // This is the failure that motivated the test. `role` and
     // `commercialVisibility` were on the wire for six tasks while the spec

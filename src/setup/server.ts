@@ -90,6 +90,7 @@ import {
 } from "../infrastructure/postgres/lead-assignment";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
+import { PostgresEngagementLifecycle } from "../infrastructure/postgres/engagement-lifecycle";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
@@ -100,6 +101,8 @@ import { PdfLibRenderer } from "../infrastructure/render/pdf-renderer";
 import { PostgresRenderSource } from "../infrastructure/postgres/render-source";
 import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboard-repository";
 import { DashboardService } from "../usecase/dashboard/service";
+import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-facts";
+import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
@@ -122,6 +125,7 @@ import { esignFor } from "./esign";
 import { blobStoreFor } from "./blobs";
 import { signedCopyFiler } from "./signed-copies";
 import { proposalLinks, proposalPdfs } from "./proposal-delivery";
+import { invoiceIssuedCopies } from "./invoice-copies";
 import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
@@ -159,6 +163,7 @@ import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
+import { EngagementLifecycleService } from "../usecase/engagement/lifecycle";
 import { DocumentService } from "../usecase/document/service";
 import { FirmEntityService } from "../usecase/document/firm-entities";
 import { IdentityService } from "../usecase/identity/service";
@@ -413,6 +418,8 @@ export function wire(cfg: Config, log: Logger): Wired {
   // an API that answered differently from the worker would let somebody tick off
   // work a machine was already doing.
   const orchestrator = new OrchestratorService({
+    // A cancelled job closes its tasks through the work-item module (V2.4).
+    jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
     jobs,
     steps: new PostgresJobStepRepository(pools.app),
@@ -485,20 +492,6 @@ export function wire(cfg: Config, log: Logger): Wired {
   // `create` both allocates and writes — a gapless series cannot be handed to a
   // caller, because a failure between the two spends the number. See the file.
   const invoiceRepository = new PostgresInvoiceRepository(pools.app);
-  const invoices = new InvoiceService({
-    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
-    timeZones: new PostgresFirmTimeZone(pools.app),
-    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
-    // companies and the billed party is not. `DocumentService` owns that list
-    // (it is the issuing-entity rule's), so the "Charged by" picker and this
-    // refusal are one definition. Names and archiving come from the party read.
-    firmEntities: documents,
-    parties: partyRepository,
-    invoices: invoiceRepository,
-    ids: systemIds,
-    clock: systemClock,
-    events: ledger,
-  });
 
   // THE DOCUMENT STORE (T3.6). The blob adapter is chosen here and nowhere
   // else, which is what makes replacing the filesystem stub with an object
@@ -531,12 +524,38 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
   });
 
+  const invoices = new InvoiceService({
+    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
+    // companies and the billed party is not. `DocumentService` owns that list
+    // (it is the issuing-entity rule's), so the "Charged by" picker and this
+    // refusal are one definition. Names and archiving come from the party read.
+    firmEntities: documents,
+    parties: partyRepository,
+    invoices: invoiceRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+    // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
+    // after the document store for this.
+    issuedCopies: invoiceIssuedCopies(fileStore, log),
+  });
+
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
   // rows at read time. The clock and the firm's timezone are for the one
   // figure cut by month (billing by company, Wave 5): which month the FIRM is
   // in now, as every daily sweep asks since T6.14.
   const dashboards = new DashboardService({
     dashboards: new PostgresDashboardRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+  });
+
+  // SETUP READINESS (V2.6). Read-only: eight lines computed from one read, on
+  // the firm's own day.
+  const readiness = new ReadinessService({
+    facts: new PostgresReadinessFacts(pools.app),
     timeZones: new PostgresFirmTimeZone(pools.app),
     clock: systemClock,
   });
@@ -1235,14 +1254,25 @@ export function wire(cfg: Config, log: Logger): Wired {
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
         escalations: { service: escalations },
-        orchestrator: { service: orchestrator, grades: staffGrades },
+        orchestrator: { service: orchestrator, grades: staffGrades, jobs: scheduler },
         scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },
         config: { service: config },
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
-        engagement: { service: engagement, authz },
+        engagement: {
+          service: engagement,
+          authz,
+          // End, pause, resume (V2.3): the engagement row and the calendar
+          // that hangs off it, in one transaction per end.
+          lifecycle: new EngagementLifecycleService({
+            lifecycle: new PostgresEngagementLifecycle(pools.app),
+            timeZones: new PostgresFirmTimeZone(pools.app),
+            clock: systemClock,
+            events: ledger,
+          }),
+        },
         document: {
           service: documents,
           // The firm's own companies (T6.18): created in one transaction, so
@@ -1256,6 +1286,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         invoice: { service: invoices, dunning, authz },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
+        readiness: { service: readiness },
       },
       log,
       {
@@ -1271,6 +1302,9 @@ export function wire(cfg: Config, log: Logger): Wired {
         maxUploadBytes: cfg.storage.maxUploadBytes,
         // HSTS only where the API is actually served over https.
         hstsEnabled: isProductionLike(cfg),
+        // What GET /health reports: the commit and build time stamped into
+        // the image (V0.2), null when it was built without them.
+        build: cfg.build,
         rateLimit: {
           auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },
           general: { limit: cfg.rateLimit.generalPerMinute, windowSeconds: 60 },

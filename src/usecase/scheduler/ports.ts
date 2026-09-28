@@ -59,6 +59,16 @@ export interface JobDetail {
   readonly entityName: string | null;
   /** Who is BILLED. Not the same question, and often not the same party. */
   readonly clientName: string | null;
+  /** The two parties by id, so a list can LINK the client rather than print
+   *  it (V2.1's My day). Null exactly where the name is. */
+  readonly clientPartyId: string | null;
+  readonly entityPartyId: string | null;
+  /** The job's own period ("Aug 2026"), null on a job that is not per period. */
+  readonly periodLabel: string | null;
+  /** The EARLIEST due day of the job's unfinished tasks, `YYYY-MM-DD` — what a
+   *  step on this job is due by, as the person doing it reads it. Null when no
+   *  open task of the job carries a date. */
+  readonly dueOn: string | null;
   /** In the order their advances were recorded — the order the client bought
    *  them in, which is the order a merged card should read. */
   readonly services: readonly JobService[];
@@ -157,6 +167,13 @@ export interface JobRepository {
    * Returns whether this call was the one that set it.
    */
   pinTemplate(tenantId: string, jobId: string, versionId: string): Promise<boolean>;
+  /**
+   * Cancel a job that is still open (V2.4). The guard is in the write, so a
+   * job that finished a moment ago stays finished: null means it was already
+   * `done` or `cancelled`. Its engagement links are untouched, so the period
+   * is never spawned again.
+   */
+  cancel(tenantId: string, jobId: string, at: string): Promise<Job | null>;
 }
 
 /**
@@ -317,10 +334,16 @@ export interface RecurringEngagement {
   readonly slaDays: number | null;
   /** `period_start` of every link row this engagement already has. */
   readonly linkedPeriods: readonly string[];
+  /** Its last day of service when it has been ended (V2.3): periods that
+   *  begin after it get no job. */
+  readonly endsOn: string | null;
+  /** The day it last resumed after a pause (V2.3). */
+  readonly resumedOn: string | null;
 }
 
 export interface RecurringEngagementFeed {
-  /** Active recurring engagements at this firm, oldest start first. */
+  /** Active recurring engagements at this firm, oldest start first, and the
+   *  ENDED ones that still owe periods up to their last day (V2.3). */
   activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]>;
 }
 

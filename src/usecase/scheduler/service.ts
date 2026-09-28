@@ -497,6 +497,8 @@ export class SchedulerService {
         floor,
         today,
         slaDays: row.slaDays,
+        endsOn: row.endsOn,
+        resumedOn: row.resumedOn,
       });
       for (const period of periods) {
         if (row.linkedPeriods.includes(period.start)) continue;

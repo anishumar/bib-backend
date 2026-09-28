@@ -14,6 +14,7 @@
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import { mayBeWithdrawn } from "../../domain/obligation/model";
+import type { WithdrawnReason } from "../../domain/obligation/model";
 import { lockChainForRemoval } from "./obligation-chain-lock";
 import type {
   RuleServiceLinkRepository,
@@ -173,164 +174,203 @@ export class PostgresRuleServiceLinkRepository implements RuleServiceLinkReposit
       `;
       if (removed.length === 0) return null;
 
-      // ── 2. this service's rows on this chain, and what still covers them ─
-      //
-      // "This service's" is the row's own ENGAGEMENT: the engagement whose
-      // pinned letter-line version belongs to the service being removed. A row
-      // a different service's engagement holds is that service's, and is not
-      // touched or counted.
-      //
-      // "What still covers it" is the question the generator would ask
-      // tomorrow: another ACTIVE engagement of the same entity whose service
-      // still has a LIVE link to this chain, AND which had started by the
-      // row's statutory date. That last half is the generator's own floor
-      // (`generateReport` skips a subject whose `effectiveFrom` is after the
-      // period's statutory date), and without it a signed engagement starting
-      // in December counted as cover for September's return: the row was kept
-      // and moved onto an engagement that would never have been given it, and
-      // nothing withdrew it afterwards. With it, cover here and a proposal
-      // there are one answer. The removal above is visible to this statement
-      // (same transaction), so the service being removed can never be its own
-      // cover. When there are several, the one chosen is the earliest to
-      // start, then the lowest id: `subjectsFor`'s order, so the row carries
-      // the engagement the generator would have given it.
-      //
-      // Settled history (a terminal state, already past) is left out entirely:
-      // years of filed returns were never going to move, and counting them as
-      // "kept" would drown the number a partner reads.
-      const rows = await db<CandidateRow[]>`
-        SELECT oi.id,
-               oi.engagement_id,
-               oi.work_item_id,
-               oi.filed_on::text,
-               ${db.unsafe(isoInstant("oi.resolved_at", "resolved_at"))},
-               oi.statutory_due_on::text,
-               s.is_terminal,
-               s.needs_decision,
-               cover.engagement_id AS cover_engagement_id
-        FROM delivery.obligation_instance oi
-        JOIN delivery.obligation_state s
-          ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
-        JOIN crm.engagement e
-          ON e.id = oi.engagement_id AND e.tenant_id = oi.tenant_id
-        JOIN crm.engagement_letter_line ln
-          ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
-        JOIN config.version pinned
-          ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
-        LEFT JOIN LATERAL (
-          SELECT e2.id AS engagement_id
-          FROM crm.engagement e2
-          JOIN crm.engagement_letter_line ln2
-            ON ln2.id = e2.engagement_letter_line_id AND ln2.tenant_id = e2.tenant_id
-          JOIN config.version p2
-            ON p2.id = ln2.service_version_id AND p2.tenant_id = ln2.tenant_id
-          JOIN delivery.obligation_rule_service l2
-            ON l2.tenant_id = e2.tenant_id
-           AND l2.lineage_id = oi.lineage_id
-           AND l2.service_entry_id = p2.entry_id
-           AND l2.unlinked_at IS NULL
-          WHERE e2.tenant_id = oi.tenant_id
-            AND e2.entity_party_id = oi.entity_party_id
-            AND e2.status = 'active'
-            AND e2.effective_from <= oi.statutory_due_on
-          ORDER BY e2.effective_from, e2.id
-          LIMIT 1
-        ) cover ON true
-        WHERE oi.lineage_id = ${input.lineageId}
-          AND pinned.entry_id = ${input.serviceEntryId}
-          AND oi.withdrawn_at IS NULL
-          AND (NOT s.is_terminal OR oi.statutory_due_on >= ${input.firmToday}::date)
-      `;
-
-      // ── 3. classify, with the domain's own rule ─────────────────────────
-      const withdrawIds: string[] = [];
-      const repoint: { id: string; engagementId: string }[] = [];
-      let keptStarted = 0;
-      let keptPastDue = 0;
-      let keptCoveredElsewhere = 0;
-      for (const r of rows) {
-        const touched = r.work_item_id !== null || r.filed_on !== null || r.resolved_at !== null;
-        const eligible = mayBeWithdrawn(
-          {
-            workItemId: r.work_item_id,
-            filedOn: r.filed_on,
-            resolvedAt: r.resolved_at,
-            statutoryDueOn: r.statutory_due_on,
-            withdrawnAt: null,
-          },
-          { isTerminal: r.is_terminal, needsDecision: r.needs_decision },
-          input.firmToday,
-        );
-        if (eligible && r.cover_engagement_id === null) withdrawIds.push(r.id);
-        else if (eligible) keptCoveredElsewhere += 1;
-        else if (touched) keptStarted += 1;
-        else keptPastDue += 1;
-
-        // RE-POINTED, so the task it may yet raise is routed by the service
-        // that owes it now. Only rows nobody has started: a started or filed
-        // row keeps the engagement its work was done under, which is history.
-        if (
-          !touched &&
-          !r.is_terminal &&
-          r.cover_engagement_id !== null &&
-          r.cover_engagement_id !== r.engagement_id
-        ) {
-          repoint.push({ id: r.id, engagementId: r.cover_engagement_id });
-        }
-      }
-
-      // ── 4. the withdrawal, with the guard said again ────────────────────
-      //
-      // The read above is a snapshot. The UPDATE repeats every condition on
-      // the row itself, so a task raised in between keeps its filing, and that
-      // filing is then counted as started rather than as withdrawn.
-      const withdrawn =
-        withdrawIds.length === 0
-          ? []
-          : await db<{ id: string }[]>`
-              UPDATE delivery.obligation_instance AS oi
-              SET withdrawn_at = now(),
-                  withdrawn_by_user_id = ${input.byUserId},
-                  withdrawn_reason = 'service_unlinked'
-              FROM delivery.obligation_state s
-              WHERE oi.id = ANY(${db.array(withdrawIds)}::uuid[])
-                AND s.id = oi.state_id AND s.tenant_id = oi.tenant_id
-                AND oi.withdrawn_at IS NULL
-                AND oi.work_item_id IS NULL
-                AND oi.filed_on IS NULL
-                AND oi.resolved_at IS NULL
-                AND oi.statutory_due_on >= ${input.firmToday}::date
-                AND NOT s.is_terminal
-                AND NOT s.needs_decision
-              RETURNING oi.id
-            `;
-      keptStarted += withdrawIds.length - withdrawn.length;
-
-      // ── 5. the re-pointing, same guard ──────────────────────────────────
-      const repointed =
-        repoint.length === 0
-          ? []
-          : await db<{ id: string }[]>`
-              UPDATE delivery.obligation_instance AS o
-              SET engagement_id = r."engagementId"
-              FROM jsonb_to_recordset(${JSON.stringify(repoint)}::text::jsonb)
-                AS r(id uuid, "engagementId" uuid)
-              WHERE o.id = r.id
-                AND o.withdrawn_at IS NULL
-                AND o.work_item_id IS NULL
-                AND o.filed_on IS NULL
-                AND o.resolved_at IS NULL
-              RETURNING o.id
-            `;
-
-      return {
-        withdrawn: withdrawn.length,
-        kept: keptStarted + keptPastDue + keptCoveredElsewhere,
-        keptStarted,
-        keptPastDue,
-        keptCoveredElsewhere,
-        repointed: repointed.length,
-      };
+      // ── 2.-5. withdraw what nothing else covers, re-point what something does
+      return withdrawUncovered(
+        db,
+        { kind: "service", lineageId: input.lineageId, serviceEntryId: input.serviceEntryId },
+        { byUserId: input.byUserId, firmToday: input.firmToday, reason: "service_unlinked" },
+      );
     });
   }
+}
+
+/**
+ * Which calendar rows a withdrawal is about. Removing a filing from a service
+ * (T6.16): that service's rows on that chain. Ending an engagement (V2.3): the
+ * engagement's rows for periods that begin AFTER its last day.
+ */
+export type WithdrawalScope =
+  | { readonly kind: "service"; readonly lineageId: string; readonly serviceEntryId: string }
+  | { readonly kind: "engagement"; readonly engagementId: string; readonly after: string };
+
+/**
+ * THE ONE WITHDRAWAL (T6.16, reused by V2.3). Inside the caller's transaction,
+ * after the caller has taken the chain lock(s) and made the change that
+ * removes the cover (the link removed, or the engagement ended): classify the
+ * scope's rows with the domain's own rule, withdraw the untouched upcoming ones
+ * nothing else covers, re-point the ones another live engagement still covers,
+ * and count the rest by reason. Every condition is said again in the writes,
+ * so a task raised in between keeps its filing.
+ */
+export async function withdrawUncovered(
+  db: Db,
+  scope: WithdrawalScope,
+  input: {
+    readonly byUserId: string | null;
+    readonly firmToday: string;
+    readonly reason: WithdrawnReason;
+  },
+): Promise<UnlinkOutcome> {
+  // ── 2. the scope's rows, and what still covers them ────────────────
+  //
+  // For a SERVICE removal, "this service's" is the row's own ENGAGEMENT: the
+  // engagement whose pinned letter-line version belongs to the service being
+  // removed. A row a different service's engagement holds is that service's,
+  // and is not touched or counted. For an ENDED engagement (V2.3), its own
+  // rows for periods that begin after its last day.
+  //
+  // "What still covers it" is the question the generator would ask
+  // tomorrow: another ACTIVE engagement of the same entity whose service
+  // still has a LIVE link to this chain, AND which had started by the
+  // row's statutory date. That last half is the generator's own floor
+  // (`generateReport` skips a subject whose `effectiveFrom` is after the
+  // period's statutory date), and without it a signed engagement starting
+  // in December counted as cover for September's return: the row was kept
+  // and moved onto an engagement that would never have been given it, and
+  // nothing withdrew it afterwards. With it, cover here and a proposal
+  // there are one answer. The caller's change (the link removed, or the
+  // engagement ended) is visible to this statement (same transaction), so
+  // the service or engagement going away can never be its own cover. When there are several, the one chosen is the earliest to
+  // start, then the lowest id: `subjectsFor`'s order, so the row carries
+  // the engagement the generator would have given it.
+  //
+  // Settled history (a terminal state, already past) is left out entirely:
+  // years of filed returns were never going to move, and counting them as
+  // "kept" would drown the number a partner reads.
+  const rows = await db<CandidateRow[]>`
+    SELECT oi.id,
+           oi.engagement_id,
+           oi.work_item_id,
+           oi.filed_on::text,
+           ${db.unsafe(isoInstant("oi.resolved_at", "resolved_at"))},
+           oi.statutory_due_on::text,
+           s.is_terminal,
+           s.needs_decision,
+           cover.engagement_id AS cover_engagement_id
+    FROM delivery.obligation_instance oi
+    JOIN delivery.obligation_state s
+      ON s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+    JOIN crm.engagement e
+      ON e.id = oi.engagement_id AND e.tenant_id = oi.tenant_id
+    JOIN crm.engagement_letter_line ln
+      ON ln.id = e.engagement_letter_line_id AND ln.tenant_id = e.tenant_id
+    JOIN config.version pinned
+      ON pinned.id = ln.service_version_id AND pinned.tenant_id = ln.tenant_id
+    LEFT JOIN LATERAL (
+      SELECT e2.id AS engagement_id
+      FROM crm.engagement e2
+      JOIN crm.engagement_letter_line ln2
+        ON ln2.id = e2.engagement_letter_line_id AND ln2.tenant_id = e2.tenant_id
+      JOIN config.version p2
+        ON p2.id = ln2.service_version_id AND p2.tenant_id = ln2.tenant_id
+      JOIN delivery.obligation_rule_service l2
+        ON l2.tenant_id = e2.tenant_id
+       AND l2.lineage_id = oi.lineage_id
+       AND l2.service_entry_id = p2.entry_id
+       AND l2.unlinked_at IS NULL
+      WHERE e2.tenant_id = oi.tenant_id
+        AND e2.entity_party_id = oi.entity_party_id
+        AND e2.status = 'active'
+        AND e2.effective_from <= oi.statutory_due_on
+      ORDER BY e2.effective_from, e2.id
+      LIMIT 1
+    ) cover ON true
+    WHERE ${
+      scope.kind === "service"
+        ? db`oi.lineage_id = ${scope.lineageId} AND pinned.entry_id = ${scope.serviceEntryId}`
+        : db`oi.engagement_id = ${scope.engagementId} AND oi.period_start > ${scope.after}::date`
+    }
+      AND oi.withdrawn_at IS NULL
+      AND (NOT s.is_terminal OR oi.statutory_due_on >= ${input.firmToday}::date)
+  `;
+
+  // ── 3. classify, with the domain's own rule ─────────────────────────
+  const withdrawIds: string[] = [];
+  const repoint: { id: string; engagementId: string }[] = [];
+  let keptStarted = 0;
+  let keptPastDue = 0;
+  let keptCoveredElsewhere = 0;
+  for (const r of rows) {
+    const touched = r.work_item_id !== null || r.filed_on !== null || r.resolved_at !== null;
+    const eligible = mayBeWithdrawn(
+      {
+        workItemId: r.work_item_id,
+        filedOn: r.filed_on,
+        resolvedAt: r.resolved_at,
+        statutoryDueOn: r.statutory_due_on,
+        withdrawnAt: null,
+      },
+      { isTerminal: r.is_terminal, needsDecision: r.needs_decision },
+      input.firmToday,
+    );
+    if (eligible && r.cover_engagement_id === null) withdrawIds.push(r.id);
+    else if (eligible) keptCoveredElsewhere += 1;
+    else if (touched) keptStarted += 1;
+    else keptPastDue += 1;
+
+    // RE-POINTED, so the task it may yet raise is routed by the service
+    // that owes it now. Only rows nobody has started: a started or filed
+    // row keeps the engagement its work was done under, which is history.
+    if (
+      !touched &&
+      !r.is_terminal &&
+      r.cover_engagement_id !== null &&
+      r.cover_engagement_id !== r.engagement_id
+    ) {
+      repoint.push({ id: r.id, engagementId: r.cover_engagement_id });
+    }
+  }
+
+  // ── 4. the withdrawal, with the guard said again ────────────────────
+  //
+  // The read above is a snapshot. The UPDATE repeats every condition on
+  // the row itself, so a task raised in between keeps its filing, and that
+  // filing is then counted as started rather than as withdrawn.
+  const withdrawn =
+    withdrawIds.length === 0
+      ? []
+      : await db<{ id: string }[]>`
+          UPDATE delivery.obligation_instance AS oi
+          SET withdrawn_at = now(),
+              withdrawn_by_user_id = ${input.byUserId},
+              withdrawn_reason = ${input.reason}
+          FROM delivery.obligation_state s
+          WHERE oi.id = ANY(${db.array(withdrawIds)}::uuid[])
+            AND s.id = oi.state_id AND s.tenant_id = oi.tenant_id
+            AND oi.withdrawn_at IS NULL
+            AND oi.work_item_id IS NULL
+            AND oi.filed_on IS NULL
+            AND oi.resolved_at IS NULL
+            AND oi.statutory_due_on >= ${input.firmToday}::date
+            AND NOT s.is_terminal
+            AND NOT s.needs_decision
+          RETURNING oi.id
+        `;
+  keptStarted += withdrawIds.length - withdrawn.length;
+
+  // ── 5. the re-pointing, same guard ──────────────────────────────────
+  const repointed =
+    repoint.length === 0
+      ? []
+      : await db<{ id: string }[]>`
+          UPDATE delivery.obligation_instance AS o
+          SET engagement_id = r."engagementId"
+          FROM jsonb_to_recordset(${JSON.stringify(repoint)}::text::jsonb)
+            AS r(id uuid, "engagementId" uuid)
+          WHERE o.id = r.id
+            AND o.withdrawn_at IS NULL
+            AND o.work_item_id IS NULL
+            AND o.filed_on IS NULL
+            AND o.resolved_at IS NULL
+          RETURNING o.id
+        `;
+
+  return {
+    withdrawn: withdrawn.length,
+    kept: keptStarted + keptPastDue + keptCoveredElsewhere,
+    keptStarted,
+    keptPastDue,
+    keptCoveredElsewhere,
+    repointed: repointed.length,
+  };
 }

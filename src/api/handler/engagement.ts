@@ -17,6 +17,7 @@ import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { EngagementService } from "../../usecase/engagement/service";
+import type { EngagementLifecycleService } from "../../usecase/engagement/lifecycle";
 import type {
   EngagementRecord,
   FeeGroupRecord,
@@ -35,6 +36,8 @@ import type { BillingFrequency } from "../../domain/document/model";
 export interface EngagementDeps {
   readonly service: EngagementService;
   readonly authz: AuthzService;
+  /** End, pause and resume an engagement (V2.3). */
+  readonly lifecycle: EngagementLifecycleService;
 }
 
 export const LETTER_STATUS_VALUES = [
@@ -406,7 +409,17 @@ const EngagementSchema = z
     /** The day work begins, resolved at signature from line, then letter, then
      *  the signature date. This is what a scheduler plans from. */
     effectiveFrom: DaySchema,
+    /** Its LAST day of service, once it has been ended (V2.3). Periods that
+     *  begin after it get no job and no filing. */
     endsOn: DaySchema.nullable(),
+    /** Why it ended, in the firm's words. Null until it is ended. */
+    endReason: z.string().nullable(),
+    /** When the end was recorded. */
+    endedAt: z.string().nullable(),
+    /** When it was paused, while it is paused. */
+    pausedAt: z.string().nullable(),
+    /** The firm's day it last resumed after a pause. */
+    resumedOn: DaySchema.nullable(),
   })
   .openapi("Engagement");
 
@@ -916,6 +929,8 @@ const BillableEngagementSchema = z
     }),
     effectiveFrom: DaySchema,
     endsOn: DaySchema.nullable(),
+    /** Why it ended (V2.3), in the firm's words. Null until it is ended. */
+    endReason: z.string().nullable(),
     feeGroup: z
       .object({
         id: z.string().uuid(),
@@ -1440,6 +1455,107 @@ const withdrawRoute = createRoute({
   },
 });
 
+// ── An engagement's life after signature (V2.3) ─────────────────────────────
+
+const EngagementParam = z.object({ engagementId: z.string().uuid() });
+
+const EndEngagementBody = z
+  .object({
+    endsOn: DaySchema.openapi({
+      description:
+        "The LAST day the firm serves it, YYYY-MM-DD. Periods that begin after it get no job " +
+        "and no filing; its untouched filings for them are withdrawn. A day before its work " +
+        "began ends it as cancelled.",
+      example: "2026-09-30",
+    }),
+    reason: z.string().max(2000).openapi({
+      description: "Why it is ending, in your words. Kept on the engagement, never in the audit log.",
+      example: "Client moved their books to another firm.",
+    }),
+  })
+  .openapi("EndEngagement");
+
+const EngagementEndedSchema = z
+  .object({
+    engagement: EngagementSchema,
+    filings: z.object({
+      withdrawn: z.number().int(),
+      kept: z.number().int(),
+      keptStarted: z.number().int(),
+      keptPastDue: z.number().int(),
+      keptCoveredElsewhere: z.number().int(),
+      repointed: z.number().int(),
+    }),
+    openJobsAfterEnd: z
+      .array(z.object({ jobId: z.string().uuid(), periodLabel: z.string().nullable() }))
+      .openapi({
+        description:
+          "Jobs already on the board for periods after the end. Ending leaves them; cancel each " +
+          "on its job page.",
+      }),
+  })
+  .openapi("EngagementEnded");
+
+const endEngagementRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagements/{engagementId}/end",
+  tags: ["engagement-letters"],
+  summary: "End an engagement on its last day of service",
+  description:
+    "The status changes at once (completed, or cancelled when the end falls before the work " +
+    "began), so it leaves MRR today. Work up to the last day still spawns; its untouched " +
+    "upcoming filings for later periods are withdrawn in the same transaction. The signed " +
+    "letter is not touched.",
+  request: {
+    params: EngagementParam,
+    body: { content: { "application/json": { schema: EndEngagementBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Ended", content: { "application/json": { schema: EngagementEndedSchema } } },
+    400: errorResponse("No reason, or the day is not a calendar day"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such engagement at this firm"),
+    409: errorResponse("It has already ended"),
+  },
+});
+
+const pauseEngagementRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagements/{engagementId}/pause",
+  tags: ["engagement-letters"],
+  summary: "Pause running work",
+  description:
+    "No new jobs and no new filings until it resumes. Nothing already on the board or the " +
+    "calendar moves. It leaves MRR while paused.",
+  request: { params: EngagementParam },
+  responses: {
+    200: { description: "Paused", content: { "application/json": { schema: EngagementSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such engagement at this firm"),
+    409: errorResponse("It is not running: waiting for its advance, already paused, or ended"),
+  },
+});
+
+const resumeEngagementRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagements/{engagementId}/resume",
+  tags: ["engagement-letters"],
+  summary: "Resume a paused engagement",
+  description:
+    "Work spawns again from the firm's today. A period that ended while it was paused gets no " +
+    "job; a filing that fell due meanwhile comes back, as missed if its date has passed.",
+  request: { params: EngagementParam },
+  responses: {
+    200: { description: "Resumed", content: { "application/json": { schema: EngagementSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such engagement at this firm"),
+    409: errorResponse("It is not paused, or it has ended"),
+  },
+});
+
 const signRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/signature",
@@ -1574,6 +1690,10 @@ function toEngagementBody(r: EngagementRecord): z.infer<typeof EngagementSchema>
     activatedAt: r.engagement.activatedAt,
     effectiveFrom: r.engagement.effectiveFrom,
     endsOn: r.engagement.endsOn,
+    endReason: r.engagement.endReason,
+    endedAt: r.engagement.endedAt,
+    pausedAt: r.engagement.pausedAt,
+    resumedOn: r.engagement.resumedOn,
   };
 }
 
@@ -1899,6 +2019,7 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
           status: e.status,
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
+          endReason: e.endReason,
           feeGroup:
             e.feeGroup === null
               ? null
@@ -2090,6 +2211,48 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const { letterId } = c.req.valid("param");
     const withdrawn = await deps.service.withdraw(s.tenantId, letterId, s.actor);
     return c.json(toLetterBody(withdrawn, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(endEngagementRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { engagementId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const out = await deps.lifecycle.end(
+      { tenantId: s.tenantId, engagementId, endsOn: body.endsOn, reason: body.reason },
+      s.actor,
+    );
+    return c.json(
+      {
+        engagement: toEngagementBody(out.record),
+        filings: {
+          withdrawn: out.filings.withdrawn,
+          kept: out.filings.kept,
+          keptStarted: out.filings.keptStarted,
+          keptPastDue: out.filings.keptPastDue,
+          keptCoveredElsewhere: out.filings.keptCoveredElsewhere,
+          repointed: out.filings.repointed,
+        },
+        openJobsAfterEnd: out.openJobsAfterEnd.map((j) => ({ jobId: j.jobId, periodLabel: j.periodLabel })),
+      },
+      200,
+    );
+  });
+
+  app.openapi(pauseEngagementRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { engagementId } = c.req.valid("param");
+    const record = await deps.lifecycle.pause({ tenantId: s.tenantId, engagementId }, s.actor);
+    return c.json(toEngagementBody(record), 200);
+  });
+
+  app.openapi(resumeEngagementRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { engagementId } = c.req.valid("param");
+    const record = await deps.lifecycle.resume({ tenantId: s.tenantId, engagementId }, s.actor);
+    return c.json(toEngagementBody(record), 200);
   });
 
   app.openapi(signRoute, async (c) => {

@@ -230,6 +230,34 @@ the moment somebody decides to hand it out. Reading is `config:read` — an asso
 from the catalogue. And a publish that would leave no role carrying `tenant:admin` is
 refused: it is unrecoverable from inside the product.
 
+## Setup readiness — is the firm set up well enough to run its work (V2.6, 2026-09-28)
+
+`GET /api/v1/tenancy/readiness` (`tenant:admin`): eight lines, each `done` or naming its gaps.
+Setting up a firm is about sixteen ordered steps and several fail SILENTLY (a client with no
+SPOC gets work on nobody's desk, no ladder escalates nothing, an unconfirmed rule files
+nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
+
+- **Computed on every read, never stored or ticked.** Fixing a gap turns its line done on the
+  next read. `domain/readiness/model.ts` is the rules (pure, `tests/readiness/model.test.ts`);
+  `PostgresReadinessFacts` reads every fact in ONE `withTenant` on the FIRM's day
+  (`dayInZone`), so all eight describe one moment (`readiness.integration.test.ts` rebuilds the
+  QA state and fixes gaps).
+- **Each fact restates a rule the product already applies**, so a line never disagrees with
+  what it predicts: a service's Dept is the LIVE version's `module` (routing's rule); an
+  assignment or portal grant is in force on `day` half-open; a rule generates when active,
+  dated, not event-driven, confirmed and linked (the generator's predicate).
+- **The lines** (in setup order): `deadlines` (compliance_policy `missedFromOn` and
+  `fiscalYearStartMonth`), `reporting_lines` (only where a PUBLISHED check rule is
+  `reporting_line` alone; `_or_rank` falls back to rank; the firm's top rung is never asked for a
+  manager, an ungraded person is), `request_routing` (not `none`), `processes` (every live service
+  names a published `workflow_template`), `compliance_rules` (at least one generating, and no
+  linked rule left unconfirmed: which services OUGHT to file is not ours to say), `ladders`
+  (escalation, chaser and nudge each PUBLISHED: never their days, decision D3 is open),
+  `account_team` (every client with an active engagement has a Key Manager and a SPOC for each
+  Dept its services name), `portal_contacts` (each such client has a live portal login).
+- **The API ships codes, the screen ships words.** `gaps[].missing` is a closed vocabulary per
+  line (documented on the schema); `id`/`ref` let the screen link the client or service.
+
 ## Firm administration — the roster is the other half of access control
 
 `/api/v1/tenancy/members` is a firm running itself: who works here, what their role is, and
@@ -417,7 +445,8 @@ party by id ALWAYS returns it, archived or not — that asymmetry is the whole d
 why this is one column on one table rather than `deleted_at` across `core` behind a filter every
 read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
 proposal, a proposal line's entity, an engagement letter, a letter line's entity or an engagement
-still points at the party, and the refusal names them — a lead, proposal or letter DELETED as a
+that is still LIVE points at the party (0314: an open lead, a draft or sent document, a pending,
+active or paused engagement; see "An engagement ends" below), and the refusal names them — a lead, proposal or letter DELETED as a
 mistake (0086), and a line of one, does not count. A trigger rather than a service check
 because an import or an agent walks straight past a service, and it costs nothing on ordinary
 writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
@@ -515,8 +544,7 @@ not reused**; a reference may gap, and this is one honest reason.
 
 **Deliberately not here** — the plan's later phases, each needing its own decision: a client or
 contact made by mistake (still ARCHIVED, G0.3; 0086 only stops a deleted lead or draft blocking
-that), a mistyped identifier (`findByValue` ignores `valid_to`, so today a PAN on the wrong client
-is stuck there), which references count as ONGOING work for the archive guard in general, a
+that), a mistyped identifier (ANSWERED by V2.5 / 0315: see "Correcting a client's master data"), which references count as ONGOING work for the archive guard in general, a
 catalogue service or other config entry nobody used, and Restore. **An invoice is never deleted**:
 its number is drawn from the gapless GST series when the DRAFT is created, so cancelling is the
 only honest answer (T3.4).
@@ -1255,6 +1283,15 @@ makes any party a routing row names a member (the older way in, which `smoke.sh`
 use). Never deleted; `retired_at` is there for the day something retires one. `crm.is_firm_entity`
 is the firm itself OR a live member.
 
+**An own company is never a CLIENT (2026-09-29).** The invoice refused one first (`BILLS_THE_FIRM`).
+Now every document that names a client refuses it too, with `CLIENT_IS_OWN_COMPANY` (400):
+- proposal draft;
+- letter draft, including a letter written up from a quote (both go through `draftLetter`);
+- a lead capture whose dedup match lands on one.
+`GET /parties` and `GET /parties/{id}` still return own companies, with `isOwnCompany`, so a task may
+name the firm. The list computes it as two joins, held to the function row for row by
+`tests/party/own-company.integration.test.ts`. The client screens hide these parties.
+
 **A draft LETTER changes in place (T6.18 S6)**, as a proposal does. `PATCH /engagement-letters/{id}`
 revises the head (title, Background, addressee, dates, advance), the currency while no line or
 section row exists at all (live or pulled: their keys to the letter's currency do not cascade, 0017 /
@@ -1857,6 +1894,79 @@ Money still prints with its ISO code (`INR 216,000.00`), and that is now a produ
 rather than a limit: this is a cross-border product, and a bare symbol is ambiguous to a reader
 in Dubai or Delaware. One function changes it.
 
+## Which build is live (V0.2)
+
+`GET /health` answers `{ status, commit, builtAt }`. The Dockerfile turns its `COMMIT_SHA` and
+`BUILD_TIME` build args into `BIB_BUILD_COMMIT` / `BIB_BUILD_TIME`, `config.ts` validates both (a
+7-40 hex SHA, an ISO instant; an EMPTY value, which is what Docker makes of an arg nobody passed,
+reads as not stamped), and `cloudbuild.yaml` passes both. `gcloud builds submit --tag` passes no
+build args, so an image built that way answers `commit: null`: say "not stamped", never guess.
+`/health` is in the OpenAPI spec (unlike `/ready`) and has its own CORS, because the account page's
+Technical details reads it through the generated client.
+
+## An engagement ends, pauses and resumes (V2.3, 0314)
+
+Until 0314 only `active` (and `pending_advance`) was ever written, so a client who left kept a job
+and a task every month, its filings kept coming and it stayed in MRR. **Four decisions (the user,
+2026-09-28), not to be re-made:**
+
+1. **Ending changes the status at once** (`completed`, or `cancelled` when `endsOn` is before
+   `effectiveFrom`), so MRR (`status = 'active'`) drops the day it is recorded. `ends_on` is the
+   LAST day served, inclusive. The work up to it still happens: `activeRecurring` also offers ended
+   engagements (active first, so they never crowd the batch) and `periodsToMaterialise` stops at
+   `endsOn`; `subjectsFor` also returns them and the generator skips a period that STARTS after
+   `endsOn` (THE CEILING, the floor's other end: a firm that served September files September's
+   return, due in October). `lifecycle.integration.test.ts` goes red with the ceiling removed.
+2. **Ending withdraws only the untouched upcoming filings for periods AFTER the end**, in the same
+   transaction as the end, through T6.16's own `withdrawUncovered` (extracted from `unlink`, one
+   code path, a `WithdrawalScope`), reason `engagement_ended`. The chains are locked in id order
+   first. Jobs already on the board for later periods are NOT cancelled: the answer lists them
+   (`openJobsAfterEnd`) and the job page cancels (V2.4).
+3. **Pause stops new jobs and new filings** (both read `active`); nothing moves. Resume sets
+   `resumed_on` (the firm's day): a recurring period that ENDED before it never spawns, the month
+   the pause ended in does, and the generator back-fills filings that fell due meanwhile (missed if
+   past, for a partner).
+4. **A client may be archived once nothing is live** (0314 rewrote
+   `core.refuse_archive_with_references()`): an open lead, a draft or sent proposal or letter, and
+   a `pending_advance` / `active` / `paused` engagement refuse; history does not. The flow for a
+   client who leaves: End each engagement, then Archive. Both spawn feeds also skip an archived
+   client or company (belt and braces: the guard already keeps live work off archived parties).
+
+The walls are ONE-DIRECTIONAL on purpose: an end record implies an ended status, a pause stamp
+implies `paused`, never the reverse, because the integration suites leave `cancelled` rows with no
+end record. The reason is prose about a client: on the row (`end_reason`), never in the ledger
+(`engagement.ended` carries ids, days and counts). Routes `POST /engagements/{id}/end | pause |
+resume`, `party:write`, `EngagementLifecycleService` (its own use case: 15 constructions of
+`EngagementService` did not need to change), `PostgresEngagementLifecycle`. `isDay` accepts
+2026-02-31 (V8 rolls it into March), so the end date uses `isCalendarDay`.
+
+## Correcting a client's master data (V2.5, 0315)
+
+`PATCH /parties/{id}` (display name, trade name, industry, website; absent = unchanged, blank =
+cleared), `PATCH /parties/{id}/legal-entity` (country, kind), `POST
+/parties/{id}/identifiers/{identifierId}/end` (a GSTIN cancelled on a day) and `.../void`
+(entered by mistake: `voided_at`, kept, shown, FINAL by trigger 55000), all `party:write`, and
+`PATCH /tenancy/me` (your OWN display name only: the account is global, so a firm renaming a
+colleague would rename them at every firm; no permission, like your own password). **The duplicate
+check reads only OPEN identifiers** (not voided, no end day), so voiding the wrong PAN frees it for
+the right client. Every event names the FIELDS that changed, never the values (`party.updated`,
+`legal_entity.corrected`, `party_identifier.ended` / `.voided`, `user.renamed`). A rename reaches
+every list and every NEW render; a signed letter is frozen and a FILED PDF is stored bytes, but an
+invoice PDF rendered on demand reads the client's CURRENT name (render-source joins
+`core.party.display_name`): snapshotting the billed name at Issue is a follow-up, not done here.
+
+## Cancelling a job (V2.4)
+
+`POST /jobs/{id}/cancel` (`work:write`): the job's open TASKS move first, to the firm's own
+cancelled state read by its flags (`cancelledState`: active, terminal, not a success), through
+`moveToState`, and a firm with none is refused (`NO_CANCELLED_STATE`) before anything moves; then
+the job row, guarded in the write (`NOT IN ('done','cancelled')`; 0041's CHECK makes a never-started
+job start and finish at the cancel instant); then its open STEPS, skipped with "The job was
+cancelled." (0304 keeps an opened step's start). One `job.cancelled` with the withdrawn step keys
+and counts. The job keeps its engagement links, so the period is never spawned again. The checkers'
+queue leaves out a cancelled job's pending checks. The orchestrator reaches tasks through the
+`JobTasks` port that `WorkItemService` satisfies.
+
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 
 `npm run worker` is a SEPARATE PROCESS from the API, with its own composition root
@@ -2393,6 +2503,25 @@ reused unchanged is T2.9's `isEligible`, `VerificationPolicy` and the grade/repo
 comparison: one answer to "who checks whose work", two tables recording the answers.
 `submitted_by` is DERIVED from the item's assignee and FROZEN by trigger, exactly as T2.9's is.
 **Do not add a `submittedBy` to any write path.**
+
+**A task raised by hand is HIDDEN from the client unless the caller says otherwise (V1.4,
+2026-09-28).** `create` defaulted `isClientVisible` to `true`, so an internal note ("chase Ravi
+for the ledger") reached the client's portal unless somebody remembered to untick a box. It is
+`input.isClientVisible ?? false` now. The two writers that ARE client work set `true` themselves
+and are unchanged: `spawnForEngagements` (the month's work) and `raiseForObligation` (a
+statutory filing's task). The column's DATABASE default is still `TRUE` (0051); no writer relies
+on it, since every insert names the value.
+
+**THE READS MY DAY IS BUILT FROM CARRY THE CLIENT BY ID AND THE DUE DAY (V2.1, 2026-09-28).**
+The frontend's `/` lists everything on a person's desk from six reads with no lookup per row, so
+four read models grew what a row needs, by the "lists return read models" rule:
+`JobDetail` (`describeJobs`) gained `clientPartyId`, `entityPartyId`, `periodLabel` and `dueOn` =
+the EARLIEST due day of the job's UNFINISHED tasks (a subquery, read as `::text`); the
+orchestrator handler takes the scheduler as `deps.jobs` and puts it on `MyStep.job` and
+`StepCheck.job` (null when the job links no engagement), one `describeJobs` per response;
+`WorkItemCheck` gained `clientPartyId` and `dueOn` (on the queue row only, not on a task's
+reviews); `EscalationRecord` gained `clientPartyId` (null on a filing, as `clientName` is).
+`tests/workitem/my-day-reads.integration.test.ts` proves the three joins on a real database.
 
 **A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
 is finished" is what it says. Cancelling stays allowed: cancelling something that never

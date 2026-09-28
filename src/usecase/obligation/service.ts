@@ -1805,6 +1805,11 @@ export class ObligationService {
           // produces August's return, covering three weeks before the firm was
           // appointed. It is generated here because somebody has to file it.
           if (schedule.statutoryDueOn < subject.effectiveFrom) continue;
+          // THE CEILING (V2.3): a period that begins after the engagement's
+          // last day is not the firm's. The PERIOD, not the due date, and
+          // that is the other half of the floor's reasoning: a firm that
+          // served September files September's return, due in October.
+          if (subject.endsOn !== null && period.start > subject.endsOn) continue;
           // THE FIRM'S OWN FLOOR, the same test: a filing due before the day
           // the firm started keeping this calendar is not the firm's either.
           if (floor !== null && schedule.statutoryDueOn < floor) continue;

@@ -19,6 +19,8 @@
 // any future plain-Hono route would have been. The middleware guards still
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
+import { ReadinessService } from "../../src/usecase/readiness/service";
+import { FakeReadinessFacts } from "../../src/testfakes/readiness";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { describe, expect, it } from "vitest";
@@ -31,6 +33,7 @@ import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { EngagementLifecycleService } from "../../src/usecase/engagement/lifecycle";
 import { DocumentService } from "../../src/usecase/document/service";
 import { FileStoreService } from "../../src/usecase/filestore/service";
 import { DashboardService } from "../../src/usecase/dashboard/service";
@@ -64,6 +67,7 @@ import {
   FakeTemplateSource,
   FakeStepDeskResolver,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
@@ -148,7 +152,7 @@ import { makeLedgerFakes } from "../../src/testfakes/ledger";
 import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
@@ -390,7 +394,9 @@ function deps(): RouterDeps {
     },
     orchestrator: {
       grades: { listGrades: () => Promise.resolve([]) },
+      jobs: { describeJobs: () => Promise.resolve(new Map()) },
       service: new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),
@@ -572,10 +578,23 @@ function deps(): RouterDeps {
     engagement: {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+      lifecycle: new EngagementLifecycleService({
+        lifecycle: new FakeEngagementLifecycle(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
+      }),
     },
     document: {
       service: new DocumentService(makeDocumentFakes()),
       firmEntities: makeFirmEntityFakes().service,
+    },
+    readiness: {
+      service: new ReadinessService({
+        facts: new FakeReadinessFacts(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(new Date("2026-09-28T00:00:00.000Z")),
+      }),
     },
     dashboard: {
       service: new DashboardService({
@@ -645,6 +664,7 @@ function app(principal: Principal | null = null) {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: () => Promise.resolve(principal),
   });
@@ -757,6 +777,7 @@ describe("every route is accounted for", () => {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       rateLimit: {
         auth: { limit: 1000, windowSeconds: 60 },
         general: { limit: 10000, windowSeconds: 60 },
@@ -1258,6 +1279,7 @@ describe("CORS — the frontend is a separate origin", () => {
       corsOrigins: [ALLOWED],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       principalOf: () => Promise.resolve(null),
     });
 
@@ -1300,6 +1322,7 @@ describe("the /internal surface authorizes, not just authenticates", () => {
       corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       principalOf: () => Promise.resolve(null),
     });
   }

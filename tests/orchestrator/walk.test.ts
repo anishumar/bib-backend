@@ -17,6 +17,7 @@ import {
   FakeTierSource,
   FakeStepDeskResolver,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -114,6 +115,7 @@ async function world(over: { readonly recurrence?: string | null } = {}): Promis
   const tiers = new FakeTierSource().publish(SUGGESTED_TIERS);
   const runs = new FakeAgentRunRepo();
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
     jobs,

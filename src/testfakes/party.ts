@@ -70,6 +70,46 @@ export class FakePartyRepo implements PartyRepository {
   readonly persons: Person[] = [];
   readonly legalEntities: LegalEntity[] = [];
 
+  updateDetails(
+    tenantId: string,
+    partyId: string,
+    patch: Parameters<PartyRepository["updateDetails"]>[2],
+  ): Promise<Party | null> {
+    const i = this.parties.findIndex((p) => p.tenantId === tenantId && p.id === partyId);
+    const party = this.parties[i];
+    if (party === undefined) return Promise.resolve(null);
+    const next = { ...party, displayName: patch.displayName ?? party.displayName };
+    this.parties[i] = next;
+    const o = this.organizations.findIndex((x) => x.partyId === partyId);
+    const org = this.organizations[o];
+    if (org !== undefined) {
+      this.organizations[o] = {
+        ...org,
+        tradeName: patch.tradeName === undefined ? org.tradeName : patch.tradeName,
+        industry: patch.industry === undefined ? org.industry : patch.industry,
+        website: patch.website === undefined ? org.website : patch.website,
+      };
+    }
+    return Promise.resolve(next);
+  }
+
+  correctLegalEntity(
+    tenantId: string,
+    partyId: string,
+    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+  ): Promise<LegalEntity | null> {
+    const i = this.legalEntities.findIndex((e) => e.tenantId === tenantId && e.partyId === partyId);
+    const entity = this.legalEntities[i];
+    if (entity === undefined) return Promise.resolve(null);
+    const next = {
+      ...entity,
+      jurisdiction: patch.jurisdiction ?? entity.jurisdiction,
+      entityType: patch.entityType ?? entity.entityType,
+    };
+    this.legalEntities[i] = next;
+    return Promise.resolve(next);
+  }
+
   /**
    * What refers to a party, by party id — the thing migration 0035's trigger
    * knows and no in-memory fake can: the crm tables are a different module and
@@ -94,6 +134,7 @@ export class FakePartyRepo implements PartyRepository {
       kind: "organization",
       displayName: o.displayName,
       archivedAt: null,
+      isOwnCompany: false,
     });
     const org: Organization = {
       partyId: o.partyId,
@@ -115,6 +156,7 @@ export class FakePartyRepo implements PartyRepository {
       kind: "person",
       displayName: p.displayName,
       archivedAt: null,
+      isOwnCompany: false,
     });
     const person: Person = {
       partyId: p.partyId,
@@ -146,6 +188,13 @@ export class FakePartyRepo implements PartyRepository {
     return Promise.resolve(
       this.parties.find((p) => p.tenantId === tenantId && p.id === partyId) ?? null,
     );
+  }
+
+  /** Make a party one of the firm's own companies, as a `crm.firm_entity`
+   *  row does (0313). */
+  markOwnCompany(partyId: string): this {
+    this.parties = this.parties.map((p) => (p.id === partyId ? { ...p, isOwnCompany: true } : p));
+    return this;
   }
 
   findOrganization(tenantId: string, partyId: string): Promise<Organization | null> {
@@ -300,6 +349,7 @@ export class FakeIdentifierRepo implements IdentifierRepository {
       isPrimary: i.isPrimary,
       validFrom: i.validFrom,
       validTo: i.validTo,
+      voidedAt: null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -316,9 +366,38 @@ export class FakeIdentifierRepo implements IdentifierRepository {
     type: PartyIdentifier["type"],
     value: string,
   ): Promise<PartyIdentifier | null> {
+    // OPEN only, as the adapter reads (0315).
     return Promise.resolve(
-      this.rows.find((r) => r.tenantId === tenantId && r.type === type && r.value === value) ?? null,
+      this.rows.find(
+        (r) =>
+          r.tenantId === tenantId && r.type === type && r.value === value &&
+          r.voidedAt === null && r.validTo === null,
+      ) ?? null,
     );
+  }
+
+  findById(tenantId: string, identifierId: string): Promise<PartyIdentifier | null> {
+    return Promise.resolve(this.rows.find((r) => r.tenantId === tenantId && r.id === identifierId) ?? null);
+  }
+
+  end(tenantId: string, identifierId: string, validTo: string): Promise<PartyIdentifier | null> {
+    const i = this.rows.findIndex(
+      (r) => r.tenantId === tenantId && r.id === identifierId && r.voidedAt === null && r.validTo === null,
+    );
+    const row = this.rows[i];
+    if (row === undefined) return Promise.resolve(null);
+    const next = { ...row, validTo };
+    this.rows[i] = next;
+    return Promise.resolve(next);
+  }
+
+  void(tenantId: string, identifierId: string): Promise<PartyIdentifier | null> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === identifierId && r.voidedAt === null);
+    const row = this.rows[i];
+    if (row === undefined) return Promise.resolve(null);
+    const next = { ...row, voidedAt: "2026-09-29T09:00:00.000Z" };
+    this.rows[i] = next;
+    return Promise.resolve(next);
   }
 }
 

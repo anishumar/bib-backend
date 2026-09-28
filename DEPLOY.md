@@ -145,6 +145,12 @@ terraform apply -var-file=<env>.tfvars
 
 ## 5 · Images, then migrate, then everything else
 
+An image built with `--tag` below carries no build stamp, so `/health` reports
+`"commit": null`. Every later deploy goes through `cloudbuild.yaml`
+(`--config=cloudbuild.yaml --substitutions=_COMMIT_SHA=$(git rev-parse HEAD)`),
+which passes `COMMIT_SHA` and `BUILD_TIME` to the Dockerfile, and `/health` then
+names the commit.
+
 ```bash
 # backend — one image, three entrypoints
 gcloud builds submit --tag <region>-docker.pkg.dev/<id>/bib/bib-backend:<sha> --region=<region>
@@ -190,7 +196,7 @@ browser with no server log.
 ## 6 · Verify
 
 ```bash
-curl -s <api>/health                      # {"status":"ok"}
+curl -s <api>/health                      # {"status":"ok","commit":"<sha>","builtAt":"<utc>"}
 curl -so /dev/null -w '%{http_code}' <api>/api/v1/parties    # 401
 ```
 

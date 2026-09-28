@@ -286,6 +286,10 @@ export interface WorkItemCheck {
   readonly workItemId: string;
   readonly workItemTitle: string;
   readonly clientName: string;
+  /** The client by id, so a list can LINK it (V2.1's My day). */
+  readonly clientPartyId: string;
+  /** The task's own due day, `YYYY-MM-DD`, or null when it has none. */
+  readonly dueOn: string | null;
   /** Who made it, by name. Null when the item was unassigned — "—" is the
    *  honest cell, and it is also what tells a checker there is no maker to
    *  compare against. */
@@ -400,6 +404,21 @@ export function isValidRank(rank: number): boolean {
  *  `isInitial`. */
 export function initialState(states: readonly WorkItemState[]): WorkItemState | null {
   return states.find((s) => s.isInitial) ?? null;
+}
+
+/**
+ * Where a task goes when the job it belongs to is cancelled (V2.4): the firm's
+ * own state that is TERMINAL and NOT a success, active, first in the firm's
+ * order. Read by its flags, never its code, like every rule here; the product
+ * seeds "Cancelled" at every firm. Null when the firm has none, and the
+ * caller refuses rather than calling a cancellation a completion.
+ */
+export function cancelledState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter((s) => s.isActive && s.isTerminal && !s.isSuccess)
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
 }
 
 /**

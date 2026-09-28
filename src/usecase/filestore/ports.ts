@@ -84,6 +84,17 @@ export interface DocumentRecord {
   readonly versionCount: number;
 }
 
+/**
+ * A document as one subject's file list shows it: the record, and the ROLE of
+ * its link to that subject. The role is what tells an invoice's copy of record
+ * from a draft copy (`RENDERED_ROLE`), and a document attached to two things
+ * can play a different part on each, so it belongs to the listing and not to
+ * the document.
+ */
+export interface SubjectDocument extends DocumentRecord {
+  readonly role: string | null;
+}
+
 /** A link with the subject resolved to something readable. */
 export interface DocumentLinkRecord {
   readonly link: DocumentLink;
@@ -151,12 +162,13 @@ export interface DocumentStoreRepository {
     readonly limit: number;
   }): Promise<readonly DocumentRecord[]>;
 
-  /** Every document attached to one thing, newest first. */
+  /** Every document attached to one thing, newest first, each with the role
+   *  its link to that thing carries. */
   listForSubject(input: {
     readonly tenantId: string;
     readonly subjectKind: SubjectKind;
     readonly subjectRef: string;
-  }): Promise<readonly DocumentRecord[]>;
+  }): Promise<readonly SubjectDocument[]>;
 
   versions(tenantId: string, documentId: string): Promise<readonly DocumentVersion[]>;
 

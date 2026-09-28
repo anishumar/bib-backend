@@ -231,6 +231,9 @@ export class PostgresStepApprovalRepository implements StepApprovalRepository {
         JOIN delivery.job j ON j.id = a.job_id
         LEFT JOIN tenancy.user_account u ON u.id = a.submitted_by
         WHERE a.decision = 'pending'
+          -- A cancelled job's checks leave the queue (V2.4): its steps were
+          -- withdrawn, so there is nothing left to check.
+          AND j.status <> 'cancelled'
         ORDER BY a.submitted_at
       `;
       return rows.map(toCheck);

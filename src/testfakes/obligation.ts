@@ -823,7 +823,9 @@ export class FakeCalendarSource implements CalendarSource {
    *  matched on: the entity's country and type, and the SERVICE the
    *  engagement's letter line pinned. A test adds these rather than a
    *  database. */
-  readonly subjects: (CalendarSubject & {
+  readonly subjects: (Omit<CalendarSubject, "endsOn"> & {
+    /** Absent reads as not ended. */
+    readonly endsOn?: string | null;
     readonly jurisdiction: string;
     readonly entityType: string | null;
   })[] = [];
@@ -857,6 +859,7 @@ export class FakeCalendarSource implements CalendarSource {
           engagementId: s.engagementId,
           effectiveFrom: s.effectiveFrom,
           serviceEntryId: s.serviceEntryId,
+          endsOn: s.endsOn ?? null,
         })),
     );
   }

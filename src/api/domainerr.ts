@@ -112,6 +112,7 @@ export function mapError(err: unknown): MappedError {
   if (err instanceof TenancyError) {
     switch (err.code) {
       case "INVALID_SLUG":
+      case "INVALID_DISPLAY_NAME":
       case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
@@ -176,6 +177,10 @@ export function mapError(err: unknown): MappedError {
       // ago, and the fix is to look at the job again rather than to retry.
       case "STEP_NOT_WAITING":
       case "STEP_NO_LONGER_NEEDED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A finished or cancelled job cannot be cancelled (V2.4). A conflict:
+      // the job's state refuses it, and the page already says what it is.
+      case "JOB_CLOSED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Whose desk a step is on (0301). All conflicts: the request is well
       // formed and what refuses it is the state of the step or the firm's own
@@ -623,6 +628,7 @@ export function mapError(err: unknown): MappedError {
       case "STATE_RETIRED":
       case "PRIORITY_RETIRED":
       case "NO_INITIAL_STATE":
+      case "NO_CANCELLED_STATE":
       case "NO_DEFAULT_PRIORITY":
       case "LAST_INITIAL_STATE":
       case "LAST_DEFAULT_PRIORITY":
@@ -644,6 +650,7 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "PARTY_NOT_FOUND":
       case "RELATIONSHIP_NOT_FOUND":
+      case "IDENTIFIER_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // Each of these is "the party is not in the state this call assumed", and
       // none is a malformed request. PARTY_HAS_REFERENCES in particular is the
@@ -654,8 +661,12 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_NOT_ARCHIVED":
       case "PARTY_HAS_REFERENCES":
       case "RELATIONSHIP_ALREADY_ENDED":
+      case "IDENTIFIER_CLOSED":
+      case "NOT_A_LEGAL_ENTITY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
+      case "INVALID_PARTY_DETAILS":
+      case "NOTHING_TO_CHANGE":
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":
@@ -673,6 +684,8 @@ export function mapError(err: unknown): MappedError {
       // way to reach the prospect, no name, a close with no explanation, and an
       // explanation attached to a stage that has nothing to explain. None is a
       // statement about the pipeline's current state, so none is a 409.
+      // CLIENT_IS_OWN_COMPANY joins them: the details typed are the firm's own
+      // company's, the invoice's BILLS_THE_FIRM, answered by entering the right ones.
       case "INVALID_SOURCE":
       case "INVALID_STAGE":
       case "NO_CONTACT_DETAIL":
@@ -682,6 +695,7 @@ export function mapError(err: unknown): MappedError {
       case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
+      case "CLIENT_IS_OWN_COMPANY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LEAD_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
@@ -743,6 +757,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DECISION":
       case "NOT_A_SERVICE":
       case "SERVICE_NOT_PUBLISHED":
+      case "CLIENT_IS_OWN_COMPANY":
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "ADDRESSEE_NOT_A_PERSON":
       case "PREPARER_NOT_STAFF":
@@ -841,6 +856,7 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_AMOUNT_REQUIRED":
       case "INVALID_DATE":
       case "QUOTE_JURISDICTION_UNCLEAR":
+      case "CLIENT_IS_OWN_COMPANY":
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "QUOTE_OF_ANOTHER_CLIENT":
       case "ADDRESSEE_NOT_A_PERSON":
@@ -852,6 +868,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_CURRENCY_CHANGE":
       case "NOT_CALLERS_TODAY":
+      case "END_REASON_REQUIRED":
+      case "INVALID_END_DATE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -898,6 +916,8 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
       case "ENGAGEMENT_NOT_ACTIVE":
+      case "ENGAGEMENT_ENDED":
+      case "ENGAGEMENT_NOT_PAUSED":
       case "ENVELOPE_ALREADY_SIGNED":
       case "SIGNATURE_REQUEST_NOT_PENDING":
       case "LETTER_NOT_SUPERSEDABLE":
@@ -1028,6 +1048,8 @@ export function mapError(err: unknown): MappedError {
       case "BRAND_ASSET_NOT_FOUND":
       case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "COPY_OF_RECORD_STAYS":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 502, and this is the one mapping here worth arguing. The metadata is
@@ -1057,6 +1079,10 @@ export function mapError(err: unknown): MappedError {
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "NOT_CALLERS_TODAY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // The copy of record exists: a state of the invoice or letter, not a
+      // malformed request.
+      case "COPY_ALREADY_MADE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

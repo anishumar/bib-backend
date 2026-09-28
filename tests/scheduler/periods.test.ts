@@ -192,6 +192,8 @@ describe("the periods a recurring engagement is owed a job for", () => {
     floor: null,
     today: "2026-09-17",
     slaDays: 10,
+    endsOn: null,
+    resumedOn: null,
   };
 
   it("with no floor, materialises only the period under way", () => {
@@ -237,6 +239,29 @@ describe("the periods a recurring engagement is owed a job for", () => {
     expect(periods.map((p) => p.label)).toEqual(["Sep 2026"]);
   });
 
+  it("stops at the engagement's last day: ended on 30 September, no October job (V2.3)", () => {
+    const late = { ...monthly, floor: "2026-07-01", today: "2026-10-05", slaDays: 0 };
+    expect(periodsToMaterialise(late).map((p) => p.label)).toEqual([
+      "Jul 2026",
+      "Aug 2026",
+      "Sep 2026",
+      "Oct 2026",
+    ]);
+    const ended = periodsToMaterialise({ ...late, endsOn: "2026-09-30" });
+    expect(ended.map((p) => p.label)).toEqual(["Jul 2026", "Aug 2026", "Sep 2026"]);
+    // A month the firm served part of is still its month.
+    const midMonth = periodsToMaterialise({ ...late, endsOn: "2026-10-15" });
+    expect(midMonth.map((p) => p.label)).toContain("Oct 2026");
+  });
+
+  it("skips a month that fell inside a pause, and spawns the month it ended in (V2.3)", () => {
+    const late = { ...monthly, floor: "2026-07-01", today: "2026-11-20" };
+    // Paused in August, resumed on 20 October: September ended inside the
+    // pause and gets no job; October, the month it resumed in, does.
+    const periods = periodsToMaterialise({ ...late, resumedOn: "2026-10-20" });
+    expect(periods.map((p) => p.label)).toEqual(["Oct 2026", "Nov 2026"]);
+  });
+
   it("cuts a quarter on the FINANCIAL year", () => {
     const periods = periodsToMaterialise({
       recurrence: "quarterly",
@@ -245,6 +270,8 @@ describe("the periods a recurring engagement is owed a job for", () => {
       floor: "2026-04-01",
       today: "2026-09-17",
       slaDays: 15,
+      endsOn: null,
+      resumedOn: null,
     });
     expect(periods.map((p) => p.label)).toEqual(["Q1 FY2026-27", "Q2 FY2026-27"]);
     expect(periods[1]).toMatchObject({ start: "2026-07-01", end: "2026-09-30" });
@@ -258,6 +285,8 @@ describe("the periods a recurring engagement is owed a job for", () => {
       floor: "2026-01-01",
       today: "2026-09-17",
       slaDays: 60,
+      endsOn: null,
+      resumedOn: null,
     });
     expect(periods.map((p) => p.label)).toEqual(["FY2025-26", "FY2026-27"]);
   });

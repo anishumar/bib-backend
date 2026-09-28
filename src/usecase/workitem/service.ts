@@ -42,6 +42,7 @@ import {
   defaultPriorityFor,
   dueOnFrom,
   initialState,
+  cancelledState,
   underReviewState,
   isIsoDate,
   isValidRank,
@@ -71,6 +72,7 @@ import {
   LastInitialState,
   NoDefaultPriority,
   NoInitialState,
+  NoCancelledState,
   PriorityNotFound,
   PriorityRetired,
   ReviewAlreadyDecided,
@@ -997,7 +999,13 @@ export class WorkItemService {
       dueOn,
       isStatutoryDue,
       slaDaysSnapshot: null,
-      isClientVisible: input.isClientVisible ?? true,
+      // HIDDEN FROM THE CLIENT UNLESS SOMEBODY SAYS OTHERWISE (V1.4). A task
+      // raised by hand is as often an internal note ("chase Ravi for the
+      // ledger") as client work, and the portal is somebody else's screen: a
+      // default of `true` put every such note in front of the client unless the
+      // person raising it remembered to untick a box. Spawned monthly work and
+      // statutory tasks set `true` themselves, below, and are unaffected.
+      isClientVisible: input.isClientVisible ?? false,
     } satisfies NewWorkItem);
 
     await this.recordCreated(item, actor, "manual");
@@ -1390,6 +1398,25 @@ export class WorkItemService {
       actor,
     );
     return updated;
+  }
+
+  /**
+   * A job was cancelled (V2.4): every open task of it moves to the firm's own
+   * cancelled state, through `moveToState`, so each move is the ordinary
+   * `work_item.state_changed` (with `isSuccess: false`) and a filing's task
+   * stays un-filed. The state is read by its FLAGS (`cancelledState`); a firm
+   * with none is refused BEFORE anything moves, which is what lets the job's
+   * cancellation call this first.
+   */
+  async cancelOpenForJob(tenantId: string, jobId: string, actor: Actor): Promise<number> {
+    const open = await this.deps.items.list(tenantId, { jobId, openOnly: true });
+    if (open.length === 0) return 0;
+    const to = cancelledState(await this.deps.vocabulary.listStates(tenantId));
+    if (to === null) throw new NoCancelledState();
+    for (const record of open) {
+      await this.moveToState({ tenantId, workItemId: record.item.id, stateId: to.id }, actor);
+    }
+    return open.length;
   }
 
   /** Put it on somebody's desk, or take it off. Taking it off records WHY as a

@@ -38,6 +38,7 @@ import {
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
   LetterPartyArchived,
+  LetterClientIsOwnCompany,
   LetterNotCallersToday,
 } from "../../src/domain/engagement/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
@@ -1589,6 +1590,19 @@ describe("a client the firm has ARCHIVED (0305)", () => {
     expect(s.letters.letters).toHaveLength(0);
   });
 
+  it("refuses one of the firm's OWN companies as the client, as the invoice's BILLS_THE_FIRM does", async () => {
+    const s = setup();
+    s.firmEntities.members.add(`${TENANT}:${PARTY}`);
+    s.parties.know(PARTY, "10x Global FZE");
+    const err = await draft(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(LetterClientIsOwnCompany);
+    expect((err as LetterClientIsOwnCompany).code).toBe("CLIENT_IS_OWN_COMPANY");
+    expect((err as Error).message).toMatch(
+      /^10x Global FZE is one of your own companies, so it cannot be the client on an engagement letter\./,
+    );
+    expect(s.letters.letters).toHaveLength(0);
+  });
+
   it("refuses a line whose company was archived", async () => {
     const s = setup();
     const id = await draft(s);
@@ -1665,6 +1679,15 @@ describe("writing an ACCEPTED quote up as a letter (T3.5b)", () => {
     const h = withQuote(quoted([quoteLine()]));
     h.parties.archive(ENTITY_A, "Acme Foods Private Limited");
     await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(LetterPartyArchived);
+    expect(h.letters.letters).toHaveLength(0);
+  });
+
+  it("REFUSES a quote made to one of the firm's OWN companies: no letter is written up from it", async () => {
+    // A quote from before the proposal refused own companies, or one written
+    // straight to the table: the letter's own check still stops it.
+    const h = withQuote(quoted([quoteLine()]));
+    h.firmEntities.members.add(`${TENANT}:${PARTY}`);
+    await expect(h.service.draftFromQuote(ask(), ACTOR)).rejects.toBeInstanceOf(LetterClientIsOwnCompany);
     expect(h.letters.letters).toHaveLength(0);
   });
 

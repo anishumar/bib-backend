@@ -35,6 +35,7 @@ interface PartyRow {
   kind: PartyKind;
   display_name: string;
   archived_at: Date | null;
+  is_own_company: boolean;
 }
 interface OrgRow {
   party_id: string;
@@ -117,8 +118,19 @@ function toParty(r: PartyRow): Party {
     // timestamptz arrives as a Date; the domain carries ISO 8601 with an
     // offset, like every other timestamp that crosses this door.
     archivedAt: r.archived_at === null ? null : r.archived_at.toISOString(),
+    isOwnCompany: r.is_own_company,
   };
 }
+
+/**
+ * A party's columns plus whether it is one of the firm's own companies, for a
+ * read of ONE party: the migration's own function (`crm.is_firm_entity`), so
+ * there is one definition. The list restates it as two joins instead, for the
+ * reason `listParties` gives.
+ */
+const PARTY_COLUMNS =
+  "id, tenant_id, kind, display_name, archived_at, crm.is_firm_entity(tenant_id, id) AS is_own_company";
+
 function toOrg(r: OrgRow): Organization {
   return {
     partyId: r.party_id,
@@ -199,10 +211,68 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
   async findParty(tenantId: string, partyId: string): Promise<Party | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<PartyRow[]>`
-        SELECT id, tenant_id, kind, display_name, archived_at
+        SELECT ${db.unsafe(PARTY_COLUMNS)}
         FROM core.party WHERE id = ${partyId}
       `;
       return row ? toParty(row) : null;
+    });
+  }
+
+  /**
+   * Correct a client's master data (V2.5), both rows in ONE transaction: the
+   * party's display name (what every list, picker and new PDF reads) and the
+   * organization's trade name, industry and website. A person has only the
+   * first. Nothing here touches a document already issued: a signed letter is
+   * frozen and a filed PDF is stored bytes.
+   */
+  async updateDetails(
+    tenantId: string,
+    partyId: string,
+    patch: {
+      readonly displayName?: string | undefined;
+      readonly tradeName?: string | null | undefined;
+      readonly industry?: string | null | undefined;
+      readonly website?: string | null | undefined;
+    },
+  ): Promise<Party | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      if (patch.displayName !== undefined) {
+        await db`UPDATE core.party SET display_name = ${patch.displayName} WHERE id = ${partyId}`;
+      }
+      if (patch.tradeName !== undefined || patch.industry !== undefined || patch.website !== undefined) {
+        await db`
+          UPDATE core.organization SET
+            trade_name = ${patch.tradeName === undefined ? db`trade_name` : patch.tradeName},
+            industry   = ${patch.industry === undefined ? db`industry` : patch.industry},
+            website    = ${patch.website === undefined ? db`website` : patch.website}
+          WHERE party_id = ${partyId}
+        `;
+      }
+      const [row] = await db<PartyRow[]>`
+        SELECT ${db.unsafe(PARTY_COLUMNS)}
+        FROM core.party WHERE id = ${partyId}
+      `;
+      return row ? toParty(row) : null;
+    });
+  }
+
+  /** Correct a registered company's country and kind (V2.5). */
+  async correctLegalEntity(
+    tenantId: string,
+    partyId: string,
+    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+  ): Promise<LegalEntity | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LegalEntityRow[]>`
+        UPDATE core.legal_entity SET
+          jurisdiction = ${patch.jurisdiction ?? db`jurisdiction`},
+          entity_type  = ${patch.entityType ?? db`entity_type`}
+        WHERE party_id = ${partyId}
+        RETURNING party_id, tenant_id, jurisdiction, entity_type,
+                  incorporated_on::text AS incorporated_on,
+                  financial_year_end, registered_address, status
+      `;
+      return row ? toLegalEntity(row) : null;
     });
   }
 
@@ -255,19 +325,31 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
    */
   async listParties(tenantId: string, includeArchived: boolean): Promise<Party[]> {
     return withTenant(this.app, tenantId, async (db) => {
+      // WHICH ARE OURS, in the same pass: `crm.is_firm_entity` (0313) spelled
+      // as two joins, the firm's own organization row and a live
+      // `crm.firm_entity` member (one per party, by its unique key), so the
+      // list stays one scan however many companies the firm has. The
+      // integration test holds this to the function row for row.
+      const parties = db`
+        SELECT p.id, p.tenant_id, p.kind, p.display_name, p.archived_at,
+               (COALESCE(o.is_firm_self, false) OR fe.party_id IS NOT NULL) AS is_own_company
+        FROM core.party p
+        LEFT JOIN core.organization o
+          ON o.party_id = p.id AND o.tenant_id = p.tenant_id
+        LEFT JOIN crm.firm_entity fe
+          ON fe.party_id = p.id AND fe.tenant_id = p.tenant_id AND fe.retired_at IS NULL
+      `;
       const rows = includeArchived
         ? await db<PartyRow[]>`
-            SELECT id, tenant_id, kind, display_name, archived_at
-            FROM core.party
-            ORDER BY display_name
+            ${parties}
+            ORDER BY p.display_name
             -- A CEILING, not pagination — see MAX_LIST_ROWS.
             LIMIT ${MAX_LIST_ROWS}
           `
         : await db<PartyRow[]>`
-            SELECT id, tenant_id, kind, display_name, archived_at
-            FROM core.party
-            WHERE archived_at IS NULL
-            ORDER BY display_name
+            ${parties}
+            WHERE p.archived_at IS NULL
+            ORDER BY p.display_name
             LIMIT ${MAX_LIST_ROWS}
           `;
       return rows.map(toParty);
@@ -302,7 +384,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
       const rows = await db<PartyRow[]>`
         UPDATE core.party SET archived_at = now()
         WHERE id = ${partyId} AND archived_at IS NULL
-        RETURNING id, tenant_id, kind, display_name, archived_at
+        RETURNING ${db.unsafe(PARTY_COLUMNS)}
       `.catch((err: unknown) => {
         throw isArchiveRefusal(err) ? new PartyHasReferences(partyId, referrersOf(err)) : err;
       });
@@ -319,7 +401,7 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
       const [row] = await db<PartyRow[]>`
         UPDATE core.party SET archived_at = NULL
         WHERE id = ${partyId} AND archived_at IS NOT NULL
-        RETURNING id, tenant_id, kind, display_name, archived_at
+        RETURNING ${db.unsafe(PARTY_COLUMNS)}
       `;
       if (!row) throw await this.explainMissedUpdate(db, partyId, "unarchive");
       return toParty(row);

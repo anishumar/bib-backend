@@ -57,6 +57,15 @@ export class PostgresUserRepository implements UserRepository {
    * sign in anywhere, which is why it lives on /internal and why no firm's
    * session can reach it.
    */
+  async setDisplayName(id: string, displayName: string): Promise<UserAccount | null> {
+    const [row] = await this.app<UserRow[]>`
+      UPDATE tenancy.user_account SET display_name = ${displayName}
+       WHERE id = ${id}
+      RETURNING id, email::text AS email, display_name, status
+    `;
+    return row ? toUser(row) : null;
+  }
+
   async setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null> {
     const [row] = await this.app<UserRow[]>`
       UPDATE tenancy.user_account SET status = ${status}

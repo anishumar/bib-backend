@@ -49,6 +49,9 @@ import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR } from "../../domain/render/mode
 import type { DescribedDocument, RenderSource } from "../../usecase/render/ports";
 import { isoInstant, utcDayOf, zoneDayOf } from "./instant";
 
+/** A letter as its layout draws it; `letter` adds whether it went out. */
+type LetterDrawn = Omit<DescribedDocument, "isOut">;
+
 /** What this source can describe. Anything else is refused BY NAME rather than
  *  producing an empty document. */
 const RENDERABLE: readonly DocumentKind[] = ["engagement_letter", "invoice", "proposal"];
@@ -425,6 +428,7 @@ export class PostgresRenderSource implements RenderSource {
       return {
         document,
         partyId: row.party_id,
+        isOut: row.status !== "draft",
         issuingEntity: { partyId: row.issuing_entity_party_id, name: row.entity_name },
         ...(previewing ? { datedAsIfSent: issuedOn } : {}),
       };
@@ -524,6 +528,7 @@ export class PostgresRenderSource implements RenderSource {
       const described = await this.letterDocument(db, tenantId, letterId, row);
       return {
         ...described,
+        isOut: head.status !== "draft",
         issuingEntity: { partyId: row.issuing_entity_party_id, name: row.entity_name },
         // Only when the preview supplied the date: a date the drafter set is
         // the letter's own, and prints the same either way.
@@ -539,7 +544,7 @@ export class PostgresRenderSource implements RenderSource {
     tenantId: string,
     letterId: string,
     row: LetterRow,
-  ): Promise<DescribedDocument> {
+  ): Promise<LetterDrawn> {
 
     // THE LAYOUT DECIDES THE DOCUMENT (0083). Everything below this branch is
     // the classic letter exactly as it was, because a letter issued in it
@@ -740,7 +745,7 @@ export class PostgresRenderSource implements RenderSource {
     tenantId: string,
     letterId: string,
     row: LetterRow,
-  ): Promise<DescribedDocument> {
+  ): Promise<LetterDrawn> {
     const lines = await db<AnnexureLineRow[]>`
       SELECT l.id, l.position, l.fee_group_id, l.entity_party_id,
              entity.display_name AS entity_name, l.service_version_id, l.description,
@@ -1005,7 +1010,9 @@ export class PostgresRenderSource implements RenderSource {
         logo: await this.logo(db, tenantId, invoiceId, "invoice"),
         issuedOn: row.issued_on ?? row.created_on,
       };
-      return { document, partyId: row.party_id };
+      // Issued means dated: `issued_on` is written by Issue and by nothing
+      // else, and a draft cancelled before it was issued never went out.
+      return { document, partyId: row.party_id, isOut: row.issued_on !== null };
     });
   }
 

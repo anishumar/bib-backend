@@ -14,6 +14,7 @@ export class TenancyError extends Error {
 }
 
 export type TenancyErrorCode =
+  | "INVALID_DISPLAY_NAME"
   | "INVALID_SLUG"
   | "INVALID_CURRENCY"
   | "INVALID_AUDIENCE"
@@ -127,5 +128,12 @@ export class LastAdministrator extends TenancyError {
         `change roles or memberships at all, including undoing this, so nobody could put it back ` +
         `from inside the product. Give somebody else an administrator role first.`,
     );
+  }
+}
+
+/** Your own name, blank or too long (V2.5). */
+export class InvalidDisplayName extends TenancyError {
+  constructor(max: number) {
+    super("INVALID_DISPLAY_NAME", `Give your name, up to ${String(max)} characters.`);
   }
 }

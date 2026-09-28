@@ -56,6 +56,10 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   // PASSWORD is.
   routeKey("POST", "/api/v1/auth/password"),
   routeKey("GET", "/api/v1/tenancy/me/memberships"),
+  // Your OWN name (V2.5), like your own password: no role anywhere should be
+  // able to stop somebody correcting how their name is spelt, and the route
+  // takes no id, so it can reach nobody else's account.
+  routeKey("PATCH", "/api/v1/tenancy/me"),
   routeKey("GET", "/api/v1/portal/home"),
   // The action centre's LIST, for the same reason as the home above it, and it
   // is what makes T6.6's read-only portal role coherent: `client_viewer` holds
@@ -100,6 +104,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "party:write" as const,
   ],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
+  // Correcting a client's master data (V2.5): the gate that created it.
+  [routeKey("PATCH", "/api/v1/parties/{partyId}"), "party:write" as const],
+  [routeKey("PATCH", "/api/v1/parties/{partyId}/legal-entity"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/end"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/void"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
   // Ending one is the same permission as recording one. It is not a delete —
   // the row stays, it still resolves by id, and what changes is a date the
@@ -284,6 +293,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // the same reason: between them these two surfaces decide what every role
   // means AND who holds it, which is the whole of access control at a firm.
   [routeKey("GET", "/api/v1/tenancy/members"), "tenant:admin" as const],
+  // Setup readiness (V2.6): what the firm has not set up yet, by name. Behind
+  // the permission every line's fix already needs.
+  [routeKey("GET", "/api/v1/tenancy/readiness"), "tenant:admin" as const],
   // The PICKER, not the roster: names and rungs of active staff, no emails.
   // `party:read`: whoever may look at a client may see which colleague to
   // hand its work to. Decided 2026-09-25; see `TenancyService.listColleagues`.
@@ -480,6 +492,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses/standard"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
+  // An engagement's life after signature (V2.3): the same gate as the letter
+  // that created it.
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/end"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/pause"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/resume"), "party:write" as const],
   // A draft made by mistake (0086), on the permission that withdraws one: the
   // same person who may pull a letter the client has seen may strike off one
   // nobody has.
@@ -507,6 +524,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // filing is done is not the same act as reading the board, and the record of
   // WHO did it is worth only as much as the gate in front of it.
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
+  // CANCELLING a job (V2.4) takes its work off every desk: the same gate as
+  // doing that work.
+  [routeKey("POST", "/api/v1/jobs/{jobId}/cancel"), "work:write" as const],
   // Whose desk a step sits on (0301): moving it is doing the work's
   // housekeeping, so the same gate as ticking it; reading who may do it and
   // what is on your own desk is reading the board.

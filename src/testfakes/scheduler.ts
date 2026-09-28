@@ -160,10 +160,25 @@ export class FakeJobRepo implements JobRepository {
         entityName ??= this.entityNames.get(link.engagementId) ?? null;
         clientName ??= this.clientNames.get(link.engagementId) ?? null;
       }
-      if (services.length > 0) out.set(jobId, { entityName, clientName, services });
+      if (services.length > 0) {
+        out.set(jobId, {
+          entityName,
+          clientName,
+          // The ids and the due day are the adapter's joins; the fake answers
+          // what a test put in these maps, and null otherwise.
+          entityPartyId: this.entityPartyIds.get(jobId) ?? null,
+          clientPartyId: this.clientPartyIds.get(jobId) ?? null,
+          periodLabel: this.rows.find((j) => j.id === jobId)?.periodLabel ?? null,
+          dueOn: this.dueOns.get(jobId) ?? null,
+          services,
+        });
+      }
     }
     return Promise.resolve(out);
   }
+  entityPartyIds = new Map<string, string>();
+  clientPartyIds = new Map<string, string>();
+  dueOns = new Map<string, string>();
 
   findById(tenantId: string, jobId: string): Promise<Job | null> {
     return Promise.resolve(
@@ -231,6 +246,18 @@ export class FakeJobRepo implements JobRepository {
       startedAt: status === "pending" ? null : (current.startedAt ?? at),
       finishedAt: terminal ? at : null,
     };
+    this.rows[index] = next;
+    return Promise.resolve(next);
+  }
+
+  cancel(tenantId: string, jobId: string, at: string): Promise<Job | null> {
+    const index = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === jobId);
+    const current = this.rows[index];
+    // The adapter's guard: only an open job moves.
+    if (!current || current.status === "done" || current.status === "cancelled") {
+      return Promise.resolve(null);
+    }
+    const next: Job = { ...current, status: "cancelled", startedAt: current.startedAt ?? at, finishedAt: at };
     this.rows[index] = next;
     return Promise.resolve(next);
   }
