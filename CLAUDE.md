@@ -417,7 +417,8 @@ party by id ALWAYS returns it, archived or not — that asymmetry is the whole d
 why this is one column on one table rather than `deleted_at` across `core` behind a filter every
 read from now on has to remember to write. Archiving is refused **by a trigger** while a lead, a
 proposal, a proposal line's entity, an engagement letter, a letter line's entity or an engagement
-still points at the party, and the refusal names them — a lead, proposal or letter DELETED as a
+that is still LIVE points at the party (0314: an open lead, a draft or sent document, a pending,
+active or paused engagement; see "An engagement ends" below), and the refusal names them — a lead, proposal or letter DELETED as a
 mistake (0086), and a line of one, does not count. A trigger rather than a service check
 because an import or an agent walks straight past a service, and it costs nothing on ordinary
 writes: `BEFORE UPDATE OF archived_at`, with a `WHEN` clause on the NULL → NOT NULL transition, so
@@ -1826,6 +1827,64 @@ than producing nothing. CJK is the honest remaining gap.
 Money still prints with its ISO code (`INR 216,000.00`), and that is now a product decision
 rather than a limit: this is a cross-border product, and a bare symbol is ambiguous to a reader
 in Dubai or Delaware. One function changes it.
+
+## Which build is live (V0.2)
+
+`GET /health` answers `{ status, commit, builtAt }`. The Dockerfile turns its `COMMIT_SHA` and
+`BUILD_TIME` build args into `BIB_BUILD_COMMIT` / `BIB_BUILD_TIME`, `config.ts` validates both (a
+7-40 hex SHA, an ISO instant; an EMPTY value, which is what Docker makes of an arg nobody passed,
+reads as not stamped), and `cloudbuild.yaml` passes both. `gcloud builds submit --tag` passes no
+build args, so an image built that way answers `commit: null`: say "not stamped", never guess.
+`/health` is in the OpenAPI spec (unlike `/ready`) and has its own CORS, because the account page's
+Technical details reads it through the generated client.
+
+## An engagement ends, pauses and resumes (V2.3, 0314)
+
+Until 0314 only `active` (and `pending_advance`) was ever written, so a client who left kept a job
+and a task every month, its filings kept coming and it stayed in MRR. **Four decisions (the user,
+2026-09-28), not to be re-made:**
+
+1. **Ending changes the status at once** (`completed`, or `cancelled` when `endsOn` is before
+   `effectiveFrom`), so MRR (`status = 'active'`) drops the day it is recorded. `ends_on` is the
+   LAST day served, inclusive. The work up to it still happens: `activeRecurring` also offers ended
+   engagements (active first, so they never crowd the batch) and `periodsToMaterialise` stops at
+   `endsOn`; `subjectsFor` also returns them and the generator skips a period that STARTS after
+   `endsOn` (THE CEILING, the floor's other end: a firm that served September files September's
+   return, due in October). `lifecycle.integration.test.ts` goes red with the ceiling removed.
+2. **Ending withdraws only the untouched upcoming filings for periods AFTER the end**, in the same
+   transaction as the end, through T6.16's own `withdrawUncovered` (extracted from `unlink`, one
+   code path, a `WithdrawalScope`), reason `engagement_ended`. The chains are locked in id order
+   first. Jobs already on the board for later periods are NOT cancelled: the answer lists them
+   (`openJobsAfterEnd`) and the job page cancels (V2.4).
+3. **Pause stops new jobs and new filings** (both read `active`); nothing moves. Resume sets
+   `resumed_on` (the firm's day): a recurring period that ENDED before it never spawns, the month
+   the pause ended in does, and the generator back-fills filings that fell due meanwhile (missed if
+   past, for a partner).
+4. **A client may be archived once nothing is live** (0314 rewrote
+   `core.refuse_archive_with_references()`): an open lead, a draft or sent proposal or letter, and
+   a `pending_advance` / `active` / `paused` engagement refuse; history does not. The flow for a
+   client who leaves: End each engagement, then Archive. Both spawn feeds also skip an archived
+   client or company (belt and braces: the guard already keeps live work off archived parties).
+
+The walls are ONE-DIRECTIONAL on purpose: an end record implies an ended status, a pause stamp
+implies `paused`, never the reverse, because the integration suites leave `cancelled` rows with no
+end record. The reason is prose about a client: on the row (`end_reason`), never in the ledger
+(`engagement.ended` carries ids, days and counts). Routes `POST /engagements/{id}/end | pause |
+resume`, `party:write`, `EngagementLifecycleService` (its own use case: 15 constructions of
+`EngagementService` did not need to change), `PostgresEngagementLifecycle`. `isDay` accepts
+2026-02-31 (V8 rolls it into March), so the end date uses `isCalendarDay`.
+
+## Cancelling a job (V2.4)
+
+`POST /jobs/{id}/cancel` (`work:write`): the job's open TASKS move first, to the firm's own
+cancelled state read by its flags (`cancelledState`: active, terminal, not a success), through
+`moveToState`, and a firm with none is refused (`NO_CANCELLED_STATE`) before anything moves; then
+the job row, guarded in the write (`NOT IN ('done','cancelled')`; 0041's CHECK makes a never-started
+job start and finish at the cancel instant); then its open STEPS, skipped with "The job was
+cancelled." (0304 keeps an opened step's start). One `job.cancelled` with the withdrawn step keys
+and counts. The job keeps its engagement links, so the period is never spawned again. The checkers'
+queue leaves out a cancelled job's pending checks. The orchestrator reaches tasks through the
+`JobTasks` port that `WorkItemService` satisfies.
 
 ## The delivery engine — a second process, and at-least-once everywhere (T2.6)
 

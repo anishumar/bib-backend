@@ -63,6 +63,8 @@ interface RecurringRow {
   sla_days: string | null;
   body: Record<string, unknown> | null;
   linked_periods: string[];
+  ends_on: string | null;
+  resumed_on: string | null;
 }
 
 const COLUMNS =
@@ -528,6 +530,9 @@ export class PostgresJobRepository
           e.entity_party_id,
           -- A DATE, read as text: the period arithmetic is calendar arithmetic.
           e.effective_from::text       AS effective_from,
+          -- The end and the last resume (V2.3), dates too.
+          e.ends_on::text              AS ends_on,
+          e.resumed_on::text           AS resumed_on,
           -- PINNED: terms of the letter the client signed.
           pinned.body ->> 'recurrence' AS recurrence,
           pinned.body ->> 'slaDays'    AS sla_days,
@@ -556,9 +561,13 @@ export class PostgresJobRepository
         JOIN core.party served
           ON served.id = e.entity_party_id AND served.tenant_id = e.tenant_id
          AND served.archived_at IS NULL
-        WHERE e.status = 'active'
+        -- ACTIVE, and ENDED ones (V2.3): an engagement ended on 31 December
+        -- still owes October to December, and periodsToMaterialise stops it
+        -- at its last day. A paused one owes nothing new until it resumes.
+        WHERE (e.status = 'active' OR (e.status IN ('completed', 'cancelled') AND e.ends_on IS NOT NULL))
           AND pinned.body ->> 'recurrence' IN ('monthly', 'quarterly', 'annually')
-        ORDER BY e.effective_from, e.id
+        -- Active first, so ended ones never crowd running work out of the batch.
+        ORDER BY (e.status <> 'active'), e.effective_from, e.id
         LIMIT ${limit}
       `;
       return rows.map((r) => {
@@ -574,6 +583,8 @@ export class PostgresJobRepository
           recurrence: r.recurrence,
           slaDays: wholeDays(r.sla_days),
           linkedPeriods: r.linked_periods,
+          endsOn: r.ends_on,
+          resumedOn: r.resumed_on,
         };
       });
     });

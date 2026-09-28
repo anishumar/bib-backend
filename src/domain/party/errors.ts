@@ -156,7 +156,10 @@ export class PartyHasReferences extends PartyError {
   ) {
     super(
       "PARTY_HAS_REFERENCES",
-      `Party ${JSON.stringify(ref)} cannot be archived: it is still referenced by ${referrers.join(", ")}`,
+      // Only LIVE references refuse since 0314, and each is named for what it
+      // is ("a live engagement"), so the sentence says what to finish first.
+      `This client cannot be archived yet: it still has ${referrers.join(", ")}. End its ` +
+        `engagements and close or withdraw what is in progress, then archive it.`,
     );
   }
 }

@@ -857,6 +857,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_CURRENCY_CHANGE":
       case "NOT_CALLERS_TODAY":
+      case "END_REASON_REQUIRED":
+      case "INVALID_END_DATE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -903,6 +905,8 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
       case "ENGAGEMENT_NOT_ACTIVE":
+      case "ENGAGEMENT_ENDED":
+      case "ENGAGEMENT_NOT_PAUSED":
       case "ENVELOPE_ALREADY_SIGNED":
       case "SIGNATURE_REQUEST_NOT_PENDING":
       case "LETTER_NOT_SUPERSEDABLE":

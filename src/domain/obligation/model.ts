@@ -967,8 +967,9 @@ export interface ObligationInstance {
 }
 
 /** Why a filing was taken off the calendar. A closed set, so "why" can be
- *  grouped; one member today (0309). */
-export type WithdrawnReason = "service_unlinked";
+ *  grouped: its service stopped carrying it (0309), or its engagement ended
+ *  before the period began (0314). */
+export type WithdrawnReason = "service_unlinked" | "engagement_ended";
 
 /**
  * Whether removing a rule from a service may take this filing off the

@@ -14,6 +14,7 @@ import { ConfigService } from "../../src/usecase/config/service";
 import { LeadService } from "../../src/usecase/lead/service";
 import { ProposalService } from "../../src/usecase/proposal/service";
 import { EngagementService } from "../../src/usecase/engagement/service";
+import { EngagementLifecycleService } from "../../src/usecase/engagement/lifecycle";
 import { DocumentService } from "../../src/usecase/document/service";
 import { FileStoreService } from "../../src/usecase/filestore/service";
 import { DashboardService } from "../../src/usecase/dashboard/service";
@@ -130,7 +131,7 @@ import { makeLedgerFakes } from "../../src/testfakes/ledger";
 import { makeConfigFakes, withDefaultRoles } from "../../src/testfakes/config";
 import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
 import { makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
@@ -504,6 +505,12 @@ function deps(): RouterDeps {
     engagement: {
       service: new EngagementService(makeEngagementFakes()),
       authz: new AuthzService({ permissions }),
+      lifecycle: new EngagementLifecycleService({
+        lifecycle: new FakeEngagementLifecycle(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
+      }),
     },
     document: {
       service: new DocumentService(makeDocumentFakes()),

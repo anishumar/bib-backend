@@ -501,6 +501,13 @@ export interface CalendarSubject {
    * through a different service.
    */
   readonly serviceEntryId: string;
+  /**
+   * THE CEILING (V2.3), the floor's other end: an ENDED engagement's last day
+   * of service. It is still a subject, for the periods that begin on or
+   * before this day (the firm served them, so it files them); a period that
+   * begins after it is not the firm's. Null while it has not been ended.
+   */
+  readonly endsOn: IsoDate | null;
 }
 
 /**

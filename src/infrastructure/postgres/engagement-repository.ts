@@ -199,7 +199,7 @@ interface ClauseRow {
   position: number;
 }
 
-interface EngagementRow {
+export interface EngagementRow {
   id: string;
   tenant_id: string;
   engagement_letter_id: string;
@@ -210,7 +210,16 @@ interface EngagementRow {
   activated_at: Date | null;
   effective_from: Date;
   ends_on: Date | null;
+  end_reason: string | null;
+  ended_at: Date | null;
+  paused_at: Date | null;
+  resumed_on: Date | null;
 }
+
+/** Every column `toEngagement` reads, for a SELECT or a RETURNING (0314). */
+export const ENGAGEMENT_COLUMNS =
+  "id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id, entity_party_id, " +
+  "status, activated_at, effective_from, ends_on, end_reason, ended_at, paused_at, resumed_on";
 
 
 
@@ -329,7 +338,7 @@ function toPinnedService(
   };
 }
 
-function toEngagement(r: EngagementRow): Engagement {
+export function toEngagement(r: EngagementRow): Engagement {
   return {
     id: r.id,
     tenantId: r.tenant_id,
@@ -341,6 +350,10 @@ function toEngagement(r: EngagementRow): Engagement {
     activatedAt: r.activated_at?.toISOString() ?? null,
     effectiveFrom: toDay(r.effective_from),
     endsOn: r.ends_on === null ? null : toDay(r.ends_on),
+    endReason: r.end_reason,
+    endedAt: r.ended_at?.toISOString() ?? null,
+    pausedAt: r.paused_at?.toISOString() ?? null,
+    resumedOn: r.resumed_on === null ? null : toDay(r.resumed_on),
   };
 }
 
@@ -579,8 +592,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
       `;
 
       const engagements = await db<EngagementRow[]>`
-        SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               entity_party_id, status, activated_at, effective_from, ends_on
+        SELECT ${db.unsafe(ENGAGEMENT_COLUMNS)}
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
       `;
 
@@ -1261,8 +1273,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
             (${e.id}, ${e.tenantId}, ${e.engagementLetterId}, ${e.engagementLetterLineId},
              ${e.partyId}, ${e.entityPartyId}, ${e.status}, ${e.activatedAt}::timestamptz,
              ${e.effectiveFrom})
-          RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                    entity_party_id, status, activated_at, effective_from, ends_on
+          RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
         `;
         if (!row) throw new Error("engagement insert returned no row");
         created.push(toEngagement(row));
@@ -1294,8 +1305,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         UPDATE crm.engagement
            SET status = 'active', activated_at = ${at}::timestamptz
          WHERE engagement_letter_id = ${letterId} AND status = 'pending_advance'
-        RETURNING id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-                  entity_party_id, status, activated_at, effective_from, ends_on
+        RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
       `;
       return { letter: toLetter(letter), released: released.map(toEngagement) };
     });
@@ -1304,8 +1314,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
   async listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<EngagementRow[]>`
-        SELECT id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id,
-               entity_party_id, status, activated_at, effective_from, ends_on
+        SELECT ${db.unsafe(ENGAGEMENT_COLUMNS)}
         FROM crm.engagement WHERE engagement_letter_id = ${letterId}
         ORDER BY created_at
       `;
@@ -1332,6 +1341,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const rows = await db<BillableRow[]>`
         SELECT e.id, e.entity_party_id, e.status,
                e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
+               e.end_reason,
                ep.display_name AS entity_name,
                l.id AS letter_id, l.ref AS letter_ref,
                l.issuing_entity_party_id, ip.display_name AS issuing_entity_name,
@@ -1387,6 +1397,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         status: r.status,
         effectiveFrom: r.effective_from,
         endsOn: r.ends_on,
+        endReason: r.end_reason,
         feeGroup:
           r.fee_group_id === null ||
           r.fee_group_rank === null ||
@@ -1429,6 +1440,7 @@ interface BillableRow {
   status: string;
   effective_from: string;
   ends_on: string | null;
+  end_reason: string | null;
   fee_group_id: string | null;
   fee_group_rank: number | null;
   fee_group_title: string | null;

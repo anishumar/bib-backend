@@ -46,6 +46,10 @@ export type EngagementErrorCode =
   | "ALREADY_SUPERSEDED"
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_NOT_ACTIVE"
+  | "ENGAGEMENT_ENDED"
+  | "ENGAGEMENT_NOT_PAUSED"
+  | "END_REASON_REQUIRED"
+  | "INVALID_END_DATE"
   | "SIGNATURE_INCOMPLETE"
   | "SIGNER_UNAVAILABLE"
   | "SIGNATURE_REQUEST_NOT_PENDING"
@@ -571,6 +575,56 @@ export class AlreadySuperseded extends EngagementError {
 export class EngagementNotFound extends EngagementError {
   constructor(id: string) {
     super("ENGAGEMENT_NOT_FOUND", `No engagement ${JSON.stringify(id)} at this firm`);
+  }
+}
+
+/** Ended already, so it cannot end, pause or resume (V2.3). A client who
+ *  comes back signs a new letter. */
+export class EngagementEnded extends EngagementError {
+  constructor(endsOn: string | null) {
+    super(
+      "ENGAGEMENT_ENDED",
+      `This engagement has already ended${endsOn === null ? "" : ` (last day ${endsOn})`}. ` +
+        `To take the client back, sign a new engagement letter.`,
+    );
+  }
+}
+
+/** Only running work can be paused (V2.3). */
+export class EngagementNotActive extends EngagementError {
+  constructor(status: string) {
+    super(
+      "ENGAGEMENT_NOT_ACTIVE",
+      status === "paused"
+        ? "This engagement is already paused."
+        : "This engagement has not started: it is waiting for its advance. Record the advance " +
+            "first, or end it.",
+    );
+  }
+}
+
+export class EngagementNotPaused extends EngagementError {
+  constructor() {
+    super("ENGAGEMENT_NOT_PAUSED", "This engagement is not paused, so there is nothing to resume.");
+  }
+}
+
+export class EndReasonRequired extends EngagementError {
+  constructor(max: number) {
+    super(
+      "END_REASON_REQUIRED",
+      `Say why the engagement is ending, in up to ${String(max)} characters.`,
+    );
+  }
+}
+
+export class InvalidEndDate extends EngagementError {
+  constructor(value: string) {
+    super(
+      "INVALID_END_DATE",
+      `${JSON.stringify(value)} is not a calendar day. Give the last day you serve the client, ` +
+        `as YYYY-MM-DD.`,
+    );
   }
 }
 

@@ -244,6 +244,9 @@ afterAll(async () => {
   await owner`ALTER TABLE crm.credit_note ENABLE TRIGGER trg_credit_note_freeze`;
   await owner`DELETE FROM crm.invoice_series WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM crm.firm_entity_preference WHERE tenant_id = ${tenantId}`;
+  // 0313 made a routed company a MEMBER of the firm (crm.firm_entity), which
+  // references the party; it goes before the parties do.
+  await owner`DELETE FROM crm.firm_entity WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM files.document_version WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM files.document WHERE tenant_id = ${tenantId}`;
   await owner`DELETE FROM core.party WHERE tenant_id = ${tenantId}`;

@@ -90,6 +90,7 @@ import {
 } from "../infrastructure/postgres/lead-assignment";
 import { PostgresProposalRepository } from "../infrastructure/postgres/proposal-repository";
 import { PostgresEngagementRepository } from "../infrastructure/postgres/engagement-repository";
+import { PostgresEngagementLifecycle } from "../infrastructure/postgres/engagement-lifecycle";
 import { PostgresDocumentRepository } from "../infrastructure/postgres/document-repository";
 import { PostgresFirmEntityRepository } from "../infrastructure/postgres/firm-entity-repository";
 import { PostgresInvoiceRepository } from "../infrastructure/postgres/invoice-repository";
@@ -159,6 +160,7 @@ import { PostgresAgentRunRepository } from "../infrastructure/postgres/agent-run
 import { LeadService } from "../usecase/lead/service";
 import { ProposalService } from "../usecase/proposal/service";
 import { EngagementService } from "../usecase/engagement/service";
+import { EngagementLifecycleService } from "../usecase/engagement/lifecycle";
 import { DocumentService } from "../usecase/document/service";
 import { FirmEntityService } from "../usecase/document/firm-entities";
 import { IdentityService } from "../usecase/identity/service";
@@ -1241,7 +1243,18 @@ export function wire(cfg: Config, log: Logger): Wired {
         config: { service: config },
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
-        engagement: { service: engagement, authz },
+        engagement: {
+          service: engagement,
+          authz,
+          // End, pause, resume (V2.3): the engagement row and the calendar
+          // that hangs off it, in one transaction per end.
+          lifecycle: new EngagementLifecycleService({
+            lifecycle: new PostgresEngagementLifecycle(pools.app),
+            timeZones: new PostgresFirmTimeZone(pools.app),
+            clock: systemClock,
+            events: ledger,
+          }),
+        },
         document: {
           service: documents,
           // The firm's own companies (T6.18): created in one transaction, so

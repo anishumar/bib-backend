@@ -480,6 +480,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/clauses/standard"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/send"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/withdraw"), "party:write" as const],
+  // An engagement's life after signature (V2.3): the same gate as the letter
+  // that created it.
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/end"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/pause"), "party:write" as const],
+  [routeKey("POST", "/api/v1/engagements/{engagementId}/resume"), "party:write" as const],
   // A draft made by mistake (0086), on the permission that withdraws one: the
   // same person who may pull a letter the client has seen may strike off one
   // nobody has.

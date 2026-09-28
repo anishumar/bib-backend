@@ -324,10 +324,16 @@ export interface RecurringEngagement {
   readonly slaDays: number | null;
   /** `period_start` of every link row this engagement already has. */
   readonly linkedPeriods: readonly string[];
+  /** Its last day of service when it has been ended (V2.3): periods that
+   *  begin after it get no job. */
+  readonly endsOn: string | null;
+  /** The day it last resumed after a pause (V2.3). */
+  readonly resumedOn: string | null;
 }
 
 export interface RecurringEngagementFeed {
-  /** Active recurring engagements at this firm, oldest start first. */
+  /** Active recurring engagements at this firm, oldest start first, and the
+   *  ENDED ones that still owe periods up to their last day (V2.3). */
   activeRecurring(tenantId: string, limit: number): Promise<readonly RecurringEngagement[]>;
 }
 

@@ -174,7 +174,7 @@ describe("archiving is refused while anything points at the party", () => {
       .archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PartyHasReferences);
-    expect((err as PartyHasReferences).referrers).toEqual(["a lead"]);
+    expect((err as PartyHasReferences).referrers).toEqual(["an open lead"]);
 
     // Refused means unchanged: still live, still in the picker.
     const [row] = await owner<{ archived_at: Date | null }[]>`
@@ -198,7 +198,7 @@ describe("archiving is refused while anything points at the party", () => {
     const err = await service
       .archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR)
       .catch((e: unknown) => e);
-    expect((err as PartyHasReferences).referrers).toEqual(["a lead", "a proposal"]);
+    expect((err as PartyHasReferences).referrers).toEqual(["an open lead", "a proposal in progress"]);
   });
 
   // THE ONLY THING THAT PROVES A DATABASE-LEVEL RULE: the same refusal with the
@@ -212,7 +212,7 @@ describe("archiving is refused while anything points at the party", () => {
 
     const err = await archiveRaw(partyId);
     expect((err as { code?: string }).code).toBe("23001"); // restrict_violation
-    expect((err as { detail?: string }).detail).toBe("a lead");
+    expect((err as { detail?: string }).detail).toBe("an open lead");
   });
 
   it("and as the OWNER role, which RLS does not filter — the psql path", async () => {
@@ -279,31 +279,29 @@ describe("archiving is refused while anything points at the party", () => {
       .archiveParty({ tenantId: tenant, partyId: subsidiary }, SYSTEM_ACTOR)
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(PartyHasReferences);
-    expect((err as PartyHasReferences).referrers).toEqual(["a proposal line"]);
+    expect((err as PartyHasReferences).referrers).toEqual(["a line of a proposal in progress"]);
 
     // And the client at the head of the same document is refused too, by the
     // proposal itself — the two probes are independent and both hold.
     const clientErr = await service
       .archiveParty({ tenantId: tenant, partyId: client }, SYSTEM_ACTOR)
       .catch((e: unknown) => e);
-    expect((clientErr as PartyHasReferences).referrers).toEqual(["a proposal"]);
+    expect((clientErr as PartyHasReferences).referrers).toEqual(["a proposal in progress"]);
   });
 
-  it("lets the party be archived once what pointed at it is gone", async () => {
-    // Not a trick: crm.lead has no DELETE grant either. The lead is CLOSED, and
-    // a closed lead still refers to the party — which is the rule working, not
-    // failing. The party is archivable only once nothing at all points at it,
-    // and this asserts the refusal is about the reference and not about a
-    // particular lead stage.
+  it("lets the party be archived once nothing LIVE points at it (0314)", async () => {
+    // Until 0314 this asserted the opposite: a CLOSED lead still refused, and
+    // a client with any history could never be put away. Decided 2026-09-28:
+    // only live references refuse (an open lead, a proposal or letter in
+    // progress, a live engagement), so a client who left can be archived once
+    // its engagements are ended. A lost lead is history, not work in hand.
     const partyId = await newParty(`Closed Lead ${stamp}`);
     await withTenant(app, tenant, (db) =>
       db`INSERT INTO crm.lead (tenant_id, party_id, source, stage, closed_at, title)
          VALUES (${tenant}, ${partyId}, 'partner', 'lost', now(), 'Statutory audit')`,
     );
-    const err = await service
-      .archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR)
-      .catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(PartyHasReferences);
+    const archived = await service.archiveParty({ tenantId: tenant, partyId }, SYSTEM_ACTOR);
+    expect(archived.archivedAt).not.toBeNull();
   });
 });
 

@@ -439,6 +439,8 @@ function monthly(
     effectiveFrom: "2026-04-01",
     recurrence: "monthly",
     slaDays: 10,
+    endsOn: null,
+    resumedOn: null,
     ...over,
   };
 }

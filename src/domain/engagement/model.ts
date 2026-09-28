@@ -477,7 +477,39 @@ export interface Engagement {
    * `contract.activated` for exactly that reason.
    */
   readonly effectiveFrom: string;
+  /** The LAST day the firm serves it (inclusive), once it has been ended
+   *  (V2.3, 0314). Periods starting after it get no job and no filing. */
   readonly endsOn: string | null;
+  /** Why it ended, in the firm's words. On the row only, never the ledger. */
+  readonly endReason: string | null;
+  /** When the end was recorded. */
+  readonly endedAt: string | null;
+  /** When it was paused, while it is paused. */
+  readonly pausedAt: string | null;
+  /** The firm's day it last resumed after a pause. A recurring period that
+   *  ended before it fell inside the pause and is never spawned. */
+  readonly resumedOn: string | null;
+}
+
+/** The longest reason an end may carry, as the database's CHECK says (0314). */
+export const END_REASON_MAX = 1000;
+
+/**
+ * The status an ended engagement takes (V2.3). `completed` when the firm
+ * served it for at least a day; `cancelled` when the end falls BEFORE the day
+ * its work was to begin, so nothing was ever delivered. Days are ISO, so the
+ * comparison is chronological.
+ */
+export function endStatusFor(
+  engagement: Pick<Engagement, "effectiveFrom">,
+  endsOn: string,
+): "completed" | "cancelled" {
+  return endsOn < engagement.effectiveFrom ? "cancelled" : "completed";
+}
+
+/** Still running or able to run: an end, a pause or a resume applies to it. */
+export function isLive(status: EngagementStatus): boolean {
+  return status === "pending_advance" || status === "active" || status === "paused";
 }
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
@@ -555,6 +587,17 @@ const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 export function isDay(v: string): boolean {
   return DAY_PATTERN.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
+}
+
+/**
+ * A day that EXISTS (V2.3). `isDay` takes 2026-02-31, because V8 parses it and
+ * rolls it into March; an engagement's last day is a date somebody will act
+ * on, so it must survive the round trip unchanged.
+ */
+export function isCalendarDay(v: string): boolean {
+  if (!DAY_PATTERN.test(v)) return false;
+  const at = new Date(`${v}T00:00:00Z`);
+  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === v;
 }
 
 /**

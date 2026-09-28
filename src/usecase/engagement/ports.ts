@@ -1270,6 +1270,8 @@ export interface BillableEngagement {
   readonly status: string;
   readonly effectiveFrom: string;
   readonly endsOn: string | null;
+  /** Why it ended (V2.3), in the firm's words; null until it is ended. */
+  readonly endReason: string | null;
   /**
    * The FEE GROUP that prices this engagement, or null (0083).
    *
@@ -1287,4 +1289,64 @@ export interface BillableEngagement {
     /** How many live engagements' worth of work the fee covers. */
     readonly lineCount: number;
   } | null;
+}
+
+// ── An engagement's life after signature: end, pause, resume (V2.3) ─────────
+
+/** What ending did to the engagement's filings: T6.16's own counts, because
+ *  it is T6.16's withdrawal (`withdrawUncovered`) that did it. */
+export interface FilingsWithdrawn {
+  readonly withdrawn: number;
+  readonly kept: number;
+  readonly keptStarted: number;
+  readonly keptPastDue: number;
+  readonly keptCoveredElsewhere: number;
+  readonly repointed: number;
+}
+
+/** A job still open for a period that begins after the end: ending does not
+ *  cancel work already on the board, it says so, and the job page cancels. */
+export interface JobAfterEnd {
+  readonly jobId: string;
+  readonly periodLabel: string | null;
+}
+
+export interface EndOutcome {
+  readonly engagement: Engagement;
+  readonly filings: FilingsWithdrawn;
+  readonly openJobsAfterEnd: readonly JobAfterEnd[];
+}
+
+/**
+ * The engagement row's status after signature, and the calendar that hangs
+ * off it (V2.3). Each write is guarded on the status it was read in, so two
+ * people pressing at once produce one change; null means the guard failed.
+ */
+export interface EngagementLifecycle {
+  find(tenantId: string, engagementId: string): Promise<Engagement | null>;
+  /**
+   * End it, and in the SAME transaction withdraw its untouched upcoming
+   * filings for periods after `endsOn`: T6.16's withdrawal, reason
+   * `engagement_ended`, each half alone being a broken calendar.
+   */
+  end(
+    tenantId: string,
+    input: {
+      readonly engagementId: string;
+      readonly expect: EngagementStatus;
+      readonly status: "completed" | "cancelled";
+      readonly endsOn: string;
+      readonly reason: string;
+      readonly byUserId: string | null;
+      readonly firmToday: string;
+    },
+  ): Promise<EndOutcome | null>;
+  pause(
+    tenantId: string,
+    input: { readonly engagementId: string; readonly byUserId: string | null },
+  ): Promise<Engagement | null>;
+  resume(
+    tenantId: string,
+    input: { readonly engagementId: string; readonly resumedOn: string },
+  ): Promise<Engagement | null>;
 }

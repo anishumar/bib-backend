@@ -59,6 +59,10 @@ import type {
   SignatureSigner,
   SignatureTenants,
   SignedCopyFiler,
+  EndOutcome,
+  EngagementLifecycle,
+  FilingsWithdrawn,
+  JobAfterEnd,
 } from "../usecase/engagement/ports";
 import type { Deps } from "../usecase/engagement/service";
 import { FakeIds } from "./ids";
@@ -458,6 +462,10 @@ export class FakeEngagementRepo implements EngagementRepository {
         activatedAt: e.activatedAt,
         effectiveFrom: e.effectiveFrom,
         endsOn: null,
+        endReason: null,
+        endedAt: null,
+        pausedAt: null,
+        resumedOn: null,
       };
       this.engagements.push(row);
       return row;
@@ -530,6 +538,7 @@ export class FakeEngagementRepo implements EngagementRepository {
           status: e.status,
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
+          endReason: e.endReason,
           feeGroup:
             group === undefined
               ? null
@@ -1293,5 +1302,74 @@ export class FakeAcceptedQuotes implements AcceptedQuoteDirectory {
 
   findQuote(_tenantId: string, proposalId: string): Promise<QuotedProposal | null> {
     return Promise.resolve(this.quotes.get(proposalId) ?? null);
+  }
+}
+
+/**
+ * An engagement's life after signature (V2.3), over a list a test fills. Each
+ * write is guarded on the status it expects, as the adapter's UPDATE is, and
+ * the filing counts are whatever the test says the calendar held.
+ */
+export class FakeEngagementLifecycle implements EngagementLifecycle {
+  readonly rows: Engagement[] = [];
+  filings: FilingsWithdrawn = {
+    withdrawn: 0,
+    kept: 0,
+    keptStarted: 0,
+    keptPastDue: 0,
+    keptCoveredElsewhere: 0,
+    repointed: 0,
+  };
+  openJobsAfterEnd: JobAfterEnd[] = [];
+
+  find(tenantId: string, engagementId: string): Promise<Engagement | null> {
+    return Promise.resolve(this.rows.find((r) => r.tenantId === tenantId && r.id === engagementId) ?? null);
+  }
+
+  private swap(tenantId: string, id: string, expect: Engagement["status"], next: (e: Engagement) => Engagement): Engagement | null {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === id && r.status === expect);
+    const current = this.rows[i];
+    if (current === undefined) return null;
+    const updated = next(current);
+    this.rows[i] = updated;
+    return updated;
+  }
+
+  end(
+    tenantId: string,
+    input: Parameters<EngagementLifecycle["end"]>[1],
+  ): Promise<EndOutcome | null> {
+    const ended = this.swap(tenantId, input.engagementId, input.expect, (e) => ({
+      ...e,
+      status: input.status,
+      endsOn: input.endsOn,
+      endReason: input.reason,
+      endedAt: "2026-09-29T09:00:00.000Z",
+      pausedAt: null,
+    }));
+    return Promise.resolve(
+      ended === null ? null : { engagement: ended, filings: this.filings, openJobsAfterEnd: this.openJobsAfterEnd },
+    );
+  }
+
+  pause(tenantId: string, input: { readonly engagementId: string }): Promise<Engagement | null> {
+    return Promise.resolve(
+      this.swap(tenantId, input.engagementId, "active", (e) => ({
+        ...e,
+        status: "paused",
+        pausedAt: "2026-09-29T09:00:00.000Z",
+      })),
+    );
+  }
+
+  resume(tenantId: string, input: { readonly engagementId: string; readonly resumedOn: string }): Promise<Engagement | null> {
+    return Promise.resolve(
+      this.swap(tenantId, input.engagementId, "paused", (e) => ({
+        ...e,
+        status: "active",
+        pausedAt: null,
+        resumedOn: input.resumedOn,
+      })),
+    );
   }
 }
