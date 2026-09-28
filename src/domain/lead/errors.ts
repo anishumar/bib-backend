@@ -29,6 +29,7 @@ export type LeadErrorCode =
   | "INVALID_LEAD_JURISDICTION"
   | "INVALID_ESTIMATED_VALUE"
   | "PARTY_ARCHIVED"
+  | "CLIENT_IS_OWN_COMPANY"
   | "NOT_CALLERS_TODAY"
   | "LEAD_DELETED"
   | "LEAD_CONVERTED"
@@ -56,6 +57,19 @@ export class LeadPartyArchived extends LeadError {
       `${displayName} is archived, so a new lead cannot be opened for them. If the firm is ` +
         `working with them again, restore them from their client page first: restoring is its ` +
         `own step, so that putting a client away is never undone without somebody seeing it.`,
+    );
+  }
+}
+
+/** The contact details on this capture are one of the firm's OWN companies'
+ *  (0313): usually the firm's phone or email typed as the prospect's. A lead
+ *  would make the firm its own prospect, so nothing is written. */
+export class LeadMatchesOwnCompany extends LeadError {
+  constructor(displayName: string) {
+    super(
+      "CLIENT_IS_OWN_COMPANY",
+      `These contact details belong to ${displayName}, one of your own companies, so a lead ` +
+        `cannot be opened for it. Check the phone, email and PAN, and enter the prospect's own.`,
     );
   }
 }

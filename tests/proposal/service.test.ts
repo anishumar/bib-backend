@@ -40,6 +40,7 @@ import {
   ProposalAddresseeNotAPerson,
   ProposalIssuerNotAFirmEntity,
   ProposalPartyArchived,
+  ProposalClientIsOwnCompany,
 } from "../../src/domain/proposal/errors";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
@@ -91,6 +92,21 @@ describe("a client the firm has ARCHIVED (0305)", () => {
     const err = await draftWith(s).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ProposalPartyArchived);
     expect((err as Error).message).toMatch(/Acme Industries Private Limited is archived/);
+    expect(s.proposals.rows).toHaveLength(0);
+    expect(s.events.recorded).toHaveLength(0);
+  });
+
+  it("refuses one of the firm's OWN companies as the client, as the invoice's BILLS_THE_FIRM does", async () => {
+    const s = setup();
+    s.firmEntities.members.add(`${TENANT}:${PARTY}`);
+    s.parties.know(PARTY, "10x Global FZE");
+    const err = await draftWith(s).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProposalClientIsOwnCompany);
+    expect((err as ProposalClientIsOwnCompany).code).toBe("CLIENT_IS_OWN_COMPANY");
+    expect((err as Error).message).toBe(
+      "10x Global FZE is one of your own companies, so it cannot be the client on a proposal. " +
+        "Choose the client the quote is for.",
+    );
     expect(s.proposals.rows).toHaveLength(0);
     expect(s.events.recorded).toHaveLength(0);
   });

@@ -134,6 +134,7 @@ export class FakePartyRepo implements PartyRepository {
       kind: "organization",
       displayName: o.displayName,
       archivedAt: null,
+      isOwnCompany: false,
     });
     const org: Organization = {
       partyId: o.partyId,
@@ -155,6 +156,7 @@ export class FakePartyRepo implements PartyRepository {
       kind: "person",
       displayName: p.displayName,
       archivedAt: null,
+      isOwnCompany: false,
     });
     const person: Person = {
       partyId: p.partyId,
@@ -186,6 +188,13 @@ export class FakePartyRepo implements PartyRepository {
     return Promise.resolve(
       this.parties.find((p) => p.tenantId === tenantId && p.id === partyId) ?? null,
     );
+  }
+
+  /** Make a party one of the firm's own companies, as a `crm.firm_entity`
+   *  row does (0313). */
+  markOwnCompany(partyId: string): this {
+    this.parties = this.parties.map((p) => (p.id === partyId ? { ...p, isOwnCompany: true } : p));
+    return this;
   }
 
   findOrganization(tenantId: string, partyId: string): Promise<Organization | null> {

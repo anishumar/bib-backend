@@ -1283,6 +1283,15 @@ makes any party a routing row names a member (the older way in, which `smoke.sh`
 use). Never deleted; `retired_at` is there for the day something retires one. `crm.is_firm_entity`
 is the firm itself OR a live member.
 
+**An own company is never a CLIENT (2026-09-29).** The invoice refused one first (`BILLS_THE_FIRM`).
+Now every document that names a client refuses it too, with `CLIENT_IS_OWN_COMPANY` (400):
+- proposal draft;
+- letter draft, including a letter written up from a quote (both go through `draftLetter`);
+- a lead capture whose dedup match lands on one.
+`GET /parties` and `GET /parties/{id}` still return own companies, with `isOwnCompany`, so a task may
+name the firm. The list computes it as two joins, held to the function row for row by
+`tests/party/own-company.integration.test.ts`. The client screens hide these parties.
+
 **A draft LETTER changes in place (T6.18 S6)**, as a proposal does. `PATCH /engagement-letters/{id}`
 revises the head (title, Background, addressee, dates, advance), the currency while no line or
 section row exists at all (live or pulled: their keys to the letter's currency do not cascade, 0017 /

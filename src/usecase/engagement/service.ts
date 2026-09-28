@@ -78,6 +78,7 @@ import {
   LetterNotFound,
   LetterNotSupersedable,
   LetterPartyArchived,
+  LetterClientIsOwnCompany,
   NoClauses,
   NotAClause,
   ServiceNotQuotable,
@@ -584,6 +585,11 @@ export class EngagementService {
     // An archived client gets no new letter (0305) - refused before the
     // reference number is drawn.
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    // Nor one of the firm's own companies: every letter, drafted or written
+    // up from a quote, comes through here, as every invoice meets BILLS_THE_FIRM.
+    if (await this.deps.documents.isFirmEntity(input.tenantId, input.partyId)) {
+      throw new LetterClientIsOwnCompany(await this.nameOf(input.tenantId, input.partyId));
+    }
 
     // WHO ELSE the letter names, also before the number is drawn (F-10-1).
     // Each of these was checked for the FIRM only, so a client's company as

@@ -684,6 +684,8 @@ export function mapError(err: unknown): MappedError {
       // way to reach the prospect, no name, a close with no explanation, and an
       // explanation attached to a stage that has nothing to explain. None is a
       // statement about the pipeline's current state, so none is a 409.
+      // CLIENT_IS_OWN_COMPANY joins them: the details typed are the firm's own
+      // company's, the invoice's BILLS_THE_FIRM, answered by entering the right ones.
       case "INVALID_SOURCE":
       case "INVALID_STAGE":
       case "NO_CONTACT_DETAIL":
@@ -693,6 +695,7 @@ export function mapError(err: unknown): MappedError {
       case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
+      case "CLIENT_IS_OWN_COMPANY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "LEAD_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
@@ -754,6 +757,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DECISION":
       case "NOT_A_SERVICE":
       case "SERVICE_NOT_PUBLISHED":
+      case "CLIENT_IS_OWN_COMPANY":
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "ADDRESSEE_NOT_A_PERSON":
       case "PREPARER_NOT_STAFF":
@@ -852,6 +856,7 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_AMOUNT_REQUIRED":
       case "INVALID_DATE":
       case "QUOTE_JURISDICTION_UNCLEAR":
+      case "CLIENT_IS_OWN_COMPANY":
       case "ISSUER_NOT_A_FIRM_ENTITY":
       case "QUOTE_OF_ANOTHER_CLIENT":
       case "ADDRESSEE_NOT_A_PERSON":

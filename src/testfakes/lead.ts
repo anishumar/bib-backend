@@ -422,6 +422,9 @@ export function makeLeadFakes(): Deps & {
   /** The real party module the pipeline is built on, for a test that wants to
    *  read back the prospect capture created. */
   party: PartyService;
+  /** Its in-memory repository, so a test can make a party one of the firm's
+   *  own companies (`markOwnCompany`). */
+  partyRepo: FakePartyRepo;
   /** UTC unless a test sets the firm's zone. */
   timeZones: FakeFirmTimeZone;
   /** INR unless a test sets the firm's currency. */
@@ -475,5 +478,6 @@ export function makeLeadFakes(): Deps & {
     clock: new FakeClock(new Date("2026-03-01T10:00:00Z")),
     events,
     party,
+    partyRepo: partyFakes.parties as FakePartyRepo,
   };
 }

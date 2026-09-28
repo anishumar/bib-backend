@@ -21,6 +21,17 @@ export interface Party {
    * (migration 0035, and the paragraph in CLAUDE.md).
    */
   readonly archivedAt: string | null;
+  /**
+   * One of the firm's OWN companies: the firm itself, or a live member of
+   * `crm.firm_entity` (0313). Computed on read, never stored, by the same
+   * definition as `crm.is_firm_entity`, which the invoice, the proposal, the
+   * letter and the lead capture all refuse as a client.
+   *
+   * Kept in the list rather than filtered out: the client screens hide these
+   * rows, but a task may be about the firm itself, and whether it may is not
+   * the party module's to decide.
+   */
+  readonly isOwnCompany: boolean;
 }
 
 export interface Organization {

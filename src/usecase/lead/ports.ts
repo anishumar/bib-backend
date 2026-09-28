@@ -337,5 +337,10 @@ export interface ProspectDirectory {
   findParty(
     tenantId: string,
     partyId: string,
-  ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
+  ): Promise<{
+    readonly displayName: string;
+    readonly archivedAt: string | null;
+    /** One of the firm's own companies (0313): a capture that lands on one is refused. */
+    readonly isOwnCompany: boolean;
+  } | null>;
 }

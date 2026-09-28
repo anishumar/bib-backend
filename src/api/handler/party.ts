@@ -19,6 +19,7 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
+import type { Party } from "../../domain/party/model";
 import type { PartyService } from "../../usecase/party/service";
 
 export interface PartyDeps {
@@ -40,8 +41,28 @@ const PartySchema = z
     // here because zod-openapi documents a response without validating it: a
     // field the spec omits is one the generated client cannot see.
     archivedAt: z.string().nullable(),
+    isOwnCompany: z.boolean().openapi({
+      description:
+        "One of the firm's OWN companies: the firm itself, or a company on Our companies " +
+        "(`crm.is_firm_entity`, 0313). Such a party is never a client: a proposal, an " +
+        "engagement letter, a lead and an invoice all refuse it. Listed all the same, so a " +
+        "screen that may name the firm (a task about it) still can; the client screens hide it.",
+    }),
   })
   .openapi("Party");
+
+/** A party on the wire, field by field: a field forwarded by a spread reaches
+ *  the JSON without reaching the spec, so the generated client never sees it. */
+function partyWire(p: Party) {
+  return {
+    id: p.id,
+    tenantId: p.tenantId,
+    kind: p.kind,
+    displayName: p.displayName,
+    archivedAt: p.archivedAt,
+    isOwnCompany: p.isOwnCompany,
+  };
+}
 
 const OrganizationSchema = z
   .object({
@@ -614,16 +635,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
     const party = await deps.service.updateParty({ tenantId: s.tenantId, partyId, ...body }, s.actor);
-    return c.json(
-      {
-        id: party.id,
-        tenantId: party.tenantId,
-        kind: party.kind,
-        displayName: party.displayName,
-        archivedAt: party.archivedAt,
-      },
-      200,
-    );
+    return c.json(partyWire(party), 200);
   });
 
   app.openapi(correctLegalEntityRoute, async (c) => {
@@ -705,7 +717,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const party = await deps.service.archiveParty({ tenantId: s.tenantId, partyId }, s.actor);
-    return c.json({ ...party }, 200);
+    return c.json(partyWire(party), 200);
   });
 
   app.openapi(unarchivePartyRoute, async (c) => {
@@ -713,7 +725,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     if (!s.ok) return c.json(s.deny, s.status);
     const { partyId } = c.req.valid("param");
     const party = await deps.service.unarchiveParty({ tenantId: s.tenantId, partyId }, s.actor);
-    return c.json({ ...party }, 200);
+    return c.json(partyWire(party), 200);
   });
 
   app.openapi(listPartiesRoute, async (c) => {
@@ -721,7 +733,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     if (!s.ok) return c.json(s.deny, s.status);
     const { includeArchived } = c.req.valid("query");
     const parties = await deps.service.listParties(s.tenantId, includeArchived === "true");
-    return c.json({ parties: parties.map((p) => ({ ...p })) }, 200);
+    return c.json({ parties: parties.map(partyWire) }, 200);
   });
 
   app.openapi(partyProfileRoute, async (c) => {
@@ -734,7 +746,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     // model is how a field reaches the wire without reaching the spec.
     return c.json(
       {
-        party: { ...profile.party },
+        party: partyWire(profile.party),
         organization: profile.organization === null ? null : { ...profile.organization },
         person: profile.person === null ? null : { ...profile.person },
         legalEntities: profile.legalEntities.map((e) => ({ ...e })),

@@ -63,6 +63,7 @@ import {
   InvalidEstimatedValue,
   LeadNotCallersToday,
   LeadPartyArchived,
+  LeadMatchesOwnCompany,
   LeadDeleted,
   OwnerNotStaff,
   SameStage,
@@ -323,6 +324,11 @@ export class LeadService {
       const existing = await this.deps.prospects.findParty(input.tenantId, existingPartyId);
       if (existing !== null && existing.archivedAt !== null) {
         throw new LeadPartyArchived(existing.displayName);
+      }
+      // The firm's own company: its phone, email or PAN typed as the
+      // prospect's. Refused before a contact detail is attached to it.
+      if (existing !== null && existing.isOwnCompany) {
+        throw new LeadMatchesOwnCompany(existing.displayName);
       }
     }
 

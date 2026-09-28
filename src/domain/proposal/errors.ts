@@ -46,6 +46,7 @@ export type ProposalErrorCode =
   | "INVALID_FX_RATE"
   | "INVALID_CURRENCY"
   | "PARTY_ARCHIVED"
+  | "CLIENT_IS_OWN_COMPANY"
   | "ISSUER_NOT_A_FIRM_ENTITY"
   | "ADDRESSEE_NOT_A_PERSON"
   | "ADDRESSEE_NOT_LINKED"
@@ -141,6 +142,18 @@ export class ProposalPartyArchived extends ProposalError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+/** The client is one of the firm's own companies: an invoice cannot bill one
+ *  (`BILLS_THE_FIRM`), and a quote cannot be made to one either. */
+export class ProposalClientIsOwnCompany extends ProposalError {
+  constructor(displayName: string) {
+    super(
+      "CLIENT_IS_OWN_COMPANY",
+      `${displayName} is one of your own companies, so it cannot be the client on a proposal. ` +
+        `Choose the client the quote is for.`,
     );
   }
 }

@@ -85,6 +85,7 @@ import {
   ProposalExpired,
   ProposalNotFound,
   ProposalPartyArchived,
+  ProposalClientIsOwnCompany,
   ServiceNotFound,
   ShareLinkUnknown,
   ServiceNotPublished,
@@ -419,6 +420,12 @@ export class ProposalService {
     }
     // Before the reference is drawn, so a refusal spends no number (0305).
     await this.refuseArchived(input.tenantId, input.partyId, "client");
+    // Nor to one of the firm's own companies: the invoice refuses to bill one
+    // (BILLS_THE_FIRM), and a quote to one is where that invoice would start.
+    if (await this.deps.documents.isFirmEntity(input.tenantId, input.partyId)) {
+      const named = await this.deps.parties.findParty(input.tenantId, input.partyId);
+      throw new ProposalClientIsOwnCompany(named?.displayName ?? input.partyId);
+    }
     // A lead deleted as a mistake gains no proposal (0086): there was never a
     // prospect to offer it to. A lead that does not exist is the foreign key's.
     if (input.leadId !== undefined) {

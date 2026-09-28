@@ -60,6 +60,7 @@ export type EngagementErrorCode =
   | "QUOTE_JURISDICTION_UNCLEAR"
   | "QUOTE_NAMES_NO_ENTITY"
   | "PARTY_ARCHIVED"
+  | "CLIENT_IS_OWN_COMPANY"
   | "ISSUER_NOT_A_FIRM_ENTITY"
   | "QUOTE_OF_ANOTHER_CLIENT"
   | "ADDRESSEE_NOT_A_PERSON"
@@ -190,6 +191,18 @@ export class LetterPartyArchived extends EngagementError {
         `If the firm is working with them again, restore them from their client page first: ` +
         `restoring is its own step, so that putting a client away is never undone without ` +
         `somebody seeing it.`,
+    );
+  }
+}
+
+/** The client is one of the firm's own companies: the firm does not sign an
+ *  engagement letter with itself, as an invoice cannot bill it. */
+export class LetterClientIsOwnCompany extends EngagementError {
+  constructor(displayName: string) {
+    super(
+      "CLIENT_IS_OWN_COMPANY",
+      `${displayName} is one of your own companies, so it cannot be the client on an ` +
+        `engagement letter. Choose the client the letter is for.`,
     );
   }
 }
