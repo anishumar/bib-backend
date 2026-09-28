@@ -669,6 +669,14 @@ from the browser are untouched — the caller's day is still the caller's. The P
 BEFORE `withPortal` opens — `tenancy.tenant` has no portal policy and must not grow one (T6.9's
 rule about the Key Manager).
 
+**A LETTER'S TWO DAYS FOLLOWED (2026-09-28).** `send` dated an undated letter, and `sign` started
+work nobody dated, on `utcDay(now)`: a letter sent at 01:00 IST was dated the day before. Both now
+take the caller's `asOf` (query param, held to the firm's day ±1 by `isCallersToday`, refused as
+`NOT_CALLERS_TODAY`), else the firm's day, as invoices do; the browser sends `browserDay()`. The
+signature sweep and the import send none and get the firm's day. `withState` ("has this work
+started yet") reads the firm's day too, or work signed at 01:00 read "not started" until 05:30.
+Letters already sent or signed keep their stored days.
+
 `tests/architecture/instant-format.test.ts` bans a bare `_at::date` across the adapters, beside
 the `_at::text` ban it already carried. Same family, same reason: **name the zone**.
 
@@ -1537,6 +1545,13 @@ addressed to another client's director. All refused now, before any number is dr
 - **An invoice's engagement is the billed client's** (`engagement.party_id = invoice.party_id`),
   exactly what `billable-engagements` offers; **a letter's quote is its own client's**; **an
   archived client gains no new invoice** (0305's rule, reaching the document it did not list).
+- **And the company that signed the engagement's letter charges for it** (2026-09-28). The
+  invoice's number is already in its issuer's series, so a line billing work another of the
+  firm's companies contracted booked that sale in the wrong company's GST books for good.
+  `addLine` refuses it (`ENGAGEMENT_OF_ANOTHER_ISSUER`, 409: the answer is another invoice, not
+  another request), and `billable-engagements` carries `issuingEntityPartyId` /
+  `issuingEntityName` so the raise dialog preselects "Charged by" and the line picker disables
+  the rest. A service check, not a trigger: an invoice line is only ever written through it.
 
 **The invariant ones are also WALLS (0306)**, for the writers that are not the services: the
 invoice's issuer and billed party, its series, its line's engagement and the letter's quote.

@@ -56,6 +56,7 @@ import {
   isPaymentMethod,
 } from "../../domain/invoice/model";
 import type {
+  EngagementBilling,
   InvoiceFilters,
   InvoiceLineRecord,
   InvoiceRecord,
@@ -414,12 +415,24 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   async engagementOf(
     tenantId: string,
     engagementId: string,
-  ): Promise<{ readonly partyId: string } | null> {
+  ): Promise<EngagementBilling | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [row] = await db<{ party_id: string }[]>`
-        SELECT party_id FROM crm.engagement WHERE id = ${engagementId}
+      const [row] = await db<
+        { party_id: string; issuing_entity_party_id: string; letter_ref: string }[]
+      >`
+        SELECT e.party_id, l.issuing_entity_party_id, l.ref AS letter_ref
+          FROM crm.engagement e
+          JOIN crm.engagement_letter l
+            ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
+         WHERE e.id = ${engagementId}
       `;
-      return row ? { partyId: row.party_id } : null;
+      return row
+        ? {
+            partyId: row.party_id,
+            issuingEntityPartyId: row.issuing_entity_party_id,
+            letterRef: row.letter_ref,
+          }
+        : null;
     });
   }
 

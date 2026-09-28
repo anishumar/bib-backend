@@ -41,7 +41,6 @@ import {
   mayActivate,
   normalizeJurisdiction,
   resolveEffectiveFrom,
-  utcDay,
 } from "../../domain/engagement/model";
 import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
@@ -107,12 +106,13 @@ import {
   LetterProseEdited,
   TermsOnLetter,
   QuoteDeleted,
+  LetterNotCallersToday,
   letterDeletionRefusal,
   EngagementError,
 } from "../../domain/engagement/errors";
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
-import { dayInZone } from "../../domain/scheduler/zone";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import { planAnnexure } from "../../domain/engagement/annexure";
 import type {
   ClauseLibrary,
@@ -226,6 +226,9 @@ export interface SendOptions {
    * the product inventing a second signing. Set by the book import only.
    */
   readonly migrated?: boolean | undefined;
+  /** The caller's today, which dates an undated letter; the firm's day when
+   *  absent. Held to the firm's day or one either side (`isCallersToday`). */
+  readonly asOf?: string | undefined;
 }
 
 /** What one pass of the signature sweep did at one firm. */
@@ -517,6 +520,10 @@ export interface SignInput {
    * import only; the HTTP route does not expose it.
    */
   readonly migrated?: boolean | undefined;
+  /** The caller's today: the day work starts when neither the line nor the
+   *  letter names one. The firm's day when absent, which is what the
+   *  signature sweep and the import get. */
+  readonly asOf?: string | undefined;
 }
 
 export class EngagementService {
@@ -914,8 +921,7 @@ export class EngagementService {
    * Delhi must count from the morning, not from 05:30.
    */
   async structureFor(tenantId: string, clientPartyId: string): Promise<ClientStructure> {
-    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
-    const today = dayInZone(this.deps.clock.now().toISOString(), zone);
+    const today = await this.firmDay(tenantId);
     return this.deps.structure.structureOf(tenantId, clientPartyId, today);
   }
 
@@ -1761,7 +1767,7 @@ export class EngagementService {
     return {
       ...record,
       document,
-      engagements: this.withState(record.engagements),
+      engagements: await this.withState(tenantId, record.engagements),
       blocks,
       signing: {
         provider: this.deps.esign.method,
@@ -1844,6 +1850,11 @@ export class EngagementService {
     // `canTransition` check here would be unreachable.
     const letter = await this.editableOrThrow(tenantId, letterId);
     await this.requireCompleteTerms(tenantId, letterId);
+    // THE DATE ON THE LETTER, when the drafter left it blank: the caller's
+    // today, or the firm's. It was Greenwich's, which dated a letter sent at
+    // 01:00 in Delhi the day before it went out. Settled before anything is
+    // written, so a refused asOf leaves nothing behind.
+    const issuedOn = await this.callersDay(tenantId, options.asOf);
 
     // WHOM TO ASK, recorded BEFORE the letter is marked sent. The other order
     // could leave a letter `sent` through DocuSign with nobody on record to
@@ -1863,8 +1874,7 @@ export class EngagementService {
             requestedBy: actor.type === "human" ? actor.id : null,
           });
 
-    const now = this.deps.clock.now();
-    const at = now.toISOString();
+    const at = this.deps.clock.now().toISOString();
     const standing = await this.deps.firm.firmSignatory(tenantId);
     // THE MARK IS RESOLVED HERE AND PINNED, never looked up when the PDF is
     // drawn (0081). Only when there IS a signatory: the firm's block prints on
@@ -1883,7 +1893,7 @@ export class EngagementService {
             ),
           };
 
-    const sent = await this.deps.letters.markSent(tenantId, letter.id, at, utcDay(now), firm);
+    const sent = await this.deps.letters.markSent(tenantId, letter.id, at, issuedOn, firm);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "engagement_letter.sent",
@@ -2298,6 +2308,10 @@ export class EngagementService {
       throw new InvalidLetterTransition(letter.status, "signed");
     }
     if (input.signedByName.trim() === "") throw new SignatureIncomplete("a signatory's name");
+    // The signature's day, settled before the provider is asked anything. It
+    // is the caller's today, or the firm's: never Greenwich's, which started
+    // work signed at 01:00 in Delhi on the day before.
+    const signatureDay = await this.callersDay(input.tenantId, input.asOf);
 
     const [lines, clauses, feeGroups] = await this.requireCompleteTerms(
       input.tenantId,
@@ -2316,13 +2330,11 @@ export class EngagementService {
       reference: input.reference,
     });
 
-    const now = this.deps.clock.now();
-    const at = now.toISOString();
+    const at = this.deps.clock.now().toISOString();
     // WHEN THE WORK BEGINS, resolved once per line and then stored. Null on the
     // line means the letter's date; null on the letter means today's signature.
     // Resolved HERE rather than read back through two joins later, because the
     // letter freezes at this moment and the answer can therefore never change.
-    const signatureDay = utcDay(now);
     // The fee gate, decided ONCE by the domain and carried into every
     // engagement the letter creates.
     //
@@ -2396,7 +2408,10 @@ export class EngagementService {
     for (const engagement of result.engagements) {
       if (engagement.status === "active") await this.recordActivation(engagement, actor);
     }
-    return { letter: result.letter, engagements: this.withState(result.engagements) };
+    return {
+      letter: result.letter,
+      engagements: await this.withState(input.tenantId, result.engagements),
+    };
   }
 
   /**
@@ -2436,7 +2451,7 @@ export class EngagementService {
       },
     });
     for (const engagement of result.released) await this.recordActivation(engagement, actor);
-    return { letter: result.letter, released: this.withState(result.released) };
+    return { letter: result.letter, released: await this.withState(tenantId, result.released) };
   }
 
   /**
@@ -2471,20 +2486,46 @@ export class EngagementService {
 
   async listEngagements(tenantId: string, letterId: string): Promise<readonly EngagementRecord[]> {
     await this.findOrThrow(tenantId, letterId);
-    return this.withState(await this.deps.letters.listEngagements(tenantId, letterId));
+    return this.withState(tenantId, await this.deps.letters.listEngagements(tenantId, letterId));
   }
 
   // ── internals ───────────────────────────────────────────────────────────────
 
   /** The stored rows, each narrowed against today. The clock lives here and
    *  nowhere below: repositories return what is stored, and "has this started
-   *  yet" is a rule. */
-  private withState(engagements: readonly Engagement[]): readonly EngagementRecord[] {
-    const today = utcDay(this.deps.clock.now());
+   *  yet" is a rule. Today is the FIRM's, the calendar `effectiveFrom` was
+   *  set on: on Greenwich's, work signed at 01:00 in Delhi read "not started"
+   *  until 05:30. */
+  private async withState(
+    tenantId: string,
+    engagements: readonly Engagement[],
+  ): Promise<readonly EngagementRecord[]> {
+    const today = await this.firmDay(tenantId);
     return engagements.map((engagement) => ({
       engagement,
       state: engagementState(engagement, today),
     }));
+  }
+
+  /** Today on the firm's calendar (0071). */
+  private async firmDay(tenantId: string): Promise<string> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
+  }
+
+  /**
+   * Today as the caller sees it, for the two moments that stamp a day on a
+   * letter: sending (its date) and signing (the day its work starts, when
+   * nothing else says). The caller's `asOf` (the browser's local day), else the
+   * firm's day, never the server's. `asOf` is held to the firm's day or one
+   * either side (`isCallersToday`): it says what day it is, it does not choose
+   * one. Invoices and proposals answer the same question the same way.
+   */
+  private async callersDay(tenantId: string, asOf: string | undefined): Promise<string> {
+    const firmDay = await this.firmDay(tenantId);
+    if (asOf === undefined) return firmDay;
+    if (!isCallersToday(asOf, firmDay)) throw new LetterNotCallersToday(asOf, firmDay);
+    return asOf;
   }
 
   /**

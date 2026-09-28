@@ -851,6 +851,7 @@ export function mapError(err: unknown): MappedError {
       case "NOTHING_TO_CHANGE_ON_LINE":
       case "INVALID_LINE_DESCRIPTION":
       case "INVALID_CURRENCY_CHANGE":
+      case "NOT_CALLERS_TODAY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // The e-signature provider itself failed (token refused, account not
       // discoverable, malformed answer). This server is healthy and the letter
@@ -943,6 +944,10 @@ export function mapError(err: unknown): MappedError {
       // a malformed request. INVOICE_NOT_EDITABLE in particular is answered by
       // cancelling and reissuing, never by retrying — a copy has left the
       // building and, in India, a copy is registered with the government.
+      // ENGAGEMENT_OF_ANOTHER_ISSUER is the same kind of answer: the line is
+      // well formed, but the INVOICE is charged by another company than the one
+      // that signed the work, and its number is already in that company's
+      // series. The fix is another invoice, not another request.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
@@ -952,6 +957,7 @@ export function mapError(err: unknown): MappedError {
       case "DUNNING_NOT_AWAITING_APPROVAL":
       case "DUNNING_ALREADY_DECIDED":
       case "PARTY_ARCHIVED":
+      case "ENGAGEMENT_OF_ANOTHER_ISSUER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

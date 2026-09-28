@@ -294,6 +294,10 @@ const addLineRoute = createRoute({
   path: "/api/v1/invoices/{invoiceId}/lines",
   tags: ["invoices"],
   summary: "Add a line to a draft invoice",
+  description:
+    "An `engagementId` must be the billed client's, and its letter must have been signed by " +
+    "the company this invoice is charged by: the number is already in that company's series " +
+    "(ENGAGEMENT_OF_ANOTHER_ISSUER, 409).",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
     body: { content: { "application/json": { schema: AddInvoiceLineRequest } }, required: true },
@@ -304,7 +308,10 @@ const addLineRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
-    409: errorResponse("The invoice has been issued — its lines are fixed"),
+    409: errorResponse(
+      "The invoice has been issued (its lines are fixed), or the engagement's letter was signed " +
+        "by another of the firm's companies",
+    ),
   },
 });
 

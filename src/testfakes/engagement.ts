@@ -517,6 +517,8 @@ export class FakeEngagementRepo implements EngagementRepository {
           entityName: `Entity ${e.entityPartyId.slice(-2)}`,
           letterId: letter.id,
           letterRef: letter.ref,
+          issuingEntityPartyId: letter.issuingEntityPartyId,
+          issuingEntityName: `Company ${letter.issuingEntityPartyId.slice(-2)}`,
           description: line.description,
           quantity: line.quantity,
           unitAmount: line.unitAmount,

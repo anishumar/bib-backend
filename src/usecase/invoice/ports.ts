@@ -131,6 +131,17 @@ export interface PartyStanding {
   ): Promise<{ readonly displayName: string; readonly archivedAt: string | null } | null>;
 }
 
+/** What an invoice line needs to know about the engagement it bills. */
+export interface EngagementBilling {
+  /** The client it bills (F-10-1). */
+  readonly partyId: string;
+  /** The firm's company that signed its letter, and so the one that charges
+   *  for it: its series is where the invoice's number comes from. */
+  readonly issuingEntityPartyId: string;
+  /** That letter, so a refusal can name it. */
+  readonly letterRef: string;
+}
+
 export interface InvoiceRepository {
   /**
    * Create the invoice AND take its number, in ONE transaction.
@@ -153,9 +164,9 @@ export interface InvoiceRepository {
   addLine(l: NewInvoiceLine): Promise<InvoiceLine>;
   removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void>;
   listLines(tenantId: string, invoiceId: string): Promise<readonly InvoiceLine[]>;
-  /** Whose engagement this is — the client it bills (F-10-1). Null when there
-   *  is no such engagement at this firm. */
-  engagementOf(tenantId: string, engagementId: string): Promise<{ readonly partyId: string } | null>;
+  /** Whose engagement this is and who signed for it. Null when there is no
+   *  such engagement at this firm. */
+  engagementOf(tenantId: string, engagementId: string): Promise<EngagementBilling | null>;
 
   /** Issue it: the status and the date it carries, in one statement. */
   issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;

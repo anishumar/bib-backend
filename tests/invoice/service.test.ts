@@ -15,6 +15,7 @@ import {
   InvoiceNotFound,
   IrnAlreadyRegistered,
   EngagementOfAnotherClient,
+  EngagementOfAnotherIssuer,
   InvoiceBillsTheFirm,
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
@@ -517,15 +518,28 @@ describe("who an invoice names (F-10-1)", () => {
   const OTHER_CLIENT = "00000000-0000-0000-0000-0000000000b9";
   const ENGAGEMENT = "00000000-0000-0000-0000-0000000000e1";
   const THEIR_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e2";
+  /** The same client's work, under a letter the firm's OTHER company signed. */
+  const US_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e3";
 
   function named() {
     const s = setup();
     s.parties
       .know(CLIENT, "Meridian Textiles Private Limited")
       .know(OTHER_CLIENT, "Lakeview Foods Private Limited")
-      .know(ENTITY, "10x Global Advisory Private Limited");
-    s.invoices.engagementParties.set(ENGAGEMENT, CLIENT);
-    s.invoices.engagementParties.set(THEIR_ENGAGEMENT, OTHER_CLIENT);
+      .know(ENTITY, "10x Global Advisory Private Limited")
+      .know(OTHER_ENTITY, "10x Global Inc.");
+    s.invoices.engagements
+      .set(ENGAGEMENT, { partyId: CLIENT, issuingEntityPartyId: ENTITY, letterRef: "EL-2026-0001" })
+      .set(THEIR_ENGAGEMENT, {
+        partyId: OTHER_CLIENT,
+        issuingEntityPartyId: ENTITY,
+        letterRef: "EL-2026-0002",
+      })
+      .set(US_ENGAGEMENT, {
+        partyId: CLIENT,
+        issuingEntityPartyId: OTHER_ENTITY,
+        letterRef: "EL-2026-0003",
+      });
     return s;
   }
 
@@ -578,6 +592,48 @@ describe("who an invoice names (F-10-1)", () => {
       InvoiceEngagementNotFound,
     );
     expect(await s.invoices.listLines(TENANT, invoice.id)).toHaveLength(1);
+  });
+
+  it("bills an engagement only on an invoice charged by the company that signed its letter", async () => {
+    // The invoice's number is drawn from its issuer's series when it is raised,
+    // so the Indian company's invoice billing the US company's contract would
+    // put that sale in the wrong books, with a number nobody can take back.
+    const s = named();
+    const indian = await s.service.raise(raise(), ACTOR);
+    const line = (invoiceId: string, engagementId: string) =>
+      s.service.addLine({
+        tenantId: TENANT,
+        invoiceId,
+        engagementId,
+        description: "US bookkeeping, July",
+        quantity: "1",
+        unitAmount: "1500",
+      });
+
+    const refused = line(indian.id, US_ENGAGEMENT);
+    await expect(refused).rejects.toBeInstanceOf(EngagementOfAnotherIssuer);
+    await expect(refused).rejects.toThrow(
+      "That engagement is under EL-2026-0003, which 10x Global Inc. signed, and this invoice is " +
+        "charged by 10x Global Advisory Private Limited. Bill it on an invoice charged by 10x " +
+        "Global Inc.",
+    );
+    expect(await s.invoices.listLines(TENANT, indian.id)).toHaveLength(0);
+
+    // The same line goes on the US company's invoice, and the Indian
+    // company's own engagement still goes on the Indian invoice.
+    const american = await s.service.raise(raise({ entityPartyId: OTHER_ENTITY }), ACTOR);
+    await expect(line(american.id, US_ENGAGEMENT)).resolves.toBeUndefined();
+    await expect(line(indian.id, ENGAGEMENT)).resolves.toBeUndefined();
+    // A line typed by hand names no engagement, and no company is checked.
+    await expect(
+      s.service.addLine({
+        tenantId: TENANT,
+        invoiceId: indian.id,
+        description: "Courier recharge",
+        quantity: "1",
+        unitAmount: "450",
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("names a series only for one of the firm's own companies", async () => {

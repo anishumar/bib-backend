@@ -73,7 +73,8 @@ export type EngagementErrorCode =
   | "INVALID_CURRENCY_CHANGE"
   | "CURRENCY_LOCKED_BY_LINES"
   | "PROSE_EDITED"
-  | "TERMS_ON_LETTER";
+  | "TERMS_ON_LETTER"
+  | "NOT_CALLERS_TODAY";
 
 // ── Revising a DRAFT letter (T6.18, S6) ────────────────────────────────────
 //
@@ -524,6 +525,20 @@ export class InvalidDate extends EngagementError {
       `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD — "2026-10-01". ` +
         `A day, not an instant: an engagement that begins on 1 October begins on the client's ` +
         `1 October, and midnight UTC is somebody else's evening.`,
+    );
+  }
+}
+
+/** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
+ *  A letter that belongs to another day says so in its own `issuedOn` or
+ *  `effectiveFrom`. */
+export class LetterNotCallersToday extends EngagementError {
+  constructor(given: string, firmDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
+        `day is ${firmDay}, and anywhere in the world today is that day or the one either side. ` +
+        `To date a letter or start its work on another day, set its issuedOn or effectiveFrom.`,
     );
   }
 }

@@ -35,7 +35,8 @@ export type InvoiceErrorCode =
   | "BILLS_THE_FIRM"
   | "PARTY_ARCHIVED"
   | "ENGAGEMENT_NOT_FOUND"
-  | "ENGAGEMENT_OF_ANOTHER_CLIENT";
+  | "ENGAGEMENT_OF_ANOTHER_CLIENT"
+  | "ENGAGEMENT_OF_ANOTHER_ISSUER";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -92,6 +93,24 @@ export class InvoicePartyArchived extends InvoiceError {
 export class InvoiceEngagementNotFound extends InvoiceError {
   constructor(id: string) {
     super("ENGAGEMENT_NOT_FOUND", `No engagement ${JSON.stringify(id)} at this firm.`);
+  }
+}
+
+/**
+ * The company that signed the letter charges for its work (2026-09-28).
+ *
+ * An invoice's number comes from its issuer's gapless series, so a line for
+ * work another of the firm's companies contracted puts that sale in the wrong
+ * company's GST books, and a number cannot be taken back: the invoice can only
+ * be cancelled. The answer is a different invoice, not a different line.
+ */
+export class EngagementOfAnotherIssuer extends InvoiceError {
+  constructor(letterRef: string, letterIssuer: string, invoiceIssuer: string) {
+    super(
+      "ENGAGEMENT_OF_ANOTHER_ISSUER",
+      `That engagement is under ${letterRef}, which ${letterIssuer} signed, and this invoice is ` +
+        `charged by ${invoiceIssuer}. Bill it on an invoice charged by ${letterIssuer}.`,
+    );
   }
 }
 

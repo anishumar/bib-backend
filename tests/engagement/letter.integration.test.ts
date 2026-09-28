@@ -1316,6 +1316,16 @@ describe("what a client can be BILLED for (T3.5b)", () => {
     expect(mine.every((b) => b.letterRef.length > 0)).toBe(true);
   });
 
+  it("names the firm's company that signed the letter, which is the one that charges", async () => {
+    const id = await signedLetter();
+    const letter = await letters.findLetter(tenantA, id);
+
+    const mine = (await letters.listBillable(tenantA, partyA)).filter((b) => b.letterId === id);
+    expect(mine.length).toBeGreaterThan(0);
+    expect(mine.every((b) => b.issuingEntityPartyId === letter?.issuingEntityPartyId)).toBe(true);
+    expect(mine.every((b) => b.issuingEntityName.length > 0)).toBe(true);
+  });
+
   it("returns work still behind the ADVANCE GATE, marked, rather than hiding it", async () => {
     // Filtering here would leave a screen unable to explain why a service the
     // client signed for is missing from the picker — the blank-versus-absent

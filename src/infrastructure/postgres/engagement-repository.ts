@@ -1334,6 +1334,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
                ep.display_name AS entity_name,
                l.id AS letter_id, l.ref AS letter_ref,
+               l.issuing_entity_party_id, ip.display_name AS issuing_entity_name,
                ll.description, ll.quantity::text AS quantity,
                ll.unit_amount::text AS unit_amount, ll.pricing_note,
                ll.currency, ll.discount_percent::text AS discount_percent,
@@ -1350,6 +1351,9 @@ export class PostgresEngagementRepository implements EngagementRepository {
             ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
           JOIN core.party ep
             ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
+          -- Which of the firm's companies signed the letter, and so charges for it.
+          JOIN core.party ip
+            ON ip.id = l.issuing_entity_party_id AND ip.tenant_id = l.tenant_id
           -- The group that prices the line, with its section letter (its rank
           -- among the letter's live groups) and how many live lines it covers.
           LEFT JOIN LATERAL (
@@ -1371,6 +1375,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         entityName: r.entity_name,
         letterId: r.letter_id,
         letterRef: r.letter_ref,
+        issuingEntityPartyId: r.issuing_entity_party_id,
+        issuingEntityName: r.issuing_entity_name,
         description: r.description,
         quantity: r.quantity,
         unitAmount: r.unit_amount,
@@ -1411,6 +1417,8 @@ interface BillableRow {
   entity_name: string;
   letter_id: string;
   letter_ref: string;
+  issuing_entity_party_id: string;
+  issuing_entity_name: string;
   description: string;
   quantity: string;
   unit_amount: string | null;

@@ -24,6 +24,7 @@ import {
   formatInvoiceNumber,
 } from "../domain/invoice/model";
 import type {
+  EngagementBilling,
   InvoiceFilters,
   InvoiceRecord,
   InvoiceRepository,
@@ -57,12 +58,12 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   readonly lines: (InvoiceLine & { removed: boolean })[] = [];
   /** Display names, so a joined read returns something a screen could render. */
   readonly partyNames = new Map<string, string>();
-  /** Engagement id to the client it bills (F-10-1); unknown ids are absent. */
-  readonly engagementParties = new Map<string, string>();
+  /** Engagement id to the client it bills and the company that signed its
+   *  letter; unknown ids are absent. */
+  readonly engagements = new Map<string, EngagementBilling>();
 
-  engagementOf(_tenantId: string, engagementId: string): Promise<{ readonly partyId: string } | null> {
-    const partyId = this.engagementParties.get(engagementId);
-    return Promise.resolve(partyId === undefined ? null : { partyId });
+  engagementOf(_tenantId: string, engagementId: string): Promise<EngagementBilling | null> {
+    return Promise.resolve(this.engagements.get(engagementId) ?? null);
   }
   private readonly series = new Map<string, { last: number; prefix: string }>();
 

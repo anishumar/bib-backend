@@ -883,6 +883,13 @@ const BillableEngagementSchema = z
     letterRef: z.string().openapi({
       description: "Where the figure comes from, so a screen can cite the signed document.",
     }),
+    issuingEntityPartyId: z.string().uuid().openapi({
+      description:
+        "Which of the firm's companies signed the letter. That company charges for the work: " +
+        "an invoice line for this engagement is refused on an invoice charged by any other " +
+        "(ENGAGEMENT_OF_ANOTHER_ISSUER), so an invoice screen preselects it.",
+    }),
+    issuingEntityName: z.string(),
     description: z.string().openapi({
       description:
         "The LETTER LINE's own wording — what the client read and agreed to, not the " +
@@ -1319,6 +1326,25 @@ const addStandardClausesRoute = createRoute({
   },
 });
 
+/**
+ * The CALLER's today, for the two writes that stamp a day on a letter: sending
+ * (the date on an undated letter) and recording the signature (the day its work
+ * starts when nothing else says). Absent means the FIRM's day, never the
+ * server's UTC day. Held to the firm's day or one either side, as on invoices.
+ */
+const CallerDayQuery = z.object({
+  asOf: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .optional()
+    .openapi({
+      description:
+        "Today where the caller is (a browser sends its local date). Defaults to the firm's " +
+        "day. Must be the firm's day or one either side; a letter meant for another day says " +
+        "so in its own issuedOn or effectiveFrom.",
+    }),
+});
+
 const SendRequest = z
   .object({
     signer: z
@@ -1340,14 +1366,18 @@ const sendRoute = createRoute({
     "that SENDS (`signing.sends` on the letter — DocuSign), `signer` is required and an " +
     "envelope is raised for them at once; if the provider refuses, the letter is still sent " +
     "and `signing.request.lastFailure` says why — retry with `…/signature-request`. When it " +
-    "does not send, `signer` is ignored.",
+    "does not send, `signer` is ignored. A letter drafted with no `issuedOn` is dated the " +
+    "caller's `asOf`, or the firm's day.",
   request: {
     params: z.object({ letterId: z.string().uuid() }),
+    query: CallerDayQuery,
     body: { content: { "application/json": { schema: SendRequest } }, required: false },
   },
   responses: {
     200: { description: "Sent", content: { "application/json": { schema: LetterSchema } } },
-    400: errorResponse("DocuSign is the provider and no usable signer was given"),
+    400: errorResponse(
+      "DocuSign is the provider and no usable signer was given, or asOf is not today anywhere",
+    ),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such letter at this firm"),
@@ -1418,9 +1448,11 @@ const signRoute = createRoute({
   description:
     "Freezes the letter — the database refuses any later change — and creates one engagement " +
     "per line. Engagements start `pending_advance` when the letter requires an advance, and " +
-    "no `contract.activated` is emitted until it is recorded.",
+    "no `contract.activated` is emitted until it is recorded. Work whose line and letter name " +
+    "no start day starts on the caller's `asOf`, or the firm's day.",
   request: {
     params: z.object({ letterId: z.string().uuid() }),
+    query: CallerDayQuery,
     body: { content: { "application/json": { schema: SignRequest } }, required: true },
   },
   responses: {
@@ -1428,7 +1460,7 @@ const signRoute = createRoute({
       description: "Signed, with the engagements it created",
       content: { "application/json": { schema: SignedResponse } },
     },
-    400: errorResponse("A signature missing a signatory"),
+    400: errorResponse("A signature missing a signatory, or asOf is not today anywhere"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such letter at this firm"),
@@ -1845,13 +1877,39 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     // has signed for and no figures, rather than an empty list that reads as
     // "this client has no engagements".
     const fees = seesFees(c.get("principal"));
+    // Field by field: the response is documented, not validated, so a spread
+    // would ship whatever the read model grows next without the spec saying so.
     return c.json(
       {
         engagements: engagements.map((e) => ({
-          ...e,
+          engagementId: e.engagementId,
+          entityPartyId: e.entityPartyId,
+          entityName: e.entityName,
+          letterId: e.letterId,
+          letterRef: e.letterRef,
+          issuingEntityPartyId: e.issuingEntityPartyId,
+          issuingEntityName: e.issuingEntityName,
+          description: e.description,
+          quantity: e.quantity,
           unitAmount: fees ? e.unitAmount : null,
+          pricingNote: e.pricingNote,
+          currency: e.currency,
+          discountPercent: e.discountPercent,
+          billingFrequency: e.billingFrequency,
+          status: e.status,
+          effectiveFrom: e.effectiveFrom,
+          endsOn: e.endsOn,
           feeGroup:
-            e.feeGroup === null ? null : { ...e.feeGroup, amount: fees ? e.feeGroup.amount : null },
+            e.feeGroup === null
+              ? null
+              : {
+                  id: e.feeGroup.id,
+                  code: e.feeGroup.code,
+                  title: e.feeGroup.title,
+                  amount: fees ? e.feeGroup.amount : null,
+                  billingFrequency: e.feeGroup.billingFrequency,
+                  lineCount: e.feeGroup.lineCount,
+                },
         })),
       },
       200,
@@ -2004,6 +2062,7 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const body = c.req.valid("json");
     const sent = await deps.service.send(s.tenantId, letterId, s.actor, {
       signer: body?.signer,
+      asOf: c.req.valid("query").asOf,
     });
     return c.json(toLetterBody(sent, seesFees(c.get("principal"))), 200);
   });
@@ -2038,7 +2097,10 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     if (!s.ok) return c.json(s.deny, s.status);
     const { letterId } = c.req.valid("param");
     const body = c.req.valid("json");
-    const result = await deps.service.sign({ tenantId: s.tenantId, letterId, ...body }, s.actor);
+    const result = await deps.service.sign(
+      { tenantId: s.tenantId, letterId, ...body, asOf: c.req.valid("query").asOf },
+      s.actor,
+    );
     const fees = seesFees(c.get("principal"));
     return c.json(
       {

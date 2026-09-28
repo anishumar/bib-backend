@@ -1246,6 +1246,11 @@ export interface BillableEngagement {
    *  from and link to the document the client signed. */
   readonly letterId: string;
   readonly letterRef: string;
+  /** Which of the FIRM's companies signed that letter. The same company
+   *  charges for the work: an invoice for this engagement is drawn from its
+   *  series, and `InvoiceService.addLine` refuses any other. */
+  readonly issuingEntityPartyId: string;
+  readonly issuingEntityName: string;
   /** The line's own wording — what the client read and agreed to, not the
    *  catalogue's standard description. */
   readonly description: string;

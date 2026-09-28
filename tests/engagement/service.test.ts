@@ -38,6 +38,7 @@ import {
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
   LetterPartyArchived,
+  LetterNotCallersToday,
 } from "../../src/domain/engagement/errors";
 import { NoIssuingEntity } from "../../src/domain/document/errors";
 import {
@@ -1092,6 +1093,85 @@ describe("the firm's signature block", () => {
     await completeTerms(s, undated);
     // The fake clock is 2026-07-01T09:00:00Z.
     expect((await s.service.send(TENANT, undated, ACTOR)).issuedOn).toBe("2026-07-01");
+  });
+});
+
+// ── Whose day a letter is dated and its work starts on (2026-09-28) ─────────
+
+describe("the day on a letter is the caller's, or the firm's, never Greenwich's", () => {
+  /** 01:00 on 29 September in Delhi, which is still the 28th in UTC. */
+  function inDelhiAtOne() {
+    const s = setup();
+    s.timeZones.set("Asia/Kolkata");
+    s.clock.set("2026-09-28T19:30:00.000Z");
+    return s;
+  }
+
+  it("dates an undated letter on the firm's day when it is sent at 01:00 IST", async () => {
+    const s = inDelhiAtOne();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR)).issuedOn).toBe("2026-09-29");
+  });
+
+  it("takes the browser's day, and refuses one that is not today anywhere", async () => {
+    const s = inDelhiAtOne();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await expect(
+      s.service.send(TENANT, id, ACTOR, { asOf: "2026-09-25" }),
+    ).rejects.toBeInstanceOf(LetterNotCallersToday);
+    // Refused before anything was written: still a draft, still undated.
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("draft");
+    expect((await s.service.send(TENANT, id, ACTOR, { asOf: "2026-09-29" })).issuedOn).toBe(
+      "2026-09-29",
+    );
+  });
+
+  it("still prints the day the drafter chose", async () => {
+    const s = inDelhiAtOne();
+    const id = await draft(s, { issuedOn: "2026-09-15" });
+    await completeTerms(s, id);
+    expect((await s.service.send(TENANT, id, ACTOR, { asOf: "2026-09-29" })).issuedOn).toBe(
+      "2026-09-15",
+    );
+  });
+
+  it("starts the work on the firm's day, and reads it as started", async () => {
+    // On Greenwich's day the engagement started on the 28th, and the read that
+    // followed called work signed that morning "not started" until 05:30.
+    const s = inDelhiAtOne();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign(
+      { tenantId: TENANT, letterId: id, signedByName: "Priya Menon" },
+      ACTOR,
+    );
+    expect(engagements[0]?.engagement.effectiveFrom).toBe("2026-09-29");
+    expect(engagements[0]?.state).toBe("active");
+    const [listed] = await s.service.listEngagements(TENANT, id);
+    expect(listed?.state).toBe("active");
+  });
+
+  it("starts the work on the browser's day when it records the signature", async () => {
+    const s = inDelhiAtOne();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR, { asOf: "2026-09-29" });
+    await expect(
+      s.service.sign(
+        { tenantId: TENANT, letterId: id, signedByName: "Priya Menon", asOf: "2026-10-05" },
+        ACTOR,
+      ),
+    ).rejects.toBeInstanceOf(LetterNotCallersToday);
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("sent");
+
+    const { engagements } = await s.service.sign(
+      { tenantId: TENANT, letterId: id, signedByName: "Priya Menon", asOf: "2026-09-29" },
+      ACTOR,
+    );
+    expect(engagements[0]?.engagement.effectiveFrom).toBe("2026-09-29");
   });
 });
 

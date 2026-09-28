@@ -61,6 +61,7 @@ import {
   IrnAlreadyRegistered,
   NotCallersToday,
   EngagementOfAnotherClient,
+  EngagementOfAnotherIssuer,
   InvoiceBillsTheFirm,
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
@@ -225,6 +226,16 @@ export class InvoiceService {
         throw new EngagementOfAnotherClient(
           await this.nameOf(input.tenantId, engagement.partyId),
           await this.nameOf(input.tenantId, invoice.partyId),
+        );
+      }
+      // And the company that signed its letter charges for it. The invoice's
+      // number is already drawn from ITS issuer's series, so billing another
+      // company's contract here would book that sale in the wrong company.
+      if (engagement.issuingEntityPartyId !== invoice.entityPartyId) {
+        throw new EngagementOfAnotherIssuer(
+          engagement.letterRef,
+          await this.nameOf(input.tenantId, engagement.issuingEntityPartyId),
+          await this.nameOf(input.tenantId, invoice.entityPartyId),
         );
       }
     }
