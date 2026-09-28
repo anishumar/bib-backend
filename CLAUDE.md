@@ -230,6 +230,34 @@ the moment somebody decides to hand it out. Reading is `config:read` — an asso
 from the catalogue. And a publish that would leave no role carrying `tenant:admin` is
 refused: it is unrecoverable from inside the product.
 
+## Setup readiness — is the firm set up well enough to run its work (V2.6, 2026-09-28)
+
+`GET /api/v1/tenancy/readiness` (`tenant:admin`): eight lines, each `done` or naming its gaps.
+Setting up a firm is about sixteen ordered steps and several fail SILENTLY (a client with no
+SPOC gets work on nobody's desk, no ladder escalates nothing, an unconfirmed rule files
+nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
+
+- **Computed on every read, never stored or ticked.** Fixing a gap turns its line done on the
+  next read. `domain/readiness/model.ts` is the rules (pure, `tests/readiness/model.test.ts`);
+  `PostgresReadinessFacts` reads every fact in ONE `withTenant` on the FIRM's day
+  (`dayInZone`), so all eight describe one moment (`readiness.integration.test.ts` rebuilds the
+  QA state and fixes gaps).
+- **Each fact restates a rule the product already applies**, so a line never disagrees with
+  what it predicts: a service's Dept is the LIVE version's `module` (routing's rule); an
+  assignment or portal grant is in force on `day` half-open; a rule generates when active,
+  dated, not event-driven, confirmed and linked (the generator's predicate).
+- **The lines** (in setup order): `deadlines` (compliance_policy `missedFromOn` and
+  `fiscalYearStartMonth`), `reporting_lines` (only where a PUBLISHED check rule is
+  `reporting_line` alone; `_or_rank` falls back to rank; the firm's top rung is never asked for a
+  manager, an ungraded person is), `request_routing` (not `none`), `processes` (every live service
+  names a published `workflow_template`), `compliance_rules` (at least one generating, and no
+  linked rule left unconfirmed: which services OUGHT to file is not ours to say), `ladders`
+  (escalation, chaser and nudge each PUBLISHED: never their days, decision D3 is open),
+  `account_team` (every client with an active engagement has a Key Manager and a SPOC for each
+  Dept its services name), `portal_contacts` (each such client has a live portal login).
+- **The API ships codes, the screen ships words.** `gaps[].missing` is a closed vocabulary per
+  line (documented on the schema); `id`/`ref` let the screen link the client or service.
+
 ## Firm administration — the roster is the other half of access control
 
 `/api/v1/tenancy/members` is a firm running itself: who works here, what their role is, and

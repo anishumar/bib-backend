@@ -89,6 +89,8 @@ import { registerInvoiceRoutes } from "./handler/invoice";
 import { registerFileStoreRoutes } from "./handler/filestore";
 import { registerDashboardRoutes } from "./handler/dashboard";
 import type { DashboardDeps } from "./handler/dashboard";
+import { registerReadinessRoutes } from "./handler/readiness";
+import type { ReadinessDeps } from "./handler/readiness";
 import type { FileStoreDeps } from "./handler/filestore";
 import type { InvoiceDeps } from "./handler/invoice";
 import type { LeadDeps } from "./handler/lead";
@@ -200,6 +202,7 @@ export interface RouterDeps {
   readonly invoice: InvoiceDeps;
   readonly filestore: FileStoreDeps;
   readonly dashboard: DashboardDeps;
+  readonly readiness: ReadinessDeps;
   readonly auth: AuthDeps;
 }
 
@@ -435,6 +438,7 @@ export function buildRouter(
   registerInvoiceRoutes(app, deps.invoice);
   registerFileStoreRoutes(app, deps.filestore);
   registerDashboardRoutes(app, deps.dashboard);
+  registerReadinessRoutes(app, deps.readiness);
 
   // Docs are generated FROM the routes above, so this must come after them.
   if (opts.docsEnabled) {

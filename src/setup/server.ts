@@ -100,6 +100,8 @@ import { PdfLibRenderer } from "../infrastructure/render/pdf-renderer";
 import { PostgresRenderSource } from "../infrastructure/postgres/render-source";
 import { PostgresDashboardRepository } from "../infrastructure/postgres/dashboard-repository";
 import { DashboardService } from "../usecase/dashboard/service";
+import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-facts";
+import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
@@ -536,6 +538,14 @@ export function wire(cfg: Config, log: Logger): Wired {
   // nothing to inject a clock or an id generator for.
   const dashboards = new DashboardService({
     dashboards: new PostgresDashboardRepository(pools.app),
+  });
+
+  // SETUP READINESS (V2.6). Read-only: eight lines computed from one read, on
+  // the firm's own day.
+  const readiness = new ReadinessService({
+    facts: new PostgresReadinessFacts(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
 
   // CHASING is its own use case, and it runs in TWO places: the worker sweeps
@@ -1253,6 +1263,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         invoice: { service: invoices, dunning, authz },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
+        readiness: { service: readiness },
       },
       log,
       {
