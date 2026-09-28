@@ -21,6 +21,7 @@ import type {
   NewDocument,
   NewDocumentLink,
   NewDocumentVersion,
+  SubjectDocument,
 } from "../usecase/filestore/ports";
 import type {
   DescribedDocument,
@@ -143,8 +144,8 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     readonly tenantId: string;
     readonly subjectKind: SubjectKind;
     readonly subjectRef: string;
-  }): Promise<readonly DocumentRecord[]> {
-    const ids = new Set(
+  }): Promise<readonly SubjectDocument[]> {
+    const roles = new Map(
       this.links
         .filter(
           (l) =>
@@ -153,12 +154,12 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
             l.subjectKind === input.subjectKind &&
             l.subjectRef === input.subjectRef,
         )
-        .map((l) => l.documentId),
+        .map((l) => [l.documentId, l.role] as const),
     );
     return Promise.resolve(
       this.documents
-        .filter((d) => d.tenantId === input.tenantId && ids.has(d.id))
-        .map((d) => this.recordOf(d)),
+        .filter((d) => d.tenantId === input.tenantId && roles.has(d.id))
+        .map((d) => ({ ...this.recordOf(d), role: roles.get(d.id) ?? null })),
     );
   }
 
@@ -346,6 +347,9 @@ export class FakeRenderSource implements RenderSource {
    *  because the caller no longer gets to say. */
   readonly parties = new Map<string, string>();
   renderable: string[] = ["engagement_letter", "invoice"];
+  /** Records described as DRAFTS (not issued, not sent). Every other record
+   *  has gone out, which is what most tests of filing a copy want. */
+  readonly drafts = new Set<string>();
 
   supports(kind: string): boolean {
     return this.renderable.includes(kind);
@@ -361,6 +365,7 @@ export class FakeRenderSource implements RenderSource {
     return Promise.resolve({
       document,
       partyId: this.parties.get(input.subjectRef) ?? null,
+      isOut: !this.drafts.has(input.subjectRef),
       issuingEntity: { partyId: "00000000-0000-4000-8000-00000000e171", name: document.issuer.name },
       ...(input.asIfSentOn === undefined ? {} : { datedAsIfSent: input.asIfSentOn }),
     });

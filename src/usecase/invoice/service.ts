@@ -77,6 +77,7 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  IssuedCopies,
   PartyStanding,
   ReceivableRecord,
 } from "./ports";
@@ -92,6 +93,8 @@ export interface Deps {
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+  /** Files the invoice's PDF as it is issued (2026-09-29). */
+  readonly issuedCopies: IssuedCopies;
 }
 
 export interface RaiseInvoiceInput {
@@ -307,6 +310,9 @@ export class InvoiceService {
         lineCount: lines.length,
       },
     });
+    // Its paper, drawn now and never again: the copy of record. After the
+    // status is written, so the copy is the issued one, dated.
+    await this.deps.issuedCopies.file(tenantId, issued.id, actor);
     return issued;
   }
 

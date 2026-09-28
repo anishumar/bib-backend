@@ -125,6 +125,7 @@ import { esignFor } from "./esign";
 import { blobStoreFor } from "./blobs";
 import { signedCopyFiler } from "./signed-copies";
 import { proposalLinks, proposalPdfs } from "./proposal-delivery";
+import { invoiceIssuedCopies } from "./invoice-copies";
 import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
@@ -491,20 +492,6 @@ export function wire(cfg: Config, log: Logger): Wired {
   // `create` both allocates and writes — a gapless series cannot be handed to a
   // caller, because a failure between the two spends the number. See the file.
   const invoiceRepository = new PostgresInvoiceRepository(pools.app);
-  const invoices = new InvoiceService({
-    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
-    timeZones: new PostgresFirmTimeZone(pools.app),
-    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
-    // companies and the billed party is not. `DocumentService` owns that list
-    // (it is the issuing-entity rule's), so the "Charged by" picker and this
-    // refusal are one definition. Names and archiving come from the party read.
-    firmEntities: documents,
-    parties: partyRepository,
-    invoices: invoiceRepository,
-    ids: systemIds,
-    clock: systemClock,
-    events: ledger,
-  });
 
   // THE DOCUMENT STORE (T3.6). The blob adapter is chosen here and nowhere
   // else, which is what makes replacing the filesystem stub with an object
@@ -535,6 +522,24 @@ export function wire(cfg: Config, log: Logger): Wired {
     renderSource,
     timeZones: new PostgresFirmTimeZone(pools.app),
     clock: systemClock,
+  });
+
+  const invoices = new InvoiceService({
+    // "Today" on an invoice nobody dated is the firm's day, or the caller's.
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    // WHO an invoice names (F-10-1): the issuer is one of the firm's own
+    // companies and the billed party is not. `DocumentService` owns that list
+    // (it is the issuing-entity rule's), so the "Charged by" picker and this
+    // refusal are one definition. Names and archiving come from the party read.
+    firmEntities: documents,
+    parties: partyRepository,
+    invoices: invoiceRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+    // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
+    // after the document store for this.
+    issuedCopies: invoiceIssuedCopies(fileStore, log),
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one

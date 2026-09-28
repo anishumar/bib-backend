@@ -31,7 +31,8 @@ export type FileStoreErrorCode =
   | "ALREADY_ATTACHED"
   | "BYTES_MISSING"
   | "BRAND_ASSET_NOT_FOUND"
-  | "LINK_NOT_FOUND";
+  | "LINK_NOT_FOUND"
+  | "COPY_OF_RECORD_STAYS";
 
 export class DocumentNotFound extends FileStoreError {
   constructor(id: string) {
@@ -137,6 +138,22 @@ export class LinkNotFound extends FileStoreError {
       "LINK_NOT_FOUND",
       `This document is not attached to ${subjectKind} ${JSON.stringify(subjectRef)}, so ` +
         `there is nothing to take off. It may already have been withdrawn.`,
+    );
+  }
+}
+
+/**
+ * Taking an issued invoice's or a sent letter's copy of record off it
+ * (2026-09-29). It is the document the client holds, and with it gone the
+ * store would draw a new one from today's rows: the rename the copy of record
+ * exists to keep out would be back in through a side door.
+ */
+export class CopyOfRecordStays extends FileStoreError {
+  constructor(title: string) {
+    super(
+      "COPY_OF_RECORD_STAYS",
+      `${title} is the copy the client was given, so it stays on the record. To correct an ` +
+        `issued invoice, raise a credit note and a new invoice.`,
     );
   }
 }

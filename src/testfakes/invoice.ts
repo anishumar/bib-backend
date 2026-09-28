@@ -30,6 +30,7 @@ import type {
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  IssuedCopies,
   NewCreditNote,
   NewInvoice,
   NewInvoiceLine,
@@ -378,6 +379,15 @@ export class FakeFirmEntities {
   }
 }
 
+/** Records every invoice whose issued copy was asked for, in order. */
+export class FakeIssuedCopies implements IssuedCopies {
+  readonly filed: { tenantId: string; invoiceId: string }[] = [];
+  file(tenantId: string, invoiceId: string): Promise<void> {
+    this.filed.push({ tenantId, invoiceId });
+    return Promise.resolve();
+  }
+}
+
 export function makeInvoiceFakes(): Deps & {
   invoices: FakeInvoiceRepo;
   /** UTC unless a test sets the firm's zone. */
@@ -386,6 +396,7 @@ export function makeInvoiceFakes(): Deps & {
   parties: FakePartyStanding;
   clock: FakeClock;
   events: RecordingEventSink;
+  issuedCopies: FakeIssuedCopies;
 } {
   return {
     invoices: new FakeInvoiceRepo(),
@@ -395,5 +406,6 @@ export function makeInvoiceFakes(): Deps & {
     ids: new FakeIds(),
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
     events: new RecordingEventSink(),
+    issuedCopies: new FakeIssuedCopies(),
   };
 }

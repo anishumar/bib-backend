@@ -191,6 +191,50 @@ export function clientVisibleByDefault(kind: DocumentKind): boolean {
   }
 }
 
+/**
+ * THE COPY OF RECORD (2026-09-29): the kinds whose PDF is filed ONCE after
+ * they go out, and never drawn again.
+ *
+ * An issued invoice and a sent engagement letter are documents the client
+ * holds. The renderer draws from rows as they stand today, and some of those
+ * rows move after the document went out: a client's name is corrected (V2.5),
+ * the firm uploads a new logo. A second render of an issued invoice after a
+ * rename was a second, DIFFERENT PDF under the same invoice number, and both
+ * were in the client's portal. So the first copy made once the record is out
+ * is the one on file. An issued invoice is corrected the way GST expects: a
+ * credit note and a new invoice.
+ *
+ * A draft of either kind may still be printed, as a DRAFT copy: the firm's
+ * own, never shown to the client. Before this, a draft's PDF went to the
+ * client's portal like an issued one (both kinds are client-visible by
+ * default), before the firm had issued anything.
+ *
+ * A proposal is not here. Its PDF of record is pinned when it is sent
+ * (`sent_pdf_version_id`), and a copy made from its page is a working copy
+ * the client does not see.
+ */
+export type CopyOfRecordKind = "invoice" | "engagement_letter";
+
+export function hasCopyOfRecord(kind: DocumentKind): kind is CopyOfRecordKind {
+  return kind === "invoice" || kind === "engagement_letter";
+}
+
+/**
+ * How a rendered file hangs off the record it was drawn from: the `role` on
+ * its `files.document_link` row. The column is free text (0037); these are
+ * the values the renderer writes.
+ */
+export const RENDERED_ROLE = {
+  /** A working copy of a draft invoice or letter. The firm's only. */
+  draftCopy: "draft_copy",
+  /** The copy of record: made once, after the invoice was issued or the
+   *  letter was sent. */
+  copyOfRecord: "copy_of_record",
+  /** Everything else rendered: a proposal's copies, and every copy of an
+   *  invoice or a letter made before 2026-09-29. */
+  rendered: "rendered",
+} as const;
+
 /** One immutable set of bytes. */
 export interface DocumentVersion {
   readonly id: string;

@@ -119,6 +119,22 @@ const DocumentsResponse = z
   .object({ documents: z.array(DocumentSchema) })
   .openapi("DocumentsResponse");
 
+const SubjectDocumentSchema = DocumentSchema.extend({
+  role: z.string().nullable().openapi({
+    description:
+      "What this file is TO the subject it was listed for: `copy_of_record` is an issued " +
+      "invoice's or a sent letter's one copy, made once and never again; `draft_copy` is a " +
+      "draft printed for the firm, never shown to the client; `rendered` is any other copy " +
+      "the product made (a proposal's, or one made before 2026-09-29). Null for a file a " +
+      "person attached.",
+    example: "copy_of_record",
+  }),
+}).openapi("SubjectDocument");
+
+const SubjectDocumentsResponse = z
+  .object({ documents: z.array(SubjectDocumentSchema) })
+  .openapi("SubjectDocumentsResponse");
+
 const VersionsResponse = z
   .object({ versions: z.array(VersionSchema) })
   .openapi("DocumentVersionsResponse");
@@ -540,7 +556,11 @@ const renderRoute = createRoute({
     "Renders an engagement letter, an invoice or a proposal, stores it as a `generated` document and " +
     "attaches it to the record it came from. Re-rendering unchanged data produces the SAME " +
     "bytes and therefore the same content hash — the store is content-addressed, so calling " +
-    "this twice costs one blob.",
+    "this twice costs one blob. " +
+    "An invoice or a letter is filed ONCE after it goes out (2026-09-29): the first copy after " +
+    "an invoice is issued (Issue files it) or a letter is sent is its copy of record, and a " +
+    "second is refused with 409 COPY_ALREADY_MADE. A draft's copy is the firm's own, titled " +
+    "Draft and never shown to the client.",
   request: {
     body: { content: { "application/json": { schema: RenderRequest } }, required: true },
   },
@@ -550,6 +570,7 @@ const renderRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such record at this firm"),
+    409: errorResponse("The issued invoice or sent letter already has its copy of record"),
     501: errorResponse("Nothing knows how to render that kind of document yet"),
   },
 });
@@ -618,6 +639,7 @@ const withdrawRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such document at this firm, or it is not attached to that subject"),
+    409: errorResponse("An issued invoice's or a sent letter's copy of record stays on it"),
   },
 });
 
@@ -644,7 +666,10 @@ const subjectDocumentsRoute = createRoute({
     "The read a client page, an engagement page or a job page makes to show its file list.",
   request: { params: SubjectParam },
   responses: {
-    200: { description: "Documents", content: { "application/json": { schema: DocumentsResponse } } },
+    200: {
+      description: "Documents",
+      content: { "application/json": { schema: SubjectDocumentsResponse } },
+    },
     400: errorResponse("Unknown subject kind"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not read"),
@@ -960,7 +985,7 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
     if (!s.ok) return c.json(s.deny, s.status);
     const { subjectKind, subjectRef } = c.req.valid("param");
     const documents = await deps.service.listForSubject(s.tenantId, subjectKind, subjectRef);
-    return c.json({ documents: documents.map(toWire) }, 200);
+    return c.json({ documents: documents.map((d) => ({ ...toWire(d), role: d.role })) }, 200);
   });
 
   app.openapi(brandAssetsRoute, async (c) => {

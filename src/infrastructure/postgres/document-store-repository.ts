@@ -31,6 +31,7 @@ import type {
   NewDocument,
   NewDocumentLink,
   NewDocumentVersion,
+  SubjectDocument,
 } from "../../usecase/filestore/ports";
 
 interface DocumentRow {
@@ -340,7 +341,7 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
     readonly tenantId: string;
     readonly subjectKind: SubjectKind;
     readonly subjectRef: string;
-  }): Promise<readonly DocumentRecord[]> {
+  }): Promise<readonly SubjectDocument[]> {
     return withTenant(this.app, input.tenantId, async (db) => {
       const rows = await db<DocumentRow[]>`
         ${this.recordSelect(db)}
@@ -354,7 +355,17 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         )
         ORDER BY d.created_at DESC
       `;
-      return rows.map(toRecord);
+      // The same live links, read for their ROLE. One live link per document
+      // per subject (ALREADY_ATTACHED), so the map has one answer each.
+      const links = await db<{ document_id: string; role: string | null }[]>`
+        SELECT l.document_id, l.role
+        FROM files.document_link l
+        WHERE l.subject_kind = ${input.subjectKind}
+          AND l.subject_ref = ${input.subjectRef}
+          AND l.withdrawn_at IS NULL
+      `;
+      const roles = new Map(links.map((l) => [l.document_id, l.role]));
+      return rows.map((r) => ({ ...toRecord(r), role: roles.get(r.id) ?? null }));
     });
   }
 

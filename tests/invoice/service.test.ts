@@ -280,6 +280,32 @@ describe("issuing, and what stops afterwards", () => {
       InvalidInvoiceTransition,
     );
   });
+
+  it("files its PDF as it is issued, once, and never for a refused issue (2026-09-29)", async () => {
+    // The copy of record is drawn at Issue, while the client's name and the
+    // lines are what was billed. A rename next month cannot reach it.
+    const s = setup();
+    const invoice = await s.service.raise(raise(), ACTOR);
+    await expect(s.service.issue(TENANT, invoice.id, ACTOR)).rejects.toBeInstanceOf(EmptyInvoice);
+    expect(s.issuedCopies.filed).toEqual([]);
+
+    await s.service.addLine({
+      tenantId: TENANT,
+      invoiceId: invoice.id,
+      description: "Advisory",
+      quantity: "1",
+      unitAmount: "1000",
+    });
+    await s.service.issue(TENANT, invoice.id, ACTOR);
+    await expect(s.service.issue(TENANT, invoice.id, ACTOR)).rejects.toBeInstanceOf(
+      InvalidInvoiceTransition,
+    );
+    expect(s.issuedCopies.filed).toEqual([{ tenantId: TENANT, invoiceId: invoice.id }]);
+
+    // Cancelling files nothing: the issued copy stays the copy.
+    await s.service.cancel(TENANT, invoice.id, ACTOR);
+    expect(s.issuedCopies.filed).toHaveLength(1);
+  });
 });
 
 describe("the registry's identifier", () => {

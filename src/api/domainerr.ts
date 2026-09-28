@@ -1048,6 +1048,8 @@ export function mapError(err: unknown): MappedError {
       case "BRAND_ASSET_NOT_FOUND":
       case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "COPY_OF_RECORD_STAYS":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 502, and this is the one mapping here worth arguing. The metadata is
@@ -1077,6 +1079,10 @@ export function mapError(err: unknown): MappedError {
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "NOT_CALLERS_TODAY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // The copy of record exists: a state of the invoice or letter, not a
+      // malformed request.
+      case "COPY_ALREADY_MADE":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

@@ -14,14 +14,17 @@ import type {
   SubjectKind,
 } from "../../domain/filestore/model";
 import {
+  RENDERED_ROLE,
   SUBJECT_KINDS,
   clientVisibleByDefault,
+  hasCopyOfRecord,
   isSubjectKind,
   normaliseMediaType,
   safeFilename,
 } from "../../domain/filestore/model";
 import {
   AlreadyAttached,
+  CopyOfRecordStays,
   LinkNotFound,
   BrandAssetNotFound,
   BytesMissing,
@@ -42,9 +45,15 @@ import type {
   DocumentLinkRecord,
   DocumentRecord,
   DocumentStoreRepository,
+  SubjectDocument,
 } from "./ports";
 import type { DocumentRenderer, FirmTimeZone, RenderSource } from "../render/ports";
-import { NotRenderable, PreviewNotCallersToday, SourceNotFound } from "../../domain/render/errors";
+import {
+  CopyAlreadyMade,
+  NotRenderable,
+  PreviewNotCallersToday,
+  SourceNotFound,
+} from "../../domain/render/errors";
 import type { PlacedAnchor } from "../../domain/render/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type { Clock } from "../../platform/clock";
@@ -430,7 +439,7 @@ export class FileStoreService {
     tenantId: string,
     subjectKind: string,
     subjectRef: string,
-  ): Promise<readonly DocumentRecord[]> {
+  ): Promise<readonly SubjectDocument[]> {
     return this.deps.documents.listForSubject({
       tenantId,
       subjectKind: this.requireSubjectKind(subjectKind),
@@ -457,7 +466,17 @@ export class FileStoreService {
    */
   async withdraw(input: WithdrawInput): Promise<DocumentLink> {
     const subjectKind = this.requireSubjectKind(input.subjectKind);
-    await this.get(input.tenantId, input.documentId);
+    const record = await this.get(input.tenantId, input.documentId);
+
+    // The copy of record stays where it is (2026-09-29, `hasCopyOfRecord`).
+    const here = await this.deps.documents.listForSubject({
+      tenantId: input.tenantId,
+      subjectKind,
+      subjectRef: input.subjectRef,
+    });
+    if (here.some((d) => d.document.id === input.documentId && d.role === RENDERED_ROLE.copyOfRecord)) {
+      throw new CopyOfRecordStays(record.document.title);
+    }
 
     const withdrawn = await this.deps.documents.withdraw({
       tenantId: input.tenantId,
@@ -558,6 +577,40 @@ export class FileStoreService {
     if (source === null) throw new SourceNotFound(input.kind, input.subjectRef);
     const described = source.document;
 
+    // WHAT THIS COPY IS (2026-09-29, `hasCopyOfRecord`). An invoice or a
+    // letter still in draft is printed as the firm's own DRAFT copy, which its
+    // client never sees. Once it has gone out, the first copy is the copy of
+    // record and there is never a second: refused BEFORE anything is drawn or
+    // stored.
+    let role: string = RENDERED_ROLE.rendered;
+    let title = `${described.documentTitle} ${described.reference}`;
+    let filename = `${described.reference}.pdf`;
+    let isClientVisible = clientVisibleByDefault(input.kind);
+    if (hasCopyOfRecord(input.kind)) {
+      if (source.isOut) {
+        const filed = await this.deps.documents.listForSubject({
+          tenantId: input.tenantId,
+          subjectKind,
+          subjectRef: input.subjectRef,
+        });
+        const ofRecord = filed.find((d) => d.role === RENDERED_ROLE.copyOfRecord);
+        if (ofRecord !== undefined) {
+          const zone = await this.deps.timeZones.timeZoneFor(input.tenantId);
+          throw new CopyAlreadyMade(
+            input.kind,
+            described.reference,
+            dayInZone(ofRecord.document.createdAt, zone),
+          );
+        }
+        role = RENDERED_ROLE.copyOfRecord;
+      } else {
+        role = RENDERED_ROLE.draftCopy;
+        title = `Draft ${title}`;
+        filename = `${described.reference}-draft.pdf`;
+        isClientVisible = false;
+      }
+    }
+
     const bytes = await this.deps.renderer.render(described);
     const contentHash = this.deps.digest.ofBytes(bytes);
     const { storageKey } = await this.deps.blobs.put({
@@ -567,12 +620,11 @@ export class FileStoreService {
     });
 
     const documentId = this.deps.ids.newId();
-    const filename = `${described.reference}.pdf`;
     const record = await this.deps.documents.create(
       {
         id: documentId,
         tenantId: input.tenantId,
-        title: `${described.documentTitle} ${described.reference}`,
+        title,
         origin: "generated",
         kind: input.kind,
         // WHOSE record this is, off the record itself. Never the caller's word
@@ -581,8 +633,9 @@ export class FileStoreService {
         partyId: source.partyId,
         // Same rule for a rendered document. A generated engagement letter is
         // the one the client signed; a generated proposal is a quote that may
-        // never be sent, which is why `proposal` is false in that mapping.
-        isClientVisible: clientVisibleByDefault(input.kind),
+        // never be sent, which is why `proposal` is false in that mapping. A
+        // DRAFT copy of an invoice or a letter is the firm's own (above).
+        isClientVisible,
         createdBy: input.actor.type === "human" ? input.actor.id : null,
       },
       {
@@ -619,7 +672,7 @@ export class FileStoreService {
       documentId,
       subjectKind,
       subjectRef: input.subjectRef,
-      role: "rendered",
+      role,
       actor: input.actor,
     });
 
