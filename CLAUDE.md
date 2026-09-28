@@ -2364,6 +2364,14 @@ comparison: one answer to "who checks whose work", two tables recording the answ
 `submitted_by` is DERIVED from the item's assignee and FROZEN by trigger, exactly as T2.9's is.
 **Do not add a `submittedBy` to any write path.**
 
+**A task raised by hand is HIDDEN from the client unless the caller says otherwise (V1.4,
+2026-09-28).** `create` defaulted `isClientVisible` to `true`, so an internal note ("chase Ravi
+for the ledger") reached the client's portal unless somebody remembered to untick a box. It is
+`input.isClientVisible ?? false` now. The two writers that ARE client work set `true` themselves
+and are unchanged: `spawnForEngagements` (the month's work) and `raiseForObligation` (a
+statutory filing's task). The column's DATABASE default is still `TRUE` (0051); no writer relies
+on it, since every insert names the value.
+
 **A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
 is finished" is what it says. Cancelling stays allowed: cancelling something that never
 started is a real act, and refusing it would trap the item. The cycle check walks the edge

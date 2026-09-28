@@ -360,7 +360,10 @@ const CreateWorkItemRequest = z
     assigneeUserId: z.string().uuid().nullable().optional(),
     dueOn: IsoDate.nullable().optional(),
     isStatutoryDue: z.boolean().optional(),
-    isClientVisible: z.boolean().optional(),
+    isClientVisible: z.boolean().optional().openapi({
+      description:
+        "Show this task on the client's portal. Absent means FALSE (V1.4): a task raised by hand is often an internal note, and the portal is the client's screen. Work spawned from an engagement or a statutory filing is shown regardless.",
+    }),
   })
   .openapi("CreateWorkItemRequest");
 

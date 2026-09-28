@@ -997,7 +997,13 @@ export class WorkItemService {
       dueOn,
       isStatutoryDue,
       slaDaysSnapshot: null,
-      isClientVisible: input.isClientVisible ?? true,
+      // HIDDEN FROM THE CLIENT UNLESS SOMEBODY SAYS OTHERWISE (V1.4). A task
+      // raised by hand is as often an internal note ("chase Ravi for the
+      // ledger") as client work, and the portal is somebody else's screen: a
+      // default of `true` put every such note in front of the client unless the
+      // person raising it remembered to untick a box. Spawned monthly work and
+      // statutory tasks set `true` themselves, below, and are unaffected.
+      isClientVisible: input.isClientVisible ?? false,
     } satisfies NewWorkItem);
 
     await this.recordCreated(item, actor, "manual");
