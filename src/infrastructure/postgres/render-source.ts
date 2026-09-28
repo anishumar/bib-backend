@@ -246,7 +246,7 @@ export class PostgresRenderSource implements RenderSource {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<ProposalHeadRow[]>`
         SELECT p.party_id, p.ref, p.title, p.currency, p.valid_until::text, p.background,
-               p.issuing_entity_party_id, p.status,
+               p.issuing_entity_party_id, p.status, p.addressed_to_party_id,
                -- The FIRM's day (T6.18): a proposal sent at 02:15 in Delhi is
                -- dated that day, not the UTC day before.
                ${db.unsafe(zoneDayOf("p.sent_at", "firm.time_zone", "sent_on"))},
@@ -388,8 +388,13 @@ export class PostgresRenderSource implements RenderSource {
             artwork: cover,
             title: "Proposal for Services",
             subtitle: row.title,
+            // The person, then the client — ONCE when they are the same party:
+            // a person who is the client, addressed to themselves, printed
+            // "Asha Verma / Asha Verma" (2026-09-28).
             preparedFor: [
-              ...(row.addressee_name === null ? [] : [{ text: row.addressee_name, bold: true }]),
+              ...(row.addressee_name === null || row.addressed_to_party_id === row.party_id
+                ? []
+                : [{ text: row.addressee_name, bold: true }]),
               { text: row.client_name, bold: true },
             ],
             preparedBy,
@@ -1337,6 +1342,7 @@ interface ProposalHeadRow {
   created_on: string;
   client_name: string;
   entity_name: string;
+  addressed_to_party_id: string | null;
   addressee_name: string | null;
   preparer_name: string | null;
   preparer_email: string | null;

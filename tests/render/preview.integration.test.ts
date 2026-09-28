@@ -315,6 +315,29 @@ describe("the preview of a proposal", () => {
     expect(preview.issuingEntity?.name).toBe("10x Global Private Limited");
   });
 
+  it("names a person who is the client, addressed to herself, once on the cover", async () => {
+    // Found on the screen (2026-09-28): the cover read "Asha Verma / Asha Verma".
+    const p = await proposals.draft(
+      {
+        tenantId: tenant,
+        partyId: priya,
+        title: "Proposal for Priya",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-09-28",
+        addressedToPartyId: priya,
+        preparedByUserId: preparer,
+      },
+      SYSTEM_ACTOR,
+    );
+    const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: p.id });
+    expect(described?.document.proposal?.cover.preparedFor.map((l) => l.text)).toEqual(["Priya Sharma"]);
+    // A person at a company is still named above the company.
+    const id = await draftProposal();
+    const other = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
+    expect(other?.document.proposal?.cover.preparedFor.map((l) => l.text)).toEqual(["Priya Sharma", "Nexus Fintech"]);
+  });
+
   it("prints rupees in lakhs", async () => {
     const id = await draftProposal();
     const described = await source.describe({ tenantId: tenant, kind: "proposal", subjectRef: id });
