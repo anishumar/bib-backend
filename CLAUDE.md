@@ -1425,9 +1425,11 @@ view and recorded by the answer, so what the box said is what the firm keeps.
 - **The PDF of record** — `crm.proposal.sent_pdf_version_id`, the one render the client was
   sent: the email's attachment, the link's download (`POST /proposals/shared/pdf`) and what an
   answer is recorded against. Filed through `FileStoreService.render` (so it is an ordinary
-  document on the proposal's page) and PINNED the first time a sent proposal needs it —
-  `coalesce` in `pinSentPdf`, so two racing renders cite one file — and never re-rendered after,
-  because a render reads today's brand assets.
+  document on the proposal's page) and PINNED at Send (since 2026-09-28; before, the first time
+  a sent proposal needed it, so one sent as a bare link had no file until the client downloaded
+  it) — `coalesce` in `pinSentPdf`, so two racing renders cite one file — and never re-rendered
+  after, because a render reads today's brand assets. Pinning at Send is best-effort like the
+  email: a render that fails leaves the proposal sent and the next reader files it.
 - **Each email** — `crm.proposal_email`: address, note, the PDF version and the DIGEST of the link
   it carried. Written only once the mail server took it.
 - **The client's answer** — `crm.proposal_client_decision`: name, statement (acceptances only, a
@@ -1467,6 +1469,62 @@ the firm's name. A second firm on one deployment would need a sender per firm �
 
 **Not built:** a confirmation copy to the client, reminders before expiry, a notice on first open,
 and a portal-authenticated answer.
+
+## The preview IS the PDF (2026-09-28)
+
+Every screen that shows a proposal or a letter as a document used to draw an HTML imitation of
+it: no cover, no logo, no page breaks. Two layouts drift, and they did. So there is ONE layout,
+the renderer's, and the screens draw the server's PDF page by page (pdf.js on canvas, frontend).
+
+**`POST /api/v1/documents/preview`** takes `render`'s body (`kind`, `subjectRef`) plus an optional
+`asOf`, and answers JSON: the bytes (base64), their `contentHash`, `pageCount`, the `anchors`,
+`datedAsIfSent`, the issuing company and `missingBrand`. It **files nothing**: no blob, no
+document, no link, no event (`FileStoreService.preview`; the service test and the integration
+test count all four). Same permission as `render`, `party:write`, because it draws the same rows
+and prints the same fees.
+
+**Why it does not break "bytes leave by ONE route" (T3.6).** That rule is about STORED bytes: a
+stored file leaves only through `fetchBytes`, under RLS, with no URL that outlives the session.
+The preview stores nothing and returns no storage key. It draws rows the caller can already read
+under RLS (the render source reads inside `withTenant`) through the renderer `render` uses, so it
+hands out nothing the same caller could not have filed with `render` and then downloaded.
+
+**A draft is drawn as Send will leave it.** `RenderSource.describe` takes `asIfSentOn`; given,
+and the record a DRAFT, the source fills in exactly what Send stamps and nothing else:
+- a proposal: the date (`sent_on` is the firm's day; the preview uses the firm's day too);
+- a letter: `issued_on` when the drafter left it blank (`coalesce`, as `markSent` does), and the
+  firm's block from the standing signatory on the tenant row plus the issuer's signature in force
+  (what `send` pins, 0081).
+
+The renderer is deterministic, so an unedited draft previews the very bytes Send produces the
+same day. `tests/render/preview.integration.test.ts` proves it by hash for both: the proposal's
+preview equals its pinned PDF of record, the letter's equals the envelope's PDF. A document
+already out is drawn as it stands, which the freeze makes the file of record. `datedAsIfSent`
+says when the preview supplied the date, so the screen can say so under the pages. A letter's
+`asOf` is held to the firm's day or one either side (`PreviewNotCallersToday` → 400
+`NOT_CALLERS_TODAY`); a proposal ignores it, as Send dates a proposal on the firm's day.
+
+**Anchors: where each editable piece was drawn, never drawn themselves.** Flow pieces, table
+rows (`rowAnchors`) and the two covers carry an optional `anchor` key (`Anchor` in
+`domain/render/model.ts`): `proposal.title|background|validUntil|preparedFor|preparedBy`,
+`letter.issuedOn|addressedTo|subject|background`,
+`line:<id>.name|scope|volumeLimits|clientObligations|exclusions` (a letter item that prints for
+several companies' lines is keyed by its first line), `fee:line:<id>`, `fee:group:<id>`,
+`section:<groupId>.title|intro|deliverables|clientObligations`, `block:<id>`, and `add:<kind>` on
+a Notes heading. `PdfLibRenderer.renderWithAnchors` reports one rectangle per occurrence per page
+(PDF points from the page's top-left) as a SIDE OUTPUT of the same pass: `Face.draw` measures
+what it just drew into an `AnchorTracker` and changes nothing it draws; the proposal's running
+head and a table's repeated header are drawn `quiet`, so a piece broken across pages never
+claims them. `tests/render/anchors.test.ts` hashes a render with and without collecting, and a
+document with and without anchor keys: equal both ways. `tests/render/layout.test.ts` is
+untouched and still matches its pinned hashes.
+
+**Rupees in lakhs on the PROPOSAL.** `wholeMoney` prints INR as "INR 12,50,000" (regrouped from
+the western string by `inLakhs`, never asked of `en-IN`: a Node built with small ICU answers that
+as en-US, which would make the bytes depend on the machine). Safe because a sent proposal keeps
+its pinned PDF. **Letters and invoices still group the western way** ("INR 1,250,000.00"): a
+signed letter must re-render byte for byte and `layout.test.ts` pins their hashes. Changing them
+is open, and is a decision about every issued letter's re-render.
 
 ## Invoicing — the one number in this product that may not gap (T3.4)
 
@@ -1604,7 +1662,9 @@ missing feature: a pre-signed URL is a capability that outlives the session that
 is checked by a storage vendor, so it answers to **none of the four scoping gates**. The
 version row naming the storage key is read under RLS, which makes the key unreachable before
 it could be used. If object storage ever replaces the filesystem adapter, this stays true —
-the port has no method that returns a URL, and adding one is the thing not to do.
+the port has no method that returns a URL, and adding one is the thing not to do. The
+preview route (2026-09-28) is not a second way out: it stores nothing and returns no key — see
+"The preview IS the PDF".
 
 **`document_version` is append-only by GRANT, not by trigger.** `bib_app` holds SELECT and
 INSERT and nothing else, the same arrangement the `ledger` schema has. A trigger is a rule the

@@ -802,6 +802,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // Rendering WRITES — it stores a document and attaches it — so `party:write`,
   // the same permission every other drafting route on these documents takes.
   [routeKey("POST", "/api/v1/documents/render"), "party:write" as const],
+  // THE PREVIEW (2026-09-28) stores nothing, and still takes what rendering
+  // takes: it draws the same rows through the same renderer, and a session that
+  // could not have rendered and downloaded the PDF must not be handed its bytes
+  // by a route that merely skips the filing. Fee figures print on the page.
+  [routeKey("POST", "/api/v1/documents/preview"), "party:write" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}"), "party:read" as const],
   [routeKey("GET", "/api/v1/documents/{documentId}/content"), "party:read" as const],
   // A DISCLOSURE decision, and it takes `party:write` rather than a permission

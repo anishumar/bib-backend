@@ -22,7 +22,12 @@ import type {
   NewDocumentLink,
   NewDocumentVersion,
 } from "../usecase/filestore/ports";
-import type { DescribedDocument, DocumentRenderer, RenderSource } from "../usecase/render/ports";
+import type {
+  DescribedDocument,
+  DocumentRenderer,
+  RenderSource,
+  RenderedWithAnchors,
+} from "../usecase/render/ports";
 import type { RenderableDocument } from "../domain/render/model";
 
 export class FakeDocumentStoreRepo implements DocumentStoreRepository {
@@ -319,6 +324,16 @@ export class FakeRenderer implements DocumentRenderer {
   render(document: RenderableDocument): Promise<Uint8Array> {
     return Promise.resolve(new TextEncoder().encode(JSON.stringify(document)));
   }
+
+  /** The same bytes, and one anchor per anchored flow piece of a proposal —
+   *  enough for a service test to see that anchors come through. */
+  async renderWithAnchors(document: RenderableDocument): Promise<RenderedWithAnchors> {
+    const anchors = (document.proposal?.flow ?? [])
+      .map((piece) => piece.anchor)
+      .filter((key): key is string => key !== undefined)
+      .map((key) => ({ key, page: 2, x: 56, y: 100, width: 400, height: 12 }));
+    return { bytes: await this.render(document), anchors, pageCount: 1 };
+  }
 }
 
 /** Describes whatever it was told to describe. `documents` maps a subjectRef to
@@ -336,10 +351,19 @@ export class FakeRenderSource implements RenderSource {
     return this.renderable.includes(kind);
   }
 
-  describe(input: { subjectRef: string }): Promise<DescribedDocument | null> {
+  /** Every `asIfSentOn` it was asked with, in order — what a preview passed. */
+  readonly asked: (string | undefined)[] = [];
+
+  describe(input: { subjectRef: string; asIfSentOn?: string | undefined }): Promise<DescribedDocument | null> {
+    this.asked.push(input.asIfSentOn);
     const document = this.documents.get(input.subjectRef);
     if (document === undefined) return Promise.resolve(null);
-    return Promise.resolve({ document, partyId: this.parties.get(input.subjectRef) ?? null });
+    return Promise.resolve({
+      document,
+      partyId: this.parties.get(input.subjectRef) ?? null,
+      issuingEntity: { partyId: "00000000-0000-4000-8000-00000000e171", name: document.issuer.name },
+      ...(input.asIfSentOn === undefined ? {} : { datedAsIfSent: input.asIfSentOn }),
+    });
   }
 }
 

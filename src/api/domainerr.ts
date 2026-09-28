@@ -1055,6 +1055,8 @@ export function mapError(err: unknown): MappedError {
         return { status: 501, code: "NOT_IMPLEMENTED", message: err.message, reason: err.code };
       case "SOURCE_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "NOT_CALLERS_TODAY":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

@@ -43,8 +43,11 @@ import type {
   DocumentRecord,
   DocumentStoreRepository,
 } from "./ports";
-import type { DocumentRenderer, RenderSource } from "../render/ports";
-import { NotRenderable, SourceNotFound } from "../../domain/render/errors";
+import type { DocumentRenderer, FirmTimeZone, RenderSource } from "../render/ports";
+import { NotRenderable, PreviewNotCallersToday, SourceNotFound } from "../../domain/render/errors";
+import type { PlacedAnchor } from "../../domain/render/model";
+import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
+import type { Clock } from "../../platform/clock";
 
 export interface Deps {
   readonly documents: DocumentStoreRepository;
@@ -71,6 +74,33 @@ export interface Deps {
    * uploads, and hardcoding it would make raising it a deploy.
    */
   readonly maxUploadBytes: number;
+  /** "Today" for a preview is the FIRM's day (T6.11): the day Send will date
+   *  a draft on. */
+  readonly timeZones: FirmTimeZone;
+  readonly clock: Clock;
+}
+
+/**
+ * A document drawn and handed back, filed nowhere (2026-09-28).
+ *
+ * What a screen needs to SHOW the PDF instead of an imitation of it: the bytes,
+ * their hash (so "this is what Send will produce" is a comparison), where each
+ * editable piece was drawn, and which of the issuing company's marks the page
+ * wanted and found none of.
+ */
+export interface DocumentPreview {
+  readonly reference: string;
+  readonly bytes: Uint8Array;
+  readonly contentHash: string;
+  readonly mediaType: string;
+  readonly pageCount: number;
+  readonly anchors: readonly PlacedAnchor[];
+  /** The day a DRAFT was dated as if sent (it has no date of its own yet), or
+   *  null when the document printed its own. */
+  readonly datedAsIfSent: string | null;
+  readonly issuingEntity: { readonly partyId: string; readonly name: string } | null;
+  /** The marks this page draws when the issuer has them, and it has none of. */
+  readonly missingBrand: readonly ("logo" | "proposal_cover")[];
 }
 
 export interface StoreDocumentInput {
@@ -594,6 +624,81 @@ export class FileStoreService {
     });
 
     return record;
+  }
+
+  /**
+   * Draw a record and hand the bytes back, FILING NOTHING (2026-09-28): no
+   * blob, no document, no link, no event. The preview a screen shows in place
+   * of an HTML imitation of the document — "the preview IS the PDF".
+   *
+   * **Why this is not a second way for bytes to leave.** T3.6's rule is about
+   * STORED bytes: a stored file leaves only through `fetchBytes`, under RLS,
+   * with no URL that outlives the session. This stores nothing and returns no
+   * storage key; it draws rows the caller can already read under RLS (the
+   * source reads inside `withTenant`) through the same renderer `render` uses,
+   * so it can hand out nothing the caller could not have asked `render` to
+   * file and then downloaded.
+   *
+   * **A draft is described as Send will leave it**, on the firm's day: a
+   * proposal is dated that day; a letter is dated that day (or the caller's,
+   * `asOf`, held to the firm's day or one either side as Send holds it) unless
+   * the drafter set a date, and carries the firm's signature block when the
+   * firm names a signatory. Rendering is deterministic, so an unedited draft
+   * previews the very bytes Send produces on the same day — which a test proves
+   * by hash. A document already out is drawn as it stands, which the freeze
+   * makes the file of record.
+   */
+  async preview(input: {
+    readonly tenantId: string;
+    readonly kind: DocumentKind;
+    readonly subjectRef: string;
+    readonly asOf?: string | undefined;
+  }): Promise<DocumentPreview> {
+    if (!this.deps.renderSource.supports(input.kind)) {
+      throw new NotRenderable(input.kind, ["engagement_letter", "invoice", "proposal"]);
+    }
+    const firmDay = dayInZone(
+      this.deps.clock.now().toISOString(),
+      await this.deps.timeZones.timeZoneFor(input.tenantId),
+    );
+    if (input.asOf !== undefined && !isCallersToday(input.asOf, firmDay)) {
+      throw new PreviewNotCallersToday(input.asOf, firmDay);
+    }
+    // A proposal is dated by Send on the FIRM's day (`zoneDayOf(sent_at)`); a
+    // letter on the caller's (`callersDay`). An invoice is drawn as it stands.
+    const asIfSentOn =
+      input.kind === "proposal"
+        ? firmDay
+        : input.kind === "engagement_letter"
+          ? (input.asOf ?? firmDay)
+          : undefined;
+
+    const source = await this.deps.renderSource.describe({
+      tenantId: input.tenantId,
+      kind: input.kind,
+      subjectRef: input.subjectRef,
+      asIfSentOn,
+    });
+    if (source === null) throw new SourceNotFound(input.kind, input.subjectRef);
+    const described = source.document;
+
+    const drawn = await this.deps.renderer.renderWithAnchors(described);
+    const missingBrand: ("logo" | "proposal_cover")[] = [];
+    if (described.logo === null) missingBrand.push("logo");
+    if (described.proposal !== undefined && described.proposal.cover.artwork === null) {
+      missingBrand.push("proposal_cover");
+    }
+    return {
+      reference: described.reference,
+      bytes: drawn.bytes,
+      contentHash: this.deps.digest.ofBytes(drawn.bytes),
+      mediaType: this.deps.renderer.mediaType,
+      pageCount: drawn.pageCount,
+      anchors: drawn.anchors,
+      datedAsIfSent: source.datedAsIfSent ?? null,
+      issuingEntity: source.issuingEntity ?? null,
+      missingBrand,
+    };
   }
 
   /** Whether a document of this kind can be rendered — asked by a screen before

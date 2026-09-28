@@ -527,6 +527,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     maxUploadBytes: cfg.storage.maxUploadBytes,
     renderer,
     renderSource,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one

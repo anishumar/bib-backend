@@ -92,6 +92,8 @@ const files = new FileStoreService({
   maxUploadBytes: 10 * 1024 * 1024,
   renderer: new PdfLibRenderer(),
   renderSource: new PostgresRenderSource(app, (i) => blobs.get(i)),
+  timeZones: new PostgresFirmTimeZone(app),
+  clock: systemClock,
 });
 const mailer = new FakeProposalMailer();
 const tokens = new RandomTokenFactory();
@@ -255,12 +257,14 @@ describe("the proposal by email, end to end", () => {
   it("serves the pinned PDF from the link, byte for byte", async () => {
     const id = await draft();
     const sent = await proposals.send(tenant, id, SYSTEM_ACTOR);
-    // Nothing asked for a PDF at Send; the first download files and pins it.
-    expect((await proposals.describe(tenant, id)).sentPdf).toBeNull();
+    // Send filed and pinned it (2026-09-28); the link serves THAT file.
+    const atSend = (await proposals.describe(tenant, id)).sentPdf;
+    expect(atSend).not.toBeNull();
     const first = await proposals.sharedPdf(sent.shareToken, SYSTEM_ACTOR);
     const second = await proposals.sharedPdf(sent.shareToken, SYSTEM_ACTOR);
     expect(second.bytes).toEqual(first.bytes);
     const pinned = (await proposals.describe(tenant, id)).sentPdf;
+    expect(pinned?.versionId).toBe(atSend?.versionId);
     expect(pinned?.contentHash).toBe(createHash("sha256").update(first.bytes).digest("hex"));
   });
 

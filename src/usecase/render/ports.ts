@@ -1,6 +1,6 @@
 // The seams rendering needs. Interfaces owned by this use case.
 import type { DocumentKind } from "../../domain/filestore/model";
-import type { RenderableDocument } from "../../domain/render/model";
+import type { PlacedAnchor, RenderableDocument } from "../../domain/render/model";
 
 /**
  * Bytes from a document description. Knows about fonts and page sizes; knows
@@ -19,6 +19,18 @@ export interface DocumentRenderer {
   readonly kind: string;
   readonly mediaType: string;
   render(document: RenderableDocument): Promise<Uint8Array>;
+  /**
+   * The same bytes, and where each anchored piece was drawn — the preview's
+   * read (2026-09-28). The anchors are a side output of the one drawing pass
+   * and never reach the file: these bytes are `render`'s, hash for hash.
+   */
+  renderWithAnchors(document: RenderableDocument): Promise<RenderedWithAnchors>;
+}
+
+export interface RenderedWithAnchors {
+  readonly bytes: Uint8Array;
+  readonly anchors: readonly PlacedAnchor[];
+  readonly pageCount: number;
 }
 
 /**
@@ -38,6 +50,14 @@ export interface RenderSource {
     readonly tenantId: string;
     readonly kind: DocumentKind;
     readonly subjectRef: string;
+    /**
+     * A PREVIEW's day (2026-09-28). Given, and the record an unsent DRAFT, the
+     * source describes it as Send would leave it on that day: the proposal's
+     * date, and the letter's date and the firm's signature block, which Send
+     * stamps. Absent, or a record already out, and it describes the record as
+     * it stands, exactly as before.
+     */
+    readonly asIfSentOn?: string | undefined;
   }): Promise<DescribedDocument | null>;
 }
 
@@ -69,4 +89,18 @@ export interface DescribedDocument {
   /** The client this record belongs to. Null only where the source genuinely
    *  has no party — no renderable kind is in that state today. */
   readonly partyId: string | null;
+  /** Which of the firm's companies issues it — whose logo and cover the page
+   *  carries, so a preview can say which company's brand is missing. */
+  readonly issuingEntity?: { readonly partyId: string; readonly name: string } | undefined;
+  /** The day a draft was described as sent on (`asIfSentOn` applied), or
+   *  absent when the record was described as it stands. */
+  readonly datedAsIfSent?: string | undefined;
+}
+
+/**
+ * The firm's time zone — whose calendar "today" is on (T6.11). This use case's
+ * own port, as every other that needs one declares its own.
+ */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }

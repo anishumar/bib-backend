@@ -261,6 +261,75 @@ const RenderRequest = z
   })
   .openapi("RenderDocumentRequest");
 
+const PreviewRequest = z
+  .object({
+    kind: z.enum(["engagement_letter", "invoice", "proposal"]).openapi({
+      description: "What to draw — the kinds `render` takes.",
+    }),
+    subjectRef: z.string().uuid(),
+    asOf: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .optional()
+      .openapi({
+        description:
+          "The caller's calendar day, which a draft LETTER is dated on when its drafter set no " +
+          "date (Send takes the same). Held to the firm's day or one either side. A proposal is " +
+          "dated on the firm's day whatever this says, as Send dates it.",
+      }),
+  })
+  .openapi("PreviewDocumentRequest");
+
+const DocumentAnchorSchema = z
+  .object({
+    key: z.string().openapi({
+      description:
+        "Which piece of the record this is: `proposal.title`, `proposal.background`, " +
+        "`proposal.validUntil`, `proposal.preparedFor`, `proposal.preparedBy`, " +
+        "`letter.issuedOn`, `letter.addressedTo`, `letter.subject`, `letter.background`, " +
+        "`line:<id>.name|scope|volumeLimits|clientObligations|exclusions`, `fee:line:<id>`, " +
+        "`fee:group:<id>`, `section:<id>.title|intro|deliverables|clientObligations`, " +
+        "`block:<id>`, `add:<kind>`.",
+    }),
+    page: z.number().int().openapi({ description: "Counts from 1." }),
+    x: z.number(),
+    y: z.number().openapi({ description: "From the TOP of the page, in PDF points." }),
+    width: z.number(),
+    height: z.number(),
+  })
+  .openapi("DocumentAnchor");
+
+const DocumentPreviewSchema = z
+  .object({
+    reference: z.string(),
+    mediaType: z.string(),
+    contentHash: z.string().openapi({
+      description:
+        "Lower-case hex SHA-256 of the bytes. For an unedited draft, the hash of the PDF Send " +
+        "produces the same day.",
+    }),
+    pdf: z.string().openapi({ description: "The PDF's bytes, base64." }),
+    pageCount: z.number().int(),
+    anchors: z.array(DocumentAnchorSchema).openapi({
+      description:
+        "Where each editable piece was drawn, one rectangle per page it touched. A side output " +
+        "of the drawing pass; nothing of it is in the PDF.",
+    }),
+    datedAsIfSent: z.string().nullable().openapi({
+      description:
+        "The day a draft with no date of its own was dated on, as Send will date it; null when " +
+        "the document printed its own date.",
+    }),
+    issuingEntity: z
+      .object({ partyId: z.string().uuid(), name: z.string() })
+      .nullable()
+      .openapi({ description: "Whose logo and cover the pages carry." }),
+    missingBrand: z.array(z.enum(["logo", "proposal_cover"])).openapi({
+      description: "Marks this page would draw that the issuing company has not uploaded.",
+    }),
+  })
+  .openapi("DocumentPreview");
+
 const AttachRequest = z
   .object({
     subjectKind: z.enum(SUBJECT_KINDS as unknown as [string, ...string[]]),
@@ -478,6 +547,29 @@ const renderRoute = createRoute({
   responses: {
     201: { description: "Rendered and stored", content: { "application/json": { schema: DocumentSchema } } },
     400: errorResponse("The document contains a character the renderer cannot draw"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write"),
+    404: errorResponse("No such record at this firm"),
+    501: errorResponse("Nothing knows how to render that kind of document yet"),
+  },
+});
+
+const previewRoute = createRoute({
+  method: "post",
+  path: "/api/v1/documents/preview",
+  tags: ["documents"],
+  summary: "Draw a PDF of one of the firm's own documents, and file nothing",
+  description:
+    "The screen's preview: the same renderer and the same rows as `render`, handed back with " +
+    "where each editable piece was drawn. Stores no document, attaches nothing and records no " +
+    "event. A draft is drawn as Send will leave it that day, so an unedited draft previews the " +
+    "bytes Send produces.",
+  request: {
+    body: { content: { "application/json": { schema: PreviewRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Drawn", content: { "application/json": { schema: DocumentPreviewSchema } } },
+    400: errorResponse("A character the renderer cannot draw, or an asOf that cannot be today"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write"),
     404: errorResponse("No such record at this firm"),
@@ -784,6 +876,44 @@ export function registerFileStoreRoutes(app: OpenAPIHono<AppEnv>, deps: FileStor
       actor: s.actor,
     });
     return c.json(toWire(record), 201);
+  });
+
+  app.openapi(previewRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const body = c.req.valid("json");
+    const preview = await deps.service.preview({
+      tenantId: s.tenantId,
+      kind: body.kind,
+      subjectRef: body.subjectRef,
+      asOf: body.asOf,
+    });
+    // Field by field: the wire says only what the schema documents.
+    c.header("cache-control", "private, no-store");
+    return c.json(
+      {
+        reference: preview.reference,
+        mediaType: preview.mediaType,
+        contentHash: preview.contentHash,
+        pdf: Buffer.from(preview.bytes).toString("base64"),
+        pageCount: preview.pageCount,
+        anchors: preview.anchors.map((a) => ({
+          key: a.key,
+          page: a.page,
+          x: a.x,
+          y: a.y,
+          width: a.width,
+          height: a.height,
+        })),
+        datedAsIfSent: preview.datedAsIfSent,
+        issuingEntity:
+          preview.issuingEntity === null
+            ? null
+            : { partyId: preview.issuingEntity.partyId, name: preview.issuingEntity.name },
+        missingBrand: [...preview.missingBrand],
+      },
+      200,
+    );
   });
 
   app.openapi(attachRoute, async (c) => {

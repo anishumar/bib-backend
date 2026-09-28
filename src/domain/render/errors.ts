@@ -11,7 +11,11 @@ export class RenderError extends Error {
   }
 }
 
-export type RenderErrorCode = "UNRENDERABLE_TEXT" | "NOT_RENDERABLE" | "SOURCE_NOT_FOUND";
+export type RenderErrorCode =
+  | "UNRENDERABLE_TEXT"
+  | "NOT_RENDERABLE"
+  | "SOURCE_NOT_FOUND"
+  | "NOT_CALLERS_TODAY";
 
 /**
  * The document contains a character the current renderer cannot draw.
@@ -58,5 +62,20 @@ export class NotRenderable extends RenderError {
 export class SourceNotFound extends RenderError {
   constructor(kind: string, ref: string) {
     super("SOURCE_NOT_FOUND", `No ${kind} ${JSON.stringify(ref)} at this firm`);
+  }
+}
+
+/**
+ * A preview asked to be dated on a day that cannot be today anywhere (a
+ * preview dates a draft as Send will, and Send holds `asOf` to the firm's day
+ * or one either side — `isCallersToday`).
+ */
+export class PreviewNotCallersToday extends RenderError {
+  constructor(given: string, firmDay: string) {
+    super(
+      "NOT_CALLERS_TODAY",
+      `The day sent as asOf, ${JSON.stringify(given)}, cannot be today where you are: the firm's ` +
+        `day is ${firmDay}, and anywhere in the world today is that day or the one either side.`,
+    );
   }
 }

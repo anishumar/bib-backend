@@ -512,6 +512,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     maxUploadBytes: cfg.storage.maxUploadBytes,
     renderer: new PdfLibRenderer(),
     renderSource: new PostgresRenderSource(pools.app, (i) => blobs.get(i)),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
   const tenantRepository = new PostgresTenantRepository(pools.app);
   const workerParties = new PostgresPartyRepository(pools.app);

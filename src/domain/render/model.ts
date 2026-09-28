@@ -43,6 +43,35 @@ export interface LineTable {
    *  formatted, because the renderer must never turn an amount into a number
    *  and the caller is the only thing that knows the currency. */
   readonly rows: readonly (readonly string[])[];
+  /** Which piece of the record each row prints, by the same position as
+   *  `rows` — see `Anchor`. Never drawn. */
+  readonly rowAnchors?: readonly (Anchor | null)[] | undefined;
+}
+
+/**
+ * WHICH PIECE OF THE RECORD a drawn thing prints — `proposal.background`,
+ * `line:<id>.scope`, `block:<id>`, `fee:line:<id>` — so a screen showing the
+ * PDF can say where on the page that piece sits, and open its editor there.
+ *
+ * NEVER DRAWN, and that is the whole contract. The renderer reports where it
+ * drew an anchored piece only when asked (`renderWithAnchors`), as a side
+ * output of the same pass; the bytes are the same either way, which a test
+ * proves by hash. An anchor is a key a screen understands, not a word on paper.
+ */
+export type Anchor = string;
+
+/**
+ * Where an anchored piece was drawn: one rectangle per page it touched, in
+ * PDF points from the page's TOP-LEFT corner (the way a screen measures), the
+ * union of every line of text drawn for it on that page. `page` counts from 1.
+ */
+export interface PlacedAnchor {
+  readonly key: Anchor;
+  readonly page: number;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
 }
 
 /** A label/value pair at the head of the document — reference, date, whose law. */
@@ -158,7 +187,7 @@ export interface SignatureBlock {
  * size. A paragraph keeps the firm's own line breaks, and a line that starts
  * with "- ", "• " or "* " is a bullet.
  */
-export type Flow =
+export type Flow = (
   | { readonly kind: "heading"; readonly level: 1 | 2 | 3; readonly text: string }
   | {
       readonly kind: "paragraph";
@@ -172,7 +201,11 @@ export type Flow =
       readonly lead?: string | undefined;
     }
   | { readonly kind: "table"; readonly table: LineTable }
-  | { readonly kind: "figures"; readonly rows: readonly TotalRow[] };
+  | { readonly kind: "figures"; readonly rows: readonly TotalRow[] }
+) & {
+  /** The piece of the record this prints, for a screen — never drawn. */
+  readonly anchor?: Anchor | undefined;
+};
 
 export interface Annexure {
   /** "Annexure 1". */
@@ -198,6 +231,13 @@ export interface CoverLetter {
   /** What the client accepts under — the firm's own acceptance paragraphs. */
   readonly acceptance: readonly Flow[];
   readonly client: SignatureBlock;
+  /** Which piece of the letter each head line prints — see `Anchor`. */
+  readonly anchors?: {
+    readonly date?: Anchor | undefined;
+    readonly addressee?: Anchor | undefined;
+    readonly subject?: Anchor | undefined;
+    readonly salutation?: Anchor | undefined;
+  } | undefined;
 }
 
 export interface AnnexureLetter {
@@ -236,6 +276,12 @@ export interface ProposalCover {
   readonly preparedFor: readonly CoverLine[];
   /** "Prepared by:" — the colleague, the firm's company, the email. */
   readonly preparedBy: readonly CoverLine[];
+  /** Which piece of the proposal each cover block prints — see `Anchor`. */
+  readonly anchors?: {
+    readonly subtitle?: Anchor | undefined;
+    readonly preparedFor?: Anchor | undefined;
+    readonly preparedBy?: Anchor | undefined;
+  } | undefined;
 }
 
 export interface ProposalDocument {

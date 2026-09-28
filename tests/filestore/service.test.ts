@@ -11,6 +11,8 @@ import {
 } from "../../src/testfakes/filestore";
 import { FakeIds } from "../../src/testfakes/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { FileStoreError } from "../../src/domain/filestore/errors";
 
 const TENANT = "11111111-1111-1111-1111-111111111111";
@@ -25,6 +27,8 @@ function makeService(maxUploadBytes = 1024 * 1024) {
   const blobs = new FakeBlobStore();
   const events = new RecordingEventSink();
   const renderSource = new FakeRenderSource();
+  const timeZones = new FakeFirmTimeZone("Asia/Kolkata");
+  const clock = new FakeClock(new Date("2026-09-28T20:30:00Z"));
   const service = new FileStoreService({
     documents,
     blobs,
@@ -34,8 +38,10 @@ function makeService(maxUploadBytes = 1024 * 1024) {
     maxUploadBytes,
     renderer: new FakeRenderer(),
     renderSource,
+timeZones,
+clock,
   });
-  return { service, documents, blobs, events, renderSource };
+  return { service, documents, blobs, events, renderSource, timeZones, clock };
 }
 
 function bytes(text: string): Uint8Array {
@@ -562,5 +568,107 @@ describe("rendering one of the product's own records", () => {
     });
 
     expect(record.document.partyId).toBeNull();
+  });
+});
+
+describe("previewing a record — drawn, and filed nowhere (2026-09-28)", () => {
+  const proposalDoc = () => ({
+    ...aRenderableDocument("PR-2026-0003"),
+    logo: null,
+    proposal: {
+      cover: {
+        artwork: null,
+        title: "Proposal for Services",
+        subtitle: "Books and GST",
+        preparedFor: [],
+        preparedBy: [],
+      },
+      running: "PR-2026-0003",
+      flow: [{ kind: "paragraph" as const, text: "Background.", anchor: "proposal.background" }],
+    },
+  });
+
+  it("hands back the bytes, their hash and the anchors, and stores, attaches and records NOTHING", async () => {
+    const { service, renderSource, documents, blobs, events } = makeService();
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, proposalDoc());
+
+    const preview = await service.preview({ tenantId: TENANT, kind: "proposal", subjectRef: ENGAGEMENT });
+
+    expect(preview.reference).toBe("PR-2026-0003");
+    expect(preview.bytes.byteLength).toBeGreaterThan(0);
+    expect(preview.contentHash).toBe(new FakeContentDigest().ofBytes(preview.bytes));
+    expect(preview.anchors.map((a) => a.key)).toEqual(["proposal.background"]);
+    expect(documents.documents).toHaveLength(0);
+    expect(documents.versionRows).toHaveLength(0);
+    expect(documents.links).toHaveLength(0);
+    expect(blobs.blobs.size).toBe(0);
+    expect(events.recorded).toHaveLength(0);
+  });
+
+  it("the same bytes `render` files, for the same description", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("EL-2026-0011"));
+    const preview = await service.preview({ tenantId: TENANT, kind: "engagement_letter", subjectRef: ENGAGEMENT });
+    const filed = await service.render({
+      tenantId: TENANT, kind: "engagement_letter", subjectKind: "engagement_letter",
+      subjectRef: ENGAGEMENT, actor,
+    });
+    expect(preview.contentHash).toBe(filed.latestVersion.contentHash);
+  });
+
+  it("dates a draft on the FIRM's day, not the server's", async () => {
+    // The clock reads 20:30 UTC on the 28th — already 02:00 on the 29th in Delhi.
+    const { service, renderSource } = makeService();
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, proposalDoc());
+    const preview = await service.preview({ tenantId: TENANT, kind: "proposal", subjectRef: ENGAGEMENT });
+    expect(renderSource.asked).toEqual(["2026-09-29"]);
+    expect(preview.datedAsIfSent).toBe("2026-09-29");
+  });
+
+  it("a letter takes the caller's day, held to the firm's day or one either side", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument());
+    await service.preview({ tenantId: TENANT, kind: "engagement_letter", subjectRef: ENGAGEMENT, asOf: "2026-09-28" });
+    expect(renderSource.asked).toEqual(["2026-09-28"]);
+    await expect(
+      service.preview({ tenantId: TENANT, kind: "engagement_letter", subjectRef: ENGAGEMENT, asOf: "2026-09-26" }),
+    ).rejects.toThrow(/cannot be today where you are/);
+  });
+
+  it("a proposal is dated on the firm's day whatever the caller says, as Send dates it", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, proposalDoc());
+    await service.preview({ tenantId: TENANT, kind: "proposal", subjectRef: ENGAGEMENT, asOf: "2026-09-28" });
+    expect(renderSource.asked).toEqual(["2026-09-29"]);
+  });
+
+  it("an invoice is drawn as it stands", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.documents.set(ENGAGEMENT, aRenderableDocument("INV-1"));
+    const preview = await service.preview({ tenantId: TENANT, kind: "invoice", subjectRef: ENGAGEMENT });
+    expect(renderSource.asked).toEqual([undefined]);
+    expect(preview.datedAsIfSent).toBeNull();
+  });
+
+  it("says which of the issuer's marks the page wanted and found none of", async () => {
+    const { service, renderSource } = makeService();
+    renderSource.renderable = ["engagement_letter", "invoice", "proposal"];
+    renderSource.documents.set(ENGAGEMENT, proposalDoc());
+    const preview = await service.preview({ tenantId: TENANT, kind: "proposal", subjectRef: ENGAGEMENT });
+    expect(preview.missingBrand).toEqual(["logo", "proposal_cover"]);
+    expect(preview.issuingEntity?.name).toBe("The Firm LLP");
+  });
+
+  it("refuses a kind nothing can draw, and a record that is not there", async () => {
+    const { service } = makeService();
+    await expect(
+      service.preview({ tenantId: TENANT, kind: "working_paper", subjectRef: ENGAGEMENT }),
+    ).rejects.toThrow(/Renderable today/);
+    await expect(
+      service.preview({ tenantId: TENANT, kind: "invoice", subjectRef: "77777777-7777-7777-7777-777777777777" }),
+    ).rejects.toThrow(/no invoice/i);
   });
 });

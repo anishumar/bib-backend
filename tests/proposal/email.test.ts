@@ -193,13 +193,26 @@ describe("sending by email", () => {
     expect((await s.proposals.findById(TENANT, id))?.status).toBe("draft");
   });
 
-  it("sends without an email exactly as before — the link, and nothing written", async () => {
+  it("sends without an email — the link, no letter, and the PDF of record filed at once", async () => {
+    // 2026-09-28: a proposal sent as a bare link (WhatsApp, copied) used to
+    // have no PDF of record until the client downloaded one, so the staff page
+    // had no file to show. It is filed and pinned the moment it goes out.
     const s = setup();
     const id = await ready(s);
     const result = await s.service.send(TENANT, id, ACTOR);
     expect(result.email).toBeNull();
     expect(s.mailer.letters).toHaveLength(0);
-    expect(s.pdfs.filed).toHaveLength(0);
+    expect(s.pdfs.filed).toHaveLength(1);
+    expect(result.proposal.sentPdfVersionId).toBe(s.pdfs.filed[0]?.versionId);
+  });
+
+  it("still sends when the PDF cannot be rendered — the file is filed later", async () => {
+    const s = setup();
+    const id = await ready(s);
+    s.pdfs.failWith = new Error("render failed");
+    const result = await s.service.send(TENANT, id, ACTOR);
+    expect(result.proposal.status).toBe("sent");
+    expect(result.proposal.sentPdfVersionId).toBeNull();
   });
 });
 
@@ -417,8 +430,9 @@ describe("the client answers on the link", () => {
   it("does not refuse an answer because the PDF cannot be rendered", async () => {
     const s = setup();
     const id = await ready(s);
-    const { shareToken } = await s.service.send(TENANT, id, ACTOR);
+    // Failing from before Send, so nothing was pinned when it went out.
     s.pdfs.failWith = new Error("render failed");
+    const { shareToken } = await s.service.send(TENANT, id, ACTOR);
     const shared = await s.service.answerShared(answer(shareToken), SYSTEM_ACTOR);
     expect(shared.status).toBe("accepted");
     expect(s.proposals.answers[0]?.pdfVersionId).toBeNull();

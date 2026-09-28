@@ -1150,7 +1150,21 @@ export class ProposalService {
         validUntil: proposal.validUntil,
       },
     });
-    if (request === null) return { proposal: sent, shareToken, email: null };
+    if (request === null) {
+      // THE PDF OF RECORD, filed the moment it goes out (2026-09-28), not the
+      // first time something asks for it: a proposal sent by WhatsApp or as a
+      // bare link used to have none until the client downloaded it, so the
+      // staff page had no file to show and the client's copy could carry a
+      // logo uploaded after it was sent. Best-effort, as the email's render
+      // is: a render that fails leaves the proposal sent, and the next reader
+      // that needs the file files it (`pdfOfRecord`).
+      const pinned = await this.pdfOfRecord(sent, actor).catch(() => null);
+      return {
+        proposal: pinned === null ? sent : await this.findOrThrow(tenantId, proposalId),
+        shareToken,
+        email: null,
+      };
+    }
 
     const outcome = await this.deliver(sent, shareToken, request, actor);
     return { proposal: await this.findOrThrow(tenantId, proposalId), shareToken, email: outcome };

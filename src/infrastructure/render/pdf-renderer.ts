@@ -54,6 +54,7 @@ import type {
   CoverLine,
   Flow,
   LineTable,
+  PlacedAnchor,
   ProposalDocument,
   RenderableDocument,
   RenderableImage,
@@ -63,7 +64,7 @@ import type {
 } from "../../domain/render/model";
 import { wrapParagraph } from "../../domain/render/model";
 import { UnrenderableText } from "../../domain/render/errors";
-import type { DocumentRenderer } from "../../usecase/render/ports";
+import type { DocumentRenderer, RenderedWithAnchors } from "../../usecase/render/ports";
 
 // A4 in points, and the margins a business letter uses. Constants rather than
 // configuration: a firm choosing its own page geometry is not a request anybody
@@ -176,6 +177,9 @@ class Face {
   constructor(
     private readonly fonts: FontSet,
     private readonly bold: boolean,
+    /** Where anchored pieces land — null on every render that files a
+     *  document, so those draw exactly as they always did. */
+    private readonly tracker: AnchorTracker | null = null,
   ) {}
 
   widthOfTextAtSize(text: string, size: number): number {
@@ -191,6 +195,105 @@ class Face {
       page.drawText(run.text, { x: cursorX, y, size, font, color });
       cursorX += font.widthOfTextAtSize(run.text, size);
     }
+    // READ-ONLY: what was just drawn, measured. Nothing above changes with it.
+    this.tracker?.touch(page, x, y, cursorX - x, size);
+  }
+
+  /** Everything drawn until `end` prints this piece of the record. */
+  begin(anchor: string | undefined): void {
+    this.tracker?.begin(anchor);
+  }
+
+  end(): void {
+    this.tracker?.end();
+  }
+
+  /** Drawn but belonging to no piece — a page's running head, drawn while a
+   *  paragraph breaks across the page. */
+  quiet(draw: () => void): void {
+    if (this.tracker === null) {
+      draw();
+      return;
+    }
+    this.tracker.pause();
+    try {
+      draw();
+    } finally {
+      this.tracker.resume();
+    }
+  }
+}
+
+/**
+ * WHERE EACH ANCHORED PIECE WAS DRAWN (2026-09-28): the union of every line of
+ * text drawn for it, per page. A side output of the one drawing pass — it
+ * reads the coordinates the draw calls were given and writes nothing to the
+ * document, so a render that collects them produces the same bytes as one that
+ * does not (`tests/render/anchors.test.ts` hashes both).
+ */
+class AnchorTracker {
+  /** Each piece being drawn, with its OCCURRENCE: one key drawn in two places
+   *  (a fee's line and its Summary row) is two rectangles, never their union. */
+  private readonly stack: ({ key: string; occurrence: number } | null)[] = [];
+  private occurrences = 0;
+  private paused = 0;
+  /** In the order first drawn — the document's own order. */
+  private readonly boxes = new Map<string, { key: string; page: number; x0: number; y0: number; x1: number; y1: number }>();
+
+  constructor(private readonly pdf: PDFDocument) {}
+
+  begin(anchor: string | undefined): void {
+    this.occurrences += 1;
+    this.stack.push(anchor === undefined || anchor === "" ? null : { key: anchor, occurrence: this.occurrences });
+  }
+
+  end(): void {
+    this.stack.pop();
+  }
+
+  pause(): void {
+    this.paused += 1;
+  }
+
+  resume(): void {
+    this.paused -= 1;
+  }
+
+  touch(page: PDFPage, x: number, baseline: number, width: number, size: number): void {
+    if (this.paused > 0) return;
+    // The innermost piece being drawn owns the text.
+    let open: { key: string; occurrence: number } | null = null;
+    for (let i = this.stack.length - 1; i >= 0 && open === null; i -= 1) open = this.stack[i] ?? null;
+    if (open === null) return;
+    const key = open.key;
+    const index = this.pdf.getPages().indexOf(page);
+    if (index < 0) return;
+    // A line's box from its ascent to its descent, in points from the TOP.
+    const height = page.getHeight();
+    const top = height - (baseline + size * 0.95);
+    const bottom = height - (baseline - size * 0.3);
+    const id = `${String(open.occurrence)}\u0000${String(index)}`;
+    const box = this.boxes.get(id);
+    if (box === undefined) {
+      this.boxes.set(id, { key, page: index + 1, x0: x, y0: top, x1: x + width, y1: bottom });
+      return;
+    }
+    box.x0 = Math.min(box.x0, x);
+    box.y0 = Math.min(box.y0, top);
+    box.x1 = Math.max(box.x1, x + width);
+    box.y1 = Math.max(box.y1, bottom);
+  }
+
+  placed(): PlacedAnchor[] {
+    const round = (n: number): number => Math.round(n * 100) / 100;
+    return [...this.boxes.values()].map((b) => ({
+      key: b.key,
+      page: b.page,
+      x: round(b.x0),
+      y: round(b.y0),
+      width: round(b.x1 - b.x0),
+      height: round(b.y1 - b.y0),
+    }));
   }
 }
 
@@ -199,11 +302,26 @@ export class PdfLibRenderer implements DocumentRenderer {
   readonly mediaType = "application/pdf";
 
   async render(doc: RenderableDocument): Promise<Uint8Array> {
+    return (await this.draw(doc, false)).bytes;
+  }
+
+  /** The same pass, reporting where each anchored piece landed. */
+  async renderWithAnchors(doc: RenderableDocument): Promise<RenderedWithAnchors> {
+    return this.draw(doc, true);
+  }
+
+  private async draw(doc: RenderableDocument, collect: boolean): Promise<RenderedWithAnchors> {
     // CHECKED UP FRONT, and this is deliberate. pdf-lib raises on the character
     // it cannot encode, deep inside a draw call, with a message naming neither
     // the field nor the document. Scanning first means the refusal says WHERE —
     // and it means a half-drawn page is never produced.
     const pdf = await PDFDocument.create();
+    const tracker = collect ? new AnchorTracker(pdf) : null;
+    const done = async (): Promise<RenderedWithAnchors> => ({
+      bytes: await pdf.save(),
+      anchors: tracker === null ? [] : tracker.placed(),
+      pageCount: pdf.getPageCount(),
+    });
 
     // ── The determinism block. See the file header. ──────────────────────
     // Parsed from the document's own issue date, at midday UTC so that a
@@ -225,8 +343,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     // anything is drawn, so a half-page is never produced.
     assertRenderable(doc, fonts);
 
-    const body = new Face(fonts, false);
-    const bold = new Face(fonts, true);
+    const body = new Face(fonts, false, tracker);
+    const bold = new Face(fonts, true, tracker);
 
     // THE ANNEXURE LETTER (0083) draws pages of its own. Branching HERE — after
     // the setup every document shares and before the first classic draw — is
@@ -235,14 +353,14 @@ export class PdfLibRenderer implements DocumentRenderer {
     // must re-render as the document its client holds.
     if (doc.annexureLetter !== undefined) {
       await this.drawAnnexureLetter(pdf, doc, doc.annexureLetter, body, bold);
-      if (doc.footer !== null) this.drawFooter(pdf, doc, body);
-      return pdf.save();
+      if (doc.footer !== null) body.quiet(() => { this.drawFooter(pdf, doc, body); });
+      return done();
     }
     // THE PROPOSAL (0084), for the same reason and in the same place.
     if (doc.proposal !== undefined) {
       await this.drawProposal(pdf, doc, doc.proposal, body, bold);
-      if (doc.footer !== null) this.drawFooter(pdf, doc, body);
-      return pdf.save();
+      if (doc.footer !== null) body.quiet(() => { this.drawFooter(pdf, doc, body); });
+      return done();
     }
 
     const cursor: Cursor = { page: pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]), y: 0 };
@@ -263,7 +381,7 @@ export class PdfLibRenderer implements DocumentRenderer {
     }
     if (doc.footer !== null) this.drawFooter(pdf, doc, body);
 
-    return pdf.save();
+    return done();
   }
 
   // ── Layout primitives ────────────────────────────────────────────────────
@@ -638,14 +756,23 @@ export class PdfLibRenderer implements DocumentRenderer {
     this.rule(pdf, cursor);
 
     // Date, addressee, subject, salutation — the order every letter has.
+    const marks = cover.anchors;
     this.advance(pdf, cursor, 8);
+    body.begin(marks?.date);
     this.drawLines(pdf, cursor, cover.dateLine, body, SIZE_BODY, INK);
+    body.end();
     this.advance(pdf, cursor, 8);
+    body.begin(marks?.addressee);
     for (const line of cover.addressee) this.drawLines(pdf, cursor, line, body, SIZE_BODY, INK);
+    body.end();
     this.advance(pdf, cursor, 10);
+    body.begin(marks?.subject);
     this.drawLines(pdf, cursor, cover.subject, bold, SIZE_BODY, INK);
+    body.end();
     this.advance(pdf, cursor, 10);
+    body.begin(marks?.salutation);
     this.drawLines(pdf, cursor, cover.salutation, body, SIZE_BODY, INK);
+    body.end();
     this.advance(pdf, cursor, 4);
 
     this.drawFlow(pdf, cursor, cover.body, body, bold);
@@ -698,16 +825,20 @@ export class PdfLibRenderer implements DocumentRenderer {
       const left = (PAGE_WIDTH - w) / 2;
       const top = (PAGE_HEIGHT - h) / 2;
       coverPage.drawImage(art, { x: left, y: PAGE_HEIGHT - top - h, width: w, height: h });
+      body.begin(cover.anchors?.preparedFor);
       this.drawCoverBlock(coverPage, "Prepared for", cover.preparedFor, {
         x: left + PREPARED_FOR_AT.x * w,
         top: top + PREPARED_FOR_AT.y * h,
         color: INK,
       }, body, bold);
+      body.end();
+      body.begin(cover.anchors?.preparedBy);
       this.drawCoverBlock(coverPage, "Prepared by", cover.preparedBy, {
         x: left + PREPARED_BY_AT.x * w,
         top: top + PREPARED_BY_AT.y * h,
         color: ON_ARTWORK,
       }, body, bold);
+      body.end();
     } else {
       // A PLAIN COVER, for a firm that has uploaded no artwork: the logo, the
       // title, the proposal's own title, and the same two blocks.
@@ -719,20 +850,26 @@ export class PdfLibRenderer implements DocumentRenderer {
         y -= 30 * 1.2;
       }
       y -= 6;
+      body.begin(cover.anchors?.subtitle);
       for (const line of wrapParagraph(cover.subtitle, CONTENT_WIDTH, (t) => body.widthOfTextAtSize(t, 13))) {
         body.draw(coverPage, line, MARGIN_X, y, 13, MUTED);
         y -= 13 * LEADING;
       }
+      body.end();
+      body.begin(cover.anchors?.preparedFor);
       this.drawCoverBlock(coverPage, "Prepared for", cover.preparedFor, {
         x: MARGIN_X,
         top: PAGE_HEIGHT * 0.52,
         color: INK,
       }, body, bold);
+      body.end();
+      body.begin(cover.anchors?.preparedBy);
       this.drawCoverBlock(coverPage, "Prepared by", cover.preparedBy, {
         x: MARGIN_X,
         top: PAGE_HEIGHT * 0.72,
         color: INK,
       }, body, bold);
+      body.end();
     }
 
     // Every page after the cover: the logo, the running line, then the text.
@@ -750,14 +887,18 @@ export class PdfLibRenderer implements DocumentRenderer {
         });
       }
       const running = proposal.running;
-      body.draw(
-        c.page,
-        running,
-        PAGE_WIDTH - MARGIN_X - body.widthOfTextAtSize(running, SIZE_SMALL),
-        baseline + 2,
-        SIZE_SMALL,
-        MUTED,
-      );
+      // The running head belongs to no piece, even when a paragraph that is
+      // being drawn is what turned the page.
+      body.quiet(() => {
+        body.draw(
+          c.page,
+          running,
+          PAGE_WIDTH - MARGIN_X - body.widthOfTextAtSize(running, SIZE_SMALL),
+          baseline + 2,
+          SIZE_SMALL,
+          MUTED,
+        );
+      });
       c.y = PAGE_HEIGHT - PROPOSAL_BODY_TOP;
     };
     const cursor: Cursor = { page: coverPage, y: 0, turn };
@@ -832,11 +973,13 @@ export class PdfLibRenderer implements DocumentRenderer {
     style: FlowStyle = LETTER_FLOW,
   ): void {
     for (const piece of flow) {
+      body.begin(piece.anchor);
       if (piece.kind === "heading") this.drawFlowHeading(pdf, cursor, piece.level, piece.text, bold, style);
       else if (piece.kind === "paragraph") {
         this.drawFlowParagraph(pdf, cursor, piece.text, piece.muted === true, body, style, piece.lead, bold);
       } else if (piece.kind === "table") this.drawFlowTable(pdf, cursor, piece.table, body, bold, style);
       else this.drawFigures(pdf, cursor, piece.rows, body, bold);
+      body.end();
     }
   }
 
@@ -976,13 +1119,16 @@ export class PdfLibRenderer implements DocumentRenderer {
 
     // The header and the first row together, or neither.
     this.ensureRoom(pdf, cursor, 20 + 14 + heightOf(wrappedRows[0] ?? []));
-    header();
-    for (const cells of wrappedRows) {
+    body.quiet(header);
+    for (const [r, cells] of wrappedRows.entries()) {
       const height = heightOf(cells);
       if (cursor.y - height < MARGIN_BOTTOM) {
-        this.newPage(pdf, cursor);
-        header();
+        body.quiet(() => {
+          this.newPage(pdf, cursor);
+          header();
+        });
       }
+      body.begin(table.rowAnchors?.[r] ?? undefined);
       const first = cursor.y - 4 - size;
       cells.forEach((cellLines, i) => {
         const x = edges[i] ?? MARGIN_X;
@@ -998,6 +1144,7 @@ export class PdfLibRenderer implements DocumentRenderer {
           }
         });
       });
+      body.end();
       cursor.y -= height;
       line(cursor.y);
     }

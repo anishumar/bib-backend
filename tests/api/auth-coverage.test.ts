@@ -591,6 +591,8 @@ function deps(): RouterDeps {
         maxUploadBytes: 25 * 1024 * 1024,
         renderer: new FakeRenderer(),
         renderSource: new FakeRenderSource(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
       }),
     },
     invoice: {
@@ -1161,6 +1163,25 @@ describe("gate 3 — role", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { permissions: { key: string }[] };
     expect(body.permissions.map((p) => p.key)).toContain("tenant:admin");
+  });
+
+  it("the preview takes what rendering takes, though it files nothing (2026-09-28)", async () => {
+    // It draws the same rows through the same renderer, fee figures and all:
+    // a session that could not render and download the PDF must not be handed
+    // its bytes by a route that merely skips the filing.
+    expect(decideRoute("POST", "/api/v1/documents/preview")).toEqual({ kind: "permission", permission: "party:write" });
+    expect(decideRoute("POST", "/api/v1/documents/preview")).toEqual(decideRoute("POST", "/api/v1/documents/render"));
+    const init = {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "engagement_letter", subjectRef: "00000000-0000-4000-8000-0000000000aa" }),
+    };
+    // Through every gate, to the use case: nothing by that id, said as such.
+    const res = await app(as("associate")).request("/api/v1/documents/preview", init);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { error: { reason?: string } }).error.reason).toBe("SOURCE_NOT_FOUND");
+    expect((await app(PORTAL_SESSION).request("/api/v1/documents/preview", init)).status).toBe(403);
+    expect((await app(null).request("/api/v1/documents/preview", init)).status).toBe(401);
   });
 
   it("never lets a role reach an unmapped route", async () => {

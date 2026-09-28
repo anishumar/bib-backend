@@ -521,6 +521,8 @@ function deps(): RouterDeps {
         maxUploadBytes: 25 * 1024 * 1024,
         renderer: new FakeRenderer(),
         renderSource: new FakeRenderSource(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
       }),
     },
     invoice: {
