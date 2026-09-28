@@ -98,6 +98,7 @@ export class FakeEscalationNotices implements EscalationNoticeRepository {
       open: boolean;
       title: string;
       clientName: string | null;
+      clientPartyId?: string | null;
       entityName: string | null;
       holderUserId: string | null;
       holderName: string | null;
@@ -208,6 +209,7 @@ export class FakeEscalationNotices implements EscalationNoticeRepository {
           daysPast: r.daysPast,
           subjectTitle: facts?.title ?? "",
           clientName: facts?.clientName ?? null,
+          clientPartyId: facts?.clientPartyId ?? null,
           entityName: facts?.entityName ?? null,
           raisedTo: this.person(r.raisedToUserId),
           holder:

@@ -32,6 +32,8 @@ interface ApprovalRow {
 interface CheckRow extends ApprovalRow {
   work_item_title: string;
   client_name: string;
+  client_party_id: string;
+  due_on: string | null;
   submitted_by_name: string | null;
   policy_label: string | null;
 }
@@ -60,6 +62,8 @@ function toCheck(r: CheckRow): WorkItemCheck {
     workItemId: r.work_item_id,
     workItemTitle: r.work_item_title,
     clientName: r.client_name,
+    clientPartyId: r.client_party_id,
+    dueOn: r.due_on,
     submittedByName: r.submitted_by_name,
     policyLabel: r.policy_label,
   };
@@ -83,6 +87,9 @@ const CHECK_SELECT = `
          a.decided_at,
          w.title AS work_item_title,
          cp.display_name AS client_name,
+         w.client_party_id,
+         -- A DAY, read as text: no Date is built, so no zone can move it.
+         w.due_on::text AS due_on,
          mk.display_name AS submitted_by_name,
          v.body ->> 'label' AS policy_label
   FROM delivery.work_item_approval a

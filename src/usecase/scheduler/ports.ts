@@ -59,6 +59,16 @@ export interface JobDetail {
   readonly entityName: string | null;
   /** Who is BILLED. Not the same question, and often not the same party. */
   readonly clientName: string | null;
+  /** The two parties by id, so a list can LINK the client rather than print
+   *  it (V2.1's My day). Null exactly where the name is. */
+  readonly clientPartyId: string | null;
+  readonly entityPartyId: string | null;
+  /** The job's own period ("Aug 2026"), null on a job that is not per period. */
+  readonly periodLabel: string | null;
+  /** The EARLIEST due day of the job's unfinished tasks, `YYYY-MM-DD` — what a
+   *  step on this job is due by, as the person doing it reads it. Null when no
+   *  open task of the job carries a date. */
+  readonly dueOn: string | null;
   /** In the order their advances were recorded — the order the client bought
    *  them in, which is the order a merged card should read. */
   readonly services: readonly JobService[];

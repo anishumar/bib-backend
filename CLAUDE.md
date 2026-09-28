@@ -230,6 +230,34 @@ the moment somebody decides to hand it out. Reading is `config:read` — an asso
 from the catalogue. And a publish that would leave no role carrying `tenant:admin` is
 refused: it is unrecoverable from inside the product.
 
+## Setup readiness — is the firm set up well enough to run its work (V2.6, 2026-09-28)
+
+`GET /api/v1/tenancy/readiness` (`tenant:admin`): eight lines, each `done` or naming its gaps.
+Setting up a firm is about sixteen ordered steps and several fail SILENTLY (a client with no
+SPOC gets work on nobody's desk, no ladder escalates nothing, an unconfirmed rule files
+nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
+
+- **Computed on every read, never stored or ticked.** Fixing a gap turns its line done on the
+  next read. `domain/readiness/model.ts` is the rules (pure, `tests/readiness/model.test.ts`);
+  `PostgresReadinessFacts` reads every fact in ONE `withTenant` on the FIRM's day
+  (`dayInZone`), so all eight describe one moment (`readiness.integration.test.ts` rebuilds the
+  QA state and fixes gaps).
+- **Each fact restates a rule the product already applies**, so a line never disagrees with
+  what it predicts: a service's Dept is the LIVE version's `module` (routing's rule); an
+  assignment or portal grant is in force on `day` half-open; a rule generates when active,
+  dated, not event-driven, confirmed and linked (the generator's predicate).
+- **The lines** (in setup order): `deadlines` (compliance_policy `missedFromOn` and
+  `fiscalYearStartMonth`), `reporting_lines` (only where a PUBLISHED check rule is
+  `reporting_line` alone; `_or_rank` falls back to rank; the firm's top rung is never asked for a
+  manager, an ungraded person is), `request_routing` (not `none`), `processes` (every live service
+  names a published `workflow_template`), `compliance_rules` (at least one generating, and no
+  linked rule left unconfirmed: which services OUGHT to file is not ours to say), `ladders`
+  (escalation, chaser and nudge each PUBLISHED: never their days, decision D3 is open),
+  `account_team` (every client with an active engagement has a Key Manager and a SPOC for each
+  Dept its services name), `portal_contacts` (each such client has a live portal login).
+- **The API ships codes, the screen ships words.** `gaps[].missing` is a closed vocabulary per
+  line (documented on the schema); `id`/`ref` let the screen link the client or service.
+
 ## Firm administration — the roster is the other half of access control
 
 `/api/v1/tenancy/members` is a firm running itself: who works here, what their role is, and
@@ -2436,6 +2464,25 @@ reused unchanged is T2.9's `isEligible`, `VerificationPolicy` and the grade/repo
 comparison: one answer to "who checks whose work", two tables recording the answers.
 `submitted_by` is DERIVED from the item's assignee and FROZEN by trigger, exactly as T2.9's is.
 **Do not add a `submittedBy` to any write path.**
+
+**A task raised by hand is HIDDEN from the client unless the caller says otherwise (V1.4,
+2026-09-28).** `create` defaulted `isClientVisible` to `true`, so an internal note ("chase Ravi
+for the ledger") reached the client's portal unless somebody remembered to untick a box. It is
+`input.isClientVisible ?? false` now. The two writers that ARE client work set `true` themselves
+and are unchanged: `spawnForEngagements` (the month's work) and `raiseForObligation` (a
+statutory filing's task). The column's DATABASE default is still `TRUE` (0051); no writer relies
+on it, since every insert names the value.
+
+**THE READS MY DAY IS BUILT FROM CARRY THE CLIENT BY ID AND THE DUE DAY (V2.1, 2026-09-28).**
+The frontend's `/` lists everything on a person's desk from six reads with no lookup per row, so
+four read models grew what a row needs, by the "lists return read models" rule:
+`JobDetail` (`describeJobs`) gained `clientPartyId`, `entityPartyId`, `periodLabel` and `dueOn` =
+the EARLIEST due day of the job's UNFINISHED tasks (a subquery, read as `::text`); the
+orchestrator handler takes the scheduler as `deps.jobs` and puts it on `MyStep.job` and
+`StepCheck.job` (null when the job links no engagement), one `describeJobs` per response;
+`WorkItemCheck` gained `clientPartyId` and `dueOn` (on the queue row only, not on a task's
+reviews); `EscalationRecord` gained `clientPartyId` (null on a filing, as `clientName` is).
+`tests/workitem/my-day-reads.integration.test.ts` proves the three joins on a real database.
 
 **A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
 is finished" is what it says. Cancelling stays allowed: cancelling something that never

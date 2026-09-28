@@ -160,6 +160,7 @@ interface NoticeRow {
 interface RecordRow extends NoticeRow {
   subject_title: string;
   client_name: string | null;
+  client_party_id: string | null;
   entity_name: string | null;
   raised_to_name: string | null;
   raised_to_email: string | null;
@@ -256,6 +257,7 @@ export class PostgresEscalationNoticeRepository implements EscalationNoticeRepos
                -- carries the row; a task has both, and G0.1 is why the second
                -- one matters.
                cp.display_name                                                     AS client_name,
+               cp.id                                                               AS client_party_id,
                COALESCE(wep.display_name, ep.display_name)                         AS entity_name,
                -- THE EMAIL COMES TOO, and it is not belt-and-braces. A display
                -- name is optional on tenancy.user_account and is genuinely
@@ -342,6 +344,7 @@ export class PostgresEscalationNoticeRepository implements EscalationNoticeRepos
           ...toRow(r),
           subjectTitle: r.subject_title,
           clientName: r.client_name,
+          clientPartyId: r.client_party_id,
           entityName: r.entity_name,
           raisedTo:
             r.raised_to_user_id !== null && r.raised_to_email !== null

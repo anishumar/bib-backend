@@ -340,6 +340,12 @@ const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
   // NEVER NULL HERE: every row of the queue is an OPEN check, so the question
   // always applies.
   viewer: viewerVerdict().openapi("WorkItemCheckViewer"),
+  // On the QUEUE's row, not the review's: a list of checks links the client and
+  // says when the work is due (V2.1's My day); a task's own page has both.
+  clientPartyId: z.string().uuid(),
+  dueOn: IsoDate.nullable().openapi({
+    description: "The task's own due day, or null when it has none.",
+  }),
 }).openapi("WorkItemCheckRow");
 
 const ChecksResponse = z
@@ -360,7 +366,10 @@ const CreateWorkItemRequest = z
     assigneeUserId: z.string().uuid().nullable().optional(),
     dueOn: IsoDate.nullable().optional(),
     isStatutoryDue: z.boolean().optional(),
-    isClientVisible: z.boolean().optional(),
+    isClientVisible: z.boolean().optional().openapi({
+      description:
+        "Show this task on the client's portal. Absent means FALSE (V1.4): a task raised by hand is often an internal note, and the portal is the client's screen. Work spawned from an engagement or a statutory filing is shown regardless.",
+    }),
   })
   .openapi("CreateWorkItemRequest");
 
@@ -615,7 +624,12 @@ function toReviewWire(c: WorkItemCheck): z.infer<typeof WorkItemReviewSchema> {
 }
 
 function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRowSchema> {
-  return { ...toReviewWire(c), viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason } };
+  return {
+    ...toReviewWire(c),
+    viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason },
+    clientPartyId: c.clientPartyId,
+    dueOn: c.dueOn,
+  };
 }
 
 // ── Routes ──────────────────────────────────────────────────────────────────

@@ -367,6 +367,37 @@ describe("raising work by hand", () => {
     ).rejects.toThrow(WorkItemError);
   });
 
+  it("keeps it OFF the client's portal unless the caller says to show it (V1.4)", async () => {
+    const h = await harness();
+    const quiet = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "Chase Ravi for the ledger" },
+      ACTOR,
+    );
+    expect(quiet.isClientVisible).toBe(false);
+
+    const shown = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "Board minutes", isClientVisible: true },
+      ACTOR,
+    );
+    expect(shown.isClientVisible).toBe(true);
+  });
+
+  it("still shows the client spawned monthly work and statutory tasks (V1.4)", async () => {
+    const h = await harness();
+    h.engagements.rows.push(engagementWork());
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const statutory = await h.service.raiseForObligation(
+      FIRM,
+      { entityPartyId: ENTITY, engagementId: ENGAGEMENT, title: "GSTR-3B · Aug 2026", description: null, dueOn: "2026-09-20" },
+      ACTOR,
+    );
+
+    const spawned = h.items.rows.find((r) => r.engagementId === ENGAGEMENT && r.id !== statutory);
+    expect(spawned?.isClientVisible).toBe(true);
+    expect(h.items.rows.find((r) => r.id === statutory)?.isClientVisible).toBe(true);
+  });
+
   it("gives statutory work the STATUTORY default priority", async () => {
     const h = await harness();
     const item = await h.service.create(
