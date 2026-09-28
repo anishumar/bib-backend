@@ -641,6 +641,7 @@ function app(principal: Principal | null = null) {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: () => Promise.resolve(principal),
   });
@@ -753,6 +754,7 @@ describe("every route is accounted for", () => {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       rateLimit: {
         auth: { limit: 1000, windowSeconds: 60 },
         general: { limit: 10000, windowSeconds: 60 },
@@ -1254,6 +1256,7 @@ describe("CORS — the frontend is a separate origin", () => {
       corsOrigins: [ALLOWED],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       principalOf: () => Promise.resolve(null),
     });
 
@@ -1296,6 +1299,7 @@ describe("the /internal surface authorizes, not just authenticates", () => {
       corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
       principalOf: () => Promise.resolve(null),
     });
   }

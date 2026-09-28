@@ -621,7 +621,7 @@ const INTERNAL_CLIENTS = [
 ];
 const internal = { authorization: `Bearer ${INTERNAL_KEY}`, "content-type": "application/json" };
 
-function app() {
+function app(build: { commit: string | null; builtAt: string | null } = { commit: null, builtAt: null }) {
   return buildRouter(deps(), silentLog, {
     docsEnabled: true,
     internalClients: INTERNAL_CLIENTS,
@@ -633,6 +633,7 @@ function app() {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build,
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
     principalOf: devPrincipal,
   });
@@ -662,6 +663,7 @@ describe("OpenAPI spec", () => {
     corsOrigins: ["http://localhost:3000"],
     maxUploadBytes: 25 * 1024 * 1024,
     hstsEnabled: false,
+    build: { commit: null, builtAt: null },
     rateLimit: { auth: { limit: 1000, windowSeconds: 60 }, general: { limit: 10000, windowSeconds: 60 }, trustProxy: false, trustedProxyHops: 1 },
       principalOf: devPrincipal,
     }).request("/openapi.json");
@@ -670,6 +672,33 @@ describe("OpenAPI spec", () => {
 });
 
 describe("the spec and the wire agree", () => {
+  it("documents exactly the fields /health sends, and it names the build (V0.2)", async () => {
+    // /health is the one ops route in the spec: a staff screen reads which
+    // build is live through the generated client, so an undocumented field
+    // would be invisible there.
+    const spec = (await (await app().request("/openapi.json")).json()) as {
+      paths: Record<string, { get: { responses: { 200: { content: { "application/json": {
+        schema: { properties: Record<string, unknown> };
+      } } } } } }>;
+    };
+    const documented = Object.keys(
+      spec.paths["/health"]?.get.responses[200].content["application/json"].schema.properties ?? {},
+    ).sort();
+
+    const stamped = app({ commit: "32fbca3c0d1e", builtAt: "2026-09-28T18:30:00Z" });
+    const res = await stamped.request("/health", { headers: { origin: "http://localhost:3000" } });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(documented);
+    expect(body).toEqual({ status: "ok", commit: "32fbca3c0d1e", builtAt: "2026-09-28T18:30:00Z" });
+    // Read cross-origin by the staff screen, so the exact origin is allowed.
+    expect(res.headers.get("access-control-allow-origin")).toBe("http://localhost:3000");
+
+    // Unstamped is null, never a guess.
+    const bare = (await (await app().request("/health")).json()) as Record<string, unknown>;
+    expect(bare).toEqual({ status: "ok", commit: null, builtAt: null });
+  });
+
   it("documents exactly the fields /auth/me actually sends", async () => {
     // This is the failure that motivated the test. `role` and
     // `commercialVisibility` were on the wire for six tasks while the spec

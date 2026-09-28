@@ -1268,6 +1268,9 @@ export function wire(cfg: Config, log: Logger): Wired {
         maxUploadBytes: cfg.storage.maxUploadBytes,
         // HSTS only where the API is actually served over https.
         hstsEnabled: isProductionLike(cfg),
+        // What GET /health reports: the commit and build time stamped into
+        // the image (V0.2), null when it was built without them.
+        build: cfg.build,
         rateLimit: {
           auth: { limit: cfg.rateLimit.authPerMinute, windowSeconds: 60 },
           general: { limit: cfg.rateLimit.generalPerMinute, windowSeconds: 60 },

@@ -109,14 +109,23 @@ steps:
   # must produce an image carrying dist/, migrations/ (cmd/migrate.ts resolves
   # them relative to its own location) and production node_modules, with no
   # ENTRYPOINT that fixes one of the three commands.
+  #
+  # BUILD_TIME is the moment this step runs, in UTC. Cloud Build has no
+  # substitution for it, so the step runs through bash to compute one; with
+  # COMMIT_SHA it is what GET /health reports (V0.2).
   - id: build
     name: gcr.io/cloud-builders/docker
+    entrypoint: bash
     args:
-      - build
-      - --file=Dockerfile
-      - --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA}
-      - --build-arg=COMMIT_SHA=${_COMMIT_SHA}
-      - .
+      - -c
+      - |
+        set -euo pipefail
+        docker build \
+          --file=Dockerfile \
+          --tag=${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPOSITORY}/${_IMAGE_NAME}:${_COMMIT_SHA} \
+          --build-arg=COMMIT_SHA=${_COMMIT_SHA} \
+          --build-arg=BUILD_TIME=$$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+          .
 
   # ── 3. Push ─────────────────────────────────────────────────────────────────
   # Pushed in its own step rather than through the top-level `images:` field,

@@ -197,6 +197,27 @@ const EnvSchema = z.object({
   // only. Unset falls back to BIB_APP_BASE_URL — the app that receives magic
   // links is the app that calls the API, so one origin covers both by default.
   BIB_CORS_ORIGINS: z.string().optional(),
+
+  // ── Which build is running (V0.2) ─────────────────────────────────────────
+  // Stamped into the image by the Dockerfile from its COMMIT_SHA and BUILD_TIME
+  // build args, and reported by GET /health, so "which commit is QA on, and did
+  // that migration go out" is answered by asking the API rather than a person.
+  // Unset locally, and an image built without the args (`gcloud builds submit
+  // --tag`) has them EMPTY, not absent: Docker turns an ARG with no value into
+  // an empty ENV. Both read as "not stamped" and /health says null, never a
+  // guessed value. A value that is present must be well-formed, so a garbled
+  // stamp fails the boot instead of reporting a SHA nobody can check out.
+  BIB_BUILD_COMMIT: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z
+      .string()
+      .regex(/^[0-9a-f]{7,40}$/, "a git commit SHA: 7 to 40 lowercase hex characters")
+      .optional(),
+  ),
+  BIB_BUILD_TIME: z.preprocess(
+    (v) => (v === "" ? undefined : v),
+    z.string().datetime({ message: "an ISO-8601 UTC instant, e.g. 2026-09-28T18:30:00Z" }).optional(),
+  ),
 });
 
 export type Environment = z.infer<typeof EnvSchema>["BIB_ENVIRONMENT"];
@@ -250,6 +271,13 @@ export interface MailConfig {
   readonly smtp: SmtpConfig | null;
 }
 
+/** Which build this process is (V0.2). Null when the image was not stamped. */
+export interface BuildConfig {
+  readonly commit: string | null;
+  /** When the image was built, as an ISO-8601 UTC instant. */
+  readonly builtAt: string | null;
+}
+
 export interface CorsConfig {
   /** Exact origins allowed to send credentialed requests. Never a wildcard. */
   readonly origins: readonly string[];
@@ -299,6 +327,7 @@ export interface Config {
   readonly auth: AuthConfig;
   readonly rateLimit: RateLimitConfig;
   readonly cors: CorsConfig;
+  readonly build: BuildConfig;
   readonly worker: WorkerConfig;
   readonly storage: StorageConfig;
   readonly docusign: DocusignConfig;
@@ -379,6 +408,10 @@ export function load(): Config {
           : env.BIB_CORS_ORIGINS.split(",")
               .map((o) => o.trim())
               .filter((o) => o !== ""),
+    },
+    build: {
+      commit: env.BIB_BUILD_COMMIT ?? null,
+      builtAt: env.BIB_BUILD_TIME ?? null,
     },
     rateLimit: {
       trustProxy: env.BIB_TRUST_PROXY === "true",
@@ -516,6 +549,7 @@ export function redacted(cfg: Config): Record<string, unknown> {
     },
     rateLimit: cfg.rateLimit,
     cors: cfg.cors,
+    build: cfg.build,
     db: {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),

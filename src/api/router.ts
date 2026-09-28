@@ -19,6 +19,7 @@
 // Per-module routes live in their handler module's registrar (registerTenancy…)
 // and are mounted here; ops, error mapping and docs are cross-cutting and stay.
 import { swaggerUI } from "@hono/swagger-ui";
+import { createRoute } from "@hono/zod-openapi";
 import { cors } from "hono/cors";
 import { bodyLimit } from "hono/body-limit";
 import { secureHeaders } from "hono/secure-headers";
@@ -36,7 +37,7 @@ import { boundedStrings } from "./bounds";
 import { PUBLIC_PATHS } from "./guards";
 import type { InternalClient } from "./capabilities";
 import type { Logger } from "../platform/log";
-import { createOpenAPIApp } from "./openapi";
+import { createOpenAPIApp, z } from "./openapi";
 import { registerTenancyRoutes } from "./handler/tenancy";
 import type { TenancyDeps } from "./handler/tenancy";
 import { registerStaffGradeRoutes } from "./handler/staffgrade";
@@ -161,6 +162,9 @@ export interface RouterOptions {
    *  the header pins a browser to https for the WHOLE host, which on localhost
    *  breaks every other service the developer runs. */
   readonly hstsEnabled: boolean;
+  /** Which build this process is, for GET /health (V0.2). Nulls when the
+   *  image was not stamped. */
+  readonly build: { readonly commit: string | null; readonly builtAt: string | null };
 }
 
 /** Per-module dependencies the router mounts. One field per capability. */
@@ -202,6 +206,33 @@ export interface RouterDeps {
   readonly dashboard: DashboardDeps;
   readonly auth: AuthDeps;
 }
+
+const healthRoute = createRoute({
+  method: "get",
+  path: "/health",
+  tags: ["ops"],
+  summary: "Is the process up, and which build is it",
+  responses: {
+    200: {
+      description: "Up. `commit` and `builtAt` are null when the image was built without them.",
+      content: {
+        "application/json": {
+          schema: z.object({
+            status: z.literal("ok"),
+            commit: z.string().nullable().openapi({
+              description: "The git commit the running image was built from.",
+              example: "32fbca3c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a",
+            }),
+            builtAt: z.string().nullable().openapi({
+              description: "When the image was built, ISO-8601 UTC.",
+              example: "2026-09-28T18:30:00Z",
+            }),
+          }),
+        },
+      },
+    },
+  },
+});
 
 export function buildRouter(
   deps: RouterDeps,
@@ -281,8 +312,19 @@ export function buildRouter(
   );
 
   // Ops — always auth-free. Deliberately mounted BEFORE the guards: a load
-  // balancer cannot hold a credential, and neither endpoint reveals anything.
-  app.get("/health", (c) => c.json({ status: "ok" }));
+  // balancer cannot hold a credential, and neither endpoint reveals anything
+  // beyond which commit is running.
+  //
+  // /health SAYS WHICH BUILD IS LIVE (V0.2): the commit and the build time the
+  // image was stamped with, or null for an unstamped one. Nobody could tell
+  // which build QA ran, or whether a migration had gone out, without asking the
+  // person who deployed it. It is in the OpenAPI spec, unlike /ready, because a
+  // staff screen reads it through the generated client; and it gets its own
+  // CORS for that reason, with the product surface's exact origin list.
+  app.use("/health", cors({ origin: [...opts.corsOrigins], credentials: true }));
+  app.openapi(healthRoute, (c) =>
+    c.json({ status: "ok" as const, commit: opts.build.commit, builtAt: opts.build.builtAt }, 200),
+  );
   app.get("/ready", (c) => c.json({ status: "ready" }));
 
   // CORS, first of all, and only on the product surface.
