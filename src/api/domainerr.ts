@@ -177,6 +177,10 @@ export function mapError(err: unknown): MappedError {
       case "STEP_NOT_WAITING":
       case "STEP_NO_LONGER_NEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // A finished or cancelled job cannot be cancelled (V2.4). A conflict:
+      // the job's state refuses it, and the page already says what it is.
+      case "JOB_CLOSED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // Whose desk a step is on (0301). All conflicts: the request is well
       // formed and what refuses it is the state of the step or the firm's own
       // process, fixed on the job page or the process editor.
@@ -623,6 +627,7 @@ export function mapError(err: unknown): MappedError {
       case "STATE_RETIRED":
       case "PRIORITY_RETIRED":
       case "NO_INITIAL_STATE":
+      case "NO_CANCELLED_STATE":
       case "NO_DEFAULT_PRIORITY":
       case "LAST_INITIAL_STATE":
       case "LAST_DEFAULT_PRIORITY":

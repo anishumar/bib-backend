@@ -157,6 +157,13 @@ export interface JobRepository {
    * Returns whether this call was the one that set it.
    */
   pinTemplate(tenantId: string, jobId: string, versionId: string): Promise<boolean>;
+  /**
+   * Cancel a job that is still open (V2.4). The guard is in the write, so a
+   * job that finished a moment ago stays finished: null means it was already
+   * `done` or `cancelled`. Its engagement links are untouched, so the period
+   * is never spawned again.
+   */
+  cancel(tenantId: string, jobId: string, at: string): Promise<Job | null>;
 }
 
 /**

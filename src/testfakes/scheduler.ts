@@ -234,6 +234,18 @@ export class FakeJobRepo implements JobRepository {
     this.rows[index] = next;
     return Promise.resolve(next);
   }
+
+  cancel(tenantId: string, jobId: string, at: string): Promise<Job | null> {
+    const index = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === jobId);
+    const current = this.rows[index];
+    // The adapter's guard: only an open job moves.
+    if (!current || current.status === "done" || current.status === "cancelled") {
+      return Promise.resolve(null);
+    }
+    const next: Job = { ...current, status: "cancelled", startedAt: current.startedAt ?? at, finishedAt: at };
+    this.rows[index] = next;
+    return Promise.resolve(next);
+  }
 }
 
 /** The ledger read, as a list a test can write to directly. */

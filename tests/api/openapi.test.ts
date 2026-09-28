@@ -45,6 +45,7 @@ import {
   FakeTemplateSource,
   FakeStepDeskResolver,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { ServiceAxisService } from "../../src/usecase/serviceaxis/service";
 import { ClientAssignmentService } from "../../src/usecase/clientassignment/service";
@@ -313,6 +314,7 @@ function deps(): RouterDeps {
     orchestrator: {
       grades: { listGrades: () => Promise.resolve([]) },
       service: new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
         jobs: new FakeJobRepo(),

@@ -370,6 +370,40 @@ const decideProposalRoute = createRoute({
   },
 });
 
+const JobCancelledSchema = z
+  .object({
+    jobId: z.string().uuid(),
+    status: z.literal("cancelled"),
+    stepsWithdrawn: z.number().int().openapi({
+      description: "Open steps taken off every desk (skipped, noted as cancelled).",
+    }),
+    tasksCancelled: z.number().int().openapi({
+      description: "Open tasks moved to the firm's own cancelled state.",
+    }),
+  })
+  .openapi("JobCancelled");
+
+const cancelJobRoute = createRoute({
+  method: "post",
+  path: "/api/v1/jobs/{jobId}/cancel",
+  tags: ["delivery"],
+  summary: "Stop a job for good",
+  description:
+    "Withdraws the job's open steps and moves its open tasks to the firm's cancelled state, " +
+    "so nothing of it is left on anybody's desk, and writes `job.cancelled`. Steps already " +
+    "done stay done. The period is never spawned again: the job keeps its engagements.",
+  request: { params: JobParam },
+  responses: {
+    200: { description: "Cancelled", content: { "application/json": { schema: JobCancelledSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such job at this firm"),
+    409: errorResponse(
+      "The job is already finished or cancelled, or the firm has no state for cancelled work",
+    ),
+  },
+});
+
 const completeStepRoute = createRoute({
   method: "post",
   path: "/api/v1/jobs/{jobId}/steps/{stepKey}/complete",
@@ -792,6 +826,22 @@ export function registerOrchestratorRoutes(
       s.userId,
     );
     return c.json(await describeOne(s.tenantId, jobId, step.id, s.userId), 200);
+  });
+
+  app.openapi(cancelJobRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { jobId } = c.req.valid("param");
+    const done = await deps.service.cancelJob({ tenantId: s.tenantId, jobId }, s.actor);
+    return c.json(
+      {
+        jobId: done.job.id,
+        status: "cancelled" as const,
+        stepsWithdrawn: done.stepsWithdrawn,
+        tasksCancelled: done.tasksCancelled,
+      },
+      200,
+    );
   });
 
   app.openapi(completeStepRoute, async (c) => {

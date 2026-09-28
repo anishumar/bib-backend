@@ -403,6 +403,21 @@ export function initialState(states: readonly WorkItemState[]): WorkItemState | 
 }
 
 /**
+ * Where a task goes when the job it belongs to is cancelled (V2.4): the firm's
+ * own state that is TERMINAL and NOT a success, active, first in the firm's
+ * order. Read by its flags, never its code, like every rule here; the product
+ * seeds "Cancelled" at every firm. Null when the firm has none, and the
+ * caller refuses rather than calling a cancellation a completion.
+ */
+export function cancelledState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter((s) => s.isActive && s.isTerminal && !s.isSuccess)
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
+}
+
+/**
  * Where work goes when somebody sends it to be checked, or null (0073).
  *
  * NULL IS A SUPPORTED ANSWER AND NOT A GAP. A firm that has not said which of

@@ -25,6 +25,7 @@ import {
   FakeStepDeskResolver,
   FakeTemplateSource,
   FakeTierSource,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import {
   FakeCheckerDirectory,
@@ -107,6 +108,7 @@ async function world() {
   subjects.set(JOB, { workflowTemplateKey: "close", recurrence: "monthly", jurisdiction: "IN" });
   templates.publish(TENANT, "close", { versionId: "v1", label: "Monthly close", steps: PROCESS });
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks, jobs, steps, stepChecks, templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),

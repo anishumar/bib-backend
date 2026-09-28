@@ -374,6 +374,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // decides whether a machine may act with nobody watching.
 
   const orchestrator = new OrchestratorService({
+    // A cancelled job closes its tasks through the work-item module (V2.4).
+    jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
     jobs,
     steps: new PostgresJobStepRepository(pools.app),

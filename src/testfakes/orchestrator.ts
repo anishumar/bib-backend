@@ -7,6 +7,7 @@ import type { ConfidenceTiers } from "../domain/agent/model";
 import type { NoSpocLookup, OwnerPerson } from "../domain/workitem/model";
 import type {
   StepDeskResolver,
+  JobTasks,
   StepOwnerFacts,
   AgentOutcome,
   AgentRun,
@@ -567,5 +568,19 @@ export class FakeStepCheckRepo implements StepCheckRepository {
       this.rows[i] = { ...current, outcome: null, note: null, markedByUserId: null, markedByName: null, markedAt: null };
     }
     return Promise.resolve(true);
+  }
+}
+
+/**
+ * A job's tasks, as the orchestrator sees them (V2.4). Records every call, and
+ * answers with `tasks` per job, so a test can say "this job had two open".
+ */
+export class FakeJobTasks implements JobTasks {
+  readonly calls: { tenantId: string; jobId: string }[] = [];
+  constructor(private readonly tasks: ReadonlyMap<string, number> = new Map()) {}
+
+  cancelOpenForJob(tenantId: string, jobId: string): Promise<number> {
+    this.calls.push({ tenantId, jobId });
+    return Promise.resolve(this.tasks.get(jobId) ?? 0);
   }
 }

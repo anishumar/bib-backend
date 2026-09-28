@@ -29,6 +29,7 @@ import {
   FakeTierSource,
   FakeStepDeskResolver,
   FakeStepCheckRepo,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { OrchestratorService } from "../../src/usecase/orchestrator/service";
@@ -149,6 +150,7 @@ async function world(executor = "agent") {
   });
 
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),
     jobs,

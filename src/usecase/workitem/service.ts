@@ -42,6 +42,7 @@ import {
   defaultPriorityFor,
   dueOnFrom,
   initialState,
+  cancelledState,
   underReviewState,
   isIsoDate,
   isValidRank,
@@ -71,6 +72,7 @@ import {
   LastInitialState,
   NoDefaultPriority,
   NoInitialState,
+  NoCancelledState,
   PriorityNotFound,
   PriorityRetired,
   ReviewAlreadyDecided,
@@ -1390,6 +1392,25 @@ export class WorkItemService {
       actor,
     );
     return updated;
+  }
+
+  /**
+   * A job was cancelled (V2.4): every open task of it moves to the firm's own
+   * cancelled state, through `moveToState`, so each move is the ordinary
+   * `work_item.state_changed` (with `isSuccess: false`) and a filing's task
+   * stays un-filed. The state is read by its FLAGS (`cancelledState`); a firm
+   * with none is refused BEFORE anything moves, which is what lets the job's
+   * cancellation call this first.
+   */
+  async cancelOpenForJob(tenantId: string, jobId: string, actor: Actor): Promise<number> {
+    const open = await this.deps.items.list(tenantId, { jobId, openOnly: true });
+    if (open.length === 0) return 0;
+    const to = cancelledState(await this.deps.vocabulary.listStates(tenantId));
+    if (to === null) throw new NoCancelledState();
+    for (const record of open) {
+      await this.moveToState({ tenantId, workItemId: record.item.id, stateId: to.id }, actor);
+    }
+    return open.length;
   }
 
   /** Put it on somebody's desk, or take it off. Taking it off records WHY as a

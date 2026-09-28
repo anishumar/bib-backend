@@ -1747,3 +1747,37 @@ describe("where an unsigned letter's work will land (T6.17's Send warning)", () 
     });
   });
 });
+
+describe("a cancelled job closes its tasks (V2.4)", () => {
+  it("moves every open task of the job to the firm's cancelled state, as a cancellation", async () => {
+    const h = await harness();
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const cancelled = await stateNamed(h, "cancelled");
+    const before = h.recorded().length;
+
+    expect(await h.service.cancelOpenForJob(FIRM, JOB, ACTOR)).toBe(1);
+
+    expect(h.items.rows[0]?.stateId).toBe(cancelled.id);
+    const moved = h.recorded().slice(before);
+    expect(moved.map((e) => e.verb)).toEqual(["work_item.state_changed"]);
+    // A cancellation, never a completion: no `work_item.completed`.
+    expect(moved[0]?.payload).toMatchObject({ isTerminal: true, isSuccess: false });
+    // Nothing open is left, so a second call moves nothing.
+    expect(await h.service.cancelOpenForJob(FIRM, JOB, ACTOR)).toBe(0);
+  });
+
+  it("refuses BEFORE moving anything when the firm has no state for cancelled work", async () => {
+    const h = await harness();
+    h.engagements.rows.push(engagementWork());
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR);
+    const cancelled = await stateNamed(h, "cancelled");
+    await h.vocab.updateState({ tenantId: FIRM, stateId: cancelled.id, isActive: false }, ACTOR);
+    const stateBefore = h.items.rows[0]?.stateId;
+
+    await expect(h.service.cancelOpenForJob(FIRM, JOB, ACTOR)).rejects.toMatchObject({
+      code: "NO_CANCELLED_STATE",
+    });
+    expect(h.items.rows[0]?.stateId).toBe(stateBefore);
+  });
+});

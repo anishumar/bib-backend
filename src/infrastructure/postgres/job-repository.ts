@@ -380,6 +380,23 @@ export class PostgresJobRepository
     });
   }
 
+  async cancel(tenantId: string, jobId: string, at: string): Promise<Job | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // 0041's CHECK pairs `cancelled` with BOTH timestamps, so a job
+      // cancelled before it ever ran starts and finishes at the same instant:
+      // zero duration, which is what it had. No screen reads a job's start.
+      const [row] = await db<JobRow[]>`
+        UPDATE delivery.job SET
+          status      = 'cancelled',
+          started_at  = COALESCE(started_at, ${at}::timestamptz),
+          finished_at = ${at}::timestamptz
+        WHERE id = ${jobId} AND status NOT IN ('done', 'cancelled')
+        RETURNING ${db.unsafe(COLUMNS)}
+      `;
+      return row ? toJob(row) : null;
+    });
+  }
+
   // ── ActivationFeed ──────────────────────────────────────────────────────────
 
   /**
@@ -415,6 +432,16 @@ export class PostgresJobRepository
         -- which was not better -- it was the same fault, further downstream.
         JOIN crm.engagement e
           ON e.id = ev.object_id AND e.tenant_id = ev.tenant_id
+        -- NOBODY ARCHIVED (V2.4). A client the firm has put away gets no new
+        -- work, and neither does a company of it: the billed party and the
+        -- entity served are both asked. INNER, because an engagement always
+        -- names both.
+        JOIN core.party client
+          ON client.id = e.party_id AND client.tenant_id = e.tenant_id
+         AND client.archived_at IS NULL
+        JOIN core.party served
+          ON served.id = e.entity_party_id AND served.tenant_id = e.tenant_id
+         AND served.archived_at IS NULL
         -- LEFT from here down, and this half matters more. The line, the
         -- pinned version and the live body are needed only for the GROUPING
         -- facts, and a service that cannot be resolved -- unpublished since,
@@ -437,6 +464,9 @@ export class PostgresJobRepository
          AND live.tenant_id = pinned.tenant_id
          AND live.status = 'published'
         WHERE ev.verb = 'contract.activated'
+          -- STILL LIVE (V2.4). An engagement ended or paused before its job
+          -- was built owes no checklist: the activation is history.
+          AND e.status = 'active'
           -- RECURRING SERVICES TAKE THE OTHER ROUTE (T6.13). A pinned body
           -- that says monthly, quarterly or annually is owed a job PER PERIOD
           -- from activeRecurring, never the one-time checklist this feed
@@ -519,6 +549,13 @@ export class PostgresJobRepository
           ON live.entry_id = pinned.entry_id
          AND live.tenant_id = pinned.tenant_id
          AND live.status = 'published'
+        -- NOBODY ARCHIVED (V2.4), as the one-time feed above asks.
+        JOIN core.party client
+          ON client.id = e.party_id AND client.tenant_id = e.tenant_id
+         AND client.archived_at IS NULL
+        JOIN core.party served
+          ON served.id = e.entity_party_id AND served.tenant_id = e.tenant_id
+         AND served.archived_at IS NULL
         WHERE e.status = 'active'
           AND pinned.body ->> 'recurrence' IN ('monthly', 'quarterly', 'annually')
         ORDER BY e.effective_from, e.id

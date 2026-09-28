@@ -507,6 +507,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // filing is done is not the same act as reading the board, and the record of
   // WHO did it is worth only as much as the gate in front of it.
   [routeKey("POST", "/api/v1/jobs/{jobId}/steps/{stepKey}/complete"), "work:write" as const],
+  // CANCELLING a job (V2.4) takes its work off every desk: the same gate as
+  // doing that work.
+  [routeKey("POST", "/api/v1/jobs/{jobId}/cancel"), "work:write" as const],
   // Whose desk a step sits on (0301): moving it is doing the work's
   // housekeeping, so the same gate as ticking it; reading who may do it and
   // what is on your own desk is reading the board.

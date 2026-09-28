@@ -413,6 +413,8 @@ export function wire(cfg: Config, log: Logger): Wired {
   // an API that answered differently from the worker would let somebody tick off
   // work a machine was already doing.
   const orchestrator = new OrchestratorService({
+    // A cancelled job closes its tasks through the work-item module (V2.4).
+    jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
     jobs,
     steps: new PostgresJobStepRepository(pools.app),

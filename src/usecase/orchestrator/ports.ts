@@ -14,6 +14,7 @@ import type {
   ProposalOutcome,
 } from "../../domain/agent/model";
 import type { OwnerFacts, OwnerPerson } from "../../domain/workitem/model";
+import type { Actor } from "../../domain/ledger/model";
 
 export interface NewJobStep {
   readonly id: string;
@@ -119,6 +120,21 @@ export interface JobStepRepository {
  * work together has no split code, so every job's steps went to nobody while
  * its task went to the SPOC.
  */
+/**
+ * A job's tasks, from the orchestrator's side (V2.4). Cancelling a job takes
+ * its work off every desk, and a job's TASK is the work-item module's row, so
+ * this is the one thing the orchestrator asks of it. Satisfied by
+ * `WorkItemService` in setup.
+ */
+export interface JobTasks {
+  /**
+   * Move every open task of this job to the firm's cancelled state, and say
+   * how many moved. Refuses before moving anything when the firm has no such
+   * state (`NoCancelledState`), so a job is never half cancelled on its board.
+   */
+  cancelOpenForJob(tenantId: string, jobId: string, actor: Actor): Promise<number>;
+}
+
 export interface StepDeskResolver {
   ownerFactsFor(tenantId: string, jobId: string, onDate: string): Promise<StepOwnerFacts>;
 }

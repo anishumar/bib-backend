@@ -24,6 +24,7 @@ import {
   FakeStepDeskResolver,
   FakeTemplateSource,
   FakeTierSource,
+  FakeJobTasks,
 } from "../../src/testfakes/orchestrator";
 import { SUGGESTED_TIERS } from "../../src/domain/agent/model";
 import { FakeIds } from "../../src/testfakes/ids";
@@ -149,6 +150,7 @@ async function world(
   templates.publish(TENANT, "close", template);
   const clock = new FakeClock(new Date("2026-09-25T09:00:00.000Z"));
   const service = new OrchestratorService({
+    jobTasks: new FakeJobTasks(),
     timeZones: new FakeFirmTimeZone(),
     desks, jobs, steps: stepRepo, stepChecks, templates, subjects,
     tiers: new FakeTierSource().publish(SUGGESTED_TIERS),
