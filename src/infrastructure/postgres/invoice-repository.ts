@@ -418,9 +418,14 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   ): Promise<EngagementBilling | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<
-        { party_id: string; issuing_entity_party_id: string; letter_ref: string }[]
+        {
+          party_id: string;
+          issuing_entity_party_id: string;
+          letter_ref: string;
+          currency: string;
+        }[]
       >`
-        SELECT e.party_id, l.issuing_entity_party_id, l.ref AS letter_ref
+        SELECT e.party_id, l.issuing_entity_party_id, l.ref AS letter_ref, l.currency
           FROM crm.engagement e
           JOIN crm.engagement_letter l
             ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
@@ -431,6 +436,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
             partyId: row.party_id,
             issuingEntityPartyId: row.issuing_entity_party_id,
             letterRef: row.letter_ref,
+            currency: row.currency,
           }
         : null;
     });

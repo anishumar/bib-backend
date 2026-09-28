@@ -62,6 +62,7 @@ import {
   NotCallersToday,
   EngagementOfAnotherClient,
   EngagementOfAnotherIssuer,
+  EngagementInAnotherCurrency,
   InvoiceBillsTheFirm,
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
@@ -236,6 +237,18 @@ export class InvoiceService {
           engagement.letterRef,
           await this.nameOf(input.tenantId, engagement.issuingEntityPartyId),
           await this.nameOf(input.tenantId, invoice.entityPartyId),
+        );
+      }
+      // And in the currency the letter priced it in. The line below takes the
+      // INVOICE's currency, so a USD 3,000 engagement on an INR invoice became
+      // ₹3,000. One company signs letters in several currencies, so the issuer
+      // check above does not cover this.
+      const letterCurrency = normalizeCurrency(engagement.currency);
+      if (letterCurrency !== invoice.currency) {
+        throw new EngagementInAnotherCurrency(
+          engagement.letterRef,
+          letterCurrency,
+          invoice.currency,
         );
       }
     }

@@ -948,6 +948,8 @@ export function mapError(err: unknown): MappedError {
       // well formed, but the INVOICE is charged by another company than the one
       // that signed the work, and its number is already in that company's
       // series. The fix is another invoice, not another request.
+      // ENGAGEMENT_IN_ANOTHER_CURRENCY likewise: the invoice is in another
+      // currency than the letter priced the work in.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
@@ -958,6 +960,7 @@ export function mapError(err: unknown): MappedError {
       case "DUNNING_ALREADY_DECIDED":
       case "PARTY_ARCHIVED":
       case "ENGAGEMENT_OF_ANOTHER_ISSUER":
+      case "ENGAGEMENT_IN_ANOTHER_CURRENCY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

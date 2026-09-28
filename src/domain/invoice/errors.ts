@@ -36,7 +36,8 @@ export type InvoiceErrorCode =
   | "PARTY_ARCHIVED"
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_OF_ANOTHER_CLIENT"
-  | "ENGAGEMENT_OF_ANOTHER_ISSUER";
+  | "ENGAGEMENT_OF_ANOTHER_ISSUER"
+  | "ENGAGEMENT_IN_ANOTHER_CURRENCY";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -110,6 +111,24 @@ export class EngagementOfAnotherIssuer extends InvoiceError {
       "ENGAGEMENT_OF_ANOTHER_ISSUER",
       `That engagement is under ${letterRef}, which ${letterIssuer} signed, and this invoice is ` +
         `charged by ${invoiceIssuer}. Bill it on an invoice charged by ${letterIssuer}.`,
+    );
+  }
+}
+
+/**
+ * An engagement is billed in the currency its letter priced it in (2026-09-28).
+ *
+ * A line takes the invoice's currency, so a letter priced at USD 3,000 a month
+ * added to an INR invoice became ₹3,000, refused by nothing. One company signs
+ * letters in several currencies (an Indian company billing an export client in
+ * USD), so the issuer check does not cover it.
+ */
+export class EngagementInAnotherCurrency extends InvoiceError {
+  constructor(letterRef: string, letterCurrency: string, invoiceCurrency: string) {
+    super(
+      "ENGAGEMENT_IN_ANOTHER_CURRENCY",
+      `${letterRef} is priced in ${letterCurrency} and this invoice is in ${invoiceCurrency}. ` +
+        `Bill this work on an invoice in ${letterCurrency}.`,
     );
   }
 }

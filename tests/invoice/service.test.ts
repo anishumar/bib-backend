@@ -16,6 +16,7 @@ import {
   IrnAlreadyRegistered,
   EngagementOfAnotherClient,
   EngagementOfAnotherIssuer,
+  EngagementInAnotherCurrency,
   InvoiceBillsTheFirm,
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
@@ -520,6 +521,8 @@ describe("who an invoice names (F-10-1)", () => {
   const THEIR_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e2";
   /** The same client's work, under a letter the firm's OTHER company signed. */
   const US_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e3";
+  /** The same client's work, signed with the SAME company, priced in USD. */
+  const EXPORT_ENGAGEMENT = "00000000-0000-0000-0000-0000000000e4";
 
   function named() {
     const s = setup();
@@ -529,16 +532,29 @@ describe("who an invoice names (F-10-1)", () => {
       .know(ENTITY, "10x Global Advisory Private Limited")
       .know(OTHER_ENTITY, "10x Global Inc.");
     s.invoices.engagements
-      .set(ENGAGEMENT, { partyId: CLIENT, issuingEntityPartyId: ENTITY, letterRef: "EL-2026-0001" })
+      .set(ENGAGEMENT, {
+        partyId: CLIENT,
+        issuingEntityPartyId: ENTITY,
+        letterRef: "EL-2026-0001",
+        currency: "INR",
+      })
       .set(THEIR_ENGAGEMENT, {
         partyId: OTHER_CLIENT,
         issuingEntityPartyId: ENTITY,
         letterRef: "EL-2026-0002",
+        currency: "INR",
       })
       .set(US_ENGAGEMENT, {
         partyId: CLIENT,
         issuingEntityPartyId: OTHER_ENTITY,
         letterRef: "EL-2026-0003",
+        currency: "INR",
+      })
+      .set(EXPORT_ENGAGEMENT, {
+        partyId: CLIENT,
+        issuingEntityPartyId: ENTITY,
+        letterRef: "EL-2026-0007",
+        currency: "USD",
       });
     return s;
   }
@@ -634,6 +650,42 @@ describe("who an invoice names (F-10-1)", () => {
         unitAmount: "450",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("bills an engagement only on an invoice in the currency its letter priced it in", async () => {
+    // A line takes the INVOICE's currency, so USD 3,000 a month on an INR
+    // invoice was billed as ₹3,000. The same company signs both letters here,
+    // so the issuer check passes and only this one stands in the way.
+    const s = named();
+    const line = (invoiceId: string, engagementId: string) =>
+      s.service.addLine({
+        tenantId: TENANT,
+        invoiceId,
+        engagementId,
+        description: "Export bookkeeping, October",
+        quantity: "1",
+        unitAmount: "3000",
+      });
+
+    const inr = await s.service.raise(raise(), ACTOR);
+    const refused = line(inr.id, EXPORT_ENGAGEMENT);
+    await expect(refused).rejects.toBeInstanceOf(EngagementInAnotherCurrency);
+    await expect(refused).rejects.toThrow(
+      "EL-2026-0007 is priced in USD and this invoice is in INR. Bill this work on an invoice in USD.",
+    );
+    expect(await s.invoices.listLines(TENANT, inr.id)).toHaveLength(0);
+
+    // A USD invoice from the same company takes it, and refuses the INR work.
+    const usd = await s.service.raise(raise({ currency: "usd", fxRate: "83.5" }), ACTOR);
+    await expect(line(usd.id, EXPORT_ENGAGEMENT)).resolves.toBeUndefined();
+    await expect(line(usd.id, ENGAGEMENT)).rejects.toThrow(
+      "EL-2026-0001 is priced in INR and this invoice is in USD. Bill this work on an invoice in INR.",
+    );
+    expect(await s.invoices.listLines(TENANT, usd.id)).toHaveLength(1);
+
+    // Another company's work in another currency is refused as another
+    // company's first: that is the invoice to raise instead.
+    await expect(line(usd.id, US_ENGAGEMENT)).rejects.toBeInstanceOf(EngagementOfAnotherIssuer);
   });
 
   it("names a series only for one of the firm's own companies", async () => {

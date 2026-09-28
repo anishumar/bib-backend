@@ -140,6 +140,10 @@ export interface EngagementBilling {
   readonly issuingEntityPartyId: string;
   /** That letter, so a refusal can name it. */
   readonly letterRef: string;
+  /** The currency the letter priced the work in. A line takes the invoice's
+   *  currency, so billing this engagement on an invoice in another one would
+   *  restate its agreed figure in the wrong money (USD 3,000 as ₹3,000). */
+  readonly currency: string;
 }
 
 export interface InvoiceRepository {

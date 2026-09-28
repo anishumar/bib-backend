@@ -1552,6 +1552,10 @@ addressed to another client's director. All refused now, before any number is dr
   another request), and `billable-engagements` carries `issuingEntityPartyId` /
   `issuingEntityName` so the raise dialog preselects "Charged by" and the line picker disables
   the rest. A service check, not a trigger: an invoice line is only ever written through it.
+- **And in the currency its letter priced it in** (2026-09-28, `ENGAGEMENT_IN_ANOTHER_CURRENCY`,
+  409, checked after the issuer). A line takes the INVOICE's currency, so a USD 3,000 engagement
+  on an INR invoice was billed as ₹3,000. One company signs letters in several currencies (an
+  Indian company billing an export client in USD), so the issuer check never covered it.
 
 **The invariant ones are also WALLS (0306)**, for the writers that are not the services: the
 invoice's issuer and billed party, its series, its line's engagement and the letter's quote.

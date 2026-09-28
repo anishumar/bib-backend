@@ -297,7 +297,8 @@ const addLineRoute = createRoute({
   description:
     "An `engagementId` must be the billed client's, and its letter must have been signed by " +
     "the company this invoice is charged by: the number is already in that company's series " +
-    "(ENGAGEMENT_OF_ANOTHER_ISSUER, 409).",
+    "(ENGAGEMENT_OF_ANOTHER_ISSUER, 409). The letter must also be priced in this invoice's " +
+    "currency, because the line takes the invoice's (ENGAGEMENT_IN_ANOTHER_CURRENCY, 409).",
   request: {
     params: z.object({ invoiceId: z.string().uuid() }),
     body: { content: { "application/json": { schema: AddInvoiceLineRequest } }, required: true },
@@ -310,7 +311,7 @@ const addLineRoute = createRoute({
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse(
       "The invoice has been issued (its lines are fixed), or the engagement's letter was signed " +
-        "by another of the firm's companies",
+        "by another of the firm's companies or priced in another currency",
     ),
   },
 });

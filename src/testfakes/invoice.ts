@@ -58,8 +58,8 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   readonly lines: (InvoiceLine & { removed: boolean })[] = [];
   /** Display names, so a joined read returns something a screen could render. */
   readonly partyNames = new Map<string, string>();
-  /** Engagement id to the client it bills and the company that signed its
-   *  letter; unknown ids are absent. */
+  /** Engagement id to the client it bills, the company that signed its
+   *  letter and the currency it priced the work in; unknown ids are absent. */
   readonly engagements = new Map<string, EngagementBilling>();
 
   engagementOf(_tenantId: string, engagementId: string): Promise<EngagementBilling | null> {
