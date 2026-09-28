@@ -6,12 +6,32 @@
 // not cached columns", so the arithmetic lives in the views (migration 0038)
 // where the rows are. What is left here is the two things a view cannot do:
 // assemble the figures into one answer, and apply the DSO definition.
-import type { Slice } from "../../domain/dashboard/model";
-import { daysSalesOutstanding } from "../../domain/dashboard/model";
-import type { DashboardRepository } from "./ports";
+import type { CompanyBilling, MonthBilling, Slice } from "../../domain/dashboard/model";
+import { billingWindow, daysSalesOutstanding } from "../../domain/dashboard/model";
+import { defaultCurrencyFor } from "../../domain/document/model";
+import { dayInZone } from "../../domain/scheduler/zone";
+import type { Clock } from "../../platform/clock";
+import type { DashboardRepository, FirmTimeZone } from "./ports";
 
 export interface Deps {
   readonly dashboards: DashboardRepository;
+  /** For the one figure cut by month: which month the FIRM is in (T6.14). */
+  readonly timeZones: FirmTimeZone;
+  readonly clock: Clock;
+}
+
+/** What `revenueByCompany` answers. */
+export interface RevenueByCompany {
+  readonly reportingCurrency: string;
+  /** Oldest first, `YYYY-MM`, the last one the month the firm is in now. */
+  readonly months: readonly string[];
+  /** The whole firm, month by month, in the reporting currency. */
+  readonly total: readonly {
+    readonly month: string;
+    readonly billedReporting: string;
+    readonly invoiceCount: number;
+  }[];
+  readonly companies: readonly CompanyBilling[];
 }
 
 /**
@@ -109,5 +129,65 @@ export class DashboardService {
   /** Who owes the firm money, biggest first. */
   async receivablesByClient(tenantId: string): Promise<readonly Slice[]> {
     return this.deps.dashboards.receivablesByClient(tenantId);
+  }
+
+  /**
+   * What each of the firm's companies billed, month by month, over the last
+   * `months` months (Wave 5): issued invoices, before tax, less credit notes
+   * (the definition is on `MonthBilling`), each company in its own currency,
+   * and the whole firm in the reporting currency.
+   *
+   * The months are cut on the FIRM's calendar, like every daily sweep since
+   * T6.14. The adding up is SQL's; what is left here is assembly: which
+   * currency a company bills in (D1's one table), and a month with no row
+   * being a month of nothing, written "0" rather than left out, so every
+   * company's series has every month.
+   */
+  async revenueByCompany(tenantId: string, months: number): Promise<RevenueByCompany> {
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const window = billingWindow(dayInZone(this.deps.clock.now().toISOString(), zone), months);
+    const [reportingCurrency, companies] = await Promise.all([
+      this.deps.dashboards.reportingCurrency(tenantId),
+      this.deps.dashboards.billingCompanies(tenantId, window),
+    ]);
+    const owns = companies.map((c) => ({
+      partyId: c.partyId,
+      currency: defaultCurrencyFor(c.jurisdiction, reportingCurrency),
+    }));
+    const rows = await this.deps.dashboards.billingByMonth(tenantId, window, owns, reportingCurrency);
+
+    const cell = (partyId: string | null, month: string) =>
+      rows.find((r) => r.partyId === partyId && r.month === month);
+
+    return {
+      reportingCurrency,
+      months: window.months,
+      total: window.months.map((month) => {
+        const row = cell(null, month);
+        return {
+          month,
+          billedReporting: row?.billedReporting ?? "0",
+          invoiceCount: (row?.invoices ?? 0) + (row?.otherCurrencyInvoices ?? 0),
+        };
+      }),
+      companies: companies.map((c, i) => ({
+        partyId: c.partyId,
+        name: c.name,
+        jurisdiction: c.jurisdiction,
+        currency: owns[i]?.currency ?? reportingCurrency,
+        months: window.months.map((month): MonthBilling => {
+          const row = cell(c.partyId, month);
+          return {
+            month,
+            billed: row?.billed ?? "0",
+            billedReporting: row?.billedReporting ?? "0",
+            invoiceCount: row?.invoices ?? 0,
+          };
+        }),
+        otherCurrencyInvoices: rows
+          .filter((r) => r.partyId === c.partyId)
+          .reduce((n, r) => n + r.otherCurrencyInvoices, 0),
+      })),
+    };
   }
 }

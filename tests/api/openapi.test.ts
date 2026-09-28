@@ -508,7 +508,11 @@ function deps(): RouterDeps {
       firmEntities: makeFirmEntityFakes().service,
     },
     dashboard: {
-      service: new DashboardService({ dashboards: new FakeDashboardRepo() }),
+      service: new DashboardService({
+        dashboards: new FakeDashboardRepo(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+      }),
       authz: new AuthzService({ permissions: permissions }),
     },
     filestore: {

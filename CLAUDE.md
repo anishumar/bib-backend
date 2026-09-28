@@ -1575,6 +1575,36 @@ without it the numbers always reconcile and *why* money came off does not — an
 we write off to service failures" is a GROUP BY, which free text cannot answer. The reason
 travels in the ledger payload for the same reason.
 
+## Billing by company — the one dashboard figure cut by MONTH (Wave 5, 2026-09-29)
+
+`GET /api/v1/dashboard/revenue/by-company?months=12` (1 to 24), behind the fee axis like the
+rest of `/dashboard`. No migration. What each of the firm's companies billed, month by month, for
+the frontend's area charts (one small chart per company, because the companies bill in different
+currencies and cannot share an axis).
+
+- **BILLED** = ISSUED invoices only, by the month of `issued_on`, BEFORE TAX (`invoice_totals.net`,
+  after discount), less the credit notes issued that month at their PRE-TAX SHARE of the invoice
+  they credit (`amount × net / total`): a credit note reverses tax in proportion, so taking its
+  whole amount off a pre-tax figure would take the tax off twice. A credit note on an invoice
+  cancelled since goes with it. The definition is in the route's description, where a caller
+  reads it.
+- **The window is the FIRM's months**: `billingWindow(dayInZone(now, the firm's zone), n)`, as
+  every sweep cuts today since T6.14. `issued_on` is a `date`, so a document's month needs no zone.
+- **A company's currency is D1's table** (`defaultCurrencyFor`: IN INR, AE AED, SG SGD, US USD,
+  else the reporting currency). Its `billed` counts its invoices in that currency, or ALL of them at
+  their stored rates when that currency IS the reporting one. An invoice in a third currency is
+  left out of `billed` and counted in `otherCurrencyInvoices`: nothing stores a rate between two
+  non-reporting currencies, and one is never invented. `billedReporting` (and the whole-firm
+  `total`) take every document at the rate stored on it.
+- **One pass, summed in SQL on `numeric`** (grouping sets: per company and month, and per month),
+  each document rounded to four places after conversion as `crm.receivable_ageing` does. The use
+  case only assembles: the currency per company and a month with no row written `"0"`.
+- **Which companies**: `crm.is_firm_entity` and not archived, the firm itself first, PLUS any party
+  that issued an invoice in the window, so money billed by a company put away since is not dropped.
+- Proven in `tests/dashboard/revenue.integration.test.ts` (two companies, a credit note, a
+  cancelled invoice, a draft, a USD invoice from the Gulf company, a second firm behind the wall)
+  and `revenue.test.ts` (the month cut at 00:30 IST on 1 October, the assembly).
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The

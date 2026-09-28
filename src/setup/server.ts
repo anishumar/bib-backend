@@ -531,11 +531,14 @@ export function wire(cfg: Config, log: Logger): Wired {
     clock: systemClock,
   });
 
-  // THE LEADERSHIP FIGURES (T3.7). No writes and no ports beyond the one
-  // repository: every number is derived from rows at read time, so there is
-  // nothing to inject a clock or an id generator for.
+  // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
+  // rows at read time. The clock and the firm's timezone are for the one
+  // figure cut by month (billing by company, Wave 5): which month the FIRM is
+  // in now, as every daily sweep asks since T6.14.
   const dashboards = new DashboardService({
     dashboards: new PostgresDashboardRepository(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
 
   // CHASING is its own use case, and it runs in TWO places: the worker sweeps

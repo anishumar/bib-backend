@@ -45,4 +45,59 @@ export interface DashboardRepository {
    * inflating the denominator.
    */
   creditSales(tenantId: string, sinceDays: number): Promise<string>;
+
+  /**
+   * The firm's own companies (`crm.is_firm_entity`, live and not archived),
+   * the firm itself first, PLUS any other party that issued an invoice in the
+   * window: a company put away since is still who billed that money, and a
+   * chart that dropped it would under-report the month.
+   */
+  billingCompanies(tenantId: string, window: BillingWindowDays): Promise<readonly BillingCompany[]>;
+
+  /**
+   * Billing per company per month, and per month for the whole firm, in ONE
+   * pass (grouping sets), summed in SQL on `numeric`. `owns` says which
+   * currency each company's `billed` is struck in; see `CompanyMonthRow`.
+   */
+  billingByMonth(
+    tenantId: string,
+    window: BillingWindowDays,
+    owns: readonly { readonly partyId: string; readonly currency: string }[],
+    reportingCurrency: string,
+  ): Promise<readonly CompanyMonthRow[]>;
+}
+
+/** A billing window as two days: `from` inclusive, `until` exclusive. */
+export interface BillingWindowDays {
+  readonly from: string;
+  readonly until: string;
+}
+
+export interface BillingCompany {
+  readonly partyId: string;
+  readonly name: string;
+  readonly jurisdiction: string | null;
+}
+
+/**
+ * One row of `billingByMonth`. `partyId` null is the WHOLE FIRM's month.
+ *
+ * `billed` is in the company's own currency: its invoices in that currency,
+ * or, when that currency IS the reporting currency, all of its invoices at
+ * their stored rates. Null on a whole-firm row (the companies' currencies
+ * differ). `billedReporting` is every document at its own stored rate.
+ */
+export interface CompanyMonthRow {
+  readonly partyId: string | null;
+  readonly month: string;
+  readonly billed: string | null;
+  readonly billedReporting: string;
+  readonly invoices: number;
+  readonly otherCurrencyInvoices: number;
+}
+
+/** The firm's timezone, for the month the firm is in. Structural: satisfied
+ *  by `PostgresFirmTimeZone`, like every other use case's (T6.14). */
+export interface FirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }

@@ -19,9 +19,18 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import type { AuthzService } from "../../usecase/authz/service";
-import type { DashboardService, Overview } from "../../usecase/dashboard/service";
+import type {
+  DashboardService,
+  Overview,
+  RevenueByCompany,
+} from "../../usecase/dashboard/service";
 import type { Slice } from "../../domain/dashboard/model";
-import { AGEING_BUCKETS, MRR_EXCLUSIONS } from "../../domain/dashboard/model";
+import {
+  AGEING_BUCKETS,
+  BILLING_MONTHS_DEFAULT,
+  BILLING_MONTHS_MAX,
+  MRR_EXCLUSIONS,
+} from "../../domain/dashboard/model";
 import { toEnvelope } from "../httpresp";
 import { scopeOf } from "../scope";
 
@@ -136,6 +145,93 @@ function overviewToWire(o: Overview): z.infer<typeof OverviewResponse> {
   };
 }
 
+const BILLED_DEFINITION =
+  "BILLED is ISSUED invoices only (a draft was never sent, a cancelled one was withdrawn), by " +
+  "the month of their issue date, BEFORE TAX (net of discount), less the credit notes issued " +
+  "that month, each at its pre-tax share of the invoice it credits. A credit note on an " +
+  "invoice cancelled since is left out with it.";
+
+const MonthBillingSchema = z.object({
+  month: z.string().openapi({ description: "YYYY-MM." }),
+  billed: z.string().openapi({
+    description:
+      "A decimal STRING in the company's own `currency`, never a number. " + BILLED_DEFINITION,
+  }),
+  billedReporting: z.string().openapi({
+    description:
+      "The same month in the firm's reporting currency, every document at the rate stored on " +
+      "it, never a rate looked up today. Includes invoices in other currencies.",
+  }),
+  invoiceCount: z.number().int().openapi({ description: "Invoices counted in `billed`." }),
+});
+
+const RevenueByCompanyResponse = z
+  .object({
+    reportingCurrency: z.string().length(3),
+    months: z.array(z.string()).openapi({
+      description:
+        "The last N calendar months, oldest first, as YYYY-MM. The last one is the month the " +
+        "FIRM is in now, on its own timezone, not the server's.",
+    }),
+    total: z
+      .array(
+        z.object({
+          month: z.string(),
+          billedReporting: z.string(),
+          invoiceCount: z.number().int(),
+        }),
+      )
+      .openapi({
+        description: "The whole firm, every company, month by month, in the reporting currency.",
+      }),
+    companies: z.array(
+      z.object({
+        partyId: z.string().uuid(),
+        name: z.string(),
+        jurisdiction: z.string().nullable(),
+        currency: z.string().length(3).openapi({
+          description:
+            "The currency the company bills in, from where it is registered (IN INR, AE AED, " +
+            "SG SGD, US USD, else the reporting currency): the one table `defaultCurrency` on " +
+            "/firm-entities serves.",
+        }),
+        months: z.array(MonthBillingSchema),
+        otherCurrencyInvoices: z.number().int().openapi({
+          description:
+            "Invoices it issued in the window in ANOTHER currency: in `billedReporting`, not in " +
+            "`billed`, because nothing stores a rate between two currencies that are not the " +
+            "reporting one. Zero for a company billing in the reporting currency.",
+        }),
+      }),
+    ),
+  })
+  .openapi("DashboardRevenueByCompany");
+
+function revenueToWire(r: RevenueByCompany): z.infer<typeof RevenueByCompanyResponse> {
+  return {
+    reportingCurrency: r.reportingCurrency,
+    months: [...r.months],
+    total: r.total.map((t) => ({
+      month: t.month,
+      billedReporting: t.billedReporting,
+      invoiceCount: t.invoiceCount,
+    })),
+    companies: r.companies.map((c) => ({
+      partyId: c.partyId,
+      name: c.name,
+      jurisdiction: c.jurisdiction,
+      currency: c.currency,
+      months: c.months.map((m) => ({
+        month: m.month,
+        billed: m.billed,
+        billedReporting: m.billedReporting,
+        invoiceCount: m.invoiceCount,
+      })),
+      otherCurrencyInvoices: c.otherCurrencyInvoices,
+    })),
+  };
+}
+
 // ── Routes ──────────────────────────────────────────────────────────────────
 
 const overviewRoute = createRoute({
@@ -173,6 +269,40 @@ const receivablesByClientRoute = createRoute({
   summary: "Who owes the firm money, biggest first",
   responses: {
     200: { description: "Slices", content: { "application/json": { schema: SlicesResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("No org selected, or the caller does not have commercial visibility"),
+  },
+});
+
+const revenueByCompanyRoute = createRoute({
+  method: "get",
+  path: "/api/v1/dashboard/revenue/by-company",
+  tags: ["dashboard"],
+  summary: "What each of the firm's companies billed, month by month",
+  description:
+    "One series per company in its own currency (they cannot share an axis), and the whole " +
+    "firm in the reporting currency. " +
+    BILLED_DEFINITION +
+    " Summed in SQL on numeric; every amount is a decimal string. Requires commercial visibility.",
+  request: {
+    query: z.object({
+      months: z.coerce
+        .number()
+        .int()
+        .min(1)
+        .max(BILLING_MONTHS_MAX)
+        .default(BILLING_MONTHS_DEFAULT)
+        .openapi({
+          description: `How many months, ending with this one. Default ${String(BILLING_MONTHS_DEFAULT)}.`,
+        }),
+    }),
+  },
+  responses: {
+    200: {
+      description: "Billing by company",
+      content: { "application/json": { schema: RevenueByCompanyResponse } },
+    },
+    400: errorResponse("`months` is not a whole number from 1 to 24"),
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org selected, or the caller does not have commercial visibility"),
   },
@@ -227,10 +357,20 @@ export function registerDashboardRoutes(app: OpenAPIHono<AppEnv>, deps: Dashboar
     ]);
     return c.json({ currency, slices: slices.map(sliceToWire) }, 200);
   });
+
+  app.openapi(revenueByCompanyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const denied = denyWithoutFees(c.get("principal"));
+    if (denied !== null) return c.json(denied, 403);
+    const { months } = c.req.valid("query");
+    return c.json(revenueToWire(await deps.service.revenueByCompany(s.tenantId, months)), 200);
+  });
 }
 
 export const dashboardRoutes = {
   overview: overviewRoute,
   mrrBy: mrrByRoute,
   receivablesByClient: receivablesByClientRoute,
+  revenueByCompany: revenueByCompanyRoute,
 } as const;

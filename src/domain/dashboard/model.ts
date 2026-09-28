@@ -125,3 +125,77 @@ export function isAgeingBucket(value: string): value is AgeingBucket {
 export function isMrrExclusion(value: string): value is MrrExclusion {
   return (MRR_EXCLUSIONS as readonly string[]).includes(value);
 }
+
+// ── Billing by company (Wave 5) ─────────────────────────────────────────────
+
+/** How many months the billing chart may ask for, and how many it gets. */
+export const BILLING_MONTHS_DEFAULT = 12;
+export const BILLING_MONTHS_MAX = 24;
+
+/**
+ * The last `count` calendar months up to and including the one `today` falls
+ * in, oldest first, as `YYYY-MM`, with the window as two DAYS: `from` its
+ * first day, `until` the first day AFTER it (exclusive), so a query needs no
+ * idea of how long a month is.
+ *
+ * `today` is the FIRM's day (T6.14's cut: `dayInZone(now, the firm's zone)`),
+ * never the server's: at 01:00 IST on 1 October the server's UTC day is still
+ * 30 September, and a firm looking at its October billing would be shown a
+ * window that ends in September. String arithmetic on the day, no `Date`.
+ */
+export function billingWindow(
+  today: string,
+  count: number,
+): { readonly months: readonly string[]; readonly from: string; readonly until: string } {
+  const m = /^(\d{4})-(\d{2})-\d{2}$/.exec(today);
+  if (!m) throw new RangeError(`not a calendar day: ${JSON.stringify(today)}`);
+  if (!Number.isInteger(count) || count < 1) {
+    throw new RangeError(`a billing window is at least one whole month, not ${String(count)}`);
+  }
+  // Months counted from year 0, so stepping back never has to think about
+  // January.
+  const current = Number(m[1]) * 12 + (Number(m[2]) - 1);
+  const label = (index: number): string =>
+    `${String(Math.floor(index / 12)).padStart(4, "0")}-${String((index % 12) + 1).padStart(2, "0")}`;
+  const months: string[] = [];
+  for (let i = current - count + 1; i <= current; i += 1) months.push(label(i));
+  return { months, from: `${label(current - count + 1)}-01`, until: `${label(current + 1)}-01` };
+}
+
+/**
+ * One company's billing in one month.
+ *
+ * BILLED is the definition the chart is drawn from, and the API states it:
+ * ISSUED invoices only (a draft was never sent, a cancelled one was
+ * withdrawn), by the month they were issued, BEFORE TAX (net of discount),
+ * less the credit notes issued that month, each at its pre-tax share of the
+ * invoice it credits. A credit note reverses tax in the same proportion as
+ * the value, so taking its whole amount off a pre-tax figure would take the
+ * tax off twice.
+ */
+export interface MonthBilling {
+  readonly month: string;
+  /** In the company's own currency. A decimal string, never a number. */
+  readonly billed: string;
+  /** In the firm's reporting currency, each document at its OWN stored rate. */
+  readonly billedReporting: string;
+  /** Invoices counted in `billed` that month. */
+  readonly invoiceCount: number;
+}
+
+export interface CompanyBilling {
+  readonly partyId: string;
+  readonly name: string;
+  readonly jurisdiction: string | null;
+  /** The currency it bills in: `defaultCurrencyFor` its registration (D1). */
+  readonly currency: string;
+  readonly months: readonly MonthBilling[];
+  /**
+   * Invoices it issued in the window in ANOTHER currency, which `billed`
+   * cannot hold without a rate between the two that nothing stores. They are
+   * in `billedReporting` (every document carries its rate to the reporting
+   * currency), and a company that bills in the reporting currency has none
+   * here, because for it the stored rate IS the conversion.
+   */
+  readonly otherCurrencyInvoices: number;
+}

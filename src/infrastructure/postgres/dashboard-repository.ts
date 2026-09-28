@@ -16,6 +16,9 @@ import { withTenant } from "../../db/tenant";
 import type { AgeingBucket, MrrExclusion, Slice } from "../../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../../domain/dashboard/model";
 import type {
+  BillingCompany,
+  BillingWindowDays,
+  CompanyMonthRow,
   DashboardRepository,
   MrrTotals,
   ReceivableTotals,
@@ -196,6 +199,122 @@ export class PostgresDashboardRepository implements DashboardRepository {
           AND i.issued_on >= CURRENT_DATE - ${sinceDays}::int
       `;
       return row?.total ?? "0";
+    });
+  }
+
+  async billingCompanies(
+    tenantId: string,
+    window: BillingWindowDays,
+  ): Promise<readonly BillingCompany[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // The firm's companies as `crm.is_firm_entity` defines them (the firm
+      // itself, or a live member of 0313's list), not archived; and whoever
+      // else issued an invoice in the window, so no billed money is dropped
+      // because its company was put away since.
+      const rows = await db<{ party_id: string; name: string; jurisdiction: string | null }[]>`
+        SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction
+        FROM core.party p
+        LEFT JOIN core.organization o ON o.party_id = p.id
+        LEFT JOIN core.legal_entity le ON le.party_id = p.id
+        WHERE (crm.is_firm_entity(${tenantId}, p.id) AND p.archived_at IS NULL)
+           OR p.id IN (SELECT i.entity_party_id FROM crm.invoice i
+                        WHERE i.status = 'issued'
+                          AND i.issued_on >= ${window.from}::date
+                          AND i.issued_on <  ${window.until}::date)
+        ORDER BY coalesce(o.is_firm_self, false) DESC, p.display_name
+      `;
+      return rows.map((r) => ({ partyId: r.party_id, name: r.name, jurisdiction: r.jurisdiction }));
+    });
+  }
+
+  async billingByMonth(
+    tenantId: string,
+    window: BillingWindowDays,
+    owns: readonly { readonly partyId: string; readonly currency: string }[],
+    reportingCurrency: string,
+  ): Promise<readonly CompanyMonthRow[]> {
+    if (owns.length === 0) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      // BILLED, as the domain defines it (`MonthBilling`): issued invoices by
+      // the month of `issued_on`, before tax (`invoice_totals.net`, after
+      // discount), less the credit notes issued in the window by THEIR month,
+      // each at its pre-tax share of the invoice it credits. A credit note on
+      // an invoice cancelled since is left out with the invoice: the whole
+      // sale is already gone. `issued_on` is a `date`, so its month is the
+      // same for everybody and needs no zone; the WINDOW is the firm's.
+      //
+      // Every document is rounded to four places after its conversion, as
+      // `crm.receivable_ageing` does, then summed: the month is the sum of
+      // the documents a person could list, not a rounding of a longer sum.
+      //
+      // ONE pass, two grouping sets: (company, month) and (month) for the
+      // whole firm. A company's `billed` takes its own-currency documents,
+      // or all of them at their stored rates when its currency is the
+      // reporting currency (the rate IS the conversion); the rest are counted
+      // and left out of `billed`, never converted at a rate nothing stores.
+      const rows = await db<
+        {
+          party_id: string | null;
+          month: string;
+          billed: string | null;
+          billed_reporting: string;
+          invoices: number;
+          other_invoices: number;
+        }[]
+      >`
+        WITH own AS (
+          SELECT * FROM unnest(${owns.map((o) => o.partyId)}::uuid[],
+                               ${owns.map((o) => o.currency)}::text[]) AS o(party_id, currency)
+        ),
+        docs AS (
+          SELECT i.entity_party_id AS party_id, i.currency, i.fx_rate,
+                 to_char(i.issued_on, 'YYYY-MM') AS month,
+                 coalesce(t.net, 0) AS net,
+                 1 AS invoices
+          FROM crm.invoice i
+          LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          WHERE i.status = 'issued'
+            AND i.issued_on >= ${window.from}::date
+            AND i.issued_on <  ${window.until}::date
+          UNION ALL
+          SELECT i.entity_party_id, i.currency, i.fx_rate,
+                 to_char(c.issued_on, 'YYYY-MM'),
+                 -round(CASE WHEN coalesce(t.total, 0) = 0 THEN c.amount
+                             ELSE c.amount * t.net / t.total END, 4),
+                 0
+          FROM crm.credit_note c
+          JOIN crm.invoice i ON i.id = c.invoice_id AND i.tenant_id = c.tenant_id
+          LEFT JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
+          WHERE i.status = 'issued'
+            AND c.issued_on >= ${window.from}::date
+            AND c.issued_on <  ${window.until}::date
+        ),
+        placed AS (
+          SELECT d.party_id AS company, d.month, d.net, d.fx_rate, d.invoices,
+                 (o.currency = ${reportingCurrency} OR d.currency = o.currency) AS counts,
+                 CASE WHEN d.currency = o.currency THEN d.net
+                      ELSE round(d.net * d.fx_rate, 4) END AS in_own
+          FROM docs d
+          JOIN own o ON o.party_id = d.party_id
+        )
+        SELECT company AS party_id,
+               month,
+               CASE WHEN GROUPING(company) = 0
+                    THEN coalesce(sum(in_own) FILTER (WHERE counts), 0)::text END AS billed,
+               coalesce(sum(round(net * fx_rate, 4)), 0)::text AS billed_reporting,
+               (count(*) FILTER (WHERE counts AND invoices = 1))::int AS invoices,
+               (count(*) FILTER (WHERE NOT counts AND invoices = 1))::int AS other_invoices
+        FROM placed
+        GROUP BY GROUPING SETS ((company, month), (month))
+      `;
+      return rows.map((r) => ({
+        partyId: r.party_id,
+        month: r.month,
+        billed: r.billed,
+        billedReporting: r.billed_reporting,
+        invoices: r.invoices,
+        otherCurrencyInvoices: r.other_invoices,
+      }));
     });
   }
 

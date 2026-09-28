@@ -13,6 +13,8 @@
 import type { MrrGap, Slice } from "../domain/dashboard/model";
 import { AGEING_BUCKETS } from "../domain/dashboard/model";
 import type {
+  BillingCompany,
+  CompanyMonthRow,
   DashboardRepository,
   MrrTotals,
   ReceivableTotals,
@@ -27,6 +29,13 @@ export class FakeDashboardRepo implements DashboardRepository {
   bandAmounts = new Map<string, { amount: string; invoiceCount: number }>();
   slices: Slice[] = [];
   sales = "0";
+  /** Billing by company: the companies, and the rows SQL would have summed.
+   *  `billingWindows` records every window asked for, so a test can see
+   *  which months the service cut. */
+  companies: BillingCompany[] = [];
+  billingRows: CompanyMonthRow[] = [];
+  billingWindows: { from: string; until: string }[] = [];
+  billingOwns: { partyId: string; currency: string }[][] = [];
 
   reportingCurrency(): Promise<string> {
     return Promise.resolve(this.currency);
@@ -64,5 +73,22 @@ export class FakeDashboardRepo implements DashboardRepository {
 
   creditSales(): Promise<string> {
     return Promise.resolve(this.sales);
+  }
+
+  billingCompanies(
+    _tenantId: string,
+    window: { from: string; until: string },
+  ): Promise<readonly BillingCompany[]> {
+    this.billingWindows.push({ from: window.from, until: window.until });
+    return Promise.resolve(this.companies);
+  }
+
+  billingByMonth(
+    _tenantId: string,
+    _window: { from: string; until: string },
+    owns: readonly { readonly partyId: string; readonly currency: string }[],
+  ): Promise<readonly CompanyMonthRow[]> {
+    this.billingOwns.push(owns.map((o) => ({ partyId: o.partyId, currency: o.currency })));
+    return Promise.resolve(this.billingRows);
   }
 }
