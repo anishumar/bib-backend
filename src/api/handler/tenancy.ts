@@ -651,6 +651,41 @@ const setFirmSignatoryRoute = createRoute({
   },
 });
 
+const renameSelfRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/tenancy/me",
+  tags: ["tenancy"],
+  summary: "Correct your own display name",
+  description:
+    "Your account is yours across every firm you belong to, so this changes your name " +
+    "everywhere. It takes no id: it can reach nobody else's account.",
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({ displayName: z.string().max(400) }).openapi("RenameSelf"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description: "Renamed",
+      content: {
+        "application/json": {
+          schema: z
+            .object({ userId: z.string().uuid(), displayName: z.string().nullable() })
+            .openapi("SelfName"),
+        },
+      },
+    },
+    400: errorResponse("A blank name, or longer than 200 characters"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org"),
+  },
+});
+
 const myMembershipsRoute = createRoute({
   method: "get",
   path: "/api/v1/tenancy/me/memberships",
@@ -849,6 +884,14 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
       { userId: signatory.userId, displayName: signatory.displayName, title: signatory.title },
       200,
     );
+  });
+
+  app.openapi(renameSelfRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { displayName } = c.req.valid("json");
+    const user = await deps.service.renameSelf({ tenantId: s.tenantId, userId: s.userId, displayName }, s.actor);
+    return c.json({ userId: user.id, displayName: user.displayName }, 200);
   });
 
   app.openapi(myMembershipsRoute, async (c) => {

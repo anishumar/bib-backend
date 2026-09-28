@@ -101,7 +101,19 @@ export interface PartyIdentifier {
   readonly isPrimary: boolean;
   readonly validFrom: string;
   readonly validTo: string | null;
+  /** Entered by mistake and voided (V2.5, 0315): kept, shown as voided, and no
+   *  longer blocks the value on another party. Final. */
+  readonly voidedAt: string | null;
 }
+
+/** An identifier blocks a duplicate only while it is OPEN: not voided and no
+ *  end day (V2.5). Ending or voiding one frees its value. */
+export function isOpenIdentifier(i: Pick<PartyIdentifier, "validTo" | "voidedAt">): boolean {
+  return i.voidedAt === null && i.validTo === null;
+}
+
+/** The longest display name a party may carry. */
+export const DISPLAY_NAME_MAX = 200;
 
 export interface PartyRelationship {
   readonly id: string;

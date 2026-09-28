@@ -29,7 +29,12 @@ export type PartyErrorCode =
   | "PARTY_HAS_REFERENCES"
   | "RELATIONSHIP_NOT_FOUND"
   | "RELATIONSHIP_ALREADY_ENDED"
-  | "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN";
+  | "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN"
+  | "IDENTIFIER_NOT_FOUND"
+  | "IDENTIFIER_CLOSED"
+  | "INVALID_PARTY_DETAILS"
+  | "NOTHING_TO_CHANGE"
+  | "NOT_A_LEGAL_ENTITY";
 
 export class PartyNotFound extends PartyError {
   constructor(ref: string) {
@@ -160,6 +165,47 @@ export class PartyHasReferences extends PartyError {
       // is ("a live engagement"), so the sentence says what to finish first.
       `This client cannot be archived yet: it still has ${referrers.join(", ")}. End its ` +
         `engagements and close or withdraw what is in progress, then archive it.`,
+    );
+  }
+}
+
+// ── Correcting a client's master data (V2.5) ───────────────────────────────
+
+export class IdentifierNotFound extends PartyError {
+  constructor(id: string) {
+    super("IDENTIFIER_NOT_FOUND", `No identifier ${JSON.stringify(id)} on this client`);
+  }
+}
+
+/** Already ended or voided: nothing more can happen to it. */
+export class IdentifierClosed extends PartyError {
+  constructor(how: "ended" | "voided") {
+    super(
+      "IDENTIFIER_CLOSED",
+      how === "voided"
+        ? "This identifier was voided as a mistake and cannot change."
+        : "This identifier has already ended. Add the correct one instead.",
+    );
+  }
+}
+
+export class InvalidPartyDetails extends PartyError {
+  constructor(what: string) {
+    super("INVALID_PARTY_DETAILS", what);
+  }
+}
+
+export class NothingToChange extends PartyError {
+  constructor() {
+    super("NOTHING_TO_CHANGE", "Nothing changed: every field already says that.");
+  }
+}
+
+export class NotALegalEntity extends PartyError {
+  constructor() {
+    super(
+      "NOT_A_LEGAL_ENTITY",
+      "This client is not registered as a company yet. Register it first, then correct it.",
     );
   }
 }

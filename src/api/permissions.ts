@@ -56,6 +56,10 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   // PASSWORD is.
   routeKey("POST", "/api/v1/auth/password"),
   routeKey("GET", "/api/v1/tenancy/me/memberships"),
+  // Your OWN name (V2.5), like your own password: no role anywhere should be
+  // able to stop somebody correcting how their name is spelt, and the route
+  // takes no id, so it can reach nobody else's account.
+  routeKey("PATCH", "/api/v1/tenancy/me"),
   routeKey("GET", "/api/v1/portal/home"),
   // The action centre's LIST, for the same reason as the home above it, and it
   // is what makes T6.6's read-only portal role coherent: `client_viewer` holds
@@ -100,6 +104,11 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "party:write" as const,
   ],
   [routeKey("POST", "/api/v1/parties/{partyId}/identifiers"), "party:write" as const],
+  // Correcting a client's master data (V2.5): the gate that created it.
+  [routeKey("PATCH", "/api/v1/parties/{partyId}"), "party:write" as const],
+  [routeKey("PATCH", "/api/v1/parties/{partyId}/legal-entity"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/end"), "party:write" as const],
+  [routeKey("POST", "/api/v1/parties/{partyId}/identifiers/{identifierId}/void"), "party:write" as const],
   [routeKey("POST", "/api/v1/parties/relationships"), "party:write" as const],
   // Ending one is the same permission as recording one. It is not a delete —
   // the row stays, it still resolves by id, and what changes is a date the

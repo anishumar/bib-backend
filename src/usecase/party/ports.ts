@@ -43,7 +43,26 @@ export interface NewLegalEntity {
   readonly registeredAddress: Record<string, unknown> | null;
 }
 
+/** What a client's master data may be corrected to (V2.5). Absent means
+ *  unchanged; null clears an optional field. */
+export interface PartyDetailsPatch {
+  readonly displayName?: string | undefined;
+  readonly tradeName?: string | null | undefined;
+  readonly industry?: string | null | undefined;
+  readonly website?: string | null | undefined;
+}
+
 export interface PartyRepository {
+  /** Correct the display name and, for an organization, its trade name,
+   *  industry and website, in one transaction. Null when there is no party. */
+  updateDetails(tenantId: string, partyId: string, patch: PartyDetailsPatch): Promise<Party | null>;
+  /** Correct a registered company's country and kind. Null when it has no
+   *  registration. */
+  correctLegalEntity(
+    tenantId: string,
+    partyId: string,
+    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+  ): Promise<LegalEntity | null>;
   /** Creates the party row and its organization subtype in one transaction. */
   createOrganization(o: NewOrganization): Promise<Organization>;
   /** Creates the party row and its person subtype in one transaction. */
@@ -117,7 +136,13 @@ export interface NewIdentifier {
 export interface IdentifierRepository {
   add(i: NewIdentifier): Promise<PartyIdentifier>;
   listForParty(tenantId: string, partyId: string): Promise<PartyIdentifier[]>;
-  /** The dedup lookup: matches on (type, normalised value) within the tenant. */
+  findById(tenantId: string, identifierId: string): Promise<PartyIdentifier | null>;
+  /** Set the day it stopped being in force; null when it was not open. */
+  end(tenantId: string, identifierId: string, validTo: string): Promise<PartyIdentifier | null>;
+  /** Void it as a mistake; null when it was already voided. */
+  void(tenantId: string, identifierId: string, byUserId: string | null): Promise<PartyIdentifier | null>;
+  /** The dedup lookup: matches on (type, normalised value) within the tenant,
+   *  among OPEN identifiers only (V2.5): an ended or voided one frees its value. */
   findByValue(tenantId: string, type: IdentifierType, value: string): Promise<PartyIdentifier | null>;
 }
 

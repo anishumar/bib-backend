@@ -89,6 +89,9 @@ const IdentifierSchema = z
     isPrimary: z.boolean(),
     validFrom: z.string(),
     validTo: z.string().nullable(),
+    /** Entered by mistake and voided (V2.5): kept, shown as voided, and no
+     *  longer blocking the value on another party. */
+    voidedAt: z.string().nullable(),
   })
   .openapi("PartyIdentifier");
 
@@ -282,6 +285,110 @@ const registerLegalEntityRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org"),
     404: errorResponse("Organization not found"),
+  },
+});
+
+// ── Correcting a client's master data (V2.5) ───────────────────────────────
+
+const UpdatePartyBody = z
+  .object({
+    displayName: z.string().max(400).optional(),
+    tradeName: z.string().max(400).nullable().optional(),
+    industry: z.string().max(400).nullable().optional(),
+    website: z.string().max(400).nullable().optional(),
+  })
+  .openapi("UpdateParty");
+
+const updatePartyRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/parties/{partyId}",
+  tags: ["party"],
+  summary: "Correct a client's name, trade name, industry or website",
+  description:
+    "Absent means unchanged; null or blank clears an optional field. Every list and every NEW " +
+    "PDF reads the new name; a signed letter and a filed PDF do not change. The audit trail " +
+    "records which fields changed, never their values.",
+  request: {
+    params: PartyParam,
+    body: { content: { "application/json": { schema: UpdatePartyBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Corrected", content: { "application/json": { schema: PartySchema } } },
+    400: errorResponse("A blank name, a company field on a person, or nothing changed"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("Party not found"),
+  },
+});
+
+const CorrectLegalEntityBody = z
+  .object({
+    jurisdiction: z.string().max(10).optional().openapi({ example: "IN" }),
+    entityType: z.string().max(100).optional().openapi({ example: "private_limited" }),
+  })
+  .openapi("CorrectLegalEntity");
+
+const correctLegalEntityRoute = createRoute({
+  method: "patch",
+  path: "/api/v1/parties/{partyId}/legal-entity",
+  tags: ["party"],
+  summary: "Correct a registered company's country or kind",
+  request: {
+    params: PartyParam,
+    body: { content: { "application/json": { schema: CorrectLegalEntityBody } }, required: true },
+  },
+  responses: {
+    200: { description: "Corrected", content: { "application/json": { schema: LegalEntitySchema } } },
+    400: errorResponse("Not a two-letter country, a blank kind, or nothing changed"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    409: errorResponse("The client is not registered as a company"),
+  },
+});
+
+const IdentifierParam = z.object({
+  partyId: z.string().uuid(),
+  identifierId: z.string().uuid(),
+});
+
+const endIdentifierRoute = createRoute({
+  method: "post",
+  path: "/api/v1/parties/{partyId}/identifiers/{identifierId}/end",
+  tags: ["party"],
+  summary: "An identifier stopped being in force (a GSTIN cancelled)",
+  description: "Sets its end day. An ended identifier no longer blocks the value on another client.",
+  request: {
+    params: IdentifierParam,
+    body: {
+      content: { "application/json": { schema: z.object({ validTo: z.string().date() }).openapi("EndIdentifier") } },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Ended", content: { "application/json": { schema: IdentifierSchema } } },
+    400: errorResponse("The end is before it began"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such identifier on this client"),
+    409: errorResponse("Already ended or voided"),
+  },
+});
+
+const voidIdentifierRoute = createRoute({
+  method: "post",
+  path: "/api/v1/parties/{partyId}/identifiers/{identifierId}/void",
+  tags: ["party"],
+  summary: "Void an identifier entered by mistake",
+  description:
+    "Kept and shown as voided, final, and no longer blocking the value: the correct PAN or " +
+    "GSTIN can then be added, here or on the right client.",
+  request: { params: IdentifierParam },
+  responses: {
+    200: { description: "Voided", content: { "application/json": { schema: IdentifierSchema } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not do this"),
+    404: errorResponse("No such identifier on this client"),
+    409: errorResponse("Already voided"),
   },
 });
 
@@ -499,6 +606,56 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       s.actor,
     );
     return c.json(entity, 201);
+  });
+
+  app.openapi(updatePartyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const party = await deps.service.updateParty({ tenantId: s.tenantId, partyId, ...body }, s.actor);
+    return c.json(
+      {
+        id: party.id,
+        tenantId: party.tenantId,
+        kind: party.kind,
+        displayName: party.displayName,
+        archivedAt: party.archivedAt,
+      },
+      200,
+    );
+  });
+
+  app.openapi(correctLegalEntityRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    const entity = await deps.service.correctLegalEntity({ tenantId: s.tenantId, partyId, ...body }, s.actor);
+    return c.json(entity, 200);
+  });
+
+  app.openapi(endIdentifierRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId, identifierId } = c.req.valid("param");
+    const { validTo } = c.req.valid("json");
+    const identifier = await deps.service.endIdentifier(
+      { tenantId: s.tenantId, partyId, identifierId, validTo },
+      s.actor,
+    );
+    return c.json(identifier, 200);
+  });
+
+  app.openapi(voidIdentifierRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { partyId, identifierId } = c.req.valid("param");
+    const identifier = await deps.service.voidIdentifier(
+      { tenantId: s.tenantId, partyId, identifierId },
+      s.actor,
+    );
+    return c.json(identifier, 200);
   });
 
   app.openapi(addIdentifierRoute, async (c) => {

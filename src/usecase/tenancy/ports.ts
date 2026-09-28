@@ -67,6 +67,9 @@ export interface UserRepository {
    * rather than a control.
    */
   setStatus(id: string, status: "active" | "disabled"): Promise<UserAccount | null>;
+  /** The person's own name (V2.5). The account is GLOBAL, so every firm they
+   *  belong to reads the new one. */
+  setDisplayName(id: string, displayName: string): Promise<UserAccount | null>;
 }
 
 export interface NewMembership {

@@ -18,6 +18,7 @@ import {
 import { ADMIN_PERMISSION } from "../../domain/authz/model";
 import { isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
 import {
+  InvalidDisplayName,
   EmailTaken,
   InvalidAudience,
   InvalidCurrency,
@@ -399,6 +400,30 @@ export class TenancyService {
   }
 
   /** The org-switcher: every active membership this user holds, across tenants. */
+  /**
+   * Correct your OWN name (V2.5). Nobody else's: the account is global, so a
+   * firm renaming a colleague would rename them at every other firm too. The
+   * event is recorded in the firm the session is acting as and names the
+   * field, never the value.
+   */
+  async renameSelf(
+    input: { readonly tenantId: string; readonly userId: string; readonly displayName: string },
+    actor: Actor,
+  ): Promise<UserAccount> {
+    const name = input.displayName.trim();
+    if (name === "" || name.length > 200) throw new InvalidDisplayName(200);
+    const user = await this.deps.users.setDisplayName(input.userId, name);
+    if (!user) throw new UserNotFound(input.userId);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "user.renamed",
+      objectId: input.userId,
+      actor,
+      payload: { fields: ["displayName"] },
+    });
+    return user;
+  }
+
   async resolveAccess(userId: string): Promise<readonly Membership[]> {
     const all = await this.deps.memberships.listByUser(userId);
     return activeMemberships(all);

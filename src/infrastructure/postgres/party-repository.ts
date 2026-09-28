@@ -206,6 +206,64 @@ export class PostgresPartyRepository implements PartyRepository, ClientDirectory
     });
   }
 
+  /**
+   * Correct a client's master data (V2.5), both rows in ONE transaction: the
+   * party's display name (what every list, picker and new PDF reads) and the
+   * organization's trade name, industry and website. A person has only the
+   * first. Nothing here touches a document already issued: a signed letter is
+   * frozen and a filed PDF is stored bytes.
+   */
+  async updateDetails(
+    tenantId: string,
+    partyId: string,
+    patch: {
+      readonly displayName?: string | undefined;
+      readonly tradeName?: string | null | undefined;
+      readonly industry?: string | null | undefined;
+      readonly website?: string | null | undefined;
+    },
+  ): Promise<Party | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      if (patch.displayName !== undefined) {
+        await db`UPDATE core.party SET display_name = ${patch.displayName} WHERE id = ${partyId}`;
+      }
+      if (patch.tradeName !== undefined || patch.industry !== undefined || patch.website !== undefined) {
+        await db`
+          UPDATE core.organization SET
+            trade_name = ${patch.tradeName === undefined ? db`trade_name` : patch.tradeName},
+            industry   = ${patch.industry === undefined ? db`industry` : patch.industry},
+            website    = ${patch.website === undefined ? db`website` : patch.website}
+          WHERE party_id = ${partyId}
+        `;
+      }
+      const [row] = await db<PartyRow[]>`
+        SELECT id, tenant_id, kind, display_name, archived_at
+        FROM core.party WHERE id = ${partyId}
+      `;
+      return row ? toParty(row) : null;
+    });
+  }
+
+  /** Correct a registered company's country and kind (V2.5). */
+  async correctLegalEntity(
+    tenantId: string,
+    partyId: string,
+    patch: { readonly jurisdiction?: string | undefined; readonly entityType?: string | undefined },
+  ): Promise<LegalEntity | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<LegalEntityRow[]>`
+        UPDATE core.legal_entity SET
+          jurisdiction = ${patch.jurisdiction ?? db`jurisdiction`},
+          entity_type  = ${patch.entityType ?? db`entity_type`}
+        WHERE party_id = ${partyId}
+        RETURNING party_id, tenant_id, jurisdiction, entity_type,
+                  incorporated_on::text AS incorporated_on,
+                  financial_year_end, registered_address, status
+      `;
+      return row ? toLegalEntity(row) : null;
+    });
+  }
+
   async findOrganization(tenantId: string, partyId: string): Promise<Organization | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<OrgRow[]>`

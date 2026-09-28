@@ -516,8 +516,7 @@ not reused**; a reference may gap, and this is one honest reason.
 
 **Deliberately not here** — the plan's later phases, each needing its own decision: a client or
 contact made by mistake (still ARCHIVED, G0.3; 0086 only stops a deleted lead or draft blocking
-that), a mistyped identifier (`findByValue` ignores `valid_to`, so today a PAN on the wrong client
-is stuck there), which references count as ONGOING work for the archive guard in general, a
+that), a mistyped identifier (ANSWERED by V2.5 / 0315: see "Correcting a client's master data"), which references count as ONGOING work for the archive guard in general, a
 catalogue service or other config entry nobody used, and Restore. **An invoice is never deleted**:
 its number is drawn from the gapless GST series when the DRAFT is created, so cancelling is the
 only honest answer (T3.4).
@@ -1873,6 +1872,21 @@ end record. The reason is prose about a client: on the row (`end_reason`), never
 resume`, `party:write`, `EngagementLifecycleService` (its own use case: 15 constructions of
 `EngagementService` did not need to change), `PostgresEngagementLifecycle`. `isDay` accepts
 2026-02-31 (V8 rolls it into March), so the end date uses `isCalendarDay`.
+
+## Correcting a client's master data (V2.5, 0315)
+
+`PATCH /parties/{id}` (display name, trade name, industry, website; absent = unchanged, blank =
+cleared), `PATCH /parties/{id}/legal-entity` (country, kind), `POST
+/parties/{id}/identifiers/{identifierId}/end` (a GSTIN cancelled on a day) and `.../void`
+(entered by mistake: `voided_at`, kept, shown, FINAL by trigger 55000), all `party:write`, and
+`PATCH /tenancy/me` (your OWN display name only: the account is global, so a firm renaming a
+colleague would rename them at every firm; no permission, like your own password). **The duplicate
+check reads only OPEN identifiers** (not voided, no end day), so voiding the wrong PAN frees it for
+the right client. Every event names the FIELDS that changed, never the values (`party.updated`,
+`legal_entity.corrected`, `party_identifier.ended` / `.voided`, `user.renamed`). A rename reaches
+every list and every NEW render; a signed letter is frozen and a FILED PDF is stored bytes, but an
+invoice PDF rendered on demand reads the client's CURRENT name (render-source joins
+`core.party.display_name`): snapshotting the billed name at Issue is a follow-up, not done here.
 
 ## Cancelling a job (V2.4)
 

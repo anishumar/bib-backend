@@ -112,6 +112,7 @@ export function mapError(err: unknown): MappedError {
   if (err instanceof TenancyError) {
     switch (err.code) {
       case "INVALID_SLUG":
+      case "INVALID_DISPLAY_NAME":
       case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
@@ -649,6 +650,7 @@ export function mapError(err: unknown): MappedError {
     switch (err.code) {
       case "PARTY_NOT_FOUND":
       case "RELATIONSHIP_NOT_FOUND":
+      case "IDENTIFIER_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       // Each of these is "the party is not in the state this call assumed", and
       // none is a malformed request. PARTY_HAS_REFERENCES in particular is the
@@ -659,8 +661,12 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_NOT_ARCHIVED":
       case "PARTY_HAS_REFERENCES":
       case "RELATIONSHIP_ALREADY_ENDED":
+      case "IDENTIFIER_CLOSED":
+      case "NOT_A_LEGAL_ENTITY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
+      case "INVALID_PARTY_DETAILS":
+      case "NOTHING_TO_CHANGE":
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":

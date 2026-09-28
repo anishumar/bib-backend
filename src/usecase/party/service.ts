@@ -14,15 +14,22 @@ import type {
   Person,
 } from "../../domain/party/model";
 import {
+  DISPLAY_NAME_MAX,
   isArchived,
   isInForceOn,
+  isOpenIdentifier,
   isValidDateRange,
   isValidIdentifier,
   normalizeIdentifier,
 } from "../../domain/party/model";
 import {
   DuplicateIdentifier,
+  IdentifierClosed,
+  IdentifierNotFound,
   InvalidDateRange,
+  InvalidPartyDetails,
+  NotALegalEntity,
+  NothingToChange,
   InvalidIdentifier,
   InvalidRelationshipType,
   NotAnOrganization,
@@ -520,5 +527,160 @@ export class PartyService {
     value: string,
   ): Promise<PartyIdentifier | null> {
     return this.deps.identifiers.findByValue(tenantId, type, normalizeIdentifier(type, value));
+  }
+
+  // ── Correcting a client's master data (V2.5) ─────────────────────────────
+  //
+  // A typo in a client's name, PAN or GSTIN was permanent. Every event below
+  // carries WHICH fields changed, never their old or new values: a person's
+  // name and an identifier's value are personal data, and the ledger cannot be
+  // erased. Documents already issued do not move: a signed letter is frozen
+  // and a filed PDF is stored bytes; the next PDF rendered reads the new name.
+
+  /** Correct the display name and, for a company, trade name, industry, website. */
+  async updateParty(
+    input: {
+      readonly tenantId: string;
+      readonly partyId: string;
+      readonly displayName?: string | undefined;
+      readonly tradeName?: string | null | undefined;
+      readonly industry?: string | null | undefined;
+      readonly website?: string | null | undefined;
+    },
+    actor: Actor,
+  ): Promise<Party> {
+    const party = await this.deps.parties.findParty(input.tenantId, input.partyId);
+    if (!party) throw new PartyNotFound(input.partyId);
+    const org = await this.deps.parties.findOrganization(input.tenantId, input.partyId);
+
+    const optional = (v: string | null | undefined): string | null | undefined =>
+      v === undefined ? undefined : v === null || v.trim() === "" ? null : v.trim();
+    const displayName = input.displayName?.trim();
+    if (displayName !== undefined && (displayName === "" || displayName.length > DISPLAY_NAME_MAX)) {
+      throw new InvalidPartyDetails(`Give the client a name, up to ${String(DISPLAY_NAME_MAX)} characters.`);
+    }
+    const tradeName = optional(input.tradeName);
+    const industry = optional(input.industry);
+    const website = optional(input.website);
+    if (org === null && (tradeName !== undefined || industry !== undefined || website !== undefined)) {
+      throw new InvalidPartyDetails("A person has no trade name, industry or website.");
+    }
+
+    const patch: Record<string, string | null> = {};
+    if (displayName !== undefined && displayName !== party.displayName) patch["displayName"] = displayName;
+    if (tradeName !== undefined && tradeName !== org?.tradeName) patch["tradeName"] = tradeName;
+    if (industry !== undefined && industry !== org?.industry) patch["industry"] = industry;
+    if (website !== undefined && website !== org?.website) patch["website"] = website;
+    const fields = Object.keys(patch);
+    if (fields.length === 0) throw new NothingToChange();
+
+    const updated = await this.deps.parties.updateDetails(input.tenantId, input.partyId, patch);
+    if (!updated) throw new PartyNotFound(input.partyId);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party.updated",
+      objectId: input.partyId,
+      actor,
+      payload: { fields },
+    });
+    return updated;
+  }
+
+  /** Correct a registered company's country and kind. */
+  async correctLegalEntity(
+    input: {
+      readonly tenantId: string;
+      readonly partyId: string;
+      readonly jurisdiction?: string | undefined;
+      readonly entityType?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<LegalEntity> {
+    const [current] = await this.deps.parties.listLegalEntities(input.tenantId, input.partyId);
+    if (!current) throw new NotALegalEntity();
+    const jurisdiction = input.jurisdiction?.trim().toUpperCase();
+    if (jurisdiction !== undefined && !/^[A-Z]{2}$/.test(jurisdiction)) {
+      throw new InvalidPartyDetails("Give the country as its two-letter code, e.g. IN or AE.");
+    }
+    const entityType = input.entityType?.trim();
+    if (entityType !== undefined && entityType === "") {
+      throw new InvalidPartyDetails("Say what kind of company it is, e.g. private_limited.");
+    }
+    const fields: string[] = [];
+    if (jurisdiction !== undefined && jurisdiction !== current.jurisdiction) fields.push("jurisdiction");
+    if (entityType !== undefined && entityType !== current.entityType) fields.push("entityType");
+    if (fields.length === 0) throw new NothingToChange();
+
+    const corrected = await this.deps.parties.correctLegalEntity(input.tenantId, input.partyId, {
+      ...(fields.includes("jurisdiction") ? { jurisdiction } : {}),
+      ...(fields.includes("entityType") ? { entityType } : {}),
+    });
+    if (!corrected) throw new NotALegalEntity();
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "legal_entity.corrected",
+      objectId: input.partyId,
+      actor,
+      payload: { fields, jurisdiction: corrected.jurisdiction, entityType: corrected.entityType },
+    });
+    return corrected;
+  }
+
+  /** An identifier stopped being in force on `validTo` (a GSTIN cancelled). */
+  async endIdentifier(
+    input: {
+      readonly tenantId: string;
+      readonly partyId: string;
+      readonly identifierId: string;
+      readonly validTo: string;
+    },
+    actor: Actor,
+  ): Promise<PartyIdentifier> {
+    const current = await this.openIdentifier(input.tenantId, input.partyId, input.identifierId);
+    if (!isValidDateRange(current.validFrom, input.validTo)) {
+      throw new InvalidDateRange(current.validFrom, input.validTo);
+    }
+    const ended = await this.deps.identifiers.end(input.tenantId, current.id, input.validTo);
+    if (!ended) throw new IdentifierClosed("ended");
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party_identifier.ended",
+      objectId: current.id,
+      actor,
+      payload: { partyId: input.partyId, identifierType: current.type, validTo: input.validTo },
+    });
+    return ended;
+  }
+
+  /** It was entered by mistake: kept, shown as voided, and the value is free. */
+  async voidIdentifier(
+    input: { readonly tenantId: string; readonly partyId: string; readonly identifierId: string },
+    actor: Actor,
+  ): Promise<PartyIdentifier> {
+    const current = await this.deps.identifiers.findById(input.tenantId, input.identifierId);
+    if (!current || current.partyId !== input.partyId) throw new IdentifierNotFound(input.identifierId);
+    if (current.voidedAt !== null) throw new IdentifierClosed("voided");
+    const voided = await this.deps.identifiers.void(
+      input.tenantId,
+      current.id,
+      actor.type === "human" ? actor.id : null,
+    );
+    if (!voided) throw new IdentifierClosed("voided");
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "party_identifier.voided",
+      objectId: current.id,
+      actor,
+      payload: { partyId: input.partyId, identifierType: current.type },
+    });
+    return voided;
+  }
+
+  private async openIdentifier(tenantId: string, partyId: string, identifierId: string): Promise<PartyIdentifier> {
+    const current = await this.deps.identifiers.findById(tenantId, identifierId);
+    if (!current || current.partyId !== partyId) throw new IdentifierNotFound(identifierId);
+    if (current.voidedAt !== null) throw new IdentifierClosed("voided");
+    if (!isOpenIdentifier(current)) throw new IdentifierClosed("ended");
+    return current;
   }
 }
