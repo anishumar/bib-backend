@@ -2372,6 +2372,17 @@ and are unchanged: `spawnForEngagements` (the month's work) and `raiseForObligat
 statutory filing's task). The column's DATABASE default is still `TRUE` (0051); no writer relies
 on it, since every insert names the value.
 
+**THE READS MY DAY IS BUILT FROM CARRY THE CLIENT BY ID AND THE DUE DAY (V2.1, 2026-09-28).**
+The frontend's `/` lists everything on a person's desk from six reads with no lookup per row, so
+four read models grew what a row needs, by the "lists return read models" rule:
+`JobDetail` (`describeJobs`) gained `clientPartyId`, `entityPartyId`, `periodLabel` and `dueOn` =
+the EARLIEST due day of the job's UNFINISHED tasks (a subquery, read as `::text`); the
+orchestrator handler takes the scheduler as `deps.jobs` and puts it on `MyStep.job` and
+`StepCheck.job` (null when the job links no engagement), one `describeJobs` per response;
+`WorkItemCheck` gained `clientPartyId` and `dueOn` (on the queue row only, not on a task's
+reviews); `EscalationRecord` gained `clientPartyId` (null on a filing, as `clientName` is).
+`tests/workitem/my-day-reads.integration.test.ts` proves the three joins on a real database.
+
 **A dependency is enforced on STARTING, never on finishing** — "this cannot start until that
 is finished" is what it says. Cancelling stays allowed: cancelling something that never
 started is a real act, and refusing it would trap the item. The cycle check walks the edge

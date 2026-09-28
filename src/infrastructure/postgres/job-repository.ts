@@ -44,6 +44,10 @@ interface DetailRow {
   service_name: string | null;
   entity_name: string | null;
   client_name: string | null;
+  entity_party_id: string | null;
+  client_party_id: string | null;
+  period_label: string | null;
+  due_on: string | null;
 }
 
 interface ActivationRow {
@@ -233,8 +237,22 @@ export class PostgresJobRepository
           je.engagement_id,
           pinned.body->>'name' AS service_name,
           ent.display_name AS entity_name,
-          cl.display_name  AS client_name
+          cl.display_name  AS client_name,
+          ent.id           AS entity_party_id,
+          cl.id            AS client_party_id,
+          j.period_label,
+          -- What a step on this job is due by (V2.1): the earliest date among
+          -- the job's UNFINISHED tasks. Read as text, a DAY, never an instant.
+          (SELECT min(wi.due_on)::text
+             FROM delivery.work_item wi
+             JOIN delivery.work_item_state ws
+               ON ws.id = wi.state_id AND ws.tenant_id = wi.tenant_id
+            WHERE wi.job_id = je.job_id
+              AND wi.tenant_id = je.tenant_id
+              AND NOT ws.is_terminal) AS due_on
         FROM delivery.job_engagement je
+        JOIN delivery.job j
+          ON j.id = je.job_id AND j.tenant_id = je.tenant_id
         -- LEFT all the way down. The link row is the fact that this work is in
         -- this job; everything below it is only how to NAME it. A row that
         -- could not be named must still appear, blank, rather than vanish from
@@ -273,6 +291,10 @@ export class PostgresJobRepository
         out.set(r.job_id, {
           entityName: r.entity_name,
           clientName: r.client_name,
+          entityPartyId: r.entity_party_id,
+          clientPartyId: r.client_party_id,
+          periodLabel: r.period_label,
+          dueOn: r.due_on,
           services: [service],
         });
       }

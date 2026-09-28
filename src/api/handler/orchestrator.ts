@@ -35,7 +35,59 @@ export interface OrchestratorDeps {
    *  may not read `/tenancy/grades` (that is the admin surface), and a job
    *  page that said "for analyst to senior_associate" to Kavya was the result. */
   readonly grades: { listGrades(tenantId: string): Promise<readonly { code: string; name: string }[]> };
+  /** What each job is for, in words and ids: ONE read for a whole list, so a
+   *  step or a check can name and LINK its client and say when it is due (V2.1's
+   *  My day). The scheduler's `describeJobs`, which the Jobs board already reads. */
+  readonly jobs: {
+    describeJobs(tenantId: string, jobIds: readonly string[]): Promise<ReadonlyMap<string, JobContextSource>>;
+  };
 }
+
+/** The part of the scheduler's `JobDetail` a step row carries. */
+interface JobContextSource {
+  readonly clientPartyId: string | null;
+  readonly clientName: string | null;
+  readonly entityPartyId: string | null;
+  readonly entityName: string | null;
+  readonly periodLabel: string | null;
+  readonly dueOn: string | null;
+  readonly services: readonly { readonly serviceName: string }[];
+}
+
+const StepJobContextSchema = z
+  .object({
+    clientPartyId: z.string().uuid().nullable(),
+    clientName: z.string().nullable(),
+    entityPartyId: z.string().uuid().nullable(),
+    entityName: z.string().nullable(),
+    periodLabel: z.string().nullable(),
+    services: z.array(z.string()).openapi({
+      description: "The services the job delivers, by the names the client's letter pinned.",
+    }),
+    dueOn: z.string().nullable().openapi({
+      description:
+        "`YYYY-MM-DD`: the earliest due day of the job's unfinished tasks, which is what a step " +
+        "on it is due by. Null when none carries a date.",
+    }),
+  })
+  .openapi("StepJobContext");
+
+function jobContextWire(d: JobContextSource | undefined): z.infer<typeof StepJobContextSchema> | null {
+  if (d === undefined) return null;
+  return {
+    clientPartyId: d.clientPartyId,
+    clientName: d.clientName,
+    entityPartyId: d.entityPartyId,
+    entityName: d.entityName,
+    periodLabel: d.periodLabel,
+    services: d.services.map((s) => s.serviceName),
+    dueOn: d.dueOn,
+  };
+}
+
+const JOB_CONTEXT_DESCRIPTION =
+  "The job this is part of: its client (by id, to link) and company, period, services and due " +
+  "day. Null when the job is linked to no engagement, so there is nothing to name.";
 
 // `AgentProposal`, not `Proposal`. This product already has proposals — the
 // priced document a firm sends a prospect — and a second meaning of the word on
@@ -229,6 +281,7 @@ const MyStepSchema = z
     stepKey: z.string(),
     label: z.string(),
     status: z.enum(["pending", "running", "blocked", "done", "skipped", "failed"]),
+    job: StepJobContextSchema.nullable().openapi({ description: JOB_CONTEXT_DESCRIPTION }),
   })
   .openapi("MyStep");
 
@@ -500,6 +553,7 @@ const CheckSchema = z
         "How many review points are still open: the same count the decide route refuses " +
         "Approve on.",
     }),
+    job: StepJobContextSchema.nullable().openapi({ description: JOB_CONTEXT_DESCRIPTION }),
   })
   .openapi("StepCheck");
 
@@ -519,8 +573,12 @@ const CheckersResponse = z
   .object({ checkers: z.array(CheckerSchema) })
   .openapi("PossibleCheckersResponse");
 
-function toCheckWire(c: CheckOnDesk): z.infer<typeof CheckSchema> {
+function toCheckWire(
+  c: CheckOnDesk,
+  jobs: ReadonlyMap<string, JobContextSource>,
+): z.infer<typeof CheckSchema> {
   return {
+    job: jobContextWire(jobs.get(c.jobId)),
     id: c.approval.id,
     jobId: c.jobId,
     stepKey: c.stepKey,
@@ -764,8 +822,19 @@ export function registerOrchestratorRoutes(
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const steps = await deps.service.myOpenSteps(s.tenantId, s.userId);
+    // ONE describe for the whole desk, never one per step.
+    const jobs = await deps.jobs.describeJobs(s.tenantId, [...new Set(steps.map((st) => st.jobId))]);
     return c.json(
-      { steps: steps.map((st) => ({ id: st.id, jobId: st.jobId, stepKey: st.stepKey, label: st.label, status: st.status })) },
+      {
+        steps: steps.map((st) => ({
+          id: st.id,
+          jobId: st.jobId,
+          stepKey: st.stepKey,
+          label: st.label,
+          status: st.status,
+          job: jobContextWire(jobs.get(st.jobId)),
+        })),
+      },
       200,
     );
   });
@@ -814,7 +883,8 @@ export function registerOrchestratorRoutes(
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const checks = await deps.service.pendingChecks(s.tenantId, s.userId);
-    return c.json({ checks: checks.map(toCheckWire) }, 200);
+    const jobs = await deps.jobs.describeJobs(s.tenantId, [...new Set(checks.map((k) => k.jobId))]);
+    return c.json({ checks: checks.map((k) => toCheckWire(k, jobs)) }, 200);
   });
 
   app.openapi(listJobChecksRoute, async (c) => {
@@ -822,7 +892,8 @@ export function registerOrchestratorRoutes(
     if (!s.ok) return c.json(s.deny, s.status);
     const { jobId } = c.req.valid("param");
     const checks = await deps.service.checksForJob(s.tenantId, jobId, s.userId);
-    return c.json({ checks: checks.map(toCheckWire) }, 200);
+    const jobs = await deps.jobs.describeJobs(s.tenantId, [jobId]);
+    return c.json({ checks: checks.map((k) => toCheckWire(k, jobs)) }, 200);
   });
 
   app.openapi(listCheckersRoute, async (c) => {
@@ -873,7 +944,8 @@ export function registerOrchestratorRoutes(
       s.actor,
       s.userId,
     );
-    return c.json(toCheckWire(check), 200);
+    const jobs = await deps.jobs.describeJobs(s.tenantId, [check.jobId]);
+    return c.json(toCheckWire(check, jobs), 200);
   });
 
   app.openapi(decideCheckRoute, async (c) => {

@@ -390,6 +390,7 @@ function deps(): RouterDeps {
     },
     orchestrator: {
       grades: { listGrades: () => Promise.resolve([]) },
+      jobs: { describeJobs: () => Promise.resolve(new Map()) },
       service: new OrchestratorService({
     timeZones: new FakeFirmTimeZone(),
     desks: new FakeStepDeskResolver(),

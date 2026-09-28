@@ -100,6 +100,9 @@ const EscalationRowSchema = z
         "Who is billed. Null on a filing — an obligation is owed by the ENTITY and carries no " +
         "client.",
     }),
+    clientPartyId: z.string().uuid().nullable().openapi({
+      description: "The same client by id, to link it. Null exactly where `clientName` is.",
+    }),
     entityName: z.string().nullable().openapi({
       description:
         "WHICH of the client's companies. A group of four files four sets of returns (G0.1), so " +
@@ -218,6 +221,7 @@ function toWire(
     raisedOn: r.raisedOn,
     subjectTitle: r.subjectTitle,
     clientName: r.clientName,
+    clientPartyId: r.clientPartyId,
     entityName: r.entityName,
     holder: r.holder,
     dueOn: r.dueOn,

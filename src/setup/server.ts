@@ -1232,7 +1232,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         workItems: { service: workItems, vocabulary: workVocabulary },
         obligations: { service: obligations, vocabulary: obligationVocabulary },
         escalations: { service: escalations },
-        orchestrator: { service: orchestrator, grades: staffGrades },
+        orchestrator: { service: orchestrator, grades: staffGrades, jobs: scheduler },
         scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },

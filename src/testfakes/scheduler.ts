@@ -160,10 +160,25 @@ export class FakeJobRepo implements JobRepository {
         entityName ??= this.entityNames.get(link.engagementId) ?? null;
         clientName ??= this.clientNames.get(link.engagementId) ?? null;
       }
-      if (services.length > 0) out.set(jobId, { entityName, clientName, services });
+      if (services.length > 0) {
+        out.set(jobId, {
+          entityName,
+          clientName,
+          // The ids and the due day are the adapter's joins; the fake answers
+          // what a test put in these maps, and null otherwise.
+          entityPartyId: this.entityPartyIds.get(jobId) ?? null,
+          clientPartyId: this.clientPartyIds.get(jobId) ?? null,
+          periodLabel: this.rows.find((j) => j.id === jobId)?.periodLabel ?? null,
+          dueOn: this.dueOns.get(jobId) ?? null,
+          services,
+        });
+      }
     }
     return Promise.resolve(out);
   }
+  entityPartyIds = new Map<string, string>();
+  clientPartyIds = new Map<string, string>();
+  dueOns = new Map<string, string>();
 
   findById(tenantId: string, jobId: string): Promise<Job | null> {
     return Promise.resolve(
