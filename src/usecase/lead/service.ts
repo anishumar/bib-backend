@@ -24,6 +24,8 @@ import { isJurisdiction } from "../../domain/document/model";
 import type { TerritoryRule } from "../../domain/lead/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
+import { isValidIdentifier, normalizeIdentifier } from "../../domain/party/model";
+import { InvalidIdentifier } from "../../domain/party/errors";
 import type {
   Lead,
   LeadSource,
@@ -288,13 +290,21 @@ export class LeadService {
    *   known party,   — there is already a live opportunity. The capture appends
    *   open lead        to it and creates nothing. This is the merge.
    */
-  async capture(input: CaptureLeadInput, actor: Actor): Promise<CaptureResult> {
-    const source = this.parseSource(input.source);
-    const title = this.parseTitle(input.title);
+  async capture(typed: CaptureLeadInput, actor: Actor): Promise<CaptureResult> {
+    const source = this.parseSource(typed.source);
+    const title = this.parseTitle(typed.title);
     // Demanded in canonical UPPER CASE rather than normalised, the same rule
     // G1.8 applies to a clause's terms: this value is COMPARED — against a
     // territory rule — and "in" is what a comparison would get.
-    const jurisdiction = this.parseJurisdiction(input.jurisdiction);
+    const jurisdiction = this.parseJurisdiction(typed.jurisdiction);
+    // Every contact detail normalised and shape-checked BEFORE the dedup
+    // lookup and before anything is written: a bad phone used to be refused
+    // by the party module only after the prospect had been created. A phone
+    // typed without its calling code is completed with the lead's country.
+    const input: CaptureLeadInput = {
+      ...typed,
+      identifiers: typed.identifiers.map((i) => this.parseIdentifier(i, jurisdiction)),
+    };
     const estimate = this.parseEstimatedValue(input.estimatedValue ?? null);
 
     // Everything that can be refused without writing is refused first — a
@@ -752,6 +762,12 @@ export class LeadService {
    *  answers for it. A malformed one is refused rather than dropped, so a
    *  caller sending "India" learns it, instead of quietly getting the rotation
    *  and wondering why the UK desk rule never fires. */
+  private parseIdentifier(identifier: CaptureIdentifier, jurisdiction: string | null): CaptureIdentifier {
+    const value = normalizeIdentifier(identifier.type, identifier.value, jurisdiction);
+    if (!isValidIdentifier(identifier.type, value)) throw new InvalidIdentifier(identifier.type, identifier.value);
+    return { ...identifier, value };
+  }
+
   private parseJurisdiction(raw: string | undefined): string | null {
     if (raw === undefined) return null;
     if (!isJurisdiction(raw)) throw new InvalidLeadJurisdiction(raw);

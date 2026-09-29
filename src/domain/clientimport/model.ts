@@ -177,7 +177,7 @@ export const PEOPLE_COLUMNS: readonly SheetColumn[] = [
   { header: "Relationship", required: true, hint: "director, signatory, shareholder or employee", about: "director, signatory, shareholder or employee." },
   { header: "Since", required: false, hint: "YYYY-MM-DD, optional", about: "When the role began. Defaults to today." },
   { header: "Email", required: false, hint: "optional", about: "Also how a re-run recognises the same person." },
-  { header: "Phone", required: false, hint: "optional", about: "" },
+  { header: "Phone", required: false, hint: "with country code, e.g. +91 98200 12345", about: "With the country code. A number without one is read as a number in the company's country." },
 ];
 
 export const ENGAGEMENT_SHEET_MARKER = "Company";
@@ -675,6 +675,11 @@ export interface ImportReport {
   readonly rows: readonly RowVerdict[];
   readonly letters: readonly LetterPlan[];
   readonly portalInvites: readonly PortalInvitePlan[];
+  /** A people row's phone as it will be stored (E.164), keyed by the row. A
+   *  number typed without its calling code is completed with the country of
+   *  the company the row is for, which is a fact the confirm step would
+   *  otherwise have to look up again. */
+  readonly peoplePhones: ReadonlyMap<number, string>;
   readonly counts: ImportCounts;
   readonly compliance: {
     readonly floor: IsoDate | null;
@@ -1047,6 +1052,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
   let rolesToRecord = 0;
   let peopleOnFile = 0;
   let peopleBlocked = 0;
+  const peoplePhones = new Map<number, string>();
   /** `${email}|${target}|${type}` → the row that already said it. */
   const seenRoles = new Map<string, number>();
   /** Lower-cased email → the first row naming it, and the name it used. */
@@ -1077,6 +1083,10 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
     const email = p.email === null ? null : normalizeIdentifier("email", p.email);
     if (email !== null && !isValidIdentifier("email", email)) bad(`Email "${p.email ?? ""}" is not an email address`);
+    const phone = p.phone === null ? null : normalizeIdentifier("phone", p.phone, target?.jurisdiction ?? client?.jurisdiction);
+    if (phone !== null && !isValidIdentifier("phone", phone)) {
+      bad(`Phone "${p.phone ?? ""}" is not a phone number this can read. Write it with the country code, for example +91 98200 12345`);
+    } else if (phone !== null) peoplePhones.set(p.lineNo, phone);
 
     // The SAME ROLE twice — same person, same company, same relationship — is a
     // duplicate, and the only shape of repeated email that is one.
@@ -1377,6 +1387,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     rows: finalVerdicts,
     letters,
     portalInvites,
+    peoplePhones,
     counts: {
       clientsToCreate: count("clients", "create"),
       clientsOnFile: count("clients", "skip"),

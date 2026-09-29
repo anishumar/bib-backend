@@ -3,6 +3,8 @@
 // is a party; directors/employees/shareholders are effective-dated
 // RELATIONSHIPS between parties, never separate tables.
 
+import { isValidPhone, normalizePhone } from "./phone";
+
 export type PartyKind = "organization" | "person";
 
 export interface Party {
@@ -183,12 +185,13 @@ export const CONTACT_ROLES = [
 // ── Pure rules ────────────────────────────────────────────────────────────
 
 /** Normalise an identifier before storage/lookup so dedup is exact: emails
- *  lower-cased, phone stripped of separators, registration numbers upper-cased,
- *  all trimmed. */
-export function normalizeIdentifier(type: IdentifierType, value: string): string {
+ *  lower-cased, phones in E.164 (`normalizePhone` — `country` completes one
+ *  typed without its calling code), registration numbers upper-cased, all
+ *  trimmed. */
+export function normalizeIdentifier(type: IdentifierType, value: string, country?: string | null): string {
   const v = value.trim();
   if (type === "email") return v.toLowerCase();
-  if (type === "phone") return v.replace(/[\s()-]/g, "");
+  if (type === "phone") return normalizePhone(v, country);
   return v.toUpperCase();
 }
 
@@ -201,9 +204,14 @@ export function isValidIdentifier(type: IdentifierType, normalized: string): boo
     case "pan":
       return /^[A-Z]{5}[0-9]{4}[A-Z]$/.test(normalized); // e.g. ABCDE1234F
     case "gstin":
-      return /^[0-9A-Z]{15}$/.test(normalized); // 15-char state GSTIN
+      // State code, the holder's PAN, the registration's number in that
+      // state, a fixed "Z", a check character: 27ABCDE1234F1Z5. The check
+      // character's arithmetic is not tested, so a typo there still goes in.
+      return /^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(normalized);
     case "email":
       return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(normalized);
+    case "phone":
+      return isValidPhone(normalized);
     default:
       return true;
   }

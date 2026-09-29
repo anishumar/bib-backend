@@ -49,9 +49,22 @@ export class NotAnOrganization extends PartyError {
     );
   }
 }
+/** What a well-formed value of each checked type looks like, said in the
+ *  refusal so the person can fix it without asking. */
+const IDENTIFIER_EXAMPLE: Readonly<Record<string, string>> = {
+  phone: "Write it with the country code, for example +91 98200 12345",
+  pan: "A PAN is five letters, four digits and a letter, for example ABCDE1234F",
+  gstin: "A GSTIN is 15 characters, for example 27ABCDE1234F1Z5",
+  email: "For example name@firm.com",
+};
 export class InvalidIdentifier extends PartyError {
   constructor(type: string, value: string) {
-    super("INVALID_IDENTIFIER", `${JSON.stringify(value)} is not a valid ${type}`);
+    const example = IDENTIFIER_EXAMPLE[type];
+    const label = type === "phone" || type === "email" ? type : type.toUpperCase();
+    super(
+      "INVALID_IDENTIFIER",
+      `${JSON.stringify(value)} is not a valid ${label}.${example === undefined ? "" : ` ${example}.`}`,
+    );
   }
 }
 export class InvalidIdentifierType extends PartyError {

@@ -224,6 +224,25 @@ describe("the duplicate — the acceptance", () => {
     );
     expect(again.merged).toBe(true);
   });
+
+  it("matches a phone typed without its country code, completed with the lead's country", async () => {
+    const { service } = setup();
+    await service.capture(capture({ identifiers: [{ type: "phone", value: PHONE }] }), ACTOR);
+    const again = await service.capture(
+      capture({ jurisdiction: "IN", identifiers: [{ type: "phone", value: "098765 43210" }] }),
+      ACTOR,
+    );
+    expect(again.merged).toBe(true);
+  });
+
+  it("refuses a malformed phone before anything is written", async () => {
+    const { service, events } = setup();
+    await expect(
+      service.capture(capture({ identifiers: [{ type: "phone", value: "+91 98765" }] }), ACTOR),
+    ).rejects.toMatchObject({ code: "INVALID_IDENTIFIER" });
+    // No prospect, no lead: the refusal came before the party was created.
+    expect(events.recorded).toHaveLength(0);
+  });
 });
 
 describe("a prospect who comes back", () => {

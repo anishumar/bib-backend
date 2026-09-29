@@ -238,7 +238,9 @@ export class PartyService {
     const party = await this.deps.parties.findParty(input.tenantId, input.partyId);
     if (!party) throw new PartyNotFound(input.partyId);
 
-    const value = normalizeIdentifier(input.type, input.value);
+    // A phone's jurisdiction is the country it was typed in, which is what
+    // completes one written without its calling code.
+    const value = normalizeIdentifier(input.type, input.value, input.jurisdiction);
     if (!isValidIdentifier(input.type, value)) throw new InvalidIdentifier(input.type, input.value);
     if (!isValidDateRange(input.validFrom, input.validTo ?? null)) {
       throw new InvalidDateRange(input.validFrom, input.validTo ?? null);

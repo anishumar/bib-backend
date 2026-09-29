@@ -582,6 +582,23 @@ amounts, discounts and wording come across EXACTLY as they were.
   on it does. Each detail read carries `copyRefusal` (the refusal's own sentence, or null), so the
   page offers the button only when it will work.
 
+## A phone is stored in E.164, and PAN / GSTIN are checked for shape (2026-09-30)
+
+`normalizeIdentifier("phone", value, country?)` returns E.164 (`+919820012345`) and
+`isValidIdentifier` refuses anything else, in `domain/party/phone.ts` (stdlib only, so no
+libphonenumber here; the screen uses it). Two strengths: every phone must be E.164 at all (a
+"+", a code not starting with 0, 7 to 15 digits), and the firm's countries must also be the right
+length with a leading digit that country uses (IN 10, AE 9 mobile or 8 landline, SG 8, US/CA 10,
+GB 9 or 10). **A number with no "+" is completed only when the caller says the country**, and
+nobody guesses it: the party route uses the identifier's `jurisdiction`, lead capture the lead's
+country, the client import the company the people row is for (carried to confirm as
+`report.peoplePhones`). **Lead capture now normalises and checks every identifier BEFORE the dedup
+lookup and before any write**; a bad one used to be refused by the party module only after the
+prospect existed. A GSTIN is held to its structure (`27ABCDE1234F1Z5`: state code, the PAN, the
+entity number, a fixed Z, a check character; the check character's arithmetic is not tested). The
+refusal (`INVALID_IDENTIFIER`) says what a good value looks like. Phones stored before this are
+not rewritten: a lookup of the old bare form will not match the new E.164 form.
+
 ## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
 
 **Measured, not reasoned about:** `postgres.js` materialises a `date` column at **UTC midnight** —

@@ -546,10 +546,11 @@ export class ClientImportService {
             );
             personByEmail.set(email, person.partyId);
           }
-          if (p.phone !== null) {
+          const phone = report.peoplePhones.get(p.lineNo) ?? null;
+          if (phone !== null) {
             step = "adding their phone";
             await this.deps.parties.addIdentifier(
-              { tenantId, partyId: person.partyId, type: "phone", value: p.phone, validFrom: since },
+              { tenantId, partyId: person.partyId, type: "phone", value: phone, validFrom: since },
               actor,
             );
           }

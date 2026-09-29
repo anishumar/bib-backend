@@ -419,6 +419,27 @@ describe("a people row", () => {
     expect(report.rows.find((r) => r.sheet === "people")?.detail).toBe("director of Cobalt Logistics");
   });
 
+  it("stores a phone in E.164, completing one typed without its code with the company's country", () => {
+    const report = validateImport(
+      {
+        clients: [client()],
+        people: [
+          person({ lineNo: 2, phone: "098200 12345" }),
+          person({ lineNo: 3, email: "ravi@cobalt.test", fullName: "Ravi Iyer", phone: "+971 50 123 4567" }),
+          person({ lineNo: 4, email: "sara@cobalt.test", fullName: "Sara Khan", phone: "98200" }),
+        ],
+        engagements: [],
+      },
+      snapshot(),
+    );
+    expect(report.peoplePhones.get(2)).toBe("+919820012345");
+    expect(report.peoplePhones.get(3)).toBe("+971501234567");
+    expect(report.peoplePhones.has(4)).toBe(false);
+    expect(blockingMessages(report)).toContain(
+      'Phone "98200" is not a phone number this can read. Write it with the country code, for example +91 98200 12345',
+    );
+  });
+
   it("refuses a person whose client is nowhere, a relationship it does not read, and a bad email", () => {
     const report = validateImport(
       { clients: [client()], people: [person({ client: "Nobody Ltd", relationship: "auditor", email: "not-an-email" })], engagements: [] },
