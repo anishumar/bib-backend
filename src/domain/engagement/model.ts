@@ -30,6 +30,16 @@ export type LetterStatus = "draft" | "sent" | "signed" | "withdrawn";
 
 export const LETTER_STATUSES: readonly LetterStatus[] = ["draft", "sent", "signed", "withdrawn"];
 
+/**
+ * Whether a letter can be COPIED into a new draft (0316, decided 2026-09-30):
+ * a WITHDRAWN one only, which includes one the client declined in DocuSign.
+ * A draft is edited, a sent one is still with the client, and a signed one is
+ * changed by a letter that supersedes it.
+ */
+export function isLetterCopyable(status: LetterStatus): boolean {
+  return status === "withdrawn";
+}
+
 export function isLetterStatus(v: string): v is LetterStatus {
   return (LETTER_STATUSES as readonly string[]).includes(v);
 }
@@ -281,6 +291,9 @@ export interface EngagementLetter {
   /** Who deleted it, for the page. The ledger's `engagement_letter.deleted`
    *  names the actor either way. */
   readonly deletedByUserId: string | null;
+  /** The withdrawn letter this draft was COPIED from (0316), or null. Not
+   *  `supersedesId`, which names a SIGNED letter this one replaces. */
+  readonly copiedFromId: string | null;
 }
 
 export interface LetterLine {

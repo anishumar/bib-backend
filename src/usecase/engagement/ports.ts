@@ -130,6 +130,16 @@ export interface DocumentIdentity {
     from: { readonly kind: "proposal"; readonly id: string },
   ): Promise<readonly DocumentBlock[]>;
   /**
+   * Seed a new draft with another letter's prose, whole (0316) — the copy of a
+   * withdrawn letter, its cover and acceptance included. Instead of
+   * `seedBlocks`, never after it.
+   */
+  seedBlocksCopied(
+    tenantId: string,
+    owner: { readonly kind: "engagement_letter"; readonly id: string },
+    from: { readonly kind: "engagement_letter"; readonly id: string },
+  ): Promise<readonly DocumentBlock[]>;
+  /**
    * What this document's prose says NOW — the copy it owns, not the firm's
    * standard set. A struck-off line is not returned.
    */
@@ -299,6 +309,8 @@ export interface NewLetter {
   readonly supersedesId: string | null;
   /** When the engagements it opens begin. Null means the signature date. */
   readonly effectiveFrom: string | null;
+  /** The withdrawn letter this draft copies (0316). Absent on every other draft. */
+  readonly copiedFromId?: string | null | undefined;
 }
 
 export interface NewLetterLine {
@@ -514,6 +526,11 @@ export interface LetterRecord {
    *  is one. Without it, "is this still the agreement?" is a question the
    *  screen showing the agreement cannot answer. */
   readonly supersededBy: { readonly id: string; readonly ref: string } | null;
+  /** The withdrawn letter this draft was copied from (0316), or null. */
+  readonly copiedFrom: LetterCopyLink | null;
+  /** The drafts copied FROM this letter, oldest first (0316). A copy deleted
+   *  as a mistake is left out. */
+  readonly copies: readonly LetterCopyLink[];
   readonly lines: readonly LetterLineRecord[];
   /** The letter's live FEE GROUPS (0083), in section order. Each group's fee is
    *  counted ONCE in the totals below, and its lines are not counted as
@@ -594,6 +611,9 @@ export interface LetterView extends Omit<LetterRecord, "engagements"> {
    * live draft. The page offers the button only when it will work.
    */
   readonly deleteRefusal: { readonly code: EngagementErrorCode; readonly message: string } | null;
+  /** Why "Copy as new draft" would be refused right now (0316), or null when it
+   *  would work, which for a letter means a withdrawn one. */
+  readonly copyRefusal: { readonly code: EngagementErrorCode; readonly message: string } | null;
 }
 
 /**
@@ -1349,4 +1369,11 @@ export interface EngagementLifecycle {
     tenantId: string,
     input: { readonly engagementId: string; readonly resumedOn: string },
   ): Promise<Engagement | null>;
+}
+
+/** One end of a letter copy (0316): enough to link to it and say where it stands. */
+export interface LetterCopyLink {
+  readonly id: string;
+  readonly ref: string;
+  readonly status: LetterStatus;
 }

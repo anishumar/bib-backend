@@ -191,6 +191,25 @@ export interface Proposal {
   /** Who deleted it, for the page. The ledger's `proposal.deleted` names the
    *  actor either way. */
   readonly deletedByUserId: string | null;
+  /**
+   * The rejected or expired proposal this draft was COPIED from (0316), or
+   * null. Set once, when the copy is drafted; the source is never changed by
+   * being copied, so it stays exactly what the client turned down.
+   */
+  readonly copiedFromId: string | null;
+}
+
+/**
+ * The statuses a proposal can be COPIED from into a new draft (0316, decided
+ * 2026-09-30). Closed ones only: the client said no, or the offer lapsed. A
+ * sent quote still waiting for an answer is not copied, because then one
+ * client would hold two live offers for the same work; an accepted one goes on
+ * to a letter instead.
+ */
+export const COPYABLE_STATUSES: readonly ProposalStatus[] = ["rejected", "expired"];
+
+export function isCopyable(status: ProposalStatus): boolean {
+  return COPYABLE_STATUSES.includes(status);
 }
 
 /**

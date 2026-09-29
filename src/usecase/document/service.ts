@@ -398,6 +398,45 @@ export class DocumentService {
   }
 
   /**
+   * Seed a document with ANOTHER DOCUMENT OF THE SAME KIND's prose, whole
+   * (0316) — a closed proposal or a withdrawn letter copied into a new draft.
+   *
+   * Every live line of every kind, bodies, headings and order as they stood,
+   * because "copy it as it was" is the whole request: the exclusions a client
+   * negotiated and the cover letter the firm rewrote are exactly what the next
+   * draft should start from. Nothing comes from the standard set. A line keeps
+   * pointing at its standard row only when it was never changed, as in
+   * `seedBlocksCarrying`, so the new draft's screen does not call edited
+   * wording standard.
+   */
+  async seedBlocksCopied(
+    tenantId: string,
+    owner: BlockOwner,
+    from: BlockOwner,
+  ): Promise<readonly DocumentBlock[]> {
+    if (from.kind !== owner.kind) {
+      throw new Error(`prose is copied between documents of one kind, not ${from.kind} to ${owner.kind}`);
+    }
+    const existing = await this.deps.blocks.list(tenantId, owner);
+    if (existing.length > 0) throw new BlocksAlreadySeeded(owner.id, existing.length);
+
+    const rows = (await this.deps.blocks.list(tenantId, from)).map(
+      (b): NewDocumentBlock => ({
+        id: this.deps.ids.newId(),
+        tenantId,
+        owner,
+        kind: b.kind,
+        body: b.body,
+        isHeading: b.isHeading,
+        sortOrder: b.sortOrder,
+        sourceId: b.isEdited ? null : b.sourceId,
+      }),
+    );
+    if (rows.length === 0) return [];
+    return this.deps.blocks.addMany(rows);
+  }
+
+  /**
    * The firm's standard set as it would land on this document — chosen by
    * `blocksFor`, renumbered, given ids — WITHOUT writing it.
    *

@@ -17,6 +17,7 @@ export class EngagementError extends Error {
 export type EngagementErrorCode =
   | "LETTER_DELETED"
   | "LETTER_NOT_DELETABLE"
+  | "LETTER_NOT_COPYABLE"
   | "QUOTE_DELETED"
   | "LETTER_NOT_FOUND"
   | "LETTER_LINE_NOT_FOUND"
@@ -840,6 +841,21 @@ export class LetterDeleted extends EngagementError {
       "LETTER_DELETED",
       `${ref} was deleted as made by mistake, and a deleted draft is final: nothing about it ` +
         `changes again. If the engagement is real after all, draft a new letter.`,
+    );
+  }
+}
+
+/** Only a withdrawn letter is copied into a new draft (0316). */
+export class LetterNotCopyable extends EngagementError {
+  constructor(ref: string, status: string) {
+    super(
+      "LETTER_NOT_COPYABLE",
+      `${ref} is ${status}. Only a withdrawn letter is copied into a new draft. ` +
+        (status === "draft"
+          ? `This one is still a draft, so change it directly.`
+          : status === "sent"
+            ? `The client still has this one; withdraw it first if the terms have to change.`
+            : `A signed letter is changed by drafting a new letter that supersedes it.`),
     );
   }
 }

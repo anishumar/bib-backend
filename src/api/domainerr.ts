@@ -806,6 +806,7 @@ export function mapError(err: unknown): MappedError {
       case "ALREADY_ANSWERED":
       case "PROPOSAL_DELETED":
       case "PROPOSAL_NOT_DELETABLE":
+      case "PROPOSAL_NOT_COPYABLE":
       case "PROPOSAL_CITED_BY_LETTER":
       case "LEAD_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
@@ -933,6 +934,7 @@ export function mapError(err: unknown): MappedError {
       case "FEE_GROUP_EMPTY":
       case "LETTER_DELETED":
       case "LETTER_NOT_DELETABLE":
+      case "LETTER_NOT_COPYABLE":
       case "QUOTE_DELETED":
       case "CURRENCY_LOCKED_BY_LINES":
       case "PROSE_EDITED":

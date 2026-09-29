@@ -93,6 +93,7 @@ interface LetterRow {
   firm_signed_at: Date | null;
   deleted_at: Date | null;
   deleted_by_user_id: string | null;
+  copied_from_id: string | null;
 }
 
 interface LineRow {
@@ -142,7 +143,7 @@ const LETTER_COLUMNS = `id, tenant_id, ref, party_id, issuing_entity_party_id, p
                         signed_by_title, withdrawn_at, background, addressed_to_party_id,
                         issued_on, supersedes_id, effective_from, firm_signatory_user_id,
                         firm_signatory_title, firm_signed_at, firm_signature_version_id,
-                        deleted_at, deleted_by_user_id`;
+                        deleted_at, deleted_by_user_id, copied_from_id`;
 
 interface FeeGroupRow {
   id: string;
@@ -261,6 +262,7 @@ function toLetter(r: LetterRow): EngagementLetter {
     firmSignedAt: r.firm_signed_at?.toISOString() ?? null,
     deletedAt: r.deleted_at?.toISOString() ?? null,
     deletedByUserId: r.deleted_by_user_id,
+    copiedFromId: r.copied_from_id,
   };
 }
 
@@ -366,13 +368,14 @@ export class PostgresEngagementRepository implements EngagementRepository {
         INSERT INTO crm.engagement_letter
           (id, tenant_id, ref, party_id, issuing_entity_party_id, proposal_id, jurisdiction,
            title, layout, currency, fx_rate, fx_rate_date, advance_required, advance_amount,
-           background, addressed_to_party_id, issued_on, supersedes_id, effective_from)
+           background, addressed_to_party_id, issued_on, supersedes_id, effective_from,
+           copied_from_id)
         VALUES
           (${l.id}, ${l.tenantId}, ${l.ref}, ${l.partyId}, ${l.issuingEntityPartyId},
            ${l.proposalId}, ${l.jurisdiction}, ${l.title}, ${l.layout},
            ${l.currency}, ${l.fxRate}, ${l.fxRateDate}, ${l.advanceRequired}, ${l.advanceAmount},
            ${l.background}, ${l.addressedToPartyId}, ${l.issuedOn}, ${l.supersedesId},
-           ${l.effectiveFrom})
+           ${l.effectiveFrom}, ${l.copiedFromId ?? null})
         RETURNING ${db.unsafe(LETTER_COLUMNS)}
       `;
       if (!row) throw new Error("engagement letter insert returned no row");
@@ -415,6 +418,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
+               l.copied_from_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                addressee.display_name AS addressee_display_name,
@@ -459,6 +463,23 @@ export class PostgresEngagementRepository implements EngagementRepository {
         WHERE l.id = ${letterId}
       `;
       if (!head) return null;
+
+      // Where this draft was copied from, and what was copied from it (0316).
+      const copyRows = await db<{ id: string; ref: string; status: LetterStatus; is_source: boolean }[]>`
+        SELECT id, ref, status, true AS is_source
+        FROM crm.engagement_letter WHERE id = ${head.copied_from_id}
+        UNION ALL
+        SELECT id, ref, status, false AS is_source
+        FROM crm.engagement_letter
+        WHERE copied_from_id = ${head.id} AND deleted_at IS NULL
+        ORDER BY is_source DESC, ref
+      `;
+      const copyLink = (r: { id: string; ref: string; status: LetterStatus }) => ({
+        id: r.id,
+        ref: r.ref,
+        status: r.status,
+      });
+      const copySource = copyRows.find((r) => r.is_source);
 
       const lines = await db<
         (LineRow & {
@@ -641,6 +662,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
           head.superseded_by_id === null || head.superseded_by_ref === null
             ? null
             : { id: head.superseded_by_id, ref: head.superseded_by_ref },
+        copiedFrom: copySource === undefined ? null : copyLink(copySource),
+        copies: copyRows.filter((r) => !r.is_source).map(copyLink),
         deletedBy:
           head.deleted_by_user_id === null || head.deleter_email === null
             ? null
@@ -726,6 +749,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.background, l.addressed_to_party_id, l.issued_on, l.supersedes_id,
                l.effective_from, l.firm_signatory_user_id, l.firm_signatory_title,
                l.firm_signed_at, l.firm_signature_version_id, l.deleted_at, l.deleted_by_user_id,
+               l.copied_from_id,
                party.display_name AS party_display_name,
                issuer.display_name AS issuer_display_name,
                t.gross + g.fees AS gross, t.discount, t.net + g.fees AS net,

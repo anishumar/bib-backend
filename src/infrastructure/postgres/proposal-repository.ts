@@ -66,6 +66,7 @@ interface ProposalRow {
   sent_pdf_version_id: string | null;
   deleted_at: Date | null;
   deleted_by_user_id: string | null;
+  copied_from_id: string | null;
 }
 
 /**
@@ -79,7 +80,7 @@ const PROPOSAL_COLUMN_NAMES = [
   "currency", "fx_rate", "fx_rate_date", "valid_until", "sent_at", "decided_at",
   "discount_approved_by", "discount_approved_at", "first_viewed_at", "last_viewed_at",
   "view_count", "declined_reason", "background", "addressed_to_party_id", "prepared_by_user_id",
-  "sent_pdf_version_id", "deleted_at", "deleted_by_user_id",
+  "sent_pdf_version_id", "deleted_at", "deleted_by_user_id", "copied_from_id",
 ] as const;
 const PROPOSAL_COLUMNS = PROPOSAL_COLUMN_NAMES.join(", ");
 const PROPOSAL_COLUMNS_P = PROPOSAL_COLUMN_NAMES.map((c) => `p.${c}`).join(", ");
@@ -154,6 +155,7 @@ function toProposal(r: ProposalRow): Proposal {
     sentPdfVersionId: r.sent_pdf_version_id,
     deletedAt: r.deleted_at?.toISOString() ?? null,
     deletedByUserId: r.deleted_by_user_id,
+    copiedFromId: r.copied_from_id,
   };
 }
 
@@ -223,12 +225,13 @@ export class PostgresProposalRepository implements ProposalRepository {
         INSERT INTO crm.proposal
           (id, tenant_id, ref, party_id, issuing_entity_party_id, lead_id, title,
            currency, fx_rate, fx_rate_date, valid_until,
-           background, addressed_to_party_id, prepared_by_user_id)
+           background, addressed_to_party_id, prepared_by_user_id, copied_from_id)
         VALUES
           (${p.id}, ${p.tenantId}, ${p.ref}, ${p.partyId}, ${p.issuingEntityPartyId},
            ${p.leadId}, ${p.title},
            ${p.currency}, ${p.fxRate}, ${p.fxRateDate}, ${p.validUntil},
-           ${p.background}, ${p.addressedToPartyId}, ${p.preparedByUserId})
+           ${p.background}, ${p.addressedToPartyId}, ${p.preparedByUserId},
+           ${p.copiedFromId ?? null})
         RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
       `;
       if (!row) throw new Error("proposal insert returned no row");
@@ -470,8 +473,27 @@ export class PostgresProposalRepository implements ProposalRepository {
           ? null
           : { code, name: axes.find((a) => a.axis === axis && a.code === code)?.name ?? null };
 
+      // Where this draft was copied from, and what was copied from it (0316).
+      const copyRows = await db<{ id: string; ref: string; status: ProposalStatus; is_source: boolean }[]>`
+        SELECT id, ref, status, true AS is_source
+        FROM crm.proposal WHERE id = ${head.copied_from_id}
+        UNION ALL
+        SELECT id, ref, status, false AS is_source
+        FROM crm.proposal
+        WHERE copied_from_id = ${head.id} AND deleted_at IS NULL
+        ORDER BY is_source DESC, ref
+      `;
+      const link = (r: { id: string; ref: string; status: ProposalStatus }) => ({
+        id: r.id,
+        ref: r.ref,
+        status: r.status,
+      });
+      const source = copyRows.find((r) => r.is_source);
+
       return {
         proposal: toProposal(head),
+        copiedFrom: source === undefined ? null : link(source),
+        copies: copyRows.filter((r) => !r.is_source).map(link),
         party: { id: head.party_id, displayName: head.party_display_name },
         issuingEntity: {
           id: head.issuing_entity_party_id,

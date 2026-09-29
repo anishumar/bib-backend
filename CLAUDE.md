@@ -549,6 +549,39 @@ catalogue service or other config entry nobody used, and Restore. **An invoice i
 its number is drawn from the gapless GST series when the DRAFT is created, so cancelling is the
 only honest answer (T3.4).
 
+## Copy as new draft — a closed proposal or letter starts the next one (0316)
+
+**Decided 2026-09-30 (Shrestha):** a proposal the client DECLINED or that EXPIRED, and a letter
+that was WITHDRAWN (including one declined in DocuSign), can be copied into a new draft with a new
+reference, so nobody types fifteen lines again. `POST /proposals/{id}/copy` and `POST
+/engagement-letters/{id}/copy` (`party:write`); `ProposalService.copyAsDraft` /
+`EngagementService.copyAsDraft`. The three answers, not to be re-made: only those statuses (a sent
+one is still with the client, an accepted quote goes on to a letter, a signed letter is superseded);
+the link is STORED both ways (`copied_from_id` on the new row, `copies` read back on the old one);
+amounts, discounts and wording come across EXACTLY as they were.
+
+- **The source never changes**: a declined quote stays what the client declined. The pointer is on
+  the NEW row, so the signed-letter freeze is not asked for an exception. `proposal.copied` /
+  `engagement_letter.copied` are recorded against the OLD document; the new one gets its ordinary
+  `*.drafted` with `copiedFromId`.
+- **Every piece goes through the door a hand-built draft uses** (`draftProposal`/`draftLetter`,
+  `addLine`, `addFeeGroup`, `addClause`), so a copy meets every check a new draft would. A line
+  that can no longer be added (its company archived since) is SKIPPED AND REPORTED, never failing
+  the copy; so is an addressee no longer in the client's structure. The screen lands on the new
+  draft with `?copied=partial` when anything stayed behind.
+- **Prose comes whole** (`DocumentService.seedBlocksCopied`, instead of `seedBlocks`, never after
+  it): every kind, the letter's cover and acceptance included; a line keeps its standard `sourceId`
+  only if it was never edited.
+- **A letter's terms come at the library's CURRENT wording** (a new letter is a new contract): each
+  clause key is re-added at its published version through `addClause`; one retired from the library,
+  or no longer fitting the country or the issuer's law, is reported in `skippedClauses`.
+- **Not copied**: status and its dates, the share link, the PDF of record, the client's answer, the
+  signature request, and the discount APPROVAL (the new draft asks again). A validity date or start
+  date already past is left off.
+- A sent proposal past its date counts as expired: the copy expires it first, as every other act
+  on it does. Each detail read carries `copyRefusal` (the refusal's own sentence, or null), so the
+  page offers the button only when it will work.
+
 ## A `date` column is a DAY, and postgres.js hands it back as a UTC instant
 
 **Measured, not reasoned about:** `postgres.js` materialises a `date` column at **UTC midnight** —

@@ -246,8 +246,21 @@ const ProposalSchema = z
         "in no list, still opens by id, and never changes again; its reference is not reused.",
     }),
     deletedByUserId: z.string().uuid().nullable(),
+    copiedFromId: z.string().uuid().nullable().openapi({
+      description:
+        "The rejected or expired proposal this draft was copied from (0316), or null.",
+    }),
   })
   .openapi("Proposal");
+
+/** One end of a copy (0316). Inlined, NOT a named component: `.nullable()` on
+ *  a named component rewrites the component itself as nullable, and every
+ *  item of `copies` then reads as possibly null in the generated client. */
+const CopyLinkSchema = z.object({
+  id: z.string().uuid(),
+  ref: z.string(),
+  status: z.enum(STATUS_VALUES),
+});
 
 const PartyRefSchema = z.object({ id: z.string().uuid(), displayName: z.string() });
 
@@ -486,6 +499,23 @@ const ProposalRecordSchema = z
           "Why DELETE /api/v1/proposals/{proposalId} would be refused right now, in its own " +
           "words — or null when it would work (0086). Says nothing about `party:write`, which " +
           "/auth/me already does.",
+      }),
+    copiedFrom: CopyLinkSchema.nullable().openapi({
+      description: "The closed proposal this draft was copied from (0316), or null.",
+    }),
+    copies: z.array(CopyLinkSchema).openapi({
+      description:
+        "The drafts copied from this proposal, oldest first (0316). A copy deleted as a mistake " +
+        "is left out.",
+    }),
+    copyRefusal: z
+      .object({ code: z.string(), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why POST /api/v1/proposals/{proposalId}/copy would be refused right now, in its own " +
+          "words, or null when it would work (0316). Only a rejected or expired proposal is " +
+          "copied; a sent one past its date counts as expired.",
       }),
   })
   .openapi("ProposalRecord");
@@ -971,6 +1001,50 @@ const deleteRoute = createRoute({
   },
 });
 
+const copyRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/{proposalId}/copy",
+  tags: ["proposals"],
+  summary: "Copy a rejected or expired proposal into a new draft",
+  description:
+    "Starts the next quote from one the client turned down or let lapse (0316): a new DRAFT " +
+    "with a new reference, the same client, issuing company, currency, title, Background, " +
+    "addressee, every live line exactly as it was (price, discount, wording) and the prose. " +
+    "The old proposal does not change. A line that can no longer be added (its company was " +
+    "archived since) is skipped and listed in `skipped`; a discount past the firm's limit " +
+    "needs approving again. GET /api/v1/proposals/{proposalId} says in advance whether this " +
+    "would work (`copyRefusal`).",
+  request: { params: z.object({ proposalId: z.string().uuid() }) },
+  responses: {
+    201: {
+      description: "The new draft",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              proposal: ProposalSchema,
+              source: z.object({ id: z.string().uuid(), ref: z.string() }),
+              linesCopied: z.number().int(),
+              skipped: z.array(
+                z.object({ lineId: z.string().uuid(), description: z.string(), reason: z.string() }),
+              ),
+              addresseeDropped: z.boolean().openapi({
+                description:
+                  "The person the old proposal was addressed to is no longer in the client's " +
+                  "structure, so the copy names nobody. Pick one on the draft.",
+              }),
+            })
+            .openapi("ProposalCopy"),
+        },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("The proposal is not rejected or expired, or it was deleted"),
+  },
+});
+
 const removeLineRoute = createRoute({
   method: "delete",
   path: "/api/v1/proposals/{proposalId}/lines/{lineId}",
@@ -1201,6 +1275,7 @@ function toProposalBody(
     preparedByUserId: proposal.preparedByUserId,
     deletedAt: proposal.deletedAt,
     deletedByUserId: proposal.deletedByUserId,
+    copiedFromId: proposal.copiedFromId,
   };
 }
 
@@ -1402,6 +1477,12 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
       record.deleteRefusal === null
         ? null
         : { code: record.deleteRefusal.code, message: record.deleteRefusal.message },
+    copiedFrom: record.copiedFrom === null ? null : { ...record.copiedFrom },
+    copies: record.copies.map((c) => ({ id: c.id, ref: c.ref, status: c.status })),
+    copyRefusal:
+      record.copyRefusal === null
+        ? null
+        : { code: record.copyRefusal.code, message: record.copyRefusal.message },
   };
 }
 
@@ -1515,6 +1596,23 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     const { proposalId } = c.req.valid("param");
     const deleted = await deps.service.delete(s.tenantId, proposalId, s.actor);
     return c.json(toProposalBody(deleted, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(copyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { proposalId } = c.req.valid("param");
+    const made = await deps.service.copyAsDraft(s.tenantId, proposalId, s.actor);
+    return c.json(
+      {
+        proposal: toProposalBody(made.proposal, seesFees(c.get("principal"))),
+        source: { id: made.source.id, ref: made.source.ref },
+        linesCopied: made.linesCopied,
+        skipped: made.skipped.map((l) => ({ lineId: l.lineId, description: l.description, reason: l.reason })),
+        addresseeDropped: made.addresseeDropped,
+      },
+      201,
+    );
   });
 
   app.openapi(reviseRoute, async (c) => {

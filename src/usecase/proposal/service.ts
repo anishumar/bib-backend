@@ -38,6 +38,7 @@ import {
   canTransition,
   composeShareToken,
   discountApprovalLapses,
+  isCopyable,
   isEmailAddress,
   isPastValidity,
   isProposalDecision,
@@ -101,6 +102,8 @@ import {
   NotOutForAnswer,
   SignerNameRequired,
   ProposalDeleted,
+  ProposalError,
+  ProposalNotCopyable,
   ProposalLeadDeleted,
   proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
@@ -306,6 +309,23 @@ export interface SendResult {
   readonly email: EmailOutcome | null;
 }
 
+/** A line of the source that did not come across to the copy, and why. */
+export interface SkippedCopyLine {
+  readonly lineId: string;
+  readonly description: string;
+  readonly reason: string;
+}
+
+/** What copying a closed proposal made (0316). */
+export interface ProposalCopy {
+  readonly proposal: Proposal;
+  readonly source: { readonly id: string; readonly ref: string };
+  readonly linesCopied: number;
+  readonly skipped: readonly SkippedCopyLine[];
+  /** The addressee was left off: no longer a person in the client's structure. */
+  readonly addresseeDropped: boolean;
+}
+
 export interface AddLineInput {
   readonly tenantId: string;
   readonly proposalId: string;
@@ -407,6 +427,149 @@ export class ProposalService {
    * that depends on the order somebody added them.
    */
   async draft(input: DraftProposalInput, actor: Actor): Promise<Proposal> {
+    return this.draftProposal(input, actor, null);
+  }
+
+  /**
+   * COPY a closed proposal into a new draft (0316, decided 2026-09-30).
+   *
+   * A client who says no usually wants it changed, not gone: a lower fee, one
+   * service fewer. Without this the firm typed the whole quote again. The
+   * source must be REJECTED or EXPIRED (a sent one past its date is expired
+   * here, lazily, the way every other act on it expires it), and it does not
+   * change: it stays exactly what the client turned down.
+   *
+   * WHAT IS COPIED is everything the document says, exactly as it said it: the
+   * client, the issuing company, the currency and its rate, the title, the
+   * Background, the person it is addressed to, every live line with its
+   * service pin, wording, quantity, price, discount, country, billing, four
+   * scope overrides, out-of-pocket range and pricing note, and the prose
+   * (exclusions, commercials, team) as it stood. What is NOT: the status, the
+   * dates it was sent and answered, the share link, the PDF of record, the
+   * client's answer and the discount approval. A discount past the firm's limit
+   * needs approving again, because the approval was for the old document.
+   *
+   * EVERY LINE GOES THROUGH `addLine`, the door a hand-built draft uses, so a
+   * copy meets every check one would: a company archived since the quote went
+   * out is refused. Such a line is SKIPPED AND REPORTED rather than failing the
+   * whole copy, because the other fourteen lines are still worth having. The
+   * validity date comes across only while it is still ahead; an expired
+   * quote's date is the reason it expired. An addressee no longer linked to the
+   * client is left off and reported, for the same reason as a line.
+   */
+  async copyAsDraft(tenantId: string, proposalId: string, actor: Actor): Promise<ProposalCopy> {
+    let source = await this.deps.proposals.findById(tenantId, proposalId);
+    if (source === null) throw new ProposalNotFound(proposalId);
+    if (source.deletedAt !== null) throw new ProposalDeleted(source.ref);
+    const now = this.deps.clock.now().toISOString();
+    if (source.status === "sent" && isPastValidity(source.validUntil, now)) {
+      await this.expire(source, actor);
+      source = { ...source, status: "expired" };
+    }
+    if (!isCopyable(source.status)) throw new ProposalNotCopyable(source.ref, source.status);
+    const lines = await this.deps.proposals.listLines(tenantId, source.id);
+
+    let addressedToPartyId = source.addressedToPartyId ?? undefined;
+    let addresseeDropped = false;
+    if (addressedToPartyId !== undefined) {
+      try {
+        await this.requireContact(tenantId, source.partyId, addressedToPartyId);
+      } catch (err) {
+        if (!(err instanceof ProposalError)) throw err;
+        addressedToPartyId = undefined;
+        addresseeDropped = true;
+      }
+    }
+
+    const copy = await this.draftProposal(
+      {
+        tenantId,
+        partyId: source.partyId,
+        issuingEntityPartyId: source.issuingEntityPartyId,
+        ...(source.leadId === null ? {} : { leadId: source.leadId }),
+        title: source.title,
+        currency: source.currency,
+        fxRate: source.fxRate,
+        fxRateDate: source.fxRateDate,
+        ...(source.validUntil !== null && !isPastValidity(source.validUntil, now)
+          ? { validUntil: source.validUntil }
+          : {}),
+        ...(source.background === null ? {} : { background: source.background }),
+        ...(addressedToPartyId === undefined ? {} : { addressedToPartyId }),
+      },
+      actor,
+      source,
+    );
+
+    let linesCopied = 0;
+    const skipped: SkippedCopyLine[] = [];
+    // IN ORDER, one at a time: `addLine` takes each line's position from what
+    // is already on the draft.
+    for (const line of lines) {
+      try {
+        await this.addLine(
+          {
+            tenantId,
+            proposalId: copy.id,
+            ...(line.entityPartyId === null ? {} : { entityPartyId: line.entityPartyId }),
+            serviceVersionId: line.serviceVersionId,
+            description: line.description,
+            quantity: line.quantity,
+            ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
+            discountPercent: line.discountPercent,
+            ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
+            ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+            ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
+            ...(line.clientObligationsOverride === null
+              ? {}
+              : { clientObligationsOverride: line.clientObligationsOverride }),
+            ...(line.volumeLimitsOverride === null
+              ? {}
+              : { volumeLimitsOverride: line.volumeLimitsOverride }),
+            ...(line.exclusionsOverride === null ? {} : { exclusionsOverride: line.exclusionsOverride }),
+            ...(line.oopEstimate === null ? {} : { oopEstimate: line.oopEstimate }),
+            ...(line.pricingNote === null ? {} : { pricingNote: line.pricingNote }),
+          },
+          actor,
+        );
+        linesCopied += 1;
+      } catch (err) {
+        if (!(err instanceof ProposalError)) throw err;
+        skipped.push({ lineId: line.id, description: line.description, reason: err.message });
+      }
+    }
+
+    const prose = await this.deps.documents.listBlocks(tenantId, { kind: "proposal", id: copy.id });
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "proposal.copied",
+      objectId: source.id,
+      actor,
+      // Ids and counts. Which lines did not come across is on the answer the
+      // person is looking at; their descriptions are the client's own words.
+      payload: {
+        copyId: copy.id,
+        copyRef: copy.ref,
+        linesCopied,
+        linesSkipped: skipped.length,
+        proseLinesCopied: prose.length,
+        addresseeDropped,
+      },
+    });
+    return {
+      proposal: copy,
+      source: { id: source.id, ref: source.ref },
+      linesCopied,
+      skipped,
+      addresseeDropped,
+    };
+  }
+
+  private async draftProposal(
+    input: DraftProposalInput,
+    actor: Actor,
+    copyFrom: Proposal | null,
+  ): Promise<Proposal> {
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidQuoteCurrency(input.currency);
     // Positive, not merely non-negative: a rate of zero would make every
@@ -482,6 +645,7 @@ export class ProposalService {
       addressedToPartyId: input.addressedToPartyId ?? null,
       // Prepared by whoever is preparing it, unless the caller named somebody.
       preparedByUserId: input.preparedByUserId ?? (actor.type === "human" ? actor.id : null),
+      copiedFromId: copyFrom?.id ?? null,
     });
 
     // The firm's standard prose, COPIED onto this document (G1.7). After the
@@ -496,16 +660,28 @@ export class ProposalService {
     // takes the lines that are true everywhere. Before T6.18 an unknown client
     // country was always `*`, and the builder never sends one, so an Indian
     // company's India-only lines never reached a proposal it issued.
-    const registered = await this.deps.documents.issuerJurisdiction(
-      proposal.tenantId,
-      issuingEntityPartyId,
-    );
-    await this.deps.documents.seedBlocks(
-      proposal.tenantId,
-      { kind: "proposal", id: proposal.id },
-      this.proseJurisdiction(input.clientJurisdiction, registered.jurisdiction),
-      issuingEntityPartyId,
-    );
+    //
+    // A COPY takes the source's prose instead, whole (0316): the wording the
+    // firm had already tailored for this client is what the next draft starts
+    // from.
+    if (copyFrom === null) {
+      const registered = await this.deps.documents.issuerJurisdiction(
+        proposal.tenantId,
+        issuingEntityPartyId,
+      );
+      await this.deps.documents.seedBlocks(
+        proposal.tenantId,
+        { kind: "proposal", id: proposal.id },
+        this.proseJurisdiction(input.clientJurisdiction, registered.jurisdiction),
+        issuingEntityPartyId,
+      );
+    } else {
+      await this.deps.documents.seedBlocksCopied(
+        proposal.tenantId,
+        { kind: "proposal", id: proposal.id },
+        { kind: "proposal", id: copyFrom.id },
+      );
+    }
 
     await this.deps.events.recordEvent({
       tenantId: proposal.tenantId,
@@ -526,6 +702,8 @@ export class ProposalService {
         // Ids, erasable where they point; the names stay out of the log.
         addressedToPartyId: proposal.addressedToPartyId,
         preparedByUserId: proposal.preparedByUserId,
+        // Where it came from, when it is a copy of a closed quote (0316).
+        copiedFromId: proposal.copiedFromId,
       },
     });
     return proposal;
@@ -977,11 +1155,24 @@ export class ProposalService {
         : [];
     const block = proposalDeletionBlock(proposal, citing);
     const refusal = block === null ? null : proposalDeletionRefusal(proposal.ref, block);
+    // Whether Copy would work (0316): the same test `copyAsDraft` makes, a sent
+    // proposal past its date counting as the expired one it is about to become.
+    const lapsed =
+      proposal.status === "sent" &&
+      isPastValidity(proposal.validUntil, this.deps.clock.now().toISOString());
+    const copyRefusal =
+      proposal.deletedAt !== null
+        ? new ProposalDeleted(proposal.ref)
+        : isCopyable(proposal.status) || lapsed
+          ? null
+          : new ProposalNotCopyable(proposal.ref, proposal.status);
     return {
       ...record,
       blocks,
       document: planOf(record),
       deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
+      copyRefusal:
+        copyRefusal === null ? null : { code: copyRefusal.code, message: copyRefusal.message },
     };
   }
 

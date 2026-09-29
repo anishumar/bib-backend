@@ -97,6 +97,15 @@ export interface DocumentIdentity {
     issuingEntityPartyId: string,
   ): Promise<unknown>;
   /**
+   * Seed a new draft with another proposal's prose, whole (0316) — the copy
+   * of a rejected or expired quote. Instead of `seedBlocks`, never after it.
+   */
+  seedBlocksCopied(
+    tenantId: string,
+    owner: { readonly kind: "proposal"; readonly id: string },
+    from: { readonly kind: "proposal"; readonly id: string },
+  ): Promise<unknown>;
+  /**
    * What this document's prose says NOW — the copy it owns, not the firm's
    * standard set. A struck-off line is not returned.
    */
@@ -158,6 +167,8 @@ export interface NewProposal {
   readonly addressedToPartyId: string | null;
   /** The colleague the cover names — the drafter, unless the caller named one. */
   readonly preparedByUserId: string | null;
+  /** The closed proposal this draft copies (0316). Absent on every other draft. */
+  readonly copiedFromId?: string | null | undefined;
 }
 
 /**
@@ -328,6 +339,18 @@ export interface ProposalRecord {
     readonly displayName: string | null;
     readonly email: string;
   } | null;
+  /** The closed proposal this draft was copied from (0316), or null. */
+  readonly copiedFrom: CopyLink | null;
+  /** The drafts copied FROM this one, oldest first (0316). A copy deleted as a
+   *  mistake is left out, as it is from every list. */
+  readonly copies: readonly CopyLink[];
+}
+
+/** One end of a copy (0316): enough to link to it and say where it stands. */
+export interface CopyLink {
+  readonly id: string;
+  readonly ref: string;
+  readonly status: ProposalStatus;
 }
 
 /** One row of `ProposalRecord.totalsByFrequency`. */
@@ -524,6 +547,12 @@ export interface ProposalView extends ProposalRecord {
    * do": the page offers the button only when it will work.
    */
   readonly deleteRefusal: { readonly code: ProposalErrorCode; readonly message: string } | null;
+  /**
+   * Why "Copy as new draft" would be refused right now (0316), in the words the
+   * copy would be refused with, or null when it would work. A sent proposal
+   * past its date reads as copyable: the copy expires it first.
+   */
+  readonly copyRefusal: { readonly code: ProposalErrorCode; readonly message: string } | null;
 }
 
 /**

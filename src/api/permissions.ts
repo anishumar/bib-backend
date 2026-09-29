@@ -415,6 +415,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // A draft made by mistake (0086), on the permission that drafts one — the
   // whole document struck off before it went out, as a line is above.
   [routeKey("DELETE", "/api/v1/proposals/{proposalId}"), "party:write" as const],
+  // A closed quote copied into a new draft (0316): drafting, so drafting's
+  // permission.
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/copy"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/send"), "party:write" as const],
   // A new link, and a new email with it (0085) — sending again, so Send's own
   // permission.
@@ -501,6 +504,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // same person who may pull a letter the client has seen may strike off one
   // nobody has.
   [routeKey("DELETE", "/api/v1/engagement-letters/{letterId}"), "party:write" as const],
+  // A withdrawn letter copied into a new draft (0316): drafting's permission.
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/copy"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],

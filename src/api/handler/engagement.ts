@@ -248,6 +248,11 @@ const LetterSchema = z
         "never changes again.",
     }),
     deletedByUserId: z.string().uuid().nullable(),
+    copiedFromId: z.string().uuid().nullable().openapi({
+      description:
+        "The withdrawn letter this draft was copied from (0316), or null. Not `supersedesId`, " +
+        "which names a SIGNED letter this one replaces.",
+    }),
   })
   .openapi("EngagementLetter");
 
@@ -459,6 +464,15 @@ const SigningSchema = z
 /** A letter identified the way a person identifies one: by its reference. */
 const DocumentRefSchema = z.object({ id: z.string().uuid(), ref: z.string() });
 
+/** One end of a letter copy (0316). Inlined, not a named component, for the
+ *  reason given beside the proposal's: `.nullable()` would make it nullable
+ *  everywhere it is used. */
+const LetterCopyLinkSchema = z.object({
+  id: z.string().uuid(),
+  ref: z.string(),
+  status: z.enum(LETTER_STATUS_VALUES),
+});
+
 /**
  * The letter's money PER BILLING FREQUENCY (T6.18, D8), summed by the
  * database: lines priced on their own at their frequency, each section's fee
@@ -600,6 +614,22 @@ const LetterRecordSchema = z
           "Why DELETE /api/v1/engagement-letters/{letterId} would be refused right now, in its " +
           "own words — or null when it would work (0086), which means a live draft. Says nothing " +
           "about `party:write`, which /auth/me already does.",
+      }),
+    copiedFrom: LetterCopyLinkSchema.nullable().openapi({
+      description: "The withdrawn letter this draft was copied from (0316), or null.",
+    }),
+    copies: z.array(LetterCopyLinkSchema).openapi({
+      description:
+        "The drafts copied from this letter, oldest first (0316). A copy deleted as a mistake " +
+        "is left out.",
+    }),
+    copyRefusal: z
+      .object({ code: z.string(), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why POST /api/v1/engagement-letters/{letterId}/copy would be refused right now, in " +
+          "its own words, or null when it would work (0316): only a withdrawn letter is copied.",
       }),
   })
   .openapi("EngagementLetterRecord");
@@ -1440,6 +1470,54 @@ const deleteRoute = createRoute({
   },
 });
 
+const SkippedCopySchema = z.object({
+  id: z.string(),
+  description: z.string(),
+  reason: z.string(),
+});
+
+const copyRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/copy",
+  tags: ["engagement-letters"],
+  summary: "Copy a withdrawn letter into a new draft",
+  description:
+    "Starts the next letter from one the firm withdrew or the client declined (0316): a new " +
+    "DRAFT with a new reference, the same client, issuing company, country, quote, currency, " +
+    "title, Background, addressee and advance, every fee section and live line exactly as it " +
+    "was, and the prose including the cover letter and acceptance. Terms come across at the " +
+    "clause library's CURRENT wording; one retired from the library, or no longer fitting the " +
+    "country or the issuer's law, is listed in `skippedClauses`. A start date already past is " +
+    "left off. The old letter does not change. GET /api/v1/engagement-letters/{letterId} says " +
+    "in advance whether this would work (`copyRefusal`).",
+  request: { params: z.object({ letterId: z.string().uuid() }) },
+  responses: {
+    201: {
+      description: "The new draft",
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              letter: LetterSchema,
+              source: DocumentRefSchema,
+              linesCopied: z.number().int(),
+              feeGroupsCopied: z.number().int(),
+              clausesCopied: z.number().int(),
+              skippedLines: z.array(SkippedCopySchema),
+              skippedClauses: z.array(SkippedCopySchema),
+              addresseeDropped: z.boolean(),
+            })
+            .openapi("LetterCopy"),
+        },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("The letter is not withdrawn, or it was deleted"),
+  },
+});
+
 const withdrawRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/withdraw",
@@ -1649,6 +1727,7 @@ function toLetterBody(
     firmSignedAt: letter.firmSignedAt,
     deletedAt: letter.deletedAt,
     deletedByUserId: letter.deletedByUserId,
+    copiedFromId: letter.copiedFromId,
   };
 }
 
@@ -1851,6 +1930,12 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       record.deleteRefusal === null
         ? null
         : { code: record.deleteRefusal.code, message: record.deleteRefusal.message },
+    copiedFrom: record.copiedFrom === null ? null : { ...record.copiedFrom },
+    copies: record.copies.map((c) => ({ id: c.id, ref: c.ref, status: c.status })),
+    copyRefusal:
+      record.copyRefusal === null
+        ? null
+        : { code: record.copyRefusal.code, message: record.copyRefusal.message },
   };
 }
 
@@ -1952,6 +2037,31 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
     const body = c.req.valid("json");
     const letter = await deps.service.draft({ tenantId: s.tenantId, ...body }, s.actor);
     return c.json(toLetterBody(letter, seesFees(c.get("principal"))), 201);
+  });
+
+  app.openapi(copyRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { letterId } = c.req.valid("param");
+    const made = await deps.service.copyAsDraft(s.tenantId, letterId, s.actor);
+    const item = (i: { id: string; description: string; reason: string }) => ({
+      id: i.id,
+      description: i.description,
+      reason: i.reason,
+    });
+    return c.json(
+      {
+        letter: toLetterBody(made.letter, seesFees(c.get("principal"))),
+        source: { id: made.source.id, ref: made.source.ref },
+        linesCopied: made.linesCopied,
+        feeGroupsCopied: made.feeGroupsCopied,
+        clausesCopied: made.clausesCopied,
+        skippedLines: made.skippedLines.map(item),
+        skippedClauses: made.skippedClauses.map(item),
+        addresseeDropped: made.addresseeDropped,
+      },
+      201,
+    );
   });
 
   app.openapi(draftFromProposalRoute, async (c) => {

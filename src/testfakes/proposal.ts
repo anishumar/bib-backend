@@ -113,6 +113,7 @@ export class FakeProposalRepo implements ProposalRepository {
       sentPdfVersionId: null,
       deletedAt: null,
       deletedByUserId: null,
+      copiedFromId: p.copiedFromId ?? null,
     };
     this.rows.push(row);
     return Promise.resolve(row);
@@ -479,6 +480,14 @@ export class FakeProposalRepo implements ProposalRepository {
                 this.accounts.get(proposal.deletedByUserId)?.email ??
                 `${proposal.deletedByUserId}@example.test`,
             },
+      copiedFrom: (() => {
+        const source = this.rows.find((r) => r.tenantId === tenantId && r.id === proposal.copiedFromId);
+        return source === undefined ? null : { id: source.id, ref: source.ref, status: source.status };
+      })(),
+      copies: this.rows
+        .filter((r) => r.tenantId === tenantId && r.copiedFromId === proposal.id && r.deletedAt === null)
+        .sort((a, b) => a.ref.localeCompare(b.ref))
+        .map((r) => ({ id: r.id, ref: r.ref, status: r.status })),
     };
   }
 

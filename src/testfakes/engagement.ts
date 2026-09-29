@@ -151,6 +151,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       firmSignedAt: null,
       deletedAt: null,
       deletedByUserId: null,
+      copiedFromId: l.copiedFromId ?? null,
     };
     this.letters.push(row);
     return Promise.resolve(row);
@@ -599,6 +600,14 @@ export class FakeEngagementRepo implements EngagementRepository {
               signedAt: letter.firmSignedAt,
             },
       supersedes: this.refOf(tenantId, letter.supersedesId),
+      copiedFrom: (() => {
+        const source = this.letters.find((l) => l.tenantId === tenantId && l.id === letter.copiedFromId);
+        return source === undefined ? null : { id: source.id, ref: source.ref, status: source.status };
+      })(),
+      copies: this.letters
+        .filter((l) => l.tenantId === tenantId && l.copiedFromId === letter.id && l.deletedAt === null)
+        .sort((a, b) => a.ref.localeCompare(b.ref))
+        .map((l) => ({ id: l.id, ref: l.ref, status: l.status })),
       supersededBy: this.refOf(
         tenantId,
         this.letters.find(

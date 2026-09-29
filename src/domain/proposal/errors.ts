@@ -19,6 +19,7 @@ export class ProposalError extends Error {
 export type ProposalErrorCode =
   | "PROPOSAL_DELETED"
   | "PROPOSAL_NOT_DELETABLE"
+  | "PROPOSAL_NOT_COPYABLE"
   | "PROPOSAL_CITED_BY_LETTER"
   | "LEAD_DELETED"
   | "PROPOSAL_NOT_FOUND"
@@ -578,6 +579,23 @@ export class ProposalNotDeletable extends ProposalError {
       `${ref} is ${status}, and only a draft that never went out can be deleted. The client has ` +
         `the document as it was sent, so it stays on record as what they were shown` +
         (status === "sent" ? `; record their answer, or let it expire.` : `.`),
+    );
+  }
+}
+
+/** Only a closed proposal is copied into a new draft (0316). Each answer
+ *  says what to do instead of copying. */
+export class ProposalNotCopyable extends ProposalError {
+  constructor(ref: string, status: string) {
+    super(
+      "PROPOSAL_NOT_COPYABLE",
+      `${ref} is ${status}. Only a proposal the client turned down, or one that expired, is ` +
+        `copied into a new draft. ` +
+        (status === "draft"
+          ? `This one is still a draft, so change it directly.`
+          : status === "sent"
+            ? `The client still has this one; record their answer first, or let it expire.`
+            : `An accepted proposal goes on to an engagement letter instead.`),
     );
   }
 }

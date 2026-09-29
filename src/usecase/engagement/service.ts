@@ -37,6 +37,7 @@ import {
   isDay,
   isEditable,
   isJurisdiction,
+  isLetterCopyable,
   letterDeletionBlock,
   mayActivate,
   normalizeJurisdiction,
@@ -99,6 +100,7 @@ import {
   GroupedLinePriced,
   LineNotPriced,
   LetterDeleted,
+  LetterNotCopyable,
   NothingToRevise,
   NothingToChangeOnLetterLine,
   InvalidLetterLineDescription,
@@ -420,6 +422,29 @@ export interface SkippedQuoteLine {
  * one that never ran, because the letter LOOKS complete. Every screen showing
  * this shows both halves.
  */
+/** Something of the source letter that did not come across to the copy, and why. */
+export interface SkippedCopyItem {
+  readonly id: string;
+  readonly description: string;
+  readonly reason: string;
+}
+
+/** What copying a withdrawn letter made (0316). */
+export interface LetterCopy {
+  readonly letter: EngagementLetter;
+  readonly source: { readonly id: string; readonly ref: string };
+  readonly linesCopied: number;
+  readonly feeGroupsCopied: number;
+  readonly clausesCopied: number;
+  readonly skippedLines: readonly SkippedCopyItem[];
+  /** Terms that could not come across: retired from the library, or no longer
+   *  fitting the letter's country or its issuer's law. Each is added again by
+   *  hand, or left off. */
+  readonly skippedClauses: readonly SkippedCopyItem[];
+  /** The addressee was left off: no longer a person in the client's structure. */
+  readonly addresseeDropped: boolean;
+}
+
 export interface LetterFromQuote {
   readonly letter: EngagementLetter;
   readonly lines: readonly LetterLine[];
@@ -535,6 +560,196 @@ export class EngagementService {
   }
 
   /**
+   * COPY a withdrawn letter into a new draft (0316, decided 2026-09-30).
+   *
+   * A letter the firm pulled, or the client declined in DocuSign, usually comes
+   * back changed rather than not at all. The source must be WITHDRAWN and it
+   * does not change: it stays on record as what was offered and pulled.
+   *
+   * WHAT IS COPIED, exactly as it was: the client, the issuing company, the
+   * country, the quote it cites, the currency and its rate, the title, the
+   * Background, the addressee, the advance, every fee section (0083) with its
+   * fee, terms and prose, every live line with its price, discount, section,
+   * wording and scope overrides, and the prose including the cover letter and
+   * the acceptance. The TERMS come across at the clause library's CURRENT
+   * wording (a new letter is a new contract, on the firm's terms as they stand
+   * today), each through `addClause`, so one that no longer fits the country or
+   * the issuer's law is skipped and reported, as is one retired from the
+   * library. NOT copied: the status, the dates it was issued, sent and
+   * withdrawn, the signature request and the firm's signature. A start date
+   * already past is left off; the letter then starts when it is signed.
+   *
+   * Lines and fee sections go through `addLine` and `addFeeGroup`, the doors a
+   * hand-built draft uses. A line that can no longer be added is skipped and
+   * reported rather than failing the copy.
+   */
+  async copyAsDraft(tenantId: string, letterId: string, actor: Actor): Promise<LetterCopy> {
+    const source = await this.deps.letters.findLetter(tenantId, letterId);
+    if (source === null) throw new LetterNotFound(letterId);
+    if (source.deletedAt !== null) throw new LetterDeleted(source.ref);
+    if (!isLetterCopyable(source.status)) throw new LetterNotCopyable(source.ref, source.status);
+
+    const [lines, groups, clauses] = await Promise.all([
+      this.deps.letters.listLines(tenantId, source.id),
+      this.deps.letters.listFeeGroups(tenantId, source.id),
+      this.deps.letters.listClauses(tenantId, source.id),
+    ]);
+    const today = await this.firmDay(tenantId);
+    const ahead = (day: string | null): string | undefined =>
+      day !== null && day >= today ? day : undefined;
+
+    let addressedToPartyId = source.addressedToPartyId ?? undefined;
+    let addresseeDropped = false;
+    if (addressedToPartyId !== undefined) {
+      try {
+        await this.requireContact(tenantId, source.partyId, addressedToPartyId);
+      } catch (err) {
+        if (!(err instanceof EngagementError)) throw err;
+        addressedToPartyId = undefined;
+        addresseeDropped = true;
+      }
+    }
+
+    const effectiveFrom = ahead(source.effectiveFrom);
+    const { letter } = await this.draftLetter(
+      {
+        tenantId,
+        partyId: source.partyId,
+        ...(source.proposalId === null ? {} : { proposalId: source.proposalId }),
+        issuingEntityPartyId: source.issuingEntityPartyId,
+        jurisdiction: source.jurisdiction,
+        title: source.title,
+        currency: source.currency,
+        fxRate: source.fxRate,
+        fxRateDate: source.fxRateDate,
+        advanceRequired: source.advanceRequired,
+        ...(source.advanceAmount === null ? {} : { advanceAmount: source.advanceAmount }),
+        ...(source.background === null ? {} : { background: source.background }),
+        ...(addressedToPartyId === undefined ? {} : { addressedToPartyId }),
+        ...(effectiveFrom === undefined ? {} : { effectiveFrom }),
+      },
+      actor,
+      null,
+      source,
+    );
+
+    // The fee sections first, in their order, so each line can name its new one.
+    const groupIds = new Map<string, string>();
+    for (const g of groups) {
+      const made = await this.addFeeGroup(tenantId, letter.id, {
+        title: g.title,
+        billingFrequency: g.billingFrequency,
+        amount: g.amount,
+        ...(g.paymentTerms === null ? {} : { paymentTerms: g.paymentTerms }),
+        ...(g.feeDescription === null ? {} : { feeDescription: g.feeDescription }),
+        ...(g.intro === null ? {} : { intro: g.intro }),
+        ...(g.deliverables === null ? {} : { deliverables: g.deliverables }),
+        ...(g.clientObligations === null ? {} : { clientObligations: g.clientObligations }),
+      });
+      groupIds.set(g.id, made.id);
+    }
+
+    let linesCopied = 0;
+    const skippedLines: SkippedCopyItem[] = [];
+    // IN ORDER, one at a time: `addLine` takes each line's position from what
+    // is already on the letter.
+    for (const line of lines) {
+      const feeGroupId = line.feeGroupId === null ? undefined : groupIds.get(line.feeGroupId);
+      const lineStart = ahead(line.effectiveFrom);
+      try {
+        await this.addLine({
+          tenantId,
+          letterId: letter.id,
+          entityPartyId: line.entityPartyId,
+          serviceVersionId: line.serviceVersionId,
+          description: line.description,
+          quantity: line.quantity,
+          ...(line.unitAmount === null ? {} : { unitAmount: line.unitAmount }),
+          discountPercent: line.discountPercent,
+          ...(lineStart === undefined ? {} : { effectiveFrom: lineStart }),
+          ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
+          ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+          ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
+          ...(line.clientObligationsOverride === null
+            ? {}
+            : { clientObligationsOverride: line.clientObligationsOverride }),
+          ...(line.volumeLimitsOverride === null
+            ? {}
+            : { volumeLimitsOverride: line.volumeLimitsOverride }),
+          ...(line.exclusionsOverride === null ? {} : { exclusionsOverride: line.exclusionsOverride }),
+          ...(line.oopEstimate === null ? {} : { oopEstimate: line.oopEstimate }),
+          ...(line.pricingNote === null ? {} : { pricingNote: line.pricingNote }),
+          ...(feeGroupId === undefined ? {} : { feeGroupId }),
+        });
+        linesCopied += 1;
+      } catch (err) {
+        if (!(err instanceof EngagementError)) throw err;
+        skippedLines.push({ id: line.id, description: line.description, reason: err.message });
+      }
+    }
+
+    // The terms, at the library's CURRENT wording of each.
+    const published = await this.deps.library.publishedClauses(tenantId);
+    let clausesCopied = 0;
+    const skippedClauses: SkippedCopyItem[] = [];
+    for (const clause of clauses) {
+      const pinned = await this.deps.library.readPinnedVersion(tenantId, clause.clauseVersionId);
+      const title =
+        pinned === null ? clause.clauseVersionId : readClauseBody(pinned.body).title;
+      const current = pinned === null ? undefined : published.find((c) => c.key === pinned.key);
+      if (current === undefined) {
+        skippedClauses.push({
+          id: clause.clauseVersionId,
+          description: title,
+          reason: "This term is no longer in the firm's clause library.",
+        });
+        continue;
+      }
+      try {
+        await this.addClause(tenantId, letter.id, current.versionId);
+        clausesCopied += 1;
+      } catch (err) {
+        if (!(err instanceof EngagementError)) throw err;
+        skippedClauses.push({ id: clause.clauseVersionId, description: title, reason: err.message });
+      }
+    }
+
+    const prose = await this.deps.documents.listBlocks(tenantId, {
+      kind: "engagement_letter",
+      id: letter.id,
+    });
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "engagement_letter.copied",
+      objectId: source.id,
+      actor,
+      // Ids and counts; which lines and terms did not come across is on the
+      // answer the person is looking at.
+      payload: {
+        copyId: letter.id,
+        copyRef: letter.ref,
+        linesCopied,
+        linesSkipped: skippedLines.length,
+        feeGroupsCopied: groupIds.size,
+        clausesCopied,
+        clausesSkipped: skippedClauses.length,
+        proseLinesCopied: prose.length,
+        addresseeDropped,
+      },
+    });
+    return {
+      letter,
+      source: { id: source.id, ref: source.ref },
+      linesCopied,
+      feeGroupsCopied: groupIds.size,
+      clausesCopied,
+      skippedLines,
+      skippedClauses,
+      addresseeDropped,
+    };
+  }
+
+  /**
    * Drafting, with the one thing a letter from a quote does differently: its
    * prose is the QUOTE's (T6.18, D11) rather than the standard set's.
    * `carryFrom` is that quote, or null for an ordinary draft. Answers with how
@@ -544,6 +759,8 @@ export class EngagementService {
     input: DraftLetterInput,
     actor: Actor,
     carryFrom: string | null,
+    /** A withdrawn letter this draft copies (0316): its prose comes whole. */
+    copyFrom: EngagementLetter | null = null,
   ): Promise<{ readonly letter: EngagementLetter; readonly proseCarried: number }> {
     const jurisdiction = normalizeJurisdiction(input.jurisdiction);
     if (!isJurisdiction(jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
@@ -644,6 +861,7 @@ export class EngagementService {
       issuedOn: input.issuedOn ?? null,
       supersedesId: input.supersedesId ?? null,
       effectiveFrom: input.effectiveFrom ?? null,
+      copiedFromId: copyFrom?.id ?? null,
     });
 
         // The firm's standard prose, COPIED onto this letter (G1.7). The letter
@@ -655,7 +873,14 @@ export class EngagementService {
     // them, with only the cover and acceptance from the standard set (D11).
     const owner = { kind: "engagement_letter" as const, id: letter.id };
     let proseCarried = 0;
-    if (carryFrom === null) {
+    if (copyFrom !== null) {
+      // A COPY (0316) takes the withdrawn letter's prose whole, its cover letter
+      // and acceptance included: the firm's wording for this client as it stood.
+      await this.deps.documents.seedBlocksCopied(letter.tenantId, owner, {
+        kind: "engagement_letter",
+        id: copyFrom.id,
+      });
+    } else if (carryFrom === null) {
       await this.deps.documents.seedBlocks(
         letter.tenantId,
         owner,
@@ -699,6 +924,8 @@ export class EngagementService {
         // and the other is a person, and this log cannot be erased.
         supersedesId: letter.supersedesId,
         effectiveFrom: letter.effectiveFrom,
+        // Where it came from, when it is a copy of a withdrawn letter (0316).
+        copiedFromId: letter.copiedFromId,
       },
     });
     return { letter, proseCarried };
@@ -1781,6 +2008,17 @@ export class EngagementService {
         request,
       },
       deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
+      // Whether Copy would work (0316): the same test `copyAsDraft` makes.
+      copyRefusal: (() => {
+        const letter = record.letter;
+        const refused =
+          letter.deletedAt !== null
+            ? new LetterDeleted(letter.ref)
+            : isLetterCopyable(letter.status)
+              ? null
+              : new LetterNotCopyable(letter.ref, letter.status);
+        return refused === null ? null : { code: refused.code, message: refused.message };
+      })(),
     };
   }
 
