@@ -340,8 +340,10 @@ export class PdfLibRenderer implements DocumentRenderer {
     // CHECKED AGAINST THE FONTS ACTUALLY LOADED, not a hardcoded range. The
     // guard therefore cannot lie about what this renderer can draw, and it
     // narrows on its own the day the chain gains a script. It runs BEFORE
-    // anything is drawn, so a half-page is never produced.
-    assertRenderable(doc, fonts);
+    // anything is drawn, so a half-page is never produced. What it walked is
+    // every character the document draws, so it is also what decides which
+    // of the on-demand symbol fonts this document embeds.
+    await fonts.prepare(assertRenderable(doc, fonts));
 
     const body = new Face(fonts, false, tracker);
     const bold = new Face(fonts, true, tracker);
@@ -1203,20 +1205,21 @@ function wrapAfterLabel(
 }
 
 /**
- * Every string the document will draw, checked against what WinAnsi covers.
+ * Every string the document will draw, checked against the font chain.
  *
- * The standard PDF fonts encode Latin-1 and no more. `\t` and `\n` are allowed
- * through because the layout handles them; everything else outside the range is
- * refused by name.
+ * `\t` and `\n` are allowed through because the layout handles them; any other
+ * character no font in the chain carries is refused by name. Answers every
+ * character it passed, for `FontSet.prepare`.
  */
-function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
+function assertRenderable(doc: RenderableDocument, fonts: FontSet): ReadonlySet<number> {
+  const seen = new Set<number>();
   const check = (field: string, value: string | null): void => {
     if (value === null) return;
     for (const ch of value) {
       if (ch === "\n" || ch === "\t") continue;
       const code = ch.codePointAt(0) ?? 0;
-      if (fonts.canRender(code)) continue;
-      throw new UnrenderableText(field, ch);
+      if (!fonts.canRender(code)) throw new UnrenderableText(field, ch);
+      seen.add(code);
     }
   };
 
@@ -1299,4 +1302,5 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): void {
     check("the running line", proposal.running);
     flow("the proposal", proposal.flow);
   }
+  return seen;
 }

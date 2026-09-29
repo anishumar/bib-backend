@@ -1879,16 +1879,38 @@ it is versioned and auditable. `subset: true` embeds only the glyphs used, which
 three fonts free: a plain English letter carries a few hundred bytes of Latin and nothing of the
 other two.
 
+**Two symbol fonts follow them, and they are embedded ON DEMAND (2026-09-29).** Noto Sans Math
+(`≤ ≥ ≠ ≈`, arrows, `✓`, box and geometric shapes) and Noto Sans Symbols 2 (`✔ ✗ ☐ ⚠`), both
+OFL-1.1 npm packages, one weight each. Found on QA: the firm's standard service template writes
+volume limits as "≤1,000 entries", and every proposal quoting it was refused. They are NOT embedded
+the way the first three are: that would add two fonts to every plain letter and move the pinned
+hashes of issued documents. The guard returns every character it walked, `FontSet.prepare` embeds
+only the symbol fonts those characters need (in chain order, so the bytes stay deterministic), and a
+document with no symbol is byte-for-byte what it was (all 40 PDFs `layout.test.ts` renders hashed
+identical before and after). `U+FE0E`/`U+FE0F`, the invisible style request a phone's emoji
+keyboard puts after `⚠`, are left out rather than refused.
+
 `font-set.ts` imports `regenerator-runtime` and the reason is written beside it — a shim for an
 upstream packaging defect in `@pdf-lib/fontkit`, which throws only on fonts with complex shaping
 tables and therefore only on Devanagari. Do not remove it, and do not "upgrade" to `fontkit` 2.x:
 it changed the subset API pdf-lib calls.
 
+**A second upstream defect, in the SUBSETTER, draws nothing instead of throwing.** A subset
+under 64 KB is written with the short `loca` format (offsets stored halved) and no glyph is padded
+to an even length first, so every glyph after an odd-length one starts a byte early or ends a byte
+short, and FreeType (Chrome, MuPDF) draws it as empty space. Noto Sans has no odd-length glyph;
+Math and Symbols 2 have over a thousand each, and ≠ → ✔ ✗ ☐ ⚠ came out blank while every test
+was green. `evenGlyphFontkit` in `font-set.ts` pads each odd glyph with one zero byte, on this
+module's subsets only. `layout.test.ts`'s `brokenGlyphs` holds every embedded glyph to its source
+font (same outline, not a byte shorter): an outline check alone passes a blank glyph, because a
+parser reads from the glyph's start and ignores where it ends. **When a font joins the chain, look
+at a rendered page, not only at the tests.**
+
 **The guard is derived from the fonts, never a hardcoded range**, so it cannot lie about what
 the renderer can draw and it narrows on its own when a font is added. **It REFUSES rather than
 mangling** — `UnrenderableText` names the character, its code point, the field and what the
 chain does carry — because dropping a letter from a client's name on a legal document is worse
-than producing nothing. CJK is the honest remaining gap.
+than producing nothing. Colour emoji (`✅ ❌`), CJK and Arabic are the honest remaining gaps.
 
 Money still prints with its ISO code (`INR 216,000.00`), and that is now a product decision
 rather than a limit: this is a cross-border product, and a bare symbol is ambiguous to a reader

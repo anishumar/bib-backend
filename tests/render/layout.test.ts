@@ -1,5 +1,9 @@
 // The renderer's pure rules, and the one property the engine was chosen for.
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+import fontkit from "@pdf-lib/fontkit";
+import { PDFArray, PDFDict, PDFDocument, PDFName, PDFRawStream, decodePDFRawStream } from "pdf-lib";
 import { describe, expect, it } from "vitest";
 import { CLIENT_DATE_ANCHOR, CLIENT_SIGN_ANCHOR, wrapParagraph } from "../../src/domain/render/model";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
@@ -104,10 +108,167 @@ describe("the font chain draws what the built-in fonts could not (T3.9)", () => 
   });
 });
 
+interface ProbeGlyph {
+  readonly id: number;
+  readonly path: { toSVG(): string };
+}
+interface ProbeFont {
+  layout(text: string): { glyphs: ProbeGlyph[] };
+  getGlyph(id: number): ProbeGlyph;
+  hasGlyphForCodePoint(codePoint: number): boolean;
+  glyphForCodePoint(codePoint: number): ProbeGlyph;
+  readonly loca: { readonly offsets: readonly number[] };
+}
+const probeFont = (bytes: Uint8Array): ProbeFont =>
+  fontkit.create(Buffer.from(bytes)) as unknown as ProbeFont;
+const requireFont = createRequire(import.meta.url);
+const SOURCE_FONTS: readonly ProbeFont[] = [
+  ...["latin", "latin-ext", "devanagari"].flatMap((s) =>
+    [400, 700].map((w) => `@fontsource/noto-sans/files/noto-sans-${s}-${String(w)}-normal.woff`)),
+  "@fontsource/noto-sans-math/files/noto-sans-math-latin-400-normal.woff",
+  "@fontsource/noto-sans-symbols-2/files/noto-sans-symbols-2-symbols-400-normal.woff",
+].map((p) => probeFont(readFileSync(requireFont.resolve(p))));
+const glyphBytes = (f: ProbeFont, id: number): number =>
+  (f.loca.offsets[id + 1] ?? 0) - (f.loca.offsets[id] ?? 0);
+
+/** The glyphs a source font could have drawn this text with: its own glyph for
+ *  one character (a Devanagari vowel sign laid out alone gains a dotted
+ *  circle), or the one glyph a ligature lays out as. */
+function candidates(source: ProbeFont, text: string): ProbeGlyph[] {
+  const chars = [...text];
+  const code = chars.length === 1 ? (text.codePointAt(0) ?? 0) : null;
+  const direct = code !== null && source.hasGlyphForCodePoint(code) ? [source.glyphForCodePoint(code)] : [];
+  const run = source.layout(text).glyphs;
+  return [...direct, ...(run.length === 1 ? run : [])].filter((g) => g.id !== 0);
+}
+
+/**
+ * Every glyph a PDF embeds, held to the font file it came from: the same
+ * outline, and not one byte shorter. The second half is the one a reader sees.
+ * A viewer's rasteriser (FreeType, under Chrome and MuPDF) draws NOTHING for a
+ * glyph whose data is cut short, while a parser reading from the glyph's start
+ * decodes it perfectly, so an outline check alone passes a blank symbol.
+ * Answers one line per broken glyph.
+ */
+async function brokenGlyphs(bytes: Uint8Array): Promise<string[]> {
+  const pdf = await PDFDocument.load(bytes);
+  const ctx = pdf.context;
+  const dict = (from: PDFDict, key: string): PDFDict => ctx.lookup(from.get(PDFName.of(key)), PDFDict);
+  const stream = (from: PDFDict, key: string): Buffer => {
+    const raw = ctx.lookup(from.get(PDFName.of(key)));
+    if (!(raw instanceof PDFRawStream)) throw new Error(`${key} is not a stream`);
+    return Buffer.from(decodePDFRawStream(raw).decode());
+  };
+  const broken: string[] = [];
+  for (const [, obj] of ctx.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFDict) || obj.get(PDFName.of("Subtype")) !== PDFName.of("Type0")) continue;
+    const cid = ctx.lookup(ctx.lookup(obj.get(PDFName.of("DescendantFonts")), PDFArray).get(0), PDFDict);
+    const embedded = probeFont(stream(dict(cid, "FontDescriptor"), "FontFile2"));
+    // The ToUnicode map says which text each glyph id draws; a ligature is one
+    // glyph for several characters, so the source is found by laying it out.
+    const cmap = stream(obj, "ToUnicode").toString("latin1");
+    for (const [, gidHex, textHex] of cmap.matchAll(/<([0-9A-Fa-f]{4})> <([0-9A-Fa-f]+)>/g)) {
+      const gid = parseInt(gidHex ?? "", 16);
+      const text = Buffer.from(textHex ?? "", "hex").swap16().toString("utf16le");
+      let outline: string;
+      try {
+        outline = embedded.getGlyph(gid).path.toSVG();
+      } catch {
+        outline = "unreadable";
+      }
+      const whole = SOURCE_FONTS.some((source) =>
+        candidates(source, text).some((glyph) =>
+          glyph.path.toSVG() === outline && glyphBytes(embedded, gid) >= glyphBytes(source, glyph.id)));
+      if (!whole) broken.push(`${JSON.stringify(text)} (glyph ${String(gid)})`);
+    }
+  }
+  return broken;
+}
+
+/** Every font a PDF carries, by its PostScript name ("ABCDEF+NotoSansMath-Regular"). */
+async function fontNames(bytes: Uint8Array): Promise<string[]> {
+  const { PDFDocument, PDFDict, PDFName } = await import("pdf-lib");
+  const pdf = await PDFDocument.load(bytes);
+  const names: string[] = [];
+  for (const [, obj] of pdf.context.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFDict) || obj.get(PDFName.of("Type")) !== PDFName.of("Font")) continue;
+    const base = obj.get(PDFName.of("BaseFont"));
+    if (base instanceof PDFName) names.push(base.decodeText());
+  }
+  return names;
+}
+
+describe("the symbols fallback draws what a firm's templates actually write", () => {
+  it("draws ≤ and ≥ — the standard service template writes volume limits with them", async () => {
+    // Found on QA, 2026-09-29: the catalogue brought over from the firm's
+    // previous app words its volume limits as "≤1,000 entries; ≤300 vendor/≤200
+    // customer invoices", and every proposal quoting that service was refused.
+    // Neither sign is in any of the three Noto Sans files; Noto Sans Math has both.
+    const bytes = await new PdfLibRenderer().render(
+      doc({
+        sections: [{
+          heading: "Volume limits",
+          paragraphs: ["≤1,000 entries; ≤8 bank accounts; GSTR-9C (turnover ≥ ₹2 cr)"],
+        }],
+      }),
+    );
+    expect(await fontNames(bytes)).toContainEqual(expect.stringContaining("NotoSansMath"));
+  });
+
+  it("draws the other signs people type into a scope: ≠ ≈ → ✓ ✔ ✗ ☐ ⚠", async () => {
+    const bytes = await new PdfLibRenderer().render(
+      doc({ sections: [{ heading: "Checks", paragraphs: ["maker ≠ checker ≈ → ✓ ✔ ✗ ☐ ⚠"] }] }),
+    );
+    const names = await fontNames(bytes);
+    expect(names).toContainEqual(expect.stringContaining("NotoSansMath"));
+    expect(names).toContainEqual(expect.stringContaining("NotoSansSymbols2"));
+  });
+
+  it("draws a warning sign typed from a phone's emoji keyboard, which appends an invisible U+FE0F", async () => {
+    // "⚠️" is TWO characters: the sign, then a variation selector asking for
+    // the colourful style. The selector draws nothing, so the PDF draws the
+    // sign and leaves the request out — nothing visible is lost.
+    const bytes = await new PdfLibRenderer().render(
+      doc({ sections: [{ heading: "Note", paragraphs: ["⚠️ Due by the 7th"] }] }),
+    );
+    expect(await fontNames(bytes)).toContainEqual(expect.stringContaining("NotoSansSymbols2"));
+  });
+
+  it("embeds every glyph WHOLE, so a symbol is drawn and not left blank", async () => {
+    // Found by looking at the page, after every test above was green: ≠ → ✔ ✗
+    // ☐ ⚠ took up their space and drew nothing. @pdf-lib/fontkit writes a small
+    // subset with the short loca format, which stores each glyph's offset
+    // halved, and never pads a glyph to an even length first. The Noto Sans
+    // text fonts have no odd-length glyph, so they never met it; Math and
+    // Symbols 2 have well over a thousand each, and every glyph after the first
+    // one was cut short or read from the wrong byte.
+    const bytes = await new PdfLibRenderer().render(
+      doc({
+        sections: [{
+          heading: "Symbols",
+          paragraphs: ["≤1,000 ≥ ₹2 cr ≠ ≈ → ← ✓ ✔ ✗ ☐ ☑ ⚠ ★ ● ■ ▶ ─ ∞ √ ±", "कावेरी — Société Łódź"],
+        }],
+      }),
+    );
+    expect(await brokenGlyphs(bytes)).toEqual([]);
+  });
+
+  it("embeds the symbol fonts ONLY into a document that uses them", async () => {
+    // The chain grew; the documents already issued must not. A plain letter
+    // carries exactly the fonts it carried before these were added, which is
+    // what keeps it re-rendering to the bytes its client holds.
+    const names = await fontNames(await new PdfLibRenderer().render(doc()));
+    // The control: without it an empty list would pass the line below.
+    expect(names).toContainEqual(expect.stringContaining("NotoSans-"));
+    expect(names.some((n) => n.includes("NotoSansMath") || n.includes("NotoSansSymbols"))).toBe(false);
+  });
+});
+
 describe("and it still refuses, by name, what the chain does not cover", () => {
   it("refuses CJK — the honest remaining limit", async () => {
-    // Noto Sans latin + latin-ext + devanagari does not include CJK, and adding
-    // it is another font in the chain rather than a change of approach.
+    // No font in the chain (Noto Sans latin, latin-ext and devanagari, then
+    // Noto Sans Math and Symbols 2) includes CJK, and adding it is another font
+    // in the chain rather than a change of approach.
     // Refusing beats mangling: a client's name with a character missing on a
     // legal document is worse than producing nothing.
     await expect(
@@ -119,6 +280,12 @@ describe("and it still refuses, by name, what the chain does not cover", () => {
     await expect(
       new PdfLibRenderer().render(doc({ footer: "株" })),
     ).rejects.toThrow(/the footer contains/);
+  });
+
+  it("refuses a colour emoji — no font in the chain carries one", async () => {
+    await expect(
+      new PdfLibRenderer().render(doc({ footer: "Filed ✅" })),
+    ).rejects.toThrow(/the footer contains "✅"/);
   });
 
   it("refuses BEFORE drawing, so no half-page is produced", async () => {
