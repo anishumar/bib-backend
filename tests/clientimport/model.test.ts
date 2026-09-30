@@ -39,6 +39,10 @@ function snapshot(over: Partial<ImportSnapshot> = {}): ImportSnapshot {
       ["anita@firm.test", "user-anita"],
       ["ravi@firm.test", "user-ravi"],
     ]),
+    staffByName: new Map([
+      ["anita rao", ["anita@firm.test"]],
+      ["ravi", ["ravi@firm.test", "ravi.k@firm.test"]],
+    ]),
     relationshipTypes: new Set(["director_of", "authorised_signatory_of", "shareholder_of", "employee_of", "parent_of", "client_of"]),
     clauseJurisdictions: new Set(["IN"]),
     byIdentifier: new Map(),
@@ -137,6 +141,18 @@ describe("reading a grid", () => {
     ];
     const [row] = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
     expect(row?.spocs).toEqual([{ dept: "TRC", email: "ravi@firm.test", column: "SPOC: TRC" }]);
+  });
+
+  it("keeps the month and day of a Financial Year End Excel turned into a whole date", () => {
+    const grid = [
+      ["Client Name", "Financial Year End"],
+      ["Alpha Ltd", "2031-03-31"],
+      ["Beta Ltd", "31-Dec-2012"],
+      ["Gamma Ltd", "03-31"],
+      ["Delta Ltd", "31/03"],
+    ];
+    const rows = clientRowsOf(rowsOf(grid, CLIENT_SHEET_MARKER) ?? []);
+    expect(rows.map((r) => r.financialYearEnd)).toEqual(["03-31", "12-31", "03-31", "31/03"]);
   });
 
   it("reads the numbered pairs, whose headers are the same at every firm", () => {
@@ -331,6 +347,24 @@ describe("a client row", () => {
     expect(messages).toContain('SPOC for TRC "who@firm.test" is not an active member of staff at this firm');
     expect(messages.some((m) => m.startsWith('the column "SPOC: Legal" names no active Dept'))).toBe(true);
     expect(report.findings.find((f) => f.name === "SPOC: Legal")?.sheet).toBe("file");
+  });
+
+  it("names the email a NAME typed into an email column belongs to, and never picks one of two", () => {
+    const report = validateImport(
+      {
+        clients: [
+          client({ keyManagerEmail: "Anita  Rao", spocs: [{ dept: "TRC", email: "Ravi", column: "SPOC 1" }] }),
+          client({ lineNo: 3, legalName: "Beta Ltd", identifiers: [], keyManagerEmail: "Nobody Known" }),
+        ],
+        people: [],
+        engagements: [],
+      },
+      snapshot(),
+    );
+    const messages = blockingMessages(report);
+    expect(messages).toContain('Key Manager "Anita  Rao" is a name. This column takes the colleague\'s login email: anita@firm.test');
+    expect(messages).toContain('SPOC for TRC "Ravi" is a name, and 2 colleagues have it (ravi@firm.test, ravi.k@firm.test). Put the login email of the one you mean');
+    expect(messages).toContain('Key Manager "Nobody Known" is not an email. This column takes the login email of an active member of staff at this firm');
   });
 
   it("refuses HALF a numbered pair — a SPOC covers a Dept, so neither half is a smaller SPOC", () => {

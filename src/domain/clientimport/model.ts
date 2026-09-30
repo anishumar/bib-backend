@@ -404,7 +404,7 @@ export function clientRowsOf(rows: readonly SheetRow[]): readonly ClientRow[] {
       jurisdiction: blankToNull(r.cell("Country")),
       entityType: blankToNull(r.cell("Entity Type")),
       incorporatedOn: blankToNull(r.cell("Incorporated On")),
-      financialYearEnd: blankToNull(r.cell("Financial Year End")),
+      financialYearEnd: monthDayOf(blankToNull(r.cell("Financial Year End"))),
       registeredAddress: blankToNull(r.cell("Registered Address")),
       identifiers: IDENTIFIER_COLUMNS.flatMap((c) => {
         const value = r.cell(c.header);
@@ -497,6 +497,21 @@ export function parsePortalInvite(raw: string | null): boolean | null {
   return null;
 }
 
+/**
+ * A Financial Year End as `MM-DD` when the cell holds a whole DATE.
+ *
+ * A year end typed into Excel becomes a date cell and the reader hands it back
+ * as `2031-03-31` (Excel adds the current year to "31/03"); `31-Mar-2026` is a
+ * date too. The year means nothing here and the month and day are
+ * unambiguous, so they are kept. Anything else comes back unchanged, so the
+ * refusal quotes what was typed.
+ */
+export function monthDayOf(s: string | null): string | null {
+  if (s === null) return null;
+  const day = parseSheetDate(s);
+  return day === null ? s : day.slice(5);
+}
+
 /** `MM-DD`, and a day that exists in that month. */
 export function isMonthDay(s: string): boolean {
   const m = /^(\d{2})-(\d{2})$/.exec(s.trim());
@@ -554,6 +569,13 @@ export interface ImportSnapshot {
   readonly axes: readonly KnownAxis[];
   /** Active staff by lower-cased email → user id. */
   readonly staff: ReadonlyMap<string, string>;
+  /**
+   * Active staff by NORMALISED display name → their login emails. Read only to
+   * say which email a NAME typed into an email column belongs to: the column
+   * still takes the email, because two colleagues share a first name at the
+   * first firm already and picking one is a guess about who owns a client.
+   */
+  readonly staffByName: ReadonlyMap<string, readonly string[]>;
   readonly relationshipTypes: ReadonlySet<string>;
   /** Letter jurisdictions the firm's clause library can cover. */
   readonly clauseJurisdictions: ReadonlySet<string>;
@@ -742,6 +764,26 @@ function roleWords(relationship: string): string {
   return `${/^[aeiou]/i.test(word) ? "an" : "a"} ${word}`;
 }
 
+/**
+ * The rest of the sentence refusing `typed` in a column that takes a
+ * colleague's login email. A name gets the email it belongs to, or the emails
+ * of every colleague it could be, because "is not an active member of staff"
+ * reads as "this person does not work here" to somebody who typed their name.
+ */
+function notStaff(typed: string, snap: ImportSnapshot): string {
+  const emails = typed.includes("@") ? [] : (snap.staffByName.get(normaliseName(typed)) ?? []);
+  if (emails.length === 1) {
+    return `"${typed}" is a name. This column takes the colleague's login email: ${emails[0] ?? ""}`;
+  }
+  if (emails.length > 1) {
+    return `"${typed}" is a name, and ${String(emails.length)} colleagues have it (${emails.join(", ")}). Put the login email of the one you mean`;
+  }
+  if (!typed.includes("@")) {
+    return `"${typed}" is not an email. This column takes the login email of an active member of staff at this firm`;
+  }
+  return `"${typed}" is not an active member of staff at this firm`;
+}
+
 export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportReport {
   const findings: Finding[] = [];
   const verdicts: RowVerdict[] = [];
@@ -853,7 +895,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     }
 
     if (row.keyManagerEmail !== null && !snap.staff.has(row.keyManagerEmail.toLowerCase())) {
-      bad(`Key Manager "${row.keyManagerEmail}" is not an active member of staff at this firm`);
+      bad(`Key Manager ${notStaff(row.keyManagerEmail, snap)}`);
     }
     // A company inside a group is owned through the group — its letter is the
     // group's and so is its account team — so only a standalone client with no
@@ -882,7 +924,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         continue;
       }
       if (!snap.staff.has(spoc.email.toLowerCase())) {
-        bad(`SPOC for ${spoc.dept} "${spoc.email}" is not an active member of staff at this firm`);
+        bad(`SPOC for ${spoc.dept} ${notStaff(spoc.email, snap)}`);
       }
     }
 

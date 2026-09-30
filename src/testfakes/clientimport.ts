@@ -156,8 +156,8 @@ export class FakeImportDirectory implements ImportDirectory {
     this.axisRows.push(a);
     return this;
   }
-  withStaff(email: string, userId: string): this {
-    this.staff.push({ email, userId });
+  withStaff(email: string, userId: string, name: string | null = null): this {
+    this.staff.push({ email, userId, name });
     return this;
   }
   withClause(c: ClauseOnFile): this {
