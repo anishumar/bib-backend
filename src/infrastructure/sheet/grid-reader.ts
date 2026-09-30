@@ -1,8 +1,9 @@
 // Reading a spreadsheet without a spreadsheet library.
 //
-// An `.xlsx` is a zip of XML. The two parts that matter are
+// An `.xlsx` is a zip of XML. The parts that matter are
 // `xl/sharedStrings.xml`, which holds every distinct string in the workbook,
-// and the first worksheet, whose cells reference those strings by index. That
+// the first worksheet, whose cells reference those strings by index, and
+// `xl/styles.xml`, the only place that says a number is a date. That
 // is enough for a flat table and it costs no dependency — a parser here is
 // smaller than the supply chain of a library that reads charts, formulas and
 // pivot tables an onboarding sheet does not have.
@@ -93,9 +94,83 @@ function columnIndex(ref: string): number {
   return n - 1;
 }
 
+// ── Dates ────────────────────────────────────────────────────────────────────
+//
+// Excel stores a date as a NUMBER — days since its epoch — and only the cell's
+// number format says it is a date. So a sheet whose Incorporated On reads
+// "2019/11/12" on screen hands a reader that ignores styles "43781", and the
+// import refused every date a firm had typed into Excel rather than into a
+// text cell (found on QA, 2026-09-30). The format is in `xl/styles.xml`: a
+// cell's `s` indexes `cellXfs`, whose `numFmtId` is either built in or defined
+// in `numFmts`. A date-formatted number comes out as `YYYY-MM-DD`, the form
+// every date column already accepts; the domain decides what else a column
+// wants from it (Financial Year End keeps the month and day).
+
+/** Built-in number formats that show a DATE (14–17, 22) or a locale's date
+ *  (27–36, 50–58). 18–21 and 45–47 are times of day and stay numbers. */
+const BUILTIN_DATE_FORMATS = new Set([14, 15, 16, 17, 22, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 50, 51, 52, 53, 54, 55, 56, 57, 58]);
+
+/** A custom format is a date when a day or year token survives removing its
+ *  literal text, escapes, fill and padding characters and bracketed sections
+ *  (locale, colour, elapsed time). `m` alone is left out: it is also minutes. */
+export function isDateFormatCode(code: string): boolean {
+  const bare = code
+    .replace(/"[^"]*"/g, "")
+    .replace(/\\./g, "")
+    .replace(/[_*]./g, "")
+    .replace(/\[[^\]]*\]/g, "");
+  return /[dy]/i.test(bare);
+}
+
+/** Which style indexes (`s` on a cell) format a number as a date. */
+function dateStyles(stylesXml: string | undefined): ReadonlySet<number> {
+  const out = new Set<number>();
+  if (stylesXml === undefined) return out;
+  const custom = new Map<number, string>();
+  for (const m of stylesXml.matchAll(/<numFmt\b[^>]*?numFmtId="(\d+)"[^>]*?formatCode="([^"]*)"/g)) {
+    custom.set(Number(m[1]), unescapeXml(m[2] ?? ""));
+  }
+  const xfs = /<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/.exec(stylesXml)?.[1] ?? "";
+  [...xfs.matchAll(/<xf\b([^>]*)/g)].forEach((m, index) => {
+    const id = Number(/numFmtId="(\d+)"/.exec(m[1] ?? "")?.[1] ?? "0");
+    const code = custom.get(id);
+    if (code !== undefined ? isDateFormatCode(code) : BUILTIN_DATE_FORMATS.has(id)) out.add(index);
+  });
+  return out;
+}
+
+/**
+ * An Excel serial day as `YYYY-MM-DD`, or null when it names no day.
+ *
+ * The 1900 system counts 1900-01-01 as 1 and carries Lotus 1-2-3's fictional
+ * 29 February 1900 as 60, so from 61 on the epoch is 1899-12-30 and below it
+ * 1899-12-31; serial 60 is a day that never existed and is refused. The 1904
+ * system (old Mac workbooks) counts from 1904-01-01 as 0. A time of day is
+ * the fraction and is dropped: these columns hold days.
+ */
+export function excelSerialToDay(serial: number, date1904: boolean): string | null {
+  if (!Number.isFinite(serial) || serial < 0) return null;
+  const whole = Math.floor(serial);
+  let epoch: number;
+  if (date1904) {
+    epoch = Date.UTC(1904, 0, 1);
+  } else {
+    if (whole < 1 || whole === 60) return null;
+    epoch = whole > 60 ? Date.UTC(1899, 11, 30) : Date.UTC(1899, 11, 31);
+  }
+  const day = new Date(epoch + whole * 86_400_000);
+  const year = day.getUTCFullYear();
+  if (year > 9999) return null;
+  return day.toISOString().slice(0, 10);
+}
+
 /** Every cell of the first worksheet, as a rectangular grid of strings. */
 function readWorkbook(buf: Buffer, filename: string): (readonly string[])[] {
   const entries = readZipEntries(buf);
+  const dates = dateStyles(entries.get("xl/styles.xml")?.toString("utf8"));
+  const date1904 = /<workbookPr\b[^>]*\bdate1904="(1|true)"/.test(
+    entries.get("xl/workbook.xml")?.toString("utf8") ?? "",
+  );
 
   const sharedXml = entries.get("xl/sharedStrings.xml");
   const shared: string[] = [];
@@ -123,11 +198,24 @@ function readWorkbook(buf: Buffer, filename: string): (readonly string[])[] {
       const body = m[2] ?? "";
       const ref = /r="([A-Z]+\d+)"/.exec(attrs)?.[1];
       if (ref === undefined) continue;
-      const type = /t="(\w+)"/.exec(attrs)?.[1];
+      const type = /\bt="(\w+)"/.exec(attrs)?.[1];
+      const style = Number(/\bs="(\d+)"/.exec(attrs)?.[1] ?? "-1");
       const v = /<v>([\s\S]*?)<\/v>/.exec(body)?.[1];
       let value = "";
       if (v !== undefined) {
-        value = type === "s" ? (shared[Number(v)] ?? "") : unescapeXml(v);
+        if (type === "s") {
+          value = shared[Number(v)] ?? "";
+        } else if (type === "b") {
+          // A typed TRUE is a boolean cell stored as 1; Portal Invite wants the word.
+          value = v.trim() === "1" ? "TRUE" : "FALSE";
+        } else if (type === "d") {
+          // Strict OOXML writes a date cell as ISO text already.
+          value = /^\d{4}-\d{2}-\d{2}/.exec(v.trim())?.[0] ?? unescapeXml(v);
+        } else if ((type === undefined || type === "n") && dates.has(style)) {
+          value = excelSerialToDay(Number(v), date1904) ?? unescapeXml(v);
+        } else {
+          value = unescapeXml(v);
+        }
       } else if (body !== "") {
         value = unescapeXml(
           [...body.matchAll(/<t[^>]*>([\s\S]*?)<\/t>/g)].map((x) => x[1] ?? "").join(""),

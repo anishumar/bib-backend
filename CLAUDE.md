@@ -4200,6 +4200,16 @@ guess.
 `tenant:admin` on every route, because one confirm creates parties, letters and assignments in
 one act, and the report names the roster by email.
 
+**An Excel date is a NUMBER, and only its style says so (2026-09-30).** The first real sheet on QA
+was refused on every date: Excel stores `2019/11/12` as `43781`, and the reader ignored
+`xl/styles.xml`. It now reads each cell's `s` → `cellXfs` → `numFmtId` (built in, or a custom
+`formatCode` with a day or year token once literals and `[...]` are stripped) and writes a
+date-formatted number as `YYYY-MM-DD`, honouring `date1904` and refusing Lotus's 29 February 1900; a
+boolean cell (a typed TRUE) becomes `TRUE`/`FALSE`. Financial Year End keeps the month and day of a
+whole date (`monthDayOf`: Excel adds the current year to "31/03"). A NAME typed where a login email
+belongs is still refused, but the sentence names the email it belongs to, or every colleague
+sharing it: picking one of two Ashishes would be a guess about who owns a client.
+
 ## First module
 
 `tenancy`, `party`, the `ledger`, the `config` registry, the `lead` pipeline, `proposals`,

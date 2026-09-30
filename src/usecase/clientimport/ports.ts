@@ -203,6 +203,8 @@ export interface PersonOnFile {
 export interface StaffMember {
   readonly email: string;
   readonly userId: string;
+  /** Their display name, when the account has one. */
+  readonly name: string | null;
 }
 
 export interface ClauseOnFile {

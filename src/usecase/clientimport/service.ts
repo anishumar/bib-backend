@@ -84,6 +84,7 @@ import type {
   PortalInviteWriter,
   PortalMemberFinder,
   SheetReader,
+  StaffMember,
   StagedImport,
   StagedImportSummary,
 } from "./ports";
@@ -301,6 +302,7 @@ export class ClientImportService {
       services: new Map(services.map((s) => [normaliseName(s.code), s] as const)),
       axes,
       staff: new Map(staff.map((s) => [s.email.toLowerCase(), s.userId] as const)),
+      staffByName: staffByName(staff),
       relationshipTypes: new Set(relationshipTypes),
       clauseJurisdictions,
       byIdentifier,
@@ -822,6 +824,17 @@ export function clausesFor(clauses: readonly ClauseOnFile[], jurisdiction: strin
         (c.courtsJurisdiction === null || c.courtsJurisdiction === jurisdiction),
     )
     .map((c) => c.versionId);
+}
+
+/** Active staff by normalised display name → every login email carrying it. */
+function staffByName(staff: readonly StaffMember[]): ReadonlyMap<string, readonly string[]> {
+  const out = new Map<string, string[]>();
+  for (const s of staff) {
+    const k = s.name === null ? "" : normaliseName(s.name);
+    if (k === "") continue;
+    out.set(k, [...(out.get(k) ?? []), s.email.toLowerCase()]);
+  }
+  return out;
 }
 
 function messageOf(err: unknown): string {
