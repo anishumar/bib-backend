@@ -773,10 +773,13 @@ p = json.load(sys.stdin)
 print("%s/%s/%s" % (p["totals"]["net"], p["totals"]["currency"], p["lines"][0]["description"][:3]))')
 chk "an associate sees the work, not the money" "None/AED/GST" "$REDACTED"
 
+# Staff no longer ACCEPT through /decision (0317): a client's yes given
+# outside the link is recorded, with how and when, by acceptance:record (a
+# partner). The firm here is on UTC, so "today" is the UTC day.
 ACCEPT='{"decision":"accepted"}'
-REJECT='{"decision":"rejected"}'
-chk "the client accepts it"                200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$ACCEPT")"
-chk "and cannot change their mind here"    409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$REJECT")"
+RECORDED="{\"channel\":\"call\",\"acceptedOn\":\"$(date -u +%F)\",\"acceptedByName\":\"Smoke Client\",\"note\":\"Said yes on a call.\"}"
+chk "accepting through /decision is refused" 409 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/decision -H "$H" -d "$ACCEPT")"
+chk "the partner records the client's yes"  200 "$(code -b $J/partner.txt -XPOST $API/api/v1/proposals/$PRID/acceptance -H "$H" -d "$RECORDED")"
 
 # The share link: the one route in this product with no session behind it. A
 # proposal goes to somebody who has no login and will not get one.

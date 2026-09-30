@@ -1,6 +1,7 @@
 // The ports the engagement use case needs from the world. Interfaces are owned
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
+import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { EngagementErrorCode } from "../../domain/engagement/errors";
 import type { ClientStructure } from "../../domain/party/model";
@@ -614,6 +615,9 @@ export interface LetterView extends Omit<LetterRecord, "engagements"> {
   /** Why "Copy as new draft" would be refused right now (0316), or null when it
    *  would work, which for a letter means a withdrawn one. */
   readonly copyRefusal: { readonly code: EngagementErrorCode; readonly message: string } | null;
+  /** The client's acceptance given outside bib, recorded by a colleague holding
+   *  `acceptance:record` (0317), or null. */
+  readonly recordedAcceptance: RecordedAcceptance | null;
 }
 
 /**
@@ -874,7 +878,19 @@ export interface EngagementRepository {
     letterId: string,
     signature: SignatureRecord,
     engagements: readonly NewEngagement[],
+    /** The client's acceptance given outside bib, recorded by a colleague
+     *  (0317): written in the SAME transaction, so a letter signed this way
+     *  never stands without its evidence. Refuses evidence not filed against
+     *  this letter (`EvidenceNotFiledHere`). */
+    acceptance?: NewRecordedAcceptance | null,
   ): Promise<{ letter: EngagementLetter; engagements: readonly Engagement[] }>;
+
+  /** Whether `documentId` is a file live-linked to this letter: the evidence
+   *  check, asked BEFORE an envelope is voided so a wrong file voids nothing. */
+  isFiledAgainst(tenantId: string, letterId: string, documentId: string): Promise<boolean>;
+
+  /** The acceptance recorded for this letter (0317), or null. */
+  findRecordedAcceptance(tenantId: string, letterId: string): Promise<RecordedAcceptance | null>;
 
   /** Records the advance and releases every engagement waiting on it, in one
    *  transaction for the same reason. */

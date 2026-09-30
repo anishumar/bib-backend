@@ -43,7 +43,8 @@ import { Sha256ContentHasher } from "../../src/infrastructure/crypto/random-toke
 import { LedgerService } from "../../src/usecase/ledger/service";
 import { ConfigService } from "../../src/usecase/config/service";
 import { PartyService } from "../../src/usecase/party/service";
-import { EngagementService } from "../../src/usecase/engagement/service";
+import { EngagementService, RECORDED_ACCEPTANCE_METHOD } from "../../src/usecase/engagement/service";
+import { EvidenceNotFiledHere } from "../../src/domain/acceptance/errors";
 import { TenancyService } from "../../src/usecase/tenancy/service";
 import { DocumentService } from "../../src/usecase/document/service";
 import { StaffGradeService } from "../../src/usecase/staffgrade/service";
@@ -1804,5 +1805,160 @@ describe("who a letter and an invoice name, in the database (F-10-1, 0306)", () 
     `;
     expect(codeOf(await insert(partyA, "EL-2026-9101").catch((e: unknown) => e))).toBe("23514");
     await expect(insert(otherClient, "EL-2026-9102")).resolves.toBeDefined();
+  });
+});
+
+describe("a letter the client accepted outside bib, in the database (0317)", () => {
+  /** A letter sent and waiting, and the client's email filed against it. */
+  async function sentWithEvidence(): Promise<{ letterId: string; emailFile: string }> {
+    const letter = await service.draft(
+      {
+        tenantId: tenantA,
+        partyId: partyA,
+        jurisdiction: "IN",
+        title: "Acme — accepted by email",
+        currency: "INR",
+        fxRate: "1",
+        fxRateDate: "2026-07-01",
+        advanceRequired: false,
+      },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({
+      tenantId: tenantA,
+      letterId: letter.id,
+      entityPartyId: entityA1,
+      serviceVersionId: gstV1,
+      description: "GST filing, 12 months",
+      quantity: "12",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await service.addClause(tenantA, letter.id, scopeV1);
+    await service.send(tenantA, letter.id, SYSTEM_ACTOR);
+    const [doc] = await owner<{ id: string }[]>`
+      INSERT INTO files.document (tenant_id, title, origin, kind, party_id)
+      VALUES (${tenantA}, 'Email from R Sharma: go ahead', 'uploaded', 'correspondence', ${partyA})
+      RETURNING id
+    `;
+    if (!doc) throw new Error("could not file the evidence");
+    await owner`
+      INSERT INTO files.document_link (tenant_id, document_id, subject_kind, subject_ref, role)
+      VALUES (${tenantA}, ${doc.id}, 'engagement_letter', ${letter.id}, 'acceptance_evidence')
+    `;
+    return { letterId: letter.id, emailFile: doc.id };
+  }
+
+  async function recorder(): Promise<string> {
+    const [u] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email, display_name)
+      VALUES (${`recorder-${stamp}-${String(refProbe())}@example.test`}, 'Siddharth Kohli') RETURNING id
+    `;
+    if (!u) throw new Error("could not create the recorder");
+    return u.id;
+  }
+
+  it("signs it, fans out, and writes the evidence in the same transaction", async () => {
+    const { letterId, emailFile } = await sentWithEvidence();
+    const partner = await recorder();
+
+    const result = await service.recordAcceptance(
+      {
+        tenantId: tenantA,
+        letterId,
+        statement: {
+          channel: "email",
+          acceptedOn: (await service.describe(tenantA, letterId)).letter.sentAt?.slice(0, 10) ?? "",
+          acceptedByName: "R Sharma",
+          note: "Replied go ahead on the letter thread.",
+          evidenceDocumentId: emailFile,
+        },
+      },
+      partner,
+      { type: "human", id: partner },
+    );
+
+    expect(result.letter).toMatchObject({ status: "signed", signatureMethod: RECORDED_ACCEPTANCE_METHOD });
+    expect(result.engagements).toHaveLength(1);
+    const view = await service.describe(tenantA, letterId);
+    expect(view.recordedAcceptance).toMatchObject({
+      channel: "email",
+      acceptedByName: "R Sharma",
+      evidenceDocumentId: emailFile,
+      evidenceTitle: "Email from R Sharma: go ahead",
+      recordedBy: { userId: partner, displayName: "Siddharth Kohli" },
+    });
+  });
+
+  it("refuses a file filed against ANOTHER letter, and moves nothing", async () => {
+    const first = await sentWithEvidence();
+    const second = await sentWithEvidence();
+    const partner = await recorder();
+    // The first letter's email, offered as the second letter's evidence.
+    await expect(
+      letters.signAndFanOut(
+        tenantA,
+        second.letterId,
+        {
+          signedAt: new Date().toISOString(),
+          signedByName: "R Sharma",
+          signedByTitle: null,
+          signatureMethod: RECORDED_ACCEPTANCE_METHOD,
+          signatureReference: "probe",
+          signedContentHash: "0".repeat(64),
+        },
+        [],
+        {
+          id: crypto.randomUUID(),
+          tenantId: tenantA,
+          channel: "email",
+          acceptedOn: "2026-07-01",
+          acceptedByName: "R Sharma",
+          acceptedByTitle: null,
+          note: "wrong file",
+          evidenceDocumentId: first.emailFile,
+          recordedByUserId: partner,
+        },
+      ),
+    ).rejects.toBeInstanceOf(EvidenceNotFiledHere);
+    // The rollback took the status with it.
+    expect((await service.describe(tenantA, second.letterId)).letter.status).toBe("sent");
+  });
+
+  it("is append-only by GRANT, needs evidence on a letter, and is walled per firm", async () => {
+    const { letterId } = await sentWithEvidence();
+    const partner = await recorder();
+    const codeOf = (e: unknown) => (e as { code?: string }).code;
+
+    // A letter's row with no evidence: the CHECK.
+    const noEvidence = await withTenant(app, tenantA, (db) => db`
+      INSERT INTO crm.recorded_acceptance
+        (tenant_id, engagement_letter_id, channel, accepted_on, accepted_by_name, note, recorded_by_user_id)
+      VALUES (${tenantA}, ${letterId}, 'call', '2026-07-01', 'R Sharma', 'said yes', ${partner})
+    `).catch((e: unknown) => e);
+    expect(codeOf(noEvidence)).toBe("23514");
+
+    // Written, then neither changed nor removed by the app role.
+    const { letterId: other, emailFile } = await sentWithEvidence();
+    await withTenant(app, tenantA, (db) => db`
+      INSERT INTO crm.recorded_acceptance
+        (tenant_id, engagement_letter_id, channel, accepted_on, accepted_by_name, note,
+         evidence_document_id, recorded_by_user_id)
+      VALUES (${tenantA}, ${other}, 'email', '2026-07-01', 'R Sharma', 'said yes', ${emailFile}, ${partner})
+    `);
+    const edit = await withTenant(app, tenantA, (db) => db`
+      UPDATE crm.recorded_acceptance SET note = 'rewritten' WHERE engagement_letter_id = ${other}
+    `).catch((e: unknown) => e);
+    expect(codeOf(edit)).toBe("42501");
+    const remove = await withTenant(app, tenantA, (db) => db`
+      DELETE FROM crm.recorded_acceptance WHERE engagement_letter_id = ${other}
+    `).catch((e: unknown) => e);
+    expect(codeOf(remove)).toBe("42501");
+
+    // The other firm sees nothing of it.
+    const seen = await withTenant(app, tenantB, (db) => db<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM crm.recorded_acceptance WHERE engagement_letter_id = ${other}
+    `);
+    expect(seen[0]?.n).toBe(0);
   });
 });

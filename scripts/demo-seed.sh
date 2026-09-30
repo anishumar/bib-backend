@@ -626,7 +626,9 @@ line "{\"serviceVersionId\":\"$V_BOOK\",\"entityPartyId\":\"$COBALT\",\"descript
 line "{\"serviceVersionId\":\"$V_AUDIT\",\"entityPartyId\":\"$COBALT\",\"description\":\"Statutory audit FY27\",\"quantity\":\"1\",\"unitAmount\":\"175000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
 line "{\"serviceVersionId\":\"$V_PAY\",\"entityPartyId\":\"$COBALT\",\"description\":\"Payroll processing, 12 months\",\"quantity\":\"12\",\"unitAmount\":\"12000.00\",\"discountPercent\":\"0\",\"jurisdiction\":\"IN\"}"
 asp partner "$API/api/v1/proposals/$PROP/send" | ok
-asp partner "$API/api/v1/proposals/$PROP/decision" -d '{"decision":"accepted"}' | ok
+# The client said yes on a call; the partner records it (0317). The firm runs
+# on UTC, so the day is the UTC one.
+asp partner "$API/api/v1/proposals/$PROP/acceptance" -d "{\"channel\":\"call\",\"acceptedOn\":\"$(date -u +%F)\",\"acceptedByName\":\"Priya Menon\",\"note\":\"Priya called to accept the quote as sent.\"}" | ok
 step "six lines across two companies, sent and accepted — PR number allocated"
 
 # A second proposal left as a DRAFT, so the pipeline is not all closed business.

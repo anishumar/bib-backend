@@ -20,6 +20,8 @@ import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
 import type { Proposal, ProposalLine, ProposalStatus } from "../domain/proposal/model";
 import { VIEW_DEDUPE_MINUTES } from "../domain/proposal/model";
+import type { NewRecordedAcceptance } from "../domain/acceptance/model";
+import { EvidenceNotFiledHere } from "../domain/acceptance/errors";
 import { readServiceBody } from "../domain/config/model";
 import { resolveTerms } from "../domain/document/model";
 import type {
@@ -79,6 +81,11 @@ export class FakeProposalRepo implements ProposalRepository {
   readonly emails: NewProposalEmail[] = [];
   /** The client answers recordClientAnswer kept (0085). */
   readonly answers: NewClientAnswer[] = [];
+  /** Acceptances recorded by a colleague (0317). */
+  readonly recorded: { proposalId: string; row: NewRecordedAcceptance; recordedAt: string }[] = [];
+  /** `${proposalId}:${documentId}` for every file live-linked to a proposal —
+   *  what the adapter's evidence check reads off `files.document_link`. */
+  readonly evidenceLinks = new Set<string>();
   /** Filed PDFs a test's `FakeProposalPdfs` produced, by version id — what
    *  `findPdf` resolves, as the join on files.document_version does. */
   readonly pdfs = new Map<string, FiledPdf>();
@@ -470,6 +477,21 @@ export class FakeProposalRepo implements ProposalRepository {
           pdf: a.pdfVersionId === null ? null : (this.pdfs.get(a.pdfVersionId) ?? null),
         };
       })(),
+      recordedAcceptance: (() => {
+        const r = this.recorded.find((x) => x.row.tenantId === tenantId && x.proposalId === proposalId);
+        if (r === undefined) return null;
+        const who = this.accounts.get(r.row.recordedByUserId);
+        return {
+          ...r.row,
+          evidenceTitle: r.row.evidenceDocumentId === null ? null : `evidence ${r.row.evidenceDocumentId}`,
+          recordedBy: {
+            userId: r.row.recordedByUserId,
+            displayName: who?.displayName ?? null,
+            email: who?.email ?? `${r.row.recordedByUserId}@example.test`,
+          },
+          recordedAt: r.recordedAt,
+        };
+      })(),
       deletedBy:
         proposal.deletedByUserId === null
           ? null
@@ -605,6 +627,30 @@ export class FakeProposalRepo implements ProposalRepository {
       .reverse()
       .find((e) => e.tenantId === tenantId && e.proposalId === proposalId && e.linkDigest === digest);
     return Promise.resolve(found ?? null);
+  }
+
+  recordAcceptance(
+    proposalId: string,
+    decidedAt: string,
+    acceptance: NewRecordedAcceptance,
+  ): Promise<Proposal | null> {
+    const current = this.rows.find((r) => r.tenantId === acceptance.tenantId && r.id === proposalId);
+    if (current?.status !== "sent" || current.deletedAt !== null) return Promise.resolve(null);
+    if (
+      acceptance.evidenceDocumentId !== null &&
+      !this.evidenceLinks.has(`${proposalId}:${acceptance.evidenceDocumentId}`)
+    ) {
+      return Promise.reject(new EvidenceNotFiledHere(acceptance.evidenceDocumentId));
+    }
+    this.recorded.push({ proposalId, row: acceptance, recordedAt: decidedAt });
+    return Promise.resolve(
+      this.replace(acceptance.tenantId, proposalId, (p) => ({
+        ...p,
+        status: "accepted",
+        decidedAt,
+        declinedReason: null,
+      })),
+    );
   }
 
   recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null> {

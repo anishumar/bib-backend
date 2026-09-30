@@ -108,6 +108,8 @@ import {
   proposalDeletionRefusal,
 } from "../../domain/proposal/errors";
 import { dayInZone } from "../../domain/scheduler/zone";
+import { checkAcceptance } from "../../domain/acceptance/model";
+import type { AcceptanceStatement } from "../../domain/acceptance/model";
 import { planProposal } from "../../domain/proposal/document";
 import type { ProposalPlan } from "../../domain/proposal/document";
 import type {
@@ -1641,6 +1643,73 @@ export class ProposalService {
       },
     });
     return decided;
+  }
+
+  /**
+   * The client accepted OUTSIDE the link — by email, on a call, in a meeting —
+   * and a colleague holding `acceptance:record` says so (0317, decided
+   * 2026-09-30). The route carries the permission; this carries the rules.
+   *
+   * Only a SENT proposal, and never a lapsed one: one past its validity date is
+   * expired here exactly as every other act on it expires it, and the answer is
+   * a copy as a new draft (0316), not an old price accepted late. How, when,
+   * who and a note are required; the client's email is optional here (the
+   * letter that follows needs one). The status and the evidence are written in
+   * ONE transaction, so neither stands without the other, and a client's own
+   * answer on the link landing first wins.
+   */
+  async recordAcceptance(
+    tenantId: string,
+    proposalId: string,
+    statement: AcceptanceStatement,
+    recordedByUserId: string,
+    actor: Actor,
+  ): Promise<Proposal> {
+    const proposal = await this.findOrThrow(tenantId, proposalId);
+    if (proposal.deletedAt !== null) throw new ProposalDeleted(proposal.ref);
+    const now = this.deps.clock.now().toISOString();
+    if (proposal.status === "sent" && isPastValidity(proposal.validUntil, now)) {
+      await this.expire(proposal, actor);
+      throw new ProposalExpired(proposal.validUntil ?? now.slice(0, 10));
+    }
+    if (proposal.status !== "sent") throw new InvalidTransition(proposal.status, "accepted");
+
+    const zone = await this.deps.timeZones.timeZoneFor(tenantId);
+    const evidence = checkAcceptance(statement, {
+      today: dayInZone(now, zone),
+      sentOn: proposal.sentAt === null ? null : dayInZone(proposal.sentAt, zone),
+      needsEvidence: false,
+    });
+    const id = this.deps.ids.newId();
+    const accepted = await this.deps.proposals.recordAcceptance(proposalId, now, {
+      ...evidence,
+      id,
+      tenantId,
+      recordedByUserId,
+    });
+    if (accepted === null) {
+      // The client answered on the link, or a colleague did, a moment ago.
+      const fresh = await this.findOrThrow(tenantId, proposalId);
+      throw new InvalidTransition(fresh.status, "accepted");
+    }
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "proposal.accepted",
+      objectId: proposal.id,
+      actor,
+      // HOW, never who at the client or what they said: the name and the note
+      // are personal data and live in the erasable row.
+      payload: {
+        partyId: proposal.partyId,
+        decision: "accepted" satisfies ProposalDecision,
+        declinedReasonRecorded: false,
+        via: "recorded",
+        channel: evidence.channel,
+        recordedAcceptanceId: id,
+        evidenceFiled: evidence.evidenceDocumentId !== null,
+      },
+    });
+    return accepted;
   }
 
   // ── internals ───────────────────────────────────────────────────────────────

@@ -6,6 +6,8 @@
 // 0017, proven against real Postgres in
 // tests/engagement/letter.integration.test.ts. A fake that simulated them would
 // be asserting its own behaviour.
+import type { NewRecordedAcceptance, RecordedAcceptance } from "../domain/acceptance/model";
+import { EvidenceNotFiledHere } from "../domain/acceptance/errors";
 import { FakeClientStructure, FakePartyStanding } from "./party";
 import { FakeFirmTimeZone } from "./tenancy";
 import { FakeClock } from "./clock";
@@ -72,6 +74,33 @@ import { makeDocumentIdentity } from "./document";
 import type { FakePreferenceRepo } from "./document";
 
 export class FakeEngagementRepo implements EngagementRepository {
+  /** Acceptances recorded by a colleague (0317), by letter id. */
+  readonly recorded = new Map<string, { row: NewRecordedAcceptance; recordedAt: string }>();
+  /** `${letterId}:${documentId}` for every file live-linked to a letter — the
+   *  adapter reads `files.document_link`. */
+  readonly evidenceLinks = new Set<string>();
+
+  isFiledAgainst(_tenantId: string, letterId: string, documentId: string): Promise<boolean> {
+    return Promise.resolve(this.evidenceLinks.has(`${letterId}:${documentId}`));
+  }
+
+  findRecordedAcceptance(_tenantId: string, letterId: string): Promise<RecordedAcceptance | null> {
+    const r = this.recorded.get(letterId);
+    if (r === undefined) return Promise.resolve(null);
+    return Promise.resolve({
+      id: r.row.id,
+      channel: r.row.channel,
+      acceptedOn: r.row.acceptedOn,
+      acceptedByName: r.row.acceptedByName,
+      acceptedByTitle: r.row.acceptedByTitle,
+      note: r.row.note,
+      evidenceDocumentId: r.row.evidenceDocumentId,
+      evidenceTitle: r.row.evidenceDocumentId === null ? null : `evidence ${r.row.evidenceDocumentId}`,
+      recordedBy: { userId: r.row.recordedByUserId, displayName: null, email: `${r.row.recordedByUserId}@example.test` },
+      recordedAt: r.recordedAt,
+    });
+  }
+
   readonly letters: EngagementLetter[] = [];
   readonly lines: (LetterLine & { removed: boolean })[] = [];
   readonly clauses: LetterClause[] = [];
@@ -440,7 +469,17 @@ export class FakeEngagementRepo implements EngagementRepository {
     letterId: string,
     signature: SignatureRecord,
     engagements: readonly NewEngagement[],
+    acceptance: NewRecordedAcceptance | null = null,
   ): Promise<{ letter: EngagementLetter; engagements: readonly Engagement[] }> {
+    // The adapter's wall, before anything moves (one transaction there).
+    if (
+      acceptance !== null &&
+      (acceptance.evidenceDocumentId === null ||
+        !this.evidenceLinks.has(`${letterId}:${acceptance.evidenceDocumentId}`))
+    ) {
+      return Promise.reject(new EvidenceNotFiledHere(acceptance.evidenceDocumentId ?? "(none)"));
+    }
+    if (acceptance !== null) this.recorded.set(letterId, { row: acceptance, recordedAt: signature.signedAt });
     const letter = this.replace(tenantId, letterId, (l) => ({
       ...l,
       status: "signed" as const,

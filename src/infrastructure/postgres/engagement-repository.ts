@@ -6,6 +6,8 @@
 // Two methods here open a transaction of their own inside the tenant scope, and
 // both do it for the same reason: the states in between are ones a person would
 // have to repair by hand.
+import { insertRecordedAcceptance, readRecordedAcceptance } from "./recorded-acceptance";
+import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 // THE BUG THIS FILE USED TO HAVE. Its own `toDay` read the LOCAL date fields
@@ -1263,6 +1265,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
     letterId: string,
     signature: SignatureRecord,
     engagements: readonly NewEngagement[],
+    acceptance: NewRecordedAcceptance | null = null,
   ): Promise<{ letter: EngagementLetter; engagements: readonly Engagement[] }> {
     return withTenant(this.app, tenantId, async (db) => {
       const [letter] = await db<LetterRow[]>`
@@ -1302,8 +1305,32 @@ export class PostgresEngagementRepository implements EngagementRepository {
         if (!row) throw new Error("engagement insert returned no row");
         created.push(toEngagement(row));
       }
+      if (acceptance !== null) {
+        await insertRecordedAcceptance(db, { kind: "engagement_letter", id: letterId }, acceptance);
+      }
       return { letter: toLetter(letter), engagements: created };
     });
+  }
+
+  async isFiledAgainst(tenantId: string, letterId: string, documentId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [r] = await db<{ ok: boolean }[]>`
+        SELECT EXISTS (
+          SELECT 1 FROM files.document_link
+          WHERE document_id = ${documentId}
+            AND subject_kind = 'engagement_letter'
+            AND subject_ref = ${letterId}
+            AND withdrawn_at IS NULL
+        ) AS ok
+      `;
+      return r?.ok === true;
+    });
+  }
+
+  async findRecordedAcceptance(tenantId: string, letterId: string): Promise<RecordedAcceptance | null> {
+    return withTenant(this.app, tenantId, (db) =>
+      readRecordedAcceptance(db, { kind: "engagement_letter", id: letterId }),
+    );
   }
 
   async recordAdvance(

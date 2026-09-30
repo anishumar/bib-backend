@@ -13,6 +13,7 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { BLOCK_KIND_VALUES } from "./document";
+import { RecordAcceptanceRequest, RecordedAcceptanceSchema, toRecordedAcceptanceBody } from "./acceptance";
 import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
@@ -631,6 +632,12 @@ const LetterRecordSchema = z
           "Why POST /api/v1/engagement-letters/{letterId}/copy would be refused right now, in " +
           "its own words, or null when it would work (0316): only a withdrawn letter is copied.",
       }),
+    recordedAcceptance: RecordedAcceptanceSchema.nullable().openapi({
+      description:
+        "The client's acceptance given outside bib, recorded by a colleague holding " +
+        "`acceptance:record` (0317): how, when, who, the note and the client's filed email. " +
+        "The letter's signatureMethod is then `recorded_acceptance`.",
+    }),
   })
   .openapi("EngagementLetterRecord");
 
@@ -1662,6 +1669,39 @@ const signRoute = createRoute({
   },
 });
 
+const recordAcceptanceRoute = createRoute({
+  method: "post",
+  path: "/api/v1/engagement-letters/{letterId}/acceptance",
+  tags: ["engagement-letters"],
+  summary: "Record that the client accepted outside bib",
+  description:
+    "The client said yes by email, on a call or in a meeting and never signed (0317). Needs " +
+    "`acceptance:record` (a partner, by default). The client's email or letter must already " +
+    "be uploaded and attached to THIS letter (`evidenceDocumentId`). Only while the letter is " +
+    "sent. An envelope still out with the e-sign provider is VOIDED first, so the client " +
+    "cannot also sign it; one the provider reports signed is refused and left for the " +
+    "signature sweep. Then the letter is signed as a signature would sign it — frozen, one " +
+    "engagement per line, the advance gate — under the method `recorded_acceptance`, with the " +
+    "evidence in the same transaction. The recorder is the session's user.",
+  request: {
+    params: z.object({ letterId: z.string().uuid() }),
+    query: CallerDayQuery,
+    body: { content: { "application/json": { schema: RecordAcceptanceRequest } }, required: true },
+  },
+  responses: {
+    200: {
+      description: "Signed as accepted, with the engagements it created",
+      content: { "application/json": { schema: SignedResponse } },
+    },
+    400: errorResponse("A field is missing or impossible, no evidence, or asOf is not today anywhere"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not hold acceptance:record"),
+    404: errorResponse("No such letter at this firm"),
+    409: errorResponse("Not sent, the envelope is already signed, or the file is not attached to this letter"),
+    502: errorResponse("The e-sign provider could not be reached to void the envelope"),
+  },
+});
+
 const advanceRoute = createRoute({
   method: "post",
   path: "/api/v1/engagement-letters/{letterId}/advance",
@@ -1936,6 +1976,7 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       record.copyRefusal === null
         ? null
         : { code: record.copyRefusal.code, message: record.copyRefusal.message },
+    recordedAcceptance: toRecordedAcceptanceBody(record.recordedAcceptance),
   };
 }
 
@@ -2375,6 +2416,27 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
       s.actor,
     );
     const fees = seesFees(c.get("principal"));
+    return c.json(
+      {
+        letter: toLetterBody(result.letter, fees),
+        engagements: result.engagements.map(toEngagementBody),
+      },
+      200,
+    );
+  });
+
+  app.openapi(recordAcceptanceRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const principal = c.get("principal");
+    const { letterId } = c.req.valid("param");
+    // The recorder is the SESSION's user, never a field in the body.
+    const result = await deps.service.recordAcceptance(
+      { tenantId: s.tenantId, letterId, statement: c.req.valid("json"), asOf: c.req.valid("query").asOf },
+      principal?.userId ?? "",
+      s.actor,
+    );
+    const fees = seesFees(principal);
     return c.json(
       {
         letter: toLetterBody(result.letter, fees),

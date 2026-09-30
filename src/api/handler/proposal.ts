@@ -20,6 +20,8 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { BLOCK_KIND_VALUES } from "./document";
+import { RecordAcceptanceRequest, RecordedAcceptanceSchema, toRecordedAcceptanceBody } from "./acceptance";
+import { AcceptThroughRecord } from "../../domain/acceptance/errors";
 import { scopeOf } from "../scope";
 import type { Principal } from "../../platform/callctx";
 import type { AuthzService } from "../../usecase/authz/service";
@@ -489,6 +491,10 @@ const ProposalRecordSchema = z
      *  when unanswered, and when a colleague recorded the answer — the History
      *  names that colleague. */
     clientDecision: ClientDecisionSchema.nullable(),
+    /** An acceptance the client gave OUTSIDE the link, recorded by a colleague
+     *  holding `acceptance:record` (0317): how, when, who, the note and the
+     *  filed email. Null otherwise. */
+    recordedAcceptance: RecordedAcceptanceSchema.nullable(),
     /** Who deleted it (0086), when it was and the account still resolves. */
     deletedBy: ApproverSchema,
     deleteRefusal: z
@@ -1215,11 +1221,13 @@ const decideRoute = createRoute({
   method: "post",
   path: "/api/v1/proposals/{proposalId}/decision",
   tags: ["proposals"],
-  summary: "Record the client's decision",
+  summary: "Record that the client declined",
   description:
     "A proposal past its validity date is marked expired here rather than accepted late — " +
     "nothing in this system runs on a timer, so expiry is written the first time somebody " +
-    "acts on it.",
+    "acts on it. An ACCEPTANCE is refused here (409 `ACCEPT_THROUGH_RECORD`, 0317): the " +
+    "client accepts on the link, or a colleague holding `acceptance:record` records how and " +
+    "when they said yes through `POST …/acceptance`.",
   request: {
     params: z.object({ proposalId: z.string().uuid() }),
     body: { content: { "application/json": { schema: DecisionRequest } }, required: true },
@@ -1230,6 +1238,32 @@ const decideRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such proposal at this firm"),
     409: errorResponse("Already decided, still a draft, or now expired"),
+  },
+});
+
+const recordAcceptanceRoute = createRoute({
+  method: "post",
+  path: "/api/v1/proposals/{proposalId}/acceptance",
+  tags: ["proposals"],
+  summary: "Record that the client accepted outside the link",
+  description:
+    "The client said yes by email, on a call or in a meeting and never pressed Accept (0317). " +
+    "Needs `acceptance:record` (a partner, by default). Only while the proposal is sent and " +
+    "within its validity date — a lapsed one is marked expired and refused, and is copied as " +
+    "a new draft instead. The evidence (how, when, who, a note, optionally the client's email " +
+    "already attached to this proposal) is recorded with the acceptance in one transaction; " +
+    "the recorder is the session's user.",
+  request: {
+    params: z.object({ proposalId: z.string().uuid() }),
+    body: { content: { "application/json": { schema: RecordAcceptanceRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Accepted", content: { "application/json": { schema: ProposalSchema } } },
+    400: errorResponse("A field is missing or impossible — a day in the future, before it was sent"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not hold acceptance:record"),
+    404: errorResponse("No such proposal at this firm"),
+    409: errorResponse("Not out for an answer, expired, or the file is not attached to this proposal"),
   },
 });
 
@@ -1472,6 +1506,7 @@ function toRecordBody(record: ProposalView, fees: boolean): z.infer<typeof Propo
             emailedTo: record.clientDecision.emailedTo,
             pdf: record.clientDecision.pdf === null ? null : { ...record.clientDecision.pdf },
           },
+    recordedAcceptance: toRecordedAcceptanceBody(record.recordedAcceptance),
     deletedBy: record.deletedBy === null ? null : { ...record.deletedBy },
     deleteRefusal:
       record.deleteRefusal === null
@@ -1796,6 +1831,9 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
     if (!s.ok) return c.json(s.deny, s.status);
     const { proposalId } = c.req.valid("param");
     const { decision, declinedReason } = c.req.valid("json");
+    // An acceptance from staff is RECORDED, with its evidence, by somebody
+    // holding `acceptance:record` (0317). This route keeps the decline.
+    if (decision === "accepted") throw new AcceptThroughRecord();
     const decided = await deps.service.decide(
       s.tenantId,
       proposalId,
@@ -1804,5 +1842,22 @@ export function registerProposalRoutes(app: OpenAPIHono<AppEnv>, deps: ProposalD
       declinedReason,
     );
     return c.json(toProposalBody(decided, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(recordAcceptanceRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const principal = c.get("principal");
+    const { proposalId } = c.req.valid("param");
+    const body = c.req.valid("json");
+    // The recorder is the SESSION's user, never a field in the body.
+    const accepted = await deps.service.recordAcceptance(
+      s.tenantId,
+      proposalId,
+      body,
+      principal?.userId ?? "",
+      s.actor,
+    );
+    return c.json(toProposalBody(accepted, seesFees(principal)), 200);
   });
 }

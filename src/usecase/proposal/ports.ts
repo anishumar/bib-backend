@@ -2,6 +2,7 @@
 // are owned by the use case that needs them, stated in our vocabulary; adapters
 // in infrastructure/ implement them, and two of them are satisfied by other use
 // cases at the composition root.
+import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { ProposalErrorCode } from "../../domain/proposal/errors";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { BillingBasis, ServiceRecurrence } from "../../domain/config/model";
@@ -332,6 +333,9 @@ export interface ProposalRecord {
   /** The evidence behind an answer the CLIENT gave on the link (0085). Null
    *  when it is unanswered, and when a colleague recorded the answer. */
   readonly clientDecision: ClientDecisionRecord | null;
+  /** An acceptance the client gave OUTSIDE the link, recorded by a colleague
+   *  holding `acceptance:record` (0317). Null otherwise. */
+  readonly recordedAcceptance: RecordedAcceptance | null;
   /** Who deleted it, when it was deleted as a mistake (0086) and the account
    *  still resolves. */
   readonly deletedBy: {
@@ -933,6 +937,16 @@ export interface ProposalRepository {
    * overwrite the first.
    */
   recordClientAnswer(answer: NewClientAnswer): Promise<Proposal | null>;
+  /**
+   * Accept a SENT proposal on the client's behalf, with the evidence, in ONE
+   * transaction (0317): null when it is no longer sent. Refuses evidence not
+   * filed against this proposal (`EvidenceNotFiledHere`).
+   */
+  recordAcceptance(
+    proposalId: string,
+    decidedAt: string,
+    acceptance: NewRecordedAcceptance,
+  ): Promise<Proposal | null>;
 
   // ── 0086 ──────────────────────────────────────────────────────────────────
 

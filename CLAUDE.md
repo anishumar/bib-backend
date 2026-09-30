@@ -582,6 +582,38 @@ amounts, discounts and wording come across EXACTLY as they were.
   on it does. Each detail read carries `copyRefusal` (the refusal's own sentence, or null), so the
   page offers the button only when it will work.
 
+## A client's yes given outside bib — the recorded acceptance (0317)
+
+**Decided 2026-09-30 (Shrestha):** a proposal or letter is sent and the client says yes by email or
+on a call without pressing Accept or signing in DocuSign. `POST /proposals/{id}/acceptance` and
+`POST /engagement-letters/{id}/acceptance` record it, on **`acceptance:record`, the twelfth
+permission, partner-only by default** (0317 publishes it onto every partner role still at the
+default). Four answers, not to be re-made: that permission and not `proposal:approve` or
+`tenant:admin`; a LETTER needs the client's email FILED against it (`evidenceDocumentId`, a live
+`document_link` to that letter; a CHECK and the service both say so), a proposal needs how, when,
+who and a note with the file optional; only while `sent` (a lapsed proposal is expired and copied,
+0316, never accepted late); a letter's envelope still out is VOIDED first and the request settled,
+one DocuSign reports signed is refused (`EnvelopeAlreadySigned`) and left for the sweep.
+
+- **`/decision` no longer accepts** (409 `ACCEPT_THROUGH_RECORD`); declining is unchanged and
+  stays `party:write`. `ProposalService.decide` still takes "accepted" for internal callers.
+- **`crm.recorded_acceptance`**, one per document (partial unique indexes), exactly one parent
+  (CHECK), channel a closed set, **append-only by GRANT**: the `crm` schema's default privileges
+  hand `bib_app` UPDATE on every new table, so 0317 REVOKEs before it GRANTs (found by asking
+  `has_table_privilege`). Written INSIDE the transaction that moves the document
+  (`recordAcceptance` on the proposal repository, `signAndFanOut`'s new last argument), so neither
+  stands without the other; `infrastructure/postgres/recorded-acceptance.ts` is the one insert and
+  one read, and re-checks the evidence link as the wall.
+- **A letter is signed through the ordinary path** (hash, freeze, fan-out, advance gate) via the
+  attested `migrationSigner`, under `signatureMethod = "recorded_acceptance"`
+  (`RECORDED_ACCEPTANCE_METHOD`) with a reference naming the channel and day. The evidence link is
+  asked BEFORE the void, so a wrong file voids nothing. The one window left: a sweep reading the
+  envelope as voided between the void and the settle would withdraw the letter (one call apart).
+- **The ledger says HOW** (`via: "recorded"`, `channel`, `recordedAcceptanceId`) on
+  `proposal.accepted` / `engagement_letter.signed`; the client's name and the note are in the
+  erasable row. Both detail reads carry `recordedAcceptance` (who recorded it, the file's title).
+- `smoke.sh` and `demo-seed.sh` record the acceptance on the UTC day (both firms run on UTC).
+
 ## A phone is stored in E.164, and PAN / GSTIN are checked for shape (2026-09-30)
 
 `normalizeIdentifier("phone", value, country?)` returns E.164 (`+919820012345`) and

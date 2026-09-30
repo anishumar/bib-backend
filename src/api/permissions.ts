@@ -423,6 +423,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // permission.
   [routeKey("POST", "/api/v1/proposals/{proposalId}/reissue"), "party:write" as const],
   [routeKey("POST", "/api/v1/proposals/{proposalId}/decision"), "party:write" as const],
+  // Accepting on the client's behalf commits the firm, so it is its own
+  // permission, a partner's by default (0317); declining stays party:write.
+  [routeKey("POST", "/api/v1/proposals/{proposalId}/acceptance"), "acceptance:record" as const],
   [
     routeKey("POST", "/api/v1/proposals/{proposalId}/discount-approval"),
     "proposal:approve" as const,
@@ -507,6 +510,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // A withdrawn letter copied into a new draft (0316): drafting's permission.
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/copy"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature"), "party:write" as const],
+  // The client said yes outside bib and a partner records it (0317): it signs
+  // the letter and starts the work, so it is not party:write.
+  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/acceptance"), "acceptance:record" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
 

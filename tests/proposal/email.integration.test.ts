@@ -344,3 +344,45 @@ describe("the walls", () => {
     expect(await refusal(() => insert("rejected", null))).toBe("23505"); // unique_violation
   });
 });
+
+describe("a proposal the client accepted outside the link, in the database (0317)", () => {
+  it("accepts it and keeps the evidence, in one transaction, and refuses a second yes", async () => {
+    const id = await draft();
+    await proposals.send(tenant, id, SYSTEM_ACTOR);
+    const today = (await proposals.describe(tenant, id)).proposal.sentAt?.slice(0, 10) ?? "";
+
+    const accepted = await proposals.recordAcceptance(
+      tenant,
+      id,
+      { channel: "call", acceptedOn: today, acceptedByName: "Priya Sharma", note: "Called to say go ahead." },
+      preparer,
+      { type: "human", id: preparer },
+    );
+
+    expect(accepted.status).toBe("accepted");
+    const record = await proposals.describe(tenant, id);
+    expect(record.recordedAcceptance).toMatchObject({
+      channel: "call",
+      acceptedOn: today,
+      acceptedByName: "Priya Sharma",
+      evidenceDocumentId: null,
+      recordedBy: { userId: preparer, displayName: "Sahil Kohli" },
+    });
+    // The client's own answer on the link can no longer land: the status moved.
+    expect(await repository.recordAcceptance(id, new Date().toISOString(), {
+      id: crypto.randomUUID(),
+      tenantId: tenant,
+      channel: "email",
+      acceptedOn: today,
+      acceptedByName: "Priya Sharma",
+      acceptedByTitle: null,
+      note: "second",
+      evidenceDocumentId: null,
+      recordedByUserId: preparer,
+    })).toBeNull();
+    const rows = await withTenant(app, tenant, (db) => db<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM crm.recorded_acceptance WHERE proposal_id = ${id}
+    `);
+    expect(rows[0]?.n).toBe(1);
+  });
+});

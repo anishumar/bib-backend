@@ -116,6 +116,9 @@ import {
 import { InvalidQuoteCurrency } from "../../domain/proposal/errors";
 import type { ClientStructure } from "../../domain/party/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
+import { checkAcceptance } from "../../domain/acceptance/model";
+import type { AcceptanceStatement, NewRecordedAcceptance } from "../../domain/acceptance/model";
+import { EvidenceNotFiledHere } from "../../domain/acceptance/errors";
 import { planAnnexure } from "../../domain/engagement/annexure";
 import type {
   ClauseLibrary,
@@ -549,6 +552,25 @@ export interface SignInput {
   /** The caller's today: the day work starts when neither the line nor the
    *  letter names one. The firm's day when absent, which is what the
    *  signature sweep and the import get. */
+  readonly asOf?: string | undefined;
+  /**
+   * The client accepted OUTSIDE bib and a colleague recorded it (0317). Signs
+   * through the attested signer under the method `recorded_acceptance`, and
+   * writes this evidence in the fan-out's own transaction. Set only by
+   * `recordAcceptance`; the HTTP signature route does not expose it.
+   */
+  readonly recorded?: NewRecordedAcceptance | undefined;
+}
+
+/** The signature method a letter accepted outside bib is recorded under
+ *  (0317): neither a provider's signature nor a wet one attested by hand. */
+export const RECORDED_ACCEPTANCE_METHOD = "recorded_acceptance";
+
+export interface RecordAcceptanceInput {
+  readonly tenantId: string;
+  readonly letterId: string;
+  readonly statement: AcceptanceStatement;
+  /** The caller's today, held to the firm's day ± 1 like every other. */
   readonly asOf?: string | undefined;
 }
 
@@ -2008,6 +2030,7 @@ export class EngagementService {
         request,
       },
       deleteRefusal: refusal === null ? null : { code: refusal.code, message: refusal.message },
+      recordedAcceptance: await this.deps.letters.findRecordedAcceptance(tenantId, record.letter.id),
       // Whether Copy would work (0316): the same test `copyAsDraft` makes.
       copyRefusal: (() => {
         const letter = record.letter;
@@ -2565,7 +2588,10 @@ export class EngagementService {
     const contentHash = this.deps.hasher.hash(
       canonicalContent({ letter, lines, feeGroups, clauses }),
     );
-    const signer = input.migrated === true ? this.deps.migrationSigner : this.deps.esign;
+    const recorded = input.recorded ?? null;
+    const signer =
+      input.migrated === true || recorded !== null ? this.deps.migrationSigner : this.deps.esign;
+    const signatureMethod = recorded !== null ? RECORDED_ACCEPTANCE_METHOD : signer.method;
     const provider = await signer.sign({
       tenantId: input.tenantId,
       letterId: input.letterId,
@@ -2619,11 +2645,12 @@ export class EngagementService {
         signedAt: at,
         signedByName: input.signedByName.trim(),
         signedByTitle: blankToNull(input.signedByTitle),
-        signatureMethod: signer.method,
+        signatureMethod,
         signatureReference: provider.reference,
         signedContentHash: contentHash,
       },
       engagements,
+      recorded,
     );
 
     await this.deps.events.recordEvent({
@@ -2639,10 +2666,19 @@ export class EngagementService {
         ref: letter.ref,
         partyId: letter.partyId,
         issuingEntityPartyId: letter.issuingEntityPartyId,
-        signatureMethod: signer.method,
+        signatureMethod,
         contentHash,
         engagementCount: result.engagements.length,
         advanceRequired: letter.advanceRequired,
+        // HOW, never who at the client or what they said (0317): those are in
+        // the erasable evidence row.
+        ...(recorded === null
+          ? {}
+          : {
+              via: "recorded",
+              channel: recorded.channel,
+              recordedAcceptanceId: recorded.id,
+            }),
       },
     });
 
@@ -2656,6 +2692,83 @@ export class EngagementService {
       letter: result.letter,
       engagements: await this.withState(input.tenantId, result.engagements),
     };
+  }
+
+  /**
+   * The client accepted the letter OUTSIDE bib — by email, on a call — and a
+   * colleague holding `acceptance:record` records it (0317, decided
+   * 2026-09-30). The route carries the permission; this carries the rules.
+   *
+   * A letter is the contract, so the client's own email or letter must be
+   * FILED against it first; the check is asked before anything else moves.
+   * Only a SENT letter. When an envelope is still out with the provider it is
+   * VOIDED first, so the client cannot also sign it, and the request settled;
+   * one the provider reports signed is refused and left for the sweep, which
+   * will record the real signature. Then the letter is signed through the
+   * ordinary path — the hash, the freeze, the fan-out, the advance gate — under
+   * the method `recorded_acceptance`, with the evidence in the same transaction.
+   *
+   * The one window left, stated: between the void and the settle a sweep that
+   * reads the envelope as voided would withdraw the letter. The two are one
+   * call apart, and the sweep runs every five minutes.
+   */
+  async recordAcceptance(
+    input: RecordAcceptanceInput,
+    recordedByUserId: string,
+    actor: Actor,
+  ): Promise<{ letter: EngagementLetter; engagements: readonly EngagementRecord[] }> {
+    const letter = await this.findOrThrow(input.tenantId, input.letterId);
+    if (letter.deletedAt !== null) throw new LetterDeleted(letter.ref);
+    if (letter.status !== "sent") throw new InvalidLetterTransition(letter.status, "signed");
+
+    const today = await this.callersDay(input.tenantId, input.asOf);
+    const zone = await this.deps.timeZones.timeZoneFor(input.tenantId);
+    const evidence = checkAcceptance(input.statement, {
+      today,
+      sentOn: letter.sentAt === null ? null : dayInZone(letter.sentAt, zone),
+      needsEvidence: true,
+    });
+    const documentId = evidence.evidenceDocumentId ?? "";
+    if (!(await this.deps.letters.isFiledAgainst(input.tenantId, letter.id, documentId))) {
+      throw new EvidenceNotFiledHere(documentId);
+    }
+
+    const request = await this.deps.signatures.findForLetter(input.tenantId, letter.id);
+    const dispatch = this.deps.dispatch;
+    if (request !== null && request.outcome === null) {
+      if (dispatch !== null && request.envelopeId !== null) {
+        const progress = await dispatch.progress(request.envelopeId);
+        if (progress.state === "completed") throw new EnvelopeAlreadySigned(request.envelopeId);
+        if (progress.state === "out") {
+          await dispatch.void(
+            request.envelopeId,
+            `${letter.ref}: the client accepted it outside ${dispatch.method}, and the firm recorded that`,
+          );
+        }
+      }
+      await this.deps.signatures.settle(
+        input.tenantId,
+        request.id,
+        "voided",
+        this.deps.clock.now().toISOString(),
+      );
+    }
+
+    const id = this.deps.ids.newId();
+    const signed = await this.sign(
+      {
+        tenantId: input.tenantId,
+        letterId: letter.id,
+        signedByName: evidence.acceptedByName,
+        signedByTitle: evidence.acceptedByTitle ?? undefined,
+        // The thread back to the evidence, in words: the row holds the rest.
+        reference: `Accepted by ${evidence.channel} on ${evidence.acceptedOn}; recorded by the firm`,
+        asOf: input.asOf,
+        recorded: { ...evidence, id, tenantId: input.tenantId, recordedByUserId },
+      },
+      actor,
+    );
+    return signed;
   }
 
   /**

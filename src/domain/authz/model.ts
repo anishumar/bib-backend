@@ -32,6 +32,7 @@ export type Permission =
   | "portal:grant"
   | "portal:respond"
   | "portal:request"
+  | "acceptance:record"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -45,6 +46,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "portal:grant",
   "portal:respond",
   "portal:request",
+  "acceptance:record",
   "tenant:admin",
 ];
 
@@ -88,6 +90,11 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "For client portal roles only. Lets a client contact ask the firm for something: a " +
     "document, a copy, a correction, a call. Kept separate from answering, so a firm can let " +
     "somebody send the registers every month without letting them open new requests.",
+  "acceptance:record":
+    "Record that a client accepted a proposal or an engagement letter outside bib, by email, " +
+    "on a call or in a meeting, when they never pressed Accept or signed in DocuSign. A " +
+    "letter recorded this way is signed and its work starts, so the client's email must be " +
+    "filed with it.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
@@ -190,6 +197,7 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "work:write",
       "obligation:resolve",
       "portal:grant",
+      "acceptance:record",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.

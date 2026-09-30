@@ -29,6 +29,7 @@ import { AuthzError } from "../domain/authz/errors";
 import { ConfigError } from "../domain/config/errors";
 import { LeadError } from "../domain/lead/errors";
 import { ProposalError } from "../domain/proposal/errors";
+import { AcceptanceError } from "../domain/acceptance/errors";
 import { EngagementError } from "../domain/engagement/errors";
 import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
@@ -728,6 +729,23 @@ export function mapError(err: unknown): MappedError {
         return unmapped(err.code);
     }
   }
+  if (err instanceof AcceptanceError) {
+    switch (err.code) {
+      // The statement itself: a field the caller fixes, or the letter's file
+      // they have not attached yet.
+      case "ACCEPTANCE_INVALID":
+      case "ACCEPTANCE_NEEDS_EVIDENCE":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // A real file, but not one filed against this document; and an accept
+      // sent to the route that no longer takes one.
+      case "EVIDENCE_NOT_FILED_HERE":
+      case "ACCEPT_THROUGH_RECORD":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+
   if (err instanceof ProposalError) {
     switch (err.code) {
       // Malformed input: a number where a decimal string belongs, a currency

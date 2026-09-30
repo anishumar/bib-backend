@@ -15,6 +15,8 @@ import { withTenant } from "../../db/tenant";
 import { toDay } from "./day";
 import { zoneDayOf } from "./instant";
 import { insertDocumentBlocks, strikeDocumentBlocks } from "./block-repository";
+import { insertRecordedAcceptance, readRecordedAcceptance } from "./recorded-acceptance";
+import type { NewRecordedAcceptance } from "../../domain/acceptance/model";
 import type { Proposal, ProposalLine, ProposalStatus } from "../../domain/proposal/model";
 import { ProposalCitedByLetter } from "../../domain/proposal/errors";
 import { readServiceBody } from "../../domain/config/model";
@@ -390,6 +392,9 @@ export class PostgresProposalRepository implements ProposalRepository {
         WHERE d.proposal_id = ${proposalId}
       `;
 
+      // An acceptance given outside the link, recorded by a colleague (0317).
+      const recordedAcceptance = await readRecordedAcceptance(db, { kind: "proposal", id: proposalId });
+
       // The lines, each with the catalogue version it was PINNED to — its code,
       // its Dept, its SLA, its scope blocks and its list price AS THEY WERE,
       // which is the question the pin exists to answer and the reason this join
@@ -617,6 +622,7 @@ export class PostgresProposalRepository implements ProposalRepository {
                         filename: answer.pdf_filename,
                       },
               },
+        recordedAcceptance,
         deletedBy:
           head.deleted_by_user_id === null || head.deleter_email === null
             ? null
@@ -1224,6 +1230,27 @@ export class PostgresProposalRepository implements ProposalRepository {
            ${answer.signerName}, ${answer.statement}, ${answer.emailId}, ${answer.pdfVersionId},
            ${answer.ipAddress}, ${answer.userAgent}, ${answer.decidedAt})
       `;
+      return toProposal(row);
+    });
+  }
+
+  async recordAcceptance(
+    proposalId: string,
+    decidedAt: string,
+    acceptance: NewRecordedAcceptance,
+  ): Promise<Proposal | null> {
+    return withTenant(this.app, acceptance.tenantId, async (db) => {
+      // ONLY WHILE IT IS SENT, in the statement that moves it: the client's
+      // own answer on the link may land a moment earlier, and then this one
+      // must write nothing. `recordClientAnswer`'s arrangement.
+      const [row] = await db<ProposalRow[]>`
+        UPDATE crm.proposal
+           SET status = 'accepted', decided_at = ${decidedAt}::timestamptz, declined_reason = NULL
+         WHERE id = ${proposalId} AND status = 'sent' AND deleted_at IS NULL
+        RETURNING ${db.unsafe(PROPOSAL_COLUMNS)}
+      `;
+      if (!row) return null;
+      await insertRecordedAcceptance(db, { kind: "proposal", id: proposalId }, acceptance);
       return toProposal(row);
     });
   }
