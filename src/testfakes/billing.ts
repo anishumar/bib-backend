@@ -20,6 +20,7 @@ import type {
   InvoiceDrafter,
   NewBillingDue,
   ScheduleRecord,
+  SpocDuty,
 } from "../usecase/billing/ports";
 
 export interface StoredDue extends NewBillingDue {
@@ -112,6 +113,10 @@ export class FakeFiscalYearSource implements FiscalYearSource {
  */
 export class FakeBillingDueDesk implements BillingDueDesk {
   readonly rows: BillingDueRecord[] = [];
+  /** Who is SPOC for which client and Dept (the fake ignores the day). */
+  readonly spocs: { userId: string; clientPartyId: string; deptCode: string }[] = [];
+  /** What `spocDutiesOf` was asked, so a test can see the day it was cut on. */
+  readonly spocsAskedOn: { userId: string; onDate: string }[] = [];
   /** invoice id → status, for the derivation. */
   readonly invoiceStatus = new Map<string, string>();
 
@@ -137,6 +142,15 @@ export class FakeBillingDueDesk implements BillingDueDesk {
 
   findMany(_t: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]> {
     return Promise.resolve(this.rows.filter((r) => ids.includes(r.id)).map((r) => this.derive(r)));
+  }
+
+  spocDutiesOf(_t: string, userId: string, onDate: string): Promise<readonly SpocDuty[]> {
+    this.spocsAskedOn.push({ userId, onDate });
+    return Promise.resolve(
+      this.spocs
+        .filter((s) => s.userId === userId)
+        .map((s) => ({ clientPartyId: s.clientPartyId, deptCode: s.deptCode })),
+    );
   }
 
   skip(_t: string, dueId: string, byUserId: string | null, reason: string): Promise<boolean> {

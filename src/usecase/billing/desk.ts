@@ -69,6 +69,9 @@ const MAX_DUES_PER_INVOICE = 50;
 const SCHEDULED_FREQUENCIES = ["monthly", "quarterly", "annually"];
 
 export interface DueOnDesk extends BillingDueRecord {
+  /** Whether the letter fixed a price. Not an amount, so never redacted: a
+   *  bill with none must have its amount typed when raised. */
+  readonly priced: boolean;
   /** Days since the bill date, on the firm's calendar. */
   readonly daysSinceBillOn: number;
   /** Still to be issued (open or drafted) a week or more after its date: it
@@ -112,27 +115,48 @@ export class BillingDeskService {
    * The dues, with how long each has waited. `mineFor` narrows to what a
    * person should act on: their own open or drafted dues, and those of the
    * people who report to them once a week has passed.
+   *
+   * A BILL WITH NO PRICE is also the SPOC's (for that client and Dept, on the
+   * firm's day) and every administrator's, from the day it falls due until an
+   * amount is on a draft (Ashish, 2026-10-01: the SPOC, the manager and the
+   * admin, in the app, every week). The weekly reminder is the screen counting
+   * weeks from `daysSinceBillOn`; nothing is stored or sent.
    */
   async list(input: {
     readonly tenantId: string;
     readonly filters?: DueFilters;
     readonly mineFor?: string | undefined;
+    /** The caller holds `tenant:admin`; meaningful with `mineFor` only. */
+    readonly mineIsAdmin?: boolean | undefined;
   }): Promise<{ readonly today: string; readonly dues: readonly DueOnDesk[] }> {
     const today = await this.today(input.tenantId);
     const rows = await this.deps.desk.list(input.tenantId, input.filters ?? {});
     const dues = rows.map((r): DueOnDesk => {
       const daysSinceBillOn = daysBetween(r.billOn, today);
       const pending = r.status === "open" || r.status === "drafted";
-      return { ...r, daysSinceBillOn, escalated: pending && daysSinceBillOn >= ESCALATE_AFTER_DAYS };
+      return {
+        ...r,
+        priced: r.fullAmount !== null,
+        daysSinceBillOn,
+        escalated: pending && daysSinceBillOn >= ESCALATE_AFTER_DAYS,
+      };
     });
     const mine = input.mineFor;
     if (mine === undefined) return { today, dues };
+
+    const admin = input.mineIsAdmin === true;
+    const unpriced = dues.some((d) => !d.priced && d.status === "open");
+    const duties = unpriced && !admin ? await this.deps.desk.spocDutiesOf(input.tenantId, mine, today) : [];
+    const spocFor = (d: DueOnDesk): boolean =>
+      duties.some((s) => s.clientPartyId === d.party.id && d.deptCodes.includes(s.deptCode));
     return {
       today,
       dues: dues.filter(
         (d) =>
           (d.status === "open" || d.status === "drafted") &&
-          (d.manager?.userId === mine || (d.escalated && d.managerReportsTo?.userId === mine)),
+          (d.manager?.userId === mine ||
+            (d.escalated && d.managerReportsTo?.userId === mine) ||
+            (!d.priced && d.status === "open" && (admin || spocFor(d)))),
       ),
     };
   }

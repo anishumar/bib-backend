@@ -130,6 +130,9 @@ export interface BillingDueRecord {
   /** What the client signed for: the letter line's own wording (a group's
    *  title for a fee group), never the catalogue's name. The invoice line's text. */
   readonly serviceName: string;
+  /** The Dept codes of the services billed (the live service's `module`), so a
+   *  bill with no price can find the client's SPOC for that work. */
+  readonly deptCodes: readonly string[];
   /** Which of the client's companies the work is for; null when a fee group
    *  covers several. */
   readonly entityName: string | null;
@@ -169,8 +172,17 @@ export interface DueFilters {
   readonly partyId?: string | undefined;
 }
 
+/** One client and Dept a person is SPOC for, on a given day. */
+export interface SpocDuty {
+  readonly clientPartyId: string;
+  readonly deptCode: string;
+}
+
 export interface BillingDueDesk {
   list(tenantId: string, filters: DueFilters): Promise<readonly BillingDueRecord[]>;
+  /** The clients and Depts this person is the SPOC for on `onDate` (the
+   *  firm's day), as an active staff member. */
+  spocDutiesOf(tenantId: string, userId: string, onDate: string): Promise<readonly SpocDuty[]>;
   findMany(tenantId: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]>;
   /** Each refuses (answers false) when the due is no longer open, in the
    *  write's own WHERE: two people on one list must not both settle it. */

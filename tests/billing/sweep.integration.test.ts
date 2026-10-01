@@ -430,6 +430,9 @@ describe("the billing desk on a real database (0318)", () => {
       issuer: { id: firm, displayName: "The Firm" },
       // The letter line's wording, not the catalogue's "Bookkeeping".
       serviceName: "Accounting and bookkeeping",
+      // The live service's module: how a bill with no price finds its SPOC.
+      deptCodes: ["FRC"],
+      priced: true,
       entityName: `Kaveri Foods ${stamp}`,
       engagementIds: [monthly],
       letter: { ref: "EL-2026-0001", fxRate: "1.0000000000" },
@@ -444,6 +447,15 @@ describe("the billing desk on a real database (0318)", () => {
     const group = dues.find((d) => d.feeGroupId === groupId);
     expect(group?.serviceName).toBe("Retainer");
     expect(group?.engagementIds).toHaveLength(2);
+  });
+
+  it("reads whom a person is SPOC for on the firm's day, active staff only", async () => {
+    expect(await deskAdapter.spocDutiesOf(tenantId, spoc, "2026-12-05")).toEqual([
+      { clientPartyId: client, deptCode: "FRC" },
+    ]);
+    // Before the assignment began, and for somebody who is not a SPOC.
+    expect(await deskAdapter.spocDutiesOf(tenantId, spoc, "2025-12-31")).toEqual([]);
+    expect(await deskAdapter.spocDutiesOf(tenantId, manager, "2026-12-05")).toEqual([]);
   });
 
   it("raises a numbered draft from two dues, a line each, in the manager's kitty", async () => {

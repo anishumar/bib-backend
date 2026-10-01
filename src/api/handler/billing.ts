@@ -60,6 +60,12 @@ const DueSchema = z
     }),
     servedDays: z.number().int(),
     periodDays: z.number().int(),
+    priced: z.boolean().openapi({
+      description:
+        "Whether the letter fixed a price. False: the amount is typed when raising, and the bill is " +
+        "on the client's SPOC's and every administrator's desk as well as the manager's until then. " +
+        "Not an amount, so never redacted.",
+    }),
     manager: PersonSchema.nullable(),
     managerHow: z.string().openapi({
       description: "`spoc_manager` (whom the SPOC reports to), `key_manager` (fallback) or `none`.",
@@ -118,8 +124,9 @@ const listRoute = createRoute({
       partyId: z.string().uuid().optional(),
       mine: z.enum(["true", "false"]).optional().openapi({
         description:
-          "Only what the caller should act on: their own open or drafted dues, and their reports' " +
-          "once a week has passed.",
+          "Only what the caller should act on: their own open or drafted dues, their reports' once " +
+          "a week has passed, and any open bill with no price where they are the client's SPOC for " +
+          "that Dept or a firm administrator.",
       }),
     }),
   },
@@ -337,6 +344,7 @@ function dueBody(d: DueOnDesk, fees: boolean) {
     amount: fees ? d.amount : null,
     servedDays: d.servedDays,
     periodDays: d.periodDays,
+    priced: d.priced,
     manager: personBody(d.manager),
     managerHow: d.managerHow,
     managerNote: d.managerNote,
@@ -389,10 +397,13 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const q = c.req.valid("query");
+    const mine = q.mine === "true";
+    const principal = c.get("principal");
     const out = await deps.service.list({
       tenantId: s.tenantId,
       filters: { status: q.status, partyId: q.partyId },
-      mineFor: q.mine === "true" ? s.userId : undefined,
+      mineFor: mine ? s.userId : undefined,
+      mineIsAdmin: mine && principal !== null && (await deps.authz.can(principal, "tenant:admin")),
     });
     const fees = seesFees(c.get("principal"));
     return c.json({ today: out.today, dues: out.dues.map((d) => dueBody(d, fees)) }, 200);

@@ -24,6 +24,7 @@ import type {
   DueStatus,
   PersonRef,
   ScheduleRecord,
+  SpocDuty,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
 
@@ -38,6 +39,7 @@ interface DueRow {
   fee_group_id: string | null;
   engagement_ids: string[];
   service_name: string;
+  dept_codes: string[];
   entity_name: string | null;
   letter_id: string;
   letter_ref: string;
@@ -85,6 +87,7 @@ function toRecord(r: DueRow): BillingDueRecord {
     feeGroupId: r.fee_group_id,
     engagementIds: r.engagement_ids,
     serviceName: r.service_name,
+    deptCodes: r.dept_codes,
     entityName: r.entity_name,
     letter: { id: r.letter_id, ref: r.letter_ref, fxRate: r.fx_rate, fxRateDate: r.fx_rate_date },
     periodStart: r.period_start,
@@ -121,7 +124,7 @@ const DUE_SELECT = `
   SELECT d.id, d.party_id, p.display_name AS party_name,
          d.issuing_entity_party_id AS issuer_id, ip.display_name AS issuer_name,
          d.currency, d.engagement_id, d.fee_group_id,
-         subj.engagement_ids, subj.service_name, subj.entity_name,
+         subj.engagement_ids, subj.service_name, subj.dept_codes, subj.entity_name,
          subj.letter_id, subj.letter_ref, subj.fx_rate::text AS fx_rate, subj.fx_rate_date::text AS fx_rate_date,
          d.period_start::text AS period_start, d.period_end::text AS period_end, d.period_label,
          d.bill_on::text AS bill_on, d.full_amount::text AS full_amount, d.amount::text AS amount,
@@ -159,6 +162,10 @@ const DUE_SELECT = `
              -- line's text, read beside the letter ref the invoice prints.
              CASE WHEN d.fee_group_id IS NOT NULL THEN max(g.title)
                   ELSE max(ll.description) END AS service_name,
+             -- The Dept of the work: the LIVE service's module, as the sweep and
+             -- the router read it, so a bill with no price finds its SPOC.
+             coalesce(array_agg(DISTINCT live.body ->> 'module')
+                        FILTER (WHERE live.body ->> 'module' IS NOT NULL), '{}') AS dept_codes,
              CASE WHEN count(DISTINCT e.entity_party_id) = 1 THEN max(ep.display_name) END AS entity_name,
              (array_agg(l.id))[1] AS letter_id,
              max(l.ref) AS letter_ref,
@@ -172,6 +179,11 @@ const DUE_SELECT = `
         JOIN core.party ep ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
         LEFT JOIN crm.engagement_letter_fee_group g
           ON g.id = ll.fee_group_id AND g.tenant_id = ll.tenant_id
+        LEFT JOIN config.version pinned
+          ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
+        LEFT JOIN config.version live
+          ON live.entry_id = pinned.entry_id AND live.tenant_id = pinned.tenant_id
+         AND live.status = 'published'
        WHERE e.tenant_id = d.tenant_id
          AND ((d.engagement_id IS NOT NULL AND e.id = d.engagement_id)
            OR (d.fee_group_id IS NOT NULL AND ll.fee_group_id = d.fee_group_id AND ll.removed_at IS NULL))
@@ -214,6 +226,25 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
          WHERE due.id = ANY(${db.array(ids as string[])}::uuid[])
       `;
       return rows.map(toRecord);
+    });
+  }
+
+  async spocDutiesOf(tenantId: string, userId: string, onDate: string): Promise<readonly SpocDuty[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ client_party_id: string; dept_code: string }[]>`
+        SELECT DISTINCT a.client_party_id, x.code AS dept_code
+          FROM crm.client_assignment a
+          JOIN tenancy.service_axis x
+            ON x.id = a.axis_id AND x.tenant_id = a.tenant_id AND x.axis = 'dept'
+          JOIN tenancy.membership m
+            ON m.tenant_id = a.tenant_id AND m.user_id = a.user_id
+           AND m.audience = 'STAFF' AND m.is_active
+         WHERE a.user_id = ${userId}
+           AND a.role = 'spoc'
+           AND a.valid_from <= ${onDate}::date
+           AND (a.valid_to IS NULL OR a.valid_to > ${onDate}::date)
+      `;
+      return rows.map((r) => ({ clientPartyId: r.client_party_id, deptCode: r.dept_code }));
     });
   }
 

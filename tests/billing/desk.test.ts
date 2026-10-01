@@ -28,6 +28,9 @@ const MANAGER = "00000000-0000-4000-8000-00000000c008";
 const OTHER_MANAGER = "00000000-0000-4000-8000-00000000c009";
 const DIRECTOR = "00000000-0000-4000-8000-00000000c00a";
 const LETTER = "00000000-0000-4000-8000-00000000c00b";
+const SPOC = "00000000-0000-4000-8000-00000000c00c";
+const ADMIN = "00000000-0000-4000-8000-00000000c00d";
+const TRC_SPOC = "00000000-0000-4000-8000-00000000c00e";
 const ME: Actor = { type: "human", id: MANAGER };
 
 let dueN = 0;
@@ -43,6 +46,7 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     engagementIds: [ENG],
     serviceName: "Bookkeeping",
     entityName: "Kaveri Foods",
+    deptCodes: ["FRC"],
     letter: { id: LETTER, ref: "EL-2026-0001", fxRate: "1.0000000000", fxRateDate: "2026-07-01" },
     periodStart: "2026-10-01",
     periodEnd: "2026-10-31",
@@ -307,6 +311,57 @@ describe("the list a manager works from", () => {
     expect(director.dues[0]?.escalated).toBe(true);
     const mohan = await w.service.list({ tenantId: FIRM, mineFor: OTHER_MANAGER });
     expect(mohan.dues).toHaveLength(2);
+  });
+
+  // Ashish (2026-10-01): a bill the letter fixed no price for is reminded to the
+  // SPOC, the manager and the administrators, in the app, every week.
+  it("puts a bill with no price on the SPOC's and every administrator's desk as well", async () => {
+    const w = world();
+    const noPrice = due({ fullAmount: null, amount: null, billOn: "2026-12-01" });
+    const priced = due({ billOn: "2026-12-01" });
+    w.desk.rows.push(noPrice, priced);
+    w.desk.spocs.push({ userId: SPOC, clientPartyId: CLIENT, deptCode: "FRC" });
+    w.desk.spocs.push({ userId: TRC_SPOC, clientPartyId: CLIENT, deptCode: "TRC" });
+
+    const spoc = await w.service.list({ tenantId: FIRM, mineFor: SPOC });
+    expect(spoc.dues.map((d) => d.id)).toEqual([noPrice.id]);
+    expect(spoc.dues[0]?.priced).toBe(false);
+    const admin = await w.service.list({ tenantId: FIRM, mineFor: ADMIN, mineIsAdmin: true });
+    expect(admin.dues.map((d) => d.id)).toEqual([noPrice.id]);
+    // The SPOC of another Dept, and an administrator's flag on somebody else, see nothing.
+    expect((await w.service.list({ tenantId: FIRM, mineFor: TRC_SPOC })).dues).toEqual([]);
+    expect((await w.service.list({ tenantId: FIRM, mineFor: ADMIN })).dues).toEqual([]);
+    // The manager still sees both.
+    expect((await w.service.list({ tenantId: FIRM, mineFor: MANAGER })).dues).toHaveLength(2);
+  });
+
+  it("reads who the SPOC is on the firm's own day", async () => {
+    const w = world();
+    w.desk.rows.push(due({ fullAmount: null, amount: null }));
+    await w.service.list({ tenantId: FIRM, mineFor: SPOC });
+    // 06:00 UTC on 5 December is 11:30 the same day in Kolkata.
+    expect(w.desk.spocsAskedOn).toEqual([{ userId: SPOC, onDate: "2026-12-05" }]);
+  });
+
+  it("stops reminding the SPOC and the administrators once an amount is on a draft", async () => {
+    const w = world();
+    const drafted = due({
+      fullAmount: null,
+      amount: null,
+      invoice: { id: "00000000-0000-4000-8000-00000000eeee", number: "INV/2026-27/0001", status: "draft" },
+    });
+    w.desk.rows.push(drafted);
+    w.desk.spocs.push({ userId: SPOC, clientPartyId: CLIENT, deptCode: "FRC" });
+    expect((await w.service.list({ tenantId: FIRM, mineFor: SPOC })).dues).toEqual([]);
+    expect((await w.service.list({ tenantId: FIRM, mineFor: ADMIN, mineIsAdmin: true })).dues).toEqual([]);
+    // The manager still has a draft to issue.
+    expect((await w.service.list({ tenantId: FIRM, mineFor: MANAGER })).dues[0]?.status).toBe("drafted");
+  });
+
+  it("says a bill is priced, which is not an amount and never hidden", async () => {
+    const w = world();
+    w.desk.rows.push(due(), due({ fullAmount: null, amount: null }));
+    expect((await w.service.list({ tenantId: FIRM })).dues.map((d) => d.priced)).toEqual([true, false]);
   });
 });
 
