@@ -33,6 +33,7 @@ import { AcceptanceError } from "../domain/acceptance/errors";
 import { EngagementError } from "../domain/engagement/errors";
 import { InvoiceError } from "../domain/invoice/errors";
 import { DocumentError } from "../domain/document/errors";
+import { BillingError } from "../domain/billing/errors";
 import { FileStoreError } from "../domain/filestore/errors";
 import { RenderError } from "../domain/render/errors";
 
@@ -1001,6 +1002,27 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_ARCHIVED":
       case "ENGAGEMENT_OF_ANOTHER_ISSUER":
       case "ENGAGEMENT_IN_ANOTHER_CURRENCY":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof BillingError) {
+    switch (err.code) {
+      case "DUES_DO_NOT_SHARE_AN_INVOICE":
+      case "DUES_OF_DIFFERENT_MANAGERS":
+      case "DUE_NEEDS_AN_AMOUNT":
+      case "INVALID_BILLING_INPUT":
+      case "FX_RATE_NEEDED":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      case "BILLING_DUE_NOT_FOUND":
+      case "BILLING_INVOICE_NOT_FOUND":
+      case "BILLING_ENGAGEMENT_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "BILLING_DUE_NOT_OPEN":
+      case "INVOICE_DOES_NOT_FIT_DUE":
+      case "NOT_BILLED_ON_A_SCHEDULE":
+      case "FISCAL_YEAR_NEEDED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

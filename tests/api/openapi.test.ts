@@ -145,6 +145,14 @@ import {
 } from "../../src/testfakes/verification";
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
+import { BillingDeskService } from "../../src/usecase/billing/desk";
+import {
+  FakeAutoBillingSetting,
+  FakeBillingDueDesk,
+  FakeBillingSchedules,
+  FakeFiscalYearSource,
+  FakeInvoiceDrafter,
+} from "../../src/testfakes/billing";
 import type { PermissionSource } from "../../src/usecase/authz/ports";
 import {
   FakeCredentialRepo,
@@ -546,6 +554,19 @@ function deps(): RouterDeps {
         renderSource: new FakeRenderSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+      }),
+    },
+    billing: {
+      authz: new AuthzService({ permissions }),
+      service: new BillingDeskService({
+        desk: new FakeBillingDueDesk(),
+        invoices: new FakeInvoiceDrafter(),
+        schedules: new FakeBillingSchedules(),
+        setting: new FakeAutoBillingSetting(),
+        fiscalYears: new FakeFiscalYearSource(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        events: new RecordingEventSink(),
       }),
     },
     invoice: {

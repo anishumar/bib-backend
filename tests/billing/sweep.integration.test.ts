@@ -14,6 +14,10 @@
 //   5. IDEMPOTENT: a second sweep writes nothing, and the unique indexes
 //      refuse a second due for the same subject and period.
 //   6. THE SWITCH: only firms with auto_billing on are visited.
+//   7. THE DESK: dues read by name with their status derived; raising drafts a
+//      numbered invoice through InvoiceService, a line per due, in the
+//      manager's kitty; a due settles once; a cancelled invoice reopens its
+//      dues; the manager freezes at issue; a schedule snaps to its period.
 //
 // Run with:  npx vitest run --config vitest.integration.config.ts tests/billing/sweep.integration.test.ts
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -29,6 +33,16 @@ import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { FakeAutoBillingFirms, FakeFiscalYearSource } from "../../src/testfakes/billing";
 import { BillingService } from "../../src/usecase/billing/service";
+import { BillingDeskService } from "../../src/usecase/billing/desk";
+import {
+  PostgresAutoBillingSetting,
+  PostgresBillingDueDesk,
+  PostgresBillingSchedules,
+} from "../../src/infrastructure/postgres/billing-desk";
+import { PostgresInvoiceRepository } from "../../src/infrastructure/postgres/invoice-repository";
+import { PostgresRenderSource } from "../../src/infrastructure/postgres/render-source";
+import { InvoiceService } from "../../src/usecase/invoice/service";
+import type { Actor } from "../../src/domain/ledger/model";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -191,6 +205,8 @@ beforeAll(async () => {
   `;
 
   firm = await company("The Firm");
+  // One of the firm's own companies (0313), so it has an invoice series.
+  await owner`INSERT INTO crm.firm_entity (tenant_id, party_id) VALUES (${tenantId}, ${firm})`;
   client = await company(`Kaveri Foods ${stamp}`);
 
   const [axis] = await owner<{ id: string }[]>`
@@ -329,10 +345,37 @@ describe("the billing sweep on a real database (0318)", () => {
   });
 
   it("keeps a missing price missing", async () => {
-    const [none] = await owner<{ amount: string | null }[]>`
-      SELECT round(NULL::numeric * 1 / 1, 2)::text AS amount
+    // A line priced "as agreed": the due is written with no amount at all,
+    // never a zero somebody could issue.
+    const [id] = await writer.insert(tenantId, [
+      {
+        id: systemIds.newId(),
+        partyId: client,
+        issuingEntityPartyId: firm,
+        currency: "INR",
+        engagementId: unscheduled,
+        feeGroupId: null,
+        periodStart: "2026-06-01",
+        periodEnd: "2026-06-30",
+        periodLabel: "Jun 2026",
+        billOn: "2026-07-01",
+        fullAmount: null,
+        servedDays: 30,
+        periodDays: 30,
+        managerUserId: manager,
+        managerHow: "spoc_manager",
+        managerNote: null,
+      },
+    ]);
+    const [row] = await owner<{ full_amount: string | null; amount: string | null }[]>`
+      SELECT full_amount::text, amount::text FROM crm.billing_due WHERE id = ${id ?? ""}
     `;
-    expect(none?.amount).toBeNull();
+    expect(row).toEqual({ full_amount: null, amount: null });
+    // Out of the desk's way: the desk tests below count what the sweep wrote.
+    await owner`
+      UPDATE crm.billing_due SET skipped_at = now(), skipped_by_user_id = ${manager}, skip_reason = 'test row'
+       WHERE id = ${id ?? ""}
+    `;
   });
 
   it("offers a firm to the sweep only once it turns auto-billing on", async () => {
@@ -340,5 +383,167 @@ describe("the billing sweep on a real database (0318)", () => {
     expect(await firms.firmsWithAutoBilling()).not.toContain(tenantId);
     await owner`UPDATE tenancy.tenant SET auto_billing = true WHERE id = ${tenantId}`;
     expect(await firms.firmsWithAutoBilling()).toContain(tenantId);
+  });
+});
+
+describe("the billing desk on a real database (0318)", () => {
+  const invoiceRepository = new PostgresInvoiceRepository(app);
+  const clock = { now: () => new Date("2026-12-05T06:00:00Z") };
+  const invoicing = new InvoiceService({
+    invoices: invoiceRepository,
+    timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+    firmEntities: { isFirmEntity: (_t: string, partyId: string) => Promise.resolve(partyId === firm) },
+    parties: { findParty: () => Promise.resolve(null) },
+    ids: systemIds,
+    clock,
+    events: new RecordingEventSink(),
+    issuedCopies: { file: () => Promise.resolve() },
+  });
+  const deskAdapter = new PostgresBillingDueDesk(app);
+  const desk = new BillingDeskService({
+    desk: deskAdapter,
+    invoices: {
+      raise: (input, actor) => invoicing.raise(input, actor),
+      addLine: (input) => invoicing.addLine(input),
+      find: (t, id) => invoiceRepository.find(t, id),
+    },
+    schedules: new PostgresBillingSchedules(app),
+    setting: new PostgresAutoBillingSetting(app),
+    fiscalYears: new FakeFiscalYearSource(4),
+    timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+    clock,
+    events: new RecordingEventSink(),
+  });
+  let me: Actor = { type: "system", id: null };
+  let invoiceId = "";
+
+  async function monthlyDues() {
+    return (await desk.list({ tenantId })).dues.filter((d) => d.engagementId === monthly);
+  }
+
+  it("reads every due by name, with its status derived", async () => {
+    me = { type: "human", id: manager };
+    const { dues } = await desk.list({ tenantId });
+    const oct = dues.find((d) => d.engagementId === monthly && d.periodLabel === "Oct 2026");
+    expect(oct).toMatchObject({
+      party: { id: client },
+      issuer: { id: firm, displayName: "The Firm" },
+      serviceName: "Bookkeeping",
+      entityName: `Kaveri Foods ${stamp}`,
+      engagementIds: [monthly],
+      letter: { ref: "EL-2026-0001", fxRate: "1.0000000000" },
+      manager: { userId: manager, email: `manager-${stamp}@example.test` },
+      status: "open",
+      invoice: null,
+      skipped: null,
+      lastTaxPercent: null,
+      daysSinceBillOn: 34,
+      escalated: true,
+    });
+    const group = dues.find((d) => d.feeGroupId === groupId);
+    expect(group?.serviceName).toBe("Retainer");
+    expect(group?.engagementIds).toHaveLength(2);
+  });
+
+  it("raises a numbered draft from two dues, a line each, in the manager's kitty", async () => {
+    const mine = await monthlyDues();
+    const out = await desk.raise(
+      { tenantId, dueIds: mine.map((d) => d.id), lines: mine.map((d) => ({ dueId: d.id, taxPercent: "18" })) },
+      me,
+    );
+    invoiceId = out.invoiceId;
+    expect(out.conflicts).toEqual([]);
+    expect(out.number).toMatch(/^INV\/2026-27\/\d{4}$/);
+
+    const [inv] = await owner<{ manager_user_id: string; status: string }[]>`
+      SELECT manager_user_id, status FROM crm.invoice WHERE id = ${invoiceId}
+    `;
+    expect(inv).toEqual({ manager_user_id: manager, status: "draft" });
+    const lines = await owner<{ description: string; unit_amount: string; tax_percent: string; engagement_id: string }[]>`
+      SELECT description, unit_amount::text, tax_percent::text, engagement_id
+        FROM crm.invoice_line WHERE invoice_id = ${invoiceId} ORDER BY position
+    `;
+    expect(lines).toEqual([
+      { description: "Bookkeeping, Oct 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
+      { description: "Bookkeeping, Nov 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
+    ]);
+    const after = await monthlyDues();
+    expect(after.map((d) => d.status)).toEqual(["drafted", "drafted"]);
+    expect(after[0]?.invoice).toMatchObject({ id: invoiceId, status: "draft" });
+    // The next bill for this engagement offers the rate it was billed at.
+    expect(after[0]?.lastTaxPercent).toBe("18.00");
+  });
+
+  it("refuses to raise a due that is already on an invoice", async () => {
+    const [drafted] = await monthlyDues();
+    if (drafted === undefined) throw new Error("no drafted due");
+    await expect(
+      desk.raise({ tenantId, dueIds: [drafted.id], lines: [{ dueId: drafted.id, taxPercent: "18" }] }, me),
+    ).rejects.toMatchObject({ code: "BILLING_DUE_NOT_OPEN" });
+  });
+
+  it("settles a due only once, whoever asks second", async () => {
+    const [group] = (await desk.list({ tenantId })).dues.filter((d) => d.feeGroupId === groupId);
+    if (group === undefined) throw new Error("no group due");
+    expect(await deskAdapter.skip(tenantId, group.id, manager, "Waived")).toBe(true);
+    expect(await deskAdapter.skip(tenantId, group.id, manager, "Again")).toBe(false);
+    expect(await deskAdapter.markInvoiced(tenantId, group.id, invoiceId, null)).toBe(false);
+    const [after] = await deskAdapter.findMany(tenantId, [group.id]);
+    expect(after).toMatchObject({ status: "skipped", skipped: { reason: "Waived", by: { userId: manager } } });
+  });
+
+  it("opens a due again when its invoice is cancelled", async () => {
+    await invoicing.cancel(tenantId, invoiceId, me);
+    const again = await monthlyDues();
+    expect(again.map((d) => d.status)).toEqual(["open", "open"]);
+    expect(again[0]?.invoice).toMatchObject({ id: invoiceId, status: "cancelled" });
+  });
+
+  it("freezes whose revenue an invoice is once it is issued", async () => {
+    const mine = await monthlyDues();
+    const out = await desk.raise(
+      { tenantId, dueIds: mine.map((d) => d.id), lines: mine.map((d) => ({ dueId: d.id, taxPercent: "18" })) },
+      me,
+    );
+    await invoicing.issue(tenantId, out.invoiceId, me, "2026-12-05");
+    await expect(
+      owner`UPDATE crm.invoice SET manager_user_id = ${keyManager} WHERE id = ${out.invoiceId}`,
+    ).rejects.toThrow(/cannot change/);
+    expect((await monthlyDues()).map((d) => d.status)).toEqual(["billed", "billed"]);
+    invoiceId = out.invoiceId;
+  });
+
+  it("names its manager and the engagement letter it bills, on the read and on the PDF", async () => {
+    const record = await invoiceRepository.describe(tenantId, invoiceId);
+    expect(record?.manager).toMatchObject({ userId: manager, email: `manager-${stamp}@example.test` });
+    expect(record?.letters.map((l) => l.ref)).toEqual(["EL-2026-0001"]);
+
+    const source = new PostgresRenderSource(app, () => Promise.resolve(null));
+    const described = await source.describe({ tenantId, kind: "invoice", subjectRef: invoiceId });
+    expect(described?.document.meta).toContainEqual({ label: "Engagement letter", value: "EL-2026-0001" });
+  });
+
+  it("lists the engagement with no schedule and sets one, snapped to its period", async () => {
+    const rows = await desk.unscheduled(tenantId);
+    const row = rows.find((r) => r.engagementId === unscheduled);
+    expect(row).toMatchObject({
+      serviceName: "Bookkeeping",
+      billingFrequency: "monthly",
+      suggestion: { billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" },
+    });
+    expect(rows.some((r) => r.engagementId === monthly)).toBe(false);
+
+    const set = await desk.setSchedule(
+      { tenantId, engagementId: unscheduled, billingFrom: "2026-12-10", firstInvoiceOn: "2027-01-01" },
+      me,
+    );
+    expect(set).toMatchObject({ billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" });
+  });
+
+  it("turns the firm's switch", async () => {
+    await desk.setAutoBilling(tenantId, false, me);
+    expect(await desk.autoBilling(tenantId)).toBe(false);
+    await desk.setAutoBilling(tenantId, true, me);
+    expect(await desk.autoBilling(tenantId)).toBe(true);
   });
 });

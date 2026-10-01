@@ -65,6 +65,9 @@ export interface Invoice {
   readonly irn: string | null;
   readonly irnRegisteredAt: string | null;
   readonly notes: string | null;
+  /** Whose revenue this is (0318): set when raised from bill dues, frozen
+   *  once issued. Null when nobody was named. */
+  readonly managerUserId: string | null;
 }
 
 export interface InvoiceLine {

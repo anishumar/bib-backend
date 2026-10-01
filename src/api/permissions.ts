@@ -783,6 +783,21 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/invoices/{invoiceId}/balance"), "party:read" as const],
   [routeKey("GET", "/api/v1/receivables"), "party:read" as const],
 
+  // BILL DUES (0318). Reading what is owed is `party:read`, with the fee axis
+  // redacting the amounts. Raising, linking, skipping and setting a schedule
+  // are `party:write`, the permission that raises an invoice by hand: SPOCs
+  // and managers both raise bills (Ashish, 2026-10-01). Issuing stays
+  // `tenant:admin` on the invoice routes. The FIRM'S SWITCH is `tenant:admin`:
+  // turning it on starts a sweep across every client.
+  [routeKey("GET", "/api/v1/billing/dues"), "party:read" as const],
+  [routeKey("GET", "/api/v1/billing/unscheduled"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/engagements/{engagementId}/billing"), "party:write" as const],
+  [routeKey("POST", "/api/v1/billing/raise"), "party:write" as const],
+  [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "party:write" as const],
+  [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
+  [routeKey("GET", "/api/v1/billing/settings"), "party:read" as const],
+  [routeKey("PUT", "/api/v1/billing/settings"), "tenant:admin" as const],
+
   // THE DUNNING LADDER (T3.5). Reading how far a receivable has been chased is
   // `party:read` — the person on the phone to the client needs to know what has
   // already been sent. DECIDING a terminal step is `tenant:admin`, and that is

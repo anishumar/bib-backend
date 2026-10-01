@@ -87,6 +87,8 @@ import { registerProposalRoutes } from "./handler/proposal";
 import { registerEngagementRoutes } from "./handler/engagement";
 import { registerDocumentRoutes } from "./handler/document";
 import { registerInvoiceRoutes } from "./handler/invoice";
+import { registerBillingRoutes } from "./handler/billing";
+import type { BillingDeps } from "./handler/billing";
 import { registerFileStoreRoutes } from "./handler/filestore";
 import { registerDashboardRoutes } from "./handler/dashboard";
 import type { DashboardDeps } from "./handler/dashboard";
@@ -204,6 +206,7 @@ export interface RouterDeps {
   readonly engagement: EngagementDeps;
   readonly document: DocumentDeps;
   readonly invoice: InvoiceDeps;
+  readonly billing: BillingDeps;
   readonly filestore: FileStoreDeps;
   readonly dashboard: DashboardDeps;
   readonly readiness: ReadinessDeps;
@@ -478,6 +481,7 @@ export function buildRouter(
   registerEngagementRoutes(app, deps.engagement);
   registerDocumentRoutes(app, deps.document);
   registerInvoiceRoutes(app, deps.invoice);
+  registerBillingRoutes(app, deps.billing);
   registerFileStoreRoutes(app, deps.filestore);
   registerDashboardRoutes(app, deps.dashboard);
   registerReadinessRoutes(app, deps.readiness);

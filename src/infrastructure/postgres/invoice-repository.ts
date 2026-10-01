@@ -88,6 +88,7 @@ interface InvoiceRow {
   irn: string | null;
   irn_registered_at: Date | null;
   notes: string | null;
+  manager_user_id: string | null;
 }
 
 /**
@@ -130,6 +131,7 @@ function toInvoice(r: InvoiceRow): Invoice {
     irn: r.irn,
     irnRegisteredAt: r.irn_registered_at === null ? null : r.irn_registered_at.toISOString(),
     notes: r.notes,
+    managerUserId: r.manager_user_id,
   };
 }
 
@@ -165,7 +167,8 @@ function toLine(r: InvoiceLineRow): InvoiceLine {
 
 const INVOICE_COLUMNS =
   "id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number, " +
-  "status, currency, fx_rate, fx_rate_date, issued_on, due_on, irn, irn_registered_at, notes";
+  "status, currency, fx_rate, fx_rate_date, issued_on, due_on, irn, irn_registered_at, notes, " +
+  "manager_user_id";
 
 const LINE_COLUMNS =
   "id, tenant_id, invoice_id, engagement_id, description, position, quantity, unit_amount, " +
@@ -225,10 +228,10 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       const [row] = await db<InvoiceRow[]>`
         INSERT INTO crm.invoice
           (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
-           currency, fx_rate, fx_rate_date, due_on, notes)
+           currency, fx_rate, fx_rate_date, due_on, notes, manager_user_id)
         VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, ${number},
                 ${financialYear}, ${sequence}, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
-                ${i.dueOn}, ${i.notes})
+                ${i.dueOn}, ${i.notes}, ${i.managerUserId ?? null})
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `;
       if (!row) throw new Error("invoice insert returned no row");
@@ -247,20 +250,41 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 
   async describe(tenantId: string, invoiceId: string): Promise<InvoiceRecord | null> {
     return withTenant(this.app, tenantId, async (db) => {
-      const [head] = await db<(InvoiceRow & { party_name: string; entity_name: string })[]>`
+      const [head] = await db<
+        (InvoiceRow & {
+          party_name: string;
+          entity_name: string;
+          manager_name: string | null;
+          manager_email: string | null;
+        })[]
+      >`
         SELECT i.id, i.tenant_id, i.party_id, i.entity_party_id, i.number, i.financial_year,
                i.sequence_number, i.status, i.currency, i.fx_rate, i.fx_rate_date, i.issued_on,
-               i.due_on, i.irn, i.irn_registered_at, i.notes,
+               i.due_on, i.irn, i.irn_registered_at, i.notes, i.manager_user_id,
                -- Both by NAME, in the query. An invoice prints an address block
                -- and a letterhead, and a uuid prints as nothing.
                p.display_name AS party_name,
-               e.display_name AS entity_name
+               e.display_name AS entity_name,
+               mu.display_name AS manager_name,
+               mu.email::text  AS manager_email
         FROM crm.invoice i
         JOIN core.party p ON p.id = i.party_id
         JOIN core.party e ON e.id = i.entity_party_id
+        LEFT JOIN tenancy.user_account mu ON mu.id = i.manager_user_id
         WHERE i.id = ${invoiceId}
       `;
       if (!head) return null;
+
+      // The letters the lines bill (0318), so the invoice traces to what the
+      // client signed. Ordered by reference for a stable read.
+      const letters = await db<{ id: string; ref: string }[]>`
+        SELECT DISTINCT l.id, l.ref
+          FROM crm.invoice_line il
+          JOIN crm.engagement eg ON eg.id = il.engagement_id AND eg.tenant_id = il.tenant_id
+          JOIN crm.engagement_letter l ON l.id = eg.engagement_letter_id AND l.tenant_id = eg.tenant_id
+         WHERE il.invoice_id = ${invoiceId} AND il.removed_at IS NULL
+         ORDER BY l.ref
+      `;
 
       const lines = await db<(InvoiceLineRow & { net: string; tax: string })[]>`
         SELECT ${db.unsafe(LINE_COLUMNS.split(", ").map((c) => `l.${c}`).join(", "))},
@@ -296,6 +320,11 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
           total: totals?.total ?? "0",
           currency: head.currency,
         },
+        manager:
+          head.manager_user_id === null || head.manager_email === null
+            ? null
+            : { userId: head.manager_user_id, displayName: head.manager_name, email: head.manager_email },
+        letters: letters.map((l) => ({ id: l.id, ref: l.ref })),
       };
     });
   }

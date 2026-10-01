@@ -92,6 +92,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       irn: null,
       irnRegisteredAt: null,
       notes: i.notes,
+      managerUserId: i.managerUserId ?? null,
     };
     this.invoices.push(invoice);
     return Promise.resolve(invoice);
@@ -113,6 +114,11 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       entity: { id: invoice.entityPartyId, displayName: this.nameOf(invoice.entityPartyId) },
       lines: lines.map((line) => ({ line, net: net(line), tax: tax(line) })),
       totals: this.totalsOf(invoice),
+      manager:
+        invoice.managerUserId === null
+          ? null
+          : { userId: invoice.managerUserId, displayName: null, email: "manager@example.test" },
+      letters: [],
     };
   }
 

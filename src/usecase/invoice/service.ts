@@ -24,6 +24,7 @@ import type {
   CreditNote,
   Invoice,
   InvoiceBalance,
+  InvoiceLine,
   InvoiceStatus,
   Payment,
 } from "../../domain/invoice/model";
@@ -111,6 +112,8 @@ export interface RaiseInvoiceInput {
   readonly seriesDate?: string | undefined;
   /** The caller's today (see `isCallersToday`); the firm's day when absent. */
   readonly asOf?: string | undefined;
+  /** Whose revenue this invoice is (0318). Absent: nobody named. */
+  readonly managerUserId?: string | undefined;
 }
 
 export interface AddInvoiceLineInput {
@@ -176,6 +179,7 @@ export class InvoiceService {
       fxRateDate: input.fxRateDate,
       dueOn: input.dueOn ?? null,
       notes: input.notes ?? null,
+      managerUserId: input.managerUserId ?? null,
       seriesDate,
     });
 
@@ -203,7 +207,7 @@ export class InvoiceService {
     return invoice;
   }
 
-  async addLine(input: AddInvoiceLineInput): Promise<void> {
+  async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
     const invoice = await this.editableOrThrow(input.tenantId, input.invoiceId);
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidInvoiceAmount("quantity", input.quantity);
@@ -256,7 +260,7 @@ export class InvoiceService {
       }
     }
 
-    await this.deps.invoices.addLine({
+    return this.deps.invoices.addLine({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       invoiceId: input.invoiceId,

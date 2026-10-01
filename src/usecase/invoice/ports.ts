@@ -24,6 +24,8 @@ export interface NewInvoice {
   readonly fxRateDate: string;
   readonly dueOn: string | null;
   readonly notes: string | null;
+  /** Whose revenue (0318). Absent: nobody named. */
+  readonly managerUserId?: string | null | undefined;
   /**
    * The date whose FINANCIAL YEAR decides which series this invoice belongs to.
    *
@@ -57,6 +59,15 @@ export interface InvoiceRecord {
   readonly entity: { readonly id: string; readonly displayName: string };
   readonly lines: readonly InvoiceLineRecord[];
   readonly totals: InvoiceTotals;
+  /** Whose revenue (0318), by name. Null when nobody was named. */
+  readonly manager: {
+    readonly userId: string;
+    readonly displayName: string | null;
+    readonly email: string;
+  } | null;
+  /** The engagement letters its lines bill, by reference (0318): an invoice
+   *  can always be traced back to what the client signed. */
+  readonly letters: readonly { readonly id: string; readonly ref: string }[];
 }
 
 export interface InvoiceLineRecord {

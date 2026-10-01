@@ -118,6 +118,31 @@ describe("raising an invoice", () => {
   });
 });
 
+describe("whose kitty, and the line a caller gets back (auto-invoice, 0318)", () => {
+  const MANAGER = "00000000-0000-0000-0000-0000000000dd";
+
+  it("records the manager an invoice was raised for, and none when not said", async () => {
+    const s = setup();
+    const theirs = await s.service.raise(raise({ managerUserId: MANAGER }), ACTOR);
+    const nobodys = await s.service.raise(raise(), ACTOR);
+    expect(theirs.managerUserId).toBe(MANAGER);
+    expect(nobodys.managerUserId).toBeNull();
+  });
+
+  it("hands back the line it added, so a bill due can name it", async () => {
+    const s = setup();
+    const invoice = await s.service.raise(raise(), ACTOR);
+    const line = await s.service.addLine({
+      tenantId: TENANT,
+      invoiceId: invoice.id,
+      description: "Bookkeeping — Oct 2026",
+      quantity: "1",
+      unitAmount: "25000",
+    });
+    expect(line).toMatchObject({ invoiceId: invoice.id, description: "Bookkeeping — Oct 2026", position: 1 });
+  });
+});
+
 describe("the lines, and what they add up to", () => {
   it("computes net of discount, and tax on the net", async () => {
     const s = setup();
@@ -624,7 +649,7 @@ describe("who an invoice names (F-10-1)", () => {
         quantity: "1",
         unitAmount: "6000",
       });
-    await expect(line(ENGAGEMENT)).resolves.toBeUndefined();
+    await expect(line(ENGAGEMENT)).resolves.toMatchObject({ engagementId: ENGAGEMENT });
     const refused = line(THEIR_ENGAGEMENT);
     await expect(refused).rejects.toBeInstanceOf(EngagementOfAnotherClient);
     await expect(refused).rejects.toThrow(
@@ -664,8 +689,8 @@ describe("who an invoice names (F-10-1)", () => {
     // The same line goes on the US company's invoice, and the Indian
     // company's own engagement still goes on the Indian invoice.
     const american = await s.service.raise(raise({ entityPartyId: OTHER_ENTITY }), ACTOR);
-    await expect(line(american.id, US_ENGAGEMENT)).resolves.toBeUndefined();
-    await expect(line(indian.id, ENGAGEMENT)).resolves.toBeUndefined();
+    await expect(line(american.id, US_ENGAGEMENT)).resolves.toMatchObject({ engagementId: US_ENGAGEMENT });
+    await expect(line(indian.id, ENGAGEMENT)).resolves.toMatchObject({ engagementId: ENGAGEMENT });
     // A line typed by hand names no engagement, and no company is checked.
     await expect(
       s.service.addLine({
@@ -675,7 +700,7 @@ describe("who an invoice names (F-10-1)", () => {
         quantity: "1",
         unitAmount: "450",
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toMatchObject({ engagementId: null, description: "Courier recharge" });
   });
 
   it("bills an engagement only on an invoice in the currency its letter priced it in", async () => {
@@ -703,7 +728,7 @@ describe("who an invoice names (F-10-1)", () => {
 
     // A USD invoice from the same company takes it, and refuses the INR work.
     const usd = await s.service.raise(raise({ currency: "usd", fxRate: "83.5" }), ACTOR);
-    await expect(line(usd.id, EXPORT_ENGAGEMENT)).resolves.toBeUndefined();
+    await expect(line(usd.id, EXPORT_ENGAGEMENT)).resolves.toMatchObject({ engagementId: EXPORT_ENGAGEMENT });
     await expect(line(usd.id, ENGAGEMENT)).rejects.toThrow(
       "EL-2026-0001 is priced in INR and this invoice is in USD. Bill this work on an invoice in INR.",
     );

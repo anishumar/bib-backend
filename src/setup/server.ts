@@ -104,6 +104,12 @@ import { DashboardService } from "../usecase/dashboard/service";
 import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-facts";
 import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
+import { BillingDeskService } from "../usecase/billing/desk";
+import {
+  PostgresAutoBillingSetting,
+  PostgresBillingDueDesk,
+  PostgresBillingSchedules,
+} from "../infrastructure/postgres/billing-desk";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import {
@@ -540,6 +546,25 @@ export function wire(cfg: Config, log: Logger): Wired {
     // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
     // after the document store for this.
     issuedCopies: invoiceIssuedCopies(fileStore, log),
+  });
+
+  // BILL DUES (0318): what a manager does with a bill the sweep found owed.
+  // Raising goes through the InvoiceService above, so every invoice rule (the
+  // issuer, the client, the currency, the gapless number) applies exactly as
+  // to an invoice raised by hand.
+  const billing = new BillingDeskService({
+    desk: new PostgresBillingDueDesk(pools.app),
+    invoices: {
+      raise: (input, actor) => invoices.raise(input, actor),
+      addLine: (input) => invoices.addLine(input),
+      find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+    },
+    schedules: new PostgresBillingSchedules(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    fiscalYears: configRepository,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    events: ledger,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
@@ -1284,6 +1309,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
+        billing: { service: billing, authz },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },

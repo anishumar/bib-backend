@@ -93,6 +93,9 @@ const InvoiceSchema = z
     }),
     irnRegisteredAt: z.string().nullable(),
     notes: z.string().nullable(),
+    managerUserId: z.string().uuid().nullable().openapi({
+      description: "Whose revenue this invoice is (0318); frozen once issued. Null when nobody was named.",
+    }),
   })
   .openapi("Invoice");
 
@@ -144,6 +147,12 @@ const InvoiceRecordSchema = z
     entity: PartyRefSchema,
     lines: z.array(InvoiceLineSchema),
     totals: TotalsSchema,
+    manager: z
+      .object({ userId: z.string().uuid(), displayName: z.string().nullable(), email: z.string() })
+      .nullable(),
+    letters: z.array(z.object({ id: z.string().uuid(), ref: z.string() })).openapi({
+      description: "The engagement letters this invoice's lines bill, by reference (0318).",
+    }),
   })
   .openapi("InvoiceRecord");
 
@@ -1058,6 +1067,7 @@ function toInvoiceBody(i: Invoice, fees: boolean): z.infer<typeof InvoiceSchema>
     irn: i.irn,
     irnRegisteredAt: i.irnRegisteredAt,
     notes: i.notes,
+    managerUserId: i.managerUserId,
   };
 }
 
@@ -1092,5 +1102,10 @@ function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof Invo
       tax: fees ? l.tax : null,
     })),
     totals: toTotalsBody(record.totals, fees),
+    manager:
+      record.manager === null
+        ? null
+        : { userId: record.manager.userId, displayName: record.manager.displayName, email: record.manager.email },
+    letters: record.letters.map((l) => ({ id: l.id, ref: l.ref })),
   };
 }

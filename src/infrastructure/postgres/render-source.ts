@@ -973,6 +973,20 @@ export class PostgresRenderSource implements RenderSource {
       // The government registry's identifier, when the firm has recorded one.
       // Absent is ordinary — nothing in this product talks to the IRP yet.
       if (row.irn !== null) meta.push({ label: "IRN", value: row.irn });
+      // The engagement letters the lines bill (0318), so a reader can trace
+      // the invoice to what the client signed. Only when a line names one: an
+      // invoice for a recharge with no engagement prints exactly as before.
+      const letters = await db<{ ref: string }[]>`
+        SELECT DISTINCT l.ref
+          FROM crm.invoice_line il
+          JOIN crm.engagement eg ON eg.id = il.engagement_id AND eg.tenant_id = il.tenant_id
+          JOIN crm.engagement_letter l ON l.id = eg.engagement_letter_id AND l.tenant_id = eg.tenant_id
+         WHERE il.invoice_id = ${invoiceId} AND il.removed_at IS NULL
+         ORDER BY l.ref
+      `;
+      if (letters.length > 0) {
+        meta.push({ label: "Engagement letter", value: letters.map((l) => l.ref).join(", ") });
+      }
 
       const document: RenderableDocument = {
         documentTitle: "Tax Invoice",
