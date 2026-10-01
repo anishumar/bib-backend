@@ -569,8 +569,16 @@ describe("and EVERY child of a signed letter is frozen, not just the ones we rem
    * the freeze lands. Nothing in it is evidence of the agreement: the envelope
    * id that IS evidence is copied onto the letter's own frozen
    * `signature_reference` at signature.
+   *
+   * `crm.recorded_acceptance` (0317) is the third, for the same reason as the
+   * second: it is how the client's yes was OBTAINED when it came by email or on
+   * a call, not a term of what they agreed to. It is written inside the very
+   * transaction that signs the letter (`signAndFanOut`), so a freeze on it
+   * would refuse the act of signing the way it would for `crm.engagement`. And
+   * it needs no trigger to stay put: it is append-only by GRANT (`bib_app`
+   * holds SELECT and INSERT only), which binds every writer a trigger would.
    */
-  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request"];
+  const NOT_TERMS = ["crm.engagement", "crm.letter_signature_request", "crm.recorded_acceptance"];
 
   it("finds no child table of an engagement letter without the freeze trigger", async () => {
     const unguarded = await owner<{ table: string }[]>`
