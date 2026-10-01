@@ -127,7 +127,7 @@ async function line(
        currency, discount_percent, billing_frequency, entity_party_id, description, pricing_note,
        fee_group_id)
     VALUES (${tenantId}, ${letterId}, ${position}, ${serviceVersion}, 1, ${amount}, 'INR', 0, ${frequency},
-            ${client}, 'Bookkeeping', ${amount === null && feeGroupId === null ? "As agreed" : null}, ${feeGroupId})
+            ${client}, 'Accounting and bookkeeping', ${amount === null && feeGroupId === null ? "As agreed" : null}, ${feeGroupId})
     RETURNING id
   `;
   if (!ln) throw new Error("line seed failed");
@@ -428,7 +428,8 @@ describe("the billing desk on a real database (0318)", () => {
     expect(oct).toMatchObject({
       party: { id: client },
       issuer: { id: firm, displayName: "The Firm" },
-      serviceName: "Bookkeeping",
+      // The letter line's wording, not the catalogue's "Bookkeeping".
+      serviceName: "Accounting and bookkeeping",
       entityName: `Kaveri Foods ${stamp}`,
       engagementIds: [monthly],
       letter: { ref: "EL-2026-0001", fxRate: "1.0000000000" },
@@ -464,8 +465,8 @@ describe("the billing desk on a real database (0318)", () => {
         FROM crm.invoice_line WHERE invoice_id = ${invoiceId} ORDER BY position
     `;
     expect(lines).toEqual([
-      { description: "Bookkeeping, Oct 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
-      { description: "Bookkeeping, Nov 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
+      { description: "Accounting and bookkeeping, Oct 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
+      { description: "Accounting and bookkeeping, Nov 2026", unit_amount: "25000.0000", tax_percent: "18.00", engagement_id: monthly },
     ]);
     const after = await monthlyDues();
     expect(after.map((d) => d.status)).toEqual(["drafted", "drafted"]);
@@ -527,7 +528,7 @@ describe("the billing desk on a real database (0318)", () => {
     const rows = await desk.unscheduled(tenantId);
     const row = rows.find((r) => r.engagementId === unscheduled);
     expect(row).toMatchObject({
-      serviceName: "Bookkeeping",
+      serviceName: "Accounting and bookkeeping",
       billingFrequency: "monthly",
       suggestion: { billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" },
     });

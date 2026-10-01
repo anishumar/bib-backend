@@ -127,7 +127,8 @@ export interface BillingDueRecord {
   /** The engagements this bill covers: one, or a fee group's. The first is
    *  the one an invoice line names, so the PDF can print the letter. */
   readonly engagementIds: readonly string[];
-  /** The service's name (a group's title for a fee group). */
+  /** What the client signed for: the letter line's own wording (a group's
+   *  title for a fee group), never the catalogue's name. The invoice line's text. */
   readonly serviceName: string;
   /** Which of the client's companies the work is for; null when a fee group
    *  covers several. */

@@ -154,8 +154,11 @@ const DUE_SELECT = `
     LEFT JOIN tenancy.user_account su ON su.id = d.skipped_by_user_id
     JOIN LATERAL (
       SELECT array_agg(e.id ORDER BY ll.position, e.id) AS engagement_ids,
+             -- WHAT THE CLIENT SIGNED: the letter line's own wording, or the fee
+             -- group's title, never the catalogue's name. It is the invoice
+             -- line's text, read beside the letter ref the invoice prints.
              CASE WHEN d.fee_group_id IS NOT NULL THEN max(g.title)
-                  ELSE max(coalesce(pinned.body ->> 'name', ll.description)) END AS service_name,
+                  ELSE max(ll.description) END AS service_name,
              CASE WHEN count(DISTINCT e.entity_party_id) = 1 THEN max(ep.display_name) END AS entity_name,
              (array_agg(l.id))[1] AS letter_id,
              max(l.ref) AS letter_ref,
@@ -169,8 +172,6 @@ const DUE_SELECT = `
         JOIN core.party ep ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
         LEFT JOIN crm.engagement_letter_fee_group g
           ON g.id = ll.fee_group_id AND g.tenant_id = ll.tenant_id
-        LEFT JOIN config.version pinned
-          ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
        WHERE e.tenant_id = d.tenant_id
          AND ((d.engagement_id IS NOT NULL AND e.id = d.engagement_id)
            OR (d.fee_group_id IS NOT NULL AND ll.fee_group_id = d.fee_group_id AND ll.removed_at IS NULL))
@@ -272,7 +273,7 @@ interface ScheduleRow {
 const SCHEDULE_SELECT = `
   SELECT e.id AS engagement_id, e.party_id, p.display_name AS party_name,
          ep.display_name AS entity_name,
-         coalesce(pinned.body ->> 'name', ll.description) AS service_name,
+         ll.description AS service_name,
          l.ref AS letter_ref, e.status,
          e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
          coalesce(g.billing_frequency, ll.billing_frequency) AS billing_frequency,
@@ -284,7 +285,6 @@ const SCHEDULE_SELECT = `
     JOIN core.party p  ON p.id = e.party_id AND p.tenant_id = e.tenant_id
     JOIN core.party ep ON ep.id = e.entity_party_id AND ep.tenant_id = e.tenant_id
     LEFT JOIN crm.engagement_letter_fee_group g ON g.id = ll.fee_group_id AND g.tenant_id = ll.tenant_id
-    LEFT JOIN config.version pinned ON pinned.id = ll.service_version_id AND pinned.tenant_id = ll.tenant_id
 `;
 
 function toSchedule(r: ScheduleRow): ScheduleRecord {

@@ -39,7 +39,11 @@ const DueSchema = z
     engagementId: z.string().uuid().nullable(),
     feeGroupId: z.string().uuid().nullable(),
     engagementIds: z.array(z.string().uuid()),
-    serviceName: z.string(),
+    serviceName: z.string().openapi({
+      description:
+        "What the client signed for: the letter line's own wording, or the fee group's title. " +
+        "Never the catalogue's name. The invoice line reads it, with the period.",
+    }),
     entityName: z.string().nullable(),
     letter: z.object({ id: z.string().uuid(), ref: z.string(), fxRate: z.string(), fxRateDate: z.string() }),
     periodStart: z.string(),
@@ -84,7 +88,7 @@ const ScheduleSchema = z
     engagementId: z.string().uuid(),
     party: z.object({ id: z.string().uuid(), displayName: z.string() }),
     entityName: z.string(),
-    serviceName: z.string(),
+    serviceName: z.string().openapi({ description: "The letter line's own wording, as the client signed it." }),
     letterRef: z.string(),
     status: z.string(),
     effectiveFrom: z.string(),
