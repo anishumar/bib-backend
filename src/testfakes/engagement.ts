@@ -582,6 +582,8 @@ export class FakeEngagementRepo implements EngagementRepository {
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
           endReason: e.endReason,
+          billingFrom: e.billingFrom,
+          firstInvoiceOn: e.firstInvoiceOn,
           feeGroup:
             group === undefined
               ? null

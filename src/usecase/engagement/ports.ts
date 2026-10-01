@@ -1308,6 +1308,10 @@ export interface BillableEngagement {
   readonly endsOn: string | null;
   /** Why it ended (V2.3), in the firm's words; null until it is ended. */
   readonly endReason: string | null;
+  /** The billing schedule (0318): the first period billed and the date its
+   *  invoice falls due. Both null: billing not set up. */
+  readonly billingFrom: string | null;
+  readonly firstInvoiceOn: string | null;
   /**
    * The FEE GROUP that prices this engagement, or null (0083).
    *

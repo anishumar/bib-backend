@@ -968,6 +968,13 @@ const BillableEngagementSchema = z
     endsOn: DaySchema.nullable(),
     /** Why it ended (V2.3), in the firm's words. Null until it is ended. */
     endReason: z.string().nullable(),
+    billingFrom: DaySchema.nullable().openapi({
+      description:
+        "The first period billed (0318), its first day. Null with `firstInvoiceOn`: billing not set up.",
+    }),
+    firstInvoiceOn: DaySchema.nullable().openapi({
+      description: "The date the first period's invoice falls due; each later period one billing span after.",
+    }),
     feeGroup: z
       .object({
         id: z.string().uuid(),
@@ -2171,6 +2178,8 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
           effectiveFrom: e.effectiveFrom,
           endsOn: e.endsOn,
           endReason: e.endReason,
+          billingFrom: e.billingFrom,
+          firstInvoiceOn: e.firstInvoiceOn,
           feeGroup:
             e.feeGroup === null
               ? null

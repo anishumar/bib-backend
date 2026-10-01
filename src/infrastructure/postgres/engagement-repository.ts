@@ -1400,6 +1400,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
         SELECT e.id, e.entity_party_id, e.status,
                e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
                e.end_reason,
+               e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on,
                ep.display_name AS entity_name,
                l.id AS letter_id, l.ref AS letter_ref,
                l.issuing_entity_party_id, ip.display_name AS issuing_entity_name,
@@ -1456,6 +1457,8 @@ export class PostgresEngagementRepository implements EngagementRepository {
         effectiveFrom: r.effective_from,
         endsOn: r.ends_on,
         endReason: r.end_reason,
+        billingFrom: r.billing_from,
+        firstInvoiceOn: r.first_invoice_on,
         feeGroup:
           r.fee_group_id === null ||
           r.fee_group_rank === null ||
@@ -1499,6 +1502,8 @@ interface BillableRow {
   effective_from: string;
   ends_on: string | null;
   end_reason: string | null;
+  billing_from: string | null;
+  first_invoice_on: string | null;
   fee_group_id: string | null;
   fee_group_rank: number | null;
   fee_group_title: string | null;
