@@ -3,12 +3,100 @@ import { deflateRawSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 
 import { SheetUnreadable } from "../../src/domain/clientimport/errors";
+import { CLIENT_SHEET_MARKER, clientRowsOf, rowsOf } from "../../src/domain/clientimport/model";
 import {
   excelSerialToDay,
   isDateFormatCode,
   NodeSheetReader,
   parseCsv,
 } from "../../src/infrastructure/sheet/grid-reader";
+
+/** One part of the zip an `.xlsx` is. */
+type Part = readonly [string, string];
+
+/**
+ * A zip of XML parts.
+ *
+ * `central` writes the central directory a real `.xlsx` ends with, and
+ * `descriptor` writes each part's sizes in a trailing data descriptor instead of
+ * in its local header — which is how a workbook streamed out of a web app
+ * arrives, and which only the central directory can then size.
+ */
+function zipOf(
+  parts: readonly Part[],
+  opts: { readonly central?: boolean; readonly descriptor?: boolean } = {},
+): Uint8Array {
+  const streamed = opts.descriptor === true;
+  const chunks: Buffer[] = [];
+  const directory: Buffer[] = [];
+  let offset = 0;
+  for (const [name, xml] of parts) {
+    const raw = Buffer.from(xml, "utf8");
+    const data = deflateRawSync(raw);
+    const nameBuf = Buffer.from(name, "utf8");
+    const header = Buffer.alloc(30);
+    header.writeUInt32LE(0x04034b50, 0);
+    header.writeUInt16LE(20, 4);
+    header.writeUInt16LE(streamed ? 0x08 : 0, 6);
+    header.writeUInt16LE(8, 8); // deflate
+    header.writeUInt32LE(0, 10);
+    header.writeUInt32LE(0, 14);
+    header.writeUInt32LE(streamed ? 0 : data.length, 18);
+    header.writeUInt32LE(streamed ? 0 : raw.length, 22);
+    header.writeUInt16LE(nameBuf.length, 26);
+    header.writeUInt16LE(0, 28);
+    chunks.push(header, nameBuf, data);
+    let written = header.length + nameBuf.length + data.length;
+    if (streamed) {
+      const trailer = Buffer.alloc(16);
+      trailer.writeUInt32LE(0x08074b50, 0);
+      trailer.writeUInt32LE(0, 4);
+      trailer.writeUInt32LE(data.length, 8);
+      trailer.writeUInt32LE(raw.length, 12);
+      chunks.push(trailer);
+      written += trailer.length;
+    }
+    if (opts.central === true) {
+      const entry = Buffer.alloc(46);
+      entry.writeUInt32LE(0x02014b50, 0);
+      entry.writeUInt16LE(20, 4);
+      entry.writeUInt16LE(20, 6);
+      entry.writeUInt16LE(streamed ? 0x08 : 0, 8);
+      entry.writeUInt16LE(8, 10);
+      entry.writeUInt32LE(0, 16);
+      entry.writeUInt32LE(data.length, 20);
+      entry.writeUInt32LE(raw.length, 24);
+      entry.writeUInt16LE(nameBuf.length, 28);
+      entry.writeUInt32LE(offset, 42);
+      directory.push(entry, nameBuf);
+    }
+    offset += written;
+  }
+  if (opts.central === true) {
+    const cd = Buffer.concat(directory);
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(parts.length, 8);
+    end.writeUInt16LE(parts.length, 10);
+    end.writeUInt32LE(cd.length, 12);
+    end.writeUInt32LE(offset, 16);
+    chunks.push(cd, end);
+  }
+  return new Uint8Array(Buffer.concat(chunks));
+}
+
+/** A workbook whose worksheet XML is written out cell by cell, as Excel writes it. */
+function rawBook(sheetData: string, parts: readonly Part[] = []): Uint8Array {
+  return zipOf([
+    ["xl/worksheets/sheet1.xml", `<worksheet><sheetData>${sheetData}</sheetData></worksheet>`],
+    ...parts,
+  ]);
+}
+
+/** `<sst>` holding these strings, in order. */
+function sst(...strings: readonly string[]): Part {
+  return ["xl/sharedStrings.xml", `<sst>${strings.map((s) => `<si><t>${s}</t></si>`).join("")}</sst>`];
+}
 
 /**
  * A minimal .xlsx: a zip holding `xl/sharedStrings.xml` and one worksheet,
@@ -43,29 +131,7 @@ function xlsx(
       .join("") +
     `</sheetData></worksheet>`;
 
-  const entries: [string, Buffer][] = [
-    ["xl/sharedStrings.xml", Buffer.from(sharedXml, "utf8")],
-    ["xl/worksheets/sheet1.xml", Buffer.from(sheetXml, "utf8")],
-    ...extra.map(([name, xml]): [string, Buffer] => [name, Buffer.from(xml, "utf8")]),
-  ];
-  const parts: Buffer[] = [];
-  for (const [name, raw] of entries) {
-    const data = deflateRawSync(raw);
-    const nameBuf = Buffer.from(name, "utf8");
-    const header = Buffer.alloc(30);
-    header.writeUInt32LE(0x04034b50, 0);
-    header.writeUInt16LE(20, 4);
-    header.writeUInt16LE(0, 6);
-    header.writeUInt16LE(8, 8); // deflate
-    header.writeUInt32LE(0, 10);
-    header.writeUInt32LE(0, 14);
-    header.writeUInt32LE(data.length, 18);
-    header.writeUInt32LE(raw.length, 22);
-    header.writeUInt16LE(nameBuf.length, 26);
-    header.writeUInt16LE(0, 28);
-    parts.push(header, nameBuf, data);
-  }
-  return new Uint8Array(Buffer.concat(parts));
+  return zipOf([["xl/sharedStrings.xml", sharedXml], ["xl/worksheets/sheet1.xml", sheetXml], ...extra]);
 }
 
 /** A cell written with its own style index and type, as Excel writes a date or a TRUE. */
@@ -120,6 +186,58 @@ describe("reading a CSV", () => {
     expect(reader.grid(bytes("Client Name,Country\nAlpha,IN"), "clients.csv")).toEqual([
       ["Client Name", "Country"],
       ["Alpha", "IN"],
+    ]);
+  });
+
+  it("keeps a blank line in the middle, so every row after it keeps the number the file gives it", () => {
+    const rows = parseCsv("Client Name,Country\nAlpha,IN\n\nBeta,AE");
+    expect(rows).toHaveLength(4);
+    expect(rows[3]).toEqual(["Beta", "AE"]);
+    // Which is the whole point: Beta is on line 4 of the file, and a finding
+    // against it has to say 4.
+    const sheet = rowsOf(rows, CLIENT_SHEET_MARKER) ?? [];
+    expect(sheet.map((r) => r.lineNo)).toEqual([2, 4]);
+  });
+
+  it("reads a sheet saved with semicolons, as Excel writes it where that is the list separator", () => {
+    expect(parseCsv('Client Name;Registered Address\nAlpha;"12, MG Road"')).toEqual([
+      ["Client Name", "Registered Address"],
+      ["Alpha", "12, MG Road"],
+    ]);
+  });
+
+  it("reads a tab-separated sheet, which is what Excel's Text (Tab delimited) writes", () => {
+    expect(reader.grid(bytes("Client Name\tCountry\nAlpha\tIN"), "clients.txt")).toEqual([
+      ["Client Name", "Country"],
+      ["Alpha", "IN"],
+    ]);
+  });
+
+  it("takes the delimiter from the header line, not from a cell under it", () => {
+    // Comma-separated, and the first address holds two semicolons: counting the
+    // whole file would read the sheet as one column.
+    expect(parseCsv('Client Name,Registered Address\nAlpha,"A; B; C"')).toEqual([
+      ["Client Name", "Registered Address"],
+      ["Alpha", "A; B; C"],
+    ]);
+  });
+
+  it("reads a CSV saved as UTF-16, which is what Excel's Unicode Text writes", () => {
+    const text = "Client Name,Country\nAlpha,IN";
+    const le = Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from(text, "utf16le")]);
+    const be = Buffer.concat([Buffer.from([0xfe, 0xff]), Buffer.from(text, "utf16le").swap16()]);
+    const expected = [
+      ["Client Name", "Country"],
+      ["Alpha", "IN"],
+    ];
+    expect(reader.grid(new Uint8Array(le), "clients.csv")).toEqual(expected);
+    expect(reader.grid(new Uint8Array(be), "clients.csv")).toEqual(expected);
+  });
+
+  it("reads a Windows line ending inside a quoted address as one newline, with no stray carriage return", () => {
+    expect(parseCsv('Name,Address\r\nAlpha,"12 MG Road\r\nBengaluru"\r\n')).toEqual([
+      ["Name", "Address"],
+      ["Alpha", "12 MG Road\nBengaluru"],
     ]);
   });
 });
@@ -197,5 +315,137 @@ describe("reading a workbook", () => {
     expect(() => reader.grid(bytes("hello"), "clients.pdf")).toThrow(SheetUnreadable);
     expect(() => reader.grid(bytes("hello"), "clients.xls")).toThrow(/save it as \.xlsx or \.csv/);
     expect(() => reader.grid(new Uint8Array([0x50, 0x4b, 3, 4]), "clients.xlsx")).toThrow(/no worksheet/);
+  });
+
+  it("keeps the cell after an empty one — a blank formatted cell is not the start of the next cell", () => {
+    // Excel writes a cell somebody formatted and left empty as `<c r="C1" s="2"/>`.
+    // Read as the START of a cell, it swallowed everything up to the next `</c>`
+    // and took that cell's value for its own: on QA the Country went missing and
+    // its shared-string INDEX turned up in Client Since (2026-10-01).
+    const book = rawBook(
+      `<row r="1">` +
+        `<c r="A1" t="s"><v>0</v></c><c r="B1" s="2"/><c r="C1" s="2"/>` +
+        `<c r="D1" t="s"><v>1</v></c><c r="E1" s="2"/><c r="F1" t="s"><v>2</v></c>` +
+        `</row>`,
+      [sst("Alpha", "IN", "skohli@10x.global")],
+    );
+    expect(reader.grid(book, "clients.xlsx")).toEqual([["Alpha", "", "", "IN", "", "skohli@10x.global"]]);
+  });
+
+  it("numbers every row as Excel does, through a row it wrote empty and a row it left out", () => {
+    const book = rawBook(
+      `<row r="1"><c r="A1" t="s"><v>0</v></c></row>` +
+        `<row r="2" spans="1:3"/>` +
+        `<row r="4"><c r="A4" t="s"><v>1</v></c></row>`,
+      [sst("Client Name", "Alpha")],
+    );
+    const grid = reader.grid(book, "clients.xlsx");
+    expect(grid).toHaveLength(4);
+    expect(grid[0]).toEqual(["Client Name"]);
+    expect(grid[3]).toEqual(["Alpha"]);
+    const sheet = rowsOf(grid, CLIENT_SHEET_MARKER) ?? [];
+    expect(sheet.map((r) => r.lineNo)).toEqual([4]);
+  });
+
+  it("resolves the shared strings after an empty one, which does not shift them", () => {
+    const book = rawBook(
+      `<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>2</v></c></row>`,
+      [["xl/sharedStrings.xml", `<sst><si><t>Client Name</t></si><si/><si><t>Country</t></si></sst>`]],
+    );
+    expect(reader.grid(book, "clients.xlsx")).toEqual([["Client Name", "Country"]]);
+  });
+
+  it("reads the workbook's first tab, which is not always the lowest-numbered sheet file", () => {
+    // Reorder or delete a tab in Excel and the file names stop matching the
+    // tabs; the sheet somebody filled in is the first TAB.
+    const book = zipOf([
+      [
+        "xl/workbook.xml",
+        `<workbook><sheets><sheet name="clients" sheetId="2" r:id="rId1"/>` +
+          `<sheet name="Instructions" sheetId="1" r:id="rId2"/></sheets></workbook>`,
+      ],
+      [
+        "xl/_rels/workbook.xml.rels",
+        `<Relationships><Relationship Target="worksheets/sheet2.xml" Id="rId1"/>` +
+          `<Relationship Id="rId2" Target="worksheets/sheet1.xml"/></Relationships>`,
+      ],
+      sst("Fill the next tab in", "Client Name"),
+      [
+        "xl/worksheets/sheet1.xml",
+        `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>`,
+      ],
+      [
+        "xl/worksheets/sheet2.xml",
+        `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>1</v></c></row></sheetData></worksheet>`,
+      ],
+    ]);
+    expect(reader.grid(book, "clients.xlsx")).toEqual([["Client Name"]]);
+  });
+
+  it("reads a workbook whose local headers carry no sizes, as one streamed out of a web app", () => {
+    const book = zipOf(
+      [
+        sst("Client Name", "Alpha"),
+        [
+          "xl/worksheets/sheet1.xml",
+          `<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row>` +
+            `<row r="2"><c r="A2" t="s"><v>1</v></c></row></sheetData></worksheet>`,
+        ],
+      ],
+      { central: true, descriptor: true },
+    );
+    expect(reader.grid(book, "clients.xlsx")).toEqual([["Client Name"], ["Alpha"]]);
+  });
+
+  it("reads the QA sheet's own shape: a blank formatted cell before the Country and the Key Manager", () => {
+    // Row 2 of `clients-corrected (1).xlsx`, cut to the columns that broke: E
+    // and P were formatted and left empty, and G (Country) and V (Key Manager)
+    // are what the reader lost.
+    const header =
+      `<row r="1">` +
+      [
+        "Client Name (registered name, spelled the same on all 3 sheets)",
+        "Known As",
+        "Industry",
+        "Website",
+        "Client Since (YYYY-MM-DD, when the relationship began)",
+        "Group",
+        "Country (2 letters: IN, AE, SG, GB, US)",
+        "Entity Type",
+        "Incorporated On",
+        "Financial Year End (MM-DD, e.g. 03-31)",
+        "Registered Address",
+        "PAN",
+        "GSTIN",
+        "CIN",
+        "LLPIN",
+        "TAN",
+        "UEN",
+        "TRN",
+        "EIN",
+        "CRN",
+        "VAT",
+        "Key Manager (login email of the colleague who owns this client)",
+      ]
+        .map((h, i) => `<c r="${String.fromCharCode(65 + i)}1" t="inlineStr"><is><t>${h}</t></is></c>`)
+        .join("") +
+      `</row>`;
+    const book = rawBook(
+      `${header}<row r="2" spans="1:31"><c r="A2" t="s"><v>0</v></c><c r="E2" s="2"/>` +
+        `<c r="G2" t="s"><v>1</v></c><c r="H2" t="s"><v>2</v></c><c r="I2" t="s"><v>3</v></c>` +
+        `<c r="J2" s="3"><v>46112</v></c><c r="P2" s="2"/><c r="V2" t="s"><v>4</v></c></row>`,
+      [sst("RT Trends", "IN", "private_limited", "2008-10-11", "skohli@10x.global"), STYLES],
+    );
+    const sheet = rowsOf(reader.grid(book, "clients.xlsx"), CLIENT_SHEET_MARKER) ?? [];
+    const row = clientRowsOf(sheet)[0];
+    expect(row?.lineNo).toBe(2);
+    expect(row?.legalName).toBe("RT Trends");
+    expect(row?.clientSince).toBeNull();
+    expect(row?.jurisdiction).toBe("IN");
+    expect(row?.entityType).toBe("private_limited");
+    expect(row?.incorporatedOn).toBe("2008-10-11");
+    expect(row?.financialYearEnd).toBe("03-31");
+    expect(row?.identifiers).toEqual([]);
+    expect(row?.keyManagerEmail).toBe("skohli@10x.global");
   });
 });
