@@ -116,6 +116,7 @@ interface LineRow {
   billing_frequency: BillingFrequency | null;
   billing_timing: string | null;
   billing_on: Date | null;
+  advance_amount: string | null;
   scope_override: string | null;
   client_obligations_override: string | null;
   volume_limits_override: string | null;
@@ -134,7 +135,7 @@ const LINE_COLUMNS = `id, tenant_id, engagement_letter_id, entity_party_id, serv
                       effective_from, jurisdiction, billing_frequency, scope_override,
                       client_obligations_override, volume_limits_override, exclusions_override,
                       oop_estimate_min, oop_estimate_max, oop_currency, pricing_note,
-                      fee_group_id, billing_timing, billing_on`;
+                      fee_group_id, billing_timing, billing_on, advance_amount`;
 
 /** Every column of a letter, for the same reason — it appeared SEVEN times,
  *  written out, until 0083 added `layout` and the choice was seven edits or
@@ -302,6 +303,7 @@ function toLine(r: LineRow): LetterLine {
     billingFrequency: r.billing_frequency,
     billingTiming: timingOf(r.billing_timing),
     billingOn: r.billing_on === null ? null : toDay(r.billing_on),
+    advanceAmount: r.advance_amount,
     scopeOverride: r.scope_override,
     clientObligationsOverride: r.client_obligations_override,
     volumeLimitsOverride: r.volume_limits_override,
@@ -519,7 +521,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                l.effective_from, l.jurisdiction, l.billing_frequency, l.scope_override,
                l.client_obligations_override, l.volume_limits_override, l.exclusions_override,
                l.oop_estimate_min, l.oop_estimate_max, l.oop_currency, l.pricing_note,
-               l.fee_group_id, l.billing_timing, l.billing_on,
+               l.fee_group_id, l.billing_timing, l.billing_on, l.advance_amount,
                -- NULL for an unpriced line, and deliberately not coalesced:
                -- there is no net of an amount that does not exist, and a zero
                -- here would be a line the client gets free.
@@ -842,10 +844,10 @@ export class PostgresEngagementRepository implements EngagementRepository {
            effective_from, jurisdiction, billing_frequency, scope_override,
            client_obligations_override, volume_limits_override, exclusions_override,
            oop_estimate_min, oop_estimate_max, oop_currency, pricing_note, fee_group_id,
-           billing_timing, billing_on)
+           billing_timing, billing_on, advance_amount)
         SELECT $1, $2, $3, $4, $5, $6, coalesce(max(position), 0) + 1,
                $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22,
-               $23, $24::date
+               $23, $24::date, $25::numeric
         FROM crm.engagement_letter_line
         WHERE engagement_letter_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
@@ -875,6 +877,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
           l.feeGroupId,
           l.billingTiming,
           l.billingOn,
+          l.advanceAmount ?? null,
         ],
       );
       if (!row) throw new Error("engagement letter line insert returned no row");
@@ -925,6 +928,7 @@ export class PostgresEngagementRepository implements EngagementRepository {
                billing_frequency = ${edit.billingFrequency},
                billing_timing = ${edit.billingTiming},
                billing_on = ${edit.billingOn}::date,
+               advance_amount = ${edit.advanceAmount}::numeric,
                scope_override = ${edit.scopeOverride},
                client_obligations_override = ${edit.clientObligationsOverride},
                volume_limits_override = ${edit.volumeLimitsOverride},
@@ -1043,7 +1047,10 @@ export class PostgresEngagementRepository implements EngagementRepository {
       const [row] = await db.unsafe<LineRow[]>(
         `
         UPDATE crm.engagement_letter_line
-           SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7
+           SET fee_group_id = $4, unit_amount = $5, discount_percent = $6, pricing_note = $7,
+               -- A line moved into a group gives up its own advance with its
+               -- price (0320): the group's advance is the letter's.
+               advance_amount = CASE WHEN $4::uuid IS NULL THEN advance_amount END
          WHERE id = $1 AND engagement_letter_id = $2 AND tenant_id = $3 AND removed_at IS NULL
         RETURNING ${LINE_COLUMNS}
       `,
@@ -1391,6 +1398,23 @@ export class PostgresEngagementRepository implements EngagementRepository {
         RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
       `;
       return { letter: toLetter(letter), released: released.map(toEngagement) };
+    });
+  }
+
+  async releaseEngagements(
+    tenantId: string,
+    engagementIds: readonly string[],
+    at: string,
+  ): Promise<readonly Engagement[]> {
+    if (engagementIds.length === 0) return [];
+    return withTenant(this.app, tenantId, async (db) => {
+      const released = await db<EngagementRow[]>`
+        UPDATE crm.engagement
+           SET status = 'active', activated_at = ${at}::timestamptz
+         WHERE id = ANY(${db.array(engagementIds as string[])}::uuid[]) AND status = 'pending_advance'
+        RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
+      `;
+      return released.map(toEngagement);
     });
   }
 

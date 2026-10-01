@@ -157,6 +157,17 @@ async function main(): Promise<void> {
     if (noYear > 0) {
       console.log(`  ${String(noYear)} quarterly or yearly bill(s) wait for the firm's financial year to be set`);
     }
+    // THE ADVANCE AND THE FINAL BILL (0320): letters still owing an advance
+    // bill (every firm), and one-time work finished with no final bill yet.
+    const advances = await wired.advanceBills.catchUp();
+    const finals = await wired.finalBills.sweep();
+    for (const r of [...advances, ...finals]) {
+      if (r.failure !== undefined) console.log(`  advance/final bills: firm ${r.tenantId} could not be visited — ${r.failure}`);
+    }
+    const advanceCount = advances.reduce((n, r) => n + r.created, 0);
+    const finalCount = finals.reduce((n, r) => n + r.created, 0);
+    if (advanceCount > 0) console.log(`  ${String(advanceCount)} advance bill(s) written for signed letters`);
+    if (finalCount > 0) console.log(`  ${String(finalCount)} final bill(s) written for finished one-time work`);
     console.log();
 
     // THE COMPLIANCE CALENDAR (T3.2), last, and after the spawn on purpose: an

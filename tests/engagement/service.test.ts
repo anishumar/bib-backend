@@ -13,6 +13,8 @@ import {
   AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
   AdvanceNotRequired,
+  InvalidLineAdvance,
+  OneKindOfAdvance,
   AlreadySuperseded,
   ClauseNotPublished,
   ClauseLawNotIssuers,
@@ -2581,5 +2583,159 @@ describe("when a recurring fee is invoiced, as the letter says it (0319)", () =>
     const l = await line(s, id, { billingFrequency: "monthly", billingTiming: "advance" });
     const oneOff = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: l.id, billingFrequency: "one_time" });
     expect(oneOff).toMatchObject({ billingFrequency: "one_time", billingTiming: null, billingOn: null });
+  });
+});
+
+// ── Phase 2 (0320): a service's own advance, and the advance bill ───────────
+
+describe("a service's own advance (0320)", () => {
+  async function twoLines(s: ReturnType<typeof setup>, id: string) {
+    const gst = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_A, serviceVersionId: GST,
+      description: "GST filing", quantity: "1", unitAmount: "2000", discountPercent: "0",
+    });
+    const audit = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_B, serviceVersionId: GST,
+      description: "Statutory audit", quantity: "1", unitAmount: "100000", discountPercent: "0",
+    });
+    return { gst, audit };
+  }
+
+  it("is set on a draft line and cleared with null", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    const set = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    expect(set.advanceAmount).toBe("50000");
+    const cleared = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: null });
+    expect(cleared.advanceAmount).toBeNull();
+  });
+
+  it("must be an amount above zero", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    for (const bad of ["0", "-5", "abc"]) {
+      await expect(
+        s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: bad }),
+      ).rejects.toBeInstanceOf(InvalidLineAdvance);
+    }
+  });
+
+  it("is refused beside the letter's own advance, both ways round", async () => {
+    const s = setup();
+    const withLetterAdvance = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
+    const { audit } = await twoLines(s, withLetterAdvance);
+    await expect(
+      s.service.updateLine({ tenantId: TENANT, letterId: withLetterAdvance, lineId: audit.id, advanceAmount: "500" }),
+    ).rejects.toBeInstanceOf(OneKindOfAdvance);
+
+    const withLineAdvance = await draft(s);
+    const lines = await twoLines(s, withLineAdvance);
+    await s.service.updateLine({ tenantId: TENANT, letterId: withLineAdvance, lineId: lines.audit.id, advanceAmount: "500" });
+    await expect(
+      s.service.revise({ tenantId: TENANT, letterId: withLineAdvance, advanceRequired: true, advanceAmount: "1000" }, ACTOR),
+    ).rejects.toBeInstanceOf(OneKindOfAdvance);
+  });
+
+  it("is refused on a grouped line, and given up when a line joins a group", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { gst, audit } = await twoLines(s, id);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: gst.id, advanceAmount: "500" });
+    const group = await s.service.addFeeGroup(TENANT, id, { title: "Retainer", billingFrequency: "monthly", amount: "5000" });
+    const moved = await s.service.setLinePricing({ tenantId: TENANT, letterId: id, lineId: gst.id, feeGroupId: group.id });
+    expect(moved.advanceAmount).toBeNull();
+    await s.service.setLinePricing({ tenantId: TENANT, letterId: id, lineId: audit.id, feeGroupId: group.id });
+    await expect(
+      s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "500" }),
+    ).rejects.toBeInstanceOf(InvalidLineAdvance);
+  });
+
+  it("holds only its own service's work at signing; the rest starts", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    const byLine = new Map(engagements.map((e) => [e.engagement.engagementLetterLineId, e.engagement.status]));
+    expect(byLine.get(audit.id)).toBe("pending_advance");
+    expect([...byLine.values()].filter((st) => st === "active")).toHaveLength(1);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
+  });
+
+  it("is a term: in the content hash when set, and absent when not", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const { audit } = await twoLines(s, id);
+    const lines = await s.letters.listLines(TENANT, id);
+    const letter = await s.letters.findLetter(TENANT, id);
+    if (letter === null) throw new Error("no letter");
+    const base = { letter, lines, feeGroups: [], clauses: [] };
+    const without = canonicalContent(base);
+    // A line read before 0320 had no advance field at all: it hashes the same.
+    const before = lines.map(({ advanceAmount: _dropped, ...l }) => l);
+    expect(canonicalContent({ ...base, lines: before })).toBe(without);
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    expect(canonicalContent({ ...base, lines: await s.letters.listLines(TENANT, id) })).not.toBe(without);
+  });
+});
+
+describe("the advance bill and its release (0320)", () => {
+  function withAdvanceBilling(fail = false) {
+    const s = setup();
+    const asked: string[] = [];
+    const service = new EngagementService({
+      ...s,
+      advanceBilling: {
+        billAdvances: (input) => {
+          asked.push(input.letterId);
+          return fail ? Promise.reject(new Error("billing is down")) : Promise.resolve({ created: 1 });
+        },
+      },
+    });
+    return { ...s, service, asked };
+  }
+
+  it("asks billing for the advance bill when a letter that asks for one is signed", async () => {
+    const s = withAdvanceBilling();
+    const id = await signedLetter(s, { advanceRequired: true, advanceAmount: "10000" });
+    expect(s.asked).toEqual([id]);
+  });
+
+  it("asks nothing when the letter asks for no advance", async () => {
+    const s = withAdvanceBilling();
+    await signedLetter(s);
+    expect(s.asked).toEqual([]);
+  });
+
+  it("never turns a signature into a failure when the advance bill cannot be written", async () => {
+    const s = withAdvanceBilling(true);
+    const id = await signedLetter(s, { advanceRequired: true, advanceAmount: "10000" });
+    expect((await s.letters.findLetter(TENANT, id))?.status).toBe("signed");
+  });
+
+  it("releases one service's work when its own advance is settled", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const audit = await s.service.addLine({
+      tenantId: TENANT, letterId: id, entityPartyId: ENTITY_B, serviceVersionId: GST,
+      description: "Statutory audit", quantity: "1", unitAmount: "100000", discountPercent: "0",
+    });
+    await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    const waiting = engagements[0]?.engagement;
+    if (waiting === undefined) throw new Error("no engagement");
+    expect(waiting.status).toBe("pending_advance");
+
+    const released = await s.service.releaseEngagementAdvance(TENANT, waiting.id, ACTOR);
+    expect(released.map((e) => e.engagement.status)).toEqual(["active"]);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
+    // Twice is nothing: the second finds no engagement still waiting.
+    expect(await s.service.releaseEngagementAdvance(TENANT, waiting.id, ACTOR)).toEqual([]);
   });
 });

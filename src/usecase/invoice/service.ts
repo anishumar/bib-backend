@@ -79,6 +79,7 @@ import type {
   InvoiceSeriesRecord,
   InvoiceSummary,
   IssuedCopies,
+  MoneyMovedListener,
   PartyStanding,
   ReceivableRecord,
 } from "./ports";
@@ -96,6 +97,9 @@ export interface Deps {
   readonly events: EventSink;
   /** Files the invoice's PDF as it is issued (2026-09-29). */
   readonly issuedCopies: IssuedCopies;
+  /** The advance gate (0320), told after money moves. Optional: absent,
+   *  nobody is told, and an admin's Approve start is the way on. */
+  readonly moneyMoved?: MoneyMovedListener | null;
 }
 
 export interface RaiseInvoiceInput {
@@ -317,7 +321,24 @@ export class InvoiceService {
     // Its paper, drawn now and never again: the copy of record. After the
     // status is written, so the copy is the issued one, dated.
     await this.deps.issuedCopies.file(tenantId, issued.id, actor);
+    await this.tellMoneyMoved(tenantId, issued.id, actor);
     return issued;
+  }
+
+  /**
+   * After the fact, and never undoing it (0320): the payment, credit note or
+   * issue is committed and was what the person asked for. If the gate fails,
+   * the advance waits for an admin's Approve start, which is a state the
+   * firm already handles.
+   */
+  private async tellMoneyMoved(tenantId: string, invoiceId: string, actor: Actor): Promise<void> {
+    const listener = this.deps.moneyMoved ?? null;
+    if (listener === null) return;
+    try {
+      await listener.moneyMoved(tenantId, invoiceId, actor);
+    } catch {
+      // Deliberately swallowed: see above.
+    }
   }
 
   /**
@@ -513,6 +534,7 @@ export class InvoiceService {
         reference: payment.reference,
       },
     });
+    await this.tellMoneyMoved(input.tenantId, input.invoiceId, actor);
     return payment;
   }
 
@@ -600,6 +622,7 @@ export class InvoiceService {
         reason: credit.reason,
       },
     });
+    await this.tellMoneyMoved(input.tenantId, input.invoiceId, actor);
     return credit;
   }
 

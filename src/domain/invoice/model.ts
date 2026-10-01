@@ -243,7 +243,10 @@ export type CreditReason =
   | "goodwill"
   | "scope_change"
   | "duplicate_invoice"
-  | "bad_debt";
+  | "bad_debt"
+  /** An advance left over once the work it covered is finished, or a client
+   *  who left early, given back (0320). */
+  | "advance_refund";
 
 export const CREDIT_REASONS: readonly CreditReason[] = [
   "service_failure",
@@ -252,6 +255,7 @@ export const CREDIT_REASONS: readonly CreditReason[] = [
   "scope_change",
   "duplicate_invoice",
   "bad_debt",
+  "advance_refund",
 ];
 
 export function isCreditReason(v: string): v is CreditReason {

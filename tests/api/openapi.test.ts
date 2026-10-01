@@ -146,9 +146,16 @@ import {
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { AdvanceGate } from "../../src/usecase/billing/advance";
+import { FinalBiller } from "../../src/usecase/billing/final";
 import {
   FakeAutoBillingSetting,
   FakeBillingDueDesk,
+  FakeAutoBillingFirms,
+  FakeBillingDueWriter,
+  FakeBillingManagerFacts,
+  FakeFinalBillFacts,
+  FakeWorkRelease,
   FakeBillingSchedules,
   FakeFiscalYearSource,
   FakeInvoiceDrafter,
@@ -566,6 +573,18 @@ function deps(): RouterDeps {
         fiscalYears: new FakeFiscalYearSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+        events: new RecordingEventSink(),
+      }),
+      gate: new AdvanceGate({ desk: new FakeBillingDueDesk(), work: new FakeWorkRelease(), events: new RecordingEventSink() }),
+      finals: new FinalBiller({
+        facts: new FakeFinalBillFacts(),
+        dues: new FakeBillingDueWriter(),
+        managers: new FakeBillingManagerFacts(),
+        setting: new FakeAutoBillingSetting(),
+        firms: new FakeAutoBillingFirms(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+        ids: new FakeIds(),
         events: new RecordingEventSink(),
       }),
     },

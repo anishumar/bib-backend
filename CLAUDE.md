@@ -1724,6 +1724,46 @@ currencies and cannot share an axis).
   cancelled invoice, a draft, a USD invoice from the Gulf company, a second firm behind the wall)
   and `revenue.test.ts` (the month cut at 00:30 IST on 1 October, the assembly).
 
+## The advance and the final bill (auto-invoice phase 2, 0320)
+
+Phase 1 (0318/0319, `bib/prompts/auto-invoice/PLAN.md`) writes a `crm.billing_due` per period of
+recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `period`, `advance` or
+`final`. The rules, each the firm's (Ashish) or the user's, 2026-10-01:
+
+- **Every advance is a GST tax invoice, and it starts the work.** The "Record advance" tick and its
+  route are GONE. Signing writes an ADVANCE BILL (`AdvanceBiller`, through the engagement use case's
+  `AdvanceBilling` port; the daily billing queue catches up every firm's letters still owing one,
+  WHATEVER the auto-billing switch says, because this is now the only way such work starts). A
+  letter has ONE advance for the whole of it or one per service (`engagement_letter_line.advance_amount`,
+  never on a grouped line), never both: refused by the service (`ONE_KIND_OF_ADVANCE`,
+  `INVALID_LINE_ADVANCE`) and by a trigger each way. The amount is BEFORE tax. An advance bill is
+  raised on an invoice of its own and cannot be skipped.
+- **The gate** (`AdvanceGate`): `InvoiceService` tells it after an issue, a payment or a credit note
+  (`MoneyMovedListener`), and the desk after a link. Paid in full (outstanding <= 0) releases the work:
+  the letter's advance through `recordAdvance` (which records `advance_recorded_by` = whoever moved the
+  money), a service's through `releaseEngagementAdvance`. A part payment waits for an admin's
+  **Approve start** (`tenant:admin`), which also pushes a paid one that did not start. Only a human's
+  act releases. Two locks: the engagements' `pending_advance` and the bill's `released_at IS NULL`.
+  A bounced cheque afterwards does not stop work: `started` wins.
+- **The final bill** of a one-time service (or one-time fee group) is written when its job is DONE
+  (the orchestrator's `jobDone` port; the daily queue catches up), dated the day it finished, at the
+  letter's price. A service with no process has a job that never finishes, so **Bill it now** writes
+  it today. Finals follow the firm's switch; advances do not.
+- **FIFO, before tax.** `crm.advance_pool` (a view) is what is left of each advance on an ISSUED
+  invoice: its line's net, less credit notes at their pre-tax share, less what bills took (counted
+  while raised or covered). Raising a period or final bill takes from the service's own advance, else
+  the letter's, earliest bill first, and the line bills the BALANCE in words that name the fee, the
+  advance and its invoice. A bill the advance pays in full gets NO invoice (`covered`), because even a
+  zero invoice draws a gapless number. The take is re-checked in the write under
+  `pg_advisory_xact_lock` on the advance invoice, so two raises cannot both spend the last of it.
+- **The refund.** Once everything an advance covered is finished (ended with its last period billed,
+  or one-time with its final bill raised, covered or skipped) and no bill of it is open, what is left
+  is on "To refund": a credit note on the advance invoice, reason `advance_refund`, for the remainder
+  with its share of the tax (worked out in SQL, capped at what the invoice still carries). The money
+  goes back as a negative payment, as any refund. A firm may keep it instead, with a reason.
+- `crm.billing_due` now names an engagement letter, so it is the fourth entry in the signed-letter
+  freeze test's `NOT_TERMS`: what the letter CAUSED, written after the signature.
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The

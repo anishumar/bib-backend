@@ -406,6 +406,7 @@ describe("the billing desk on a real database (0318)", () => {
       raise: (input, actor) => invoicing.raise(input, actor),
       addLine: (input) => invoicing.addLine(input),
       find: (t, id) => invoiceRepository.find(t, id),
+      issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
     },
     schedules: new PostgresBillingSchedules(app),
     setting: new PostgresAutoBillingSetting(app),
@@ -464,7 +465,7 @@ describe("the billing desk on a real database (0318)", () => {
       { tenantId, dueIds: mine.map((d) => d.id), lines: mine.map((d) => ({ dueId: d.id, taxPercent: "18" })) },
       me,
     );
-    invoiceId = out.invoiceId;
+    invoiceId = out.invoiceId ?? "";
     expect(out.conflicts).toEqual([]);
     expect(out.number).toMatch(/^INV\/2026-27\/\d{4}$/);
 
@@ -518,12 +519,13 @@ describe("the billing desk on a real database (0318)", () => {
       { tenantId, dueIds: mine.map((d) => d.id), lines: mine.map((d) => ({ dueId: d.id, taxPercent: "18" })) },
       me,
     );
-    await invoicing.issue(tenantId, out.invoiceId, me, "2026-12-05");
+    const raised = out.invoiceId ?? "";
+    await invoicing.issue(tenantId, raised, me, "2026-12-05");
     await expect(
-      owner`UPDATE crm.invoice SET manager_user_id = ${keyManager} WHERE id = ${out.invoiceId}`,
+      owner`UPDATE crm.invoice SET manager_user_id = ${keyManager} WHERE id = ${raised}`,
     ).rejects.toThrow(/cannot change/);
     expect((await monthlyDues()).map((d) => d.status)).toEqual(["billed", "billed"]);
-    invoiceId = out.invoiceId;
+    invoiceId = raised;
   });
 
   it("names its manager and the engagement letter it bills, on the read and on the PDF", async () => {

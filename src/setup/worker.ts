@@ -28,7 +28,10 @@ import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { BillingService } from "../usecase/billing/service";
 import { GoLiveScheduler } from "../usecase/billing/golive";
+import { AdvanceBiller } from "../usecase/billing/advance";
+import { FinalBiller } from "../usecase/billing/final";
 import { PostgresAutoBillingSetting, PostgresBillingSchedules } from "../infrastructure/postgres/billing-desk";
+import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
@@ -206,6 +209,9 @@ export interface WiredWorker {
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
   readonly billing: BillingService;
+  /** The advance bill's and the final bill's catch-up (0320). */
+  readonly advanceBills: AdvanceBiller;
+  readonly finalBills: FinalBiller;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
@@ -392,6 +398,30 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
+  // THE ADVANCE AND THE FINAL BILL (0320). The advance bill is written at
+  // signing (this process settles e-signed letters) and caught up daily for
+  // every firm, whatever its switch says: it is how work waiting on an advance
+  // starts. A one-time service's final bill is written when its job finishes
+  // (the orchestrator below) and caught up daily for firms with the switch on.
+  const advanceBills = new AdvanceBiller({
+    facts: new PostgresAdvanceBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    ids: systemIds,
+    events: ledger,
+  });
+  const finalBills = new FinalBiller({
+    facts: new PostgresFinalBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    firms: new PostgresAutoBillingFirms(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    ids: systemIds,
+    events: ledger,
+  });
+
   // THE THIRD SWEEP (T2.7). It shares the job repository with the scheduler on
   // purpose: the scheduler creates jobs and this one walks them, and two
   // adapters over `delivery.job` would eventually disagree about what "runnable"
@@ -402,6 +432,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   // decides whether a machine may act with nobody watching.
 
   const orchestrator = new OrchestratorService({
+    // A finished job may make a one-time service's final bill due (0320).
+    jobDone: finalBills,
     // A cancelled job closes its tasks through the work-item module (V2.4).
     jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
@@ -548,6 +580,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const tenantRepository = new PostgresTenantRepository(pools.app);
   const workerParties = new PostgresPartyRepository(pools.app);
   const engagement = new EngagementService({
+    // 0320: and writes the advance bill it owes.
+    advanceBilling: advanceBills,
     // 0319: an e-signed letter settled here sets its engagements' billing
     // schedules from its terms, exactly as one signed on the server does.
     goLiveBilling: new GoLiveScheduler({
@@ -632,6 +666,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     scheduler,
     dunning,
     billing,
+    advanceBills,
+    finalBills,
     orchestrator,
     obligations,
     escalations,
@@ -689,6 +725,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
             { tenantId: r.tenantId, created: r.created, alreadyDue: r.alreadyDue, awaitingFiscalYear: r.awaitingFiscalYear },
             "billing sweep",
           );
+        }
+        // The advance and the final bill's catch-up (0320), on the same day.
+        for (const r of [...(await advanceBills.catchUp()), ...(await finalBills.sweep())]) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "advance or final bill catch-up could not visit firm");
+          } else if (r.created > 0) {
+            log.info({ tenantId: r.tenantId, created: r.created }, "advance or final bills written");
+          }
         }
       });
       await queue.schedule(BILLING_QUEUE, cfg.worker.dunningCron);

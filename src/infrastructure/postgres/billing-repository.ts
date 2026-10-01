@@ -99,8 +99,9 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
       const due = await db<{ engagement_id: string | null; fee_group_id: string | null; period_start: string }[]>`
         SELECT engagement_id, fee_group_id, period_start::text AS period_start
           FROM crm.billing_due
-         WHERE engagement_id = ANY(${db.array(engagementIds)}::uuid[])
-            OR fee_group_id = ANY(${db.array(groupIds)}::uuid[])
+         WHERE kind = 'period'
+           AND (engagement_id = ANY(${db.array(engagementIds)}::uuid[])
+            OR fee_group_id = ANY(${db.array(groupIds)}::uuid[]))
       `;
       const starts = new Map<string, string[]>();
       for (const d of due) {
@@ -157,6 +158,8 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
     return withTenant(this.app, tenantId, async (db) => {
       const payload = dues.map((d) => ({
         id: d.id,
+        kind: d.kind ?? "period",
+        engagement_letter_id: d.engagementLetterId ?? null,
         party_id: d.partyId,
         issuing_entity_party_id: d.issuingEntityPartyId,
         currency: d.currency,
@@ -177,14 +180,17 @@ export class PostgresBillingDueWriter implements BillingDueWriter {
       // and a bare `::jsonb` would be a jsonb STRING (T3.2's lesson).
       const created = await db<{ id: string }[]>`
         INSERT INTO crm.billing_due
-          (id, tenant_id, party_id, issuing_entity_party_id, currency, engagement_id, fee_group_id,
+          (id, tenant_id, kind, engagement_letter_id, party_id, issuing_entity_party_id, currency,
+           engagement_id, fee_group_id,
            period_start, period_end, period_label, bill_on, full_amount, served_days, period_days,
            manager_user_id, manager_how, manager_note)
-        SELECT r.id, ${tenantId}, r.party_id, r.issuing_entity_party_id, r.currency, r.engagement_id,
+        SELECT r.id, ${tenantId}, r.kind, r.engagement_letter_id, r.party_id, r.issuing_entity_party_id,
+               r.currency, r.engagement_id,
                r.fee_group_id, r.period_start, r.period_end, r.period_label, r.bill_on, r.full_amount,
                r.served_days, r.period_days, r.manager_user_id, r.manager_how, r.manager_note
           FROM jsonb_to_recordset(${JSON.stringify(payload)}::text::jsonb) AS r(
-            id uuid, party_id uuid, issuing_entity_party_id uuid, currency text, engagement_id uuid,
+            id uuid, kind text, engagement_letter_id uuid, party_id uuid, issuing_entity_party_id uuid,
+            currency text, engagement_id uuid,
             fee_group_id uuid, period_start date, period_end date, period_label text, bill_on date,
             full_amount numeric, served_days integer, period_days integer, manager_user_id uuid,
             manager_how text, manager_note text)

@@ -155,6 +155,11 @@ export interface Deps {
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
+  /** Billing, told when a job is done (0320): a one-time service's final bill
+   *  falls due then. Optional; the daily billing sweep catches up regardless. */
+  readonly jobDone?: {
+    jobDone(input: { readonly tenantId: string; readonly jobId: string }, actor: Actor): Promise<unknown>;
+  } | null;
 }
 
 /**
@@ -2259,6 +2264,16 @@ export class OrchestratorService {
         skipped: steps.filter((s) => s.status === "skipped").length,
       },
     });
+    // The final bill of a one-time service is due now (0320). After the job is
+    // done and never undoing it: a failure here is caught up by the sweep.
+    const billing = this.deps.jobDone ?? null;
+    if (billing !== null) {
+      try {
+        await billing.jobDone({ tenantId, jobId: job.id }, actor);
+      } catch {
+        // Deliberately swallowed: see above.
+      }
+    }
     return true;
   }
 }

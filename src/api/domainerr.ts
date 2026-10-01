@@ -867,6 +867,7 @@ export function mapError(err: unknown): MappedError {
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_BILLING_TIMING":
+      case "INVALID_LINE_ADVANCE":
       case "INVALID_OOP_ESTIMATE":
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":
@@ -936,6 +937,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_LETTER_TRANSITION":
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":
+      case "ONE_KIND_OF_ADVANCE":
       case "ENGAGEMENT_NOT_ACTIVE":
       case "ENGAGEMENT_ENDED":
       case "ENGAGEMENT_NOT_PAUSED":
@@ -1024,6 +1026,11 @@ export function mapError(err: unknown): MappedError {
       case "INVOICE_DOES_NOT_FIT_DUE":
       case "NOT_BILLED_ON_A_SCHEDULE":
       case "FISCAL_YEAR_NEEDED":
+      case "ADVANCE_NOT_SKIPPABLE":
+      case "START_NOT_APPROVABLE":
+      case "BILL_NOW_REFUSED":
+      case "AUTO_BILLING_OFF":
+      case "NOTHING_TO_REFUND":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

@@ -98,6 +98,16 @@ export interface GoLiveBilling {
   ): Promise<unknown>;
 }
 
+/**
+ * Writes the advance bill(s) a signed letter owes (0320): the letter's one, or
+ * one per service with its own advance. Satisfied structurally by the billing
+ * desk's `AdvanceBiller`, so neither use case imports the other. Every advance
+ * is a tax invoice, and the work it holds starts when that invoice is paid.
+ */
+export interface AdvanceBilling {
+  billAdvances(input: { readonly tenantId: string; readonly letterId: string }, actor: Actor): Promise<unknown>;
+}
+
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
 }
@@ -228,6 +238,8 @@ export interface LetterLineEdit {
   /** When it is invoiced (0319), judged with the frequency above. */
   readonly billingTiming: LetterBillingTiming | null;
   readonly billingOn: string | null;
+  /** This service's own advance, before tax (0320); null = none. */
+  readonly advanceAmount: Amount | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -359,6 +371,9 @@ export interface NewLetterLine {
   /** When it is invoiced (0319); null = not chosen. Validated upstream. */
   readonly billingTiming: LetterBillingTiming | null;
   readonly billingOn: string | null;
+  /** Its own advance (0320). Absent or null = none; only a copy carries one,
+   *  since a line is given its advance on the letter page. */
+  readonly advanceAmount?: Amount | null | undefined;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -928,6 +943,11 @@ export interface EngagementRepository {
     recordedByUserId: string,
     at: string,
   ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }>;
+
+  /** One service's own advance was settled (0320): these engagements become
+   *  active. Only those still `pending_advance`: the write is the lock, so a
+   *  second call answers none. */
+  releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]>;
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]>;
 

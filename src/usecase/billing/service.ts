@@ -28,8 +28,8 @@ import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { monthsPerPeriod, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
-import type { BillingManager } from "../../domain/billing/model";
-import { billingDues, resolveBillingManager, serviceWindowOf } from "../../domain/billing/model";
+import { billingDues, serviceWindowOf } from "../../domain/billing/model";
+import { billingManagerFor, type ManagerCache } from "./manager";
 import type {
   AutoBillingFirms,
   BillingDueWriter,
@@ -96,7 +96,7 @@ export class BillingService {
   async sweepTenant(tenantId: string): Promise<BillingSweepReport> {
     const today = dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
     const fiscalYearStartMonth = await this.deps.fiscalYears.fiscalYearStartMonth(tenantId);
-    const managers = new Map<string, Promise<BillingManager>>();
+    const managers: ManagerCache = new Map();
 
     const planned: NewBillingDue[] = [];
     let awaitingFiscalYear = 0;
@@ -166,31 +166,12 @@ export class BillingService {
   }
 
   /** Whose kitty, asked once per client and set of Depts per pass. */
-  private managerFor(
-    tenantId: string,
-    subject: BillingSubject,
-    today: string,
-    cache: Map<string, Promise<BillingManager>>,
-  ): Promise<BillingManager> {
-    const deptCodes = [...new Set(subject.engagements.map((e) => e.deptCode).filter((d): d is string => d !== null))].sort();
-    // A service filed under no Dept says so in the rule's own words, so it is
-    // part of the key: one under no Dept beside one under FRC is not "FRC".
-    const unfiled = subject.engagements.some((e) => e.deptCode === null);
-    const key = `${subject.partyId}|${deptCodes.join(",")}|${String(unfiled)}`;
-    const hit = cache.get(key);
-    if (hit !== undefined) return hit;
-    const answer = (async () => {
-      const codes = unfiled && deptCodes.length > 0 ? [...deptCodes, "(no Dept)"] : deptCodes;
-      const [dept] = deptCodes;
-      const spocs =
-        codes.length === 1 && dept !== undefined
-          ? await this.deps.managers.spocsFor(tenantId, subject.partyId, dept, today)
-          : [];
-      const keyManager = await this.deps.managers.keyManagerFor(tenantId, subject.partyId, today);
-      return resolveBillingManager({ deptCodes: codes, spocs, keyManager });
-    })();
-    cache.set(key, answer);
-    return answer;
+  private managerFor(tenantId: string, subject: BillingSubject, today: string, cache: ManagerCache) {
+    return billingManagerFor(
+      this.deps.managers,
+      { tenantId, partyId: subject.partyId, deptCodes: subject.engagements.map((e) => e.deptCode), today },
+      cache,
+    );
   }
 }
 

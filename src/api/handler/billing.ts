@@ -12,27 +12,47 @@ import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import type { BillingDeskService, DueOnDesk, UnscheduledRecord } from "../../usecase/billing/desk";
-import type { PersonRef, ScheduleRecord } from "../../usecase/billing/ports";
+import type { AdvanceGate, AdvanceOnDesk } from "../../usecase/billing/advance";
+import type { BillNowCandidate, FinalBiller } from "../../usecase/billing/final";
+import type { PersonRef, RefundCandidate, ScheduleRecord } from "../../usecase/billing/ports";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 
 export interface BillingDeps {
   readonly service: BillingDeskService;
+  /** The advance's gate: where each stands, and an admin's Approve start (0320). */
+  readonly gate: AdvanceGate;
+  /** One-time services' final bills: Bill it now (0320). */
+  readonly finals: FinalBiller;
   /** For the FEE AXIS only; gate 3 is middleware. */
   readonly authz: AuthzService;
 }
 
 const Decimal = z.string().regex(/^\d+(\.\d+)?$/);
 const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
-const STATUSES = ["open", "drafted", "billed", "skipped"] as const;
+const STATUSES = ["open", "drafted", "billed", "skipped", "covered"] as const;
+const KINDS = ["period", "advance", "final"] as const;
 
 const PersonSchema = z
   .object({ userId: z.string().uuid(), displayName: z.string().nullable(), email: z.string() })
   .openapi("BillingPerson");
 
+const ReleasedSchema = z
+  .object({ at: z.string(), how: z.enum(["paid", "approved"]), by: PersonSchema.nullable() })
+  .openapi("AdvanceReleased");
+
 const DueSchema = z
   .object({
     id: z.string().uuid(),
+    kind: z.enum(KINDS).openapi({
+      description:
+        "`period` (one period of recurring work), `advance` (the letter's advance, or one service's: " +
+        "raised on an invoice of its own, and the work waits until it is paid) or `final` (a one-time " +
+        "service whose work is done, billed for the balance after the advance) (0320).",
+    }),
+    engagementLetterId: z.string().uuid().nullable().openapi({
+      description: "The letter a LETTER-WIDE advance is for; null otherwise.",
+    }),
     party: z.object({ id: z.string().uuid(), displayName: z.string() }),
     issuer: z.object({ id: z.string().uuid(), displayName: z.string() }),
     currency: z.string(),
@@ -75,7 +95,8 @@ const DueSchema = z
     status: z.enum(STATUSES).openapi({
       description:
         "Derived on read: `open` (to raise), `drafted` (on a draft invoice), `billed` (issued), " +
-        "`skipped`. A cancelled invoice makes its dues open again.",
+        "`skipped`, or `covered` (the advance paid it in full, so no invoice was raised). A " +
+        "cancelled invoice makes its dues open again.",
     }),
     invoice: z.object({ id: z.string().uuid(), number: z.string(), status: z.string() }).nullable(),
     skipped: z.object({ at: z.string(), by: PersonSchema.nullable(), reason: z.string() }).nullable(),
@@ -86,8 +107,80 @@ const DueSchema = z
     escalated: z.boolean().openapi({
       description: "Still to be issued a week after its bill date: it shows to the manager's own manager too.",
     }),
+    advancePool: z
+      .object({ invoiceId: z.string().uuid(), invoiceNumber: z.string(), remaining: Decimal.nullable() })
+      .nullable()
+      .openapi({
+        description:
+          "The advance this bill will be taken off when raised (the service's own, else the letter's) " +
+          "and what is left of it, before tax. `remaining` is null without the fee axis.",
+      }),
+    advanceApplied: z
+      .object({ invoiceId: z.string().uuid(), invoiceNumber: z.string(), amount: Decimal.nullable() })
+      .nullable()
+      .openapi({ description: "What this bill was reduced by, once raised or covered." }),
+    released: ReleasedSchema.nullable().openapi({
+      description: "An advance bill: when the work it held started, and how.",
+    }),
   })
   .openapi("BillingDue");
+
+const AdvanceSchema = z
+  .object({
+    id: z.string().uuid(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    issuer: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    currency: z.string(),
+    engagementLetterId: z.string().uuid().nullable(),
+    engagementId: z.string().uuid().nullable(),
+    serviceName: z.string().openapi({ description: "`All services` for the letter's own advance." }),
+    letter: z.object({ id: z.string().uuid(), ref: z.string() }),
+    billOn: z.string(),
+    amount: Decimal.nullable(),
+    manager: PersonSchema.nullable(),
+    invoice: z.object({ id: z.string().uuid(), number: z.string(), status: z.string() }).nullable(),
+    balance: z
+      .object({ invoiced: z.string().nullable(), paid: z.string().nullable(), outstanding: z.string().nullable() })
+      .nullable()
+      .openapi({ description: "The advance invoice's money, as the invoice reads it. Amounts null without fees." }),
+    state: z.enum(["not_raised", "on_draft", "unpaid", "part_paid", "paid", "started"]).openapi({
+      description:
+        "Where the advance stands. `part_paid` waits for an admin's Approve start; `paid` starts by " +
+        "itself (an admin may push one that did not); `started` released the work.",
+    }),
+    released: ReleasedSchema.nullable(),
+  })
+  .openapi("BillingAdvance");
+
+const RefundSchema = z
+  .object({
+    dueId: z.string().uuid(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    issuer: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    currency: z.string(),
+    letter: z.object({ id: z.string().uuid(), ref: z.string() }),
+    serviceName: z.string(),
+    invoice: z.object({ id: z.string().uuid(), number: z.string() }),
+    advanceNet: Decimal.nullable(),
+    applied: Decimal.nullable(),
+    remaining: Decimal.nullable().openapi({ description: "Left of the advance, before tax." }),
+    refundAmount: Decimal.nullable().openapi({
+      description: "The credit note that gives it back, with its share of the tax. Null without fees.",
+    }),
+  })
+  .openapi("BillingRefund");
+
+const BillNowSchema = z
+  .object({
+    engagementId: z.string().uuid(),
+    feeGroupId: z.string().uuid().nullable(),
+    party: z.object({ id: z.string().uuid(), displayName: z.string() }),
+    serviceName: z.string(),
+    letterRef: z.string(),
+    currency: z.string(),
+    fullAmount: Decimal.nullable(),
+  })
+  .openapi("BillingBillNow");
 
 const ScheduleSchema = z
   .object({
@@ -222,8 +315,13 @@ const raiseRoute = createRoute({
         "application/json": {
           schema: z
             .object({
-              invoiceId: z.string().uuid(),
-              number: z.string(),
+              invoiceId: z.string().uuid().nullable().openapi({
+                description: "Null when the advance paid every bill in full: no invoice, so no number drawn.",
+              }),
+              number: z.string().nullable(),
+              covered: z.array(z.string().uuid()).openapi({
+                description: "Bills the advance paid in full: no line, and status `covered`.",
+              }),
               conflicts: z.array(z.string().uuid()).openapi({
                 description: "Dues somebody else settled while this ran: on the invoice, but not linked to it.",
               }),
@@ -282,6 +380,138 @@ const linkRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such due or invoice at this firm"),
     409: errorResponse("Already settled, or the invoice cannot be this bill"),
+  },
+});
+
+const advancesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/billing/advances",
+  tags: ["billing"],
+  summary: "Every advance bill, and where it stands",
+  responses: {
+    200: {
+      description: "The advances",
+      content: { "application/json": { schema: z.object({ advances: z.array(AdvanceSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const approveStartRoute = createRoute({
+  method: "post",
+  path: "/api/v1/billing/advances/{dueId}/approve-start",
+  tags: ["billing"],
+  summary: "Start the work on a part-paid advance",
+  description:
+    "An admin's decision (Ashish, 2026-10-01): the work an advance holds starts by itself when its " +
+    "invoice is paid in full, and on a part payment only when an admin approves it here.",
+  request: { params: z.object({ dueId: z.string().uuid() }) },
+  responses: {
+    200: { description: "Started", content: { "application/json": { schema: AdvanceSchema } } },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or not a firm administrator"),
+    404: errorResponse("No such advance bill at this firm"),
+    409: errorResponse("Not raised, not issued, nothing paid, or already started"),
+  },
+});
+
+const refundsRoute = createRoute({
+  method: "get",
+  path: "/api/v1/billing/refunds",
+  tags: ["billing"],
+  summary: "Advances with some left once the work they covered is finished",
+  responses: {
+    200: {
+      description: "To refund",
+      content: { "application/json": { schema: z.object({ refunds: z.array(RefundSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const refundRoute = createRoute({
+  method: "post",
+  path: "/api/v1/billing/refunds/{dueId}/credit-note",
+  tags: ["billing"],
+  summary: "Give an unused advance back as a credit note",
+  description:
+    "A credit note on the advance invoice for what is left, with its share of the tax, reason " +
+    "`advance_refund`. The money itself goes back as a negative payment, as any refund does.",
+  request: { params: z.object({ dueId: z.string().uuid() }), query: z.object({ asOf: Day.optional() }) },
+  responses: {
+    201: {
+      description: "Credited",
+      content: {
+        "application/json": {
+          schema: z.object({ creditNoteId: z.string(), number: z.string() }).openapi("AdvanceRefunded"),
+        },
+      },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or not a firm administrator"),
+    404: errorResponse("No such advance at this firm"),
+    409: errorResponse("Nothing left, the work goes on, or the firm kept it"),
+  },
+});
+
+const keepRoute = createRoute({
+  method: "post",
+  path: "/api/v1/billing/refunds/{dueId}/keep",
+  tags: ["billing"],
+  summary: "Keep an unused advance, and say why",
+  request: {
+    params: z.object({ dueId: z.string().uuid() }),
+    body: {
+      content: { "application/json": { schema: z.object({ reason: z.string().max(500) }).openapi("KeepAdvance") } },
+      required: true,
+    },
+  },
+  responses: {
+    204: { description: "Kept" },
+    400: errorResponse("No reason"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or not a firm administrator"),
+    404: errorResponse("No such advance at this firm"),
+    409: errorResponse("Nothing left, the work goes on, or already kept"),
+  },
+});
+
+const billNowListRoute = createRoute({
+  method: "get",
+  path: "/api/v1/billing/bill-now",
+  tags: ["billing"],
+  summary: "One-time services with no process, to bill by hand",
+  request: { query: z.object({ partyId: z.string().uuid().optional() }) },
+  responses: {
+    200: {
+      description: "Billable now",
+      content: { "application/json": { schema: z.object({ engagements: z.array(BillNowSchema) }) } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+  },
+});
+
+const billNowRoute = createRoute({
+  method: "post",
+  path: "/api/v1/billing/engagements/{engagementId}/bill-now",
+  tags: ["billing"],
+  summary: "Bill a one-time service with no process now",
+  description:
+    "Writes its final bill, dated today, onto To raise. Only where the firm wrote no process for " +
+    "the service: with one, the bill comes when the job's last step is done.",
+  request: { params: z.object({ engagementId: z.string().uuid() }) },
+  responses: {
+    201: {
+      description: "On To raise",
+      content: { "application/json": { schema: z.object({ dueId: z.string().uuid() }).openapi("BilledNow") } },
+    },
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such one-time engagement at this firm"),
+    409: errorResponse("It has a process, is waiting for its advance, is billed already, or billing is off"),
   },
 });
 
@@ -356,6 +586,84 @@ function dueBody(d: DueOnDesk, fees: boolean) {
     lastTaxPercent: d.lastTaxPercent,
     daysSinceBillOn: d.daysSinceBillOn,
     escalated: d.escalated,
+    kind: d.kind,
+    engagementLetterId: d.engagementLetterId,
+    advancePool:
+      d.advancePool === null
+        ? null
+        : {
+            invoiceId: d.advancePool.invoiceId,
+            invoiceNumber: d.advancePool.invoiceNumber,
+            remaining: fees ? d.advancePool.remaining : null,
+          },
+    advanceApplied:
+      d.advanceApplied === null
+        ? null
+        : {
+            invoiceId: d.advanceApplied.invoiceId,
+            invoiceNumber: d.advanceApplied.invoiceNumber,
+            amount: fees ? d.advanceApplied.amount : null,
+          },
+    released: releasedBody(d.released),
+  };
+}
+
+function releasedBody(r: DueOnDesk["released"]) {
+  return r === null ? null : { at: r.at, how: r.how, by: personBody(r.by) };
+}
+
+function advanceBody(a: AdvanceOnDesk, fees: boolean) {
+  return {
+    id: a.id,
+    party: { id: a.party.id, displayName: a.party.displayName },
+    issuer: { id: a.issuer.id, displayName: a.issuer.displayName },
+    currency: a.currency,
+    engagementLetterId: a.engagementLetterId,
+    engagementId: a.engagementId,
+    serviceName: a.serviceName,
+    letter: { id: a.letter.id, ref: a.letter.ref },
+    billOn: a.billOn,
+    amount: fees ? a.amount : null,
+    manager: personBody(a.manager),
+    invoice: a.invoice === null ? null : { id: a.invoice.id, number: a.invoice.number, status: a.invoice.status },
+    balance:
+      a.balance === null
+        ? null
+        : {
+            invoiced: fees ? a.balance.invoiced : null,
+            paid: fees ? a.balance.paid : null,
+            outstanding: fees ? a.balance.outstanding : null,
+          },
+    state: a.state,
+    released: releasedBody(a.released),
+  };
+}
+
+function refundBody(r: RefundCandidate, fees: boolean) {
+  return {
+    dueId: r.advance.id,
+    party: { id: r.advance.party.id, displayName: r.advance.party.displayName },
+    issuer: { id: r.advance.issuer.id, displayName: r.advance.issuer.displayName },
+    currency: r.advance.currency,
+    letter: { id: r.advance.letter.id, ref: r.advance.letter.ref },
+    serviceName: r.advance.serviceName,
+    invoice: { id: r.invoice.id, number: r.invoice.number },
+    advanceNet: fees ? r.advanceNet : null,
+    applied: fees ? r.applied : null,
+    remaining: fees ? r.remaining : null,
+    refundAmount: fees ? r.refundAmount : null,
+  };
+}
+
+function billNowBody(b: BillNowCandidate, fees: boolean) {
+  return {
+    engagementId: b.engagementId,
+    feeGroupId: b.feeGroupId,
+    party: { id: b.partyId, displayName: b.clientName },
+    serviceName: b.serviceName,
+    letterRef: b.letterRef,
+    currency: b.currency,
+    fullAmount: fees ? b.fullAmount : null,
   };
 }
 
@@ -448,7 +756,69 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
       },
       s.actor,
     );
-    return c.json({ invoiceId: out.invoiceId, number: out.number, conflicts: [...out.conflicts] }, 201);
+    return c.json(
+      { invoiceId: out.invoiceId, number: out.number, covered: [...out.covered], conflicts: [...out.conflicts] },
+      201,
+    );
+  });
+
+  app.openapi(advancesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ advances: (await deps.gate.list(s.tenantId)).map((a) => advanceBody(a, fees)) }, 200);
+  });
+
+  app.openapi(approveStartRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const after = await deps.gate.approveStart({ tenantId: s.tenantId, dueId: c.req.valid("param").dueId }, s.actor);
+    return c.json(advanceBody(after, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(refundsRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const fees = seesFees(c.get("principal"));
+    return c.json({ refunds: (await deps.service.refunds(s.tenantId)).map((r) => refundBody(r, fees)) }, 200);
+  });
+
+  app.openapi(refundRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const note = await deps.service.refund(
+      { tenantId: s.tenantId, dueId: c.req.valid("param").dueId, asOf: c.req.valid("query").asOf },
+      s.actor,
+    );
+    return c.json({ creditNoteId: note.id, number: note.number }, 201);
+  });
+
+  app.openapi(keepRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    await deps.service.keepAdvance(
+      { tenantId: s.tenantId, dueId: c.req.valid("param").dueId, reason: c.req.valid("json").reason },
+      s.actor,
+    );
+    return c.body(null, 204);
+  });
+
+  app.openapi(billNowListRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const fees = seesFees(c.get("principal"));
+    const rows = await deps.finals.candidates(s.tenantId, c.req.valid("query").partyId);
+    return c.json({ engagements: rows.map((b) => billNowBody(b, fees)) }, 200);
+  });
+
+  app.openapi(billNowRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const out = await deps.finals.billNow(
+      { tenantId: s.tenantId, engagementId: c.req.valid("param").engagementId },
+      s.actor,
+    );
+    return c.json({ dueId: out.dueId }, 201);
   });
 
   app.openapi(skipRoute, async (c) => {

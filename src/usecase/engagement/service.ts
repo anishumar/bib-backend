@@ -46,7 +46,8 @@ import {
 } from "../../domain/engagement/model";
 import type { ClauseBody } from "../../domain/config/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
-import { isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import { compareAmounts, isAmount, isExchangeRate, isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
+import type { Amount } from "../../domain/money/model";
 import {
   isBillingFrequency,
   outOfPocketProblem,
@@ -65,6 +66,8 @@ import {
   ClauseWrongJurisdiction,
   EmptyLetter,
   InvalidAmount,
+  InvalidLineAdvance,
+  OneKindOfAdvance,
   InvalidDate,
   InvalidJurisdiction,
   QuoteHasNoLines,
@@ -132,6 +135,7 @@ import type {
   ClientStructureDirectory,
   FirmTimeZone,
   GoLiveBilling,
+  AdvanceBilling,
   EngagementRecord,
   EngagementRepository,
   FeeGroupEdit,
@@ -211,6 +215,10 @@ export interface Deps {
    *  work goes live (0319). Optional: a composition without billing (and most
    *  tests) sets none, and the engagements wait on "Billing not set up". */
   readonly goLiveBilling?: GoLiveBilling | null;
+  /** The billing desk, to write the advance bill a signed letter owes (0320).
+   *  Optional for the same reason: a composition without billing writes none,
+   *  and the daily sweep writes it later. */
+  readonly advanceBilling?: AdvanceBilling | null;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -321,6 +329,9 @@ export interface AddLetterLineInput {
    *  `billingOn`). Only for a monthly, quarterly or yearly fee. */
   readonly billingTiming?: string | undefined;
   readonly billingOn?: string | undefined;
+  /** This service's own advance, before tax (0320). Not on a grouped line, and
+   *  not on a letter that asks for one advance for the whole of it. */
+  readonly advanceAmount?: string | undefined;
   /** This letter's own wording for any of the four scope blocks. Absent prints
    *  the pinned catalogue version's words. */
   readonly scopeOverride?: string | undefined;
@@ -516,6 +527,8 @@ export interface UpdateLetterLineInput {
   readonly billingFrequency?: string | null | undefined;
   readonly billingTiming?: string | null | undefined;
   readonly billingOn?: string | null | undefined;
+  /** This service's own advance, before tax (0320); null clears it. */
+  readonly advanceAmount?: string | null | undefined;
   readonly pricingNote?: string | null | undefined;
   readonly effectiveFrom?: string | null | undefined;
   readonly jurisdiction?: string | null | undefined;
@@ -540,6 +553,7 @@ const LETTER_LINE_FIELDS = [
   "billingFrequency",
   "billingTiming",
   "billingOn",
+  "advanceAmount",
   "pricingNote",
   "effectiveFrom",
   "jurisdiction",
@@ -715,6 +729,7 @@ export class EngagementService {
           ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
           ...(line.billingTiming === null ? {} : { billingTiming: line.billingTiming }),
           ...(line.billingOn === null ? {} : { billingOn: line.billingOn }),
+          ...(line.advanceAmount === null ? {} : { advanceAmount: line.advanceAmount }),
           ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
           ...(line.clientObligationsOverride === null
             ? {}
@@ -1348,6 +1363,7 @@ export class EngagementService {
       // not one re-derived from a catalogue that has since moved.
       billingFrequency: resolvedFrequency,
       ...this.timingOrThrow(resolvedFrequency, input.billingTiming, input.billingOn),
+      advanceAmount: this.lineAdvanceOrThrow(letter, feeGroupId, input.advanceAmount),
       scopeOverride: blankToNull(input.scopeOverride),
       clientObligationsOverride: blankToNull(input.clientObligationsOverride),
       volumeLimitsOverride: blankToNull(input.volumeLimitsOverride),
@@ -1574,6 +1590,27 @@ export class EngagementService {
   }
 
   /**
+   * A service's own advance (0320), as it will be stored: an amount above zero,
+   * before tax. A grouped line has none (the group's advance is the letter's),
+   * and a letter that asks for one advance for the whole of it cannot ask for a
+   * service's as well: that service's work would wait for two payments.
+   */
+  private lineAdvanceOrThrow(
+    letter: Pick<EngagementLetter, "advanceRequired">,
+    feeGroupId: string | null,
+    advance: string | null | undefined,
+  ): Amount | null {
+    if (advance === undefined || advance === null) return null;
+    const amount = advance.trim();
+    if (feeGroupId !== null) throw new InvalidLineAdvance("a service in a fee group has no advance of its own");
+    if (!isAmount(amount) || compareAmounts(amount, "0") <= 0) {
+      throw new InvalidLineAdvance(`${JSON.stringify(advance)} is not an amount above zero`);
+    }
+    if (letter.advanceRequired) throw new OneKindOfAdvance("letter");
+    return amount;
+  }
+
+  /**
    * When a recurring fee is invoiced (0319), as it will be stored. A timing
    * only for a fee billed per period; a date with "on_date" and only with it.
    * `kept` is a value already on the row being carried through an edit of
@@ -1692,6 +1729,11 @@ export class EngagementService {
         : null;
       if (required && amount === null) throw new AdvanceAmountRequired();
       if (amount !== null && !isAmount(amount)) throw new InvalidAmount("advance amount", amount);
+      // One kind of advance per letter (0320).
+      if (required && !letter.advanceRequired) {
+        const lines = await this.deps.letters.listLines(input.tenantId, letter.id);
+        if (lines.some((l) => l.advanceAmount !== null)) throw new OneKindOfAdvance("services");
+      }
       change.advanceRequired = required;
       change.advanceAmount = amount;
     }
@@ -1873,6 +1915,13 @@ export class EngagementService {
       timingSent ? input.billingOn : current.billingOn,
       !timingSent,
     );
+    // Its own advance (0320): kept unless sent; a grouped line never has one.
+    const advanceAmount =
+      input.advanceAmount === undefined
+        ? current.feeGroupId === null
+          ? current.advanceAmount
+          : null
+        : this.lineAdvanceOrThrow(letter, current.feeGroupId, input.advanceAmount);
 
     const override = (next: string | null | undefined, now: string | null): string | null =>
       next === undefined ? now : blankToNull(next ?? undefined);
@@ -1892,6 +1941,7 @@ export class EngagementService {
       billingFrequency,
       billingTiming: timing.billingTiming,
       billingOn: timing.billingOn,
+      advanceAmount,
       scopeOverride: override(input.scopeOverride, current.scopeOverride),
       clientObligationsOverride: override(
         input.clientObligationsOverride,
@@ -2713,8 +2763,10 @@ export class EngagementService {
       engagementLetterLineId: line.id,
       partyId: letter.partyId,
       entityPartyId: line.entityPartyId,
-      status: releasedNow ? ("active" as const) : ("pending_advance" as const),
-      activatedAt: releasedNow ? at : null,
+      // A service with its OWN advance waits for it whatever the letter says
+      // (0320); the others start with the letter's gate.
+      status: releasedNow && line.advanceAmount === null ? ("active" as const) : ("pending_advance" as const),
+      activatedAt: releasedNow && line.advanceAmount === null ? at : null,
       effectiveFrom: resolveEffectiveFrom(
         line.effectiveFrom,
         letter.effectiveFrom,
@@ -2781,10 +2833,31 @@ export class EngagementService {
       signatureDay,
       actor,
     );
+    // The advance bill (0320): every advance is a tax invoice, and the work it
+    // holds starts when that invoice is paid.
+    if (result.engagements.some((e) => e.status === "pending_advance")) {
+      await this.billAdvances(input.tenantId, letter.id, actor);
+    }
     return {
       letter: result.letter,
       engagements: await this.withState(input.tenantId, result.engagements),
     };
+  }
+
+  /**
+   * Ask the billing desk for the advance bill(s) a signed letter owes (0320).
+   * After the signature is committed and never undoing it, for the reason
+   * `scheduleGoLive` gives: if it fails, the daily billing sweep writes the
+   * bill, and the work waits on it either way.
+   */
+  private async billAdvances(tenantId: string, letterId: string, actor: Actor): Promise<void> {
+    const billing = this.deps.advanceBilling ?? null;
+    if (billing === null) return;
+    try {
+      await billing.billAdvances({ tenantId, letterId }, actor);
+    } catch {
+      // Deliberately swallowed: see above.
+    }
   }
 
   /**
@@ -2895,6 +2968,29 @@ export class EngagementService {
    * The GATE is real — no advance, no `contract.activated`, no jobs — but its
    * confirmation is an attestation until the payments module can replace it.
    */
+  /**
+   * ONE SERVICE'S OWN ADVANCE IS SETTLED (0320): its invoice was paid in full,
+   * or an admin approved starting on a part payment. The billing desk decides
+   * that; this releases the work. `status = 'pending_advance'` in the write is
+   * the lock, so a second call releases nothing and records nothing.
+   */
+  async releaseEngagementAdvance(
+    tenantId: string,
+    engagementId: string,
+    actor: Actor,
+  ): Promise<readonly EngagementRecord[]> {
+    const at = this.deps.clock.now().toISOString();
+    const released = await this.deps.letters.releaseEngagements(tenantId, [engagementId], at);
+    for (const engagement of released) await this.recordActivation(engagement, actor);
+    await this.scheduleGoLive(
+      tenantId,
+      released.map((e) => e.id),
+      await this.firmDay(tenantId),
+      actor,
+    );
+    return this.withState(tenantId, released);
+  }
+
   async recordAdvance(
     tenantId: string,
     letterId: string,

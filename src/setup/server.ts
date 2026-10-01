@@ -106,11 +106,19 @@ import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
 import { GoLiveScheduler } from "../usecase/billing/golive";
+import { AdvanceBiller, AdvanceGate } from "../usecase/billing/advance";
+import { FinalBiller } from "../usecase/billing/final";
 import {
   PostgresAutoBillingSetting,
   PostgresBillingDueDesk,
   PostgresBillingSchedules,
 } from "../infrastructure/postgres/billing-desk";
+import {
+  PostgresAutoBillingFirms,
+  PostgresBillingDueWriter,
+  PostgresBillingManagerFacts,
+} from "../infrastructure/postgres/billing-repository";
+import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { DunningService } from "../usecase/dunning/service";
 import { EscalationService } from "../usecase/escalation/service";
 import {
@@ -424,7 +432,43 @@ export function wire(cfg: Config, log: Logger): Wired {
   // person completes a step the service asks whether an agent exists for it, and
   // an API that answered differently from the worker would let somebody tick off
   // work a machine was already doing.
+  // THE ADVANCE AND THE FINAL BILL (0320). A one-time service's final bill is
+  // written when its job finishes; the advance bill when a letter is signed.
+  const finalBills = new FinalBiller({
+    facts: new PostgresFinalBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    firms: new PostgresAutoBillingFirms(pools.app),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    ids: systemIds,
+    events: ledger,
+  });
+  const advanceBills = new AdvanceBiller({
+    facts: new PostgresAdvanceBillFacts(pools.app),
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    ids: systemIds,
+    events: ledger,
+  });
+  // The work an advance holds starts when its invoice is paid. The gate
+  // releases it through the engagement use case, composed further down: it is
+  // reached only when money moves, on a request, by which time it exists.
+  const advanceGate = new AdvanceGate({
+    desk: new PostgresBillingDueDesk(pools.app),
+    work: {
+      recordAdvance: (tenantId, letterId, byUserId, actor) =>
+        engagement.recordAdvance(tenantId, letterId, byUserId, actor),
+      releaseEngagementAdvance: (tenantId, engagementId, actor) =>
+        engagement.releaseEngagementAdvance(tenantId, engagementId, actor),
+    },
+    events: ledger,
+  });
+
   const orchestrator = new OrchestratorService({
+    // A finished job may make a one-time service's final bill due (0320).
+    jobDone: finalBills,
     // A cancelled job closes its tasks through the work-item module (V2.4).
     jobTasks: workItems,
     timeZones: new PostgresFirmTimeZone(pools.app),
@@ -547,6 +591,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
     // after the document store for this.
     issuedCopies: invoiceIssuedCopies(fileStore, log),
+    // Money moved: an advance paid in full starts its work (0320).
+    moneyMoved: advanceGate,
   });
 
   // BILL DUES (0318): what a manager does with a bill the sweep found owed.
@@ -559,6 +605,7 @@ export function wire(cfg: Config, log: Logger): Wired {
       raise: (input, actor) => invoices.raise(input, actor),
       addLine: (input) => invoices.addLine(input),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+      issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
     },
     schedules: new PostgresBillingSchedules(pools.app),
     setting: new PostgresAutoBillingSetting(pools.app),
@@ -566,6 +613,7 @@ export function wire(cfg: Config, log: Logger): Wired {
     timeZones: new PostgresFirmTimeZone(pools.app),
     clock: systemClock,
     events: ledger,
+    gate: advanceGate,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
@@ -1165,6 +1213,8 @@ export function wire(cfg: Config, log: Logger): Wired {
   const esign = esignFor(cfg, log);
 
   const engagement = new EngagementService({
+    // 0320: a signed letter's advance becomes a bill to raise.
+    advanceBilling: advanceBills,
     // 0319: a signed letter's billing terms set each engagement's schedule.
     goLiveBilling: new GoLiveScheduler({
       schedules: new PostgresBillingSchedules(pools.app),
@@ -1317,7 +1367,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        billing: { service: billing, authz },
+        billing: { service: billing, authz, gate: advanceGate, finals: finalBills },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },

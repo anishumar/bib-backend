@@ -300,6 +300,14 @@ const LetterLineSchema = z
         "period. Only for a monthly, quarterly or yearly fee.",
     }),
     billingOn: DaySchema.nullable().openapi({ description: "The first invoice date, with `on_date` only." }),
+    advanceAmount: AmountSchema.nullable().openapi({
+      description:
+        "This service's own advance, before tax (0320): its work waits until the advance invoice is " +
+        "paid. Null: none, or hidden without the fee axis (see `hasAdvance`).",
+    }),
+    hasAdvance: z.boolean().openapi({
+      description: "Whether this service has its own advance. Never redacted, so a screen can say so.",
+    }),
     /** WHY there is no amount. Not redacted: it is what prints where a figure
      *  would. */
     pricingNote: z.string().nullable(),
@@ -762,6 +770,9 @@ const UpdateLetterLineRequest = z
     /** Null clears it. Sent with `billingOn` when it is `on_date`. */
     billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
     billingOn: DaySchema.nullable().optional(),
+    /** This service's own advance, before tax (0320). Null clears it. Refused
+     *  on a grouped line and on a letter with one advance for the whole of it. */
+    advanceAmount: AmountSchema.nullable().optional(),
     pricingNote: z.string().max(2000).nullable().optional(),
     effectiveFrom: DaySchema.nullable().optional(),
     jurisdiction: JurisdictionSchema.nullable().optional(),
@@ -1736,27 +1747,6 @@ const recordAcceptanceRoute = createRoute({
   },
 });
 
-const advanceRoute = createRoute({
-  method: "post",
-  path: "/api/v1/engagement-letters/{letterId}/advance",
-  tags: ["engagement-letters"],
-  summary: "Record the advance as received",
-  description:
-    "Releases every engagement waiting on it. HONEST LIMIT: a person asserts the money " +
-    "arrived — payments (T3.5) do not exist yet. The gate is real; its confirmation is an " +
-    "attestation until they do.",
-  request: { params: z.object({ letterId: z.string().uuid() }) },
-  responses: {
-    200: {
-      description: "Recorded, with the engagements released",
-      content: { "application/json": { schema: SignedResponse } },
-    },
-    401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
-    404: errorResponse("No such letter at this firm"),
-    409: errorResponse("No advance is required, or it was already recorded"),
-  },
-});
 
 // ── Mapping ─────────────────────────────────────────────────────────────────
 
@@ -1959,6 +1949,8 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       billingFrequency: l.line.billingFrequency,
       billingTiming: l.line.billingTiming,
       billingOn: l.line.billingOn,
+      advanceAmount: fees ? l.line.advanceAmount : null,
+      hasAdvance: l.line.advanceAmount !== null,
       pricingNote: l.line.pricingNote,
       oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
       feeGroupId: l.line.feeGroupId,
@@ -2084,6 +2076,8 @@ function toLineEchoBody(line: LetterLine, fees: boolean): z.infer<typeof LetterL
     billingFrequency: line.billingFrequency,
     billingTiming: line.billingTiming,
     billingOn: line.billingOn,
+    advanceAmount: fees ? line.advanceAmount : null,
+    hasAdvance: line.advanceAmount !== null,
     pricingNote: line.pricingNote,
     oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
     feeGroupId: line.feeGroupId,
@@ -2483,28 +2477,6 @@ export function registerEngagementRoutes(app: OpenAPIHono<AppEnv>, deps: Engagem
       {
         letter: toLetterBody(result.letter, fees),
         engagements: result.engagements.map(toEngagementBody),
-      },
-      200,
-    );
-  });
-
-  app.openapi(advanceRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
-    if (!s.ok) return c.json(s.deny, s.status);
-    const principal = c.get("principal");
-    const { letterId } = c.req.valid("param");
-    // The person recording it is the SESSION's user, never a field in the body:
-    // an attestation somebody could attribute to a colleague is not one.
-    const result = await deps.service.recordAdvance(
-      s.tenantId,
-      letterId,
-      principal?.userId ?? "",
-      s.actor,
-    );
-    return c.json(
-      {
-        letter: toLetterBody(result.letter, seesFees(principal)),
-        engagements: result.released.map(toEngagementBody),
       },
       200,
     );

@@ -10,6 +10,8 @@ ALTER TABLE crm.credit_note
     CHECK (reason IN ('service_failure', 'billing_error', 'goodwill',
                       'scope_change', 'duplicate_invoice', 'bad_debt'));
 
+DROP VIEW crm.advance_pool;
+
 DELETE FROM crm.billing_due WHERE kind <> 'period';
 
 DROP INDEX crm.idx_billing_due_advance_invoice;

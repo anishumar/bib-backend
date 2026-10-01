@@ -211,6 +211,7 @@ export class FakeEngagementRepo implements EngagementRepository {
       billingFrequency: l.billingFrequency,
       billingTiming: l.billingTiming,
       billingOn: l.billingOn,
+      advanceAmount: l.advanceAmount ?? null,
       scopeOverride: l.scopeOverride,
       clientObligationsOverride: l.clientObligationsOverride,
       volumeLimitsOverride: l.volumeLimitsOverride,
@@ -236,8 +237,13 @@ export class FakeEngagementRepo implements EngagementRepository {
     const current = this.lines[index];
     if (current === undefined) throw new Error(`fake: no live line ${lineId}`);
     // The same one-statement write the adapter makes: group and price move
-    // together, so no reader sees a line that is both.
-    const updated = { ...current, ...pricing };
+    // together, so no reader sees a line that is both. Into a group, the line
+    // gives up its own advance too (0320).
+    const updated = {
+      ...current,
+      ...pricing,
+      advanceAmount: pricing.feeGroupId === null ? current.advanceAmount : null,
+    };
     this.lines[index] = updated;
     return Promise.resolve(strip(updated));
   }
@@ -540,6 +546,18 @@ export class FakeEngagementRepo implements EngagementRepository {
       }
     });
     return Promise.resolve({ letter, released });
+  }
+
+  releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]> {
+    const released: Engagement[] = [];
+    this.engagements.forEach((e, i) => {
+      if (e.tenantId === tenantId && engagementIds.includes(e.id) && e.status === "pending_advance") {
+        const updated: Engagement = { ...e, status: "active", activatedAt: at };
+        this.engagements[i] = updated;
+        released.push(updated);
+      }
+    });
+    return Promise.resolve(released);
   }
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]> {

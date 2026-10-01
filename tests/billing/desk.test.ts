@@ -65,6 +65,11 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     invoice: null,
     skipped: null,
     lastTaxPercent: "18.00",
+    kind: "period",
+    engagementLetterId: null,
+    advancePool: null,
+    advanceApplied: null,
+    released: null,
     ...over,
   };
 }

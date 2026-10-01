@@ -372,6 +372,16 @@ export interface IssuedCopies {
 }
 
 /**
+ * Told when money moves on an invoice: issued, a payment recorded, a credit
+ * note issued (0320). The billing desk's advance gate listens, because the work
+ * an advance holds starts when its invoice is paid in full. Satisfied
+ * structurally, so invoicing imports nothing of billing.
+ */
+export interface MoneyMovedListener {
+  moneyMoved(tenantId: string, invoiceId: string, actor: Actor): Promise<unknown>;
+}
+
+/**
  * Which firms exist — the sweep's outer loop.
  *
  * DECLARED HERE AND AGAIN in `usecase/scheduler/ports.ts`, deliberately: a port

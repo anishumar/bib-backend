@@ -2,6 +2,7 @@
 // thing this use case needs from outside, stated in its own vocabulary and
 // satisfied by an adapter in `infrastructure/postgres`.
 import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
+import type { BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
 
 /**
@@ -47,6 +48,10 @@ export interface BilledEngagement {
 
 export interface NewBillingDue {
   readonly id: string;
+  /** Absent = `period` (0318's). */
+  readonly kind?: BillKind | undefined;
+  /** The letter an advance is for (0320); null for every other kind. */
+  readonly engagementLetterId?: string | null | undefined;
   readonly partyId: string;
   readonly issuingEntityPartyId: string;
   readonly currency: string;
@@ -107,8 +112,16 @@ export interface FirmTimeZone {
 // ── The desk: what a person does with a due ────────────────────────────────
 
 /** A due's state, DERIVED on read (never stored): a skip is final; an invoice
- *  that was cancelled makes its due open again. */
-export type DueStatus = "open" | "drafted" | "billed" | "skipped";
+ *  that was cancelled makes its due open again; `covered` is a bill the
+ *  advance paid in full, so no invoice was raised (0320). */
+export type DueStatus = "open" | "drafted" | "billed" | "skipped" | "covered";
+
+/** What is left of an advance invoice, before tax (0320). */
+export interface AdvancePoolRef {
+  readonly invoiceId: string;
+  readonly invoiceNumber: string;
+  readonly remaining: string;
+}
 
 export interface PersonRef {
   readonly userId: string;
@@ -119,6 +132,11 @@ export interface PersonRef {
 /** One due as a screen shows it: names, not ids, in one query. */
 export interface BillingDueRecord {
   readonly id: string;
+  /** period | advance | final (0320). */
+  readonly kind: BillKind;
+  /** The letter a LETTER-WIDE advance is for; null otherwise (a service's
+   *  advance names its engagement). */
+  readonly engagementLetterId: string | null;
   readonly party: { readonly id: string; readonly displayName: string };
   readonly issuer: { readonly id: string; readonly displayName: string };
   readonly currency: string;
@@ -165,6 +183,49 @@ export interface BillingDueRecord {
   /** The tax rate on the last invoice line (not cancelled) that billed one of
    *  these engagements: a default for the raise form, never a rule. */
   readonly lastTaxPercent: string | null;
+  /** The advance this bill will be taken off when raised, and what is left of
+   *  it now (0320): the service's own advance, else the letter's. Null for an
+   *  advance bill, or when no advance invoice has been issued. */
+  readonly advancePool: AdvancePoolRef | null;
+  /** What this bill WAS reduced by, once raised or covered. */
+  readonly advanceApplied: {
+    readonly invoiceId: string;
+    readonly invoiceNumber: string;
+    readonly amount: string;
+  } | null;
+  /** An advance bill: when the work it held started, and how (0320). */
+  readonly released: {
+    readonly at: string;
+    readonly how: "paid" | "approved";
+    readonly by: PersonRef | null;
+  } | null;
+}
+
+/** An advance bill with its invoice's balance: where the advance stands. */
+export interface AdvanceRecord extends BillingDueRecord {
+  readonly balance: {
+    readonly invoiced: string;
+    readonly paid: string;
+    readonly outstanding: string;
+  } | null;
+}
+
+/** An advance on an issued invoice, with what is left of it and whether the
+ *  work it covered is finished (0320). */
+export interface RefundCandidate {
+  readonly advance: BillingDueRecord;
+  readonly invoice: { readonly id: string; readonly number: string };
+  /** Before tax: the advance's money, what bills took, what is left. */
+  readonly advanceNet: string;
+  readonly applied: string;
+  readonly remaining: string;
+  /** The credit note that gives `remaining` back: its share of the tax added,
+   *  worked out by the database, never more than the invoice still carries. */
+  readonly refundAmount: string;
+  /** Every engagement it covered has ended, or (one-time) had its final bill,
+   *  and no bill of them is still open. */
+  readonly finished: boolean;
+  readonly waived: { readonly at: string; readonly by: PersonRef | null; readonly reason: string } | null;
 }
 
 export interface DueFilters {
@@ -187,7 +248,33 @@ export interface BillingDueDesk {
   /** Each refuses (answers false) when the due is no longer open, in the
    *  write's own WHERE: two people on one list must not both settle it. */
   skip(tenantId: string, dueId: string, byUserId: string | null, reason: string): Promise<boolean>;
-  markInvoiced(tenantId: string, dueId: string, invoiceId: string, invoiceLineId: string | null): Promise<boolean>;
+  /** With `applied`, the advance taken off it (0320), re-checked against what
+   *  is left of that advance under a lock: answers false when another bill
+   *  took it first. */
+  markInvoiced(
+    tenantId: string,
+    dueId: string,
+    invoiceId: string,
+    invoiceLineId: string | null,
+    applied?: { readonly invoiceId: string; readonly amount: string } | null,
+  ): Promise<boolean>;
+  /** The advance paid this bill in full: no invoice (0320). Same re-check. */
+  markCovered(
+    tenantId: string,
+    dueId: string,
+    applied: { readonly invoiceId: string; readonly amount: string },
+  ): Promise<boolean>;
+  /** Advance bills with their invoices' balances, narrowed to one invoice or
+   *  one bill when asked. */
+  advances(
+    tenantId: string,
+    filter: { readonly invoiceId?: string | undefined; readonly dueId?: string | undefined },
+  ): Promise<readonly AdvanceRecord[]>;
+  /** The work this advance held started. `released_at IS NULL` in the write is
+   *  the lock: answers false when somebody else got there first. */
+  markReleased(tenantId: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean>;
+  refundCandidates(tenantId: string, filter?: { readonly dueId?: string | undefined }): Promise<readonly RefundCandidate[]>;
+  waiveRefund(tenantId: string, dueId: string, byUserId: string, reason: string): Promise<boolean>;
 }
 
 /** The slice of invoicing the desk uses, satisfied by `InvoiceService` in
@@ -227,6 +314,106 @@ export interface InvoiceDrafter {
     readonly currency: string;
     readonly status: string;
   } | null>;
+  /** A credit note, through invoicing's own rules (the cap, the series). */
+  issueCreditNote(
+    input: {
+      readonly tenantId: string;
+      readonly invoiceId: string;
+      readonly amount: string;
+      readonly reason: string;
+      readonly note?: string | undefined;
+      readonly asOf?: string | undefined;
+    },
+    actor: Actor,
+  ): Promise<{ readonly id: string; readonly number: string }>;
+}
+
+// ── The advance (0320) ──────────────────────────────────────────────────────
+
+/** One signed letter's advance terms, for its advance bill(s). */
+export interface LetterAdvanceFacts {
+  readonly letterId: string;
+  readonly partyId: string;
+  readonly issuingEntityPartyId: string;
+  readonly currency: string;
+  /** The firm's day the letter was signed: the advance's bill date. */
+  readonly signedOn: string;
+  readonly advanceRequired: boolean;
+  readonly advanceAmount: string | null;
+  /** The letter-wide advance was recorded by hand before 0320 (the old tick). */
+  readonly advanceRecorded: boolean;
+  readonly lines: readonly {
+    readonly engagementId: string;
+    readonly status: string;
+    readonly advanceAmount: string | null;
+    readonly deptCode: string | null;
+  }[];
+}
+
+export interface AdvanceBillFacts {
+  advanceFactsOf(tenantId: string, letterId: string): Promise<LetterAdvanceFacts | null>;
+  /** Signed letters with work waiting on an advance and no advance bill for it. */
+  lettersOwingAdvanceBills(tenantId: string): Promise<readonly string[]>;
+  /** GLOBAL, ids only: the firms with such letters. */
+  firmsOwingAdvanceBills(): Promise<readonly string[]>;
+}
+
+/** Releases the work an advance held, satisfied structurally by the
+ *  EngagementService so neither use case imports the other. */
+export interface WorkRelease {
+  /** The letter-wide advance: every engagement of the letter still waiting. */
+  recordAdvance(tenantId: string, letterId: string, recordedByUserId: string, actor: Actor): Promise<unknown>;
+  /** One service's own advance. */
+  releaseEngagementAdvance(tenantId: string, engagementId: string, actor: Actor): Promise<unknown>;
+}
+
+// ── The final bill (0320) ───────────────────────────────────────────────────
+
+/** A one-time engagement, or a one-time fee group, as its final bill needs it. */
+export interface FinalBillSubject {
+  readonly engagementId: string | null;
+  readonly feeGroupId: string | null;
+  readonly partyId: string;
+  readonly issuingEntityPartyId: string;
+  readonly currency: string;
+  readonly billingFrequency: string | null;
+  /** The letter's price for the whole service (a group's fee), before tax;
+   *  null when the letter names none. */
+  readonly fullAmount: string | null;
+  /** The earliest first day of the engagements it covers. */
+  readonly effectiveFrom: string;
+  /** One per engagement it covers. */
+  readonly engagements: readonly {
+    readonly engagementId: string;
+    readonly status: string;
+    readonly deptCode: string | null;
+    /** Its job, or null when none was ever spawned. */
+    readonly job: {
+      readonly status: string;
+      readonly hasProcess: boolean;
+      /** The firm's day it finished; null until done. */
+      readonly doneOn: string | null;
+    } | null;
+  }[];
+  readonly hasFinalBill: boolean;
+}
+
+export interface FinalBillFacts {
+  /** One-time subjects, narrowed to the engagements of one job, one
+   *  engagement, or one client when asked. */
+  oneTimeSubjects(
+    tenantId: string,
+    filter: {
+      readonly jobId?: string | undefined;
+      readonly engagementId?: string | undefined;
+      readonly partyId?: string | undefined;
+    },
+  ): Promise<readonly FinalBillSubject[]>;
+  /** Names for a screen: client, service, letter ref, per subject. */
+  describe(
+    tenantId: string,
+    subjects: readonly FinalBillSubject[],
+  ): Promise<ReadonlyMap<string, { readonly clientName: string; readonly serviceName: string; readonly letterRef: string }>>;
 }
 
 /** One engagement's billing schedule, and what a screen needs to set it. */

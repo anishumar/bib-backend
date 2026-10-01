@@ -42,6 +42,8 @@ export type EngagementErrorCode =
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
   | "INVALID_BILLING_TIMING"
+  | "INVALID_LINE_ADVANCE"
+  | "ONE_KIND_OF_ADVANCE"
   | "INVALID_OOP_ESTIMATE"
   | "INVALID_DATE"
   | "LETTER_NOT_SUPERSEDABLE"
@@ -534,6 +536,35 @@ export class InvalidLetterBillingTiming extends EngagementError {
       "INVALID_BILLING_TIMING",
       `Billing timing: ${reason}. Send "arrears" (after each period), "advance" (at its start) ` +
         `or "on_date" with "billingOn" (YYYY-MM-DD), for a monthly, quarterly or yearly fee only.`,
+    );
+  }
+}
+
+/** A service's own advance (0320): an amount above zero, before tax, on a line
+ *  priced on its own. */
+export class InvalidLineAdvance extends EngagementError {
+  constructor(reason: string) {
+    super(
+      "INVALID_LINE_ADVANCE",
+      `Advance: ${reason}. Send "advanceAmount" as a decimal string above zero (at most four decimals, ` +
+        `before tax), or null for none. A service in a fee group has no advance of its own: ` +
+        `ask for one advance for the whole letter instead.`,
+    );
+  }
+}
+
+/** A letter asks for ONE advance for the whole of it, or one per service, never
+ *  both (the user, 2026-10-01): two advances on one service would hold its work
+ *  for two payments. */
+export class OneKindOfAdvance extends EngagementError {
+  constructor(has: "letter" | "services") {
+    super(
+      "ONE_KIND_OF_ADVANCE",
+      has === "letter"
+        ? `This letter already asks for one advance for the whole letter, so a service cannot have ` +
+            `its own as well. Turn the letter's advance off first, or keep it and leave the services without one.`
+        : `Some services on this letter have their own advance, so the letter cannot also ask for one ` +
+            `for the whole of it. Clear the services' advances first, or keep them.`,
     );
   }
 }

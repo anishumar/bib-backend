@@ -760,6 +760,7 @@ export class PostgresRenderSource implements RenderSource {
              l.scope_override, l.client_obligations_override, l.volume_limits_override,
              l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
              l.oop_currency, l.billing_timing, l.billing_on::text AS billing_on,
+             l.advance_amount::text AS advance_amount,
              CASE WHEN l.unit_amount IS NULL THEN NULL
                   ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
              END AS line_total,
@@ -922,7 +923,13 @@ export class PostgresRenderSource implements RenderSource {
                 ? []
                 : [heading(1, "Background", "letter.background"), paragraph(row.background, false, "letter.background")]),
               ...scopeFlow(plan),
-              ...feesFlow(plan, row),
+              ...feesFlow(
+                plan,
+                row,
+                lines.flatMap((l) =>
+                  l.advance_amount === null ? [] : [{ description: l.description, amount: l.advance_amount }],
+                ),
+              ),
               ...titledBlocks("Commercials", byKind("commercial"), "commercial"),
               ...titledBlocks("Team deployment", byKind("team"), "team"),
               ...titledBlocks("General scope exclusions", byKind("exclusion"), "exclusion"),
@@ -1150,6 +1157,7 @@ interface AnnexureLineRow {
   service_body: Record<string, unknown>;
   billing_timing: string | null;
   billing_on: string | null;
+  advance_amount: string | null;
 }
 
 interface AnnexureGroupRow {
@@ -1307,7 +1315,11 @@ const PER_PERIOD: Readonly<Record<string, string>> = {
 };
 
 /** The Summary of Fees: one row per fee group, one per line priced on its own. */
-function feesFlow(plan: AnnexurePlan, row: LetterRow): Flow[] {
+function feesFlow(
+  plan: AnnexurePlan,
+  row: LetterRow,
+  lineAdvances: readonly { readonly description: string; readonly amount: string }[],
+): Flow[] {
   const out: Flow[] = [heading(1, "Summary of Fees")];
   if (plan.fees.length === 0) {
     out.push(paragraph("No services have been added to this letter yet.", true));
@@ -1357,6 +1369,19 @@ function feesFlow(plan: AnnexurePlan, row: LetterRow): Flow[] {
           emphasis: true,
         },
       ],
+    });
+  }
+  // A SERVICE'S OWN ADVANCE (0320), the same way: a term, hashed and frozen,
+  // and it holds that service's work. Printed only when a line has one, so a
+  // letter without renders exactly as before.
+  if (lineAdvances.length > 0) {
+    out.push({
+      kind: "figures",
+      rows: lineAdvances.map((a) => ({
+        label: `Advance for ${a.description}, payable before its work begins`,
+        value: money(a.amount, row.currency),
+        emphasis: true,
+      })),
     });
   }
   return out;

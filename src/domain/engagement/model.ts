@@ -366,6 +366,10 @@ export interface LetterLine {
   readonly billingTiming: LetterBillingTiming | null;
   /** The first invoice date, with `on_date` and only with it. */
   readonly billingOn: string | null;
+  /** This service's OWN advance, before tax (0320), or null. Never on a grouped
+   *  line, and never on a letter that asks for one advance for the whole of it:
+   *  the engagement it becomes waits for this advance alone. */
+  readonly advanceAmount: Amount | null;
   /**
    * THE FOUR OVERRIDES — this letter's own wording for the four scope blocks,
    * or null to print the pinned catalogue version's words.
@@ -738,7 +742,7 @@ export function canonicalContent(input: {
     | "firmSignatoryUserId"
     | "firmSignatoryTitle"
   >;
-  readonly lines: readonly Pick<
+  readonly lines: readonly (Pick<
     LetterLine,
     | "position"
     | "entityPartyId"
@@ -759,7 +763,8 @@ export function canonicalContent(input: {
     | "feeGroupId"
     | "billingTiming"
     | "billingOn"
-  >[];
+  > &
+    Partial<Pick<LetterLine, "advanceAmount">>)[];
   readonly feeGroups: readonly Pick<
     FeeGroup,
     | "id"
@@ -852,6 +857,8 @@ export function canonicalContent(input: {
         // the fee-group rows were in 0083: a letter signed before 0319 hashes
         // exactly as it did.
         ...timingField(l),
+        // The service's own advance (0320), the same way: only when set.
+        ...(l.advanceAmount === undefined || l.advanceAmount === null ? [] : [`advance:${l.advanceAmount}`]),
       ].join("\t"),
     );
 

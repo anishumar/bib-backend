@@ -24,7 +24,68 @@ export type BillingErrorCode =
   | "INVOICE_DOES_NOT_FIT_DUE"
   | "BILLING_ENGAGEMENT_NOT_FOUND"
   | "NOT_BILLED_ON_A_SCHEDULE"
-  | "FISCAL_YEAR_NEEDED";
+  | "FISCAL_YEAR_NEEDED"
+  | "ADVANCE_NOT_SKIPPABLE"
+  | "START_NOT_APPROVABLE"
+  | "BILL_NOW_REFUSED"
+  | "AUTO_BILLING_OFF"
+  | "NOTHING_TO_REFUND";
+
+/** An advance bill is how the work it holds gets started (0320): skipping it
+ *  would leave that work waiting for good. */
+export class AdvanceNotSkippable extends BillingError {
+  constructor() {
+    super(
+      "ADVANCE_NOT_SKIPPABLE",
+      "An advance bill cannot be skipped: the work it holds starts only when it is paid. " +
+        "Raise it (or link the invoice already raised); once part of it is paid, an admin can approve the start.",
+    );
+  }
+}
+
+/** Approve start is for an advance invoice that is issued and part paid (or
+ *  paid, if the start did not happen by itself), and not started yet. */
+export class StartNotApprovable extends BillingError {
+  constructor(state: string) {
+    const why: Record<string, string> = {
+      not_raised: "its invoice has not been raised yet",
+      on_draft: "its invoice is still a draft: issue it first",
+      unpaid: "nothing has been paid on its invoice yet",
+      started: "the work has already started",
+    };
+    super(
+      "START_NOT_APPROVABLE",
+      `This advance cannot be approved to start: ${why[state] ?? state}. ` +
+        "Approve start is for an advance invoice with part of it paid.",
+    );
+  }
+}
+
+/** "Bill it now" (0320): only a one-time service with no process. */
+export class BillNowRefused extends BillingError {
+  constructor(reason: string) {
+    super("BILL_NOW_REFUSED", reason);
+  }
+}
+
+/** Final bills and refunds are automatic billing: the firm's switch must be on. */
+export class AutoBillingOff extends BillingError {
+  constructor() {
+    super(
+      "AUTO_BILLING_OFF",
+      "Automatic billing is off for this firm, so final bills are raised by hand. " +
+        "Turn it on in Your firm, Automatic billing, to bill a one-time service from here.",
+    );
+  }
+}
+
+/** The advance has nothing left to give back, or what it covered is not
+ *  finished yet. */
+export class NothingToRefund extends BillingError {
+  constructor(why: string) {
+    super("NOTHING_TO_REFUND", `There is nothing to refund on this advance: ${why}`);
+  }
+}
 
 export class BillingDueNotFound extends BillingError {
   constructor(id: string) {

@@ -514,7 +514,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // the letter and starts the work, so it is not party:write.
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/acceptance"), "acceptance:record" as const],
   [routeKey("POST", "/api/v1/engagement-letters/{letterId}/signature-request"), "party:write" as const],
-  [routeKey("POST", "/api/v1/engagement-letters/{letterId}/advance"), "party:write" as const],
+
 
   // THE DELIVERY ENGINE (T2.6). `party:read`, the same permission the pipeline
   // and the proposals use — and for the same reason. A job names the engagement
@@ -795,6 +795,15 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/billing/raise"), "party:write" as const],
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "party:write" as const],
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
+  // The advance and the final bill (0320). Approve start, a refund's credit
+  // note and keeping an advance are an administrator's, as credit notes are.
+  [routeKey("GET", "/api/v1/billing/advances"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/advances/{dueId}/approve-start"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/billing/refunds"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/refunds/{dueId}/credit-note"), "tenant:admin" as const],
+  [routeKey("POST", "/api/v1/billing/refunds/{dueId}/keep"), "tenant:admin" as const],
+  [routeKey("GET", "/api/v1/billing/bill-now"), "party:read" as const],
+  [routeKey("POST", "/api/v1/billing/engagements/{engagementId}/bill-now"), "party:write" as const],
   [routeKey("GET", "/api/v1/billing/settings"), "party:read" as const],
   [routeKey("PUT", "/api/v1/billing/settings"), "tenant:admin" as const],
 

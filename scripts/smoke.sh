@@ -879,8 +879,16 @@ BEFORE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/engagement_letter/$EL/ev
 import sys, json
 print(sum(1 for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "contract.activated"))')
 chk "no spawn trigger before the advance"    0 "$BEFORE"
-chk "record the advance"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
-chk "…and it cannot be recorded twice"     409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/advance -H "$H")"
+# 0320: the advance is a TAX INVOICE, not a tick. Signing wrote its bill; it is
+# raised like any bill (here at 0% so the total is the advance), issued, and
+# the work starts by itself when that invoice is paid in full.
+ADVDUE=$(curl -s -b $J/partner.txt "$API/api/v1/billing/dues?partyId=$PID" | python3 -c '
+import sys, json
+ds = [d for d in json.load(sys.stdin)["dues"] if d["kind"] == "advance"]
+print(ds[0]["id"] if len(ds) == 1 else "count=%d" % len(ds))')
+ADVINV=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/billing/raise -H "$H" -d '{"dueIds":["'$ADVDUE'"],"lines":[{"dueId":"'$ADVDUE'","taxPercent":"0"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["invoiceId"])')
+chk "signing wrote the advance bill; it is raised and issued" 200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/issue -H "$H")"
+chk "…and paying it in full starts the work" 201 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/payments -H "$H" -d '{"amount":"10000","receivedOn":"2026-08-29","method":"bank_transfer"}')"
 ACTIVE=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
@@ -1305,7 +1313,8 @@ echo; echo "── 16d. Invoicing — the one number that may not gap ───�
 # invoices; what this section walks is the surface and the freeze.
 INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 INV1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}')
-chk "an invoice is numbered on creation"  "INV/2026-27/0001" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
+# 0002: the firm's series already holds the advance invoice raised in 14.
+chk "an invoice is numbered on creation"  "INV/2026-27/0002" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
 INV1ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<< "$INV1")
 chk "an empty invoice cannot be issued"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
 chk "a line goes on"                      204 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"GST filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"10","taxPercent":"18"}')"
@@ -1324,12 +1333,12 @@ chk "…and then its lines are fixed"       409 "$(code -b $J/partner.txt -XPOST
 INV2ID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 chk "a second invoice takes the next"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H")"
 INV3=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])')
-chk "…and a cancelled one leaves no hole" "INV/2026-27/0003" "$INV3"
+chk "…and a cancelled one leaves no hole" "INV/2026-27/0004" "$INV3"
 SEQ=$(curl -s -b $J/partner.txt "$API/api/v1/invoices" | python3 -c '
 import sys, json
 inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
 print(sorted(i["sequenceNumber"] for i in inv))')
-chk "…the series is 1..N with nothing missing" "[1, 2, 3]" "$SEQ"
+chk "…the series is 1..N with nothing missing" "[1, 2, 3, 4]" "$SEQ"
 
 # THE FEE AXIS, on the module where it matters most. An invoice is money end to
 # end, so a delivery colleague seeing the work but not what it was worth is the
@@ -1377,7 +1386,7 @@ import sys, json
 rs = {r["balance"]["invoiceId"]: r for r in json.load(sys.stdin)["receivables"]}
 r = rs.get("'$INV1ID'")
 print("absent" if r is None else "%s/%s/%s" % (r["balance"]["outstanding"], r["number"], r["party"]["displayName"]))')
-chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0001/Cobalt Foods Private Limited" "$OWED"
+chk "…the receivable names whose it is" "20000.0000/INV/2026-27/0002/Cobalt Foods Private Limited" "$OWED"
 
 echo; echo "── 16f. The compliance calendar — generated, never typed ────────────"
 # T3.2. What this section can prove that a unit test cannot: the firm got its

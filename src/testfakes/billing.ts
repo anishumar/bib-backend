@@ -5,8 +5,11 @@
 // already written (the anti-join), and a second due for the same subject and
 // period is refused (the partial unique indexes), answering no id for it.
 import type { SpocWithManager } from "../domain/billing/model";
+import { compareAmounts, subtractAmounts } from "../domain/money/model";
 import type { Actor } from "../domain/ledger/model";
 import type {
+  AdvanceBillFacts,
+  AdvanceRecord,
   AutoBillingFirms,
   AutoBillingSetting,
   BillingDueDesk,
@@ -16,11 +19,16 @@ import type {
   BillingSchedules,
   BillingSubject,
   DueFilters,
+  FinalBillFacts,
+  FinalBillSubject,
   FiscalYearSource,
   InvoiceDrafter,
+  LetterAdvanceFacts,
   NewBillingDue,
+  RefundCandidate,
   ScheduleRecord,
   SpocDuty,
+  WorkRelease,
 } from "../usecase/billing/ports";
 
 export interface StoredDue extends NewBillingDue {
@@ -43,7 +51,7 @@ export class FakeBillingDueWriter implements BillingDueWriter {
       (this.subjects.get(tenantId) ?? []).map((s) => ({
         ...s,
         duePeriodStarts: this.dues
-          .filter((d) => d.tenantId === tenantId && sameSubject(d, s))
+          .filter((d) => d.tenantId === tenantId && (d.kind ?? "period") === "period" && sameSubject(d, s))
           .map((d) => d.periodStart),
       })),
     );
@@ -52,15 +60,23 @@ export class FakeBillingDueWriter implements BillingDueWriter {
   insert(tenantId: string, dues: readonly NewBillingDue[]): Promise<readonly string[]> {
     const created: string[] = [];
     for (const due of dues) {
-      const clash = this.dues.some(
-        (d) => d.tenantId === tenantId && sameSubject(d, due) && d.periodStart === due.periodStart,
-      );
+      // The partial unique indexes, per kind (0318, 0320).
+      const clash = this.dues.some((d) => d.tenantId === tenantId && sameDue(d, due));
       if (clash) continue;
       this.dues.push({ ...due, tenantId });
       created.push(due.id);
     }
     return Promise.resolve(created);
   }
+}
+
+function sameDue(a: NewBillingDue, b: NewBillingDue): boolean {
+  const kind = a.kind ?? "period";
+  if (kind !== (b.kind ?? "period")) return false;
+  if (kind === "advance") {
+    return a.engagementLetterId === b.engagementLetterId && a.engagementId === b.engagementId;
+  }
+  return sameSubject(a, b) && (kind !== "period" || a.periodStart === b.periodStart);
 }
 
 function sameSubject(
@@ -119,9 +135,19 @@ export class FakeBillingDueDesk implements BillingDueDesk {
   readonly spocsAskedOn: { userId: string; onDate: string }[] = [];
   /** invoice id → status, for the derivation. */
   readonly invoiceStatus = new Map<string, string>();
+  /** Bills the advance paid in full (0320). */
+  readonly covered = new Set<string>();
+  /** invoice id → its balance, for the advance's state. */
+  readonly balances = new Map<string, { invoiced: string; paid: string; outstanding: string }>();
+  /** advance invoice id → what is left of it; the lock's re-check. */
+  readonly poolLeft = new Map<string, string>();
+  /** What `refundCandidates` answers; a test states it. */
+  readonly refunds: RefundCandidate[] = [];
+  readonly waived: { dueId: string; byUserId: string; reason: string }[] = [];
 
   private derive(r: BillingDueRecord): BillingDueRecord {
     if (r.skipped !== null) return { ...r, status: "skipped" };
+    if (this.covered.has(r.id)) return { ...r, status: "covered" };
     if (r.invoice === null) return { ...r, status: "open" };
     const status = this.invoiceStatus.get(r.invoice.id) ?? r.invoice.status;
     return {
@@ -168,14 +194,89 @@ export class FakeBillingDueDesk implements BillingDueDesk {
     return Promise.resolve(true);
   }
 
-  markInvoiced(_t: string, dueId: string, invoiceId: string): Promise<boolean> {
+  markInvoiced(
+    _t: string,
+    dueId: string,
+    invoiceId: string,
+    _lineId: string | null,
+    applied: { readonly invoiceId: string; readonly amount: string } | null = null,
+  ): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.id === dueId);
     const row = this.rows[i];
     if (row === undefined || this.derive(row).status !== "open") return Promise.resolve(false);
+    if (applied !== null && !this.take(applied)) return Promise.resolve(false);
     this.rows[i] = {
       ...row,
       invoice: { id: invoiceId, number: "?", status: this.invoiceStatus.get(invoiceId) ?? "draft" },
+      advanceApplied: applied === null ? null : { invoiceId: applied.invoiceId, invoiceNumber: "?", amount: applied.amount },
     };
+    return Promise.resolve(true);
+  }
+
+  markCovered(_t: string, dueId: string, applied: { readonly invoiceId: string; readonly amount: string }): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.id === dueId);
+    const row = this.rows[i];
+    if (row === undefined || this.derive(row).status !== "open") return Promise.resolve(false);
+    if (!this.take(applied)) return Promise.resolve(false);
+    this.covered.add(dueId);
+    this.rows[i] = { ...row, advanceApplied: { invoiceId: applied.invoiceId, invoiceNumber: "?", amount: applied.amount } };
+    return Promise.resolve(true);
+  }
+
+  /** The adapter's re-check under its lock: no more than is left. */
+  private take(applied: { readonly invoiceId: string; readonly amount: string }): boolean {
+    const left = this.poolLeft.get(applied.invoiceId);
+    if (left === undefined) return true;
+    if (compareAmounts(left, applied.amount) < 0) return false;
+    this.poolLeft.set(applied.invoiceId, subtractAmounts(left, applied.amount));
+    return true;
+  }
+
+  advances(
+    _t: string,
+    filter: { readonly invoiceId?: string | undefined; readonly dueId?: string | undefined },
+  ): Promise<readonly AdvanceRecord[]> {
+    return Promise.resolve(
+      this.rows
+        .map((r) => this.derive(r))
+        .filter((r) => r.kind === "advance")
+        .filter((r) => filter.dueId === undefined || r.id === filter.dueId)
+        .filter((r) => filter.invoiceId === undefined || r.invoice?.id === filter.invoiceId)
+        .map((r) => ({ ...r, balance: r.invoice === null ? null : (this.balances.get(r.invoice.id) ?? null) })),
+    );
+  }
+
+  markReleased(_t: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.id === dueId);
+    const row = this.rows[i];
+    if (row === undefined || row.released !== null) return Promise.resolve(false);
+    this.rows[i] = {
+      ...row,
+      released: {
+        at: "2026-12-05T06:00:00.000Z",
+        how,
+        by: byUserId === null ? null : { userId: byUserId, displayName: null, email: "x@example.test" },
+      },
+    };
+    return Promise.resolve(true);
+  }
+
+  refundCandidates(_t: string, filter: { readonly dueId?: string | undefined } = {}): Promise<readonly RefundCandidate[]> {
+    return Promise.resolve(
+      this.refunds
+        .filter((r) => filter.dueId === undefined || r.advance.id === filter.dueId)
+        .map((r) => {
+          const w = this.waived.find((x) => x.dueId === r.advance.id);
+          return w === undefined
+            ? r
+            : { ...r, waived: { at: "2026-12-05T06:00:00.000Z", by: null, reason: w.reason } };
+        }),
+    );
+  }
+
+  waiveRefund(_t: string, dueId: string, byUserId: string, reason: string): Promise<boolean> {
+    if (this.waived.some((w) => w.dueId === dueId)) return Promise.resolve(false);
+    this.waived.push({ dueId, byUserId, reason });
     return Promise.resolve(true);
   }
 }
@@ -240,6 +341,13 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
     return Promise.resolve({ id });
   }
 
+  readonly creditNotes: { invoiceId: string; amount: string; reason: string; note: string | undefined }[] = [];
+
+  issueCreditNote(input: Parameters<InvoiceDrafter["issueCreditNote"]>[0]): Promise<{ id: string; number: string }> {
+    this.creditNotes.push({ invoiceId: input.invoiceId, amount: input.amount, reason: input.reason, note: input.note });
+    return Promise.resolve({ id: `cn-${String(this.creditNotes.length)}`, number: `CN/2026-27/${String(this.creditNotes.length).padStart(4, "0")}` });
+  }
+
   find(_t: string, invoiceId: string): ReturnType<InvoiceDrafter["find"]> {
     const i = this.invoices.find((x) => x.id === invoiceId);
     return Promise.resolve(
@@ -282,6 +390,90 @@ export class FakeBillingSchedules implements BillingSchedules {
       }
     }
     return Promise.resolve();
+  }
+}
+
+// ── The advance and the final bill (0320) ───────────────────────────────────
+
+export class FakeAdvanceBillFacts implements AdvanceBillFacts {
+  /** `${tenant}|${letter}` → facts. */
+  readonly letters = new Map<string, LetterAdvanceFacts>();
+  /** tenant → letters still owing a bill; a test states it. */
+  readonly owing = new Map<string, string[]>();
+
+  advanceFactsOf(tenantId: string, letterId: string): Promise<LetterAdvanceFacts | null> {
+    return Promise.resolve(this.letters.get(`${tenantId}|${letterId}`) ?? null);
+  }
+
+  lettersOwingAdvanceBills(tenantId: string): Promise<readonly string[]> {
+    return Promise.resolve(this.owing.get(tenantId) ?? []);
+  }
+
+  firmsOwingAdvanceBills(): Promise<readonly string[]> {
+    return Promise.resolve([...this.owing.keys()]);
+  }
+}
+
+/** Records what the gate released; the release itself is the
+ *  EngagementService's, tested there. */
+export class FakeWorkRelease implements WorkRelease {
+  readonly letters: { letterId: string; byUserId: string }[] = [];
+  readonly engagements: string[] = [];
+
+  recordAdvance(_t: string, letterId: string, recordedByUserId: string): Promise<unknown> {
+    this.letters.push({ letterId, byUserId: recordedByUserId });
+    return Promise.resolve({});
+  }
+
+  releaseEngagementAdvance(_t: string, engagementId: string): Promise<unknown> {
+    this.engagements.push(engagementId);
+    return Promise.resolve([]);
+  }
+}
+
+export class FakeFinalBillFacts implements FinalBillFacts {
+  readonly subjects: (FinalBillSubject & { readonly tenantId: string; readonly jobIds: readonly string[] })[] = [];
+
+  /** With the writer, `hasFinalBill` is READ from the bills written, as the
+   *  adapter's anti-join reads it. */
+  constructor(private readonly writer: FakeBillingDueWriter | null = null) {}
+
+  oneTimeSubjects(
+    tenantId: string,
+    filter: { readonly jobId?: string | undefined; readonly engagementId?: string | undefined; readonly partyId?: string | undefined },
+  ): Promise<readonly FinalBillSubject[]> {
+    return Promise.resolve(
+      this.subjects
+        .filter((s) => s.tenantId === tenantId)
+        .filter((s) => filter.jobId === undefined || s.jobIds.includes(filter.jobId))
+        .filter((s) => filter.engagementId === undefined || s.engagements.some((e) => e.engagementId === filter.engagementId))
+        .filter((s) => filter.partyId === undefined || s.partyId === filter.partyId)
+        .map((s) => ({
+          ...s,
+          hasFinalBill:
+            s.hasFinalBill ||
+            (this.writer?.dues.some(
+              (d) =>
+                d.tenantId === tenantId &&
+                d.kind === "final" &&
+                (s.feeGroupId !== null ? d.feeGroupId === s.feeGroupId : d.engagementId === s.engagementId),
+            ) ?? false),
+        })),
+    );
+  }
+
+  describe(
+    _t: string,
+    subjects: readonly FinalBillSubject[],
+  ): Promise<ReadonlyMap<string, { readonly clientName: string; readonly serviceName: string; readonly letterRef: string }>> {
+    return Promise.resolve(
+      new Map(
+        subjects.map((s) => [
+          s.feeGroupId ?? s.engagementId ?? "",
+          { clientName: "Kaveri Foods", serviceName: "Statutory audit", letterRef: "EL-2026-0001" },
+        ]),
+      ),
+    );
   }
 }
 

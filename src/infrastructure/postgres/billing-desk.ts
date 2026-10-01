@@ -16,6 +16,7 @@ import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import { MAX_LIST_ROWS } from "../../db/limits";
 import type {
+  AdvanceRecord,
   AutoBillingSetting,
   BillingDueDesk,
   BillingDueRecord,
@@ -23,14 +24,18 @@ import type {
   DueFilters,
   DueStatus,
   PersonRef,
+  RefundCandidate,
   ScheduleRecord,
   SpocDuty,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
 import { BILLING_TIMINGS, type BillingTiming } from "../../domain/billing/model";
+import { BILL_KINDS, type BillKind } from "../../domain/billing/advance";
 
 interface DueRow {
   id: string;
+  kind: string;
+  engagement_letter_id: string | null;
   party_id: string;
   party_name: string;
   issuer_id: string;
@@ -72,6 +77,17 @@ interface DueRow {
   skipped_by_email: string | null;
   skip_reason: string | null;
   last_tax_percent: string | null;
+  advance_invoice_id: string | null;
+  advance_invoice_number: string | null;
+  advance_applied: string | null;
+  released_at: string | null;
+  released_how: string | null;
+  released_by_id: string | null;
+  released_by_name: string | null;
+  released_by_email: string | null;
+  pool_invoice_id: string | null;
+  pool_invoice_number: string | null;
+  pool_remaining: string | null;
 }
 
 function person(id: string | null, name: string | null, email: string | null): PersonRef | null {
@@ -81,6 +97,8 @@ function person(id: string | null, name: string | null, email: string | null): P
 function toRecord(r: DueRow): BillingDueRecord {
   return {
     id: r.id,
+    kind: BILL_KINDS.find((k) => k === r.kind) ?? ("period" satisfies BillKind),
+    engagementLetterId: r.engagement_letter_id,
     party: { id: r.party_id, displayName: r.party_name },
     issuer: { id: r.issuer_id, displayName: r.issuer_name },
     currency: r.currency,
@@ -117,12 +135,24 @@ function toRecord(r: DueRow): BillingDueRecord {
             reason: r.skip_reason,
           },
     lastTaxPercent: r.last_tax_percent,
+    advancePool:
+      r.pool_invoice_id === null || r.pool_invoice_number === null || r.pool_remaining === null
+        ? null
+        : { invoiceId: r.pool_invoice_id, invoiceNumber: r.pool_invoice_number, remaining: r.pool_remaining },
+    advanceApplied:
+      r.advance_invoice_id === null || r.advance_applied === null
+        ? null
+        : { invoiceId: r.advance_invoice_id, invoiceNumber: r.advance_invoice_number ?? "", amount: r.advance_applied },
+    released:
+      r.released_at === null || (r.released_how !== "paid" && r.released_how !== "approved")
+        ? null
+        : { at: r.released_at, how: r.released_how, by: person(r.released_by_id, r.released_by_name, r.released_by_email) },
   };
 }
 
 /** The read every desk query shares: one due per row, by name, status derived. */
 const DUE_SELECT = `
-  SELECT d.id, d.party_id, p.display_name AS party_name,
+  SELECT d.id, d.kind, d.engagement_letter_id, d.party_id, p.display_name AS party_name,
          d.issuing_entity_party_id AS issuer_id, ip.display_name AS issuer_name,
          d.currency, d.engagement_id, d.fee_group_id,
          subj.engagement_ids, subj.service_name, subj.dept_codes, subj.entity_name,
@@ -135,6 +165,8 @@ const DUE_SELECT = `
          boss.user_id AS boss_id, bu.display_name AS boss_name, bu.email::text AS boss_email,
          CASE
            WHEN d.skipped_at IS NOT NULL THEN 'skipped'
+           -- Paid in full by the advance (0320), while that advance stands.
+           WHEN d.covered_at IS NOT NULL AND adv.status = 'issued' THEN 'covered'
            WHEN i.id IS NULL OR i.status = 'cancelled' THEN 'open'
            WHEN i.status = 'draft' THEN 'drafted'
            ELSE 'billed'
@@ -143,7 +175,13 @@ const DUE_SELECT = `
          ${isoInstant("d.skipped_at", "skipped_at")},
          d.skipped_by_user_id AS skipped_by_id, su.display_name AS skipped_by_name,
          su.email::text AS skipped_by_email, d.skip_reason,
-         tax.tax_percent::text AS last_tax_percent
+         tax.tax_percent::text AS last_tax_percent,
+         d.advance_invoice_id, adv.number AS advance_invoice_number, d.advance_applied::text AS advance_applied,
+         ${isoInstant("d.released_at", "released_at")}, d.released_how,
+         d.released_by_user_id AS released_by_id, ru.display_name AS released_by_name,
+         ru.email::text AS released_by_email,
+         pool.invoice_id AS pool_invoice_id, pool.invoice_number AS pool_invoice_number,
+         pool.remaining::text AS pool_remaining
     FROM crm.billing_due d
     JOIN core.party p  ON p.id = d.party_id AND p.tenant_id = d.tenant_id
     JOIN core.party ip ON ip.id = d.issuing_entity_party_id AND ip.tenant_id = d.tenant_id
@@ -156,12 +194,16 @@ const DUE_SELECT = `
      AND boss.audience = 'STAFF' AND boss.is_active
     LEFT JOIN tenancy.user_account bu ON bu.id = boss.user_id
     LEFT JOIN tenancy.user_account su ON su.id = d.skipped_by_user_id
+    LEFT JOIN tenancy.user_account ru ON ru.id = d.released_by_user_id
+    LEFT JOIN crm.invoice adv ON adv.id = d.advance_invoice_id AND adv.tenant_id = d.tenant_id
     JOIN LATERAL (
       SELECT array_agg(e.id ORDER BY ll.position, e.id) AS engagement_ids,
              -- WHAT THE CLIENT SIGNED: the letter line's own wording, or the fee
              -- group's title, never the catalogue's name. It is the invoice
-             -- line's text, read beside the letter ref the invoice prints.
+             -- line's text, read beside the letter ref the invoice prints. The
+             -- letter's own advance covers every service on it (0320).
              CASE WHEN d.fee_group_id IS NOT NULL THEN max(g.title)
+                  WHEN d.kind = 'advance' AND d.engagement_id IS NULL THEN 'All services'
                   ELSE max(ll.description) END AS service_name,
              -- The Dept of the work: the LIVE service's module, as the sweep and
              -- the router read it, so a bill with no price finds its SPOC.
@@ -187,8 +229,23 @@ const DUE_SELECT = `
          AND live.status = 'published'
        WHERE e.tenant_id = d.tenant_id
          AND ((d.engagement_id IS NOT NULL AND e.id = d.engagement_id)
-           OR (d.fee_group_id IS NOT NULL AND ll.fee_group_id = d.fee_group_id AND ll.removed_at IS NULL))
+           OR (d.fee_group_id IS NOT NULL AND ll.fee_group_id = d.fee_group_id AND ll.removed_at IS NULL)
+           OR (d.kind = 'advance' AND d.engagement_id IS NULL AND e.engagement_letter_id = d.engagement_letter_id))
     ) subj ON true
+    -- THE ADVANCE THIS BILL WILL BE TAKEN OFF (0320): the service's own, else
+    -- the letter's, in the bill's currency, while some of it is left.
+    LEFT JOIN LATERAL (
+      SELECT ap.invoice_id, ap.invoice_number, ap.remaining
+        FROM crm.advance_pool ap
+       WHERE ap.tenant_id = d.tenant_id
+         AND d.kind <> 'advance'
+         AND ap.currency = d.currency
+         AND ap.remaining > 0
+         AND ((ap.engagement_id IS NOT NULL AND ap.engagement_id = d.engagement_id)
+           OR (ap.engagement_id IS NULL AND ap.engagement_letter_id = subj.letter_id))
+       ORDER BY ap.engagement_id NULLS LAST, ap.invoice_number
+       LIMIT 1
+    ) pool ON true
     LEFT JOIN LATERAL (
       SELECT il.tax_percent
         FROM crm.invoice_line il
@@ -255,9 +312,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
         UPDATE crm.billing_due d
            SET skipped_at = now(), skipped_by_user_id = ${byUserId}, skip_reason = ${reason}
          WHERE d.id = ${dueId}
-           AND d.skipped_at IS NULL
-           AND (d.invoice_id IS NULL OR EXISTS (
-                 SELECT 1 FROM crm.invoice i WHERE i.id = d.invoice_id AND i.status = 'cancelled'))
+           AND ${db.unsafe(OPEN_DUE_SQL)}
         RETURNING d.id
       `;
       return rows.length === 1;
@@ -269,20 +324,212 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     dueId: string,
     invoiceId: string,
     invoiceLineId: string | null,
+    applied: { readonly invoiceId: string; readonly amount: string } | null = null,
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
+      if (applied !== null && !(await takeFromPool(db, applied))) return false;
       const rows = await db<{ id: string }[]>`
         UPDATE crm.billing_due d
-           SET invoice_id = ${invoiceId}, invoice_line_id = ${invoiceLineId}
+           SET invoice_id = ${invoiceId}, invoice_line_id = ${invoiceLineId},
+               advance_invoice_id = ${applied?.invoiceId ?? null},
+               advance_applied = ${applied?.amount ?? null}::numeric,
+               covered_at = NULL
          WHERE d.id = ${dueId}
-           AND d.skipped_at IS NULL
-           AND (d.invoice_id IS NULL OR EXISTS (
-                 SELECT 1 FROM crm.invoice i WHERE i.id = d.invoice_id AND i.status = 'cancelled'))
+           AND ${db.unsafe(OPEN_DUE_SQL)}
         RETURNING d.id
       `;
       return rows.length === 1;
     });
   }
+
+  async markCovered(
+    tenantId: string,
+    dueId: string,
+    applied: { readonly invoiceId: string; readonly amount: string },
+  ): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      if (!(await takeFromPool(db, applied))) return false;
+      const rows = await db<{ id: string }[]>`
+        UPDATE crm.billing_due d
+           SET covered_at = now(), invoice_id = NULL, invoice_line_id = NULL,
+               advance_invoice_id = ${applied.invoiceId}, advance_applied = ${applied.amount}::numeric
+         WHERE d.id = ${dueId}
+           AND ${db.unsafe(OPEN_DUE_SQL)}
+        RETURNING d.id
+      `;
+      return rows.length === 1;
+    });
+  }
+
+  async advances(
+    tenantId: string,
+    filter: { readonly invoiceId?: string | undefined; readonly dueId?: string | undefined },
+  ): Promise<readonly AdvanceRecord[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<(DueRow & { invoiced: string | null; paid: string | null; outstanding: string | null })[]>`
+        SELECT due.*, b.invoiced::text AS invoiced, b.paid::text AS paid, b.outstanding::text AS outstanding
+          FROM (${db.unsafe(DUE_SELECT)}) due
+          LEFT JOIN crm.invoice_balance b ON b.invoice_id = due.invoice_id
+         WHERE due.kind = 'advance'
+           ${filter.invoiceId === undefined ? db`` : db`AND due.invoice_id = ${filter.invoiceId}`}
+           ${filter.dueId === undefined ? db`` : db`AND due.id = ${filter.dueId}`}
+         ORDER BY due.bill_on, due.party_name, due.id
+         LIMIT ${MAX_LIST_ROWS}
+      `;
+      return rows.map((r) => ({
+        ...toRecord(r),
+        balance:
+          r.invoiced === null || r.paid === null || r.outstanding === null
+            ? null
+            : { invoiced: r.invoiced, paid: r.paid, outstanding: r.outstanding },
+      }));
+    });
+  }
+
+  async markReleased(tenantId: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        UPDATE crm.billing_due
+           SET released_at = now(), released_how = ${how}, released_by_user_id = ${byUserId}
+         WHERE id = ${dueId} AND kind = 'advance' AND released_at IS NULL
+        RETURNING id
+      `;
+      return rows.length === 1;
+    });
+  }
+
+  async refundCandidates(
+    tenantId: string,
+    filter: { readonly dueId?: string | undefined } = {},
+  ): Promise<readonly RefundCandidate[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<RefundRow[]>`
+        SELECT due.*,
+               ap.invoice_id AS r_invoice_id, ap.invoice_number AS r_invoice_number,
+               round(ap.advance_net, 2)::text AS advance_net,
+               round(ap.applied, 2)::text AS applied,
+               ap.remaining::text AS remaining,
+               -- What gives the remainder back: its share of the tax added, as a
+               -- credit note reverses tax in proportion, never more than the
+               -- invoice still carries.
+               round(least(ap.remaining * ap.invoice_total / nullif(ap.invoice_net, 0),
+                           ap.invoice_total - ap.credited), 2)::text AS refund_amount,
+               (coalesce(fin.all_finished, false) AND NOT coalesce(fin.any_open, false)) AS finished,
+               ${isoInstant("w.refund_waived_at", "waived_at")},
+               w.refund_waived_by_user_id AS waived_by_id, wu.display_name AS waived_by_name,
+               wu.email::text AS waived_by_email, w.refund_waive_reason AS waive_reason
+          FROM crm.advance_pool ap
+          JOIN crm.billing_due w ON w.id = ap.advance_due_id AND w.tenant_id = ap.tenant_id
+          JOIN (${db.unsafe(DUE_SELECT)}) due ON due.id = ap.advance_due_id
+          LEFT JOIN tenancy.user_account wu ON wu.id = w.refund_waived_by_user_id
+          -- FINISHED: every engagement it covered has ended (and its last period
+          -- was billed), or is one-time with its final bill raised, covered or
+          -- skipped; and no bill of them is still open, since an open one may
+          -- still take from the advance.
+          LEFT JOIN LATERAL (
+            SELECT bool_and(
+                     (e.status IN ('completed', 'cancelled') AND (
+                        e.first_invoice_on IS NULL OR e.ends_on IS NULL OR e.ends_on < e.billing_from
+                        OR EXISTS (SELECT 1 FROM crm.billing_due x
+                                    WHERE x.tenant_id = e.tenant_id AND x.kind = 'period'
+                                      AND (x.engagement_id = e.id OR x.fee_group_id = ll.fee_group_id)
+                                      AND x.period_end >= e.ends_on)))
+                     OR (coalesce(g.billing_frequency, ll.billing_frequency) = 'one_time' AND EXISTS (
+                           SELECT 1 FROM crm.billing_due x
+                             LEFT JOIN crm.invoice xi ON xi.id = x.invoice_id AND xi.tenant_id = x.tenant_id
+                            WHERE x.tenant_id = e.tenant_id AND x.kind = 'final'
+                              AND (x.engagement_id = e.id OR x.fee_group_id = ll.fee_group_id)
+                              AND (x.skipped_at IS NOT NULL OR x.covered_at IS NOT NULL
+                                   OR xi.status IN ('draft', 'issued'))))
+                   ) AS all_finished,
+                   bool_or(EXISTS (
+                     SELECT 1 FROM crm.billing_due x
+                       LEFT JOIN crm.invoice xi ON xi.id = x.invoice_id AND xi.tenant_id = x.tenant_id
+                      WHERE x.tenant_id = e.tenant_id AND x.kind <> 'advance'
+                        AND (x.engagement_id = e.id OR x.fee_group_id = ll.fee_group_id)
+                        AND x.skipped_at IS NULL AND x.covered_at IS NULL
+                        AND (x.invoice_id IS NULL OR xi.status = 'cancelled'))) AS any_open
+              FROM crm.engagement e
+              JOIN crm.engagement_letter_line ll
+                ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+              LEFT JOIN crm.engagement_letter_fee_group g
+                ON g.id = ll.fee_group_id AND g.tenant_id = ll.tenant_id
+             WHERE e.tenant_id = w.tenant_id
+               AND ((w.engagement_id IS NOT NULL AND e.id = w.engagement_id)
+                 OR (w.engagement_id IS NULL AND e.engagement_letter_id = w.engagement_letter_id))
+          ) fin ON true
+         WHERE ${filter.dueId === undefined ? db`ap.remaining > 0` : db`ap.advance_due_id = ${filter.dueId}`}
+         ORDER BY due.bill_on, due.party_name, due.id
+         LIMIT ${MAX_LIST_ROWS}
+      `;
+      return rows.map((r) => ({
+        advance: toRecord(r),
+        invoice: { id: r.r_invoice_id, number: r.r_invoice_number },
+        advanceNet: r.advance_net,
+        applied: r.applied,
+        remaining: r.remaining,
+        refundAmount: r.refund_amount,
+        finished: r.finished,
+        waived:
+          r.waived_at === null || r.waive_reason === null
+            ? null
+            : { at: r.waived_at, by: person(r.waived_by_id, r.waived_by_name, r.waived_by_email), reason: r.waive_reason },
+      }));
+    });
+  }
+
+  async waiveRefund(tenantId: string, dueId: string, byUserId: string, reason: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        UPDATE crm.billing_due
+           SET refund_waived_at = now(), refund_waived_by_user_id = ${byUserId}, refund_waive_reason = ${reason}
+         WHERE id = ${dueId} AND kind = 'advance' AND refund_waived_at IS NULL
+        RETURNING id
+      `;
+      return rows.length === 1;
+    });
+  }
+}
+
+interface RefundRow extends DueRow {
+  r_invoice_id: string;
+  r_invoice_number: string;
+  advance_net: string;
+  applied: string;
+  remaining: string;
+  refund_amount: string;
+  finished: boolean;
+  waived_at: string | null;
+  waived_by_id: string | null;
+  waived_by_name: string | null;
+  waived_by_email: string | null;
+  waive_reason: string | null;
+}
+
+/** "Still open", in a settling write's own WHERE (0318), as a fragment. */
+const OPEN_DUE_SQL = `d.skipped_at IS NULL
+           AND d.covered_at IS NULL
+           AND (d.invoice_id IS NULL OR EXISTS (
+                 SELECT 1 FROM crm.invoice i WHERE i.id = d.invoice_id AND i.status = 'cancelled'))`;
+
+/**
+ * THE ADVANCE'S LOCK (0320). Two bills raised at once must not both take the
+ * last of one advance: the transaction takes an advisory lock on the advance
+ * invoice, then re-reads what is left, and the caller writes only when it
+ * still covers what this bill takes. The lock is held to the transaction's
+ * end, so the second writer re-reads after the first has committed.
+ */
+async function takeFromPool(
+  db: Db,
+  applied: { readonly invoiceId: string; readonly amount: string },
+): Promise<boolean> {
+  await db`SELECT pg_advisory_xact_lock(hashtext(${`advance:${applied.invoiceId}`}))`;
+  const [row] = await db<{ ok: boolean }[]>`
+    SELECT ap.remaining >= ${applied.amount}::numeric AS ok
+      FROM crm.advance_pool ap
+     WHERE ap.invoice_id = ${applied.invoiceId}
+  `;
+  return row?.ok === true;
 }
 
 interface ScheduleRow {
