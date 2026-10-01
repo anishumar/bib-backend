@@ -27,6 +27,8 @@ import { WorkItemService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { BillingService } from "../usecase/billing/service";
+import { GoLiveScheduler } from "../usecase/billing/golive";
+import { PostgresAutoBillingSetting, PostgresBillingSchedules } from "../infrastructure/postgres/billing-desk";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
@@ -546,6 +548,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const tenantRepository = new PostgresTenantRepository(pools.app);
   const workerParties = new PostgresPartyRepository(pools.app);
   const engagement = new EngagementService({
+    // 0319: an e-signed letter settled here sets its engagements' billing
+    // schedules from its terms, exactly as one signed on the server does.
+    goLiveBilling: new GoLiveScheduler({
+      schedules: new PostgresBillingSchedules(pools.app),
+      setting: new PostgresAutoBillingSetting(pools.app),
+      fiscalYears: configRepository,
+      events: ledger,
+    }),
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
     documents,

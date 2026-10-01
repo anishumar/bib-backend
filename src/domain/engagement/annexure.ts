@@ -31,7 +31,7 @@
 //    a section that mixes names them per service.
 import type { Amount } from "../money/model";
 import type { BillingFrequency, DocumentTerms, OutOfPocketEstimate } from "../document/model";
-import type { FeeGroup } from "./model";
+import type { FeeGroup, LetterBillingTiming } from "./model";
 import { sectionCode } from "./model";
 
 /** One live line of the letter, with what the letter prints for it already
@@ -46,6 +46,9 @@ export interface PlanLine {
   readonly description: string;
   readonly terms: DocumentTerms;
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319); absent or null = not chosen. */
+  readonly billingTiming?: LetterBillingTiming | null;
+  readonly billingOn?: string | null;
   /** The LINE's own start, or null for "with the letter". */
   readonly effectiveFrom: string | null;
   /** What the line costs, or null when it has no price of its own — grouped,
@@ -103,6 +106,10 @@ export interface FeeRow {
   readonly lineId: string | null;
   readonly description: string;
   readonly billingFrequency: BillingFrequency | null;
+  /** When the fee is invoiced (0319), the group's or the line's; null = not
+   *  chosen, and the Summary of Fees then says nothing about it. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   /** When the fee starts, when every service it covers starts together and
    *  the day is known. Null otherwise. */
   readonly startsOn: string | null;
@@ -173,6 +180,8 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
             ? group.title
             : `${group.title}: ${s.items.map((item) => item.description).join(", ")}`),
         billingFrequency: group.billingFrequency,
+        billingTiming: group.billingTiming,
+        billingOn: group.billingOn,
         startsOn: commonStart(members, input.letterEffectiveFrom),
         amount: group.amount,
         pricingNote: null,
@@ -193,6 +202,8 @@ export function planAnnexure(input: PlanInput): AnnexurePlan {
           // a mistake.
           description: namesCompanies ? `${line.description} (${line.entityName})` : line.description,
           billingFrequency: line.billingFrequency,
+          billingTiming: line.billingTiming ?? null,
+          billingOn: line.billingOn ?? null,
           startsOn: line.effectiveFrom ?? input.letterEffectiveFrom,
           amount: line.net,
           pricingNote: line.pricingNote,

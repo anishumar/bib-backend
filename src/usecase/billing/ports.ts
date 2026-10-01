@@ -1,7 +1,7 @@
 // The billing use case's seams (auto-invoice, phase 1). Each port is the one
 // thing this use case needs from outside, stated in its own vocabulary and
 // satisfied by an adapter in `infrastructure/postgres`.
-import type { ManagerHow, SpocWithManager } from "../../domain/billing/model";
+import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
 import type { Actor } from "../../domain/ledger/model";
 
 /**
@@ -244,6 +244,10 @@ export interface ScheduleRecord {
   readonly feeGroup: { readonly id: string; readonly title: string } | null;
   readonly billingFrom: string | null;
   readonly firstInvoiceOn: string | null;
+  /** When the LETTER says it is billed (0319): the group's for a grouped
+   *  line, else the line's. Null = the letter said nothing (arrears). */
+  readonly billingTiming: BillingTiming | null;
+  readonly billingOn: string | null;
 }
 
 export interface BillingSchedules {

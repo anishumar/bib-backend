@@ -384,6 +384,7 @@ export class BillingDeskService {
           firstInvoiceOn,
           previousBillingFrom: before[i]?.billingFrom ?? null,
           previousFirstInvoiceOn: before[i]?.firstInvoiceOn ?? null,
+          how: "by_hand",
         },
       });
     }

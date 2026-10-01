@@ -34,6 +34,7 @@ import {
   QuoteNotFound,
   ServiceNotQuotable,
   InvalidLineBillingFrequency,
+  InvalidLetterBillingTiming,
   InvalidOutOfPocketEstimate,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
@@ -1343,6 +1344,8 @@ describe("what the signature commits to", () => {
       oopEstimate: null as { min: string; max: string; currency: string } | null,
       pricingNote: null as string | null,
       feeGroupId: null as string | null,
+      billingTiming: null as "arrears" | "advance" | "on_date" | null,
+      billingOn: null as string | null,
     };
     const base = {
       letter: {
@@ -1374,6 +1377,8 @@ describe("what the signature commits to", () => {
         intro: string | null;
         deliverables: string | null;
         clientObligations: string | null;
+        billingTiming: "arrears" | "advance" | "on_date" | null;
+        billingOn: string | null;
       }[],
       clauses: [],
     };
@@ -1419,6 +1424,12 @@ describe("what the signature commits to", () => {
       lineUnpriced: {
         ...base,
         lines: [{ ...line, unitAmount: null, pricingNote: "As mutually agreed" }],
+      },
+      // When it is invoiced (0319) is a term: advance and a chosen date differ.
+      lineBilledInAdvance: { ...base, lines: [{ ...line, billingTiming: "advance" as const }] },
+      lineBilledOnADate: {
+        ...base,
+        lines: [{ ...line, billingTiming: "on_date" as const, billingOn: "2026-11-15" }],
       },
     };
 
@@ -2430,12 +2441,16 @@ describe("what the signature commits to, for a fee group (0083)", () => {
     oopEstimate: null,
     pricingNote: null,
     feeGroupId,
+    billingTiming: null,
+    billingOn: null,
   });
   const group = (id: string, position: number, amount = "5000"): Parameters<typeof canonicalContent>[0]["feeGroups"][number] => ({
     id,
     position,
     title: "Ongoing recurring services",
     billingFrequency: "monthly",
+    billingTiming: null,
+    billingOn: null,
     amount,
     paymentTerms: null,
     feeDescription: null,
@@ -2468,5 +2483,103 @@ describe("what the signature commits to, for a fee group (0083)", () => {
     expect(canonicalContent(moved)).not.toBe(rendered);
     expect(canonicalContent(repriced)).not.toBe(rendered);
     expect(canonicalContent({ ...base })).toBe(rendered);
+  });
+});
+
+// ── Phase 1b (0319): billing starts when the work does ───────────────────────
+
+describe("asking the billing desk to schedule the work that went live", () => {
+  function withBilling(fail = false) {
+    const s = setup();
+    const asked: { engagementIds: readonly string[]; liveOn: string }[] = [];
+    const service = new EngagementService({
+      ...s,
+      goLiveBilling: {
+        scheduleActivated: (input) => {
+          asked.push({ engagementIds: input.engagementIds, liveOn: input.liveOn });
+          return fail ? Promise.reject(new Error("billing is down")) : Promise.resolve({ scheduled: [] });
+        },
+      },
+    });
+    return { ...s, service, asked };
+  }
+
+  it("on signature, for the engagements it made active, from the signature's day", async () => {
+    const s = withBilling();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.asked).toEqual([
+      { engagementIds: engagements.map((e) => e.engagement.id), liveOn: engagements[0]?.engagement.effectiveFrom },
+    ]);
+  });
+
+  it("not at signature for work waiting on an advance, but when the advance is recorded", async () => {
+    const s = withBilling();
+    const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.asked).toEqual([]);
+    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
+    expect(s.asked.map((a) => a.engagementIds)).toEqual([released.map((e) => e.engagement.id)]);
+  });
+
+  it("never turns a signature into a failure when billing cannot be scheduled", async () => {
+    const s = withBilling(true);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(letter.status).toBe("signed");
+    expect(s.asked).toHaveLength(1);
+  });
+});
+
+describe("when a recurring fee is invoiced, as the letter says it (0319)", () => {
+  const line = (s: ReturnType<typeof setup>, id: string, over: Record<string, string>) =>
+    s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+      ...over,
+    });
+
+  it("keeps the timing a monthly fee was written with, and a date with on_date", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const advance = await line(s, id, { billingFrequency: "monthly", billingTiming: "advance" });
+    expect(advance).toMatchObject({ billingTiming: "advance", billingOn: null });
+    const dated = await line(s, id, { billingFrequency: "annually", billingTiming: "on_date", billingOn: "2026-11-15" });
+    expect(dated).toMatchObject({ billingTiming: "on_date", billingOn: "2026-11-15" });
+    expect((await line(s, id, { billingFrequency: "monthly" })).billingTiming).toBeNull();
+  });
+
+  it("refuses a date without on_date, on_date without a date, and a timing on a one-off fee", async () => {
+    const s = setup();
+    const id = await draft(s);
+    for (const over of [
+      { billingFrequency: "monthly", billingTiming: "on_date" },
+      { billingFrequency: "monthly", billingTiming: "advance", billingOn: "2026-11-15" },
+      { billingFrequency: "monthly", billingOn: "2026-11-15" },
+      { billingFrequency: "one_time", billingTiming: "advance" },
+      { billingFrequency: "monthly", billingTiming: "weekly" },
+    ]) {
+      await expect(line(s, id, over), JSON.stringify(over)).rejects.toBeInstanceOf(InvalidLetterBillingTiming);
+    }
+  });
+
+  it("clears a timing nobody touched when the fee stops being billed per period", async () => {
+    const s = setup();
+    const id = await draft(s);
+    const l = await line(s, id, { billingFrequency: "monthly", billingTiming: "advance" });
+    const oneOff = await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: l.id, billingFrequency: "one_time" });
+    expect(oneOff).toMatchObject({ billingFrequency: "one_time", billingTiming: null, billingOn: null });
   });
 });

@@ -105,6 +105,7 @@ import { PostgresReadinessFacts } from "../infrastructure/postgres/readiness-fac
 import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
+import { GoLiveScheduler } from "../usecase/billing/golive";
 import {
   PostgresAutoBillingSetting,
   PostgresBillingDueDesk,
@@ -1164,6 +1165,13 @@ export function wire(cfg: Config, log: Logger): Wired {
   const esign = esignFor(cfg, log);
 
   const engagement = new EngagementService({
+    // 0319: a signed letter's billing terms set each engagement's schedule.
+    goLiveBilling: new GoLiveScheduler({
+      schedules: new PostgresBillingSchedules(pools.app),
+      setting: new PostgresAutoBillingSetting(pools.app),
+      fiscalYears: configRepository,
+      events: ledger,
+    }),
     letters: new PostgresEngagementRepository(pools.app),
     library: configRepository,
     // The SAME instance proposals hold. Two documents of the same firm must not

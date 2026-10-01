@@ -27,6 +27,7 @@ import type {
   SpocDuty,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
+import { BILLING_TIMINGS, type BillingTiming } from "../../domain/billing/model";
 
 interface DueRow {
   id: string;
@@ -299,6 +300,8 @@ interface ScheduleRow {
   fee_group_title: string | null;
   billing_from: string | null;
   first_invoice_on: string | null;
+  billing_timing: string | null;
+  billing_on: string | null;
 }
 
 const SCHEDULE_SELECT = `
@@ -309,7 +312,11 @@ const SCHEDULE_SELECT = `
          e.effective_from::text AS effective_from, e.ends_on::text AS ends_on,
          coalesce(g.billing_frequency, ll.billing_frequency) AS billing_frequency,
          g.id AS fee_group_id, g.title AS fee_group_title,
-         e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on
+         e.billing_from::text AS billing_from, e.first_invoice_on::text AS first_invoice_on,
+         -- What the LETTER says about when it is billed (0319): a grouped line
+         -- is billed with its group, so the group's word is the one.
+         CASE WHEN g.id IS NOT NULL THEN g.billing_timing ELSE ll.billing_timing END AS billing_timing,
+         (CASE WHEN g.id IS NOT NULL THEN g.billing_on ELSE ll.billing_on END)::text AS billing_on
     FROM crm.engagement e
     JOIN crm.engagement_letter l ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
     JOIN crm.engagement_letter_line ll ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
@@ -333,7 +340,14 @@ function toSchedule(r: ScheduleRow): ScheduleRecord {
       r.fee_group_id === null || r.fee_group_title === null ? null : { id: r.fee_group_id, title: r.fee_group_title },
     billingFrom: r.billing_from,
     firstInvoiceOn: r.first_invoice_on,
+    billingTiming: timingOf(r.billing_timing),
+    billingOn: r.billing_on,
   };
+}
+
+/** The column's word, narrowed: the CHECK (0319) admits only these. */
+function timingOf(value: string | null): BillingTiming | null {
+  return BILLING_TIMINGS.find((t) => t === value) ?? null;
 }
 
 export class PostgresBillingSchedules implements BillingSchedules {

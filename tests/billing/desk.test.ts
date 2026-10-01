@@ -4,6 +4,7 @@
 // fakes; the SQL half is `desk.integration.test.ts`.
 import { describe, expect, it } from "vitest";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
+import { GoLiveScheduler } from "../../src/usecase/billing/golive";
 import {
   FakeAutoBillingSetting,
   FakeBillingDueDesk,
@@ -82,11 +83,14 @@ function schedule(over: Partial<ScheduleRecord> = {}): ScheduleRecord {
     feeGroup: null,
     billingFrom: null,
     firstInvoiceOn: null,
+    billingTiming: null,
+    billingOn: null,
     ...over,
   };
 }
 
 function world(opts: { fiscalYear?: number | null } = {}) {
+  const fiscalYears = new FakeFiscalYearSource(opts.fiscalYear === undefined ? 4 : opts.fiscalYear);
   const desk = new FakeBillingDueDesk();
   const invoices = new FakeInvoiceDrafter();
   const schedules = new FakeBillingSchedules();
@@ -97,12 +101,12 @@ function world(opts: { fiscalYear?: number | null } = {}) {
     invoices,
     schedules,
     setting,
-    fiscalYears: new FakeFiscalYearSource(opts.fiscalYear === undefined ? 4 : opts.fiscalYear),
+    fiscalYears,
     timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
     clock: new FakeClock(new Date("2026-12-05T06:00:00.000Z")),
     events,
   });
-  return { desk, invoices, schedules, setting, events, service };
+  return { desk, invoices, schedules, setting, events, fiscalYears, service };
 }
 
 describe("raising an invoice from bill dues", () => {
@@ -380,6 +384,7 @@ describe("an engagement's billing schedule", () => {
       firstInvoiceOn: "2026-11-01",
       previousBillingFrom: null,
       previousFirstInvoiceOn: null,
+      how: "by_hand",
     });
   });
 
@@ -436,5 +441,89 @@ describe("the firm's switch", () => {
     await w.service.setAutoBilling(FIRM, true, ME);
     expect(await w.service.autoBilling(FIRM)).toBe(true);
     expect(w.events.recorded[0]).toMatchObject({ verb: "tenant.auto_billing_set", payload: { from: false, to: true } });
+  });
+});
+
+// ── Phase 1b (0319): the letter sets the schedule when the work goes live ────
+
+describe("the schedule an engagement starts with, from its letter", () => {
+  const live = (w: ReturnType<typeof world>, engagementIds: readonly string[], liveOn = "2026-10-15") =>
+    new GoLiveScheduler({
+      schedules: w.schedules,
+      setting: w.setting,
+      fiscalYears: w.fiscalYears,
+      events: w.events,
+    }).scheduleActivated({ tenantId: FIRM, engagementIds, liveOn }, ME);
+
+  it("sets it from the letter's timing once the firm bills automatically", async () => {
+    const w = world();
+    await w.setting.set(FIRM, true);
+    w.schedules.rows.push(schedule({ billingTiming: "advance" }));
+    await live(w, [ENG]);
+    // From 1 Jul, live 15 Oct: October is the first period billed, on its first day.
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-01" });
+    expect(w.events.verbs()).toEqual(["engagement.billing_scheduled"]);
+    expect(w.events.recorded[0]?.payload).toMatchObject({
+      billingFrom: "2026-10-01",
+      firstInvoiceOn: "2026-10-01",
+      previousBillingFrom: null,
+      how: "from_letter",
+    });
+  });
+
+  it("bills in arrears when the letter said nothing, and on the letter's date when it chose one", async () => {
+    const w = world();
+    await w.setting.set(FIRM, true);
+    w.schedules.rows.push(
+      schedule(),
+      schedule({ engagementId: ENG2, billingFrequency: "annually", billingTiming: "on_date", billingOn: "2026-11-15" }),
+    );
+    await live(w, [ENG, ENG2]);
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
+    expect(w.schedules.rows[1]).toMatchObject({ billingFrom: "2026-04-01", firstInvoiceOn: "2026-11-15" });
+  });
+
+  it("starts from the engagement's own first day when that is later than going live", async () => {
+    const w = world();
+    await w.setting.set(FIRM, true);
+    w.schedules.rows.push(schedule({ effectiveFrom: "2026-12-10" }));
+    await live(w, [ENG]);
+    expect(w.schedules.rows[0]).toMatchObject({ billingFrom: "2026-12-01", firstInvoiceOn: "2027-01-01" });
+  });
+
+  it("sets nothing while the firm's switch is off: those go to Billing not set up", async () => {
+    const w = world();
+    w.schedules.rows.push(schedule());
+    await live(w, [ENG]);
+    expect(w.schedules.rows[0]?.billingFrom).toBeNull();
+    expect(w.events.verbs()).toEqual([]);
+  });
+
+  it("leaves alone a schedule already set, a one-off, and a quarter with no financial year", async () => {
+    const w = world({ fiscalYear: null });
+    await w.setting.set(FIRM, true);
+    const ENG3 = "00000000-0000-4000-8000-00000000c0f3";
+    w.schedules.rows.push(
+      schedule({ billingFrom: "2026-08-01", firstInvoiceOn: "2026-09-01" }),
+      schedule({ engagementId: ENG2, billingFrequency: "one_time" }),
+      schedule({ engagementId: ENG3, billingFrequency: "quarterly" }),
+    );
+    await live(w, [ENG, ENG2, ENG3]);
+    expect(w.schedules.rows.map((r) => r.billingFrom)).toEqual(["2026-08-01", null, null]);
+    expect(w.events.verbs()).toEqual([]);
+  });
+
+  it("sets a fee group once, for every engagement in it, from the group's timing", async () => {
+    const w = world();
+    await w.setting.set(FIRM, true);
+    const group = { id: GROUP, title: "Retainer" };
+    w.schedules.rows.push(
+      schedule({ feeGroup: group, billingTiming: "advance" }),
+      schedule({ engagementId: ENG2, feeGroup: group, billingTiming: "advance" }),
+    );
+    w.schedules.groups.set(GROUP, [ENG, ENG2]);
+    await live(w, [ENG, ENG2]);
+    expect(w.schedules.rows.map((r) => r.firstInvoiceOn)).toEqual(["2026-10-01", "2026-10-01"]);
+    expect(w.events.verbs()).toHaveLength(2);
   });
 });

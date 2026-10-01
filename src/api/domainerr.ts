@@ -866,6 +866,7 @@ export function mapError(err: unknown): MappedError {
       case "UNPRICED_LINE_NEEDS_REASON":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
+      case "INVALID_BILLING_TIMING":
       case "INVALID_OOP_ESTIMATE":
       case "NOT_A_CLAUSE":
       case "CLAUSE_NOT_PUBLISHED":

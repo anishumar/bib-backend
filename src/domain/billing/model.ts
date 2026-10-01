@@ -70,6 +70,45 @@ export function addMonthsClamped(date: string, months: number): string {
   return iso(y, m, Math.min(day, daysInMonth(y, m)));
 }
 
+// ── The schedule an engagement starts with (0319) ─────────────────────────
+
+/**
+ * When a recurring fee is invoiced, as the engagement letter says it (0319):
+ * after each period (the firm's default), at its start, or on a date the firm
+ * chose for the first one. A letter that says nothing is `null`, billed as
+ * arrears.
+ */
+export type BillingTiming = "arrears" | "advance" | "on_date";
+
+export const BILLING_TIMINGS: readonly BillingTiming[] = ["arrears", "advance", "on_date"];
+
+/**
+ * The day the first billed period must CONTAIN: the later of the engagement's
+ * first day and the day billing went live for it (signed, or its advance
+ * recorded). A letter backdated to July and signed in October was billed by hand
+ * until October, so October is the first period the system bills; billing from
+ * July would send the client a second bill for three months.
+ */
+export function goesLiveFrom(effectiveFrom: string, liveOn: string): string {
+  return later(effectiveFrom, liveOn);
+}
+
+/**
+ * The schedule for an engagement going live, from the first period billed (the
+ * one containing `goesLiveFrom`) and the letter's timing. Arrears bills it the
+ * day after it ends, advance on its first day, `on_date` on the letter's date;
+ * every later period follows one span after (`billingDues`).
+ */
+export function scheduleFor(
+  period: BillingPeriod,
+  timing: BillingTiming | null,
+  billingOn: string | null,
+): { readonly billingFrom: string; readonly firstInvoiceOn: string } {
+  const firstInvoiceOn =
+    timing === "advance" ? period.start : timing === "on_date" && billingOn !== null ? billingOn : dayAfter(period.end);
+  return { billingFrom: period.start, firstInvoiceOn };
+}
+
 /**
  * The service window of one engagement, from the facts on its row (0314, 0318).
  *
@@ -228,6 +267,13 @@ function daysInMonth(year: number, month: number): number {
 
 function later(a: string, b: string): string {
   return a > b ? a : b;
+}
+
+/** The calendar day after `date`, across month and year ends. */
+function dayAfter(date: string): string {
+  const [year = 0, month = 1, day = 1] = date.split("-").map(Number);
+  if (day < daysInMonth(year, month)) return iso(year, month, day + 1);
+  return month === 12 ? iso(year + 1, 1, 1) : iso(year, month + 1, 1);
 }
 
 function earlier(a: string, b: string): string {

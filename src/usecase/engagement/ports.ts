@@ -1,6 +1,8 @@
 // The ports the engagement use case needs from the world. Interfaces are owned
 // by the use case that needs them; adapters in infrastructure/ implement them,
 // and two are satisfied by other use cases at the composition root.
+import type { Actor } from "../../domain/ledger/model";
+import type { LetterBillingTiming } from "../../domain/engagement/model";
 import type { NewRecordedAcceptance, RecordedAcceptance } from "../../domain/acceptance/model";
 import type { Amount, CurrencyCode, Money } from "../../domain/money/model";
 import type { EngagementErrorCode } from "../../domain/engagement/errors";
@@ -81,6 +83,21 @@ export interface ClientStructureDirectory {
  * Which zone the firm keeps its calendar in — "today", for the day a client's
  * structure is read on. Structural: `PostgresFirmTimeZone` satisfies it.
  */
+/**
+ * Sets each engagement's billing schedule from its letter when the work goes
+ * live (0319, phase 1b): at signature for those it activated, and when an
+ * advance is recorded for those it released. Satisfied structurally by
+ * `BillingDeskService`, so neither use case imports the other. It decides
+ * nothing here: whether the firm bills automatically, and what the schedule
+ * is, are the billing desk's rules.
+ */
+export interface GoLiveBilling {
+  scheduleActivated(
+    input: { readonly tenantId: string; readonly engagementIds: readonly string[]; readonly liveOn: string },
+    actor: Actor,
+  ): Promise<unknown>;
+}
+
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
 }
@@ -208,6 +225,9 @@ export interface LetterLineEdit {
   readonly effectiveFrom: string | null;
   readonly jurisdiction: string | null;
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319), judged with the frequency above. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -336,6 +356,9 @@ export interface NewLetterLine {
   /** RESOLVED before it gets here: the caller's value, else the pinned
    *  service's `recurrence`, else null. */
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319); null = not chosen. Validated upstream. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   readonly scopeOverride: string | null;
   readonly clientObligationsOverride: string | null;
   readonly volumeLimitsOverride: string | null;
@@ -357,6 +380,8 @@ export interface NewFeeGroup {
   readonly currency: CurrencyCode;
   readonly title: string;
   readonly billingFrequency: BillingFrequency;
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   readonly amount: Amount;
   readonly paymentTerms: string | null;
   readonly feeDescription: string | null;
@@ -370,6 +395,9 @@ export interface NewFeeGroup {
 export interface FeeGroupEdit {
   readonly title?: string | undefined;
   readonly billingFrequency?: BillingFrequency | undefined;
+  /** With `billingOn`: both written, or neither. */
+  readonly billingTiming?: LetterBillingTiming | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly amount?: Amount | undefined;
   readonly paymentTerms?: string | null | undefined;
   readonly feeDescription?: string | null | undefined;

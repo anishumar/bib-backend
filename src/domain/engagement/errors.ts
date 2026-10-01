@@ -41,6 +41,7 @@ export type EngagementErrorCode =
   | "UNPRICED_LINE_NEEDS_REASON"
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
+  | "INVALID_BILLING_TIMING"
   | "INVALID_OOP_ESTIMATE"
   | "INVALID_DATE"
   | "LETTER_NOT_SUPERSEDABLE"
@@ -521,6 +522,18 @@ export class InvalidLineBillingFrequency extends EngagementError {
       "INVALID_BILLING_FREQUENCY",
       `Billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
         `how often this DEAL is invoiced, which is not how often the work comes round.`,
+    );
+  }
+}
+
+/** When a recurring fee is invoiced (0319): one of three words, a date with
+ *  "on_date" and only with it, and only for a fee billed per period. */
+export class InvalidLetterBillingTiming extends EngagementError {
+  constructor(reason: string) {
+    super(
+      "INVALID_BILLING_TIMING",
+      `Billing timing: ${reason}. Send "arrears" (after each period), "advance" (at its start) ` +
+        `or "on_date" with "billingOn" (YYYY-MM-DD), for a monthly, quarterly or yearly fee only.`,
     );
   }
 }

@@ -19,6 +19,8 @@ function group(id: string, position: number, over: Partial<FeeGroup> = {}): FeeG
     position,
     title: `Group ${id}`,
     billingFrequency: "monthly",
+    billingTiming: null,
+    billingOn: null,
     amount: "5000",
     currency: "USD",
     paymentTerms: null,
@@ -201,6 +203,9 @@ describe("the Summary of Fees", () => {
         lineId: null,
         description: "One-time scope for the group.",
         billingFrequency: "one_time",
+        // Not chosen on this group (0319): the Summary of Fees says nothing more.
+        billingTiming: null,
+        billingOn: null,
         startsOn: "2026-07-01",
         amount: "40000",
         pricingNote: null,

@@ -20,6 +20,7 @@
 // Dubai or Delaware by somebody for whom a bare symbol is ambiguous or simply
 // unfamiliar. A three-letter ISO code is unambiguous everywhere, and a firm that
 // wants the symbol can now have it by changing this one function.
+import { isLetterBillingTiming } from "../../domain/engagement/model";
 import { readClauseBody, readServiceBody } from "../../domain/config/model";
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
@@ -106,6 +107,8 @@ interface LetterLineRow {
   unit_amount: string | null;
   discount_percent: string;
   billing_frequency: string | null;
+  billing_timing: string | null;
+  billing_on: string | null;
   pricing_note: string | null;
   line_total: string | null;
 }
@@ -554,6 +557,7 @@ export class PostgresRenderSource implements RenderSource {
     const lines = await db<LetterLineRow[]>`
       SELECT l.description, l.quantity::text, l.unit_amount::text,
              l.discount_percent::text, l.billing_frequency, l.pricing_note,
+             l.billing_timing, l.billing_on::text AS billing_on,
              CASE WHEN l.unit_amount IS NULL THEN NULL
                   ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
              END AS line_total
@@ -672,7 +676,10 @@ export class PostgresRenderSource implements RenderSource {
                 l.description,
                 l.billing_frequency === null
                   ? "Not stated"
-                  : (FREQUENCY_LABELS[l.billing_frequency] ?? l.billing_frequency),
+                  : (FREQUENCY_LABELS[l.billing_frequency] ?? l.billing_frequency) +
+                    // When it is invoiced (0319), printed only when the letter
+                    // says: a letter without it renders byte for byte as before.
+                    withComma(billedWhen(l.billing_frequency, l.billing_timing, l.billing_on)),
                 // An unpriced line prints its REASON, never a blank and never
                 // a zero. G1.6's rule carried onto paper: a blank in a fee
                 // column reads as free.
@@ -752,7 +759,7 @@ export class PostgresRenderSource implements RenderSource {
              l.billing_frequency, l.effective_from::text, l.pricing_note,
              l.scope_override, l.client_obligations_override, l.volume_limits_override,
              l.exclusions_override, l.oop_estimate_min::text, l.oop_estimate_max::text,
-             l.oop_currency,
+             l.oop_currency, l.billing_timing, l.billing_on::text AS billing_on,
              CASE WHEN l.unit_amount IS NULL THEN NULL
                   ELSE round(l.quantity * l.unit_amount * (1 - l.discount_percent / 100), 2)::text
              END AS line_total,
@@ -767,7 +774,7 @@ export class PostgresRenderSource implements RenderSource {
     const groups = await db<AnnexureGroupRow[]>`
       SELECT id, tenant_id, engagement_letter_id, position, title, billing_frequency,
              amount::text, currency, payment_terms, fee_description, intro, deliverables,
-             client_obligations
+             client_obligations, billing_timing, billing_on::text AS billing_on
       FROM crm.engagement_letter_fee_group
       WHERE engagement_letter_id = ${letterId} AND removed_at IS NULL
       ORDER BY position
@@ -813,6 +820,8 @@ export class PostgresRenderSource implements RenderSource {
             readServiceBody(l.service_body),
           ),
           billingFrequency: l.billing_frequency,
+          billingTiming: isLetterBillingTiming(l.billing_timing) ? l.billing_timing : null,
+          billingOn: l.billing_on,
           effectiveFrom: l.effective_from,
           net: l.line_total,
           pricingNote: l.pricing_note,
@@ -1139,6 +1148,8 @@ interface AnnexureLineRow {
   oop_currency: string | null;
   line_total: string | null;
   service_body: Record<string, unknown>;
+  billing_timing: string | null;
+  billing_on: string | null;
 }
 
 interface AnnexureGroupRow {
@@ -1155,6 +1166,8 @@ interface AnnexureGroupRow {
   intro: string | null;
   deliverables: string | null;
   client_obligations: string | null;
+  billing_timing: string | null;
+  billing_on: string | null;
 }
 
 function toFeeGroup(g: AnnexureGroupRow): FeeGroup {
@@ -1172,6 +1185,8 @@ function toFeeGroup(g: AnnexureGroupRow): FeeGroup {
     intro: g.intro,
     deliverables: g.deliverables,
     clientObligations: g.client_obligations,
+    billingTiming: isLetterBillingTiming(g.billing_timing) ? g.billing_timing : null,
+    billingOn: g.billing_on,
   };
 }
 
@@ -1315,13 +1330,14 @@ function feesFlow(plan: AnnexurePlan, row: LetterRow): Flow[] {
           const recurring = f.billingFrequency !== null && f.billingFrequency !== "one_time";
           const starts =
             recurring && f.startsOn !== null ? `; starting from ${longDate(f.startsOn)}` : "";
+          const billed = billedWhen(f.billingFrequency, f.billingTiming, f.billingOn);
           // An unpriced line prints its REASON, never a blank or a zero (G1.6).
           const fee =
             f.amount === null
               ? (f.pricingNote ?? "To be agreed")
               : `${money(f.amount, row.currency)}${PER_PERIOD[f.billingFrequency ?? ""] ?? ""}` +
                 (f.paymentTerms === null ? "" : `\n(${f.paymentTerms})`);
-          return [f.code, f.description, `${frequency}${starts}`, fee];
+          return [f.code, f.description, `${frequency}${starts}${billed === "" ? "" : `; ${billed}`}`, fee];
         }),
         rowAnchors: plan.fees.map((f) =>
           f.feeGroupId !== null ? `fee:group:${f.feeGroupId}` : f.lineId !== null ? `fee:line:${f.lineId}` : null,
@@ -1576,4 +1592,19 @@ function noteFlow(title: string, rows: readonly BlockRow[], kind: string): Flow[
       return paragraph([`- ${first}`, ...rest.map((l) => `  ${l}`)].join("\n"), false, `block:${b.id}`);
     }),
   ];
+}
+
+/** "after each month", "at the start of each quarter", "first invoice on 15
+ *  November 2026": when the fee is invoiced (0319), or "" when the letter does
+ *  not say, which prints nothing and leaves the document as it was. */
+function billedWhen(frequency: string | null, timing: string | null, on: string | null): string {
+  const span = ({ monthly: "month", quarterly: "quarter", annually: "year" } as Record<string, string>)[frequency ?? ""];
+  if (span === undefined || timing === null) return "";
+  if (timing === "arrears") return `billed after each ${span}`;
+  if (timing === "advance") return `billed at the start of each ${span}`;
+  return timing === "on_date" && on !== null ? `first invoice on ${longDate(on)}` : "";
+}
+
+function withComma(words: string): string {
+  return words === "" ? "" : `, ${words}`;
 }

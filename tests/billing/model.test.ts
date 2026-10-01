@@ -13,7 +13,9 @@ import { describe, expect, it } from "vitest";
 import {
   addMonthsClamped,
   billingDues,
+  goesLiveFrom,
   resolveBillingManager,
+  scheduleFor,
   servedDays,
   serviceWindowOf,
 } from "../../src/domain/billing/model";
@@ -271,5 +273,34 @@ describe("serviceWindowOf: the days an engagement was served, from its row", () 
 
   it("has no pause when none was ever recorded", () => {
     expect(serviceWindowOf({ ...base, resumedOn: "2026-08-01" })).toMatchObject({ pausedFrom: null, pausedTo: null });
+  });
+});
+
+describe("scheduleFor: the schedule an engagement gets when it goes live (0319)", () => {
+  it("bills the period after it ends by default, and when the letter said nothing", () => {
+    expect(scheduleFor(oct, "arrears", null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
+    expect(scheduleFor(oct, null, null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" });
+  });
+
+  it("bills the period on its first day when the letter says in advance", () => {
+    expect(scheduleFor(q3, "advance", null)).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-01" });
+  });
+
+  it("bills on the letter's own date when it chose one", () => {
+    expect(scheduleFor(oct, "on_date", "2026-11-15")).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-15" });
+  });
+
+  it("rolls over a year end", () => {
+    expect(scheduleFor(dec, "arrears", null).firstInvoiceOn).toBe("2027-01-01");
+  });
+});
+
+describe("goesLiveFrom: which day the first billed period must contain", () => {
+  it("is the later of the engagement's first day and the day billing went live", () => {
+    // A letter backdated to July, signed in October: July to September were
+    // billed by hand, so October is the first period billed.
+    expect(goesLiveFrom("2026-07-01", "2026-10-15")).toBe("2026-10-15");
+    // Signed ahead of a start in December.
+    expect(goesLiveFrom("2026-12-01", "2026-10-15")).toBe("2026-12-01");
   });
 });

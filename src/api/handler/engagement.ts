@@ -8,6 +8,7 @@
 // proposals — but the CLAUSES are not. A delivery associate needs to know what
 // the firm undertook, and the scope and liability terms are the work, not the
 // fee.
+import type { LetterBillingTiming } from "../../domain/engagement/model";
 import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
@@ -113,6 +114,9 @@ const TotalsSchema = z
 const MoneySchema = z.object({ amount: AmountSchema, currency: CurrencySchema });
 
 /** The closed set lives in the domain; zod needs a literal tuple. */
+/** When a recurring fee is invoiced (0319), the domain's own list. */
+const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const satisfies readonly LetterBillingTiming[];
+
 export const BILLING_FREQUENCY_VALUES = [
   "one_time",
   "monthly",
@@ -289,6 +293,13 @@ const LetterLineSchema = z
     jurisdiction: z.string().nullable(),
     /** How often this DEAL is billed. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().openapi({
+      description:
+        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
+        "period. Only for a monthly, quarterly or yearly fee.",
+    }),
+    billingOn: DaySchema.nullable().openapi({ description: "The first invoice date, with `on_date` only." }),
     /** WHY there is no amount. Not redacted: it is what prints where a figure
      *  would. */
     pricingNote: z.string().nullable(),
@@ -318,6 +329,8 @@ const FeeGroupSchema = z
     position: z.number().int(),
     title: z.string(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable(),
+    billingOn: DaySchema.nullable(),
     /** PER BILLING PERIOD. Null when redacted. */
     amount: AmountSchema.nullable(),
     currency: CurrencySchema,
@@ -746,6 +759,9 @@ const UpdateLetterLineRequest = z
     unitAmount: AmountSchema.nullable().optional(),
     discountPercent: AmountSchema.optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).nullable().optional(),
+    /** Null clears it. Sent with `billingOn` when it is `on_date`. */
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
     pricingNote: z.string().max(2000).nullable().optional(),
     effectiveFrom: DaySchema.nullable().optional(),
     jurisdiction: JurisdictionSchema.nullable().optional(),
@@ -776,6 +792,13 @@ const AddLineRequest = z
     /** How often this DEAL is billed. Omit and it defaults from the PINNED
      *  service's `recurrence`. */
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional().openapi({
+      description:
+        "When the fee is invoiced (0319): `arrears` (after each period), `advance` (at its start) " +
+        "or `on_date` (from `billingOn`, then one span after). Null: not chosen, billed after each " +
+        "period. Only for a monthly, quarterly or yearly fee.",
+    }),
+    billingOn: DaySchema.optional(),
     /** THIS LETTER'S OWN WORDING for any of the four scope blocks — what makes
      *  a signed document reproducible. Omit any and the pinned catalogue
      *  version's words print. */
@@ -802,6 +825,8 @@ const FeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).optional(),
+    billingOn: DaySchema.optional(),
     /** PER BILLING PERIOD — 5000 on a monthly group is 5,000 a month. */
     amount: AmountSchema,
     paymentTerms: z.string().max(500).optional(),
@@ -818,6 +843,8 @@ const EditFeeGroupRequest = z
   .object({
     title: z.string().min(1).max(200).optional(),
     billingFrequency: z.enum(BILLING_FREQUENCY_VALUES).optional(),
+    billingTiming: z.enum(LETTER_BILLING_TIMINGS).nullable().optional(),
+    billingOn: DaySchema.nullable().optional(),
     amount: AmountSchema.optional(),
     paymentTerms: z.string().max(500).optional(),
     feeDescription: z.string().max(2000).optional(),
@@ -1930,6 +1957,8 @@ function toRecordBody(record: LetterView, fees: boolean): z.infer<typeof LetterR
       effectiveFrom: l.line.effectiveFrom,
       jurisdiction: l.line.jurisdiction,
       billingFrequency: l.line.billingFrequency,
+      billingTiming: l.line.billingTiming,
+      billingOn: l.line.billingOn,
       pricingNote: l.line.pricingNote,
       oopEstimate: fees && l.line.oopEstimate !== null ? { ...l.line.oopEstimate } : null,
       feeGroupId: l.line.feeGroupId,
@@ -1996,6 +2025,8 @@ function toFeeGroupBody(g: FeeGroupRecord, fees: boolean): z.infer<typeof FeeGro
     position: g.group.position,
     title: g.group.title,
     billingFrequency: g.group.billingFrequency,
+    billingTiming: g.group.billingTiming,
+    billingOn: g.group.billingOn,
     amount: fees ? g.group.amount : null,
     currency: g.group.currency,
     paymentTerms: fees ? g.group.paymentTerms : null,
@@ -2051,6 +2082,8 @@ function toLineEchoBody(line: LetterLine, fees: boolean): z.infer<typeof LetterL
     effectiveFrom: line.effectiveFrom,
     jurisdiction: line.jurisdiction,
     billingFrequency: line.billingFrequency,
+    billingTiming: line.billingTiming,
+    billingOn: line.billingOn,
     pricingNote: line.pricingNote,
     oopEstimate: fees && line.oopEstimate !== null ? { ...line.oopEstimate } : null,
     feeGroupId: line.feeGroupId,

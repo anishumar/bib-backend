@@ -28,6 +28,7 @@ import type {
   LetterLine,
   LetterStatus,
 } from "../../domain/engagement/model";
+import { isLetterBillingTiming, TIMED_FREQUENCIES, type LetterBillingTiming } from "../../domain/engagement/model";
 import {
   CURRENT_LETTER_LAYOUT,
   canTransition,
@@ -54,6 +55,7 @@ import {
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import {
   AdvanceAlreadyRecorded,
+  InvalidLetterBillingTiming,
   AdvanceAmountRequired,
   AdvanceNotRequired,
   AlreadySuperseded,
@@ -129,6 +131,7 @@ import type {
   BillableEngagement,
   ClientStructureDirectory,
   FirmTimeZone,
+  GoLiveBilling,
   EngagementRecord,
   EngagementRepository,
   FeeGroupEdit,
@@ -204,6 +207,10 @@ export interface Deps {
    *  envelope completes. Null where no document store is composed. */
   readonly signedCopies: SignedCopyFiler | null;
   readonly tenants: SignatureTenants;
+  /** The billing desk, to set the schedules the letter's terms give when the
+   *  work goes live (0319). Optional: a composition without billing (and most
+   *  tests) sets none, and the engagements wait on "Billing not set up". */
+  readonly goLiveBilling?: GoLiveBilling | null;
   readonly ids: IdGen;
   readonly clock: Clock;
   readonly events: EventSink;
@@ -310,6 +317,10 @@ export interface AddLetterLineInput {
   /** How often this DEAL is billed. Absent falls back to the PINNED service's
    *  `recurrence`. */
   readonly billingFrequency?: string | undefined;
+  /** When it is invoiced (0319): "arrears" | "advance" | "on_date" (with
+   *  `billingOn`). Only for a monthly, quarterly or yearly fee. */
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
   /** This letter's own wording for any of the four scope blocks. Absent prints
    *  the pinned catalogue version's words. */
   readonly scopeOverride?: string | undefined;
@@ -335,6 +346,8 @@ export interface AddLetterLineInput {
 export interface FeeGroupInput {
   readonly title: string;
   readonly billingFrequency: string;
+  readonly billingTiming?: string | undefined;
+  readonly billingOn?: string | undefined;
   readonly amount: string;
   readonly paymentTerms?: string | undefined;
   readonly feeDescription?: string | undefined;
@@ -348,6 +361,9 @@ export interface FeeGroupInput {
 export interface FeeGroupChange {
   readonly title?: string | undefined;
   readonly billingFrequency?: string | undefined;
+  /** Null clears it (back to after each period). */
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly amount?: string | undefined;
   readonly paymentTerms?: string | undefined;
   readonly feeDescription?: string | undefined;
@@ -498,6 +514,8 @@ export interface UpdateLetterLineInput {
   readonly unitAmount?: string | null | undefined;
   readonly discountPercent?: string | undefined;
   readonly billingFrequency?: string | null | undefined;
+  readonly billingTiming?: string | null | undefined;
+  readonly billingOn?: string | null | undefined;
   readonly pricingNote?: string | null | undefined;
   readonly effectiveFrom?: string | null | undefined;
   readonly jurisdiction?: string | null | undefined;
@@ -520,6 +538,8 @@ const LETTER_LINE_FIELDS = [
   "unitAmount",
   "discountPercent",
   "billingFrequency",
+  "billingTiming",
+  "billingOn",
   "pricingNote",
   "effectiveFrom",
   "jurisdiction",
@@ -661,6 +681,8 @@ export class EngagementService {
       const made = await this.addFeeGroup(tenantId, letter.id, {
         title: g.title,
         billingFrequency: g.billingFrequency,
+        ...(g.billingTiming === null ? {} : { billingTiming: g.billingTiming }),
+        ...(g.billingOn === null ? {} : { billingOn: g.billingOn }),
         amount: g.amount,
         ...(g.paymentTerms === null ? {} : { paymentTerms: g.paymentTerms }),
         ...(g.feeDescription === null ? {} : { feeDescription: g.feeDescription }),
@@ -691,6 +713,8 @@ export class EngagementService {
           ...(lineStart === undefined ? {} : { effectiveFrom: lineStart }),
           ...(line.jurisdiction === null ? {} : { jurisdiction: line.jurisdiction }),
           ...(line.billingFrequency === null ? {} : { billingFrequency: line.billingFrequency }),
+          ...(line.billingTiming === null ? {} : { billingTiming: line.billingTiming }),
+          ...(line.billingOn === null ? {} : { billingOn: line.billingOn }),
           ...(line.scopeOverride === null ? {} : { scopeOverride: line.scopeOverride }),
           ...(line.clientObligationsOverride === null
             ? {}
@@ -1304,6 +1328,7 @@ export class EngagementService {
       );
     }
 
+    const resolvedFrequency = billingFrequency ?? readServiceBody(pinned.body).recurrence;
     return this.deps.letters.addLine({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
@@ -1321,7 +1346,8 @@ export class EngagementService {
       // ProposalService.addLine. On a letter it matters more: the value is part
       // of what the client signs, so it must be the one decided at drafting and
       // not one re-derived from a catalogue that has since moved.
-      billingFrequency: billingFrequency ?? readServiceBody(pinned.body).recurrence,
+      billingFrequency: resolvedFrequency,
+      ...this.timingOrThrow(resolvedFrequency, input.billingTiming, input.billingOn),
       scopeOverride: blankToNull(input.scopeOverride),
       clientObligationsOverride: blankToNull(input.clientObligationsOverride),
       volumeLimitsOverride: blankToNull(input.volumeLimitsOverride),
@@ -1439,6 +1465,7 @@ export class EngagementService {
       currency: letter.currency,
       title: terms.title,
       billingFrequency: terms.billingFrequency,
+      ...this.timingOrThrow(terms.billingFrequency, input.billingTiming, input.billingOn),
       amount: terms.amount,
       paymentTerms: blankToNull(input.paymentTerms),
       feeDescription: blankToNull(input.feeDescription),
@@ -1461,9 +1488,20 @@ export class EngagementService {
       billingFrequency: change.billingFrequency ?? current.billingFrequency,
       amount: change.amount ?? current.amount,
     });
+    // The timing as it will be: sent, or kept, or cleared when the frequency
+    // stops being one billed per period.
+    const timingSent = change.billingTiming !== undefined || change.billingOn !== undefined;
+    const timing = this.timingOrThrow(
+      terms.billingFrequency,
+      timingSent ? change.billingTiming : current.billingTiming,
+      timingSent ? change.billingOn : current.billingOn,
+      !timingSent,
+    );
     const edit: FeeGroupEdit = {
       title: terms.title,
       billingFrequency: terms.billingFrequency,
+      billingTiming: timing.billingTiming,
+      billingOn: timing.billingOn,
       amount: terms.amount,
       // Absent keeps the words; a blank clears them. Null and "" are not the
       // same thing to the reader of a contract, and the column refuses "".
@@ -1533,6 +1571,42 @@ export class EngagementService {
     const normalised = normalizeJurisdiction(raw);
     if (!isJurisdiction(normalised)) throw new InvalidJurisdiction(raw);
     return normalised;
+  }
+
+  /**
+   * When a recurring fee is invoiced (0319), as it will be stored. A timing
+   * only for a fee billed per period; a date with "on_date" and only with it.
+   * `kept` is a value already on the row being carried through an edit of
+   * something else: when the frequency stopped being one billed per period it
+   * is cleared rather than refused, because nobody asked to change it.
+   */
+  private timingOrThrow(
+    frequency: string | null,
+    timing: string | null | undefined,
+    on: string | null | undefined,
+    kept = false,
+  ): { billingTiming: LetterBillingTiming | null; billingOn: string | null } {
+    if (timing === undefined || timing === null || timing.trim() === "") {
+      if (on !== undefined && on !== null && on.trim() !== "") {
+        throw new InvalidLetterBillingTiming("a first invoice date needs the timing \"on_date\"");
+      }
+      return { billingTiming: null, billingOn: null };
+    }
+    if (!isLetterBillingTiming(timing)) throw new InvalidLetterBillingTiming(`${JSON.stringify(timing)} is not one`);
+    if (!TIMED_FREQUENCIES.includes(frequency ?? "")) {
+      if (kept) return { billingTiming: null, billingOn: null };
+      throw new InvalidLetterBillingTiming(`a ${frequency ?? "frequency-less"} fee is not billed per period`);
+    }
+    if (timing === "on_date") {
+      if (on === undefined || on === null || !isDay(on)) {
+        throw new InvalidLetterBillingTiming("\"on_date\" needs \"billingOn\", a calendar day");
+      }
+      return { billingTiming: timing, billingOn: on };
+    }
+    if (on !== undefined && on !== null && on.trim() !== "") {
+      throw new InvalidLetterBillingTiming(`a date goes with "on_date" only, not ${JSON.stringify(timing)}`);
+    }
+    return { billingTiming: timing, billingOn: null };
   }
 
   private statedBillingFrequency(raw: string | undefined): BillingFrequency | null {
@@ -1792,6 +1866,14 @@ export class EngagementService {
       billingFrequency = this.statedBillingFrequency(input.billingFrequency);
     }
 
+    const timingSent = input.billingTiming !== undefined || input.billingOn !== undefined;
+    const timing = this.timingOrThrow(
+      billingFrequency,
+      timingSent ? input.billingTiming : current.billingTiming,
+      timingSent ? input.billingOn : current.billingOn,
+      !timingSent,
+    );
+
     const override = (next: string | null | undefined, now: string | null): string | null =>
       next === undefined ? now : blankToNull(next ?? undefined);
     const oopEstimate =
@@ -1808,6 +1890,8 @@ export class EngagementService {
       effectiveFrom,
       jurisdiction,
       billingFrequency,
+      billingTiming: timing.billingTiming,
+      billingOn: timing.billingOn,
       scopeOverride: override(input.scopeOverride, current.scopeOverride),
       clientObligationsOverride: override(
         input.clientObligationsOverride,
@@ -2688,10 +2772,42 @@ export class EngagementService {
     for (const engagement of result.engagements) {
       if (engagement.status === "active") await this.recordActivation(engagement, actor);
     }
+    // The letter's billing terms, for the work that started today. Those
+    // waiting on an advance are scheduled when it is recorded, from that day:
+    // billing them from the signature would bill months nobody worked.
+    await this.scheduleGoLive(
+      input.tenantId,
+      result.engagements.filter((e) => e.status === "active").map((e) => e.id),
+      signatureDay,
+      actor,
+    );
     return {
       letter: result.letter,
       engagements: await this.withState(input.tenantId, result.engagements),
     };
+  }
+
+  /**
+   * Ask the billing desk to schedule the engagements that went live on
+   * `liveOn` (0319). AFTER the signature or the advance is committed, and it
+   * never undoes either: if it fails, those engagements are simply not
+   * scheduled and wait on "Billing not set up", which is the state a person
+   * already deals with. A failed bill schedule must not read as a failed
+   * signature, which the client has already given.
+   */
+  private async scheduleGoLive(
+    tenantId: string,
+    engagementIds: readonly string[],
+    liveOn: string,
+    actor: Actor,
+  ): Promise<void> {
+    const billing = this.deps.goLiveBilling ?? null;
+    if (billing === null || engagementIds.length === 0) return;
+    try {
+      await billing.scheduleActivated({ tenantId, engagementIds, liveOn }, actor);
+    } catch {
+      // Deliberately swallowed: see above. The engagements stay unscheduled.
+    }
   }
 
   /**
@@ -2808,6 +2924,13 @@ export class EngagementService {
       },
     });
     for (const engagement of result.released) await this.recordActivation(engagement, actor);
+    // Billing starts with the work: from the day the advance came in.
+    await this.scheduleGoLive(
+      tenantId,
+      result.released.map((e) => e.id),
+      await this.firmDay(tenantId),
+      actor,
+    );
     return { letter: result.letter, released: await this.withState(tenantId, result.released) };
   }
 

@@ -296,6 +296,23 @@ export interface EngagementLetter {
   readonly copiedFromId: string | null;
 }
 
+/**
+ * WHEN A RECURRING FEE IS INVOICED, as the letter agrees it (0319): after each
+ * period (the firm's default), at its start, or from a date the firm chose.
+ * Null on a letter written before 0319 or a line nobody chose for; billing
+ * reads that as after each period. The billing domain has the same three words
+ * (`BillingTiming`); domains do not import each other, so it is stated twice.
+ */
+export const LETTER_BILLING_TIMINGS = ["arrears", "advance", "on_date"] as const;
+export type LetterBillingTiming = (typeof LETTER_BILLING_TIMINGS)[number];
+
+export function isLetterBillingTiming(value: unknown): value is LetterBillingTiming {
+  return typeof value === "string" && (LETTER_BILLING_TIMINGS as readonly string[]).includes(value);
+}
+
+/** The frequencies a billing timing means anything for: one billed per period. */
+export const TIMED_FREQUENCIES: readonly string[] = ["monthly", "quarterly", "annually"];
+
 export interface LetterLine {
   readonly id: string;
   readonly tenantId: string;
@@ -343,6 +360,12 @@ export interface LetterLine {
    *  `recurrence` and freely different from it: a monthly service billed
    *  quarterly is an arrangement the firm has today. */
   readonly billingFrequency: BillingFrequency | null;
+  /** When it is invoiced (0319); null = not chosen (after each period). Only
+   *  for a monthly, quarterly or yearly fee. A grouped line is billed with its
+   *  group, whose timing is the one that counts. */
+  readonly billingTiming: LetterBillingTiming | null;
+  /** The first invoice date, with `on_date` and only with it. */
+  readonly billingOn: string | null;
   /**
    * THE FOUR OVERRIDES — this letter's own wording for the four scope blocks,
    * or null to print the pinned catalogue version's words.
@@ -411,6 +434,9 @@ export interface FeeGroup {
   /** How often the fee is billed. Required — a fee with no period is not one
    *  anybody can invoice. */
   readonly billingFrequency: BillingFrequency;
+  /** When the group's fee is invoiced (0319), as on a line. */
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
   /** PER BILLING PERIOD: 5,000 on a monthly group is 5,000 a month. */
   readonly amount: Amount;
   readonly currency: CurrencyCode;
@@ -635,6 +661,16 @@ export function utcDay(at: Date): string {
   return at.toISOString().slice(0, 10);
 }
 
+/** The billing timing as a hash field, or nothing at all when none was
+ *  chosen, so a letter from before 0319 keeps its hash. */
+function timingField(x: {
+  readonly billingTiming: LetterBillingTiming | null;
+  readonly billingOn: string | null;
+}): string[] {
+  if (x.billingTiming === null) return [];
+  return [`billing:${x.billingTiming}${x.billingOn === null ? "" : ` ${x.billingOn}`}`];
+}
+
 /**
  * The canonical rendering of a letter, for hashing.
  *
@@ -721,6 +757,8 @@ export function canonicalContent(input: {
     | "oopEstimate"
     | "pricingNote"
     | "feeGroupId"
+    | "billingTiming"
+    | "billingOn"
   >[];
   readonly feeGroups: readonly Pick<
     FeeGroup,
@@ -734,6 +772,8 @@ export function canonicalContent(input: {
     | "intro"
     | "deliverables"
     | "clientObligations"
+    | "billingTiming"
+    | "billingOn"
   >[];
   readonly clauses: readonly Pick<LetterClause, "position" | "clauseVersionId">[];
 }): string {
@@ -808,6 +848,10 @@ export function canonicalContent(input: {
           ? ""
           : `${l.oopEstimate.currency} ${l.oopEstimate.min} ${l.oopEstimate.max}`,
         l.pricingNote ?? "",
+        // WHEN it is invoiced (0319) is a term too, and added ONLY WHEN SET, as
+        // the fee-group rows were in 0083: a letter signed before 0319 hashes
+        // exactly as it did.
+        ...timingField(l),
       ].join("\t"),
     );
 
@@ -833,6 +877,7 @@ export function canonicalContent(input: {
           .map((l) => l.position)
           .sort((a, b) => a - b)
           .join(","),
+        ...timingField(g),
       ].join("\t"),
     );
 
