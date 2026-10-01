@@ -321,8 +321,8 @@ describe("ending an engagement on 30 September (V2.3)", () => {
 
 describe("pausing (V2.3)", () => {
   it("takes the engagement out of both spawn feeds and the generator, and resuming brings it back", async () => {
-    const paused = await lifecycle.pause(tenantId, { engagementId: lotusBooks, byUserId: userId });
-    expect(paused).toMatchObject({ status: "paused" });
+    const paused = await lifecycle.pause(tenantId, { engagementId: lotusBooks, byUserId: userId, pausedOn: "2026-09-29" });
+    expect(paused).toMatchObject({ status: "paused", pausedOn: "2026-09-29" });
     expect((await jobs.activeRecurring(tenantId, 50)).map((r) => r.engagementId)).not.toContain(lotusBooks);
     expect(
       (await calendarSource.subjectsFor(tenantId, { lineageId: gstr3b, jurisdiction: "IN", entityType: null }))

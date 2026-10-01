@@ -1,0 +1,212 @@
+// The billing domain (auto-invoice, phase 1) — which periods of a recurring
+// engagement are due to be billed, how much of each the firm served, and whose
+// kitty the bill goes in. Pure rules over ISO date strings; imports nothing
+// internal and nothing beyond the standard library (enforced by the arch test).
+//
+// ── A BILL DUE IS NOT AN INVOICE ───────────────────────────────────────────
+//
+// An invoice draws its number from the gapless GST series the moment its DRAFT
+// is created (0027). A sweep that drafted invoices would leave a cancelled
+// number in the series every time a manager decided not to bill, and an
+// auditor reads a cancelled number as a question. So the sweep writes a DUE —
+// "this client owes a bill for this service for this period" — and a person
+// turns dues into an invoice. Nothing here knows an invoice exists.
+//
+// ── THE FIRM'S RULES, NOT OURS (Ashish, 2026-10-01) ────────────────────────
+//
+//   - A schedule is a FIRST INVOICE DATE plus the letter's billing frequency.
+//     Arrears (October's work billed on 1 November), advance (billed on
+//     1 October) and a yearly audit billed in October are the same rule with a
+//     different first date. Nothing is billed before it, which is what makes it
+//     each client's go-live: the firm has no single go-live day.
+//   - A period cut short by the start, an end or a pause is billed PRO-RATA BY
+//     DAYS. This file counts the days; the database does the money, because
+//     money is never arithmetic in TypeScript here.
+//   - Revenue belongs to the MANAGER the client's SPOC for that service reports
+//     to. "Every SPOC has a manager above him."
+//
+// The periods themselves come from `domain/scheduler`'s `periodsFrom`, called by
+// the use case: a domain module never imports another, so the shape is stated
+// structurally here.
+
+/** One billing period, as `periodsFrom` produces it. Both ends inclusive. */
+export interface BillingPeriod {
+  readonly start: string;
+  readonly end: string;
+  readonly label: string;
+}
+
+/**
+ * The days the firm served an engagement: from its first day to its last
+ * (inclusive, null = still running), less the last pause (from the day it began
+ * up to, not including, the day it resumed; null = not resumed yet).
+ */
+export interface ServiceWindow {
+  readonly from: string;
+  readonly to: string | null;
+  readonly pausedFrom: string | null;
+  readonly pausedTo: string | null;
+}
+
+/** One period whose bill has fallen due. */
+export interface BillingDuePlan {
+  readonly period: BillingPeriod;
+  readonly billOn: string;
+  /** Days of the period inside the service window. Always at least 1. */
+  readonly servedDays: number;
+  readonly periodDays: number;
+}
+
+/**
+ * A date moved by whole months, its day clamped to the length of the month it
+ * lands in: 31 January plus one month is the last day of February, never
+ * 3 March. A bill date must stay in the month the schedule says.
+ */
+export function addMonthsClamped(date: string, months: number): string {
+  const [year = 0, month = 1, day = 1] = date.split("-").map(Number);
+  const index = year * 12 + (month - 1) + months;
+  const y = Math.floor(index / 12);
+  const m = (index % 12) + 1;
+  return iso(y, m, Math.min(day, daysInMonth(y, m)));
+}
+
+/** How many days of `period` fall inside the service window. */
+export function servedDays(period: BillingPeriod, window: ServiceWindow): number {
+  const from = later(period.start, window.from);
+  const to = window.to === null ? period.end : earlier(period.end, window.to);
+  if (from > to) return 0;
+  let days = dayCount(from, to);
+  if (window.pausedFrom !== null) {
+    // The pause covers [pausedFrom, pausedTo), so its last day is the one
+    // before the resume; a pause not yet over runs past any period.
+    const pauseFrom = later(from, window.pausedFrom);
+    const pauseTo = window.pausedTo === null ? to : earlier(to, addDays(window.pausedTo, -1));
+    if (pauseFrom <= pauseTo) days -= dayCount(pauseFrom, pauseTo);
+  }
+  return days;
+}
+
+/**
+ * The periods whose bill has fallen due by `today`: period k (0-based) is
+ * billed on `firstInvoiceOn` plus k spans, and a period nothing was served in
+ * is never billed. `periods` is consecutive, starting with the one containing
+ * the engagement's first day.
+ */
+export function billingDues(input: {
+  readonly periods: readonly BillingPeriod[];
+  readonly spanMonths: number;
+  readonly firstInvoiceOn: string;
+  readonly today: string;
+  readonly window: ServiceWindow;
+}): readonly BillingDuePlan[] {
+  const dues: BillingDuePlan[] = [];
+  input.periods.forEach((period, k) => {
+    const billOn = addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
+    if (billOn > input.today) return;
+    const served = servedDays(period, input.window);
+    if (served === 0) return;
+    dues.push({ period, billOn, servedDays: served, periodDays: dayCount(period.start, period.end) });
+  });
+  return dues;
+}
+
+// ── Whose kitty ─────────────────────────────────────────────────────────────
+
+/** A SPOC for the bill's Dept, with the person they report to (active staff
+ *  only; null when nobody is recorded or that person has left). */
+export interface SpocWithManager {
+  readonly userId: string;
+  readonly managerUserId: string | null;
+  readonly managerName: string | null;
+}
+
+export type ManagerHow = "spoc_manager" | "key_manager" | "none";
+
+export interface BillingManager {
+  readonly userId: string | null;
+  readonly how: ManagerHow;
+  /** Why the bill is not with the SPOC's manager, for the person who has it.
+   *  Null when it is. */
+  readonly note: string | null;
+}
+
+/**
+ * The manager whose kitty a bill goes in.
+ *
+ * The SPOC's manager when there is exactly ONE answer: one Dept, at least one
+ * SPOC for it, and every SPOC reporting to the same person. Anything else is a
+ * question this rule must not guess, so the bill goes to the client's Key
+ * Manager to hand out, with a sentence saying what is missing — the owner
+ * rule's arrangement (0311), and for its reason: a wrong kitty is worse than a
+ * bill somebody is told to place.
+ */
+export function resolveBillingManager(input: {
+  readonly deptCodes: readonly string[];
+  readonly spocs: readonly SpocWithManager[];
+  readonly keyManager: { readonly userId: string; readonly displayName: string | null } | null;
+}): BillingManager {
+  const why = whyNotSpocManager(input.deptCodes, input.spocs);
+  if (why === null) {
+    const managerUserId = input.spocs[0]?.managerUserId ?? null;
+    if (managerUserId !== null) return { userId: managerUserId, how: "spoc_manager", note: null };
+  }
+  const reason = why ?? "The SPOC reports to nobody.";
+  if (input.keyManager !== null) {
+    return {
+      userId: input.keyManager.userId,
+      how: "key_manager",
+      note: `${reason} Came to the Key Manager to place.`,
+    };
+  }
+  return { userId: null, how: "none", note: `${reason} The client has no Key Manager either.` };
+}
+
+function whyNotSpocManager(
+  deptCodes: readonly string[],
+  spocs: readonly SpocWithManager[],
+): string | null {
+  const depts = [...new Set(deptCodes)];
+  if (depts.length === 0) return "The service is filed under no Dept.";
+  if (depts.length > 1) return `This fee covers services of several Depts (${depts.join(", ")}).`;
+  if (spocs.length === 0) return `The client has no SPOC for ${depts[0]}.`;
+  if (spocs.some((s) => s.managerUserId === null)) {
+    return "A SPOC for this Dept reports to nobody (set who they report to on the team page).";
+  }
+  const managers = new Map(spocs.map((s) => [s.managerUserId, s.managerName ?? "a colleague"]));
+  if (managers.size > 1) {
+    return `The SPOCs for ${depts[0]} report to different managers (${[...managers.values()].join(", ")}).`;
+  }
+  return null;
+}
+
+// ── Day arithmetic: strings in, strings out ────────────────────────────────
+
+function dayCount(from: string, to: string): number {
+  return Math.round((utc(to) - utc(from)) / 86_400_000) + 1;
+}
+
+function addDays(date: string, days: number): string {
+  const shifted = new Date(utc(date) + days * 86_400_000);
+  return iso(shifted.getUTCFullYear(), shifted.getUTCMonth() + 1, shifted.getUTCDate());
+}
+
+function utc(date: string): number {
+  const [year = 0, month = 1, day = 1] = date.split("-").map(Number);
+  return Date.UTC(year, month - 1, day);
+}
+
+function daysInMonth(year: number, month: number): number {
+  return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function later(a: string, b: string): string {
+  return a > b ? a : b;
+}
+
+function earlier(a: string, b: string): string {
+  return a < b ? a : b;
+}
+
+function iso(year: number, month: number, day: number): string {
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}

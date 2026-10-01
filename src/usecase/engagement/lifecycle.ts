@@ -111,9 +111,13 @@ export class EngagementLifecycleService {
   async pause(input: { readonly tenantId: string; readonly engagementId: string }, actor: Actor): Promise<EngagementRecord> {
     const current = await this.live(input.tenantId, input.engagementId);
     if (current.status !== "active") throw new EngagementNotActive(current.status);
+    const today = await this.firmToday(input.tenantId);
     const paused = await this.deps.lifecycle.pause(input.tenantId, {
       engagementId: current.id,
       byUserId: actor.type === "human" ? actor.id : null,
+      // The pause's first day, on the firm's calendar, kept after the resume
+      // so billing can pro-rate a period half served before it (0318).
+      pausedOn: today,
     });
     if (!paused) throw await this.moved(input.tenantId, current.id);
     await this.deps.events.recordEvent({
@@ -123,7 +127,7 @@ export class EngagementLifecycleService {
       actor,
       payload: { from: current.status },
     });
-    return { engagement: paused, state: engagementState(paused, await this.firmToday(input.tenantId)) };
+    return { engagement: paused, state: engagementState(paused, today) };
   }
 
   /** Resume a paused engagement from the firm's today. */

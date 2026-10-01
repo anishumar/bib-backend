@@ -1379,7 +1379,8 @@ export interface EngagementLifecycle {
   ): Promise<EndOutcome | null>;
   pause(
     tenantId: string,
-    input: { readonly engagementId: string; readonly byUserId: string | null },
+    /** `pausedOn` is the firm's day, kept after the resume (0318). */
+    input: { readonly engagementId: string; readonly byUserId: string | null; readonly pausedOn: string },
   ): Promise<Engagement | null>;
   resume(
     tenantId: string,

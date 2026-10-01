@@ -502,6 +502,12 @@ export interface Engagement {
   /** The firm's day it last resumed after a pause. A recurring period that
    *  ended before it fell inside the pause and is never spawned. */
   readonly resumedOn: string | null;
+  /** The firm's day the LAST pause began (0318). Kept after the resume, unlike
+   *  `pausedAt`, so a period half served before a pause is billed pro-rata. */
+  readonly pausedOn: string | null;
+  /** The date of the invoice for this engagement's FIRST billing period; later
+   *  ones follow at the letter's frequency (0318). Null: billing not set up. */
+  readonly firstInvoiceOn: string | null;
 }
 
 /** The longest reason an end may carry, as the database's CHECK says (0314). */

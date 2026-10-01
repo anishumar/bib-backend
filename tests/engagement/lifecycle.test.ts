@@ -30,6 +30,8 @@ function engagement(over: Partial<Engagement> = {}): Engagement {
     endedAt: null,
     pausedAt: null,
     resumedOn: null,
+    pausedOn: null,
+    firstInvoiceOn: null,
     ...over,
   };
 }
@@ -130,6 +132,16 @@ describe("pausing and resuming (V2.3)", () => {
     expect(resumed.engagement).toMatchObject({ status: "active", pausedAt: null, resumedOn: "2026-09-29" });
     expect(w.events.verbs()).toEqual(["engagement.paused", "engagement.resumed"]);
     expect(w.events.recorded[1]?.payload).toMatchObject({ resumedOn: "2026-09-29" });
+  });
+
+  it("records the firm's day the pause began, and keeps it after the resume (0318)", async () => {
+    // Billing pro-rates a period half served before a pause, so the pause's
+    // first day must survive the resume that clears `pausedAt`.
+    const w = world();
+    const paused = await w.service.pause({ tenantId: FIRM, engagementId: ENGAGEMENT }, PARTNER);
+    expect(paused.engagement.pausedOn).toBe("2026-09-29");
+    const resumed = await w.service.resume({ tenantId: FIRM, engagementId: ENGAGEMENT }, PARTNER);
+    expect(resumed.engagement).toMatchObject({ pausedAt: null, pausedOn: "2026-09-29" });
   });
 
   it("refuses a pause that is not running work, and a resume that is not paused", async () => {

@@ -506,6 +506,8 @@ export class FakeEngagementRepo implements EngagementRepository {
         endedAt: null,
         pausedAt: null,
         resumedOn: null,
+        pausedOn: null,
+        firstInvoiceOn: null,
       };
       this.engagements.push(row);
       return row;
@@ -1400,12 +1402,13 @@ export class FakeEngagementLifecycle implements EngagementLifecycle {
     );
   }
 
-  pause(tenantId: string, input: { readonly engagementId: string }): Promise<Engagement | null> {
+  pause(tenantId: string, input: { readonly engagementId: string; readonly pausedOn: string }): Promise<Engagement | null> {
     return Promise.resolve(
       this.swap(tenantId, input.engagementId, "active", (e) => ({
         ...e,
         status: "paused",
         pausedAt: "2026-09-29T09:00:00.000Z",
+        pausedOn: input.pausedOn,
       })),
     );
   }

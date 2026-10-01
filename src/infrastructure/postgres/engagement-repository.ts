@@ -217,12 +217,15 @@ export interface EngagementRow {
   ended_at: Date | null;
   paused_at: Date | null;
   resumed_on: Date | null;
+  paused_on: Date | null;
+  first_invoice_on: Date | null;
 }
 
 /** Every column `toEngagement` reads, for a SELECT or a RETURNING (0314). */
 export const ENGAGEMENT_COLUMNS =
   "id, tenant_id, engagement_letter_id, engagement_letter_line_id, party_id, entity_party_id, " +
-  "status, activated_at, effective_from, ends_on, end_reason, ended_at, paused_at, resumed_on";
+  "status, activated_at, effective_from, ends_on, end_reason, ended_at, paused_at, resumed_on, " +
+  "paused_on, first_invoice_on";
 
 
 
@@ -358,6 +361,8 @@ export function toEngagement(r: EngagementRow): Engagement {
     endedAt: r.ended_at?.toISOString() ?? null,
     pausedAt: r.paused_at?.toISOString() ?? null,
     resumedOn: r.resumed_on === null ? null : toDay(r.resumed_on),
+    pausedOn: r.paused_on === null ? null : toDay(r.paused_on),
+    firstInvoiceOn: r.first_invoice_on === null ? null : toDay(r.first_invoice_on),
   };
 }
 

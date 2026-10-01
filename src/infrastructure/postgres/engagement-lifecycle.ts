@@ -105,14 +105,15 @@ export class PostgresEngagementLifecycle implements EngagementLifecycle {
 
   async pause(
     tenantId: string,
-    input: { readonly engagementId: string; readonly byUserId: string | null },
+    input: { readonly engagementId: string; readonly byUserId: string | null; readonly pausedOn: string },
   ): Promise<Engagement | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<EngagementRow[]>`
         UPDATE crm.engagement SET
           status            = 'paused',
           paused_at         = now(),
-          paused_by_user_id = ${input.byUserId}
+          paused_by_user_id = ${input.byUserId},
+          paused_on         = ${input.pausedOn}::date
         WHERE id = ${input.engagementId} AND status = 'active'
         RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
       `;
