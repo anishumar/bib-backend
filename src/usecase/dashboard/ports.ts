@@ -65,6 +65,21 @@ export interface DashboardRepository {
     owns: readonly { readonly partyId: string; readonly currency: string }[],
     reportingCurrency: string,
   ): Promise<readonly CompanyMonthRow[]>;
+
+  /**
+   * Billed and collected per manager per month, and per month for the whole
+   * firm, in ONE pass (grouping sets), summed in SQL on `numeric`. The
+   * definitions are `ManagerMonth`'s.
+   */
+  billingByManager(tenantId: string, window: BillingWindowDays): Promise<readonly ManagerMonthRow[]>;
+
+  /** What each manager's issued invoices are owed now, and the firm's total,
+   *  from `crm.receivable_ageing` (the rows "Owed to the firm" sums). */
+  owedByManager(tenantId: string): Promise<readonly ManagerOwedRow[]>;
+
+  /** Names for these users, from this firm's own memberships only (a user
+   *  account is global; the membership is behind the tenant wall). */
+  managerNames(tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]>;
 }
 
 /** A billing window as two days: `from` inclusive, `until` exclusive. */
@@ -100,4 +115,39 @@ export interface CompanyMonthRow {
  *  by `PostgresFirmTimeZone`, like every other use case's (T6.14). */
 export interface FirmTimeZone {
   timeZoneFor(tenantId: string): Promise<string>;
+}
+
+/**
+ * One row of `billingByManager`. `scope: "firm"` is the whole firm's month;
+ * on a `"manager"` row `managerUserId` null is the invoices naming nobody.
+ * Every amount is in the reporting currency, each document at its own rate.
+ */
+export interface ManagerMonthRow {
+  readonly scope: "manager" | "firm";
+  readonly managerUserId: string | null;
+  readonly month: string;
+  readonly billed: string;
+  readonly collected: string;
+  readonly invoices: number;
+}
+
+/** One row of `owedByManager`, scoped the same way. */
+export interface ManagerOwedRow {
+  readonly scope: "manager" | "firm";
+  readonly managerUserId: string | null;
+  readonly outstanding: string;
+  readonly invoices: number;
+}
+
+/** A manager by name, as THIS firm's roster has them. */
+export interface ManagerName {
+  readonly userId: string;
+  readonly name: string;
+  readonly activeStaff: boolean;
+}
+
+/** The firm's financial year, so a screen can offer "this financial year"
+ *  (structural: the config repository satisfies it, as it does billing's). */
+export interface FiscalYearSource {
+  fiscalYearStartMonth(tenantId: string): Promise<number | null>;
 }

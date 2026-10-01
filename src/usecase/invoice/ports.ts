@@ -136,6 +136,15 @@ export interface FirmEntities {
  * A party's name, and whether the firm put it away (0305). Satisfied by the
  * party repository's read-one-by-id, which never hides an archived party.
  */
+/**
+ * Who is on the firm's staff today (auto-invoice T4), for a manager a PERSON
+ * names. Structural: `PostgresMembershipRepository` satisfies it, as it does
+ * the lead use case's port of the same shape.
+ */
+export interface StaffDirectory {
+  isActiveStaff(tenantId: string, userId: string): Promise<boolean>;
+}
+
 export interface PartyStanding {
   findParty(
     tenantId: string,
@@ -188,6 +197,8 @@ export interface InvoiceRepository {
   issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;
   cancel(tenantId: string, invoiceId: string): Promise<Invoice>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;
+  /** A DRAFT's manager (null: nobody). `status = 'draft'` in the write. */
+  setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice>;
 
   /** The firm's series, for the screen that names them. */
   listSeries(tenantId: string): Promise<readonly InvoiceSeriesRecord[]>;

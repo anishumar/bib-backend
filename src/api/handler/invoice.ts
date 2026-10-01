@@ -216,6 +216,12 @@ const RaiseInvoiceRequest = z
         "Which financial year's series this belongs to. Defaults to today; a firm raising an " +
         "invoice on 2 April for March's work sets it deliberately.",
     }),
+    managerUserId: z.string().uuid().nullable().optional().openapi({
+      description:
+        "Whose revenue this invoice is (auto-invoice T4); null or absent names nobody. Must be " +
+        "active staff at this firm (MANAGER_NOT_STAFF, 409). The screen preselects the client's " +
+        "Key Manager. Changeable while a draft (PUT /invoices/{id}/manager), fixed once issued.",
+    }),
   })
   .openapi("RaiseInvoiceRequest");
 
@@ -375,6 +381,39 @@ const cancelRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("Already cancelled"),
+  },
+});
+
+const setManagerRoute = createRoute({
+  method: "put",
+  path: "/api/v1/invoices/{invoiceId}/manager",
+  tags: ["invoices"],
+  summary: "Put a draft in another manager's revenue (or nobody's)",
+  description:
+    "Drafts only: the number is drawn when the draft is made, so a wrong manager would otherwise " +
+    "mean cancelling a numbered invoice. Once issued, whose revenue it is is fixed " +
+    "(INVOICE_MANAGER_FROZEN, 409, and 0318's trigger). The manager must be active staff at this " +
+    "firm (MANAGER_NOT_STAFF, 409). Writes `invoice.manager_set` when it changes.",
+  request: {
+    params: z.object({ invoiceId: z.string().uuid() }),
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({ managerUserId: z.string().uuid().nullable() })
+            .openapi("SetInvoiceManagerRequest"),
+        },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: { description: "Saved", content: { "application/json": { schema: InvoiceSchema } } },
+    400: errorResponse("Not a user id"),
+    401: errorResponse("Not signed in"),
+    403: errorResponse("No org selected, or the role does not permit it"),
+    404: errorResponse("No such invoice at this firm"),
+    409: errorResponse("The invoice is no longer a draft, or the person is not active staff here"),
   },
 });
 
@@ -758,8 +797,14 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    const { managerUserId, ...body } = c.req.valid("json");
     const raised = await deps.service.raise(
-      { tenantId: s.tenantId, ...c.req.valid("json"), asOf: c.req.valid("query").asOf },
+      {
+        tenantId: s.tenantId,
+        ...body,
+        managerUserId: managerUserId ?? undefined,
+        asOf: c.req.valid("query").asOf,
+      },
       s.actor,
     );
     return c.json(toInvoiceBody(raised, seesFees(c.get("principal"))), 201);
@@ -845,6 +890,18 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
     if (!s.ok) return c.json(s.deny, s.status);
     const cancelled = await deps.service.cancel(s.tenantId, c.req.valid("param").invoiceId, s.actor);
     return c.json(toInvoiceBody(cancelled, seesFees(c.get("principal"))), 200);
+  });
+
+  app.openapi(setManagerRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const saved = await deps.service.setManager(
+      s.tenantId,
+      c.req.valid("param").invoiceId,
+      c.req.valid("json").managerUserId,
+      s.actor,
+    );
+    return c.json(toInvoiceBody(saved, seesFees(c.get("principal"))), 200);
   });
 
   app.openapi(registerIrnRoute, async (c) => {

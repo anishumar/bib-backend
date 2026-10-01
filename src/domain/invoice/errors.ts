@@ -37,7 +37,9 @@ export type InvoiceErrorCode =
   | "ENGAGEMENT_NOT_FOUND"
   | "ENGAGEMENT_OF_ANOTHER_CLIENT"
   | "ENGAGEMENT_OF_ANOTHER_ISSUER"
-  | "ENGAGEMENT_IN_ANOTHER_CURRENCY";
+  | "ENGAGEMENT_IN_ANOTHER_CURRENCY"
+  | "MANAGER_NOT_STAFF"
+  | "INVOICE_MANAGER_FROZEN";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -349,6 +351,34 @@ export class DunningAlreadyDecided extends InvoiceError {
       "DUNNING_ALREADY_DECIDED",
       `Dunning action ${JSON.stringify(id)} was already ${state}, and a decision about a client ` +
         `is not editable. Take the next step instead.`,
+    );
+  }
+}
+
+/**
+ * The manager a person named is not on this firm's staff today (auto-invoice
+ * T4). The column's foreign key reaches `tenancy.user_account`, which every
+ * firm shares, so without this an id from another firm, or a client's portal
+ * login, could be credited with this firm's revenue.
+ */
+export class ManagerNotStaff extends InvoiceError {
+  constructor(userId: string) {
+    super(
+      "MANAGER_NOT_STAFF",
+      `User ${JSON.stringify(userId)} is not active staff at this firm, so an invoice cannot be ` +
+        `put in their revenue. Choose somebody from the firm's people, or leave the manager blank.`,
+    );
+  }
+}
+
+/** Whose revenue an invoice is was fixed when it was issued (0318's trigger
+ *  says the same). A draft can still change hands. */
+export class InvoiceManagerFrozen extends InvoiceError {
+  constructor(id: string, status: string) {
+    super(
+      "INVOICE_MANAGER_FROZEN",
+      `Invoice ${JSON.stringify(id)} is ${status}, so whose revenue it is was fixed when it was ` +
+        `issued. Only a draft's manager can change.`,
     );
   }
 }

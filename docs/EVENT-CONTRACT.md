@@ -297,6 +297,7 @@ version is exactly what gets asked about afterwards.
 | `contract.activated` | engagement | An engagement became active and work may begin. **The spawn trigger the scheduler consumes (T2.4)** — written by T2.3, which is the module that causes it. Held back until the advance is recorded when the letter requires one. |
 | `invoice.raised` | invoice | An invoice was created and its number ALLOCATED from the entity's gapless series. Registered because the allocation is the audit-relevant moment, not the sending: a consecutive series is evidence, and 'which number went to which client, when, decided by whom' is the question an auditor asks about a gap. The number is in the payload for the same reason. |
 | `invoice.issued` | invoice | An invoice was issued and its number frozen. |
+| `invoice.manager_set` | invoice | A DRAFT invoice was put in another manager's revenue, or in nobody's (auto-invoice T4). Issued invoices cannot change hands. Payload: `number`, `managerUserId`, `previousManagerUserId` (either may be null). |
 | `invoice.cancelled` | invoice | Cancelled by credit note; the number is never reused. |
 | `payment.recorded` | payment | A payment was received and applied. |
 | `credit_note.issued` | credit_note | Issued against an invoice. |

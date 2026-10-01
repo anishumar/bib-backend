@@ -16,6 +16,9 @@ import type {
   BillingCompany,
   CompanyMonthRow,
   DashboardRepository,
+  ManagerMonthRow,
+  ManagerName,
+  ManagerOwedRow,
   MrrTotals,
   ReceivableTotals,
 } from "../usecase/dashboard/ports";
@@ -36,6 +39,11 @@ export class FakeDashboardRepo implements DashboardRepository {
   billingRows: CompanyMonthRow[] = [];
   billingWindows: { from: string; until: string }[] = [];
   billingOwns: { partyId: string; currency: string }[][] = [];
+  /** Revenue by manager: the rows SQL would have summed, and the roster. */
+  managerRows: ManagerMonthRow[] = [];
+  owedRows: ManagerOwedRow[] = [];
+  names: ManagerName[] = [];
+  namesAsked: string[][] = [];
 
   reportingCurrency(): Promise<string> {
     return Promise.resolve(this.currency);
@@ -90,5 +98,22 @@ export class FakeDashboardRepo implements DashboardRepository {
   ): Promise<readonly CompanyMonthRow[]> {
     this.billingOwns.push(owns.map((o) => ({ partyId: o.partyId, currency: o.currency })));
     return Promise.resolve(this.billingRows);
+  }
+
+  billingByManager(
+    _tenantId: string,
+    window: { from: string; until: string },
+  ): Promise<readonly ManagerMonthRow[]> {
+    this.billingWindows.push({ from: window.from, until: window.until });
+    return Promise.resolve(this.managerRows);
+  }
+
+  owedByManager(): Promise<readonly ManagerOwedRow[]> {
+    return Promise.resolve(this.owedRows);
+  }
+
+  managerNames(_tenantId: string, userIds: readonly string[]): Promise<readonly ManagerName[]> {
+    this.namesAsked.push([...userIds]);
+    return Promise.resolve(this.names.filter((n) => userIds.includes(n.userId)));
   }
 }

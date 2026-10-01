@@ -32,6 +32,7 @@ import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { financialYearOf } from "../../src/domain/invoice/model";
 import { FakeIssuedCopies } from "../../src/testfakes/invoice";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const cfg = load();
 // Wide enough that six simultaneous invoices are genuinely simultaneous. A
@@ -52,6 +53,7 @@ const service = new InvoiceService({
   events: ledger,
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
+  staff: new FakeStaffDirectory(),
 });
 
 const stamp = Date.now().toString(36);

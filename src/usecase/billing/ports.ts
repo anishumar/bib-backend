@@ -292,6 +292,8 @@ export interface InvoiceDrafter {
       readonly dueOn?: string | undefined;
       readonly asOf?: string | undefined;
       readonly managerUserId?: string | undefined;
+      /** Always true from the desk: the bills resolved the manager. */
+      readonly managerFromBills?: boolean | undefined;
     },
     actor: Actor,
   ): Promise<{ readonly id: string; readonly number: string }>;

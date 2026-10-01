@@ -315,6 +315,7 @@ export class BillingDeskService {
         dueOn: input.dueOn,
         asOf: input.asOf,
         managerUserId: manager ?? undefined,
+        managerFromBills: true,
       },
       actor,
     );

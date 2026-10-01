@@ -43,6 +43,7 @@ import { FakeFirmTimeZone } from "./tenancy";
 import { FakePartyStanding } from "./party";
 import { FakeClock } from "./clock";
 import { RecordingEventSink } from "./ledger";
+import { FakeStaffDirectory } from "./lead";
 
 interface SeriesKey {
   readonly tenantId: string;
@@ -183,6 +184,10 @@ export class FakeInvoiceRepo implements InvoiceRepository {
 
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice> {
     return this.patch(tenantId, invoiceId, { irn, irnRegisteredAt: at });
+  }
+
+  setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice> {
+    return this.patch(tenantId, invoiceId, { managerUserId });
   }
 
   listSeries(tenantId: string): Promise<readonly InvoiceSeriesRecord[]> {
@@ -403,6 +408,7 @@ export function makeInvoiceFakes(): Deps & {
   clock: FakeClock;
   events: RecordingEventSink;
   issuedCopies: FakeIssuedCopies;
+  staff: FakeStaffDirectory;
 } {
   return {
     invoices: new FakeInvoiceRepo(),
@@ -413,5 +419,6 @@ export function makeInvoiceFakes(): Deps & {
     clock: new FakeClock(new Date("2026-07-01T09:00:00Z")),
     events: new RecordingEventSink(),
     issuedCopies: new FakeIssuedCopies(),
+    staff: new FakeStaffDirectory(),
   };
 }

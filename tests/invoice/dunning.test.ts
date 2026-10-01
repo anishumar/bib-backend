@@ -21,6 +21,7 @@ import {
   DunningNotAwaitingApproval,
 } from "../../src/domain/invoice/errors";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
 const CLIENT = "00000000-0000-0000-0000-0000000000bb";
@@ -63,6 +64,7 @@ function setup(): {
     clock,
     events,
     issuedCopies: new FakeIssuedCopies(),
+    staff: new FakeStaffDirectory(),
   });
   const service = new DunningService({
     timeZones: new FakeFirmTimeZone(),

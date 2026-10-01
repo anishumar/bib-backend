@@ -43,6 +43,7 @@ import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import type { Actor } from "../../src/domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -93,6 +94,7 @@ const invoicing = new InvoiceService({
   events,
   issuedCopies: { file: () => Promise.resolve() },
   moneyMoved: gate,
+  staff: new FakeStaffDirectory(),
 });
 const desk = new BillingDeskService({
   desk: deskAdapter,

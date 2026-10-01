@@ -21,6 +21,8 @@ import {
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
   InvoicePartyArchived,
+  InvoiceManagerFrozen,
+  ManagerNotStaff,
 } from "../../src/domain/invoice/errors";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -123,10 +125,36 @@ describe("whose kitty, and the line a caller gets back (auto-invoice, 0318)", ()
 
   it("records the manager an invoice was raised for, and none when not said", async () => {
     const s = setup();
+    s.staff.add(TENANT, MANAGER);
     const theirs = await s.service.raise(raise({ managerUserId: MANAGER }), ACTOR);
     const nobodys = await s.service.raise(raise(), ACTOR);
     expect(theirs.managerUserId).toBe(MANAGER);
     expect(nobodys.managerUserId).toBeNull();
+  });
+
+  it("refuses a manager who is not on this firm's staff, before a number is drawn (T4)", async () => {
+    // The column's key reaches the GLOBAL user_account, so an id from another
+    // firm would otherwise be credited with this firm's revenue.
+    const s = setup();
+    s.staff.add("00000000-0000-0000-0000-00000000aaaa", MANAGER);
+    await expect(s.service.raise(raise({ managerUserId: MANAGER }), ACTOR)).rejects.toBeInstanceOf(
+      ManagerNotStaff,
+    );
+    expect(s.invoices.invoices).toHaveLength(0);
+    expect(s.events.recorded).toHaveLength(0);
+  });
+
+  it("takes the bills' manager without asking the roster, so a leaver's bill can still be raised", async () => {
+    const s = setup();
+    const raised = await s.service.raise(raise({ managerUserId: MANAGER, managerFromBills: true }), ACTOR);
+    expect(raised.managerUserId).toBe(MANAGER);
+  });
+
+  it("names the manager in the allocation's ledger entry", async () => {
+    const s = setup();
+    s.staff.add(TENANT, MANAGER);
+    await s.service.raise(raise({ managerUserId: MANAGER }), ACTOR);
+    expect(s.events.recorded[0]?.payload).toMatchObject({ managerUserId: MANAGER });
   });
 
   it("hands back the line it added, so a bill due can name it", async () => {
@@ -140,6 +168,55 @@ describe("whose kitty, and the line a caller gets back (auto-invoice, 0318)", ()
       unitAmount: "25000",
     });
     expect(line).toMatchObject({ invoiceId: invoice.id, description: "Bookkeeping — Oct 2026", position: 1 });
+  });
+});
+
+describe("changing a draft's manager (auto-invoice T4)", () => {
+  const MONA = "00000000-0000-0000-0000-0000000000d1";
+  const SAM = "00000000-0000-0000-0000-0000000000d2";
+
+  it("moves a draft to another manager, and records who it was before", async () => {
+    const s = setup();
+    s.staff.add(TENANT, MONA).add(TENANT, SAM);
+    const draft = await s.service.raise(raise({ managerUserId: MONA }), ACTOR);
+    const saved = await s.service.setManager(TENANT, draft.id, SAM, ACTOR);
+    expect(saved.managerUserId).toBe(SAM);
+    const event = s.events.recorded.at(-1);
+    expect(event?.verb).toBe("invoice.manager_set");
+    expect(event?.payload).toEqual({ number: draft.number, managerUserId: SAM, previousManagerUserId: MONA });
+  });
+
+  it("can put it in nobody's revenue, and records nothing when nothing changes", async () => {
+    const s = setup();
+    s.staff.add(TENANT, MONA);
+    const draft = await s.service.raise(raise({ managerUserId: MONA }), ACTOR);
+    expect((await s.service.setManager(TENANT, draft.id, null, ACTOR)).managerUserId).toBeNull();
+    const before = s.events.recorded.length;
+    await s.service.setManager(TENANT, draft.id, null, ACTOR);
+    expect(s.events.recorded).toHaveLength(before);
+  });
+
+  it("refuses somebody not on the staff, and an issued invoice", async () => {
+    const s = setup();
+    s.staff.add(TENANT, MONA);
+    const draft = await s.service.raise(raise({ managerUserId: MONA }), ACTOR);
+    await expect(s.service.setManager(TENANT, draft.id, SAM, ACTOR)).rejects.toBeInstanceOf(ManagerNotStaff);
+
+    await s.service.addLine({
+      tenantId: TENANT,
+      invoiceId: draft.id,
+      description: "Bookkeeping, Oct 2026",
+      quantity: "1",
+      unitAmount: "25000",
+    });
+    await s.service.issue(TENANT, draft.id, ACTOR);
+    s.staff.add(TENANT, SAM);
+    await expect(s.service.setManager(TENANT, draft.id, SAM, ACTOR)).rejects.toBeInstanceOf(
+      InvoiceManagerFrozen,
+    );
+    await expect(s.service.setManager(TENANT, "00000000-0000-0000-0000-000000000999", SAM, ACTOR)).rejects.toBeInstanceOf(
+      InvoiceNotFound,
+    );
   });
 });
 

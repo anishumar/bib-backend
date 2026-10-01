@@ -545,6 +545,7 @@ function deps(): RouterDeps {
       service: new DashboardService({
         dashboards: new FakeDashboardRepo(),
         timeZones: new FakeFirmTimeZone(),
+        fiscalYears: new FakeFiscalYearSource(),
         clock: new FakeClock(),
       }),
       authz: new AuthzService({ permissions: permissions }),

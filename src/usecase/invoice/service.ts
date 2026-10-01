@@ -68,6 +68,8 @@ import {
   InvoiceEngagementNotFound,
   InvoiceIssuerNotAFirmEntity,
   InvoicePartyArchived,
+  InvoiceManagerFrozen,
+  ManagerNotStaff,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
@@ -82,6 +84,7 @@ import type {
   MoneyMovedListener,
   PartyStanding,
   ReceivableRecord,
+  StaffDirectory,
 } from "./ports";
 
 export interface Deps {
@@ -100,6 +103,8 @@ export interface Deps {
   /** The advance gate (0320), told after money moves. Optional: absent,
    *  nobody is told, and an admin's Approve start is the way on. */
   readonly moneyMoved?: MoneyMovedListener | null;
+  /** The roster, for a manager a person names (auto-invoice T4). */
+  readonly staff: StaffDirectory;
 }
 
 export interface RaiseInvoiceInput {
@@ -118,6 +123,14 @@ export interface RaiseInvoiceInput {
   readonly asOf?: string | undefined;
   /** Whose revenue this invoice is (0318). Absent: nobody named. */
   readonly managerUserId?: string | undefined;
+  /**
+   * The manager came from the bills being raised (the billing desk), not from
+   * a person's pick. Those were resolved from the firm's own SPOCs and Key
+   * Manager when the bill was written, and a manager who has left since still
+   * earned that period: refusing the raise would leave the bill stuck. A
+   * person's pick is checked against today's roster.
+   */
+  readonly managerFromBills?: boolean | undefined;
 }
 
 export interface AddInvoiceLineInput {
@@ -172,6 +185,11 @@ export class InvoiceService {
     if (await this.deps.firmEntities.isFirmEntity(input.tenantId, input.partyId)) {
       throw new InvoiceBillsTheFirm(billed?.displayName ?? input.partyId);
     }
+    // Before the number too: a refusal after it would leave a draft nobody
+    // asked for in the gapless series.
+    if (input.managerUserId !== undefined && input.managerFromBills !== true) {
+      await this.requireStaff(input.tenantId, input.managerUserId);
+    }
 
     const invoice = await this.deps.invoices.create({
       id: this.deps.ids.newId(),
@@ -206,9 +224,43 @@ export class InvoiceService {
         currency: invoice.currency,
         fxRate: invoice.fxRate,
         fxRateDate: invoice.fxRateDate,
+        managerUserId: invoice.managerUserId,
       },
     });
     return invoice;
+  }
+
+  /**
+   * Put a DRAFT in somebody's revenue, or in nobody's (auto-invoice T4).
+   *
+   * The number is drawn when the draft is made, so without this a wrong pick
+   * in the raise dialog could only be undone by cancelling, which leaves a
+   * cancelled number in the series for an auditor to ask about. Once issued,
+   * the manager is fixed (here, and by 0318's trigger).
+   */
+  async setManager(
+    tenantId: string,
+    invoiceId: string,
+    managerUserId: string | null,
+    actor: Actor,
+  ): Promise<Invoice> {
+    const invoice = await this.mustFind(tenantId, invoiceId);
+    if (invoice.status !== "draft") throw new InvoiceManagerFrozen(invoiceId, invoice.status);
+    if (managerUserId !== null) await this.requireStaff(tenantId, managerUserId);
+    if (invoice.managerUserId === managerUserId) return invoice;
+    const saved = await this.deps.invoices.setManager(tenantId, invoiceId, managerUserId);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "invoice.manager_set",
+      objectId: saved.id,
+      actor,
+      payload: {
+        number: saved.number,
+        managerUserId: saved.managerUserId,
+        previousManagerUserId: invoice.managerUserId,
+      },
+    });
+    return saved;
   }
 
   async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
@@ -655,6 +707,10 @@ export class InvoiceService {
       throw new InvoiceNotIssued(invoiceId, invoice.status);
     }
     return invoice;
+  }
+
+  private async requireStaff(tenantId: string, userId: string): Promise<void> {
+    if (!(await this.deps.staff.isActiveStaff(tenantId, userId))) throw new ManagerNotStaff(userId);
   }
 
   private async mustFind(tenantId: string, invoiceId: string): Promise<Invoice> {

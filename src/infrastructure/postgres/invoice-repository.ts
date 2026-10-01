@@ -526,6 +526,20 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     );
   }
 
+  async setManager(tenantId: string, invoiceId: string, managerUserId: string | null): Promise<Invoice> {
+    // A draft only: 0318's trigger refuses the same change on anything else.
+    return this.updateOne(
+      tenantId,
+      invoiceId,
+      (db) => db`
+        UPDATE crm.invoice SET manager_user_id = ${managerUserId}
+        WHERE id = ${invoiceId} AND status = 'draft'
+        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+      `,
+      "set the manager of",
+    );
+  }
+
   async listSeries(tenantId: string): Promise<readonly InvoiceSeriesRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<

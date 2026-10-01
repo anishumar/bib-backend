@@ -28,6 +28,7 @@ import { systemIds } from "../../src/platform/ids";
 import { systemClock } from "../../src/platform/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { FakeIssuedCopies } from "../../src/testfakes/invoice";
+import { FakeStaffDirectory } from "../../src/testfakes/lead";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 4 });
@@ -45,6 +46,7 @@ const service = new InvoiceService({
   events: ledger,
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
+  staff: new FakeStaffDirectory(),
 });
 
 const stamp = Date.now().toString(36);

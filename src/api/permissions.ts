@@ -769,6 +769,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/issue"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/cancel"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/invoices/{invoiceId}/irn"), "party:write" as const],
+  // Who raised a draft may say whose revenue it is, as they did when raising.
+  [routeKey("PUT", "/api/v1/invoices/{invoiceId}/manager"), "party:write" as const],
   // MONEY AGAINST AN INVOICE (T3.5). Recording a payment is `party:write` —
   // it is bookkeeping, and the person chasing a receivable is the person who
   // marks it settled. ISSUING A CREDIT NOTE IS `tenant:admin`, and that is the
@@ -852,6 +854,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/dashboard/mrr/{axis}"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/receivables/by-client"), "party:read" as const],
   [routeKey("GET", "/api/v1/dashboard/revenue/by-company"), "party:read" as const],
+  [routeKey("GET", "/api/v1/dashboard/revenue/by-manager"), "party:read" as const],
 
   [routeKey("GET", "/api/v1/documents"), "party:read" as const],
   [routeKey("POST", "/api/v1/documents"), "party:write" as const],

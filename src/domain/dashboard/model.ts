@@ -199,3 +199,47 @@ export interface CompanyBilling {
    */
   readonly otherCurrencyInvoices: number;
 }
+
+// ── Revenue by manager (auto-invoice T4) ────────────────────────────────────
+
+/**
+ * One manager's month, in the firm's REPORTING currency, every document at the
+ * rate stored on it.
+ *
+ * BILLED is exactly `MonthBilling`'s definition (issued invoices, by issue
+ * month, before tax, less credit notes at their pre-tax share), grouped by the
+ * invoice's `manager_user_id` instead of its company: Ashish's "revenue is
+ * tracked by manager", and the user's definition (2026-10-01).
+ *
+ * COLLECTED is the cash that came in that month on the manager's issued
+ * invoices, by the payment's `received_on`, WITH tax (what reached the bank).
+ * A bounced cheque or a refund is a negative payment and comes off the month it
+ * is dated. Payments on an invoice cancelled since are left out with it, as
+ * every other figure leaves a cancelled invoice out.
+ */
+export interface ManagerMonth {
+  readonly month: string;
+  readonly billed: string;
+  readonly collected: string;
+  /** Invoices issued that month (credit notes and payments are not invoices). */
+  readonly invoiceCount: number;
+}
+
+export interface ManagerRevenue {
+  /** Null: the invoices that name nobody, one row so the table adds up to the
+   *  firm. */
+  readonly userId: string | null;
+  /** Null for the no-manager row, and for an id this firm's roster cannot name. */
+  readonly name: string | null;
+  /** On the firm's staff today. False for somebody who has left: their
+   *  revenue stays theirs. */
+  readonly activeStaff: boolean;
+  readonly months: readonly ManagerMonth[];
+  /**
+   * What the manager's issued invoices are owed NOW, with tax: `crm.receivable_ageing`,
+   * the very rows "Owed to the firm" sums, so the managers add up to it.
+   * Not cut by month: a balance is a state, not a flow.
+   */
+  readonly outstanding: string;
+  readonly outstandingInvoices: number;
+}

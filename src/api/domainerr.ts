@@ -993,7 +993,9 @@ export function mapError(err: unknown): MappedError {
       // that signed the work, and its number is already in that company's
       // series. The fix is another invoice, not another request.
       // ENGAGEMENT_IN_ANOTHER_CURRENCY likewise: the invoice is in another
-      // currency than the letter priced the work in.
+      // currency than the letter priced the work in. MANAGER_NOT_STAFF is 409
+      // like OWNER_NOT_STAFF and ASSIGNEE_NOT_STAFF: the id is well formed, the
+      // roster says no. A manager is frozen once the invoice is issued.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
@@ -1005,6 +1007,8 @@ export function mapError(err: unknown): MappedError {
       case "PARTY_ARCHIVED":
       case "ENGAGEMENT_OF_ANOTHER_ISSUER":
       case "ENGAGEMENT_IN_ANOTHER_CURRENCY":
+      case "MANAGER_NOT_STAFF":
+      case "INVOICE_MANAGER_FROZEN":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

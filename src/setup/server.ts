@@ -593,6 +593,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     issuedCopies: invoiceIssuedCopies(fileStore, log),
     // Money moved: an advance paid in full starts its work (0320).
     moneyMoved: advanceGate,
+    // A manager a person names must be on the roster today (T4).
+    staff: memberships,
   });
 
   // BILL DUES (0318): what a manager does with a bill the sweep found owed.
@@ -623,6 +625,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   const dashboards = new DashboardService({
     dashboards: new PostgresDashboardRepository(pools.app),
     timeZones: new PostgresFirmTimeZone(pools.app),
+    fiscalYears: configRepository,
     clock: systemClock,
   });
 

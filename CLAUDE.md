@@ -1764,6 +1764,43 @@ recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `per
 - `crm.billing_due` now names an engagement letter, so it is the fourth entry in the signed-letter
   freeze test's `NOT_TERMS`: what the letter CAUSED, written after the signature.
 
+## Revenue by manager (auto-invoice T4, 2026-10-02, no migration)
+
+Ashish: "invoices come under the manager's name and revenue is tracked by manager". The manager
+is `crm.invoice.manager_user_id` (0318), set from the bills when raised, or picked by a person,
+and frozen at issue. `GET /api/v1/dashboard/revenue/by-manager?months=12` (1 to 24), behind the
+fee axis like the rest of `/dashboard`.
+
+- **BILLED** is "Billing by company"'s definition, document for document and rounded the same way,
+  grouped by manager instead of company. Proven: the managers of a month add up to the
+  `by-company` whole-firm total to the paisa (`revenue-by-manager.integration.test.ts`).
+- **COLLECTED** (the user asked for it beside billed; the definition is mine, industry standard)
+  is CASH: payments on the manager's issued invoices by `received_on`, WITH tax, at the invoice's
+  stored rate. A bounced cheque or a refund is a negative payment and comes off its own month.
+  Payments on an invoice cancelled since go with it, as every figure drops a cancelled invoice.
+- **OUTSTANDING** is owed NOW, from `crm.receivable_ageing`, the rows "Owed to the firm" sums,
+  so the managers add up to it (proven). Not cut by month: a balance is a state.
+- **Everything in the reporting currency**, every document at its own stored rate: a manager's
+  revenue in INR, AED and USD has to be one number, and no rate is ever looked up today.
+- **One row names nobody** (`userId: null`): invoices raised before 0318, a hand-raised one with
+  no manager, a bill that found none. Listed, not dropped, so the table adds up to the firm. No
+  backfill: an issued invoice's manager is frozen, and a guessed one would be wrong.
+- **Who is a "manager" is whoever invoices name.** A firm's ladder is its own config, so the
+  list is everybody with something in the window or something owed, never "ranks 5 to 8".
+  `activeStaff: false` keeps a leaver's revenue under their name. Names come FROM the membership
+  (behind the wall), never straight from the global `user_account`: an id from another firm gets
+  no name.
+- **`financialYearStartMonth`** rides along (the compliance policy's, null when unset), so the
+  screen can offer "this financial year" in any country instead of assuming April.
+- **The manager a PERSON names is checked** (`MANAGER_NOT_STAFF`, 409): the column's key reaches
+  the global `user_account`, so without it another firm's user could be credited. The raise
+  dialog sends `managerUserId` (preselected to the client's Key Manager on the screen); a draft's
+  manager changes with `PUT /invoices/{id}/manager` (`invoice.manager_set`; issued:
+  `INVOICE_MANAGER_FROZEN`, 409), because the number is drawn at the draft and a wrong pick
+  should not need a cancelled number. The billing desk passes `managerFromBills: true` and is
+  NOT checked: those managers were resolved from the firm's own SPOCs, and a manager who has
+  left since still earned that period, so refusing would leave the bill stuck.
+
 ## Who a commercial document names — the client, not merely the firm (F-10-1, 0306)
 
 The composite `(id, tenant_id)` keys prove a reference is THIS FIRM's and nothing more. The
