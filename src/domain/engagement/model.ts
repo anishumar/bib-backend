@@ -505,8 +505,12 @@ export interface Engagement {
   /** The firm's day the LAST pause began (0318). Kept after the resume, unlike
    *  `pausedAt`, so a period half served before a pause is billed pro-rata. */
   readonly pausedOn: string | null;
-  /** The date of the invoice for this engagement's FIRST billing period; later
-   *  ones follow at the letter's frequency (0318). Null: billing not set up. */
+  /** The first day of the FIRST period billed (0318). Nothing before it is
+   *  billed, which makes it this client's billing go-live. Null with
+   *  `firstInvoiceOn`: billing not set up. */
+  readonly billingFrom: string | null;
+  /** The date the invoice for the period starting `billingFrom` falls due;
+   *  each later period one billing span after it (0318). */
   readonly firstInvoiceOn: string | null;
 }
 

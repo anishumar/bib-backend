@@ -507,6 +507,7 @@ export class FakeEngagementRepo implements EngagementRepository {
         pausedAt: null,
         resumedOn: null,
         pausedOn: null,
+        billingFrom: null,
         firstInvoiceOn: null,
       };
       this.engagements.push(row);

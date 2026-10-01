@@ -31,6 +31,7 @@ function engagement(over: Partial<Engagement> = {}): Engagement {
     pausedAt: null,
     resumedOn: null,
     pausedOn: null,
+    billingFrom: null,
     firstInvoiceOn: null,
     ...over,
   };

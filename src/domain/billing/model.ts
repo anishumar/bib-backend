@@ -70,6 +70,28 @@ export function addMonthsClamped(date: string, months: number): string {
   return iso(y, m, Math.min(day, daysInMonth(y, m)));
 }
 
+/**
+ * The service window of one engagement, from the facts on its row (0314, 0318).
+ *
+ * The pause is the LAST one (`pausedOn`, kept after a resume). It is closed by
+ * the resume only when that resume came after it; while paused, or when an
+ * engagement was ended while paused, it runs on — an earlier resume says
+ * nothing about a later pause.
+ */
+export function serviceWindowOf(e: {
+  readonly status: string;
+  readonly effectiveFrom: string;
+  readonly endsOn: string | null;
+  readonly pausedOn: string | null;
+  readonly resumedOn: string | null;
+}): ServiceWindow {
+  const pausedTo =
+    e.pausedOn !== null && e.status !== "paused" && e.resumedOn !== null && e.resumedOn >= e.pausedOn
+      ? e.resumedOn
+      : null;
+  return { from: e.effectiveFrom, to: e.endsOn, pausedFrom: e.pausedOn, pausedTo };
+}
+
 /** How many days of `period` fall inside the service window. */
 export function servedDays(period: BillingPeriod, window: ServiceWindow): number {
   const from = later(period.start, window.from);
@@ -90,20 +112,25 @@ export function servedDays(period: BillingPeriod, window: ServiceWindow): number
  * The periods whose bill has fallen due by `today`: period k (0-based) is
  * billed on `firstInvoiceOn` plus k spans, and a period nothing was served in
  * is never billed. `periods` is consecutive, starting with the one containing
- * the engagement's first day.
+ * the first day served.
+ *
+ * `windows` is one per engagement the bill covers: one for a service priced on
+ * its own, several for a fee group (0083), whose ONE fee was earned by the
+ * period as long as any of its services ran — so a group's days served are the
+ * most any one of them was served, never a sum.
  */
 export function billingDues(input: {
   readonly periods: readonly BillingPeriod[];
   readonly spanMonths: number;
   readonly firstInvoiceOn: string;
   readonly today: string;
-  readonly window: ServiceWindow;
+  readonly windows: readonly ServiceWindow[];
 }): readonly BillingDuePlan[] {
   const dues: BillingDuePlan[] = [];
   input.periods.forEach((period, k) => {
     const billOn = addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
     if (billOn > input.today) return;
-    const served = servedDays(period, input.window);
+    const served = Math.max(0, ...input.windows.map((w) => servedDays(period, w)));
     if (served === 0) return;
     dues.push({ period, billOn, servedDays: served, periodDays: dayCount(period.start, period.end) });
   });

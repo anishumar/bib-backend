@@ -142,6 +142,23 @@ async function main(): Promise<void> {
       console.log();
     }
 
+    // BILLING DUES (0318): only firms that turned auto-billing on.
+    const billing = await wired.billing.sweep();
+    for (const r of billing) {
+      if (r.failure !== undefined) console.log(`  billing: firm ${r.tenantId} could not be visited — ${r.failure}`);
+    }
+    const dues = billing.reduce((n, r) => n + r.created, 0);
+    const noYear = billing.reduce((n, r) => n + r.awaitingFiscalYear, 0);
+    if (dues === 0) {
+      console.log("  no bill has fallen due that is not already on the list.");
+    } else {
+      console.log(`  ${String(dues)} bill(s) fell due and are waiting to be raised`);
+    }
+    if (noYear > 0) {
+      console.log(`  ${String(noYear)} quarterly or yearly bill(s) wait for the firm's financial year to be set`);
+    }
+    console.log();
+
     // THE COMPLIANCE CALENDAR (T3.2), last, and after the spawn on purpose: an
     // engagement activated a moment ago should have its filings materialised on
     // the same run rather than "next time".

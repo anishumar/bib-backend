@@ -13,8 +13,10 @@ DROP FUNCTION crm.refuse_issued_invoice_manager_change();
 ALTER TABLE crm.invoice DROP COLUMN manager_user_id;
 
 ALTER TABLE crm.engagement
+  DROP CONSTRAINT engagement_billing_schedule_chk,
   DROP COLUMN paused_on,
-  DROP COLUMN first_invoice_on;
+  DROP COLUMN first_invoice_on,
+  DROP COLUMN billing_from;
 
 ALTER TABLE tenancy.tenant DROP COLUMN auto_billing;
 

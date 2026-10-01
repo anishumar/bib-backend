@@ -20,10 +20,15 @@
 --   * tenancy.tenant.auto_billing — the switch. FALSE by default, so applying
 --     this changed no firm's behaviour; the sweep writes nothing until a firm
 --     turns it on (client_request_routing's position, 0070).
---   * crm.engagement.first_invoice_on — the date of the invoice for the FIRST
---     billing period; later ones follow at the letter's frequency. NULL means
---     billing is not set up for that engagement and nothing is billed: it is
---     each client's go-live, because the firm has no single go-live day.
+--   * crm.engagement.billing_from + first_invoice_on — the FIRST period billed
+--     (its first day) and the date its invoice falls due; later periods follow
+--     at the letter's frequency, each one span after the last. Both are needed:
+--     a 1 November invoice may be October's (arrears) or November's (advance),
+--     and a yearly audit billed in October 2026 is FY 2025-26's. NULL means
+--     billing is not set up and nothing is billed: it is each client's go-live,
+--     because the firm has no single go-live day, and nothing before
+--     `billing_from` is ever billed, so an existing client's earlier, manually
+--     billed months raise nothing.
 --   * Pro-rata by DAYS, computed HERE (`amount` is generated from the full
 --     amount and the days), never in TypeScript.
 --   * Revenue belongs to a MANAGER (`crm.invoice.manager_user_id`), frozen once
@@ -51,11 +56,19 @@ COMMENT ON COLUMN tenancy.tenant.auto_billing IS
 -- ── The schedule, and the pause's first day ─────────────────────────────────
 
 ALTER TABLE crm.engagement
+  ADD COLUMN billing_from     date,
   ADD COLUMN first_invoice_on date,
   ADD COLUMN paused_on        date;
 
+ALTER TABLE crm.engagement
+  ADD CONSTRAINT engagement_billing_schedule_chk CHECK (
+    (billing_from IS NULL) = (first_invoice_on IS NULL)
+  );
+
+COMMENT ON COLUMN crm.engagement.billing_from IS
+  'The first day of the FIRST billing period (0318). Nothing before it is billed by the sweep. NULL = billing not set up.';
 COMMENT ON COLUMN crm.engagement.first_invoice_on IS
-  'The date of the invoice for this engagement''s FIRST billing period; later periods follow at the letter''s billing frequency (0318). NULL = billing not set up, nothing is billed.';
+  'The date the invoice for the period starting billing_from falls due; each later period one billing span after (0318). NULL = billing not set up.';
 COMMENT ON COLUMN crm.engagement.paused_on IS
   'The firm''s day the LAST pause began (0318). Kept after a resume, unlike paused_at, so a period half served before a pause can be billed pro-rata.';
 

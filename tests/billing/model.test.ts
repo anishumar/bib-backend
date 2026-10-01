@@ -15,6 +15,7 @@ import {
   billingDues,
   resolveBillingManager,
   servedDays,
+  serviceWindowOf,
 } from "../../src/domain/billing/model";
 
 const oct = { start: "2026-10-01", end: "2026-10-31", label: "Oct 2026" };
@@ -74,7 +75,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 1,
       firstInvoiceOn: "2026-11-01",
       today: "2026-12-05",
-      window: open,
+      windows: [open],
     });
     expect(dues.map((d) => [d.period.label, d.billOn])).toEqual([
       ["Oct 2026", "2026-11-01"],
@@ -88,7 +89,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 1,
       firstInvoiceOn: "2026-10-01",
       today: "2026-11-01",
-      window: open,
+      windows: [open],
     });
     expect(dues.map((d) => d.period.label)).toEqual(["Oct 2026", "Nov 2026"]);
   });
@@ -99,7 +100,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 1,
       firstInvoiceOn: "2026-11-01",
       today: "2026-10-31",
-      window: open,
+      windows: [open],
     });
     expect(dues).toEqual([]);
   });
@@ -110,7 +111,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 1,
       firstInvoiceOn: "2026-11-01",
       today: "2026-12-01",
-      window: { ...open, from: "2026-10-15" },
+      windows: [{ ...open, from: "2026-10-15" }],
     });
     expect(dues[0]).toMatchObject({ servedDays: 17, periodDays: 31 });
     expect(dues[1]).toMatchObject({ servedDays: 30, periodDays: 30 });
@@ -122,9 +123,22 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 1,
       firstInvoiceOn: "2026-11-01",
       today: "2027-02-01",
-      window: { ...open, to: "2026-11-30" },
+      windows: [{ ...open, to: "2026-11-30" }],
     });
     expect(dues.map((d) => d.period.label)).toEqual(["Oct 2026", "Nov 2026"]);
+  });
+
+  it("bills one fee for several services by the service served longest in the period", () => {
+    // A fee group: one engagement ran all October, the other started on the
+    // 20th. The group's fee was earned for the whole month.
+    const dues = billingDues({
+      periods: [oct],
+      spanMonths: 1,
+      firstInvoiceOn: "2026-11-01",
+      today: "2026-11-01",
+      windows: [open, { ...open, from: "2026-10-20" }],
+    });
+    expect(dues[0]).toMatchObject({ servedDays: 31, periodDays: 31 });
   });
 
   it("bills a quarter a quarter apart", () => {
@@ -134,7 +148,7 @@ describe("billingDues: which periods are due to be billed by today", () => {
       spanMonths: 3,
       firstInvoiceOn: "2027-01-01",
       today: "2027-04-01",
-      window: open,
+      windows: [open],
     });
     expect(dues.map((d) => d.billOn)).toEqual(["2027-01-01", "2027-04-01"]);
   });
@@ -212,5 +226,50 @@ describe("resolveBillingManager: whose kitty a bill goes in", () => {
     const m = resolveBillingManager({ deptCodes: ["FRC"], spocs: [], keyManager: null });
     expect(m).toMatchObject({ userId: null, how: "none" });
     expect(m.note).toMatch(/Key Manager/);
+  });
+});
+
+describe("serviceWindowOf: the days an engagement was served, from its row", () => {
+  const base = {
+    status: "active",
+    effectiveFrom: "2026-07-01",
+    endsOn: null,
+    pausedOn: null,
+    resumedOn: null,
+  };
+
+  it("runs from the first day with no end while active", () => {
+    expect(serviceWindowOf(base)).toEqual({ from: "2026-07-01", to: null, pausedFrom: null, pausedTo: null });
+  });
+
+  it("ends on the last day served once ended", () => {
+    expect(serviceWindowOf({ ...base, status: "completed", endsOn: "2026-11-30" }).to).toBe("2026-11-30");
+  });
+
+  it("leaves the pause open while it is paused", () => {
+    const w = serviceWindowOf({ ...base, status: "paused", pausedOn: "2026-11-15", resumedOn: "2026-08-01" });
+    expect(w).toMatchObject({ pausedFrom: "2026-11-15", pausedTo: null });
+  });
+
+  it("closes the pause on the resume day once resumed", () => {
+    const w = serviceWindowOf({ ...base, pausedOn: "2026-11-15", resumedOn: "2027-01-15" });
+    expect(w).toMatchObject({ pausedFrom: "2026-11-15", pausedTo: "2027-01-15" });
+  });
+
+  it("keeps the pause open to the end when it was ended while paused", () => {
+    // Resumed once in August, paused again in November and then ended: the
+    // August resume says nothing about the November pause.
+    const w = serviceWindowOf({
+      ...base,
+      status: "completed",
+      endsOn: "2026-12-31",
+      pausedOn: "2026-11-15",
+      resumedOn: "2026-08-01",
+    });
+    expect(w).toMatchObject({ pausedFrom: "2026-11-15", pausedTo: null });
+  });
+
+  it("has no pause when none was ever recorded", () => {
+    expect(serviceWindowOf({ ...base, resumedOn: "2026-08-01" })).toMatchObject({ pausedFrom: null, pausedTo: null });
   });
 });

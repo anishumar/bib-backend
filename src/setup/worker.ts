@@ -26,6 +26,7 @@ import { SchedulerService } from "../usecase/scheduler/service";
 import { WorkItemService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
+import { BillingService } from "../usecase/billing/service";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
@@ -36,6 +37,11 @@ import { PostgresJobDeskResolver } from "../infrastructure/postgres/job-desk-res
 import { PostgresWorkOwnerDirectory } from "../infrastructure/postgres/work-owner";
 import { PostgresJobSubjectRepository } from "../infrastructure/postgres/job-subject-repository";
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
+import {
+  PostgresAutoBillingFirms,
+  PostgresBillingDueWriter,
+  PostgresBillingManagerFacts,
+} from "../infrastructure/postgres/billing-repository";
 import { PostgresPartyRepository } from "../infrastructure/postgres/party-repository";
 import { PostgresRelationshipRepository } from "../infrastructure/postgres/relationship-repository";
 import { PostgresServiceAxisRepository } from "../infrastructure/postgres/service-axis-repository";
@@ -122,6 +128,11 @@ export const SPAWN_QUEUE = "delivery.spawn";
  *  both would have to run at the faster of the two. */
 export const DUNNING_QUEUE = "billing.dunning";
 
+/** The queue the billing sweep runs on (0318). Daily, on the dunning cron: a
+ *  bill falls due on a DAY, and its own name keeps a failure in one sweep from
+ *  silencing the other. */
+export const BILLING_QUEUE = "billing.dues";
+
 /** The queue the orchestrator sweep runs on. Its own name and its own cadence
  *  again — this one is minutes rather than hours or days, because what it is
  *  waiting for is not a clock but a colleague finishing a step. */
@@ -192,6 +203,7 @@ export interface WiredWorker {
   readonly queue: JobQueue;
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
+  readonly billing: BillingService;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
@@ -359,6 +371,20 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     ladders: new PostgresDunningLadder(pools.app),
     invoices: invoiceRepository,
     tenants: new PostgresTenantDirectory(pools.app),
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+  });
+
+  // BILLING DUES (0318): what each recurring engagement owes a bill for, for
+  // every firm that turned auto-billing on. It writes dues, never invoices —
+  // an invoice draws a gapless number and is a person's act.
+  const billing = new BillingService({
+    dues: new PostgresBillingDueWriter(pools.app),
+    managers: new PostgresBillingManagerFacts(pools.app),
+    firms: new PostgresAutoBillingFirms(pools.app),
+    fiscalYears: configRepository,
+    timeZones: new PostgresFirmTimeZone(pools.app),
     ids: systemIds,
     clock: systemClock,
     events: ledger,
@@ -595,6 +621,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     queue,
     scheduler,
     dunning,
+    billing,
     orchestrator,
     obligations,
     escalations,
@@ -638,6 +665,23 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(DUNNING_QUEUE, cfg.worker.dunningCron);
+
+      await queue.register(BILLING_QUEUE, async () => {
+        for (const r of await billing.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "billing sweep could not visit firm");
+            continue;
+          }
+          if (r.created === 0 && r.alreadyDue === 0 && r.awaitingFiscalYear === 0) continue;
+          // `awaitingFiscalYear` is logged because it is a bill that will never
+          // fall due until a partner says when the firm's year starts.
+          log.info(
+            { tenantId: r.tenantId, created: r.created, alreadyDue: r.alreadyDue, awaitingFiscalYear: r.awaitingFiscalYear },
+            "billing sweep",
+          );
+        }
+      });
+      await queue.schedule(BILLING_QUEUE, cfg.worker.dunningCron);
 
       await queue.register(ORCHESTRATOR_QUEUE, async () => {
         const reports = await orchestrator.sweep();

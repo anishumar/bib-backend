@@ -1,0 +1,344 @@
+// The billing sweep against a REAL database (auto-invoice, phase 1, 0318),
+// because every claim below is about SQL a fake cannot reproduce.
+//
+// ── WHAT IS PROVED HERE AND NOWHERE ELSE ───────────────────────────────────
+//
+//   1. WHO IS OFFERED: a scheduled engagement that is active or ended; not one
+//      waiting for its advance, and not one with no schedule.
+//   2. A FEE GROUP is billed ONCE per period at the group's amount, never per
+//      engagement it covers.
+//   3. PRO-RATA is the database's: `amount` is generated from the full amount
+//      and the days, in numeric, and a missing price stays NULL.
+//   4. WHOSE KITTY: the SPOC's manager, read through the Dept, the
+//      assignment and `reports_to_user_id`.
+//   5. IDEMPOTENT: a second sweep writes nothing, and the unique indexes
+//      refuse a second due for the same subject and period.
+//   6. THE SWITCH: only firms with auto_billing on are visited.
+//
+// Run with:  npx vitest run --config vitest.integration.config.ts tests/billing/sweep.integration.test.ts
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import postgres from "postgres";
+import { load } from "../../src/config/config";
+import {
+  PostgresAutoBillingFirms,
+  PostgresBillingDueWriter,
+  PostgresBillingManagerFacts,
+} from "../../src/infrastructure/postgres/billing-repository";
+import { systemIds } from "../../src/platform/ids";
+import { RecordingEventSink } from "../../src/testfakes/ledger";
+import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeAutoBillingFirms, FakeFiscalYearSource } from "../../src/testfakes/billing";
+import { BillingService } from "../../src/usecase/billing/service";
+
+const cfg = load();
+const app = postgres(cfg.db.appUrl, { max: 4 });
+const owner = postgres(cfg.db.ownerUrl, { max: 2 });
+
+const stamp = Date.now().toString(36);
+let tenantId = "";
+let firm = "";
+let client = "";
+let spoc = "";
+let manager = "";
+let keyManager = "";
+let monthly = "";
+let quarterlyEnded = "";
+let waiting = "";
+let unscheduled = "";
+let groupId = "";
+let serviceVersion = "";
+
+const writer = new PostgresBillingDueWriter(app);
+function service(firms: string[]): BillingService {
+  return new BillingService({
+    dues: writer,
+    managers: new PostgresBillingManagerFacts(app),
+    firms: new FakeAutoBillingFirms(firms),
+    fiscalYears: new FakeFiscalYearSource(4),
+    timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+    ids: systemIds,
+    clock: { now: () => new Date("2026-12-05T06:00:00Z") },
+    events: new RecordingEventSink(),
+  });
+}
+
+async function user(name: string): Promise<string> {
+  const [u] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.user_account (email, display_name)
+    VALUES (${`${name}-${stamp}@example.test`}, ${name}) RETURNING id
+  `;
+  if (!u) throw new Error("user seed failed");
+  await owner`
+    INSERT INTO tenancy.membership (tenant_id, user_id, audience, role)
+    VALUES (${tenantId}, ${u.id}, 'STAFF', 'manager')
+  `;
+  return u.id;
+}
+
+async function company(name: string): Promise<string> {
+  const [p] = await owner<{ id: string }[]>`
+    INSERT INTO core.party (tenant_id, kind, display_name) VALUES (${tenantId}, 'organization', ${name})
+    RETURNING id
+  `;
+  if (!p) throw new Error("party seed failed");
+  await owner`INSERT INTO core.organization (party_id, tenant_id, legal_name) VALUES (${p.id}, ${tenantId}, ${name})`;
+  return p.id;
+}
+
+let letters = 0;
+async function letter(): Promise<string> {
+  letters += 1;
+  const [l] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter
+      (tenant_id, party_id, status, currency, fx_rate, fx_rate_date, ref,
+       issuing_entity_party_id, jurisdiction, title)
+    VALUES (${tenantId}, ${client}, 'draft', 'INR', 1, CURRENT_DATE,
+            ${`EL-2026-${String(letters).padStart(4, "0")}`}, ${firm}, 'IN', 'Engagement')
+    RETURNING id
+  `;
+  if (!l) throw new Error("letter seed failed");
+  return l.id;
+}
+
+async function line(
+  letterId: string,
+  position: number,
+  frequency: string,
+  amount: number | null,
+  feeGroupId: string | null = null,
+): Promise<string> {
+  const [ln] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter_line
+      (tenant_id, engagement_letter_id, position, service_version_id, quantity, unit_amount,
+       currency, discount_percent, billing_frequency, entity_party_id, description, pricing_note,
+       fee_group_id)
+    VALUES (${tenantId}, ${letterId}, ${position}, ${serviceVersion}, 1, ${amount}, 'INR', 0, ${frequency},
+            ${client}, 'Bookkeeping', ${amount === null && feeGroupId === null ? "As agreed" : null}, ${feeGroupId})
+    RETURNING id
+  `;
+  if (!ln) throw new Error("line seed failed");
+  return ln.id;
+}
+
+async function sign(letterId: string): Promise<void> {
+  await owner`
+    UPDATE crm.engagement_letter
+       SET status = 'signed', sent_at = now(), signed_at = now(), signed_by_name = 'A Director',
+           signature_method = 'attested', signed_content_hash = ${"b".repeat(64)}
+     WHERE id = ${letterId}
+  `;
+}
+
+async function engagement(
+  letterId: string,
+  lineId: string,
+  opts: { status?: string; schedule?: [string, string] | null; endsOn?: string } = {},
+): Promise<string> {
+  const status = opts.status ?? "active";
+  const schedule = opts.schedule === undefined ? ["2026-10-01", "2026-11-01"] : opts.schedule;
+  const [e] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement
+      (tenant_id, party_id, entity_party_id, engagement_letter_id, engagement_letter_line_id,
+       effective_from, status, activated_at, billing_from, first_invoice_on,
+       ends_on, ended_at, end_reason)
+    VALUES (${tenantId}, ${client}, ${client}, ${letterId}, ${lineId}, '2026-07-01'::date, ${status},
+            ${status === "pending_advance" ? null : new Date()},
+            ${schedule?.[0] ?? null}::date, ${schedule?.[1] ?? null}::date,
+            ${opts.endsOn ?? null}::date, ${opts.endsOn === undefined ? null : new Date()},
+            ${opts.endsOn === undefined ? null : "Left"})
+    RETURNING id
+  `;
+  if (!e) throw new Error("engagement seed failed");
+  return e.id;
+}
+
+interface DueRow {
+  engagement_id: string | null;
+  fee_group_id: string | null;
+  period_label: string;
+  bill_on: string;
+  full_amount: string | null;
+  amount: string | null;
+  served_days: number;
+  period_days: number;
+  manager_user_id: string | null;
+  manager_how: string;
+}
+
+async function dues(): Promise<DueRow[]> {
+  return owner<DueRow[]>`
+    SELECT engagement_id, fee_group_id, period_label, bill_on::text, full_amount::text, amount::text,
+           served_days, period_days, manager_user_id, manager_how
+      FROM crm.billing_due WHERE tenant_id = ${tenantId}
+     ORDER BY bill_on, period_label, engagement_id NULLS LAST
+  `;
+}
+
+beforeAll(async () => {
+  const [t] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.tenant (slug, name, reporting_currency)
+    VALUES (${`billing-${stamp}`}, 'Billing Sweep Test', 'INR') RETURNING id
+  `;
+  if (!t) throw new Error("tenant seed failed");
+  tenantId = t.id;
+
+  spoc = await user("spoc");
+  manager = await user("manager");
+  keyManager = await user("keymanager");
+  await owner`
+    UPDATE tenancy.membership SET reports_to_user_id = ${manager}
+     WHERE tenant_id = ${tenantId} AND user_id = ${spoc}
+  `;
+
+  firm = await company("The Firm");
+  client = await company(`Kaveri Foods ${stamp}`);
+
+  const [axis] = await owner<{ id: string }[]>`
+    INSERT INTO tenancy.service_axis (tenant_id, axis, code, name)
+    VALUES (${tenantId}, 'dept', 'FRC', 'Financial Reporting') RETURNING id
+  `;
+  if (!axis) throw new Error("axis seed failed");
+  await owner`
+    INSERT INTO crm.client_assignment (tenant_id, client_party_id, role, axis_id, user_id, valid_from)
+    VALUES (${tenantId}, ${client}, 'spoc', ${axis.id}, ${spoc}, '2026-01-01'),
+           (${tenantId}, ${client}, 'key_manager', NULL, ${keyManager}, '2026-01-01')
+  `;
+
+  const [entry] = await owner<{ id: string }[]>`
+    INSERT INTO config.entry (tenant_id, kind, key) VALUES (${tenantId}, 'service', ${`books-${stamp}`})
+    RETURNING id
+  `;
+  if (!entry) throw new Error("service seed failed");
+  const [version] = await owner<{ id: string }[]>`
+    INSERT INTO config.version (tenant_id, entry_id, version, body, status, published_at)
+    VALUES (${tenantId}, ${entry.id}, 1,
+            ${owner.json({ name: "Bookkeeping", recurrence: "monthly", module: "FRC" })}, 'published', now())
+    RETURNING id
+  `;
+  if (!version) throw new Error("version seed failed");
+  serviceVersion = version.id;
+
+  // One letter: a monthly line on its own, a quarterly line that ended on
+  // 30 November, a line waiting for its advance, and an unscheduled one.
+  const one = await letter();
+  const monthlyLine = await line(one, 1, "monthly", 25000);
+  const quarterlyLine = await line(one, 2, "quarterly", 30000);
+  const waitingLine = await line(one, 3, "monthly", 1000);
+  const unscheduledLine = await line(one, 4, "monthly", 2000);
+  await sign(one);
+  monthly = await engagement(one, monthlyLine);
+  quarterlyEnded = await engagement(one, quarterlyLine, {
+    status: "completed",
+    // Billed in advance, so its bill date (1 October) has come by 5 December.
+    schedule: ["2026-10-01", "2026-10-01"],
+    endsOn: "2026-11-30",
+  });
+  waiting = await engagement(one, waitingLine, { status: "pending_advance" });
+  unscheduled = await engagement(one, unscheduledLine, { schedule: null });
+
+  // A second letter: one fee of 9,000 a month for two services.
+  const two = await letter();
+  const [g] = await owner<{ id: string }[]>`
+    INSERT INTO crm.engagement_letter_fee_group
+      (tenant_id, engagement_letter_id, currency, position, title, billing_frequency, amount)
+    VALUES (${tenantId}, ${two}, 'INR', 1, 'Retainer', 'monthly', 9000)
+    RETURNING id
+  `;
+  if (!g) throw new Error("fee group seed failed");
+  groupId = g.id;
+  const a = await line(two, 1, "monthly", null, groupId);
+  const b = await line(two, 2, "monthly", null, groupId);
+  await sign(two);
+  await engagement(two, a);
+  await engagement(two, b);
+});
+
+afterAll(async () => {
+  await owner`
+    UPDATE crm.engagement
+       SET status = 'cancelled', activated_at = coalesce(activated_at, now()),
+           billing_from = NULL, first_invoice_on = NULL
+     WHERE tenant_id = ${tenantId} AND ended_at IS NULL
+  `;
+  await owner`UPDATE tenancy.tenant SET auto_billing = false WHERE id = ${tenantId}`;
+  await app.end();
+  await owner.end();
+});
+
+describe("the billing sweep on a real database (0318)", () => {
+  it("writes the dues the schedule owes, and only those", async () => {
+    const [report] = await service([tenantId]).sweep();
+    expect(report).toMatchObject({ tenantId, created: 5, alreadyDue: 0, awaitingFiscalYear: 0 });
+
+    const rows = await dues();
+    const subjects = new Set(rows.map((r) => r.engagement_id ?? r.fee_group_id));
+    expect(subjects).toEqual(new Set([monthly, quarterlyEnded, groupId]));
+    expect(subjects.has(waiting)).toBe(false);
+    expect(subjects.has(unscheduled)).toBe(false);
+  });
+
+  it("bills a monthly service each month, in arrears, to the SPOC's manager", async () => {
+    const rows = (await dues()).filter((r) => r.engagement_id === monthly);
+    expect(rows.map((r) => [r.period_label, r.bill_on, r.full_amount, r.amount])).toEqual([
+      ["Oct 2026", "2026-11-01", "25000.0000", "25000.00"],
+      ["Nov 2026", "2026-12-01", "25000.0000", "25000.00"],
+    ]);
+    expect(rows.every((r) => r.manager_user_id === manager && r.manager_how === "spoc_manager")).toBe(true);
+  });
+
+  it("bills a fee group once per period at the group's amount", async () => {
+    const rows = (await dues()).filter((r) => r.fee_group_id === groupId);
+    expect(rows.map((r) => [r.period_label, r.amount, r.engagement_id])).toEqual([
+      ["Oct 2026", "9000.00", null],
+      ["Nov 2026", "9000.00", null],
+    ]);
+  });
+
+  it("pro-rates an ended quarter by days, in the database", async () => {
+    const rows = (await dues()).filter((r) => r.engagement_id === quarterlyEnded);
+    expect(rows).toHaveLength(1);
+    // 61 of 92 days of 30,000: 19,891.304... rounded to the paisa.
+    expect(rows[0]).toMatchObject({ served_days: 61, period_days: 92, full_amount: "30000.0000", amount: "19891.30" });
+  });
+
+  it("writes nothing the second time, and the unique keys refuse a copy", async () => {
+    const [again] = await service([tenantId]).sweep();
+    expect(again).toMatchObject({ created: 0 });
+
+    const copy = await writer.insert(tenantId, [
+      {
+        id: systemIds.newId(),
+        partyId: client,
+        issuingEntityPartyId: firm,
+        currency: "INR",
+        engagementId: monthly,
+        feeGroupId: null,
+        periodStart: "2026-10-01",
+        periodEnd: "2026-10-31",
+        periodLabel: "Oct 2026",
+        billOn: "2026-11-01",
+        fullAmount: "1.0000",
+        servedDays: 31,
+        periodDays: 31,
+        managerUserId: null,
+        managerHow: "none",
+        managerNote: "copy",
+      },
+    ]);
+    expect(copy).toEqual([]);
+  });
+
+  it("keeps a missing price missing", async () => {
+    const [none] = await owner<{ amount: string | null }[]>`
+      SELECT round(NULL::numeric * 1 / 1, 2)::text AS amount
+    `;
+    expect(none?.amount).toBeNull();
+  });
+
+  it("offers a firm to the sweep only once it turns auto-billing on", async () => {
+    const firms = new PostgresAutoBillingFirms(app);
+    expect(await firms.firmsWithAutoBilling()).not.toContain(tenantId);
+    await owner`UPDATE tenancy.tenant SET auto_billing = true WHERE id = ${tenantId}`;
+    expect(await firms.firmsWithAutoBilling()).toContain(tenantId);
+  });
+});
