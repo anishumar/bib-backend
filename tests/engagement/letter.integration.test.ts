@@ -1323,7 +1323,13 @@ describe("what a client can be BILLED for (T3.5b)", () => {
     // client signed for is missing from the picker — the blank-versus-absent
     // failure this codebase has paid for several times. The caller decides what
     // to OFFER; this says what is true.
+    // Since 0322 a signature starts the work, so the only work still behind
+    // the gate is a letter signed before it: put one engagement back there.
     const id = await signedLetter("50000");
+    await owner`
+      UPDATE crm.engagement SET status = 'pending_advance', activated_at = NULL
+       WHERE engagement_letter_id = ${id}
+    `;
 
     const billable = (await letters.listBillable(tenantA, partyA)).filter(
       (b) => b.letterId === id,

@@ -121,12 +121,9 @@ describe("the two series do not interleave", () => {
     );
     expect(credit.number).toBe("CN/2026-27/0001");
 
-    // The invoice series carried on regardless.
-    const second = await service.raise(
-      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
-      SYSTEM_ACTOR,
-    );
-    expect(second.sequenceNumber).toBe(2);
+    // The invoice series carried on regardless: the next one ISSUED is 2 (0322).
+    const second = await repo.find(tenant, await issued());
+    expect(second?.sequenceNumber).toBe(2);
 
     // …and the two counters are two rows, which is what the key change bought.
     const rows = await owner<{ document_type: string; last_number: number }[]>`

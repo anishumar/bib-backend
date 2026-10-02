@@ -69,16 +69,17 @@ locals {
     BIB_APP_BASE_URL = local.app_origin
     BIB_CORS_ORIGINS = local.app_origin
 
-    # The transport and the two variables validateServer inspects when it is
-    # `smtp` — the relay host and the From address — and DELIBERATELY NOT the
-    # password. src/setup/worker.ts composes no Mailer at all: CLAUDE.md records
-    # that the chaser and the nudge "send nothing", that no mailer is injected,
-    # and that ChaserService's dependency list is asserted by a test so a
-    # transport appearing in it turns the build red. A credential this process
-    # cannot use is a credential it should not hold.
+    # The whole relay since 0322, as the API has it: the weekly summary of
+    # pending advances to each firm's administrators is sent by a sweep here
+    # (src/setup/worker.ts, `mailerFor`). The chaser and the nudge still send
+    # nothing: no mailer is injected into either, and ChaserService's dependency
+    # list is asserted by a test so a transport appearing in it turns the build red.
     BIB_MAIL_TRANSPORT = "smtp"
     BIB_MAIL_FROM      = var.mail_from
     BIB_SMTP_HOST      = var.smtp_host
+    BIB_SMTP_PORT      = tostring(var.smtp_port)
+    BIB_SMTP_USER      = var.smtp_user
+    BIB_SMTP_SECURE    = var.smtp_secure ? "true" : "false"
 
     # Same shape: the gate refuses `filesystem` and `attested`, so the values
     # have to be the real ones, and since 0080 both are USED here: the
@@ -95,6 +96,7 @@ locals {
   }
 
   worker_secret_env = {
+    BIB_SMTP_PASSWORD            = "smtp-password"
     BIB_APP_DATABASE_URL         = "app-database-url"
     BIB_DATABASE_URL             = "runtime-database-url"
     BIB_INTERNAL_KEYS            = "internal-keys-offline"
