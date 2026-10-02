@@ -536,7 +536,8 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     if (ids.length === 0) return true;
     return withTenant(this.app, tenantId, async (db) => {
       // Locked in id order, so two claims over overlapping bills cannot
-      // deadlock; then all free or none claimed.
+      // deadlock; then all free or none claimed. An id that is no bill here is
+      // not "busy": it is left for the caller's read to say it is not found.
       const rows = await db<{ id: string; free: boolean }[]>`
         SELECT id, (claimed_at IS NULL OR claimed_at < now() - ${CLAIM_LIFETIME}::interval) AS free
           FROM crm.billing_due
@@ -544,7 +545,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
          ORDER BY id
            FOR UPDATE
       `;
-      if (rows.length !== ids.length || rows.some((r) => !r.free)) return false;
+      if (rows.some((r) => !r.free)) return false;
       await db`UPDATE crm.billing_due SET claimed_at = now() WHERE id = ANY(${db.array(ids)}::uuid[])`;
       return true;
     });

@@ -650,3 +650,11 @@ describe("the walls (0320)", () => {
     ).rejects.toThrow(/el_line_grouped_has_no_advance_chk/);
   });
 });
+
+describe("a claim on a bill that is not there (0321)", () => {
+  it("says not found, not busy", async () => {
+    await expect(
+      desk.skip({ tenantId, dueId: "00000000-0000-4000-8000-000000000001", reason: "probe" }, me),
+    ).rejects.toMatchObject({ code: "BILLING_DUE_NOT_FOUND" });
+  });
+});

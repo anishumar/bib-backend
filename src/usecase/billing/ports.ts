@@ -287,7 +287,8 @@ export interface BillingDueDesk {
   waiveRefund(tenantId: string, dueId: string, byUserId: string, reason: string): Promise<boolean>;
   /**
    * CLAIM these bills before settling them (0321), in one statement: answers
-   * the ids claimed, which are all of them or none. A claim another request
+   * whether all of them were claimed (or none). An id that is no bill here is
+   * ignored, for the caller's read to report as not found. A claim another request
    * holds, younger than two minutes, refuses the lot. Claimed before an invoice
    * number is drawn, so a second raise of the same bill, or of a bill taking the
    * same advance, is refused while nothing is numbered.
