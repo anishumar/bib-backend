@@ -428,8 +428,8 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
           LEFT JOIN crm.invoice_balance b ON b.invoice_id = due.invoice_id
           LEFT JOIN crm.invoice inv ON inv.id = due.invoice_id
           -- RAISED BY HAND (0322, review item 12): an issued invoice, not
-          -- cancelled, with a line on this advance's work, issued no later
-          -- than the day this bill was written, that no bill is on and that is
+          -- cancelled, with a line on this advance's work, made before this
+          -- bill was written (two instants, no day cut), that no bill is on and that is
           -- no bill's advance invoice. Very likely the advance a firm invoiced
           -- itself before 0322: no automatic draft is made for it, and the
           -- screen offers to Link it instead. A month billed by hand AFTER the
@@ -441,7 +441,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
              WHERE hl.engagement_id = ANY(due.engagement_ids)
                AND hl.removed_at IS NULL
                AND hi.status = 'issued'
-               AND hi.issued_on <= due.bill_created_at::date
+               AND hi.created_at <= due.bill_created_at
                AND NOT EXISTS (SELECT 1 FROM crm.billing_due x
                                 WHERE x.invoice_id = hi.id OR x.advance_invoice_id = hi.id)
              ORDER BY hi.issued_on DESC, hi.id
