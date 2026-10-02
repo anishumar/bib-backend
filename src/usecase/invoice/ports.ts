@@ -169,17 +169,11 @@ export interface EngagementBilling {
 
 export interface InvoiceRepository {
   /**
-   * Create the invoice AND take its number, in ONE transaction.
-   *
-   * The signature is the guarantee. The obvious split — `nextNumber()` then
-   * `create()` — cannot be gapless however carefully it is called: between the
-   * two the caller may fail, and the number is spent. So the adapter locks the
-   * series row with `SELECT … FOR UPDATE`, reads what is actually stored,
-   * increments and inserts, all inside one transaction. A rollback anywhere
-   * releases the number because the counter never moved.
-   *
-   * The same reasoning `AssignmentStrategy.assign` gives for choosing and
-   * recording being one method, reached from money instead of from fairness.
+   * Create the DRAFT, in its company's series for the financial year of
+   * `seriesDate`, with NO number (0322): the number is drawn by `issue`. A
+   * draft cancelled before issue therefore spends nothing, which is what lets a
+   * draft be made by the system (the advance at signing) without a cancelled
+   * number ever sitting in the series.
    */
   create(i: NewInvoice): Promise<Invoice>;
   find(tenantId: string, invoiceId: string): Promise<Invoice | null>;
@@ -193,7 +187,21 @@ export interface InvoiceRepository {
    *  such engagement at this firm. */
   engagementOf(tenantId: string, engagementId: string): Promise<EngagementBilling | null>;
 
-  /** Issue it: the status and the date it carries, in one statement. */
+  /**
+   * Issue it AND take its number, in ONE transaction (0322; the number was
+   * taken at `create` until then).
+   *
+   * The signature is the guarantee. The obvious split — `nextNumber()` then
+   * `issue()` — cannot be gapless however carefully it is called: between the
+   * two the caller may fail, and the number is spent. So the adapter locks the
+   * series row with `SELECT … FOR UPDATE`, reads what is actually stored,
+   * increments and writes the number, the status and the date, all inside one
+   * transaction. A rollback anywhere releases the number because the counter
+   * never moved. A draft made before 0322 already holds its number and keeps it.
+   *
+   * The same reasoning `AssignmentStrategy.assign` gives for choosing and
+   * recording being one method, reached from money instead of from fairness.
+   */
   issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice>;
   cancel(tenantId: string, invoiceId: string): Promise<Invoice>;
   registerIrn(tenantId: string, invoiceId: string, irn: string, at: string): Promise<Invoice>;

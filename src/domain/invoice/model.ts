@@ -50,10 +50,14 @@ export interface Invoice {
   /** WHO IS CHARGING — one of the firm's own entities, and the owner of the
    *  series this number came from. */
   readonly entityPartyId: string;
-  /** `INV/2026-27/0001`. Frozen by a trigger the moment the row exists. */
-  readonly number: string;
+  /** `INV/2026-27/0001`. Drawn from the series when the invoice is ISSUED
+   *  (0322) and frozen by a trigger from then; null on a draft (and on a draft
+   *  cancelled before issue). Drafts made before 0322 keep the number they drew. */
+  readonly number: string | null;
+  /** Which year's series the number is (or will be) drawn from: chosen at the
+   *  draft ("which year's books"), and it does not move. */
   readonly financialYear: number;
-  readonly sequenceNumber: number;
+  readonly sequenceNumber: number | null;
   readonly status: InvoiceStatus;
   readonly currency: string;
   readonly fxRate: string;

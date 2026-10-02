@@ -53,11 +53,30 @@ function raise(over: Partial<Parameters<InvoiceService["raise"]>[0]> = {}) {
   };
 }
 
+/** Raised, given a line and issued: since 0322 the number is drawn at issue. */
+async function issuedOne(
+  s: ReturnType<typeof setup>,
+  over: Partial<Parameters<InvoiceService["raise"]>[0]> = {},
+) {
+  const invoice = await s.service.raise(raise(over), ACTOR);
+  await s.service.addLine({
+    tenantId: TENANT,
+    invoiceId: invoice.id,
+    description: "Advisory",
+    quantity: "1",
+    unitAmount: "1000",
+  });
+  return s.service.issue(TENANT, invoice.id, ACTOR);
+}
+
 describe("raising an invoice", () => {
-  it("numbers it from the entity's series, consecutively", async () => {
+  it("leaves a draft unnumbered, and numbers it from the entity's series when issued (0322)", async () => {
     const s = setup();
-    const first = await s.service.raise(raise(), ACTOR);
-    const second = await s.service.raise(raise(), ACTOR);
+    const draft = await s.service.raise(raise(), ACTOR);
+    expect(draft.number).toBeNull();
+    expect(draft.sequenceNumber).toBeNull();
+    const first = await issuedOne(s);
+    const second = await issuedOne(s);
     expect(first.number).toBe("INV/2026-27/0001");
     expect(second.number).toBe("INV/2026-27/0002");
     expect(second.sequenceNumber).toBe(2);
@@ -69,8 +88,8 @@ describe("raising an invoice", () => {
     // (tenant, number) — the firm-wide version would have failed here, on the
     // second entity's first invoice.
     const s = setup();
-    const indian = await s.service.raise(raise(), ACTOR);
-    const american = await s.service.raise(raise({ entityPartyId: OTHER_ENTITY }), ACTOR);
+    const indian = await issuedOne(s);
+    const american = await issuedOne(s, { entityPartyId: OTHER_ENTITY });
     expect(indian.number).toBe("INV/2026-27/0001");
     expect(american.number).toBe("INV/2026-27/0001");
     expect(american.entityPartyId).not.toBe(indian.entityPartyId);
@@ -78,33 +97,37 @@ describe("raising an invoice", () => {
 
   it("puts a March invoice in the previous year's series", async () => {
     // The whole reason the year is financial and not calendar. A firm raising
-    // an invoice on 2 April for March's work sets `seriesDate` deliberately.
+    // an invoice on 2 April for March's work sets `seriesDate` deliberately,
+    // and the year chosen at the draft is the series the issue numbers it in.
     const s = setup();
-    const march = await s.service.raise(raise({ seriesDate: "2026-03-31" }), ACTOR);
+    const march = await issuedOne(s, { seriesDate: "2026-03-31" });
     expect(march.number).toBe("INV/2025-26/0001");
     expect(march.financialYear).toBe(2025);
     // …and the new year starts its own count at 1, beside it.
-    const april = await s.service.raise(raise({ seriesDate: "2026-04-01" }), ACTOR);
+    const april = await issuedOne(s, { seriesDate: "2026-04-01" });
     expect(april.number).toBe("INV/2026-27/0001");
   });
 
-  it("records the allocation, with the number in it", async () => {
-    // The number IS the machine fact this event is about. A consecutive series
-    // is evidence, and "which number went to which client, when, decided by
-    // whom" is the question an auditor asks about a gap.
+  it("records the allocation, with the number in it, when it is issued", async () => {
+    // The number IS the machine fact the issue event is about. A consecutive
+    // series is evidence, and "which number went to which client, when,
+    // decided by whom" is the question an auditor asks about a gap.
     const s = setup();
-    const raised = await s.service.raise(raise(), ACTOR);
-    const event = s.events.recorded.find((e) => e.verb === "invoice.raised");
-    expect(event?.payload).toMatchObject({
-      number: raised.number,
-      partyId: CLIENT,
-      entityPartyId: ENTITY,
+    const out = await issuedOne(s);
+    const raised = s.events.recorded.find((e) => e.verb === "invoice.raised");
+    expect(raised?.payload).toMatchObject({ partyId: CLIENT, entityPartyId: ENTITY, financialYear: 2026 });
+    expect(raised?.payload).not.toHaveProperty("number");
+    const issued = s.events.recorded.find((e) => e.verb === "invoice.issued");
+    expect(issued?.payload).toMatchObject({
+      number: out.number,
       financialYear: 2026,
       sequenceNumber: 1,
+      partyId: CLIENT,
+      entityPartyId: ENTITY,
     });
     // The notes are free text a person wrote and stay out of a log that cannot
     // be erased.
-    expect(JSON.stringify(event?.payload)).not.toContain("notes");
+    expect(JSON.stringify(raised?.payload)).not.toContain("notes");
   });
 
   it("refuses a bad currency and a rate of zero", async () => {
@@ -357,21 +380,29 @@ describe("issuing, and what stops afterwards", () => {
     );
   });
 
-  it("cancels without releasing the number", async () => {
+  it("cancels an issued invoice without releasing the number", async () => {
     // The heart of "consecutive". A cancelled invoice stays IN the sequence,
     // readable, saying it was cancelled — which is exactly what an auditor
     // needs in order to see where a number went.
     const s = setup();
-    const first = await s.service.raise(raise(), ACTOR);
+    const first = await issuedOne(s);
     await s.service.cancel(TENANT, first.id, ACTOR);
-    const second = await s.service.raise(raise(), ACTOR);
+    const second = await issuedOne(s);
     expect(second.sequenceNumber).toBe(2);
 
     const listed = await s.service.list(TENANT, {});
     expect(listed.map((r) => [r.invoice.number, r.invoice.status])).toEqual([
-      ["INV/2026-27/0002", "draft"],
+      ["INV/2026-27/0002", "issued"],
       ["INV/2026-27/0001", "cancelled"],
     ]);
+  });
+
+  it("spends nothing when a DRAFT is cancelled (0322)", async () => {
+    const s = setup();
+    const draft = await s.service.raise(raise(), ACTOR);
+    const cancelled = await s.service.cancel(TENANT, draft.id, ACTOR);
+    expect(cancelled.number).toBeNull();
+    expect((await issuedOne(s)).number).toBe("INV/2026-27/0001");
   });
 
   it("cannot be cancelled twice", async () => {
@@ -426,9 +457,9 @@ describe("the registry's identifier", () => {
 describe("the series a firm names", () => {
   it("changes future numbers and never an issued one", async () => {
     const s = setup();
-    const before = await s.service.raise(raise(), ACTOR);
+    const before = await issuedOne(s);
     await s.service.setSeriesPrefix(TENANT, ENTITY, "10XIN", ACTOR);
-    const after = await s.service.raise(raise(), ACTOR);
+    const after = await issuedOne(s);
     expect(before.number).toBe("INV/2026-27/0001");
     expect(after.number).toBe("10XIN/2026-27/0002");
     // The count did not restart — the prefix is what it READS as, not which
@@ -624,7 +655,7 @@ describe("the day on the invoice is the firm's, or the caller's — never the se
     s.timeZones.set("Asia/Kolkata");
     s.clock.set("2027-03-31T20:00:00.000Z");
     const invoice = await s.service.raise(raise(), ACTOR);
-    expect(invoice.number).toMatch(/2027-28/);
+    expect(invoice.financialYear).toBe(2027);
   });
 
   it("dates a credit note by the firm's day when none is given", async () => {
@@ -696,7 +727,7 @@ describe("who an invoice names (F-10-1)", () => {
     );
     expect(s.invoices.invoices).toHaveLength(0);
     // The firm's own series starts at 1 regardless.
-    expect((await s.service.raise(raise(), ACTOR)).number).toBe("INV/2026-27/0001");
+    expect((await issuedOne(s)).number).toBe("INV/2026-27/0001");
   });
 
   it("refuses to bill one of the firm's own companies", async () => {

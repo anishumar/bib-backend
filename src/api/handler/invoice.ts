@@ -70,14 +70,18 @@ const InvoiceSchema = z
     /** WHO IS CHARGING — one of the firm's own entities, and the owner of the
      *  series this number came from. */
     entityPartyId: z.string().uuid(),
-    number: z.string().openapi({
+    number: z.string().nullable().openapi({
       description:
-        "`INV/2026-27/0001`. Allocated by the write itself from a gapless per-entity series " +
-        "and frozen by a trigger — an invoice number is never edited. A wrong invoice is " +
-        "cancelled and a new one issued, and both stay readable.",
+        "`INV/2026-27/0001`. Drawn from a gapless per-entity series when the invoice is ISSUED " +
+        "(0322) and frozen by a trigger from then: an invoice number is never edited. NULL on a " +
+        "draft (show it as a draft), and on a draft cancelled before it was issued. Drafts made " +
+        "before 0322 keep the number they drew. A wrong issued invoice is cancelled and a new " +
+        "one issued, and both stay readable.",
     }),
-    financialYear: z.number().int(),
-    sequenceNumber: z.number().int(),
+    financialYear: z.number().int().openapi({
+      description: "The financial year whose series the number is (or will be) drawn from, chosen at the draft.",
+    }),
+    sequenceNumber: z.number().int().nullable(),
     status: z.enum(STATUS_VALUES),
     currency: z.string().length(3),
     /** NULL for somebody without commercial visibility — the fee axis. Not an
@@ -252,11 +256,12 @@ const raiseRoute = createRoute({
   method: "post",
   path: "/api/v1/invoices",
   tags: ["invoices"],
-  summary: "Raise an invoice — the number is allocated by the write itself",
+  summary: "Raise a draft invoice — it is numbered when it is issued",
   description:
-    "The number comes from a gapless per-entity, per-financial-year series, taken under a row " +
-    "lock inside the same transaction as the insert. A failure releases it, because the " +
-    "counter never moved — which is the difference between this and a document reference.",
+    "A DRAFT, with no number (0322). The number comes from a gapless per-entity, " +
+    "per-financial-year series when the invoice is ISSUED, taken under a row lock inside the " +
+    "same transaction as the issue, so a draft cancelled before issue spends nothing. " +
+    "`seriesDate` chooses which financial year's series it will be numbered in.",
   request: {
     query: CallerDayQuery,
     body: { content: { "application/json": { schema: RaiseInvoiceRequest } }, required: true },
@@ -353,7 +358,8 @@ const issueRoute = createRoute({
   summary: "Issue it",
   description:
     "Refuses an invoice with no lines: it would ask the client for nothing. The date on it is " +
-    "the caller's `asOf`, or the firm's day.",
+    "the caller's `asOf`, or the firm's day. This is when the number is drawn (0322): the next " +
+    "in the draft's series, in the same transaction as the issue.",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -371,9 +377,10 @@ const cancelRoute = createRoute({
   tags: ["invoices"],
   summary: "Withdraw it",
   description:
-    "The number is NOT released and the row is not removed — that is what makes the series " +
-    "consecutive. A cancelled invoice stays in the sequence saying it was cancelled, which is " +
-    "exactly what an auditor needs to see where a number went.",
+    "An issued invoice's number is NOT released and the row is not removed — that is what " +
+    "makes the series consecutive. A cancelled invoice stays in the sequence saying it was " +
+    "cancelled, which is exactly what an auditor needs to see where a number went. A draft has " +
+    "no number yet (0322), so cancelling one spends nothing.",
   request: { params: z.object({ invoiceId: z.string().uuid() }) },
   responses: {
     200: { description: "Cancelled", content: { "application/json": { schema: InvoiceSchema } } },
@@ -390,8 +397,7 @@ const setManagerRoute = createRoute({
   tags: ["invoices"],
   summary: "Put a draft in another manager's revenue (or nobody's)",
   description:
-    "Drafts only: the number is drawn when the draft is made, so a wrong manager would otherwise " +
-    "mean cancelling a numbered invoice. Once issued, whose revenue it is is fixed " +
+    "Drafts only. Once issued, whose revenue it is is fixed " +
     "(INVOICE_MANAGER_FROZEN, 409, and 0318's trigger). The manager must be active staff at this " +
     "firm (MANAGER_NOT_STAFF, 409). Writes `invoice.manager_set` when it changes.",
   request: {

@@ -98,7 +98,10 @@ const DueSchema = z
         "`skipped`, or `covered` (the advance paid it in full, so no invoice was raised). A " +
         "cancelled invoice makes its dues open again.",
     }),
-    invoice: z.object({ id: z.string().uuid(), number: z.string(), status: z.string() }).nullable(),
+    invoice: z
+      .object({ id: z.string().uuid(), number: z.string().nullable(), status: z.string() })
+      .nullable()
+      .openapi({ description: "The invoice it is on. `number` is null while that invoice is a draft (0322)." }),
     skipped: z.object({ at: z.string(), by: PersonSchema.nullable(), reason: z.string() }).nullable(),
     lastTaxPercent: z.string().nullable().openapi({
       description: "The tax rate the last invoice line for this work carried: a default to offer.",
@@ -144,7 +147,7 @@ const AdvanceSchema = z
     billOn: z.string(),
     amount: Decimal.nullable(),
     manager: PersonSchema.nullable(),
-    invoice: z.object({ id: z.string().uuid(), number: z.string(), status: z.string() }).nullable(),
+    invoice: z.object({ id: z.string().uuid(), number: z.string().nullable(), status: z.string() }).nullable(),
     balance: z
       .object({ invoiced: z.string().nullable(), paid: z.string().nullable(), outstanding: z.string().nullable() })
       .nullable()

@@ -1,9 +1,14 @@
 // Invoicing, in Postgres (T3.4).
 //
-// ## The whole point of this file: `create` is ONE transaction
+// ## The whole point of this file: `issue` is ONE transaction
+//
+// (Until 0322 it was `create`: a draft drew its number when it was made, and a
+// cancelled draft left a cancelled number in the series. Since 0322 the draft
+// has no number and ISSUING draws it, so an automatic draft a firm withdraws
+// spends nothing. What follows is the same argument, about the issue.)
 //
 // A gapless series cannot be allocated by a method that hands a number back to
-// a caller. Between `nextNumber()` returning 41 and `create()` writing it, the
+// a caller. Between `nextNumber()` returning 41 and `issue()` writing it, the
 // caller may throw, the process may die, or a validation may fail — and 41 is
 // gone. Under Indian GST a missing invoice number is something an auditor is
 // entitled to read as a suppressed sale, and "our software burnt it" is not a
@@ -76,9 +81,9 @@ interface InvoiceRow {
   tenant_id: string;
   party_id: string;
   entity_party_id: string;
-  number: string;
+  number: string | null;
   financial_year: number;
-  sequence_number: number;
+  sequence_number: number | null;
   status: string;
   currency: string;
   fx_rate: string;
@@ -174,63 +179,36 @@ const LINE_COLUMNS =
   "id, tenant_id, invoice_id, engagement_id, description, position, quantity, unit_amount, " +
   "currency, discount_percent, tax_percent";
 
+/** The company's invoice series for the year exists. ON CONFLICT DO NOTHING so
+ *  two concurrent first invoices do not race to create it; the `FOR UPDATE`
+ *  read in `issue` is what actually orders them. */
+async function ensureInvoiceSeries(db: Db, tenantId: string, entityPartyId: string, financialYear: number): Promise<void> {
+  await db`
+    INSERT INTO crm.invoice_series
+      (tenant_id, entity_party_id, financial_year, document_type, prefix)
+    VALUES (${tenantId}, ${entityPartyId}, ${financialYear}, 'invoice', ${DEFAULT_SERIES_PREFIX})
+    ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
+  `;
+}
+
 export class PostgresInvoiceRepository implements InvoiceRepository {
   constructor(private readonly app: Db) {}
 
+  /**
+   * The DRAFT, with no number (0322). Its series row exists from here, because
+   * the draft names the series (and the year) its number will come from, and
+   * the foreign key wants the row. Nothing is counted.
+   */
   async create(i: NewInvoice): Promise<Invoice> {
     const financialYear = financialYearOf(i.seriesDate);
     return withTenant(this.app, i.tenantId, async (db) => {
-      // 1 — the series row exists. ON CONFLICT DO NOTHING so two concurrent
-      // first invoices do not race to create it; the SELECT below is what
-      // actually orders them.
-      await db`
-        INSERT INTO crm.invoice_series
-          (tenant_id, entity_party_id, financial_year, document_type, prefix)
-        VALUES (${i.tenantId}, ${i.entityPartyId}, ${financialYear}, 'invoice',
-                ${DEFAULT_SERIES_PREFIX})
-        ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
-      `;
-
-      // 2 — THE LOCK. Everything this file exists for is this line. A second
-      // writer waits here until the first transaction ends, and then reads what
-      // is stored rather than a snapshot taken at its own BEGIN.
-      const [series] = await db<{ last_number: number; prefix: string }[]>`
-        SELECT last_number, prefix FROM crm.invoice_series
-        WHERE tenant_id = ${i.tenantId}
-          AND entity_party_id = ${i.entityPartyId}
-          AND financial_year = ${financialYear}
-          AND document_type = 'invoice'
-        FOR UPDATE
-      `;
-      if (!series) {
-        // Unreachable through the insert above unless RLS hid the row, which
-        // would mean the tenant context is wrong — a fault worth naming rather
-        // than a null to carry forward.
-        throw new Error(
-          `no invoice series for entity ${i.entityPartyId} in FY ${String(financialYear)} — ` +
-            `the row was just inserted, so this means the tenant context is not this tenant.`,
-        );
-      }
-
-      const sequence = series.last_number + 1;
-      const number = formatInvoiceNumber({ prefix: series.prefix, financialYear, sequence });
-
-      // 3 — the counter moves and the invoice is written, in this same
-      // transaction. Either both happen or neither does.
-      await db`
-        UPDATE crm.invoice_series SET last_number = ${sequence}
-        WHERE tenant_id = ${i.tenantId}
-          AND entity_party_id = ${i.entityPartyId}
-          AND financial_year = ${financialYear}
-          AND document_type = 'invoice'
-      `;
-
+      await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, financialYear);
       const [row] = await db<InvoiceRow[]>`
         INSERT INTO crm.invoice
           (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
            currency, fx_rate, fx_rate_date, due_on, notes, manager_user_id)
-        VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, ${number},
-                ${financialYear}, ${sequence}, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
+        VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, NULL,
+                ${financialYear}, NULL, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
                 ${i.dueOn}, ${i.notes}, ${i.managerUserId ?? null})
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `;
@@ -482,17 +460,74 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
     });
   }
 
+  /**
+   * Issue AND number, in one transaction (0322). The draft is locked first, so
+   * two issues of it serialise and the second finds it issued; then the
+   * series' counter row under `FOR UPDATE`, then the counter moves and the
+   * draft takes the number, the status and the date in one UPDATE. A draft
+   * made before 0322 already holds a number: it keeps it and counts nothing.
+   */
   async issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
-    return this.updateOne(
-      tenantId,
-      invoiceId,
-      (db) => db`
-        UPDATE crm.invoice SET status = 'issued', issued_on = ${issuedOn}
+    return withTenant(this.app, tenantId, async (db) => {
+      const [draft] = await db<{ entity_party_id: string; financial_year: number; number: string | null }[]>`
+        SELECT entity_party_id, financial_year, number FROM crm.invoice
         WHERE id = ${invoiceId} AND status = 'draft'
+        FOR UPDATE
+      `;
+      if (!draft) {
+        throw new Error(
+          `could not issue invoice ${invoiceId}: no draft matched. It has moved on since it was ` +
+            `read — another request got there first.`,
+        );
+      }
+
+      let number = draft.number;
+      let sequence: number | null = null;
+      if (number === null) {
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year);
+        // THE LOCK. Everything this file exists for is this line. A second
+        // writer waits here until the first transaction ends, and then reads
+        // what is stored rather than a snapshot taken at its own BEGIN.
+        const [series] = await db<{ last_number: number; prefix: string }[]>`
+          SELECT last_number, prefix FROM crm.invoice_series
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${draft.financial_year}
+            AND document_type = 'invoice'
+          FOR UPDATE
+        `;
+        if (!series) {
+          // Unreachable through the insert above unless RLS hid the row, which
+          // would mean the tenant context is wrong — a fault worth naming
+          // rather than a null to carry forward.
+          throw new Error(
+            `no invoice series for entity ${draft.entity_party_id} in FY ${String(draft.financial_year)} — ` +
+              `the row was just inserted, so this means the tenant context is not this tenant.`,
+          );
+        }
+        sequence = series.last_number + 1;
+        number = formatInvoiceNumber({ prefix: series.prefix, financialYear: draft.financial_year, sequence });
+        // The counter moves and the invoice takes the number below, in this
+        // same transaction. Either both happen or neither does.
+        await db`
+          UPDATE crm.invoice_series SET last_number = ${sequence}
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${draft.financial_year}
+            AND document_type = 'invoice'
+        `;
+      }
+
+      const [row] = await db<InvoiceRow[]>`
+        UPDATE crm.invoice
+           SET status = 'issued', issued_on = ${issuedOn},
+               number = ${number}, sequence_number = coalesce(sequence_number, ${sequence})
+         WHERE id = ${invoiceId} AND status = 'draft'
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `,
-      "issue",
-    );
+      `;
+      if (!row) throw new Error(`could not issue invoice ${invoiceId}: no draft matched.`);
+      return toInvoice(row);
+    });
   }
 
   async cancel(tenantId: string, invoiceId: string): Promise<Invoice> {

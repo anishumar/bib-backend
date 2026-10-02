@@ -469,7 +469,10 @@ export class PostgresDocumentStoreRepository implements DocumentStoreRepository 
         SELECT l.id, l.tenant_id, l.document_id, l.subject_kind, l.subject_ref,
                l.role, l.created_by, l.created_at, l.withdrawn_at, l.withdrawn_by,
                COALESCE(p.display_name, ld.title, pr.ref, el.ref,
-                        eng_p.display_name, i.number, j.source_kind,
+                        eng_p.display_name,
+                        -- A draft has no number until it is issued (0322).
+                        CASE WHEN i.id IS NOT NULL THEN coalesce(i.number, 'Draft invoice') END,
+                        j.source_kind,
                         wi.title) AS subject_label
         FROM files.document_link l
         LEFT JOIN core.party p

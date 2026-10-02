@@ -132,7 +132,8 @@ interface InvoiceRow {
   /** Whose invoice this is. Read for FILING the rendered PDF, never drawn on
    *  it — see `DescribedDocument`. */
   party_id: string;
-  number: string;
+  /** Null on a draft: the number is drawn when it is issued (0322). */
+  number: string | null;
   currency: string;
   issued_on: string | null;
   due_on: string | null;
@@ -1006,7 +1007,8 @@ export class PostgresRenderSource implements RenderSource {
 
       const document: RenderableDocument = {
         documentTitle: "Tax Invoice",
-        reference: row.number,
+        // A draft has no number until it is issued (0322); its preview says so.
+        reference: row.number ?? "Draft",
         issuer: { name: row.entity_name, lines: [] },
         recipient: { name: row.client_name, lines: [] },
         recipientLabel: "Billed to",

@@ -69,21 +69,21 @@ export class FakeInvoiceRepo implements InvoiceRepository {
   }
   private readonly series = new Map<string, { last: number; prefix: string }>();
 
+  /** A draft, unnumbered (0322), in its series for the year: the series row
+   *  exists from here, as the adapter's does. */
   create(i: NewInvoice): Promise<Invoice> {
     const financialYear = financialYearOf(i.seriesDate);
     const k = keyOf({ tenantId: i.tenantId, entityPartyId: i.entityPartyId, financialYear });
-    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
-    const sequence = existing.last + 1;
-    this.series.set(k, { ...existing, last: sequence });
+    if (!this.series.has(k)) this.series.set(k, { last: 0, prefix: DEFAULT_SERIES_PREFIX });
 
     const invoice: Invoice = {
       id: i.id,
       tenantId: i.tenantId,
       partyId: i.partyId,
       entityPartyId: i.entityPartyId,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence }),
+      number: null,
       financialYear,
-      sequenceNumber: sequence,
+      sequenceNumber: null,
       status: "draft",
       currency: i.currency,
       fxRate: i.fxRate,
@@ -174,8 +174,22 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return Promise.resolve(this.liveLines(invoiceId));
   }
 
-  issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
-    return this.patch(tenantId, invoiceId, { status: "issued", issuedOn });
+  /** Issue and number in one step (0322): the next in the draft's series, or
+   *  the number a pre-0322 draft already holds. */
+  async issue(tenantId: string, invoiceId: string, issuedOn: string): Promise<Invoice> {
+    const draft = await this.find(tenantId, invoiceId);
+    if (draft === null || draft.status !== "draft") throw new Error(`could not issue invoice ${invoiceId}`);
+    if (draft.number !== null) return this.patch(tenantId, invoiceId, { status: "issued", issuedOn });
+    const k = keyOf({ tenantId, entityPartyId: draft.entityPartyId, financialYear: draft.financialYear });
+    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
+    const sequence = existing.last + 1;
+    this.series.set(k, { ...existing, last: sequence });
+    return this.patch(tenantId, invoiceId, {
+      status: "issued",
+      issuedOn,
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear: draft.financialYear, sequence }),
+      sequenceNumber: sequence,
+    });
   }
 
   cancel(tenantId: string, invoiceId: string): Promise<Invoice> {
@@ -274,7 +288,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return Promise.resolve(
       owing.map((r) => ({
         balance: r.balance,
-        number: r.invoice.number,
+        number: r.invoice.number ?? "",
         party: { id: r.invoice.partyId, displayName: this.nameOf(r.invoice.partyId) },
       })),
     );

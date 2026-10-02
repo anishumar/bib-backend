@@ -176,7 +176,9 @@ export interface BillingDueRecord {
   /** The person the manager reports to: where an overdue bill escalates. */
   readonly managerReportsTo: PersonRef | null;
   readonly status: DueStatus;
-  readonly invoice: { readonly id: string; readonly number: string; readonly status: string } | null;
+  /** The invoice it is on. `number` is null while that invoice is a draft
+   *  (0322: the number is drawn at issue). */
+  readonly invoice: { readonly id: string; readonly number: string | null; readonly status: string } | null;
   readonly skipped: {
     readonly at: string;
     readonly by: PersonRef | null;
@@ -320,7 +322,7 @@ export interface InvoiceDrafter {
       readonly managerFromBills?: boolean | undefined;
     },
     actor: Actor,
-  ): Promise<{ readonly id: string; readonly number: string }>;
+  ): Promise<{ readonly id: string; readonly number: string | null }>;
   addLine(input: {
     readonly tenantId: string;
     readonly invoiceId: string;

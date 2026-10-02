@@ -2,11 +2,14 @@
 //
 // The shape of it, and why each part is where it is:
 //
-//   THE NUMBER IS NOT THIS SERVICE'S TO GIVE. It asks the repository to create
+//   THE NUMBER IS NOT THIS SERVICE'S TO GIVE. It asks the repository to issue
 //   an invoice and gets one back already numbered, because a gapless series can
 //   only be allocated inside the transaction that writes the row (see
-//   `InvoiceRepository.create`). A service that called `nextNumber()` and then
-//   `create()` would be gapless only while nothing ever failed between the two.
+//   `InvoiceRepository.issue`). A service that called `nextNumber()` and then
+//   `issue()` would be gapless only while nothing ever failed between the two.
+//   Since 0322 the number is drawn at ISSUE, not when the draft is made: a
+//   draft (the advance at signing is drafted by the system) that is cancelled
+//   spends nothing.
 //
 //   AN ISSUED INVOICE IS NOT EDITED. Every write path checks the status first
 //   and refuses, and the database refuses again in a trigger. Both are wanted:
@@ -150,7 +153,8 @@ export class InvoiceService {
   constructor(private readonly deps: Deps) {}
 
   /**
-   * Start an invoice. The number is allocated by the write itself.
+   * Start an invoice: a DRAFT, with no number yet (0322). `seriesDate` chooses
+   * which financial year's series the issue will number it in.
    *
    * The currency and the FX rate are fixed HERE, at the top of the document,
    * and the lines are held to the currency by a composite foreign key — a
@@ -174,7 +178,7 @@ export class InvoiceService {
     this.dateOrThrow("seriesDate", seriesDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
-    // WHO issues it and WHO it bills, before a number is taken (F-10-1). The
+    // WHO issues it and WHO it bills, before anything is written (F-10-1). The
     // number is allocated in the issuer's own gapless series, so a client named
     // as the issuer would open a GST series in that client's name for good.
     await this.requireIssuer(input.tenantId, input.entityPartyId);
@@ -185,8 +189,8 @@ export class InvoiceService {
     if (await this.deps.firmEntities.isFirmEntity(input.tenantId, input.partyId)) {
       throw new InvoiceBillsTheFirm(billed?.displayName ?? input.partyId);
     }
-    // Before the number too: a refusal after it would leave a draft nobody
-    // asked for in the gapless series.
+    // Before the draft too: a refusal after it would leave a draft nobody
+    // asked for.
     if (input.managerUserId !== undefined && input.managerFromBills !== true) {
       await this.requireStaff(input.tenantId, input.managerUserId);
     }
@@ -211,16 +215,12 @@ export class InvoiceService {
       objectId: invoice.id,
       actor,
       // Ids and machine facts. `notes` is free text a person wrote and stays
-      // out of a log that cannot be erased; the NUMBER is in, because it is the
-      // machine fact this event is actually about — a consecutive series is
-      // evidence, and "which number was allocated, when, by whom" is the whole
-      // audit question.
+      // out of a log that cannot be erased. No number: a draft has none (0322);
+      // `invoice.issued` carries it, with its place in the series.
       payload: {
-        number: invoice.number,
         partyId: invoice.partyId,
         entityPartyId: invoice.entityPartyId,
         financialYear: invoice.financialYear,
-        sequenceNumber: invoice.sequenceNumber,
         currency: invoice.currency,
         fxRate: invoice.fxRate,
         fxRateDate: invoice.fxRateDate,
@@ -231,12 +231,8 @@ export class InvoiceService {
   }
 
   /**
-   * Put a DRAFT in somebody's revenue, or in nobody's (auto-invoice T4).
-   *
-   * The number is drawn when the draft is made, so without this a wrong pick
-   * in the raise dialog could only be undone by cancelling, which leaves a
-   * cancelled number in the series for an auditor to ask about. Once issued,
-   * the manager is fixed (here, and by 0318's trigger).
+   * Put a DRAFT in somebody's revenue, or in nobody's (auto-invoice T4). Once
+   * issued, the manager is fixed (here, and by 0318's trigger).
    */
   async setManager(
     tenantId: string,
@@ -356,14 +352,20 @@ export class InvoiceService {
     // Greenwich's, which dated an invoice issued at 02:00 in Delhi the day
     // before it was issued.
     const issuedOn = await this.today(tenantId, asOf);
+    // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
     const issued = await this.deps.invoices.issue(tenantId, invoiceId, issuedOn);
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
       objectId: issued.id,
       actor,
+      // The NUMBER is in, because it is the machine fact this event is about: a
+      // consecutive series is evidence, and "which number went to which client,
+      // when, by whom" is the whole audit question.
       payload: {
         number: issued.number,
+        financialYear: issued.financialYear,
+        sequenceNumber: issued.sequenceNumber,
         partyId: issued.partyId,
         entityPartyId: issued.entityPartyId,
         issuedOn: issued.issuedOn,
@@ -396,10 +398,11 @@ export class InvoiceService {
   /**
    * Withdraw it.
    *
-   * The number is NOT released and the row is not removed — that is what makes
-   * the series consecutive. A cancelled invoice stays in the sequence, readable,
-   * saying it was cancelled, which is exactly what an auditor needs to see where
-   * a number went.
+   * An issued invoice's number is NOT released and the row is not removed —
+   * that is what makes the series consecutive. A cancelled invoice stays in the
+   * sequence, readable, saying it was cancelled, which is exactly what an
+   * auditor needs to see where a number went. A draft has no number yet
+   * (0322), so cancelling one spends nothing.
    */
   async cancel(tenantId: string, invoiceId: string, actor: Actor): Promise<Invoice> {
     const invoice = await this.mustFind(tenantId, invoiceId);

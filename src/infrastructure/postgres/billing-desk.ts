@@ -125,7 +125,7 @@ function toRecord(r: DueRow): BillingDueRecord {
     managerReportsTo: person(r.boss_id, r.boss_name, r.boss_email),
     status: r.status,
     invoice:
-      r.invoice_id === null || r.invoice_number === null || r.invoice_status === null
+      r.invoice_id === null || r.invoice_status === null
         ? null
         : { id: r.invoice_id, number: r.invoice_number, status: r.invoice_status },
     skipped:

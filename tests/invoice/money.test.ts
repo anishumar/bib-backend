@@ -172,12 +172,9 @@ describe("credit notes", () => {
     );
     expect(credit.number).toBe("CN/2026-27/0001");
     expect(credit.sequenceNumber).toBe(1);
-    // The invoice series is untouched — the next invoice is still 0002.
-    const next = await s.service.raise(
-      { tenantId: TENANT, partyId: CLIENT, entityPartyId: ENTITY, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
-      ACTOR,
-    );
-    expect(next.number).toBe("INV/2026-27/0002");
+    // The invoice series is untouched — the next invoice issued is still 0002.
+    const next = await s.invoices.find(TENANT, await issuedInvoice(s));
+    expect(next?.number).toBe("INV/2026-27/0002");
   });
 
   it("reduce what is outstanding", async () => {
