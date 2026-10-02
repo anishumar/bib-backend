@@ -425,12 +425,12 @@ describe("the billing desk on a real database (0318)", () => {
   let invoiceId = "";
 
   async function monthlyDues() {
-    return (await desk.list({ tenantId })).dues.filter((d) => d.engagementId === monthly);
+    return (await desk.list({ tenantId, filters: { status: "all" } })).dues.filter((d) => d.engagementId === monthly);
   }
 
   it("reads every due by name, with its status derived", async () => {
     me = { type: "human", id: manager };
-    const { dues } = await desk.list({ tenantId });
+    const { dues } = await desk.list({ tenantId, filters: { status: "all" } });
     const oct = dues.find((d) => d.engagementId === monthly && d.periodLabel === "Oct 2026");
     expect(oct).toMatchObject({
       party: { id: client },
@@ -477,7 +477,8 @@ describe("the billing desk on a real database (0318)", () => {
     );
     invoiceId = out.invoiceId ?? "";
     expect(out.conflicts).toEqual([]);
-    expect(out.number).toMatch(/^INV\/2026-27\/\d{4}$/);
+    // A draft: numbered when an admin issues it (0322).
+    expect(out.number).toBeNull();
 
     const [inv] = await owner<{ manager_user_id: string; status: string }[]>`
       SELECT manager_user_id, status FROM crm.invoice WHERE id = ${invoiceId}
@@ -507,7 +508,7 @@ describe("the billing desk on a real database (0318)", () => {
   });
 
   it("settles a due only once, whoever asks second", async () => {
-    const [group] = (await desk.list({ tenantId })).dues.filter((d) => d.feeGroupId === groupId);
+    const [group] = (await desk.list({ tenantId, filters: { status: "all" } })).dues.filter((d) => d.feeGroupId === groupId);
     if (group === undefined) throw new Error("no group due");
     expect(await deskAdapter.skip(tenantId, group.id, manager, "Waived")).toBe(true);
     expect(await deskAdapter.skip(tenantId, group.id, manager, "Again")).toBe(false);

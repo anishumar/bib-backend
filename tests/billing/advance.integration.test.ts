@@ -38,7 +38,12 @@ import { systemIds } from "../../src/platform/ids";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { FakeAutoBillingFirms, FakeFiscalYearSource } from "../../src/testfakes/billing";
-import { AdvanceBiller, AdvanceGate } from "../../src/usecase/billing/advance";
+import { AdvanceBiller, AdvanceDesk } from "../../src/usecase/billing/advance";
+import {
+  PostgresAdvancePolicy,
+  PostgresAdvanceReminderFacts,
+  PostgresIssuerTaxDefaults,
+} from "../../src/infrastructure/postgres/advance-reminders";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
 import { InvoiceService } from "../../src/usecase/invoice/service";
@@ -74,16 +79,33 @@ const engagements = new PostgresEngagementRepository(app);
 const invoiceRepository = new PostgresInvoiceRepository(app);
 const deskAdapter = new PostgresBillingDueDesk(app);
 
-const advances = new AdvanceBiller({ facts: new PostgresAdvanceBillFacts(app), dues: writer, managers, ids: systemIds, events });
-const gate = new AdvanceGate({
-  desk: deskAdapter,
-  // The engagement use case's release, at the adapter: the rows the gate moves.
-  work: {
-    recordAdvance: (t, letterId, by) => engagements.recordAdvance(t, letterId, by, clock.now().toISOString()),
-    releaseEngagementAdvance: (t, engagementId) =>
-      engagements.releaseEngagements(t, [engagementId], clock.now().toISOString()),
-  },
+const taxDefaults = new PostgresIssuerTaxDefaults(app);
+const policy = new PostgresAdvancePolicy(app);
+const advanceFacts = new PostgresAdvanceBillFacts(app);
+const advances = new AdvanceBiller({
+  facts: advanceFacts,
+  dues: writer,
+  managers,
+  ids: systemIds,
   events,
+  drafter: { draftAdvance: (t, dueId, actor) => desk.draftAdvance(t, dueId, actor) },
+  // The engagement use case's start, at the adapter: the rows it moves.
+  work: {
+    startWaitingWork: async (t, letterId) => {
+      const waiting = (await engagements.listEngagements(t, letterId))
+        .filter((e) => e.status === "pending_advance")
+        .map((e) => e.id);
+      return { started: (await engagements.releaseEngagements(t, waiting, clock.now().toISOString())).length };
+    },
+  },
+});
+const advanceDesk = new AdvanceDesk({
+  desk: deskAdapter,
+  policy,
+  people: new PostgresAdvanceReminderFacts(app),
+  taxDefaults,
+  timeZones: zone,
+  clock,
 });
 const invoicing = new InvoiceService({
   invoices: invoiceRepository,
@@ -94,7 +116,6 @@ const invoicing = new InvoiceService({
   clock,
   events,
   issuedCopies: { file: () => Promise.resolve() },
-  moneyMoved: gate,
   staff: new FakeStaffDirectory(),
 });
 const desk = new BillingDeskService({
@@ -111,7 +132,9 @@ const desk = new BillingDeskService({
   timeZones: zone,
   clock,
   events,
-  gate,
+  taxDefaults,
+  policy,
+  firmEntities: { isFirmEntity: (_t: string, partyId: string) => Promise.resolve(partyId === firm) },
 });
 const finals = new FinalBiller({
   facts: new PostgresFinalBillFacts(app),
@@ -226,7 +249,7 @@ async function finishJob(engagementId: string, finishedAt: string): Promise<stri
 }
 
 async function advanceDue(letterId: string) {
-  return (await desk.list({ tenantId })).dues.find((d) => d.kind === "advance" && d.letter.id === letterId);
+  return (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.kind === "advance" && d.letter.id === letterId);
 }
 
 async function statuses(ids: readonly string[]): Promise<string[]> {
@@ -290,14 +313,32 @@ afterAll(async () => {
   await owner.end();
 });
 
-describe("the advance bill and the gate on a real database (0320)", () => {
-  it("finds the letters owing an advance bill, and writes each once", async () => {
-    const owing = await new PostgresAdvanceBillFacts(app).lettersOwingAdvanceBills(tenantId);
+describe("the advance on a real database (0322: work started, invoice drafted)", () => {
+  it("catches up letters signed before 0322: starts their work, writes each bill once, drafts it unnumbered", async () => {
+    // The letters were signed under the 0320 gate (their work pending_advance).
+    const owing = await advanceFacts.lettersOwingAdvance(tenantId);
     expect(new Set(owing)).toEqual(new Set([letterA, letterB]));
-    expect(await advances.billAdvances({ tenantId, letterId: letterA }, SYSTEM_ACTOR)).toEqual({ created: 1 });
-    expect(await advances.billAdvances({ tenantId, letterId: letterA }, SYSTEM_ACTOR)).toEqual({ created: 0 });
-    expect(await advances.billAdvances({ tenantId, letterId: letterB }, SYSTEM_ACTOR)).toEqual({ created: 1 });
-    expect(await new PostgresAdvanceBillFacts(app).lettersOwingAdvanceBills(tenantId)).toEqual([]);
+    // No tax rate anywhere yet: the bills are written, not drafted.
+    for (const letterId of owing) {
+      await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    }
+    expect((await advanceDesk.list(tenantId)).advances.map((x) => x.draftBlocked)).toEqual(["no_tax_rate", "no_tax_rate"]);
+    // The firm sets its company's default rate; the next catch-up drafts them
+    // and starts the work that waited.
+    await desk.setTaxDefault({ tenantId, entityPartyId: firm, taxPercent: "18" }, { type: "human", id: admin });
+    const before = await advanceFacts.lettersOwingAdvance(tenantId);
+    expect(new Set(before)).toEqual(new Set([letterA, letterB]));
+    for (const letterId of before) {
+      await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    }
+    expect(await statuses([auditA, booksA, auditB])).toEqual(["pending_advance", "pending_advance", "pending_advance"]);
+    // The work itself is the catch-up's first step; the fake-free adapter here.
+    for (const letterId of [letterA, letterB]) {
+      const waiting = (await engagements.listEngagements(tenantId, letterId)).filter((e) => e.status === "pending_advance");
+      await engagements.releaseEngagements(tenantId, waiting.map((e) => e.id), clock.now().toISOString());
+    }
+    expect(await statuses([auditA, booksA, auditB])).toEqual(["active", "active", "active"]);
+    expect(await advanceFacts.lettersOwingAdvance(tenantId)).toEqual([]);
 
     const a = await advanceDue(letterA);
     expect(a).toMatchObject({
@@ -307,51 +348,43 @@ describe("the advance bill and the gate on a real database (0320)", () => {
       serviceName: "All services",
       fullAmount: "50000.0000",
       amount: "50000.00",
-      status: "open",
+      status: "drafted",
+      invoice: { number: null, status: "draft" },
     });
     expect(a?.engagementIds).toHaveLength(2);
     const b = await advanceDue(letterB);
-    expect(b).toMatchObject({ engagementId: auditB, serviceName: "Statutory audit FY 2025-26", amount: "40000.00" });
+    expect(b).toMatchObject({ engagementId: auditB, serviceName: "Statutory audit FY 2025-26", amount: "40000.00", status: "drafted" });
+    // Written and drafted once.
+    expect(await advances.billAdvances({ tenantId, letterId: letterA }, SYSTEM_ACTOR)).toEqual({ created: 0, drafted: 0 });
   });
 
-  it("starts the letter's work on a part payment only when an admin approves", async () => {
+  it("reads where each stands as it is issued and paid, and who is reminded (the SPOC, on real SQL)", async () => {
     const a = await advanceDue(letterA);
-    if (a === undefined) throw new Error("no advance bill");
-    const out = await desk.raise({ tenantId, dueIds: [a.id], lines: [{ dueId: a.id, taxPercent: "18" }] }, me);
-    expect(out.invoiceId).not.toBeNull();
-    const invoiceId = out.invoiceId ?? "";
-    await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
+    const invoiceId = a?.invoice?.id ?? "";
+    expect((await advanceDesk.list(tenantId)).advances.find((x) => x.id === a?.id)).toMatchObject({
+      stage: "on_draft",
+      reminder: { pending: true, pendingSince: a?.billOn },
+      people: { keyManager: null, partner: null },
+    });
+    const issued = await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
+    expect(issued.number).not.toBeNull();
     await invoicing.recordPayment(
       { tenantId, invoiceId, amount: "20000", receivedOn: "2026-12-05", method: "bank_transfer" },
       me,
     );
-    expect(await statuses([auditA, booksA])).toEqual(["pending_advance", "pending_advance"]);
-    expect((await gate.list(tenantId)).find((x) => x.id === a.id)?.state).toBe("part_paid");
+    const listed = (await advanceDesk.list(tenantId)).advances.find((x) => x.id === a?.id);
+    expect(listed).toMatchObject({ stage: "part_paid", invoiceIssuedOn: "2026-12-05", reminder: { pendingSince: "2026-12-05" } });
+    expect(listed?.people.spocs.map((p) => p.displayName)).toEqual(["spoc"]);
 
-    const after = await gate.approveStart({ tenantId, dueId: a.id }, { type: "human", id: admin });
-    expect(after.state).toBe("started");
-    expect(after.released).toMatchObject({ how: "approved", by: { userId: admin } });
-    expect(await statuses([auditA, booksA])).toEqual(["active", "active"]);
-    const [l] = await owner<{ advance_recorded_by: string | null }[]>`
-      SELECT advance_recorded_by FROM crm.engagement_letter WHERE id = ${letterA}
-    `;
-    expect(l?.advance_recorded_by).toBe(admin);
-  });
-
-  it("starts a service's own work by itself once its advance invoice is paid in full", async () => {
+    // Letter B's own advance: issued and paid in full (40,000 plus 18%: before tax).
     const b = await advanceDue(letterB);
-    if (b === undefined) throw new Error("no advance bill");
-    const out = await desk.raise({ tenantId, dueIds: [b.id], lines: [{ dueId: b.id, taxPercent: "18" }] }, me);
-    const invoiceId = out.invoiceId ?? "";
-    await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
-    // 40,000 plus 18% GST: the advance is before tax.
+    const bInvoice = b?.invoice?.id ?? "";
+    await invoicing.issue(tenantId, bInvoice, me, "2026-12-05");
     await invoicing.recordPayment(
-      { tenantId, invoiceId, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" },
+      { tenantId, invoiceId: bInvoice, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" },
       me,
     );
-    expect(await statuses([auditB])).toEqual(["active"]);
-    const [row] = await owner<{ released_how: string | null }[]>`SELECT released_how FROM crm.billing_due WHERE id = ${b.id}`;
-    expect(row?.released_how).toBe("paid");
+    expect((await advanceDesk.list(tenantId)).advances.find((x) => x.id === b?.id)?.stage).toBe("paid");
   });
 });
 
@@ -378,7 +411,7 @@ describe("the final bill and FIFO on a real database (0320)", () => {
         managerNote: null,
       },
     ]);
-    const oct = (await desk.list({ tenantId })).dues.find((d) => d.engagementId === booksA && d.kind === "period");
+    const oct = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === booksA && d.kind === "period");
     expect(oct?.advancePool).toMatchObject({ remaining: "50000.00" });
     const out = await desk.raise({ tenantId, dueIds: [oct?.id ?? ""], lines: [{ dueId: oct?.id ?? "", taxPercent: "18" }] }, me);
     expect(out.covered).toEqual([oct?.id]);
@@ -392,7 +425,7 @@ describe("the final bill and FIFO on a real database (0320)", () => {
   it("writes the audit's final bill when its job finishes, and bills the balance after the advance", async () => {
     const jobId = await finishJob(auditA, "2026-11-20T05:00:00Z");
     expect(await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR)).toEqual({ created: 1 });
-    const fin = (await desk.list({ tenantId })).dues.find((d) => d.engagementId === auditA && d.kind === "final");
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditA && d.kind === "final");
     expect(fin).toMatchObject({ billOn: "2026-11-20", amount: "100000.00", periodLabel: "Final" });
     expect(fin?.advancePool).toMatchObject({ remaining: "20000.00" });
 
@@ -421,10 +454,10 @@ describe("the final bill and FIFO on a real database (0320)", () => {
   it("covers a bill the service's own advance pays in full, and offers the rest back", async () => {
     const jobId = await finishJob(auditB, "2026-11-25T05:00:00Z");
     await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR);
-    const fin = (await desk.list({ tenantId })).dues.find((d) => d.engagementId === auditB && d.kind === "final");
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditB && d.kind === "final");
     const out = await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
     expect(out).toMatchObject({ invoiceId: null, covered: [fin?.id] });
-    expect((await desk.list({ tenantId })).dues.find((d) => d.id === fin?.id)?.status).toBe("covered");
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === fin?.id)?.status).toBe("covered");
 
     const refunds = await desk.refunds(tenantId);
     expect(refunds.map((r) => [r.advance.engagementId, r.remaining, r.refundAmount])).toEqual([
@@ -483,8 +516,14 @@ async function advancedLetter(advance: string): Promise<{ letterId: string; advI
 }
 
 async function raiseAndIssue(dueId: string): Promise<string> {
-  const out = await desk.raise({ tenantId, dueIds: [dueId], lines: [{ dueId, taxPercent: "18" }] }, me);
-  const invoiceId = out.invoiceId ?? "";
+  // An advance is drafted the moment its bill is written (0322): issue that
+  // draft. Anything else is raised first.
+  const existing = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === dueId);
+  let invoiceId = existing?.status === "drafted" ? (existing.invoice?.id ?? "") : "";
+  if (invoiceId === "") {
+    const out = await desk.raise({ tenantId, dueIds: [dueId], lines: [{ dueId, taxPercent: "18" }] }, me);
+    invoiceId = out.invoiceId ?? "";
+  }
   await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
   return invoiceId;
 }
@@ -526,10 +565,10 @@ describe("an advance cancelled and raised again (0321)", () => {
     expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
 
     await invoicing.cancel(tenantId, adv, { type: "human", id: admin });
-    expect((await desk.list({ tenantId })).dues.find((d) => d.id === oct)?.status).toBe("open");
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)?.status).toBe("open");
     const out = await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
     expect(out.conflicts).toEqual([]);
-    expect((await desk.list({ tenantId })).dues.find((d) => d.id === oct)).toMatchObject({
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === oct)).toMatchObject({
       status: "drafted",
       invoice: { id: out.invoiceId },
     });
@@ -563,7 +602,7 @@ describe("two people at once (0321)", () => {
     await invoicing.recordPayment({ tenantId, invoiceId: advInvoice, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
     const jobId = await finishJob(auditId, "2026-12-01T05:00:00Z");
     await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR);
-    const fin = (await desk.list({ tenantId })).dues.find((d) => d.engagementId === auditId && d.kind === "final");
+    const fin = (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === auditId && d.kind === "final");
     await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
 
     const give = () => desk.refund({ tenantId, dueId: adv?.id ?? "", asOf: "2026-12-05" }, { type: "human", id: admin });
@@ -577,21 +616,22 @@ describe("two people at once (0321)", () => {
 
 describe("an advance nobody paid (0321)", () => {
   it("does not start the work when a credit note zeroes it", async () => {
-    const { letterId, advId, booksId } = await advancedLetter("10000");
+    const { letterId, advId } = await advancedLetter("10000");
     const adv = await raiseAndIssue(advId);
     await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "billing_error", asOf: "2026-12-05" }, { type: "human", id: admin });
-    expect(await statuses([booksId])).toEqual(["pending_advance"]);
-    expect((await gate.list(tenantId)).find((a) => a.engagementLetterId === letterId)?.state).toBe("unpaid");
+    expect((await advanceDesk.list(tenantId)).advances.find((a) => a.engagementLetterId === letterId)?.stage).toBe("unpaid");
   });
 
   it("may be skipped once no work waits on it, and not before", async () => {
-    const { advId, booksId } = await advancedLetter("15000");
+    const { letterId, advId, booksId } = await advancedLetter("15000");
+    // Its draft is withdrawn first: an advance on a draft is not open to skip.
+    await invoicing.cancel(tenantId, (await advanceDue(letterId))?.invoice?.id ?? "", me);
     await expect(desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me)).rejects.toBeInstanceOf(
       AdvanceNotSkippable,
     );
     await owner`UPDATE crm.engagement SET status = 'cancelled', activated_at = coalesce(activated_at, now()) WHERE id = ${booksId}`;
     await desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me);
-    expect((await desk.list({ tenantId })).dues.find((d) => d.id === advId)?.status).toBe("skipped");
+    expect((await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.id === advId)?.status).toBe("skipped");
   });
 });
 
@@ -606,7 +646,7 @@ describe("final bills when the switch goes on (0321)", () => {
       return e;
     };
     const finalOf = async (e: string) =>
-      (await desk.list({ tenantId })).dues.find((d) => d.engagementId === e && d.kind === "final");
+      (await desk.list({ tenantId, filters: { status: "all" } })).dues.find((d) => d.engagementId === e && d.kind === "final");
 
     const old = await oneTime();
     await finishJob(old, "2026-11-20T05:00:00Z");
