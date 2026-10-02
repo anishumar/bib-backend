@@ -29,11 +29,15 @@ import type { BillingDueRecord, FinalBillSubject, LetterAdvanceFacts } from "../
 import type { Actor } from "../../src/domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import {
+  AdvanceLinkNeedsAdmin,
   AdvanceNotSkippable,
   AutoBillingOff,
+  BillBusy,
   BillNowRefused,
   InvalidBillingInput,
+  InvoiceDoesNotFitDue,
   NothingToRefund,
+  PriceNotVisible,
   StartNotApprovable,
 } from "../../src/domain/billing/errors";
 
@@ -188,6 +192,7 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     advancePool: null,
     advanceApplied: null,
     released: null,
+    advanceHoldsWork: false,
     ...over,
   };
 }
@@ -312,6 +317,8 @@ function oneTime(over: Partial<FinalBillSubject> = {}): FinalBillSubject & { ten
       { engagementId: AUDIT, status: "active", deptCode: "FRC", job: { status: "done", hasProcess: true, doneOn: "2026-11-20" } },
     ],
     hasFinalBill: false,
+    billedByHand: false,
+    autoBillingSince: null,
     ...over,
   };
 }
@@ -370,6 +377,19 @@ describe("a one-time service's final bill", () => {
     expect(await w.biller.jobDone({ tenantId: FIRM, jobId: "job-1" }, SYSTEM_ACTOR)).toEqual({ created: 0 });
     w.facts.subjects.splice(0, 1, oneTime({ hasFinalBill: true }));
     expect(await w.biller.jobDone({ tenantId: FIRM, jobId: "job-1" }, SYSTEM_ACTOR)).toEqual({ created: 0 });
+  });
+
+  it("is not written for work billed by hand, nor finished before the switch went on (0321)", async () => {
+    // Switching on used to bill every audit the firm had ever finished.
+    const w = finalWorld();
+    w.facts.subjects.push(oneTime({ autoBillingSince: "2026-12-01" }));
+    expect(await w.biller.sweepTenant(FIRM)).toBe(0);
+    w.facts.subjects.splice(0, 1, oneTime({ autoBillingSince: "2026-11-20" }));
+    expect(await w.biller.sweepTenant(FIRM)).toBe(1);
+
+    const byHand = finalWorld();
+    byHand.facts.subjects.push(oneTime({ billedByHand: true }));
+    expect(await byHand.biller.jobDone({ tenantId: FIRM, jobId: "job-1" }, SYSTEM_ACTOR)).toEqual({ created: 0 });
   });
 
   it("is caught up by the sweep for a job that finished while nobody listened", async () => {
@@ -434,7 +454,8 @@ function deskWorld() {
   return { desk, invoices, events, moved, service };
 }
 
-const pool = (remaining: string) => ({ invoiceId: ADV_INVOICE, invoiceNumber: "INV/2026-27/0003", remaining });
+const ADV_DUE = "00000000-0000-4000-8000-00000000adde";
+const pool = (remaining: string) => ({ advanceDueId: ADV_DUE, invoiceId: ADV_INVOICE, invoiceNumber: "INV/2026-27/0003", remaining });
 
 describe("raising a bill the advance comes off (FIFO, before tax)", () => {
   it("bills the balance and says what came off, in the invoice line", async () => {
@@ -445,7 +466,7 @@ describe("raising a bill the advance comes off (FIFO, before tax)", () => {
     expect(out.covered).toEqual([]);
     expect(w.invoices.invoices[0]?.lines[0]).toMatchObject({
       unitAmount: "50000.00",
-      description: "Statutory audit, final bill: fee INR 1,00,000.00 less advance INR 50,000.00 (INV/2026-27/0003)",
+      description: "Statutory audit, final bill, less advance (INV/2026-27/0003)",
     });
     expect(w.desk.rows[0]?.advanceApplied).toMatchObject({ invoiceId: ADV_INVOICE, amount: "50000.00" });
     expect(w.events.recorded[0]?.payload).toMatchObject({ how: "raised", advanceInvoiceId: ADV_INVOICE, advanceApplied: "50000.00" });
@@ -484,19 +505,139 @@ describe("raising a bill the advance comes off (FIFO, before tax)", () => {
     expect(w.invoices.invoices[0]?.lines[0]).toMatchObject({ unitAmount: "50000.00", description: "Advance under EL-2026-0007" });
   });
 
-  it("refuses to skip an advance bill, and asks the gate when one is linked", async () => {
+  it("refuses to skip an advance work still waits on, and skips one nothing waits on (0321)", async () => {
+    const w = deskWorld();
+    const waiting = advanceDue({ advanceHoldsWork: true });
+    w.desk.rows.push(waiting);
+    await expect(w.service.skip({ tenantId: FIRM, dueId: waiting.id, reason: "client paid cash" }, ME)).rejects.toBeInstanceOf(
+      AdvanceNotSkippable,
+    );
+    // The engagement was ended before the work started: nothing waits now.
+    const ended = advanceDue({ engagementLetterId: "00000000-0000-4000-8000-00000000a0ee", advanceHoldsWork: false });
+    w.desk.rows.push(ended);
+    await w.service.skip({ tenantId: FIRM, dueId: ended.id, reason: "Client did not go ahead" }, ME);
+    expect(w.desk.rows.find((r) => r.id === ended.id)?.skipped?.reason).toBe("Client did not go ahead");
+    expect(w.desk.holding).toEqual([]);
+  });
+
+  it("links an advance only for an admin, to an invoice no other bill is on, and then asks the gate (0321)", async () => {
     const w = deskWorld();
     const adv = advanceDue();
     w.desk.rows.push(adv);
-    await expect(w.service.skip({ tenantId: FIRM, dueId: adv.id, reason: "client paid cash" }, ME)).rejects.toBeInstanceOf(
-      AdvanceNotSkippable,
-    );
     const { id } = await w.invoices.raise(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
       ME,
     );
-    await w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id }, ME);
+    // A non-admin linking a paid invoice would start the work with no advance.
+    await expect(w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id }, ME)).rejects.toBeInstanceOf(
+      AdvanceLinkNeedsAdmin,
+    );
+    // An invoice another bill is already on is not this advance's.
+    const other = due({ invoice: { id, number: "INV/2026-27/0009", status: "issued" } });
+    w.desk.rows.push(other);
+    await expect(
+      w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id, mayLinkAdvance: true }, ADMIN_ACTOR),
+    ).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
+    w.desk.rows.splice(w.desk.rows.indexOf(other), 1);
+    await w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id, mayLinkAdvance: true }, ADMIN_ACTOR);
     expect(w.moved).toEqual([id]);
+    expect(w.desk.holding).toEqual([]);
+  });
+
+  it("never links a period to another bill's advance invoice: that money is the advance (0321)", async () => {
+    const w = deskWorld();
+    const adv = advanceDue({ invoice: { id: ADV_INVOICE, number: "INV/2026-27/0003", status: "issued" } });
+    const oct = due();
+    w.desk.rows.push(adv, oct);
+    w.invoices.invoices.push({
+      id: ADV_INVOICE, number: "INV/2026-27/0003", partyId: CLIENT, entityPartyId: ISSUER, currency: "INR",
+      fxRate: "1", fxRateDate: "2026-07-01", dueOn: undefined, managerUserId: undefined, status: "issued", lines: [],
+    });
+    await expect(w.service.link({ tenantId: FIRM, dueId: oct.id, invoiceId: ADV_INVOICE }, ME)).rejects.toBeInstanceOf(
+      InvoiceDoesNotFitDue,
+    );
+  });
+});
+
+describe("one person at a time on a bill (0321)", () => {
+  it("claims the bills and the advance they take from, and lets them go", async () => {
+    const w = deskWorld();
+    const oct = due({ advancePool: pool("10000.00") });
+    w.desk.rows.push(oct);
+    await w.service.raise({ tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, taxPercent: "18" }] }, ME);
+    expect(w.desk.claims[0]).toEqual({ op: "claim", ids: [oct.id, ADV_DUE] });
+    expect(w.desk.holding).toEqual([]);
+  });
+
+  it("refuses a raise while somebody else holds the bill, and draws no number", async () => {
+    const w = deskWorld();
+    const oct = due();
+    w.desk.rows.push(oct);
+    w.desk.heldElsewhere.add(oct.id);
+    await expect(
+      w.service.raise({ tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, taxPercent: "18" }] }, ME),
+    ).rejects.toBeInstanceOf(BillBusy);
+    expect(w.invoices.invoices).toEqual([]);
+  });
+
+  it("refuses a raise while somebody else spends the same advance", async () => {
+    const w = deskWorld();
+    const nov = due({ advancePool: pool("10000.00") });
+    w.desk.rows.push(nov);
+    w.desk.heldElsewhere.add(ADV_DUE);
+    await expect(
+      w.service.raise({ tenantId: FIRM, dueIds: [nov.id], lines: [{ dueId: nov.id, taxPercent: "18" }] }, ME),
+    ).rejects.toBeInstanceOf(BillBusy);
+    expect(w.invoices.invoices).toEqual([]);
+  });
+
+  it("lets the bills go even when the raise is refused", async () => {
+    const w = deskWorld();
+    const oct = due();
+    w.desk.rows.push(oct);
+    await expect(
+      w.service.raise({ tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, taxPercent: "500" }] }, ME),
+    ).rejects.toBeInstanceOf(InvalidBillingInput);
+    expect(w.desk.holding).toEqual([]);
+  });
+});
+
+describe("the amount a bill is raised at (0321)", () => {
+  it("is never zero", async () => {
+    const w = deskWorld();
+    const oct = due({ fullAmount: null, amount: null });
+    w.desk.rows.push(oct);
+    await expect(
+      w.service.raise({ tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, amount: "0", taxPercent: "18" }] }, ME),
+    ).rejects.toBeInstanceOf(InvalidBillingInput);
+    expect(w.invoices.invoices).toEqual([]);
+  });
+
+  it("keeps the letter's price for a login that does not see fees", async () => {
+    const w = deskWorld();
+    const oct = due();
+    w.desk.rows.push(oct);
+    await expect(
+      w.service.raise({ tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, amount: "1.00", taxPercent: "18" }] }, ME),
+    ).rejects.toBeInstanceOf(PriceNotVisible);
+    // The same figure as the letter is no change, and an unpriced bill is typed by anybody.
+    await w.service.raise(
+      { tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, amount: "30000", taxPercent: "18" }] },
+      ME,
+    );
+    expect(w.invoices.invoices[0]?.lines[0]?.unitAmount).toBe("30000");
+  });
+
+  it("lets somebody who sees fees bill another figure, and records both in the ledger", async () => {
+    const w = deskWorld();
+    const oct = due();
+    w.desk.rows.push(oct);
+    await w.service.raise(
+      { tenantId: FIRM, dueIds: [oct.id], lines: [{ dueId: oct.id, amount: "27500", taxPercent: "18" }], callerSeesFees: true },
+      ME,
+    );
+    expect(w.invoices.invoices[0]?.lines[0]?.unitAmount).toBe("27500");
+    expect(w.events.recorded.at(-1)?.payload).toMatchObject({ letterAmount: "30000.00", billedAmount: "27500" });
   });
 });
 
@@ -510,6 +651,7 @@ describe("giving an unused advance back", () => {
       remaining: over.remaining ?? "20000.00",
       refundAmount: "23600.00",
       finished: over.finished ?? true,
+      paid: "23600.00",
       waived: null,
     };
   }
@@ -518,6 +660,15 @@ describe("giving an unused advance back", () => {
     const w = deskWorld();
     w.desk.refunds.push(candidate(), candidate({ finished: false }), candidate({ remaining: "0.00" }));
     expect(await w.service.refunds(FIRM)).toHaveLength(1);
+  });
+
+  it("refuses a second refund while the first is being written (0321)", async () => {
+    const w = deskWorld();
+    const c = candidate();
+    w.desk.refunds.push(c);
+    w.desk.heldElsewhere.add(c.advance.id);
+    await expect(w.service.refund({ tenantId: FIRM, dueId: c.advance.id }, ME)).rejects.toBeInstanceOf(BillBusy);
+    expect(w.invoices.creditNotes).toEqual([]);
   });
 
   it("gives it back as a credit note with the reason advance_refund, tax included", async () => {

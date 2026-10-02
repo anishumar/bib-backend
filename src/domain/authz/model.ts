@@ -33,6 +33,7 @@ export type Permission =
   | "portal:respond"
   | "portal:request"
   | "acceptance:record"
+  | "billing:skip"
   | "tenant:admin";
 
 export const PERMISSIONS: readonly Permission[] = [
@@ -47,6 +48,7 @@ export const PERMISSIONS: readonly Permission[] = [
   "portal:respond",
   "portal:request",
   "acceptance:record",
+  "billing:skip",
   "tenant:admin",
 ];
 
@@ -95,6 +97,10 @@ export const PERMISSION_DESCRIPTIONS: Readonly<Record<Permission, string>> = {
     "on a call or in a meeting, when they never pressed Accept or signed in DocuSign. A " +
     "letter recorded this way is signed and its work starts, so the client's email must be " +
     "filed with it.",
+  "billing:skip":
+    "Skip a bill on Invoices, To raise: say, with a reason, that a period of work or a " +
+    "service's final bill will not be invoiced. It gives up revenue, so it is kept apart from " +
+    "raising one. The reason stays on the bill for whoever asks later.",
   "tenant:admin":
     "Administer the firm: who works here, what their roles are, and every setting, " +
     "including this one.",
@@ -198,12 +204,14 @@ export const DEFAULT_ROLES: Readonly<Record<string, RoleDefinition>> = {
       "obligation:resolve",
       "portal:grant",
       "acceptance:record",
+      "billing:skip",
     ],
   },
   // Runs delivery for a book of clients; sees the audit trail for their work.
+  // Decides which of its bills will not be invoiced (0321).
   manager: {
     label: "Manager",
-    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write"],
+    permissions: ["party:read", "party:write", "ledger:read", "config:read", "work:write", "billing:skip"],
   },
   // Does the work, and quotes from the catalogue. No audit-trail sweep of the
   // whole firm.

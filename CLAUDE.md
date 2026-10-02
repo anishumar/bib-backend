@@ -1764,6 +1764,42 @@ recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `per
 - `crm.billing_due` now names an engagement letter, so it is the fourth entry in the signed-letter
   freeze test's `NOT_TERMS`: what the letter CAUSED, written after the signature.
 
+## Billing safeguards: what the end-to-end review found (0321, 2026-10-02)
+
+Three review agents (code, regressions, a live probe on two firms) found ten real defects in
+0318-0320; all fixed, each with a test (unit, and `advance.integration.test.ts` 0321 blocks).
+
+- **A bill is CLAIMED before it is settled** (`billing_due.claimed_at`, 2 minutes then free).
+  Raise claims its bills AND the advance bills they take from, re-reads them, then draws the
+  number; link, skip, refund and keep claim too. A second request gets `BILL_BUSY` (409) with
+  nothing numbered. It closed: two raises of one bill = two invoices; two raises spending one
+  advance; a double-click refund crediting twice.
+- **Link**: never onto another bill's ADVANCE invoice (that money is the advance), and an advance
+  bill is linked only by `tenant:admin` (`ADVANCE_LINK_NEEDS_ADMIN`, 403), to an invoice no other
+  bill is on: a paid invoice starts the work. An associate linked an old paid invoice and started
+  work with no advance (and created a phantom advance).
+- **An advance raised again after its invoice was cancelled** moves the bills that took from it
+  onto the new invoice (`markInvoiced`, same transaction): the same advance came off twice.
+  `OPEN_DUE_SQL` now matches the read (a covered bill is open once its advance invoice is not
+  issued), so raising it no longer drew an orphan number.
+- **Paid means money arrived**: a credit note zeroing an unpaid advance is `unpaid`, not `paid`
+  (it started the work and logged "paid").
+- **An advance nothing waits on may be skipped** (`advanceHoldsWork` on the bill); refunds carry
+  `paid` so the screen pays back only what was received.
+- **Final bills** are written automatically only for work finished on/after
+  `tenant.auto_billing_since` (set on every switch-on; backfilled to the deploy day) and never for
+  an engagement a hand-raised line already bills. Switching on billed every audit ever finished.
+- **Raise amounts**: above zero; a priced bill billed at another figure only by a login that sees
+  fees (`PRICE_NOT_VISIBLE`, 403), both figures in the `billing_due.invoiced` payload.
+- **No amounts in invoice line text** ("…, less advance (INV/…)"): the description reached logins
+  the fee axis hides prices from.
+- **Dates**: an `on_date` before the first period moves forward by whole spans; a period that has
+  not begun is never billed; a schedule's first invoice may not precede its first period; years
+  2000-2099.
+- **Skipping is a permission**, `billing:skip` (Partner and Manager by default, 0321 re-publishes
+  untouched default roles), the user's call: "permission bana do iski and jispe woh hogi woh kr
+  skata with a reason".
+
 ## Revenue by manager (auto-invoice T4, 2026-10-02, no migration)
 
 Ashish: "invoices come under the manager's name and revenue is tracked by manager". The manager

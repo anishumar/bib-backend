@@ -85,6 +85,12 @@ export type AdvanceStartState = "not_raised" | "on_draft" | "unpaid" | "part_pai
  * Where an advance stands. `started` wins over everything, because work that
  * began is not stopped by a bounced cheque afterwards: the receivable is chased
  * instead, as any other.
+ *
+ * PAID means money arrived and nothing is left owed (0321). An invoice a credit
+ * note took to zero with nothing paid is NOT paid: the credit note cancelled the
+ * demand, and it would otherwise start the work and record "paid" in the audit
+ * trail with no money received. Whether an unpaid advance may be waived is the
+ * firm's open question (Ashish); until it is answered such work waits.
  */
 export function advanceStartState(input: {
   readonly invoiceStatus: "draft" | "issued" | "cancelled" | null;
@@ -95,8 +101,9 @@ export function advanceStartState(input: {
   if (input.releasedAt !== null) return "started";
   if (input.invoiceStatus === null || input.invoiceStatus === "cancelled") return "not_raised";
   if (input.invoiceStatus === "draft") return "on_draft";
-  if (compareAmounts(input.outstanding ?? "0", "0") <= 0) return "paid";
-  return compareAmounts(input.paid ?? "0", "0") > 0 ? "part_paid" : "unpaid";
+  const somethingPaid = compareAmounts(input.paid ?? "0", "0") > 0;
+  if (compareAmounts(input.outstanding ?? "0", "0") <= 0 && somethingPaid) return "paid";
+  return somethingPaid ? "part_paid" : "unpaid";
 }
 
 // ── Giving it back ─────────────────────────────────────────────────────────
@@ -152,29 +159,16 @@ export function mayBillNow(input: {
 
 // ── What the invoice line says ─────────────────────────────────────────────
 
-/** An amount in a sentence: the currency code (the PDF's fonts carry no ₹),
- *  rupees grouped the Indian way, two decimals, more only when they are not
- *  zero. Never via a float. */
-export function amountInWords(currency: string, amount: Amount): string {
-  const negative = amount.trim().startsWith("-");
-  const [whole = "0", fraction = ""] = amount.trim().replace(/^-/, "").split(".");
-  const kept = fraction.replace(/0+$/, "");
-  const decimals = kept.length > 2 ? kept : fraction.padEnd(2, "0").slice(0, 2);
-  return `${currency} ${negative ? "-" : ""}${group(whole.replace(/^0+(?=\d)/, ""), currency === "INR")}.${decimals}`;
-}
-
-function group(digits: string, indian: boolean): string {
-  if (!indian) return digits.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-  if (digits.length <= 3) return digits;
-  const last3 = digits.slice(-3);
-  const rest = digits.slice(0, -3).replace(/\B(?=(\d{2})+(?!\d))/g, ",");
-  return `${rest},${last3}`;
-}
-
 /**
  * The invoice line's text for a bill: the letter's own words (phase 1), what
- * kind of bill it is, and, when an advance was taken off it, the fee and the
- * advance invoice it came from, so the client can check the balance.
+ * kind of bill it is, and, when an advance was taken off it, which advance
+ * invoice it came from.
+ *
+ * NO AMOUNTS IN THE WORDS (0321). The text is the line's description, which
+ * every login that may read an invoice reads, fees or not; "fee INR 1,00,000
+ * less advance INR 20,000" put the price in front of staff the fee axis hides it
+ * from. The balance is the line's amount (the final invoice shows only the
+ * balance, Ashish), and the advance invoice named here carries the rest.
  */
 export function billLineText(input: {
   readonly kind: BillKind;
@@ -183,10 +177,9 @@ export function billLineText(input: {
   readonly servedDays: number;
   readonly periodDays: number;
   readonly letterRef: string;
-  readonly currency: string;
   /** An advance for one service, rather than the letter's. */
   readonly perService: boolean;
-  readonly advance: { readonly fee: Amount; readonly applied: Amount; readonly invoiceNumber: string } | null;
+  readonly advance: { readonly invoiceNumber: string } | null;
 }): string {
   let text: string;
   if (input.kind === "advance") {
@@ -199,8 +192,5 @@ export function billLineText(input: {
     text = `${input.serviceName}, ${input.periodLabel}${part}`;
   }
   if (input.advance === null) return text;
-  return (
-    `${text}: fee ${amountInWords(input.currency, input.advance.fee)} ` +
-    `less advance ${amountInWords(input.currency, input.advance.applied)} (${input.advance.invoiceNumber})`
-  );
+  return `${text}, less advance (${input.advance.invoiceNumber})`;
 }

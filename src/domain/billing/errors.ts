@@ -29,16 +29,20 @@ export type BillingErrorCode =
   | "START_NOT_APPROVABLE"
   | "BILL_NOW_REFUSED"
   | "AUTO_BILLING_OFF"
-  | "NOTHING_TO_REFUND";
+  | "NOTHING_TO_REFUND"
+  | "BILL_BUSY"
+  | "ADVANCE_LINK_NEEDS_ADMIN"
+  | "PRICE_NOT_VISIBLE";
 
 /** An advance bill is how the work it holds gets started (0320): skipping it
- *  would leave that work waiting for good. */
+ *  while that work still waits would leave it waiting for good. Once nothing
+ *  waits (the engagement ended before it started, 0321), it may be skipped. */
 export class AdvanceNotSkippable extends BillingError {
   constructor() {
     super(
       "ADVANCE_NOT_SKIPPABLE",
-      "An advance bill cannot be skipped: the work it holds starts only when it is paid. " +
-        "Raise it (or link the invoice already raised); once part of it is paid, an admin can approve the start.",
+      "This advance bill cannot be skipped while work still waits for it: that work starts only when it is paid. " +
+        "Raise it; once part of it is paid, an admin can approve the start. End the engagement first if the client is not going ahead.",
     );
   }
 }
@@ -188,6 +192,42 @@ export class FiscalYearNeeded extends BillingError {
     super(
       "FISCAL_YEAR_NEEDED",
       "Quarterly and yearly billing follow the firm's financial year, and the firm has not said when its year starts. Set it in the compliance settings first.",
+    );
+  }
+}
+
+/** Somebody else is settling one of these bills, or using the same advance,
+ *  right now (0321). Refused before an invoice number is drawn. */
+export class BillBusy extends BillingError {
+  constructor(what: string) {
+    super(
+      "BILL_BUSY",
+      `Somebody else is working on ${what} right now. Wait a moment and try again; the list will show what they did.`,
+    );
+  }
+}
+
+/** Linking an advance bill to an invoice already raised starts the work it
+ *  holds when that invoice is paid, so it is an admin's act, as Approve start
+ *  is (0321). */
+export class AdvanceLinkNeedsAdmin extends BillingError {
+  constructor() {
+    super(
+      "ADVANCE_LINK_NEEDS_ADMIN",
+      "Only an admin can link an advance to an invoice already raised, because a paid invoice starts the work. " +
+        "Raise the advance from the bill instead, or ask an admin.",
+    );
+  }
+}
+
+/** A login that does not see fees cannot bill a figure other than the
+ *  letter's: it would be changing a price it is not allowed to read (0321). */
+export class PriceNotVisible extends BillingError {
+  constructor(what: string) {
+    super(
+      "PRICE_NOT_VISIBLE",
+      `The letter fixes the price of ${what}, and this login does not see fees, so it cannot bill a different amount. ` +
+        "Leave the amount empty to bill the letter's price, or ask somebody who sees fees.",
     );
   }
 }

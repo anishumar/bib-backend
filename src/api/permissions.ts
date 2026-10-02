@@ -795,7 +795,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("GET", "/api/v1/billing/unscheduled"), "party:read" as const],
   [routeKey("PUT", "/api/v1/engagements/{engagementId}/billing"), "party:write" as const],
   [routeKey("POST", "/api/v1/billing/raise"), "party:write" as const],
-  [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "party:write" as const],
+  // Skipping gives up revenue: the firm's own permission, Partner and Manager by
+  // default (0321), moved on the roles screen.
+  [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "billing:skip" as const],
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
   // The advance and the final bill (0320). Approve start, a refund's credit
   // note and keeping an advance are an administrator's, as credit notes are.

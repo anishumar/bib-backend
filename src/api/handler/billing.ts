@@ -122,6 +122,12 @@ const DueSchema = z
     released: ReleasedSchema.nullable().openapi({
       description: "An advance bill: when the work it held started, and how.",
     }),
+    advanceHoldsWork: z.boolean().openapi({
+      description:
+        "An advance bill some engagement still waits on (pending_advance). Such an advance cannot be " +
+        "skipped (ADVANCE_NOT_SKIPPABLE); once nothing waits (the engagement ended before it started), " +
+        "it may be. Always false for other kinds of bill.",
+    }),
   })
   .openapi("BillingDue");
 
@@ -166,6 +172,12 @@ const RefundSchema = z
     remaining: Decimal.nullable().openapi({ description: "Left of the advance, before tax." }),
     refundAmount: Decimal.nullable().openapi({
       description: "The credit note that gives it back, with its share of the tax. Null without fees.",
+    }),
+    paid: Decimal.nullable().openapi({
+      description:
+        "What the client actually paid on the advance invoice, with tax: the most that can be paid BACK " +
+        "after the credit note. Zero when nothing was paid (the credit note then only cancels what was " +
+        "asked for). Null without fees.",
     }),
   })
   .openapi("BillingRefund");
@@ -286,7 +298,11 @@ const raiseRoute = createRoute({
   description:
     "One client, one of the firm's companies, one currency and one manager. Every invoice rule " +
     "applies as for a hand-raised one, and the number is drawn from the gapless series. The " +
-    "rate defaults to the one the letters were struck at, when they agree.",
+    "rate defaults to the one the letters were struck at, when they agree. The bills, and the " +
+    "advance they are taken off, are claimed first: a second raise of them meanwhile is refused " +
+    "(BILL_BUSY, 409) before any number is drawn. An amount must be above zero; a bill the letter " +
+    "priced is billed at another figure only by a login that sees fees (PRICE_NOT_VISIBLE, 403), " +
+    "and the ledger records both figures.",
   request: {
     query: z.object({ asOf: Day.optional() }),
     body: {
@@ -330,11 +346,11 @@ const raiseRoute = createRoute({
         },
       },
     },
-    400: errorResponse("Mixed clients, companies, currencies or managers; an amount or a tax rate missing"),
+    400: errorResponse("Mixed clients, companies, currencies or managers; an amount or a tax rate missing, or zero"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse("No org selected, the role does not permit it, or a priced bill's amount changed without fees"),
     404: errorResponse("No such due at this firm"),
-    409: errorResponse("A due is already on an invoice or skipped"),
+    409: errorResponse("A due is already on an invoice or skipped, or being raised by somebody else"),
   },
 });
 
@@ -343,6 +359,10 @@ const skipRoute = createRoute({
   path: "/api/v1/billing/dues/{dueId}/skip",
   tags: ["billing"],
   summary: "Decide a bill will not be raised, and say why",
+  description:
+    "Needs `billing:skip`, the firm's own permission (Partner and Manager by default, 0321): it " +
+    "gives up revenue. An advance bill is skipped only once no engagement waits on it " +
+    "(ADVANCE_NOT_SKIPPABLE).",
   request: {
     params: z.object({ dueId: z.string().uuid() }),
     body: {
@@ -354,9 +374,9 @@ const skipRoute = createRoute({
     204: { description: "Skipped" },
     400: errorResponse("No reason"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse("No org selected, or the role does not hold billing:skip"),
     404: errorResponse("No such due at this firm"),
-    409: errorResponse("Already on an invoice or skipped"),
+    409: errorResponse("Already on an invoice or skipped, an advance work still waits on, or busy"),
   },
 });
 
@@ -365,6 +385,10 @@ const linkRoute = createRoute({
   path: "/api/v1/billing/dues/{dueId}/link",
   tags: ["billing"],
   summary: "Say which invoice, raised by hand, already bills this",
+  description:
+    "Same client, company and currency, not cancelled, and not another bill's advance invoice. An " +
+    "ADVANCE bill is linked only by an admin (ADVANCE_LINK_NEEDS_ADMIN, 403), to an invoice no other " +
+    "bill is on: a paid invoice starts the work it holds, as Approve start does.",
   request: {
     params: z.object({ dueId: z.string().uuid() }),
     body: {
@@ -377,7 +401,7 @@ const linkRoute = createRoute({
   responses: {
     204: { description: "Linked" },
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse("No org selected, the role does not permit it, or an advance linked by a non-admin"),
     404: errorResponse("No such due or invoice at this firm"),
     409: errorResponse("Already settled, or the invoice cannot be this bill"),
   },
@@ -605,6 +629,7 @@ function dueBody(d: DueOnDesk, fees: boolean) {
             amount: fees ? d.advanceApplied.amount : null,
           },
     released: releasedBody(d.released),
+    advanceHoldsWork: d.advanceHoldsWork,
   };
 }
 
@@ -652,6 +677,7 @@ function refundBody(r: RefundCandidate, fees: boolean) {
     applied: fees ? r.applied : null,
     remaining: fees ? r.remaining : null,
     refundAmount: fees ? r.refundAmount : null,
+    paid: fees ? r.paid : null,
   };
 }
 
@@ -753,6 +779,7 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
         fxRateDate: body.fxRateDate,
         dueOn: body.dueOn,
         asOf: c.req.valid("query").asOf,
+        callerSeesFees: seesFees(c.get("principal")),
       },
       s.actor,
     );
@@ -834,8 +861,14 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
   app.openapi(linkRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    const principal = c.get("principal");
     await deps.service.link(
-      { tenantId: s.tenantId, dueId: c.req.valid("param").dueId, invoiceId: c.req.valid("json").invoiceId },
+      {
+        tenantId: s.tenantId,
+        dueId: c.req.valid("param").dueId,
+        invoiceId: c.req.valid("json").invoiceId,
+        mayLinkAdvance: principal !== null && (await deps.authz.can(principal, "tenant:admin")),
+      },
       s.actor,
     );
     return c.body(null, 204);

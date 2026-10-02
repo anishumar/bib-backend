@@ -122,6 +122,8 @@ interface OneTimeRow {
   has_process: boolean | null;
   done_on: string | null;
   has_final_bill: boolean;
+  billed_by_hand: boolean;
+  auto_billing_since: string | null;
 }
 
 export class PostgresFinalBillFacts implements FinalBillFacts {
@@ -153,7 +155,17 @@ export class PostgresFinalBillFacts implements FinalBillFacts {
              CASE WHEN j.status = 'done' THEN (j.finished_at AT TIME ZONE t.time_zone)::date::text END AS done_on,
              EXISTS (SELECT 1 FROM crm.billing_due d
                       WHERE d.tenant_id = e.tenant_id AND d.kind = 'final'
-                        AND (d.engagement_id = e.id OR (g.id IS NOT NULL AND d.fee_group_id = g.id))) AS has_final_bill
+                        AND (d.engagement_id = e.id OR (g.id IS NOT NULL AND d.fee_group_id = g.id))) AS has_final_bill,
+             -- BILLED BY HAND (0321): a line not cancelled already bills this
+             -- engagement and was not written from a bill (an advance's own
+             -- line is). A final bill for the full price would bill it twice.
+             EXISTS (SELECT 1 FROM crm.invoice_line il
+                       JOIN crm.invoice ii ON ii.id = il.invoice_id AND ii.tenant_id = il.tenant_id
+                      WHERE il.tenant_id = e.tenant_id AND il.engagement_id = e.id
+                        AND il.removed_at IS NULL AND ii.status <> 'cancelled'
+                        AND NOT EXISTS (SELECT 1 FROM crm.billing_due bd
+                                         WHERE bd.tenant_id = il.tenant_id AND bd.invoice_line_id = il.id)) AS billed_by_hand,
+             t.auto_billing_since::text AS auto_billing_since
         FROM crm.engagement e
         JOIN tenancy.tenant t ON t.id = e.tenant_id
         JOIN crm.engagement_letter l ON l.id = e.engagement_letter_id AND l.tenant_id = e.tenant_id
@@ -190,6 +202,7 @@ export class PostgresFinalBillFacts implements FinalBillFacts {
           engagements: [...seen.engagements, engagement],
           jobIds: r.job_id === null ? seen.jobIds : [...seen.jobIds, r.job_id],
           hasFinalBill: seen.hasFinalBill || r.has_final_bill,
+          billedByHand: seen.billedByHand || r.billed_by_hand,
         });
         continue;
       }
@@ -205,6 +218,8 @@ export class PostgresFinalBillFacts implements FinalBillFacts {
         engagements: [engagement],
         jobIds: r.job_id === null ? [] : [r.job_id],
         hasFinalBill: r.has_final_bill,
+        billedByHand: r.billed_by_hand,
+        autoBillingSince: r.auto_billing_since,
       });
     }
     return [...subjects.values()]

@@ -118,6 +118,8 @@ export type DueStatus = "open" | "drafted" | "billed" | "skipped" | "covered";
 
 /** What is left of an advance invoice, before tax (0320). */
 export interface AdvancePoolRef {
+  /** The advance BILL it is, which a raise taking from it claims (0321). */
+  readonly advanceDueId: string;
   readonly invoiceId: string;
   readonly invoiceNumber: string;
   readonly remaining: string;
@@ -199,6 +201,10 @@ export interface BillingDueRecord {
     readonly how: "paid" | "approved";
     readonly by: PersonRef | null;
   } | null;
+  /** An advance bill some engagement still waits on (`pending_advance`).
+   *  False for every other kind of bill. Such an advance cannot be skipped
+   *  (0321): the work it holds would never start. */
+  readonly advanceHoldsWork: boolean;
 }
 
 /** An advance bill with its invoice's balance: where the advance stands. */
@@ -225,6 +231,10 @@ export interface RefundCandidate {
   /** Every engagement it covered has ended, or (one-time) had its final bill,
    *  and no bill of them is still open. */
   readonly finished: boolean;
+  /** What the client actually paid on the advance invoice, with tax (0321):
+   *  the most that can be paid BACK. A credit note on an advance nobody paid
+   *  only cancels the demand; nothing goes back. */
+  readonly paid: string;
   readonly waived: { readonly at: string; readonly by: PersonRef | null; readonly reason: string } | null;
 }
 
@@ -275,6 +285,19 @@ export interface BillingDueDesk {
   markReleased(tenantId: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean>;
   refundCandidates(tenantId: string, filter?: { readonly dueId?: string | undefined }): Promise<readonly RefundCandidate[]>;
   waiveRefund(tenantId: string, dueId: string, byUserId: string, reason: string): Promise<boolean>;
+  /**
+   * CLAIM these bills before settling them (0321), in one statement: answers
+   * the ids claimed, which are all of them or none. A claim another request
+   * holds, younger than two minutes, refuses the lot. Claimed before an invoice
+   * number is drawn, so a second raise of the same bill, or of a bill taking the
+   * same advance, is refused while nothing is numbered.
+   */
+  claim(tenantId: string, dueIds: readonly string[]): Promise<boolean>;
+  /** Let them go again; always called once the settling is over. */
+  release(tenantId: string, dueIds: readonly string[]): Promise<void>;
+  /** How an invoice is already used by bills (0321): as some bill's advance
+   *  invoice, and how many bills name it as theirs. */
+  invoiceUse(tenantId: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }>;
 }
 
 /** The slice of invoicing the desk uses, satisfied by `InvoiceService` in
@@ -398,6 +421,12 @@ export interface FinalBillSubject {
     } | null;
   }[];
   readonly hasFinalBill: boolean;
+  /** An invoice line not cancelled already bills one of its engagements (other
+   *  than an advance bill's own line): the firm billed it by hand (0321). */
+  readonly billedByHand: boolean;
+  /** The firm's day automatic billing was last switched on; null when it was
+   *  never switched on through the app (0321). */
+  readonly autoBillingSince: string | null;
 }
 
 export interface FinalBillFacts {
@@ -456,5 +485,7 @@ export interface BillingSchedules {
 /** The firm's switch (0318). */
 export interface AutoBillingSetting {
   isOn(tenantId: string): Promise<boolean>;
-  set(tenantId: string, on: boolean): Promise<void>;
+  /** Switching on also records the firm's day it went on (0321), `since`:
+   *  final bills are written only for work finished from then. */
+  set(tenantId: string, on: boolean, since: string): Promise<void>;
 }

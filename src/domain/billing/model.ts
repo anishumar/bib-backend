@@ -98,6 +98,13 @@ export function goesLiveFrom(effectiveFrom: string, liveOn: string): string {
  * one containing `goesLiveFrom`) and the letter's timing. Arrears bills it the
  * day after it ends, advance on its first day, `on_date` on the letter's date;
  * every later period follows one span after (`billingDues`).
+ *
+ * AN `on_date` BEFORE THE FIRST PERIOD moves forward by whole spans until it is
+ * not (0321). A letter drafted in July saying "first invoice 5 August", signed
+ * in October, starts billing in October: 5 August as the first invoice date put
+ * October's bill on 5 August, November's on 5 September and December's on
+ * 5 October, so one sweep billed three months, one of them not yet begun. The
+ * day of the month the letter chose is kept (the 5th).
  */
 export function scheduleFor(
   period: BillingPeriod,
@@ -105,8 +112,29 @@ export function scheduleFor(
   billingOn: string | null,
 ): { readonly billingFrom: string; readonly firstInvoiceOn: string } {
   const firstInvoiceOn =
-    timing === "advance" ? period.start : timing === "on_date" && billingOn !== null ? billingOn : dayAfter(period.end);
+    timing === "advance"
+      ? period.start
+      : timing === "on_date" && billingOn !== null
+        ? notBeforeStart(billingOn, period)
+        : dayAfter(period.end);
   return { billingFrom: period.start, firstInvoiceOn };
+}
+
+/** The months one period spans (1, 3 or 12): its first day to the day after it. */
+function spanMonths(period: BillingPeriod): number {
+  const [y1 = 0, m1 = 1] = period.start.split("-").map(Number);
+  const [y2 = 0, m2 = 1] = dayAfter(period.end).split("-").map(Number);
+  return Math.max(1, y2 * 12 + m2 - (y1 * 12 + m1));
+}
+
+/** `day`, moved on by whole spans of `period` until it is not before it starts.
+ *  Each step is counted from `day` itself, so a 31st clamped to a short month
+ *  is not carried into the next one. */
+function notBeforeStart(day: string, period: BillingPeriod): string {
+  const span = spanMonths(period);
+  let moved = day;
+  for (let k = 1; moved < period.start; k += 1) moved = addMonthsClamped(day, k * span);
+  return moved;
 }
 
 /**
@@ -167,6 +195,9 @@ export function billingDues(input: {
 }): readonly BillingDuePlan[] {
   const dues: BillingDuePlan[] = [];
   input.periods.forEach((period, k) => {
+    // A period that has not begun is never billed, whatever the schedule says
+    // (0321): there is nothing served in it yet to bill.
+    if (period.start > input.today) return;
     const billOn = addMonthsClamped(input.firstInvoiceOn, k * input.spanMonths);
     if (billOn > input.today) return;
     const served = Math.max(0, ...input.windows.map((w) => servedDays(period, w)));

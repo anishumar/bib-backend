@@ -85,9 +85,11 @@ interface DueRow {
   released_by_id: string | null;
   released_by_name: string | null;
   released_by_email: string | null;
+  pool_advance_due_id: string | null;
   pool_invoice_id: string | null;
   pool_invoice_number: string | null;
   pool_remaining: string | null;
+  advance_holds_work: boolean;
 }
 
 function person(id: string | null, name: string | null, email: string | null): PersonRef | null {
@@ -136,9 +138,17 @@ function toRecord(r: DueRow): BillingDueRecord {
           },
     lastTaxPercent: r.last_tax_percent,
     advancePool:
-      r.pool_invoice_id === null || r.pool_invoice_number === null || r.pool_remaining === null
+      r.pool_advance_due_id === null ||
+      r.pool_invoice_id === null ||
+      r.pool_invoice_number === null ||
+      r.pool_remaining === null
         ? null
-        : { invoiceId: r.pool_invoice_id, invoiceNumber: r.pool_invoice_number, remaining: r.pool_remaining },
+        : {
+            advanceDueId: r.pool_advance_due_id,
+            invoiceId: r.pool_invoice_id,
+            invoiceNumber: r.pool_invoice_number,
+            remaining: r.pool_remaining,
+          },
     advanceApplied:
       r.advance_invoice_id === null || r.advance_applied === null
         ? null
@@ -147,6 +157,7 @@ function toRecord(r: DueRow): BillingDueRecord {
       r.released_at === null || (r.released_how !== "paid" && r.released_how !== "approved")
         ? null
         : { at: r.released_at, how: r.released_how, by: person(r.released_by_id, r.released_by_name, r.released_by_email) },
+    advanceHoldsWork: r.advance_holds_work,
   };
 }
 
@@ -180,8 +191,17 @@ const DUE_SELECT = `
          ${isoInstant("d.released_at", "released_at")}, d.released_how,
          d.released_by_user_id AS released_by_id, ru.display_name AS released_by_name,
          ru.email::text AS released_by_email,
+         pool.advance_due_id AS pool_advance_due_id,
          pool.invoice_id AS pool_invoice_id, pool.invoice_number AS pool_invoice_number,
-         pool.remaining::text AS pool_remaining
+         pool.remaining::text AS pool_remaining,
+         -- An advance some engagement still waits on (0321): it may not be
+         -- skipped, or that work would never start.
+         (d.kind = 'advance' AND EXISTS (
+            SELECT 1 FROM crm.engagement we
+             WHERE we.tenant_id = d.tenant_id AND we.status = 'pending_advance'
+               AND ((d.engagement_id IS NOT NULL AND we.id = d.engagement_id)
+                 OR (d.engagement_id IS NULL AND we.engagement_letter_id = d.engagement_letter_id))
+         )) AS advance_holds_work
     FROM crm.billing_due d
     JOIN core.party p  ON p.id = d.party_id AND p.tenant_id = d.tenant_id
     JOIN core.party ip ON ip.id = d.issuing_entity_party_id AND ip.tenant_id = d.tenant_id
@@ -235,7 +255,7 @@ const DUE_SELECT = `
     -- THE ADVANCE THIS BILL WILL BE TAKEN OFF (0320): the service's own, else
     -- the letter's, in the bill's currency, while some of it is left.
     LEFT JOIN LATERAL (
-      SELECT ap.invoice_id, ap.invoice_number, ap.remaining
+      SELECT ap.advance_due_id, ap.invoice_id, ap.invoice_number, ap.remaining
         FROM crm.advance_pool ap
        WHERE ap.tenant_id = d.tenant_id
          AND d.kind <> 'advance'
@@ -328,6 +348,10 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
   ): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
       if (applied !== null && !(await takeFromPool(db, applied))) return false;
+      // What the bill was on before, for an advance raised again (below).
+      const [before] = await db<{ kind: string; invoice_id: string | null }[]>`
+        SELECT kind, invoice_id FROM crm.billing_due WHERE id = ${dueId} FOR UPDATE
+      `;
       const rows = await db<{ id: string }[]>`
         UPDATE crm.billing_due d
            SET invoice_id = ${invoiceId}, invoice_line_id = ${invoiceLineId},
@@ -338,7 +362,21 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
            AND ${db.unsafe(OPEN_DUE_SQL)}
         RETURNING d.id
       `;
-      return rows.length === 1;
+      if (rows.length !== 1) return false;
+      // AN ADVANCE RAISED AGAIN after its invoice was cancelled (0321): the
+      // bills that already took from it move onto the new invoice, in the same
+      // transaction. Otherwise the reissued advance started with all of its
+      // money again and the same advance came off later bills twice. The old
+      // invoice was cancelled (the open check above says so), and the new one
+      // is in the same currency (the bill's), which the key checks.
+      if (before?.kind === "advance" && before.invoice_id !== null) {
+        await db`
+          UPDATE crm.billing_due
+             SET advance_invoice_id = ${invoiceId}
+           WHERE advance_invoice_id = ${before.invoice_id}
+        `;
+      }
+      return true;
     });
   }
 
@@ -415,6 +453,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
                round(least(ap.remaining * ap.invoice_total / nullif(ap.invoice_net, 0),
                            ap.invoice_total - ap.credited), 2)::text AS refund_amount,
                (coalesce(fin.all_finished, false) AND NOT coalesce(fin.any_open, false)) AS finished,
+               coalesce(bal.paid, 0)::text AS paid,
                ${isoInstant("w.refund_waived_at", "waived_at")},
                w.refund_waived_by_user_id AS waived_by_id, wu.display_name AS waived_by_name,
                wu.email::text AS waived_by_email, w.refund_waive_reason AS waive_reason
@@ -422,6 +461,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
           JOIN crm.billing_due w ON w.id = ap.advance_due_id AND w.tenant_id = ap.tenant_id
           JOIN (${db.unsafe(DUE_SELECT)}) due ON due.id = ap.advance_due_id
           LEFT JOIN tenancy.user_account wu ON wu.id = w.refund_waived_by_user_id
+          LEFT JOIN crm.invoice_balance bal ON bal.invoice_id = ap.invoice_id AND bal.tenant_id = ap.tenant_id
           -- FINISHED: every engagement it covered has ended (and its last period
           -- was billed), or is one-time with its final bill raised, covered or
           -- skipped; and no bill of them is still open, since an open one may
@@ -470,6 +510,7 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
         remaining: r.remaining,
         refundAmount: r.refund_amount,
         finished: r.finished,
+        paid: r.paid,
         waived:
           r.waived_at === null || r.waive_reason === null
             ? null
@@ -489,7 +530,47 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
       return rows.length === 1;
     });
   }
+
+  async claim(tenantId: string, dueIds: readonly string[]): Promise<boolean> {
+    const ids = [...new Set(dueIds)].sort();
+    if (ids.length === 0) return true;
+    return withTenant(this.app, tenantId, async (db) => {
+      // Locked in id order, so two claims over overlapping bills cannot
+      // deadlock; then all free or none claimed.
+      const rows = await db<{ id: string; free: boolean }[]>`
+        SELECT id, (claimed_at IS NULL OR claimed_at < now() - ${CLAIM_LIFETIME}::interval) AS free
+          FROM crm.billing_due
+         WHERE id = ANY(${db.array(ids)}::uuid[])
+         ORDER BY id
+           FOR UPDATE
+      `;
+      if (rows.length !== ids.length || rows.some((r) => !r.free)) return false;
+      await db`UPDATE crm.billing_due SET claimed_at = now() WHERE id = ANY(${db.array(ids)}::uuid[])`;
+      return true;
+    });
+  }
+
+  async release(tenantId: string, dueIds: readonly string[]): Promise<void> {
+    if (dueIds.length === 0) return;
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`UPDATE crm.billing_due SET claimed_at = NULL WHERE id = ANY(${db.array([...dueIds])}::uuid[])`;
+    });
+  }
+
+  async invoiceUse(tenantId: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const [row] = await db<{ as_advance: boolean; by_bills: number }[]>`
+        SELECT EXISTS (SELECT 1 FROM crm.billing_due WHERE kind = 'advance' AND invoice_id = ${invoiceId}) AS as_advance,
+               (SELECT count(*) FROM crm.billing_due WHERE invoice_id = ${invoiceId} AND skipped_at IS NULL)::int AS by_bills
+      `;
+      return { asAdvance: row?.as_advance ?? false, byBills: row?.by_bills ?? 0 };
+    });
+  }
 }
+
+/** How long a claim holds (0321): long enough for one raise, short enough that
+ *  a request that died mid-way does not lock a bill for good. */
+const CLAIM_LIFETIME = "2 minutes";
 
 interface RefundRow extends DueRow {
   r_invoice_id: string;
@@ -499,6 +580,7 @@ interface RefundRow extends DueRow {
   remaining: string;
   refund_amount: string;
   finished: boolean;
+  paid: string;
   waived_at: string | null;
   waived_by_id: string | null;
   waived_by_name: string | null;
@@ -506,9 +588,16 @@ interface RefundRow extends DueRow {
   waive_reason: string | null;
 }
 
-/** "Still open", in a settling write's own WHERE (0318), as a fragment. */
+/**
+ * "Still open", in a settling write's own WHERE (0318), as a fragment. The SAME
+ * definition the read's status uses (0321): a bill the advance covered is open
+ * again once that advance invoice is no longer issued. Before, the read said
+ * open and every write refused, so pressing Raise drew a number for a draft the
+ * bill could never be put on.
+ */
 const OPEN_DUE_SQL = `d.skipped_at IS NULL
-           AND d.covered_at IS NULL
+           AND (d.covered_at IS NULL OR NOT EXISTS (
+                 SELECT 1 FROM crm.invoice a WHERE a.id = d.advance_invoice_id AND a.status = 'issued'))
            AND (d.invoice_id IS NULL OR EXISTS (
                  SELECT 1 FROM crm.invoice i WHERE i.id = d.invoice_id AND i.status = 'cancelled'))`;
 
@@ -666,9 +755,14 @@ export class PostgresAutoBillingSetting implements AutoBillingSetting {
     });
   }
 
-  async set(tenantId: string, on: boolean): Promise<void> {
+  async set(tenantId: string, on: boolean, since: string): Promise<void> {
     await withTenant(this.app, tenantId, async (db) => {
-      await db`UPDATE tenancy.tenant SET auto_billing = ${on} WHERE id = ${tenantId}`;
+      await db`
+        UPDATE tenancy.tenant
+           SET auto_billing = ${on},
+               auto_billing_since = CASE WHEN ${on} THEN ${since}::date ELSE auto_billing_since END
+         WHERE id = ${tenantId}
+      `;
     });
   }
 }

@@ -14,7 +14,6 @@ import { describe, expect, it } from "vitest";
 import {
   advanceStartState,
   advancesOwed,
-  amountInWords,
   billLineText,
   finalBillReady,
   mayBillNow,
@@ -97,6 +96,14 @@ describe("advanceStartState: has the work been allowed to start", () => {
     expect(advanceStartState(base)).toBe("unpaid");
   });
 
+  it("a credit note that zeroes it with nothing paid is not a payment (0321)", () => {
+    // Otherwise the credit note starts the work and the trail says "paid".
+    expect(advanceStartState({ ...base, paid: "0", outstanding: "0" })).toBe("unpaid");
+    expect(advanceStartState({ ...base, paid: null, outstanding: "-1.00" })).toBe("unpaid");
+    // A correction by credit note, then the rest paid: paid in full.
+    expect(advanceStartState({ ...base, paid: "53100.00", outstanding: "0" })).toBe("paid");
+  });
+
   it("part paid: an admin decides", () => {
     expect(advanceStartState({ ...base, paid: "20000.00", outstanding: "39000.00" })).toBe("part_paid");
   });
@@ -163,21 +170,6 @@ describe("mayBillNow: a one-time service with no process", () => {
   });
 });
 
-describe("amountInWords: money in an invoice line's text", () => {
-  it("groups rupees the Indian way", () => {
-    expect(amountInWords("INR", "100000.0000")).toBe("INR 1,00,000.00");
-    expect(amountInWords("INR", "1234567.5")).toBe("INR 12,34,567.50");
-  });
-
-  it("groups other currencies in thousands", () => {
-    expect(amountInWords("USD", "1234567.0000")).toBe("USD 1,234,567.00");
-  });
-
-  it("keeps digits beyond two decimals rather than rounding money away", () => {
-    expect(amountInWords("USD", "10.1250")).toBe("USD 10.125");
-  });
-});
-
 describe("billLineText: what the invoice line says", () => {
   const base = {
     serviceName: "Statutory audit FY 2025-26",
@@ -185,7 +177,6 @@ describe("billLineText: what the invoice line says", () => {
     servedDays: 1,
     periodDays: 1,
     letterRef: "EL-2026-0007",
-    currency: "INR",
     perService: true,
     advance: null,
   };
@@ -201,16 +192,11 @@ describe("billLineText: what the invoice line says", () => {
     expect(billLineText({ ...base, kind: "advance" })).toBe("Advance for Statutory audit FY 2025-26 (EL-2026-0007)");
   });
 
-  it("a final bill, and the advance it was reduced by", () => {
+  it("a final bill, and the advance it was reduced by, with no amount in the words (0321)", () => {
     expect(billLineText({ ...base, kind: "final" })).toBe("Statutory audit FY 2025-26, final bill");
-    expect(
-      billLineText({
-        ...base,
-        kind: "final",
-        advance: { fee: "100000.0000", applied: "50000.0000", invoiceNumber: "INV/2026-27/0003" },
-      }),
-    ).toBe(
-      "Statutory audit FY 2025-26, final bill: fee INR 1,00,000.00 less advance INR 50,000.00 (INV/2026-27/0003)",
-    );
+    const text = billLineText({ ...base, kind: "final", advance: { invoiceNumber: "INV/2026-27/0003" } });
+    expect(text).toBe("Statutory audit FY 2025-26, final bill, less advance (INV/2026-27/0003)");
+    // The description is read by logins the fee axis hides prices from.
+    expect(text).not.toMatch(/\d{1,3}(,\d{2,3})+|\d+\.\d{2}/);
   });
 });

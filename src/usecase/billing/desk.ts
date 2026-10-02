@@ -22,7 +22,9 @@ import { isCalendarDay } from "../../domain/engagement/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
 import { billLineText, shouldRefund, takeFromAdvance } from "../../domain/billing/advance";
 import {
+  AdvanceLinkNeedsAdmin,
   AdvanceNotSkippable,
+  BillBusy,
   BillingDueNotFound,
   BillingDueNotOpen,
   BillingEngagementNotFound,
@@ -36,6 +38,7 @@ import {
   InvoiceDoesNotFitDue,
   NotBilledOnASchedule,
   NothingToRefund,
+  PriceNotVisible,
 } from "../../domain/billing/errors";
 import type {
   AutoBillingSetting,
@@ -113,7 +116,15 @@ export interface RaiseFromDuesInput {
   readonly fxRateDate?: string | undefined;
   readonly dueOn?: string | undefined;
   readonly asOf?: string | undefined;
+  /** The caller sees fees (the fee axis). Without it, a bill the letter priced
+   *  is billed at the letter's price only (0321). Absent counts as not. */
+  readonly callerSeesFees?: boolean | undefined;
 }
+
+/** The earliest and latest day a billing schedule may name (0321): a typo of a
+ *  year (1900, 9999) is refused rather than silently stopping a client's bills. */
+const EARLIEST_SCHEDULE_DAY = "2000-01-01";
+const LATEST_SCHEDULE_DAY = "2099-12-31";
 
 export class BillingDeskService {
   constructor(private readonly deps: DeskDeps) {}
@@ -208,6 +219,13 @@ export class BillingDeskService {
    * when every bill is paid that way no invoice is raised at all, because even
    * a zero invoice draws a number from the gapless series. An ADVANCE bill is
    * raised on an invoice of its own: that invoice's money is the advance.
+   *
+   * CLAIMED FIRST (0321): the bills, and the advance bills they take from, are
+   * claimed before anything is read for the plan or a number is drawn, and let
+   * go at the end. A second raise of the same bill, or of another bill spending
+   * the same advance, is refused (`BILL_BUSY`) with nothing numbered; without it
+   * two clicks made two invoices for one bill, and two raises both spent the last
+   * of one advance.
    */
   async raise(
     input: RaiseFromDuesInput,
@@ -223,9 +241,47 @@ export class BillingDeskService {
     if (ids.length > MAX_DUES_PER_INVOICE) {
       throw new InvalidBillingInput(`One invoice can carry at most ${String(MAX_DUES_PER_INVOICE)} bills.`);
     }
+    const seen = await this.deps.desk.findMany(input.tenantId, ids);
+    for (const id of ids) {
+      if (!seen.some((d) => d.id === id)) throw new BillingDueNotFound(id);
+    }
+    const claimed = [...ids, ...poolsOf(seen)];
+    if (!(await this.deps.desk.claim(input.tenantId, claimed))) {
+      throw new BillBusy("one of these bills, or the advance it is taken off,");
+    }
+    try {
+      return await this.raiseClaimed(input, ids, claimed, actor);
+    } finally {
+      await this.deps.desk.release(input.tenantId, claimed);
+    }
+  }
+
+  /** The raise itself, on bills (and advances) this request holds. Read again
+   *  now that they are held: the plan is made from what is true, not from what
+   *  was true before somebody else finished. */
+  private async raiseClaimed(
+    input: RaiseFromDuesInput,
+    ids: readonly string[],
+    claimed: string[],
+    actor: Actor,
+  ): Promise<{
+    readonly invoiceId: string | null;
+    readonly number: string | null;
+    readonly covered: readonly string[];
+    readonly conflicts: readonly string[];
+  }> {
     const found = await this.deps.desk.findMany(input.tenantId, ids);
     for (const id of ids) {
       if (!found.some((d) => d.id === id)) throw new BillingDueNotFound(id);
+    }
+    // An advance a bill now takes from that was not held (another advance ran
+    // out meanwhile): hold it too, or refuse.
+    const extra = poolsOf(found).filter((id) => !claimed.includes(id));
+    if (extra.length > 0) {
+      if (!(await this.deps.desk.claim(input.tenantId, extra))) {
+        throw new BillBusy("the advance these bills are taken off");
+      }
+      claimed.push(...extra);
     }
     const dues = [...found].sort(
       (a, b) =>
@@ -256,13 +312,25 @@ export class BillingDeskService {
       if (!isAmount(tax) || Number(tax) > 100) {
         throw new InvalidBillingInput(`The tax rate for ${describeDue(d)} must be a percentage from 0 to 100.`);
       }
-      const amount = line.amount?.trim() ?? d.amount;
+      const typed = line.amount?.trim() ?? "";
+      const amount = typed === "" ? d.amount : typed;
       if (amount === null || amount === "") throw new DueNeedsAnAmount(describeDue(d));
       if (!isAmount(amount)) {
         throw new InvalidBillingInput(`The amount for ${describeDue(d)} must be a number with at most four decimals.`);
       }
-      return { due: d, amount, tax };
+      // A bill is for something (0321): a zero invoice line is not a tax
+      // invoice anybody should send. A bill that will not be billed is skipped.
+      if (compareAmounts(amount, "0") <= 0) {
+        throw new InvalidBillingInput(`The amount for ${describeDue(d)} must be more than zero. Skip the bill if it will not be billed.`);
+      }
+      // Changing a price the letter fixed is for somebody who can SEE it.
+      const changed = d.amount !== null && compareAmounts(amount, d.amount) !== 0;
+      if (changed && input.callerSeesFees !== true) throw new PriceNotVisible(describeDue(d));
+      return { due: d, amount, tax, changedFrom: changed ? d.amount : null };
     });
+    // Before anything is written: a refusal here leaves no bill covered and no
+    // number drawn.
+    const rate = this.rateFor(dues, input);
 
     // FIFO, before tax, on the digits: what each bill takes from its advance.
     const left = new Map<string, string>();
@@ -302,8 +370,6 @@ export class BillingDeskService {
     }
     if (toInvoice.length === 0) return { invoiceId: null, number: null, covered, conflicts };
 
-    const rate = this.rateFor(dues, input);
-
     const invoice = await this.deps.invoices.raise(
       {
         tenantId: input.tenantId,
@@ -325,10 +391,7 @@ export class BillingDeskService {
         tenantId: input.tenantId,
         invoiceId: invoice.id,
         engagementId: p.due.engagementIds[0],
-        description: lineDescription(
-          p.due,
-          p.applied === null ? null : { fee: p.amount, applied: p.applied.amount, invoiceNumber: p.applied.invoiceNumber },
-        ),
+        description: lineDescription(p.due, p.applied === null ? null : { invoiceNumber: p.applied.invoiceNumber }),
         quantity: "1",
         unitAmount: p.balance,
         taxPercent: p.tax,
@@ -351,18 +414,55 @@ export class BillingDeskService {
           invoiceLineId: line.id,
           how: "raised",
           ...(applied === null ? {} : { advanceInvoiceId: applied.invoiceId, advanceApplied: applied.amount }),
+          // A price the letter fixed, billed at another figure (0321): both, so
+          // "who changed it and from what" is answerable later.
+          ...(p.changedFrom === null ? {} : { letterAmount: p.changedFrom, billedAmount: p.amount }),
         },
       });
     }
     return { invoiceId: invoice.id, number: invoice.number, covered, conflicts };
   }
 
-  /** The bill was raised by hand: say which invoice it is on. */
+  /**
+   * The bill was raised by hand: say which invoice it is on.
+   *
+   * THE INVOICE MUST BE THIS BILL'S (0321). Not another bill's advance invoice:
+   * that money is the advance, taken off bills as they are raised, and linking
+   * a period to it billed the period with it while it was still being taken off
+   * later bills. And an ADVANCE bill is linked only by an admin, to an invoice
+   * no other bill is on: a paid invoice starts the work, so linking one starts
+   * work as Approve start does, and linking an old invoice for other work
+   * started work with no advance paid.
+   */
   async link(
-    input: { readonly tenantId: string; readonly dueId: string; readonly invoiceId: string },
+    input: {
+      readonly tenantId: string;
+      readonly dueId: string;
+      readonly invoiceId: string;
+      /** The caller holds `tenant:admin`: may link an advance bill. */
+      readonly mayLinkAdvance?: boolean | undefined;
+    },
+    actor: Actor,
+  ): Promise<void> {
+    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    try {
+      await this.linkClaimed(input, actor);
+    } finally {
+      await this.deps.desk.release(input.tenantId, [input.dueId]);
+    }
+  }
+
+  private async linkClaimed(
+    input: {
+      readonly tenantId: string;
+      readonly dueId: string;
+      readonly invoiceId: string;
+      readonly mayLinkAdvance?: boolean | undefined;
+    },
     actor: Actor,
   ): Promise<void> {
     const due = await this.openDue(input.tenantId, input.dueId);
+    if (due.kind === "advance" && input.mayLinkAdvance !== true) throw new AdvanceLinkNeedsAdmin();
     const invoice = await this.deps.invoices.find(input.tenantId, input.invoiceId);
     if (invoice === null) throw new BillingInvoiceNotFound(input.invoiceId);
     if (invoice.status === "cancelled") throw new InvoiceDoesNotFitDue("it was cancelled.");
@@ -372,6 +472,15 @@ export class BillingDeskService {
     }
     if (invoice.currency !== due.currency) {
       throw new InvoiceDoesNotFitDue(`it is in ${invoice.currency}, and this bill is in ${due.currency}.`);
+    }
+    const use = await this.deps.desk.invoiceUse(input.tenantId, invoice.id);
+    if (use.asAdvance) {
+      throw new InvoiceDoesNotFitDue(
+        "it is the advance invoice of another bill. That money is the advance, and it comes off bills as they are raised.",
+      );
+    }
+    if (due.kind === "advance" && use.byBills > 0) {
+      throw new InvoiceDoesNotFitDue("other bills are already on it, so it is not this advance's invoice.");
     }
     if (!(await this.deps.desk.markInvoiced(input.tenantId, due.id, invoice.id, null))) {
       throw new BillingDueNotOpen(describeDue(due), "drafted");
@@ -394,8 +503,15 @@ export class BillingDeskService {
     }
   }
 
-  /** The firm decided this will not be billed. The reason is mandatory and
-   *  lives on the row only: it is prose about a client. */
+  /**
+   * The firm decided this will not be billed. The reason is mandatory and
+   * lives on the row only: it is prose about a client. Who may is the firm's
+   * `billing:skip` permission (0321, checked at the route).
+   *
+   * An ADVANCE may be skipped once no work waits on it (0321): an engagement
+   * ended before it started left its advance bill on the desk for good,
+   * escalating, with no way to clear it.
+   */
   async skip(
     input: { readonly tenantId: string; readonly dueId: string; readonly reason: string },
     actor: Actor,
@@ -403,19 +519,24 @@ export class BillingDeskService {
     const reason = input.reason.trim();
     if (reason.length === 0) throw new InvalidBillingInput("Say why this bill is being skipped.");
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
-    const due = await this.openDue(input.tenantId, input.dueId);
-    if (due.kind === "advance") throw new AdvanceNotSkippable();
-    const by = actor.type === "human" ? actor.id : null;
-    if (!(await this.deps.desk.skip(input.tenantId, due.id, by, reason))) {
-      throw new BillingDueNotOpen(describeDue(due), "skipped");
+    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    try {
+      const due = await this.openDue(input.tenantId, input.dueId);
+      if (due.kind === "advance" && due.advanceHoldsWork) throw new AdvanceNotSkippable();
+      const by = actor.type === "human" ? actor.id : null;
+      if (!(await this.deps.desk.skip(input.tenantId, due.id, by, reason))) {
+        throw new BillingDueNotOpen(describeDue(due), "skipped");
+      }
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "billing_due.skipped",
+        objectId: due.id,
+        actor,
+        payload: { partyId: due.party.id, periodStart: due.periodStart },
+      });
+    } finally {
+      await this.deps.desk.release(input.tenantId, [input.dueId]);
     }
-    await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
-      verb: "billing_due.skipped",
-      objectId: due.id,
-      actor,
-      payload: { partyId: due.party.id, periodStart: due.periodStart },
-    });
   }
 
   // ── Giving an unused advance back (0320) ─────────────────────────────────
@@ -435,18 +556,26 @@ export class BillingDeskService {
     input: { readonly tenantId: string; readonly dueId: string; readonly asOf?: string | undefined },
     actor: Actor,
   ): Promise<{ readonly id: string; readonly number: string }> {
-    const c = await this.refundCandidate(input.tenantId, input.dueId);
-    return this.deps.invoices.issueCreditNote(
-      {
-        tenantId: input.tenantId,
-        invoiceId: c.invoice.id,
-        amount: c.refundAmount,
-        reason: "advance_refund",
-        note: `Advance not used under ${c.advance.letter.ref}.`,
-        asOf: input.asOf,
-      },
-      actor,
-    );
+    // Held while the credit note is written (0321): a double click credited
+    // the same remainder twice. The second waits out the claim, then finds
+    // nothing left.
+    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    try {
+      const c = await this.refundCandidate(input.tenantId, input.dueId);
+      return await this.deps.invoices.issueCreditNote(
+        {
+          tenantId: input.tenantId,
+          invoiceId: c.invoice.id,
+          amount: c.refundAmount,
+          reason: "advance_refund",
+          note: `Advance not used under ${c.advance.letter.ref}.`,
+          asOf: input.asOf,
+        },
+        actor,
+      );
+    } finally {
+      await this.deps.desk.release(input.tenantId, [input.dueId]);
+    }
   }
 
   /** The firm keeps the advance (a cancellation fee, say): the reason is on
@@ -459,17 +588,23 @@ export class BillingDeskService {
     if (reason.length === 0) throw new InvalidBillingInput("Say why the firm is keeping this advance.");
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
     if (actor.type !== "human" || actor.id === null) throw new InvalidBillingInput("A person decides to keep an advance.");
-    const c = await this.refundCandidate(input.tenantId, input.dueId);
-    if (!(await this.deps.desk.waiveRefund(input.tenantId, c.advance.id, actor.id, reason))) {
-      throw new NothingToRefund("the firm has already decided to keep it.");
+    const by = actor.id;
+    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    try {
+      const c = await this.refundCandidate(input.tenantId, input.dueId);
+      if (!(await this.deps.desk.waiveRefund(input.tenantId, c.advance.id, by, reason))) {
+        throw new NothingToRefund("the firm has already decided to keep it.");
+      }
+      await this.deps.events.recordEvent({
+        tenantId: input.tenantId,
+        verb: "billing_due.refund_kept",
+        objectId: c.advance.id,
+        actor,
+        payload: { partyId: c.advance.party.id, invoiceId: c.invoice.id, remaining: c.remaining },
+      });
+    } finally {
+      await this.deps.desk.release(input.tenantId, [input.dueId]);
     }
-    await this.deps.events.recordEvent({
-      tenantId: input.tenantId,
-      verb: "billing_due.refund_kept",
-      objectId: c.advance.id,
-      actor,
-      payload: { partyId: c.advance.party.id, invoiceId: c.invoice.id, remaining: c.remaining },
-    });
   }
 
   private async refundCandidate(tenantId: string, dueId: string): Promise<RefundCandidate> {
@@ -511,6 +646,9 @@ export class BillingDeskService {
       }
       for (const [name, value] of [["first period", input.billingFrom], ["first invoice date", input.firstInvoiceOn]] as const) {
         if (!isCalendarDay(value)) throw new InvalidBillingInput(`The ${name} must be a real date (YYYY-MM-DD), not ${value}.`);
+        if (value < EARLIEST_SCHEDULE_DAY || value > LATEST_SCHEDULE_DAY) {
+          throw new InvalidBillingInput(`The ${name} must be between ${EARLIEST_SCHEDULE_DAY} and ${LATEST_SCHEDULE_DAY}, not ${value}.`);
+        }
       }
       const recurrence = recurrenceOfService(current.billingFrequency);
       if (recurrence === null) throw new NotBilledOnASchedule(current.billingFrequency ?? "unset");
@@ -518,6 +656,13 @@ export class BillingDeskService {
       if (recurrence !== "monthly" && fiscalYear === null) throw new FiscalYearNeeded();
       const [period] = periodsFrom(input.billingFrom, recurrence, 1, fiscalYear ?? 1);
       billingFrom = period?.start ?? input.billingFrom;
+      // An invoice dated before the period it bills has begun makes every
+      // later bill fall due early, so one sweep bills months not yet begun (0321).
+      if (input.firstInvoiceOn < billingFrom) {
+        throw new InvalidBillingInput(
+          `The first invoice cannot be dated before the first period it bills begins (${billingFrom}).`,
+        );
+      }
       firstInvoiceOn = input.firstInvoiceOn;
     }
 
@@ -556,7 +701,8 @@ export class BillingDeskService {
   async setAutoBilling(tenantId: string, on: boolean, actor: Actor): Promise<boolean> {
     const from = await this.deps.setting.isOn(tenantId);
     if (from === on) return on;
-    await this.deps.setting.set(tenantId, on);
+    // The day it goes on (0321): final bills are written for work finished from it.
+    await this.deps.setting.set(tenantId, on, await this.today(tenantId));
     await this.deps.events.recordEvent({
       tenantId,
       verb: "tenant.auto_billing_set",
@@ -605,7 +751,7 @@ export class BillingDeskService {
  *  advance it was reduced by (0320). */
 export function lineDescription(
   d: BillingDueRecord,
-  advance: { readonly fee: string; readonly applied: string; readonly invoiceNumber: string } | null = null,
+  advance: { readonly invoiceNumber: string } | null = null,
 ): string {
   return billLineText({
     kind: d.kind,
@@ -614,10 +760,18 @@ export function lineDescription(
     servedDays: d.servedDays,
     periodDays: d.periodDays,
     letterRef: d.letter.ref,
-    currency: d.currency,
     perService: d.engagementId !== null,
     advance,
   });
+}
+
+/** The advance bills these bills would be taken off, which a raise holds too. */
+function poolsOf(dues: readonly BillingDueRecord[]): string[] {
+  return [
+    ...new Set(
+      dues.flatMap((d) => (d.kind !== "advance" && d.advancePool !== null ? [d.advancePool.advanceDueId] : [])),
+    ),
+  ];
 }
 
 function describeDue(d: BillingDueRecord): string {

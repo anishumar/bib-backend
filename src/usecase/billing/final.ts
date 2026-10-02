@@ -199,14 +199,22 @@ export class FinalBiller {
   }
 }
 
+/**
+ * Ready for its final bill AUTOMATICALLY: every job done, no final bill yet,
+ * and (0321) neither billed by hand already nor finished before the firm
+ * switched automatic billing on. Switching on used to write a final bill for
+ * every audit the firm had ever finished, dated the day it finished, each
+ * overdue and escalated, most of them invoiced by hand long before. Bill it now
+ * is a person's own act and is not held to this.
+ */
 function ready(s: FinalBillSubject): boolean {
-  return (
-    !s.hasFinalBill &&
-    finalBillReady({
-      billingFrequency: s.billingFrequency,
-      jobStatuses: s.engagements.map((e) => e.job?.status ?? "none"),
-    })
-  );
+  if (s.hasFinalBill || s.billedByHand) return false;
+  if (!finalBillReady({ billingFrequency: s.billingFrequency, jobStatuses: s.engagements.map((e) => e.job?.status ?? "none") })) {
+    return false;
+  }
+  if (s.autoBillingSince === null) return true;
+  const finished = s.engagements.map((e) => e.job?.doneOn ?? null).filter((d): d is string => d !== null).sort().at(-1);
+  return finished !== undefined && finished >= s.autoBillingSince;
 }
 
 /** Why a subject may not be billed now, or null. A group is judged by its

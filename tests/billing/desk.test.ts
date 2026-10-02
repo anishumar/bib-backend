@@ -70,6 +70,7 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     advancePool: null,
     advanceApplied: null,
     released: null,
+    advanceHoldsWork: false,
     ...over,
   };
 }
@@ -422,6 +423,21 @@ describe("an engagement's billing schedule", () => {
     ).rejects.toMatchObject({ code: "FISCAL_YEAR_NEEDED" });
   });
 
+  it("refuses a first invoice dated before the period it bills, and a year typed wrong (0321)", async () => {
+    const w = world();
+    w.schedules.rows.push(schedule());
+    // Before October begins: every later bill would fall due a period early.
+    await expect(
+      w.service.setSchedule({ tenantId: FIRM, engagementId: ENG, billingFrom: "2026-10-01", firstInvoiceOn: "2026-09-30" }, ME),
+    ).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+    for (const day of ["1900-01-01", "9999-12-31"]) {
+      await expect(
+        w.service.setSchedule({ tenantId: FIRM, engagementId: ENG, billingFrom: "2026-10-01", firstInvoiceOn: day }, ME),
+      ).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
+    }
+    expect(w.events.recorded).toEqual([]);
+  });
+
   it("clears it, which stops billing that engagement", async () => {
     const w = world();
     w.schedules.rows.push(schedule({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" }));
@@ -446,6 +462,12 @@ describe("the firm's switch", () => {
     await w.service.setAutoBilling(FIRM, true, ME);
     expect(await w.service.autoBilling(FIRM)).toBe(true);
     expect(w.events.recorded[0]).toMatchObject({ verb: "tenant.auto_billing_set", payload: { from: false, to: true } });
+  });
+
+  it("records the firm's day it went on, from which final bills are written (0321)", async () => {
+    const w = world();
+    await w.service.setAutoBilling(FIRM, true, ME);
+    expect(w.setting.since.get(FIRM)).toBe("2026-12-05");
   });
 });
 

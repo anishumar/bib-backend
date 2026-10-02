@@ -71,6 +71,17 @@ describe("servedDays: how much of a period the firm actually served", () => {
 });
 
 describe("billingDues: which periods are due to be billed by today", () => {
+  it("never bills a period that has not begun, whatever the first invoice date (0321)", () => {
+    const dues = billingDues({
+      periods: [oct, nov, dec],
+      spanMonths: 1,
+      firstInvoiceOn: "2026-08-05",
+      today: "2026-10-21",
+      windows: [open],
+    });
+    expect(dues.map((d) => d.period.label)).toEqual(["Oct 2026"]);
+  });
+
   it("bills each month on the first invoice date plus one month per period (arrears)", () => {
     const dues = billingDues({
       periods: [oct, nov, dec],
@@ -292,6 +303,17 @@ describe("scheduleFor: the schedule an engagement gets when it goes live (0319)"
 
   it("rolls over a year end", () => {
     expect(scheduleFor(dec, "arrears", null).firstInvoiceOn).toBe("2027-01-01");
+  });
+
+  it("moves a letter's date that is before the first period forward by whole spans (0321)", () => {
+    // Drafted in July ("first invoice 5 August"), signed in October.
+    expect(scheduleFor(oct, "on_date", "2026-08-05")).toEqual({ billingFrom: "2026-10-01", firstInvoiceOn: "2026-10-05" });
+    // A quarter keeps its own span: 5 April becomes 5 October.
+    expect(scheduleFor(q3, "on_date", "2026-04-05").firstInvoiceOn).toBe("2026-10-05");
+    // A 31st is counted from the letter's own day each step, not carried short.
+    expect(scheduleFor(oct, "on_date", "2026-08-31").firstInvoiceOn).toBe("2026-10-31");
+    // On or after the first day, untouched.
+    expect(scheduleFor(oct, "on_date", "2026-10-01").firstInvoiceOn).toBe("2026-10-01");
   });
 });
 

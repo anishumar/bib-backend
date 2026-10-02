@@ -279,6 +279,35 @@ export class FakeBillingDueDesk implements BillingDueDesk {
     this.waived.push({ dueId, byUserId, reason });
     return Promise.resolve(true);
   }
+
+  /** Bills somebody else holds (0321): a test puts an id here to be "busy". */
+  readonly heldElsewhere = new Set<string>();
+  /** Every claim and release, in order, so a test sees what was held. */
+  readonly claims: { readonly op: "claim" | "release"; readonly ids: readonly string[] }[] = [];
+  private readonly held = new Set<string>();
+
+  claim(_t: string, dueIds: readonly string[]): Promise<boolean> {
+    if (dueIds.some((id) => this.held.has(id) || this.heldElsewhere.has(id))) return Promise.resolve(false);
+    for (const id of dueIds) this.held.add(id);
+    this.claims.push({ op: "claim", ids: [...dueIds] });
+    return Promise.resolve(true);
+  }
+
+  release(_t: string, dueIds: readonly string[]): Promise<void> {
+    for (const id of dueIds) this.held.delete(id);
+    this.claims.push({ op: "release", ids: [...dueIds] });
+    return Promise.resolve();
+  }
+
+  /** Held right now (a test asserts it is empty after an act). */
+  get holding(): readonly string[] {
+    return [...this.held];
+  }
+
+  invoiceUse(_t: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }> {
+    const rows = this.rows.filter((r) => r.invoice?.id === invoiceId && r.skipped === null);
+    return Promise.resolve({ asAdvance: rows.some((r) => r.kind === "advance"), byBills: rows.length });
+  }
 }
 
 export interface DraftedInvoice {
@@ -479,14 +508,17 @@ export class FakeFinalBillFacts implements FinalBillFacts {
 
 export class FakeAutoBillingSetting implements AutoBillingSetting {
   private readonly on = new Set<string>();
+  /** The day each firm last switched on (0321). */
+  readonly since = new Map<string, string>();
 
   isOn(tenantId: string): Promise<boolean> {
     return Promise.resolve(this.on.has(tenantId));
   }
 
-  set(tenantId: string, on: boolean): Promise<void> {
+  set(tenantId: string, on: boolean, since?: string): Promise<void> {
     if (on) this.on.add(tenantId);
     else this.on.delete(tenantId);
+    if (on && since !== undefined) this.since.set(tenantId, since);
     return Promise.resolve();
   }
 }

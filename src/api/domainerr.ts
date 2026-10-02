@@ -1035,7 +1035,12 @@ export function mapError(err: unknown): MappedError {
       case "BILL_NOW_REFUSED":
       case "AUTO_BILLING_OFF":
       case "NOTHING_TO_REFUND":
+      case "BILL_BUSY":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // Who may do it, not the request's shape: 403, and the sentence says who can.
+      case "ADVANCE_LINK_NEEDS_ADMIN":
+      case "PRICE_NOT_VISIBLE":
+        return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

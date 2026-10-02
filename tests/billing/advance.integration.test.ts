@@ -19,6 +19,7 @@
 //
 // Run with:  npx vitest run --config vitest.integration.config.ts tests/billing/advance.integration.test.ts
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { AdvanceNotSkippable, InvoiceDoesNotFitDue } from "../../src/domain/billing/errors";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
 import {
@@ -400,7 +401,8 @@ describe("the final bill and FIFO on a real database (0320)", () => {
       SELECT unit_amount::text, description FROM crm.invoice_line WHERE invoice_id = ${out.invoiceId ?? ""}
     `;
     expect(ln?.unit_amount).toBe("80000.0000");
-    expect(ln?.description).toMatch(/^Statutory audit FY 2025-26, final bill: fee INR 1,00,000.00 less advance INR 20,000.00 \(/);
+    // No amounts in the words (0321): the description is read without fees.
+    expect(ln?.description).toMatch(/^Statutory audit FY 2025-26, final bill, less advance \(INV\//);
     expect(await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR)).toEqual({ created: 0 });
   });
 
@@ -437,6 +439,191 @@ describe("the final bill and FIFO on a real database (0320)", () => {
     `;
     expect(cn).toEqual({ amount: "11800.0000", reason: "advance_refund" });
     expect(await desk.refunds(tenantId)).toEqual([]);
+  });
+});
+
+// ── 0321: what the end-to-end review found ──────────────────────────────────
+
+/** October's or November's bookkeeping for `engagementId`, as the sweep writes it. */
+async function periodDue(engagementId: string, month: "10" | "11"): Promise<string> {
+  const id = systemIds.newId();
+  await writer.insert(tenantId, [
+    {
+      id,
+      partyId: client,
+      issuingEntityPartyId: firm,
+      currency: "INR",
+      engagementId,
+      feeGroupId: null,
+      periodStart: `2026-${month}-01`,
+      periodEnd: month === "10" ? "2026-10-31" : "2026-11-30",
+      periodLabel: month === "10" ? "Oct 2026" : "Nov 2026",
+      billOn: month === "10" ? "2026-11-01" : "2026-12-01",
+      fullAmount: "30000",
+      servedDays: month === "10" ? 31 : 30,
+      periodDays: month === "10" ? 31 : 30,
+      managerUserId: manager,
+      managerHow: "spoc_manager",
+      managerNote: null,
+    },
+  ]);
+  return id;
+}
+
+/** A letter with an advance for the whole of it and monthly bookkeeping,
+ *  signed, its advance billed: the advance bill's id and the engagement's. */
+async function advancedLetter(advance: string): Promise<{ letterId: string; advId: string; booksId: string }> {
+  const letterId = await letter(advance);
+  const booksLine = await line(letterId, 1, books, "monthly", 30000);
+  const [booksId = ""] = await signAndFanOut(letterId, [booksLine]);
+  await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+  const adv = await advanceDue(letterId);
+  if (adv === undefined) throw new Error("no advance bill");
+  return { letterId, advId: adv.id, booksId };
+}
+
+async function raiseAndIssue(dueId: string): Promise<string> {
+  const out = await desk.raise({ tenantId, dueIds: [dueId], lines: [{ dueId, taxPercent: "18" }] }, me);
+  const invoiceId = out.invoiceId ?? "";
+  await invoicing.issue(tenantId, invoiceId, me, "2026-12-05");
+  return invoiceId;
+}
+
+describe("an advance cancelled and raised again (0321)", () => {
+  it("is not taken off later bills a second time", async () => {
+    const { letterId, advId, booksId } = await advancedLetter("20000");
+    const first = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: first, amount: "23600", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    // October takes the whole 20,000 and bills 10,000.
+    const oct = await periodDue(booksId, "10");
+    // The advance invoice is not October's to be linked to: that money is the advance.
+    await expect(desk.link({ tenantId, dueId: oct, invoiceId: first }, me)).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
+    await raiseAndIssue(oct);
+
+    // The advance invoice was wrong: cancelled, and raised again from its bill.
+    await invoicing.cancel(tenantId, first, { type: "human", id: admin });
+    const second = await raiseAndIssue(advId);
+    const [pool] = await owner<{ remaining: string; applied: string }[]>`
+      SELECT remaining::text, applied::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterId}
+    `;
+    expect(pool).toEqual({ remaining: "0.00", applied: "20000.0000" });
+
+    // November is billed in full: the advance was used once, by October.
+    const nov = await periodDue(booksId, "11");
+    const out = await desk.raise({ tenantId, dueIds: [nov], lines: [{ dueId: nov, taxPercent: "18" }] }, me);
+    const [ln] = await owner<{ unit_amount: string; description: string }[]>`
+      SELECT unit_amount::text, description FROM crm.invoice_line WHERE invoice_id = ${out.invoiceId ?? ""}
+    `;
+    expect(ln).toEqual({ unit_amount: "30000.0000", description: "Bookkeeping, Nov 2026" });
+    expect(second).not.toBe(first);
+  });
+
+  it("lets a bill it had covered be raised once it is cancelled, with no number wasted", async () => {
+    const { advId, booksId } = await advancedLetter("50000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "59000", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const oct = await periodDue(booksId, "10");
+    expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
+
+    await invoicing.cancel(tenantId, adv, { type: "human", id: admin });
+    expect((await desk.list({ tenantId })).dues.find((d) => d.id === oct)?.status).toBe("open");
+    const out = await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
+    expect(out.conflicts).toEqual([]);
+    expect((await desk.list({ tenantId })).dues.find((d) => d.id === oct)).toMatchObject({
+      status: "drafted",
+      invoice: { id: out.invoiceId },
+    });
+  });
+});
+
+describe("two people at once (0321)", () => {
+  it("makes ONE invoice when one bill is raised twice at the same moment", async () => {
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const count = async () =>
+      Number((await owner<{ n: string }[]>`SELECT count(*)::text AS n FROM crm.invoice WHERE tenant_id = ${tenantId}`)[0]?.n);
+    const before = await count();
+    const raise = () => desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me);
+    const results = await Promise.allSettled([raise(), raise()]);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect(await count()).toBe(before + 1);
+    const [held] = await owner<{ n: string }[]>`
+      SELECT count(*)::text AS n FROM crm.billing_due WHERE tenant_id = ${tenantId} AND claimed_at IS NOT NULL
+    `;
+    expect(held?.n).toBe("0");
+  });
+
+  it("gives an unused advance back ONCE when Give it back is pressed twice", async () => {
+    const letterId = await letter(null);
+    const auditLine = await line(letterId, 1, audit, "one_time", 30000, 40000);
+    const [auditId = ""] = await signAndFanOut(letterId, [auditLine]);
+    await advances.billAdvances({ tenantId, letterId }, SYSTEM_ACTOR);
+    const adv = await advanceDue(letterId);
+    const advInvoice = await raiseAndIssue(adv?.id ?? "");
+    await invoicing.recordPayment({ tenantId, invoiceId: advInvoice, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const jobId = await finishJob(auditId, "2026-12-01T05:00:00Z");
+    await finals.jobDone({ tenantId, jobId }, SYSTEM_ACTOR);
+    const fin = (await desk.list({ tenantId })).dues.find((d) => d.engagementId === auditId && d.kind === "final");
+    await desk.raise({ tenantId, dueIds: [fin?.id ?? ""], lines: [{ dueId: fin?.id ?? "", taxPercent: "18" }] }, me);
+
+    const give = () => desk.refund({ tenantId, dueId: adv?.id ?? "", asOf: "2026-12-05" }, { type: "human", id: admin });
+    await Promise.allSettled([give(), give()]);
+    const notes = await owner<{ amount: string }[]>`
+      SELECT amount::text FROM crm.credit_note WHERE invoice_id = ${advInvoice} AND reason = 'advance_refund'
+    `;
+    expect(notes).toEqual([{ amount: "11800.0000" }]);
+  });
+});
+
+describe("an advance nobody paid (0321)", () => {
+  it("does not start the work when a credit note zeroes it", async () => {
+    const { letterId, advId, booksId } = await advancedLetter("10000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "billing_error", asOf: "2026-12-05" }, { type: "human", id: admin });
+    expect(await statuses([booksId])).toEqual(["pending_advance"]);
+    expect((await gate.list(tenantId)).find((a) => a.engagementLetterId === letterId)?.state).toBe("unpaid");
+  });
+
+  it("may be skipped once no work waits on it, and not before", async () => {
+    const { advId, booksId } = await advancedLetter("15000");
+    await expect(desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me)).rejects.toBeInstanceOf(
+      AdvanceNotSkippable,
+    );
+    await owner`UPDATE crm.engagement SET status = 'cancelled', activated_at = coalesce(activated_at, now()) WHERE id = ${booksId}`;
+    await desk.skip({ tenantId, dueId: advId, reason: "Client did not go ahead" }, me);
+    expect((await desk.list({ tenantId })).dues.find((d) => d.id === advId)?.status).toBe("skipped");
+  });
+});
+
+describe("final bills when the switch goes on (0321)", () => {
+  it("are written only for work finished since, and never for work billed by hand", async () => {
+    await new PostgresAutoBillingSetting(app).set(tenantId, true, "2026-12-01");
+    const oneTime = async () => {
+      const l = await letter(null);
+      const ln = await line(l, 1, audit, "one_time", 25000);
+      const [e = ""] = await signAndFanOut(l, [ln]);
+      await owner`UPDATE crm.engagement SET status = 'active', activated_at = now() WHERE id = ${e}`;
+      return e;
+    };
+    const finalOf = async (e: string) =>
+      (await desk.list({ tenantId })).dues.find((d) => d.engagementId === e && d.kind === "final");
+
+    const old = await oneTime();
+    await finishJob(old, "2026-11-20T05:00:00Z");
+    const fresh = await oneTime();
+    await finishJob(fresh, "2026-12-03T05:00:00Z");
+    const byHand = await oneTime();
+    const hand = await invoicing.raise(
+      { tenantId, partyId: client, entityPartyId: firm, currency: "INR", fxRate: "1", fxRateDate: "2026-12-05", asOf: "2026-12-05" },
+      me,
+    );
+    await invoicing.addLine({ tenantId, invoiceId: hand.id, engagementId: byHand, description: "Audit, by hand", quantity: "1", unitAmount: "25000" });
+    await finishJob(byHand, "2026-12-04T05:00:00Z");
+
+    await finals.sweepTenant(tenantId);
+    expect(await finalOf(old)).toBeUndefined();
+    expect(await finalOf(fresh)).toMatchObject({ billOn: "2026-12-03" });
+    expect(await finalOf(byHand)).toBeUndefined();
   });
 });
 
