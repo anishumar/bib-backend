@@ -566,20 +566,10 @@ export function isLive(status: EngagementStatus): boolean {
 }
 
 // ── Pure rules ───────────────────────────────────────────────────────────────
-
-/**
- * Whether an engagement may start work.
- *
- * The fee gate, stated once. A letter that requires an advance releases its
- * engagements only when the advance has been recorded; one that does not
- * releases them at signature. Nothing else opens it — which is why this is a
- * function of the LETTER and not a flag somebody sets on the engagement.
- */
-export function mayActivate(
-  letter: Pick<EngagementLetter, "advanceRequired" | "advanceRecordedAt">,
-): boolean {
-  return !letter.advanceRequired || letter.advanceRecordedAt !== null;
-}
+//
+// (The fee gate `mayActivate` lived here until 0322: a letter that required an
+// advance released its engagements only once it was recorded. Since 0322 the
+// signature starts the work and the advance is chased, not waited for.)
 
 /**
  * What an engagement is doing TODAY.

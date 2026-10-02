@@ -1372,35 +1372,6 @@ export class PostgresEngagementRepository implements EngagementRepository {
     );
   }
 
-  async recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }> {
-    return withTenant(this.app, tenantId, async (db) => {
-      const [letter] = await db<LetterRow[]>`
-        UPDATE crm.engagement_letter
-           SET advance_recorded_at = ${at}::timestamptz, advance_recorded_by = ${recordedByUserId}
-         WHERE id = ${letterId} AND advance_recorded_at IS NULL
-        RETURNING ${db.unsafe(LETTER_COLUMNS)}
-      `;
-      // Same trick as the signature: `advance_recorded_at IS NULL` is the lock,
-      // so two clicks cannot both release the engagements.
-      if (!letter) {
-        throw new Error(`the advance on engagement letter ${letterId} was already recorded`);
-      }
-
-      const released = await db<EngagementRow[]>`
-        UPDATE crm.engagement
-           SET status = 'active', activated_at = ${at}::timestamptz
-         WHERE engagement_letter_id = ${letterId} AND status = 'pending_advance'
-        RETURNING ${db.unsafe(ENGAGEMENT_COLUMNS)}
-      `;
-      return { letter: toLetter(letter), released: released.map(toEngagement) };
-    });
-  }
-
   async releaseEngagements(
     tenantId: string,
     engagementIds: readonly string[],

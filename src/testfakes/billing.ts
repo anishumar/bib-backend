@@ -5,11 +5,19 @@
 // already written (the anti-join), and a second due for the same subject and
 // period is refused (the partial unique indexes), answering no id for it.
 import type { SpocWithManager } from "../domain/billing/model";
+import { DEFAULT_ADVANCE_POLICY, type AdvancePolicy } from "../domain/billing/advance";
 import { compareAmounts, subtractAmounts } from "../domain/money/model";
 import type { Actor } from "../domain/ledger/model";
 import type {
   AdvanceBillFacts,
+  AdvanceDigestLetter,
+  AdvanceDigestStore,
+  AdvanceDraftBlock,
+  AdvanceDrafter,
+  AdvancePeople,
+  AdvancePolicySource,
   AdvanceRecord,
+  AdvanceReminderFacts,
   AutoBillingFirms,
   AutoBillingSetting,
   BillingDueDesk,
@@ -19,15 +27,17 @@ import type {
   BillingSchedules,
   BillingSubject,
   DueFilters,
+  BillingMailer,
   FinalBillFacts,
   FinalBillSubject,
   FiscalYearSource,
   InvoiceDrafter,
+  IssuerTaxDefaults,
   LetterAdvanceFacts,
   NewBillingDue,
+  PersonRef,
   RefundCandidate,
   ScheduleRecord,
-  SpocDuty,
   WorkRelease,
 } from "../usecase/billing/ports";
 
@@ -131,8 +141,12 @@ export class FakeBillingDueDesk implements BillingDueDesk {
   readonly rows: BillingDueRecord[] = [];
   /** Who is SPOC for which client and Dept (the fake ignores the day). */
   readonly spocs: { userId: string; clientPartyId: string; deptCode: string }[] = [];
-  /** What `spocDutiesOf` was asked, so a test can see the day it was cut on. */
-  readonly spocsAskedOn: { userId: string; onDate: string }[] = [];
+  /** What `mine` lists were asked, so a test can see the day they were cut on. */
+  readonly mineAskedOn: { userId: string; onDate: string }[] = [];
+  /** advance invoice id → the day it was issued. */
+  readonly issuedOn = new Map<string, string>();
+  /** advance bill id → an invoice raised by hand that bills its work (0322). */
+  readonly handRaised = new Map<string, { invoiceId: string; number: string }>();
   /** invoice id → status, for the derivation. */
   readonly invoiceStatus = new Map<string, string>();
   /** Bills the advance paid in full (0320). */
@@ -157,27 +171,38 @@ export class FakeBillingDueDesk implements BillingDueDesk {
     };
   }
 
+  /** The adapter's filters, in the same order of meaning: pending unless
+   *  asked, `all` newest first, and `mine` decided before anything is cut. */
   list(_t: string, filters: DueFilters): Promise<readonly BillingDueRecord[]> {
-    return Promise.resolve(
-      this.rows
-        .map((r) => this.derive(r))
-        .filter((r) => filters.status === undefined || r.status === filters.status)
-        .filter((r) => filters.partyId === undefined || r.party.id === filters.partyId),
-    );
+    const status = filters.status ?? "pending";
+    const mine = filters.mine;
+    if (mine !== undefined) this.mineAskedOn.push({ userId: mine.userId, onDate: mine.today });
+    const rows = this.rows
+      .map((r) => this.derive(r))
+      .filter((r) =>
+        status === "all" ? true : status === "pending" ? r.status === "open" || r.status === "drafted" : r.status === status,
+      )
+      .filter((r) => filters.partyId === undefined || r.party.id === filters.partyId)
+      .filter((r) => {
+        if (mine === undefined) return true;
+        if ((r.status !== "open" && r.status !== "drafted") || r.kind === "advance") return false;
+        const escalated = daysFrom(r.billOn, mine.today) >= mine.escalateAfterDays;
+        const spoc = this.spocs.some(
+          (s) => s.userId === mine.userId && s.clientPartyId === r.party.id && r.deptCodes.includes(s.deptCode),
+        );
+        return (
+          r.manager?.userId === mine.userId ||
+          (escalated && r.managerReportsTo?.userId === mine.userId) ||
+          (r.fullAmount === null && r.status === "open" && (mine.isAdmin || spoc))
+        );
+      });
+    return Promise.resolve(status === "all" ? rows.reverse() : rows);
   }
 
   findMany(_t: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]> {
     return Promise.resolve(this.rows.filter((r) => ids.includes(r.id)).map((r) => this.derive(r)));
   }
 
-  spocDutiesOf(_t: string, userId: string, onDate: string): Promise<readonly SpocDuty[]> {
-    this.spocsAskedOn.push({ userId, onDate });
-    return Promise.resolve(
-      this.spocs
-        .filter((s) => s.userId === userId)
-        .map((s) => ({ clientPartyId: s.clientPartyId, deptCode: s.deptCode })),
-    );
-  }
 
   skip(_t: string, dueId: string, byUserId: string | null, reason: string): Promise<boolean> {
     const i = this.rows.findIndex((r) => r.id === dueId);
@@ -207,7 +232,8 @@ export class FakeBillingDueDesk implements BillingDueDesk {
     if (applied !== null && !this.take(applied)) return Promise.resolve(false);
     this.rows[i] = {
       ...row,
-      invoice: { id: invoiceId, number: "?", status: this.invoiceStatus.get(invoiceId) ?? "draft" },
+      // A draft has no number until it is issued (0322).
+      invoice: { id: invoiceId, number: null, status: this.invoiceStatus.get(invoiceId) ?? "draft" },
       advanceApplied: applied === null ? null : { invoiceId: applied.invoiceId, invoiceNumber: "?", amount: applied.amount },
     };
     return Promise.resolve(true);
@@ -242,23 +268,13 @@ export class FakeBillingDueDesk implements BillingDueDesk {
         .filter((r) => r.kind === "advance")
         .filter((r) => filter.dueId === undefined || r.id === filter.dueId)
         .filter((r) => filter.invoiceId === undefined || r.invoice?.id === filter.invoiceId)
-        .map((r) => ({ ...r, balance: r.invoice === null ? null : (this.balances.get(r.invoice.id) ?? null) })),
+        .map((r) => ({
+          ...r,
+          balance: r.invoice === null ? null : (this.balances.get(r.invoice.id) ?? null),
+          invoiceIssuedOn: r.invoice === null ? null : (this.issuedOn.get(r.invoice.id) ?? null),
+          handRaised: r.status === "open" ? (this.handRaised.get(r.id) ?? null) : null,
+        })),
     );
-  }
-
-  markReleased(_t: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean> {
-    const i = this.rows.findIndex((r) => r.id === dueId);
-    const row = this.rows[i];
-    if (row === undefined || row.released !== null) return Promise.resolve(false);
-    this.rows[i] = {
-      ...row,
-      released: {
-        at: "2026-12-05T06:00:00.000Z",
-        how,
-        by: byUserId === null ? null : { userId: byUserId, displayName: null, email: "x@example.test" },
-      },
-    };
-    return Promise.resolve(true);
   }
 
   refundCandidates(_t: string, filter: { readonly dueId?: string | undefined } = {}): Promise<readonly RefundCandidate[]> {
@@ -312,7 +328,8 @@ export class FakeBillingDueDesk implements BillingDueDesk {
 
 export interface DraftedInvoice {
   readonly id: string;
-  readonly number: string;
+  /** Null: a draft is numbered when it is issued (0322). */
+  readonly number: string | null;
   readonly partyId: string;
   readonly entityPartyId: string;
   readonly currency: string;
@@ -336,12 +353,16 @@ export class FakeInvoiceDrafter implements InvoiceDrafter {
   readonly invoices: DraftedInvoice[] = [];
   private n = 0;
 
-  raise(input: Parameters<InvoiceDrafter["raise"]>[0], _actor: Actor): Promise<{ id: string; number: string }> {
+  /** Who asked for each draft, in order. */
+  readonly actors: Actor[] = [];
+
+  raise(input: Parameters<InvoiceDrafter["raise"]>[0], actor: Actor): Promise<{ id: string; number: string | null }> {
     this.n += 1;
+    this.actors.push(actor);
     const id = `00000000-0000-4000-8000-${String(this.n).padStart(12, "0")}`;
     const invoice: DraftedInvoice = {
       id,
-      number: `INV/2026-27/${String(this.n).padStart(4, "0")}`,
+      number: null,
       partyId: input.partyId,
       entityPartyId: input.entityPartyId,
       currency: input.currency,
@@ -427,37 +448,189 @@ export class FakeBillingSchedules implements BillingSchedules {
 export class FakeAdvanceBillFacts implements AdvanceBillFacts {
   /** `${tenant}|${letter}` → facts. */
   readonly letters = new Map<string, LetterAdvanceFacts>();
-  /** tenant → letters still owing a bill; a test states it. */
+  /** tenant → letters the catch-up visits; a test states it. */
   readonly owing = new Map<string, string[]>();
+  /** Advance bills already put on an invoice (a test, or the drafter, says). */
+  readonly drafted = new Set<string>();
+
+  /** With the writer, the undrafted advance bills are READ from the bills
+   *  written, as the adapter reads them. */
+  constructor(private readonly writer: FakeBillingDueWriter | null = null) {}
 
   advanceFactsOf(tenantId: string, letterId: string): Promise<LetterAdvanceFacts | null> {
     return Promise.resolve(this.letters.get(`${tenantId}|${letterId}`) ?? null);
   }
 
-  lettersOwingAdvanceBills(tenantId: string): Promise<readonly string[]> {
+  lettersOwingAdvance(tenantId: string): Promise<readonly string[]> {
     return Promise.resolve(this.owing.get(tenantId) ?? []);
   }
 
-  firmsOwingAdvanceBills(): Promise<readonly string[]> {
+  firmsOwingAdvance(): Promise<readonly string[]> {
     return Promise.resolve([...this.owing.keys()]);
+  }
+
+  undraftedAdvanceBills(tenantId: string, letterId: string): Promise<readonly string[]> {
+    return Promise.resolve(
+      (this.writer?.dues ?? [])
+        .filter((d) => d.tenantId === tenantId && d.kind === "advance" && d.engagementLetterId === letterId)
+        .filter((d) => !this.drafted.has(d.id))
+        .map((d) => d.id),
+    );
   }
 }
 
-/** Records what the gate released; the release itself is the
+/** Records which letters' waiting work was started; the start itself is the
  *  EngagementService's, tested there. */
 export class FakeWorkRelease implements WorkRelease {
-  readonly letters: { letterId: string; byUserId: string }[] = [];
-  readonly engagements: string[] = [];
+  readonly letters: string[] = [];
+  /** letter → how many engagements it had waiting. */
+  readonly waiting = new Map<string, number>();
 
-  recordAdvance(_t: string, letterId: string, recordedByUserId: string): Promise<unknown> {
-    this.letters.push({ letterId, byUserId: recordedByUserId });
-    return Promise.resolve({});
+  startWaitingWork(_t: string, letterId: string): Promise<{ readonly started: number }> {
+    this.letters.push(letterId);
+    const started = this.waiting.get(letterId) ?? 0;
+    this.waiting.delete(letterId);
+    return Promise.resolve({ started });
+  }
+}
+
+/** Drafts what it is asked to, or answers the block a test states; records
+ *  every ask, and marks the bill drafted on the facts it is given. */
+export class FakeAdvanceDrafter implements AdvanceDrafter {
+  readonly asked: { dueId: string; actor: Actor }[] = [];
+  /** due id → the block to answer instead of drafting. */
+  readonly blocks = new Map<string, AdvanceDraftBlock>();
+  /** due ids that throw, as a failing raise would. */
+  readonly failing = new Set<string>();
+
+  constructor(private readonly facts: FakeAdvanceBillFacts | null = null) {}
+
+  draftAdvance(_t: string, dueId: string, actor: Actor): Promise<{ readonly invoiceId: string } | { readonly blocked: AdvanceDraftBlock }> {
+    this.asked.push({ dueId, actor });
+    if (this.failing.has(dueId)) return Promise.reject(new Error("the raise failed"));
+    const blocked = this.blocks.get(dueId);
+    if (blocked !== undefined) return Promise.resolve({ blocked });
+    this.facts?.drafted.add(dueId);
+    return Promise.resolve({ invoiceId: `inv-${dueId}` });
+  }
+}
+
+export class FakeIssuerTaxDefaults implements IssuerTaxDefaults {
+  /** entity → rate. */
+  readonly rates = new Map<string, string>();
+
+  list(): Promise<readonly { readonly entityPartyId: string; readonly taxPercent: string }[]> {
+    return Promise.resolve([...this.rates].map(([entityPartyId, taxPercent]) => ({ entityPartyId, taxPercent })));
   }
 
-  releaseEngagementAdvance(_t: string, engagementId: string): Promise<unknown> {
-    this.engagements.push(engagementId);
-    return Promise.resolve([]);
+  set(_t: string, entityPartyId: string, taxPercent: string): Promise<void> {
+    this.rates.set(entityPartyId, taxPercent);
+    return Promise.resolve();
   }
+}
+
+export class FakeAdvancePolicy implements AdvancePolicySource {
+  policy: AdvancePolicy = DEFAULT_ADVANCE_POLICY;
+
+  policyFor(): Promise<AdvancePolicy> {
+    return Promise.resolve(this.policy);
+  }
+
+  setPolicy(_t: string, policy: AdvancePolicy): Promise<void> {
+    this.policy = policy;
+    return Promise.resolve();
+  }
+}
+
+/** Who is reminded, as a test states it: per client, its SPOCs by Dept, its
+ *  Key Manager and the partner above. The partner walk itself is SQL, and
+ *  proven against Postgres. */
+export class FakeAdvanceReminderFacts implements AdvanceReminderFacts {
+  /** `${client}|${dept}` → SPOCs. */
+  readonly spocs = new Map<string, PersonRef[]>();
+  readonly keyManagers = new Map<string, PersonRef>();
+  /** client → the partner above its Key Manager. */
+  readonly partners = new Map<string, PersonRef>();
+  readonly adminList: (PersonRef & { readonly seesFees: boolean })[] = [];
+  /** The rank each `peopleFor` was asked with. */
+  readonly askedRanks: number[] = [];
+
+  peopleFor(
+    _t: string,
+    advances: readonly { readonly dueId: string; readonly partyId: string; readonly deptCodes: readonly string[] }[],
+    _onDate: string,
+    partnerMinRank: number,
+  ): Promise<ReadonlyMap<string, AdvancePeople>> {
+    this.askedRanks.push(partnerMinRank);
+    const out = new Map<string, AdvancePeople>();
+    for (const a of advances) {
+      const spocs = a.deptCodes.flatMap((d) => this.spocs.get(`${a.partyId}|${d}`) ?? []);
+      out.set(a.dueId, {
+        spocs: spocs.filter((p, i) => spocs.findIndex((q) => q.userId === p.userId) === i),
+        keyManager: this.keyManagers.get(a.partyId) ?? null,
+        partner: this.partners.get(a.partyId) ?? null,
+      });
+    }
+    return Promise.resolve(out);
+  }
+
+  admins(): Promise<readonly (PersonRef & { readonly seesFees: boolean })[]> {
+    return Promise.resolve(this.adminList);
+  }
+}
+
+/** The week's claim, as the table's unique key and six-day rule make it. */
+export class FakeAdvanceDigestStore implements AdvanceDigestStore {
+  readonly firms: string[] = [];
+  readonly names = new Map<string, string>();
+  /** `${tenant}|${weekOf}` → what was recorded. */
+  readonly weeks = new Map<string, { sent: boolean; recipients: number; advances: number }>();
+
+  firmsWithPendingAdvances(): Promise<readonly string[]> {
+    return Promise.resolve(this.firms);
+  }
+
+  firmName(tenantId: string): Promise<string | null> {
+    return Promise.resolve(this.names.get(tenantId) ?? null);
+  }
+
+  claim(tenantId: string, weekOf: string): Promise<boolean> {
+    const key = `${tenantId}|${weekOf}`;
+    if (this.weeks.has(key)) return Promise.resolve(false);
+    const recent = [...this.weeks.keys()].some((k) => {
+      const [t, w = ""] = k.split("|");
+      const back = daysFrom(w, weekOf);
+      return t === tenantId && back > 0 && back < 6;
+    });
+    if (recent) return Promise.resolve(false);
+    this.weeks.set(key, { sent: false, recipients: 0, advances: 0 });
+    return Promise.resolve(true);
+  }
+
+  markSent(tenantId: string, weekOf: string, recipients: number, advances: number): Promise<void> {
+    this.weeks.set(`${tenantId}|${weekOf}`, { sent: true, recipients, advances });
+    return Promise.resolve();
+  }
+}
+
+export class FakeBillingMailer implements BillingMailer {
+  readonly sent: AdvanceDigestLetter[] = [];
+  /** Addresses the relay refuses. */
+  readonly refusing = new Set<string>();
+
+  sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void> {
+    if (this.refusing.has(letter.to)) return Promise.reject(new Error(`relay refused ${letter.to}`));
+    this.sent.push(letter);
+    return Promise.resolve();
+  }
+}
+
+function daysFrom(from: string, to: string): number {
+  const ms = (s: string): number => {
+    const [y = 0, m = 1, d = 1] = s.split("-").map(Number);
+    return Date.UTC(y, m - 1, d);
+  };
+  return Math.round((ms(to) - ms(from)) / 86_400_000);
 }
 
 export class FakeFinalBillFacts implements FinalBillFacts {

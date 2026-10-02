@@ -154,7 +154,7 @@ import { makeLeadFakes } from "../../src/testfakes/lead";
 import { makeProposalFakes } from "../../src/testfakes/proposal";
 import { FakeEngagementLifecycle, makeEngagementFakes } from "../../src/testfakes/engagement";
 import { makeDocumentFakes, makeFirmEntityFakes } from "../../src/testfakes/document";
-import { makeInvoiceFakes } from "../../src/testfakes/invoice";
+import { FakeFirmEntities, makeInvoiceFakes } from "../../src/testfakes/invoice";
 import { FakeDunningLadder, FakeDunningRepo } from "../../src/testfakes/dunning";
 import {
   FakeCheckerDirectory,
@@ -165,7 +165,7 @@ import {
 import { DunningService } from "../../src/usecase/dunning/service";
 import { InvoiceService } from "../../src/usecase/invoice/service";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
-import { AdvanceGate } from "../../src/usecase/billing/advance";
+import { AdvanceDesk } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import {
   FakeAutoBillingSetting,
@@ -174,7 +174,9 @@ import {
   FakeBillingDueWriter,
   FakeBillingManagerFacts,
   FakeFinalBillFacts,
-  FakeWorkRelease,
+  FakeIssuerTaxDefaults,
+  FakeAdvancePolicy,
+  FakeAdvanceReminderFacts,
   FakeBillingSchedules,
   FakeFiscalYearSource,
   FakeInvoiceDrafter,
@@ -645,8 +647,18 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
         events: new RecordingEventSink(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        policy: new FakeAdvancePolicy(),
+        firmEntities: new FakeFirmEntities(),
       }),
-      gate: new AdvanceGate({ desk: new FakeBillingDueDesk(), work: new FakeWorkRelease(), events: new RecordingEventSink() }),
+      advances: new AdvanceDesk({
+        desk: new FakeBillingDueDesk(),
+        policy: new FakeAdvancePolicy(),
+        people: new FakeAdvanceReminderFacts(),
+        taxDefaults: new FakeIssuerTaxDefaults(),
+        timeZones: new FakeFirmTimeZone(),
+        clock: new FakeClock(),
+      }),
       finals: new FinalBiller({
         facts: new FakeFinalBillFacts(),
         dues: new FakeBillingDueWriter(),

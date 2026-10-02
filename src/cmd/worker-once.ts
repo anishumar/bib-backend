@@ -157,17 +157,30 @@ async function main(): Promise<void> {
     if (noYear > 0) {
       console.log(`  ${String(noYear)} quarterly or yearly bill(s) wait for the firm's financial year to be set`);
     }
-    // THE ADVANCE AND THE FINAL BILL (0320): letters still owing an advance
-    // bill (every firm), and one-time work finished with no final bill yet.
+    // THE ADVANCE AND THE FINAL BILL (0320, 0322): signed letters whose advance
+    // still needs something (every firm: work from before 0322 started, a bill
+    // written, its invoice drafted), and one-time work finished with no final
+    // bill yet. Then the weekly advance summary, for firms whose slot has come.
     const advances = await wired.advanceBills.catchUp();
     const finals = await wired.finalBills.sweep();
     for (const r of [...advances, ...finals]) {
       if (r.failure !== undefined) console.log(`  advance/final bills: firm ${r.tenantId} could not be visited — ${r.failure}`);
     }
     const advanceCount = advances.reduce((n, r) => n + r.created, 0);
+    const draftedCount = advances.reduce((n, r) => n + r.drafted, 0);
+    const startedCount = advances.reduce((n, r) => n + r.started, 0);
     const finalCount = finals.reduce((n, r) => n + r.created, 0);
+    if (startedCount > 0) console.log(`  ${String(startedCount)} engagement(s) waiting on an advance started (signed before 0322)`);
     if (advanceCount > 0) console.log(`  ${String(advanceCount)} advance bill(s) written for signed letters`);
+    if (draftedCount > 0) console.log(`  ${String(draftedCount)} advance invoice(s) drafted`);
     if (finalCount > 0) console.log(`  ${String(finalCount)} final bill(s) written for finished one-time work`);
+    for (const r of await wired.advanceDigest.sweep()) {
+      if (r.failure !== undefined) {
+        console.log(`  advance summary: firm ${r.tenantId} could not be visited — ${r.failure}`);
+      } else if (r.recipients > 0) {
+        console.log(`  advance summary for the week of ${r.weekOf}: ${String(r.advances)} advance(s), sent to ${String(r.recipients)}`);
+      }
+    }
     console.log();
 
     // THE COMPLIANCE CALENDAR (T3.2), last, and after the spawn on purpose: an

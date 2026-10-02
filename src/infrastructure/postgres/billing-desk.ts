@@ -26,7 +26,6 @@ import type {
   PersonRef,
   RefundCandidate,
   ScheduleRecord,
-  SpocDuty,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
 import { BILLING_TIMINGS, type BillingTiming } from "../../domain/billing/model";
@@ -80,11 +79,6 @@ interface DueRow {
   advance_invoice_id: string | null;
   advance_invoice_number: string | null;
   advance_applied: string | null;
-  released_at: string | null;
-  released_how: string | null;
-  released_by_id: string | null;
-  released_by_name: string | null;
-  released_by_email: string | null;
   pool_advance_due_id: string | null;
   pool_invoice_id: string | null;
   pool_invoice_number: string | null;
@@ -153,10 +147,6 @@ function toRecord(r: DueRow): BillingDueRecord {
       r.advance_invoice_id === null || r.advance_applied === null
         ? null
         : { invoiceId: r.advance_invoice_id, invoiceNumber: r.advance_invoice_number ?? "", amount: r.advance_applied },
-    released:
-      r.released_at === null || (r.released_how !== "paid" && r.released_how !== "approved")
-        ? null
-        : { at: r.released_at, how: r.released_how, by: person(r.released_by_id, r.released_by_name, r.released_by_email) },
     advanceHoldsWork: r.advance_holds_work,
   };
 }
@@ -170,7 +160,7 @@ const DUE_SELECT = `
          subj.letter_id, subj.letter_ref, subj.fx_rate::text AS fx_rate, subj.fx_rate_date::text AS fx_rate_date,
          d.period_start::text AS period_start, d.period_end::text AS period_end, d.period_label,
          d.bill_on::text AS bill_on, d.full_amount::text AS full_amount, d.amount::text AS amount,
-         d.served_days, d.period_days,
+         d.served_days, d.period_days, d.created_at AS bill_created_at,
          d.manager_user_id AS manager_id, mu.display_name AS manager_name, mu.email::text AS manager_email,
          d.manager_how, d.manager_note,
          boss.user_id AS boss_id, bu.display_name AS boss_name, bu.email::text AS boss_email,
@@ -188,9 +178,6 @@ const DUE_SELECT = `
          su.email::text AS skipped_by_email, d.skip_reason,
          tax.tax_percent::text AS last_tax_percent,
          d.advance_invoice_id, adv.number AS advance_invoice_number, d.advance_applied::text AS advance_applied,
-         ${isoInstant("d.released_at", "released_at")}, d.released_how,
-         d.released_by_user_id AS released_by_id, ru.display_name AS released_by_name,
-         ru.email::text AS released_by_email,
          pool.advance_due_id AS pool_advance_due_id,
          pool.invoice_id AS pool_invoice_id, pool.invoice_number AS pool_invoice_number,
          pool.remaining::text AS pool_remaining,
@@ -214,7 +201,6 @@ const DUE_SELECT = `
      AND boss.audience = 'STAFF' AND boss.is_active
     LEFT JOIN tenancy.user_account bu ON bu.id = boss.user_id
     LEFT JOIN tenancy.user_account su ON su.id = d.skipped_by_user_id
-    LEFT JOIN tenancy.user_account ru ON ru.id = d.released_by_user_id
     LEFT JOIN crm.invoice adv ON adv.id = d.advance_invoice_id AND adv.tenant_id = d.tenant_id
     JOIN LATERAL (
       SELECT array_agg(e.id ORDER BY ll.position, e.id) AS engagement_ids,
@@ -282,14 +268,53 @@ const DUE_SELECT = `
 export class PostgresBillingDueDesk implements BillingDueDesk {
   constructor(private readonly app: Db) {}
 
+  /**
+   * The bills, every filter IN THE QUERY, before the ceiling (review item 14).
+   * Pending (open or drafted) unless asked otherwise, oldest first; `all` is
+   * history too, NEWEST first, so a ceiling drops the oldest and never today's.
+   */
   async list(tenantId: string, filters: DueFilters): Promise<readonly BillingDueRecord[]> {
+    const status = filters.status ?? "pending";
+    const mine = filters.mine;
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<DueRow[]>`
         SELECT * FROM (${db.unsafe(DUE_SELECT)}) due
          WHERE true
-           ${filters.status === undefined ? db`` : db`AND due.status = ${filters.status}`}
+           ${
+             status === "all"
+               ? db``
+               : status === "pending"
+                 ? db`AND due.status IN ('open', 'drafted')`
+                 : db`AND due.status = ${status}`
+           }
            ${filters.partyId === undefined ? db`` : db`AND due.party_id = ${filters.partyId}`}
-         ORDER BY due.bill_on, due.party_name, due.period_start, due.id
+           ${
+             mine === undefined
+               ? db``
+               : db`
+           AND due.status IN ('open', 'drafted')
+           -- An advance is chased by its own reminders (0322), not as a bill.
+           AND due.kind <> 'advance'
+           AND (due.manager_id = ${mine.userId}
+                OR (due.boss_id = ${mine.userId}
+                    AND due.bill_on::date <= ${mine.today}::date - ${mine.escalateAfterDays}::int)
+                OR (due.full_amount IS NULL AND due.status = 'open'
+                    AND (${mine.isAdmin}::boolean OR EXISTS (
+                      SELECT 1
+                        FROM crm.client_assignment a
+                        JOIN tenancy.service_axis x
+                          ON x.id = a.axis_id AND x.tenant_id = a.tenant_id AND x.axis = 'dept'
+                        JOIN tenancy.membership m
+                          ON m.tenant_id = a.tenant_id AND m.user_id = a.user_id
+                         AND m.audience = 'STAFF' AND m.is_active
+                       WHERE a.user_id = ${mine.userId}
+                         AND a.role = 'spoc'
+                         AND a.client_party_id = due.party_id
+                         AND x.code = ANY(due.dept_codes)
+                         AND a.valid_from <= ${mine.today}::date
+                         AND (a.valid_to IS NULL OR a.valid_to > ${mine.today}::date)))))`
+           }
+         ORDER BY ${status === "all" ? db`due.bill_on DESC` : db`due.bill_on`}, due.party_name, due.period_start, due.id
          LIMIT ${MAX_LIST_ROWS}
       `;
       return rows.map(toRecord);
@@ -307,24 +332,6 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     });
   }
 
-  async spocDutiesOf(tenantId: string, userId: string, onDate: string): Promise<readonly SpocDuty[]> {
-    return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ client_party_id: string; dept_code: string }[]>`
-        SELECT DISTINCT a.client_party_id, x.code AS dept_code
-          FROM crm.client_assignment a
-          JOIN tenancy.service_axis x
-            ON x.id = a.axis_id AND x.tenant_id = a.tenant_id AND x.axis = 'dept'
-          JOIN tenancy.membership m
-            ON m.tenant_id = a.tenant_id AND m.user_id = a.user_id
-           AND m.audience = 'STAFF' AND m.is_active
-         WHERE a.user_id = ${userId}
-           AND a.role = 'spoc'
-           AND a.valid_from <= ${onDate}::date
-           AND (a.valid_to IS NULL OR a.valid_to > ${onDate}::date)
-      `;
-      return rows.map((r) => ({ clientPartyId: r.client_party_id, deptCode: r.dept_code }));
-    });
-  }
 
   async skip(tenantId: string, dueId: string, byUserId: string | null, reason: string): Promise<boolean> {
     return withTenant(this.app, tenantId, async (db) => {
@@ -404,10 +411,42 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     filter: { readonly invoiceId?: string | undefined; readonly dueId?: string | undefined },
   ): Promise<readonly AdvanceRecord[]> {
     return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<(DueRow & { invoiced: string | null; paid: string | null; outstanding: string | null })[]>`
-        SELECT due.*, b.invoiced::text AS invoiced, b.paid::text AS paid, b.outstanding::text AS outstanding
+      const rows = await db<
+        (DueRow & {
+          invoiced: string | null;
+          paid: string | null;
+          outstanding: string | null;
+          invoice_issued_on: string | null;
+          hand_invoice_id: string | null;
+          hand_invoice_number: string | null;
+        })[]
+      >`
+        SELECT due.*, b.invoiced::text AS invoiced, b.paid::text AS paid, b.outstanding::text AS outstanding,
+               inv.issued_on::text AS invoice_issued_on,
+               hand.id AS hand_invoice_id, hand.number AS hand_invoice_number
           FROM (${db.unsafe(DUE_SELECT)}) due
           LEFT JOIN crm.invoice_balance b ON b.invoice_id = due.invoice_id
+          LEFT JOIN crm.invoice inv ON inv.id = due.invoice_id
+          -- RAISED BY HAND (0322, review item 12): an issued invoice, not
+          -- cancelled, with a line on this advance's work, issued no later
+          -- than the day this bill was written, that no bill is on and that is
+          -- no bill's advance invoice. Very likely the advance a firm invoiced
+          -- itself before 0322: no automatic draft is made for it, and the
+          -- screen offers to Link it instead. A month billed by hand AFTER the
+          -- bill was written is not mistaken for it.
+          LEFT JOIN LATERAL (
+            SELECT hi.id, hi.number
+              FROM crm.invoice_line hl
+              JOIN crm.invoice hi ON hi.id = hl.invoice_id AND hi.tenant_id = hl.tenant_id
+             WHERE hl.engagement_id = ANY(due.engagement_ids)
+               AND hl.removed_at IS NULL
+               AND hi.status = 'issued'
+               AND hi.issued_on <= due.bill_created_at::date
+               AND NOT EXISTS (SELECT 1 FROM crm.billing_due x
+                                WHERE x.invoice_id = hi.id OR x.advance_invoice_id = hi.id)
+             ORDER BY hi.issued_on DESC, hi.id
+             LIMIT 1
+          ) hand ON due.status = 'open'
          WHERE due.kind = 'advance'
            ${filter.invoiceId === undefined ? db`` : db`AND due.invoice_id = ${filter.invoiceId}`}
            ${filter.dueId === undefined ? db`` : db`AND due.id = ${filter.dueId}`}
@@ -420,19 +459,12 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
           r.invoiced === null || r.paid === null || r.outstanding === null
             ? null
             : { invoiced: r.invoiced, paid: r.paid, outstanding: r.outstanding },
+        invoiceIssuedOn: r.invoice_issued_on,
+        handRaised:
+          r.hand_invoice_id === null || r.hand_invoice_number === null
+            ? null
+            : { invoiceId: r.hand_invoice_id, number: r.hand_invoice_number },
       }));
-    });
-  }
-
-  async markReleased(tenantId: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean> {
-    return withTenant(this.app, tenantId, async (db) => {
-      const rows = await db<{ id: string }[]>`
-        UPDATE crm.billing_due
-           SET released_at = now(), released_how = ${how}, released_by_user_id = ${byUserId}
-         WHERE id = ${dueId} AND kind = 'advance' AND released_at IS NULL
-        RETURNING id
-      `;
-      return rows.length === 1;
     });
   }
 

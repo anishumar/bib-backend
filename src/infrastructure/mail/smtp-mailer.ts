@@ -28,6 +28,7 @@ import type {
   ProposalLetter,
   ProposalMailer,
 } from "../../usecase/proposal/ports";
+import type { AdvanceDigestLetter, AdvanceDigestRow, BillingMailer } from "../../usecase/billing/ports";
 import { longDay } from "../../domain/day";
 
 /**
@@ -74,7 +75,7 @@ export interface MailTransport {
  *  tenant, and the FIRM is named in the invite's own text. */
 const PRODUCT = "BiB";
 
-export class SmtpMailer implements Mailer, ProposalMailer {
+export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
   constructor(private readonly transport: MailTransport) {}
 
   sendMagicLink(to: string, url: string, expiresAt: string): Promise<void> {
@@ -526,6 +527,101 @@ export class SmtpMailer implements Mailer, ProposalMailer {
       ]),
     });
   }
+
+  /**
+   * The weekly summary of advances to a firm's administrator (0322).
+   *
+   * Ashish: "once every week it should escalate to ceo coo ... through system
+   * notification/email". It goes to a COLLEAGUE about the firm's own money, so
+   * it names the firm in the subject (one person may administer two firms) and
+   * says plainly that the work has started: the summary exists because the
+   * advance no longer holds it. Amounts only where the reader may see fees (the
+   * use case leaves them out otherwise). No client data beyond what the
+   * administrator already sees on the Advances list.
+   */
+  sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void> {
+    const firm = headerSafe(letter.firmName);
+    const count = letter.rows.length;
+    const what = count === 1 ? "1 advance" : `${String(count)} advances`;
+    const hello = headerSafe(letter.recipientName);
+    const intro =
+      `${count === 1 ? "This advance was" : "These advances were"} signed a week or more ago and ` +
+      `${count === 1 ? "is" : "are"} not paid yet. The work has started.`;
+    const lines = letter.rows.map(digestLine);
+
+    const text = [
+      hello === null ? "Hello," : `Hello ${hello},`,
+      ``,
+      intro,
+      ``,
+      ...lines.map((l) => `- ${l}`),
+      ``,
+      `Open the advances:`,
+      letter.advancesUrl,
+      ``,
+      `You get this every week as an administrator${firm === null ? "" : ` of ${firm}`} on ${PRODUCT}.`,
+    ].join("\n");
+
+    return this.transport.send({
+      to: letter.to,
+      subject: `${what} not paid yet${firm === null ? "" : ` · ${firm}`}`,
+      text,
+      html: page([
+        paragraph(esc(hello === null ? "Hello," : `Hello ${hello},`)),
+        paragraph(esc(intro)),
+        `<ul style="margin:0 0 16px;padding-left:20px">` +
+          lines.map((l) => `<li style="margin:0 0 6px">${esc(l)}</li>`).join("") +
+          `</ul>`,
+        button(letter.advancesUrl, "Open the advances"),
+        paragraph(
+          `<span style="font-size:13px;color:#666">` +
+            esc(`You get this every week as an administrator${firm === null ? "" : ` of ${firm}`} on ${PRODUCT}.`) +
+            `</span>`,
+        ),
+        fallback(letter.advancesUrl),
+      ]),
+    });
+  }
+}
+
+/** One advance as a line: whose, which letter, where it stands, for how long. */
+function digestLine(r: AdvanceDigestRow): string {
+  const stage =
+    r.stage === "on_draft"
+      ? "invoice is a draft, not issued yet"
+      : r.stage === "unpaid"
+        ? `${r.invoiceNumber ?? "invoice"} issued, not paid`
+        : r.stage === "part_paid"
+          ? `${r.invoiceNumber ?? "invoice"} part paid`
+          : r.stage === "not_raised"
+            ? "no invoice yet"
+            : "paid";
+  const owed = r.amount === null ? "" : `, ${digestMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
+  const days = r.daysSinceSigned === 1 ? "1 day" : `${String(r.daysSinceSigned)} days`;
+  return `${r.clientName}, ${r.letterRef} (${r.serviceName}): ${stage}${owed}. Signed ${days} ago.`;
+}
+
+/**
+ * Money as the screens write it: rupees in lakhs ("INR 1,18,000"), every other
+ * currency in its own thousands, no ".00" on a whole amount. Grouped from the
+ * western string rather than asked of `en-IN`, which a Node built with small
+ * ICU silently answers as en-US. Never a JavaScript number: Intl formats the
+ * decimal string exactly.
+ */
+function digestMoney(amount: string, currency: string): string {
+  const whole = /^-?\d+(\.0+)?$/.test(amount);
+  const western = new Intl.NumberFormat("en-US", {
+    minimumFractionDigits: whole ? 0 : 2,
+    maximumFractionDigits: whole ? 0 : 2,
+  }).format(amount as unknown as number);
+  if (currency !== "INR") return `${currency} ${western}`;
+  const negative = western.startsWith("-");
+  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
+  const digits = integer.replace(/,/g, "");
+  const last = digits.slice(-3);
+  const rest = digits.slice(0, -3);
+  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
+  return `INR ${negative ? "-" : ""}${[...pairs, last].join(",")}${fraction === undefined ? "" : `.${fraction}`}`;
 }
 
 /**

@@ -11,10 +11,13 @@
 //   with no engagements is a client committed to work nobody scheduled, and
 //   engagements with no signature is work nobody agreed to.
 //
-//   ACTIVATION is gated on the advance. An engagement starts `pending_advance`
-//   whenever the letter requires one, and `contract.activated` — the event the
-//   scheduler consumes from T2.4 — is not emitted until it is recorded. That is
-//   what makes the fee gate real rather than advisory.
+//   ACTIVATION is the signature (0322). Until then the advance gated it: an
+//   engagement started `pending_advance` whenever the letter required one, and
+//   `contract.activated` — the event the scheduler consumes from T2.4 — waited
+//   for the advance. Ashish (2026-10-02): "work can be started and parallelly
+//   the system should keep on notifying", because the advance "generally comes
+//   within 5 to 15 days of starting of work". So every engagement starts active
+//   and the advance is drafted and chased by the billing use case instead.
 import type { IdGen } from "../../platform/ids";
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
@@ -40,7 +43,6 @@ import {
   isJurisdiction,
   isLetterCopyable,
   letterDeletionBlock,
-  mayActivate,
   normalizeJurisdiction,
   resolveEffectiveFrom,
 } from "../../domain/engagement/model";
@@ -55,10 +57,8 @@ import {
 } from "../../domain/document/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../../domain/document/model";
 import {
-  AdvanceAlreadyRecorded,
   InvalidLetterBillingTiming,
   AdvanceAmountRequired,
-  AdvanceNotRequired,
   AlreadySuperseded,
   ClauseLawNotIssuers,
   ClauseNotFound,
@@ -2743,13 +2743,12 @@ export class EngagementService {
     // engagement the letter creates.
     //
     // The DATE gate is deliberately not a second status. `active` means the
-    // commercial gates are open — signed, and paid when an advance was
-    // required; whether work has STARTED is `effectiveFrom` against the
-    // calendar, reported as `pending_start` by `engagementState`. Storing that
-    // as a status would need something to move the row on the day, and nothing
-    // here runs on a timer: a state nothing can leave is worse than a date
-    // nothing has reached. See migration 0022.
-    const releasedNow = mayActivate(letter);
+    // commercial gate is open — signed (since 0322 the advance holds nothing);
+    // whether work has STARTED is `effectiveFrom` against the calendar,
+    // reported as `pending_start` by `engagementState`. Storing that as a
+    // status would need something to move the row on the day, and nothing here
+    // runs on a timer: a state nothing can leave is worse than a date nothing
+    // has reached. See migration 0022.
     // BOTH parties, and from different places on purpose. The CLIENT comes from
     // the letter — it is who the firm is billing, and it is the same for every
     // line. The ENTITY comes from the LINE, because an engagement is
@@ -2763,10 +2762,10 @@ export class EngagementService {
       engagementLetterLineId: line.id,
       partyId: letter.partyId,
       entityPartyId: line.entityPartyId,
-      // A service with its OWN advance waits for it whatever the letter says
-      // (0320); the others start with the letter's gate.
-      status: releasedNow && line.advanceAmount === null ? ("active" as const) : ("pending_advance" as const),
-      activatedAt: releasedNow && line.advanceAmount === null ? at : null,
+      // Every engagement starts active (0322): the advance, the letter's or a
+      // service's own, is drafted and chased, and holds no work.
+      status: "active" as const,
+      activatedAt: at,
       effectiveFrom: resolveEffectiveFrom(
         line.effectiveFrom,
         letter.effectiveFrom,
@@ -2818,24 +2817,20 @@ export class EngagementService {
       },
     });
 
-    // One `contract.activated` per engagement that is actually released — the
-    // scheduler consumes these from T2.4, and an engagement waiting on an
-    // advance must not produce one.
+    // One `contract.activated` per engagement — the scheduler consumes these
+    // from T2.4, and spawns the work the letter agreed (0322: at once).
     for (const engagement of result.engagements) {
       if (engagement.status === "active") await this.recordActivation(engagement, actor);
     }
-    // The letter's billing terms, for the work that started today. Those
-    // waiting on an advance are scheduled when it is recorded, from that day:
-    // billing them from the signature would bill months nobody worked.
+    // The letter's billing terms, for the work that started today.
     await this.scheduleGoLive(
       input.tenantId,
       result.engagements.filter((e) => e.status === "active").map((e) => e.id),
       signatureDay,
       actor,
     );
-    // The advance bill (0320): every advance is a tax invoice, and the work it
-    // holds starts when that invoice is paid.
-    if (result.engagements.some((e) => e.status === "pending_advance")) {
+    // The advance (0320, 0322): a bill, and its tax invoice drafted at once.
+    if (letter.advanceRequired || lines.some((l) => l.advanceAmount !== null)) {
       await this.billAdvances(input.tenantId, letter.id, actor);
     }
     return {
@@ -2845,10 +2840,10 @@ export class EngagementService {
   }
 
   /**
-   * Ask the billing desk for the advance bill(s) a signed letter owes (0320).
-   * After the signature is committed and never undoing it, for the reason
-   * `scheduleGoLive` gives: if it fails, the daily billing sweep writes the
-   * bill, and the work waits on it either way.
+   * Ask the billing desk for the advance bill(s) a signed letter owes and
+   * their draft invoices (0320, 0322). After the signature is committed and
+   * never undoing it, for the reason `scheduleGoLive` gives: if it fails, the
+   * daily catch-up writes and drafts it, and the work has started either way.
    */
   private async billAdvances(tenantId: string, letterId: string, actor: Actor): Promise<void> {
     const billing = this.deps.advanceBilling ?? null;
@@ -2961,26 +2956,30 @@ export class EngagementService {
   }
 
   /**
-   * Record the advance, and release everything waiting on it.
-   *
-   * THE HONEST LIMIT, stated where somebody will read it: a person asserts the
-   * money arrived, because billing (T3.4) and payments (T3.5) do not exist yet.
-   * The GATE is real — no advance, no `contract.activated`, no jobs — but its
-   * confirmation is an attestation until the payments module can replace it.
+   * WORK SIGNED BEFORE 0322 THAT STILL WAITS ON ITS ADVANCE STARTS (the user,
+   * 2026-10-02: the letters stuck at deploy get "kaam shuru + draft"). The
+   * billing catch-up calls this, then drafts the advance. Each engagement
+   * records its `contract.activated` (the scheduler spawns its work) and its
+   * billing is scheduled from today: billing from the signature would bill
+   * months nobody worked. `status = 'pending_advance'` in the write is the
+   * lock, so a second call starts nothing and records nothing.
    */
-  /**
-   * ONE SERVICE'S OWN ADVANCE IS SETTLED (0320): its invoice was paid in full,
-   * or an admin approved starting on a part payment. The billing desk decides
-   * that; this releases the work. `status = 'pending_advance'` in the write is
-   * the lock, so a second call releases nothing and records nothing.
-   */
-  async releaseEngagementAdvance(
-    tenantId: string,
-    engagementId: string,
-    actor: Actor,
-  ): Promise<readonly EngagementRecord[]> {
+  async startWaitingWork(tenantId: string, letterId: string, actor: Actor): Promise<{ readonly started: number }> {
+    const letter = await this.findOrThrow(tenantId, letterId);
+    const waiting = (await this.deps.letters.listEngagements(tenantId, letterId))
+      .filter((e) => e.status === "pending_advance")
+      .map((e) => e.id);
+    if (waiting.length === 0) return { started: 0 };
     const at = this.deps.clock.now().toISOString();
-    const released = await this.deps.letters.releaseEngagements(tenantId, [engagementId], at);
+    const released = await this.deps.letters.releaseEngagements(tenantId, waiting, at);
+    if (released.length === 0) return { started: 0 };
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "engagement_letter.work_started_before_advance",
+      objectId: letter.id,
+      actor,
+      payload: { partyId: letter.partyId, startedEngagements: released.length },
+    });
     for (const engagement of released) await this.recordActivation(engagement, actor);
     await this.scheduleGoLive(
       tenantId,
@@ -2988,46 +2987,7 @@ export class EngagementService {
       await this.firmDay(tenantId),
       actor,
     );
-    return this.withState(tenantId, released);
-  }
-
-  async recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    actor: Actor,
-  ): Promise<{ letter: EngagementLetter; released: readonly EngagementRecord[] }> {
-    const letter = await this.findOrThrow(tenantId, letterId);
-    if (!letter.advanceRequired) throw new AdvanceNotRequired();
-    if (letter.advanceRecordedAt !== null) {
-      throw new AdvanceAlreadyRecorded(letter.advanceRecordedAt);
-    }
-
-    const at = this.deps.clock.now().toISOString();
-    const result = await this.deps.letters.recordAdvance(tenantId, letterId, recordedByUserId, at);
-
-    await this.deps.events.recordEvent({
-      tenantId,
-      verb: "engagement_letter.advance_recorded",
-      objectId: letter.id,
-      actor,
-      payload: {
-        partyId: letter.partyId,
-        amount: letter.advanceAmount,
-        currency: letter.currency,
-        recordedByUserId,
-        releasedEngagements: result.released.length,
-      },
-    });
-    for (const engagement of result.released) await this.recordActivation(engagement, actor);
-    // Billing starts with the work: from the day the advance came in.
-    await this.scheduleGoLive(
-      tenantId,
-      result.released.map((e) => e.id),
-      await this.firmDay(tenantId),
-      actor,
-    );
-    return { letter: result.letter, released: await this.withState(tenantId, result.released) };
+    return { started: released.length };
   }
 
   /**
@@ -3050,8 +3010,8 @@ export class EngagementService {
    * back down — more typing than it saved.
    *
    * EVERY engagement comes back, including the ones that cannot be billed yet:
-   * `pending_advance` means the letter asked for an advance nobody has
-   * recorded. Filtering them out here would leave a screen unable to explain
+   * `pending_advance` means work signed before 0322 that still waits on its
+   * advance. Filtering them out here would leave a screen unable to explain
    * why a service the client signed for is missing from the picker, which is
    * the blank-versus-absent failure this codebase has now paid for several
    * times. The caller decides what to OFFER; this says what is true.

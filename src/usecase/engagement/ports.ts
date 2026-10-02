@@ -104,6 +104,8 @@ export interface GoLiveBilling {
  * desk's `AdvanceBiller`, so neither use case imports the other. Every advance
  * is a tax invoice, and the work it holds starts when that invoice is paid.
  */
+/** A signed letter's advance becomes a bill and a draft invoice (0320, 0322),
+ *  satisfied by the billing use case. */
 export interface AdvanceBilling {
   billAdvances(input: { readonly tenantId: string; readonly letterId: string }, actor: Actor): Promise<unknown>;
 }
@@ -504,8 +506,9 @@ export interface NewEngagement {
   /** Who the work is for, taken from the LINE rather than the letter — that is
    *  the whole point of G0.1. */
   readonly entityPartyId: string;
-  /** `active` when the letter needs no advance, `pending_advance` when it does.
-   *  Decided by the domain's `mayActivate`, never by the adapter. */
+  /** `active`: since 0322 the advance no longer holds the work, so every
+   *  engagement a signature creates starts active (`pending_advance` was the
+   *  0320 gate's, and survives only on work signed before 0322). */
   readonly status: EngagementStatus;
   readonly activatedAt: string | null;
   /** Resolved once, here, from line → letter → signature date. NOT NULL in the
@@ -935,18 +938,9 @@ export interface EngagementRepository {
   /** The acceptance recorded for this letter (0317), or null. */
   findRecordedAcceptance(tenantId: string, letterId: string): Promise<RecordedAcceptance | null>;
 
-  /** Records the advance and releases every engagement waiting on it, in one
-   *  transaction for the same reason. */
-  recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }>;
-
-  /** One service's own advance was settled (0320): these engagements become
-   *  active. Only those still `pending_advance`: the write is the lock, so a
-   *  second call answers none. */
+  /** Work signed before 0322 that still waits on its advance starts (0322's
+   *  catch-up): these engagements become active. Only those still
+   *  `pending_advance`: the write is the lock, so a second call answers none. */
   releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]>;
 
   listEngagements(tenantId: string, letterId: string): Promise<readonly Engagement[]>;

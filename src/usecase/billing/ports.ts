@@ -2,7 +2,7 @@
 // thing this use case needs from outside, stated in its own vocabulary and
 // satisfied by an adapter in `infrastructure/postgres`.
 import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
-import type { BillKind } from "../../domain/billing/advance";
+import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
 
 /**
@@ -197,15 +197,9 @@ export interface BillingDueRecord {
     readonly invoiceNumber: string;
     readonly amount: string;
   } | null;
-  /** An advance bill: when the work it held started, and how (0320). */
-  readonly released: {
-    readonly at: string;
-    readonly how: "paid" | "approved";
-    readonly by: PersonRef | null;
-  } | null;
-  /** An advance bill some engagement still waits on (`pending_advance`).
-   *  False for every other kind of bill. Such an advance cannot be skipped
-   *  (0321): the work it holds would never start. */
+  /** An advance bill some engagement still waits on (`pending_advance`, only
+   *  work signed before 0322 until the catch-up starts it). False for every
+   *  other kind of bill. Such an advance cannot be skipped (0321). */
   readonly advanceHoldsWork: boolean;
 }
 
@@ -216,6 +210,12 @@ export interface AdvanceRecord extends BillingDueRecord {
     readonly paid: string;
     readonly outstanding: string;
   } | null;
+  /** The advance invoice's date, once issued: unpaid is counted from it. */
+  readonly invoiceIssuedOn: string | null;
+  /** An issued invoice not cancelled already bills this advance's work and is
+   *  on no bill: very likely the advance raised by hand before 0322. The
+   *  automatic draft is not made; Link it instead (0322, review item 12). */
+  readonly handRaised: { readonly invoiceId: string; readonly number: string } | null;
 }
 
 /** An advance on an issued invoice, with what is left of it and whether the
@@ -240,22 +240,34 @@ export interface RefundCandidate {
   readonly waived: { readonly at: string; readonly by: PersonRef | null; readonly reason: string } | null;
 }
 
-export interface DueFilters {
-  readonly status?: DueStatus | undefined;
-  readonly partyId?: string | undefined;
-}
+/**
+ * Which bills a list returns. `pending` (open or drafted) is the default:
+ * the bills still to raise or issue. `all` is history as well, NEWEST first,
+ * so the list's ceiling drops the oldest rather than today's (review item 14).
+ */
+export type DueStatusFilter = DueStatus | "pending" | "all";
 
-/** One client and Dept a person is SPOC for, on a given day. */
-export interface SpocDuty {
-  readonly clientPartyId: string;
-  readonly deptCode: string;
+export interface DueFilters {
+  readonly status?: DueStatusFilter | undefined;
+  readonly partyId?: string | undefined;
+  /**
+   * What this person must act on, decided IN THE QUERY before the list's
+   * ceiling (review item 14: applied after it, a large firm's newest bills
+   * fell off My day silently). Pending bills that are theirs as the manager,
+   * their reports' once `escalateAfterDays` have passed, and a bill with no
+   * price where they are the client's SPOC for that Dept or an admin. Advance
+   * bills are left out: their reminders are the advance's own (0322).
+   */
+  readonly mine?: {
+    readonly userId: string;
+    readonly isAdmin: boolean;
+    readonly today: string;
+    readonly escalateAfterDays: number;
+  } | undefined;
 }
 
 export interface BillingDueDesk {
   list(tenantId: string, filters: DueFilters): Promise<readonly BillingDueRecord[]>;
-  /** The clients and Depts this person is the SPOC for on `onDate` (the
-   *  firm's day), as an active staff member. */
-  spocDutiesOf(tenantId: string, userId: string, onDate: string): Promise<readonly SpocDuty[]>;
   findMany(tenantId: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]>;
   /** Each refuses (answers false) when the due is no longer open, in the
    *  write's own WHERE: two people on one list must not both settle it. */
@@ -282,9 +294,6 @@ export interface BillingDueDesk {
     tenantId: string,
     filter: { readonly invoiceId?: string | undefined; readonly dueId?: string | undefined },
   ): Promise<readonly AdvanceRecord[]>;
-  /** The work this advance held started. `released_at IS NULL` in the write is
-   *  the lock: answers false when somebody else got there first. */
-  markReleased(tenantId: string, dueId: string, how: "paid" | "approved", byUserId: string | null): Promise<boolean>;
   refundCandidates(tenantId: string, filter?: { readonly dueId?: string | undefined }): Promise<readonly RefundCandidate[]>;
   waiveRefund(tenantId: string, dueId: string, byUserId: string, reason: string): Promise<boolean>;
   /**
@@ -380,19 +389,116 @@ export interface LetterAdvanceFacts {
 
 export interface AdvanceBillFacts {
   advanceFactsOf(tenantId: string, letterId: string): Promise<LetterAdvanceFacts | null>;
-  /** Signed letters with work waiting on an advance and no advance bill for it. */
-  lettersOwingAdvanceBills(tenantId: string): Promise<readonly string[]>;
+  /**
+   * Signed letters whose advance still needs the catch-up (0322): work
+   * waiting on it from before 0322 (`pending_advance`), an advance asked for
+   * with no bill written, or an advance bill never drafted (no tax rate when
+   * it was written, say). Not letters whose advance was recorded by hand
+   * before 0320: that work started long ago.
+   */
+  lettersOwingAdvance(tenantId: string): Promise<readonly string[]>;
   /** GLOBAL, ids only: the firms with such letters. */
-  firmsOwingAdvanceBills(): Promise<readonly string[]>;
+  firmsOwingAdvance(): Promise<readonly string[]>;
+  /** The letter's advance bills that were never on an invoice and are not
+   *  skipped: the ones an automatic draft is for. */
+  undraftedAdvanceBills(tenantId: string, letterId: string): Promise<readonly string[]>;
 }
 
-/** Releases the work an advance held, satisfied structurally by the
- *  EngagementService so neither use case imports the other. */
+/** Starts work that was signed while the advance still held it (before 0322),
+ *  satisfied structurally by the EngagementService so neither use case
+ *  imports the other. Answers how many engagements started. */
 export interface WorkRelease {
-  /** The letter-wide advance: every engagement of the letter still waiting. */
-  recordAdvance(tenantId: string, letterId: string, recordedByUserId: string, actor: Actor): Promise<unknown>;
-  /** One service's own advance. */
-  releaseEngagementAdvance(tenantId: string, engagementId: string, actor: Actor): Promise<unknown>;
+  startWaitingWork(tenantId: string, letterId: string, actor: Actor): Promise<{ readonly started: number }>;
+}
+
+/** Why an advance bill was not drafted (0322). */
+export type AdvanceDraftBlock = "no_tax_rate" | "billed_by_hand" | "not_open";
+
+/** Drafts an advance bill's invoice (0322), satisfied by the billing desk. */
+export interface AdvanceDrafter {
+  draftAdvance(
+    tenantId: string,
+    dueId: string,
+    actor: Actor,
+  ): Promise<{ readonly invoiceId: string } | { readonly blocked: AdvanceDraftBlock }>;
+}
+
+/** A company's default tax rate (0322): what an automatic draft puts on its
+ *  line when the work was never invoiced. */
+export interface IssuerTaxDefaults {
+  list(tenantId: string): Promise<readonly { readonly entityPartyId: string; readonly taxPercent: string }[]>;
+  set(tenantId: string, entityPartyId: string, taxPercent: string): Promise<void>;
+}
+
+/** The firm's advance reminder policy (0322, on the tenant row). */
+export interface AdvancePolicySource {
+  policyFor(tenantId: string): Promise<AdvancePolicy>;
+  setPolicy(tenantId: string, policy: AdvancePolicy): Promise<void>;
+}
+
+/** Who is reminded about one advance (0322): active staff only, in force on
+ *  the day. */
+export interface AdvancePeople {
+  /** The client's SPOCs for the Depts of the work the advance covers. */
+  readonly spocs: readonly PersonRef[];
+  readonly keyManager: PersonRef | null;
+  /** The first person above the Key Manager on the reporting line whose grade
+   *  rank is at least the firm's `partnerMinRank`. */
+  readonly partner: PersonRef | null;
+}
+
+export interface AdvanceReminderFacts {
+  peopleFor(
+    tenantId: string,
+    advances: readonly { readonly dueId: string; readonly partyId: string; readonly deptCodes: readonly string[] }[],
+    onDate: string,
+    partnerMinRank: number,
+  ): Promise<ReadonlyMap<string, AdvancePeople>>;
+  /** The firm's administrators (the CEO and the COO at the first firm), active
+   *  staff holding `tenant:admin`, with whether each may see fees. */
+  admins(tenantId: string): Promise<readonly (PersonRef & { readonly seesFees: boolean })[]>;
+}
+
+/** The weekly summary's record (0322). */
+export interface AdvanceDigestStore {
+  /** GLOBAL, ids only: firms with at least one advance still pending. */
+  firmsWithPendingAdvances(): Promise<readonly string[]>;
+  firmName(tenantId: string): Promise<string | null>;
+  /** Claim this week's summary: false when it was sent (or is being sent) for
+   *  this day already, or another went out in the six days before it. */
+  claim(tenantId: string, weekOf: string): Promise<boolean>;
+  markSent(tenantId: string, weekOf: string, recipients: number, advances: number): Promise<void>;
+}
+
+/** One advance on the weekly summary. */
+export interface AdvanceDigestRow {
+  readonly clientName: string;
+  readonly letterRef: string;
+  readonly serviceName: string;
+  readonly stage: AdvanceStage;
+  /** Null while a draft. */
+  readonly invoiceNumber: string | null;
+  readonly daysSinceSigned: number;
+  /** Null for a reader who may not see fees. */
+  readonly amount: string | null;
+  readonly currency: string;
+}
+
+/** The weekly summary as one administrator receives it. */
+export interface AdvanceDigestLetter {
+  readonly to: string;
+  readonly recipientName: string | null;
+  readonly firmName: string | null;
+  readonly weekOf: string;
+  /** Where the Advances list is, for the button. */
+  readonly advancesUrl: string;
+  readonly rows: readonly AdvanceDigestRow[];
+}
+
+/** Sending it: `SmtpMailer` satisfies this structurally, beside the letters it
+ *  already writes. */
+export interface BillingMailer {
+  sendAdvanceDigest(letter: AdvanceDigestLetter): Promise<void>;
 }
 
 // ── The final bill (0320) ───────────────────────────────────────────────────

@@ -1,31 +1,39 @@
-// The advance and the final bill (auto-invoice, phase 2, 0320), against fakes:
-// the advance bill a signed letter owes, the work starting when its invoice is
-// paid (or an admin approves a part payment), the one-time service's final bill
-// when its job is done, the advance taken off bills first come first served,
-// and the leftover given back by a credit note. The SQL half is
+// The advance and the final bill (auto-invoice, phase 2, 0320; 0322), against
+// fakes: the advance bill a signed letter owes and its invoice drafted at once,
+// the catch-up that starts work signed before 0322, where each advance stands
+// and who is reminded, the weekly summary to the admins, the one-time service's
+// final bill when its job is done, the advance taken off bills first come first
+// served, and the leftover given back by a credit note. The SQL half is
 // `advance.integration.test.ts`.
 import { describe, expect, it } from "vitest";
-import { AdvanceBiller, AdvanceGate } from "../../src/usecase/billing/advance";
+import { AdvanceBiller, AdvanceDesk, AdvanceDigest } from "../../src/usecase/billing/advance";
 import { FinalBiller } from "../../src/usecase/billing/final";
 import { BillingDeskService } from "../../src/usecase/billing/desk";
 import {
   FakeAdvanceBillFacts,
+  FakeAdvanceDigestStore,
+  FakeAdvanceDrafter,
+  FakeAdvancePolicy,
+  FakeAdvanceReminderFacts,
   FakeAutoBillingFirms,
   FakeAutoBillingSetting,
   FakeBillingDueDesk,
   FakeBillingDueWriter,
+  FakeBillingMailer,
   FakeBillingManagerFacts,
   FakeBillingSchedules,
   FakeFinalBillFacts,
   FakeFiscalYearSource,
   FakeInvoiceDrafter,
+  FakeIssuerTaxDefaults,
   FakeWorkRelease,
 } from "../../src/testfakes/billing";
+import { FakeFirmEntities } from "../../src/testfakes/invoice";
 import { FakeClock } from "../../src/testfakes/clock";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { FakeIds } from "../../src/testfakes/ids";
-import type { BillingDueRecord, FinalBillSubject, LetterAdvanceFacts } from "../../src/usecase/billing/ports";
+import type { BillingDueRecord, FinalBillSubject, LetterAdvanceFacts, PersonRef } from "../../src/usecase/billing/ports";
 import type { Actor } from "../../src/domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import {
@@ -38,7 +46,6 @@ import {
   InvoiceDoesNotFitDue,
   NothingToRefund,
   PriceNotVisible,
-  StartNotApprovable,
 } from "../../src/domain/billing/errors";
 
 const FIRM = "00000000-0000-4000-8000-00000000a001";
@@ -52,8 +59,12 @@ const KEY_MANAGER = "00000000-0000-4000-8000-00000000a008";
 const ADMIN = "00000000-0000-4000-8000-00000000a009";
 const SPOC = "00000000-0000-4000-8000-00000000a00a";
 const ADV_INVOICE = "00000000-0000-4000-8000-00000000a00b";
+const PARTNER = "00000000-0000-4000-8000-00000000a00c";
+const STRANGER = "00000000-0000-4000-8000-00000000a00d";
 const ME: Actor = { type: "human", id: MANAGER };
 const ADMIN_ACTOR: Actor = { type: "human", id: ADMIN };
+
+const person = (userId: string, name: string): PersonRef => ({ userId, displayName: name, email: `${name.toLowerCase()}@example.test` });
 
 function managers(): FakeBillingManagerFacts {
   const m = new FakeBillingManagerFacts();
@@ -72,27 +83,30 @@ function letterFacts(over: Partial<LetterAdvanceFacts> = {}): LetterAdvanceFacts
     advanceRequired: true,
     advanceAmount: "50000.0000",
     advanceRecorded: false,
+    // Since 0322 every engagement a signature creates starts active.
     lines: [
-      { engagementId: AUDIT, status: "pending_advance", advanceAmount: null, deptCode: "FRC" },
-      { engagementId: BOOKS, status: "pending_advance", advanceAmount: null, deptCode: "TRC" },
+      { engagementId: AUDIT, status: "active", advanceAmount: null, deptCode: "FRC" },
+      { engagementId: BOOKS, status: "active", advanceAmount: null, deptCode: "TRC" },
     ],
     ...over,
   };
 }
 
 function advanceWorld() {
-  const facts = new FakeAdvanceBillFacts();
   const dues = new FakeBillingDueWriter();
+  const facts = new FakeAdvanceBillFacts(dues);
   const events = new RecordingEventSink();
-  const biller = new AdvanceBiller({ facts, dues, managers: managers(), ids: new FakeIds(), events });
-  return { facts, dues, events, biller };
+  const drafter = new FakeAdvanceDrafter(facts);
+  const work = new FakeWorkRelease();
+  const biller = new AdvanceBiller({ facts, dues, managers: managers(), ids: new FakeIds(), events, drafter, work });
+  return { facts, dues, events, drafter, work, biller };
 }
 
-describe("the advance bill a signed letter owes", () => {
+describe("the advance bill a signed letter owes, and its draft (0322)", () => {
   it("is one bill for the whole letter, due the day it was signed, with the Key Manager across Depts", async () => {
     const w = advanceWorld();
     w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts());
-    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 1 });
+    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 1, drafted: 1 });
     expect(w.dues.dues).toHaveLength(1);
     expect(w.dues.dues[0]).toMatchObject({
       kind: "advance",
@@ -109,7 +123,14 @@ describe("the advance bill a signed letter owes", () => {
     expect(w.events.recorded[0]?.payload).toMatchObject({ kind: "advance", engagementLetterId: LETTER });
   });
 
-  it("is one bill per service with its own advance, each with its own Dept's manager", async () => {
+  it("drafts the advance invoice at once, as whoever signed it (Ashish: created as a draft invoice)", async () => {
+    const w = advanceWorld();
+    w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts());
+    await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, ME);
+    expect(w.drafter.asked).toEqual([{ dueId: w.dues.dues[0]?.id, actor: ME }]);
+  });
+
+  it("is one bill per service with its own advance, each with its own Dept's manager, on work already started", async () => {
     const w = advanceWorld();
     w.facts.letters.set(
       `${FIRM}|${LETTER}`,
@@ -117,7 +138,7 @@ describe("the advance bill a signed letter owes", () => {
         advanceRequired: false,
         advanceAmount: null,
         lines: [
-          { engagementId: AUDIT, status: "pending_advance", advanceAmount: "40000.0000", deptCode: "FRC" },
+          { engagementId: AUDIT, status: "active", advanceAmount: "40000.0000", deptCode: "FRC" },
           { engagementId: BOOKS, status: "active", advanceAmount: null, deptCode: "TRC" },
         ],
       }),
@@ -128,31 +149,74 @@ describe("the advance bill a signed letter owes", () => {
     ]);
   });
 
-  it("is written once, however often it is asked", async () => {
+  it("is written and drafted once, however often it is asked", async () => {
     const w = advanceWorld();
     w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts());
     await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR);
-    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0 });
+    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0, drafted: 0 });
     expect(w.events.verbs()).toEqual(["billing_due.created"]);
+    expect(w.drafter.asked).toHaveLength(1);
   });
 
-  it("is not written for an advance recorded by hand before 0320, nor once the work started", async () => {
+  it("is not written for an advance recorded by hand before 0320, nor for work called off", async () => {
     const w = advanceWorld();
     w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts({ advanceRecorded: true }));
-    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0 });
+    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0, drafted: 0 });
     w.facts.letters.set(
       `${FIRM}|${LETTER}`,
-      letterFacts({ lines: [{ engagementId: AUDIT, status: "active", advanceAmount: null, deptCode: "FRC" }] }),
+      letterFacts({
+        advanceRequired: false,
+        advanceAmount: null,
+        lines: [{ engagementId: AUDIT, status: "cancelled", advanceAmount: "40000.0000", deptCode: "FRC" }],
+      }),
     );
-    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0 });
+    expect(await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).toEqual({ created: 0, drafted: 0 });
   });
 
-  it("catches up every firm's letters still owing one, whatever the billing switch says", async () => {
+  it("keeps the bill when the draft cannot be made, and never fails for it", async () => {
     const w = advanceWorld();
     w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts());
+    // No tax rate to draft it with: the bill waits on To raise.
+    w.drafter.blocks.set("00000000-0000-4000-8000-000000000001", "no_tax_rate");
+    const first = await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR);
+    expect(first.created).toBe(1);
+    // The fake ids are deterministic; whichever id it got, a failing raise is
+    // swallowed too.
+    const id = w.dues.dues[0]?.id ?? "";
+    w.drafter.blocks.delete("00000000-0000-4000-8000-000000000001");
+    w.drafter.failing.add(id);
+    w.facts.drafted.delete(id);
+    await expect(w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR)).resolves.toMatchObject({ drafted: 0 });
+  });
+
+  it("catches up every firm: starts work signed before 0322, writes the bill and drafts it", async () => {
+    const w = advanceWorld();
+    w.facts.letters.set(
+      `${FIRM}|${LETTER}`,
+      letterFacts({
+        lines: [
+          { engagementId: AUDIT, status: "pending_advance", advanceAmount: null, deptCode: "FRC" },
+          { engagementId: BOOKS, status: "pending_advance", advanceAmount: null, deptCode: "TRC" },
+        ],
+      }),
+    );
     w.facts.owing.set(FIRM, [LETTER]);
-    const reports = await w.biller.catchUp();
-    expect(reports).toEqual([{ tenantId: FIRM, created: 1 }]);
+    w.work.waiting.set(LETTER, 2);
+    expect(await w.biller.catchUp()).toEqual([{ tenantId: FIRM, created: 1, drafted: 1, started: 2 }]);
+    expect(w.work.letters).toEqual([LETTER]);
+    // The work was started first, by the system.
+    expect(w.drafter.asked[0]?.actor).toEqual(SYSTEM_ACTOR);
+  });
+
+  it("drafts on the catch-up a bill that could not be drafted before (a tax rate set since)", async () => {
+    const w = advanceWorld();
+    w.facts.letters.set(`${FIRM}|${LETTER}`, letterFacts());
+    const id = "00000000-0000-4000-8000-000000000001";
+    w.drafter.blocks.set(id, "no_tax_rate");
+    await w.biller.billAdvances({ tenantId: FIRM, letterId: LETTER }, SYSTEM_ACTOR);
+    w.drafter.blocks.clear();
+    w.facts.owing.set(FIRM, [LETTER]);
+    expect(await w.biller.catchUp()).toEqual([{ tenantId: FIRM, created: 0, drafted: 1, started: 0 }]);
   });
 });
 
@@ -191,7 +255,6 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     lastTaxPercent: "18.00",
     advancePool: null,
     advanceApplied: null,
-    released: null,
     advanceHoldsWork: false,
     ...over,
   };
@@ -212,92 +275,203 @@ function advanceDue(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     amount: "50000.00",
     servedDays: 1,
     periodDays: 1,
+    deptCodes: ["FRC"],
     ...over,
   });
 }
 
-function gateWorld() {
+/** A firm on 14 October 2026 (Kolkata), nine days after the letter was signed. */
+function reminderWorld(now = "2026-10-14T06:00:00.000Z") {
   const desk = new FakeBillingDueDesk();
-  const work = new FakeWorkRelease();
-  const events = new RecordingEventSink();
-  const gate = new AdvanceGate({ desk, work, events });
-  return { desk, work, events, gate };
+  const policy = new FakeAdvancePolicy();
+  const people = new FakeAdvanceReminderFacts();
+  people.spocs.set(`${CLIENT}|FRC`, [person(SPOC, "Sonal")]);
+  people.keyManagers.set(CLIENT, person(KEY_MANAGER, "Kiran"));
+  people.partners.set(CLIENT, person(PARTNER, "Pooja"));
+  people.adminList.push({ ...person(ADMIN, "Ashish"), seesFees: true }, { ...person(STRANGER, "Sam"), seesFees: false });
+  const taxDefaults = new FakeIssuerTaxDefaults();
+  const clock = new FakeClock(new Date(now));
+  const timeZones = new FakeFirmTimeZone("Asia/Kolkata");
+  const advances = new AdvanceDesk({ desk, policy, people, taxDefaults, timeZones, clock });
+  return { desk, policy, people, taxDefaults, clock, timeZones, advances };
 }
 
-describe("the work starts when the advance invoice is paid", () => {
-  const raised = (over: Partial<BillingDueRecord> = {}) =>
+describe("where an advance stands, and who is reminded (0322)", () => {
+  const drafted = (over: Partial<BillingDueRecord> = {}) =>
+    advanceDue({ invoice: { id: ADV_INVOICE, number: null, status: "draft" }, ...over });
+  const issued = (over: Partial<BillingDueRecord> = {}) =>
     advanceDue({ invoice: { id: ADV_INVOICE, number: "INV/2026-27/0003", status: "issued" }, ...over });
 
-  it("by itself once the invoice is paid in full, releasing the whole letter's work", async () => {
-    const w = gateWorld();
-    const adv = raised();
-    w.desk.rows.push(adv);
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "59000.00", outstanding: "0.00" });
-    expect(await w.gate.moneyMoved(FIRM, ADV_INVOICE, ME)).toEqual({ released: [adv.id] });
-    expect(w.work.letters).toEqual([{ letterId: LETTER, byUserId: MANAGER }]);
-    expect(w.desk.rows[0]?.released).toMatchObject({ how: "paid" });
-    expect(w.events.verbs()).toEqual(["billing_due.advance_released"]);
-    expect(w.events.recorded[0]?.payload).toMatchObject({ how: "paid", invoiceId: ADV_INVOICE, engagementLetterId: LETTER });
+  it("a draft: waiting for an admin to issue it since signing, overdue after the firm's 3 days", async () => {
+    const w = reminderWorld();
+    w.desk.rows.push(drafted());
+    const [a] = (await w.advances.list(FIRM)).advances;
+    expect(a).toMatchObject({
+      stage: "on_draft",
+      reminder: { pending: true, pendingSince: "2026-10-05", daysPending: 9, overdue: true, escalated: true },
+      people: { spocs: [{ userId: SPOC }], keyManager: { userId: KEY_MANAGER }, partner: { userId: PARTNER } },
+      draftBlocked: null,
+    });
+    // The partner is found at the firm's own grade.
+    expect(w.people.askedRanks).toEqual([9]);
   });
 
-  it("releases only its own service for a service's advance", async () => {
-    const w = gateWorld();
-    w.desk.rows.push(raised({ engagementLetterId: LETTER, engagementId: AUDIT, engagementIds: [AUDIT] }));
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "47200.00", paid: "47200.00", outstanding: "0.00" });
-    await w.gate.moneyMoved(FIRM, ADV_INVOICE, ME);
-    expect(w.work.engagements).toEqual([AUDIT]);
-    expect(w.work.letters).toEqual([]);
-  });
-
-  it("not on a part payment, which waits for an admin", async () => {
-    const w = gateWorld();
-    w.desk.rows.push(raised());
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "20000.00", outstanding: "39000.00" });
-    expect(await w.gate.moneyMoved(FIRM, ADV_INVOICE, ME)).toEqual({ released: [] });
-    expect(w.work.letters).toEqual([]);
-  });
-
-  it("only once, and only for a person's act", async () => {
-    const w = gateWorld();
-    w.desk.rows.push(raised());
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "59000.00", outstanding: "0.00" });
-    expect(await w.gate.moneyMoved(FIRM, ADV_INVOICE, SYSTEM_ACTOR)).toEqual({ released: [] });
-    await w.gate.moneyMoved(FIRM, ADV_INVOICE, ME);
-    expect(await w.gate.moneyMoved(FIRM, ADV_INVOICE, ME)).toEqual({ released: [] });
-    expect(w.work.letters).toHaveLength(1);
-  });
-
-  it("on a part payment when an admin approves the start", async () => {
-    const w = gateWorld();
-    const adv = raised();
-    w.desk.rows.push(adv);
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "20000.00", outstanding: "39000.00" });
-    const after = await w.gate.approveStart({ tenantId: FIRM, dueId: adv.id }, ADMIN_ACTOR);
-    expect(after.state).toBe("started");
-    expect(w.work.letters).toEqual([{ letterId: LETTER, byUserId: ADMIN }]);
-    expect(w.desk.rows[0]?.released).toMatchObject({ how: "approved", by: { userId: ADMIN } });
-  });
-
-  it("refuses to approve an advance nobody has paid any of, or one already started", async () => {
-    const w = gateWorld();
-    const adv = raised();
-    w.desk.rows.push(adv);
+  it("unpaid counts from the issue: not overdue until the firm's 15 days", async () => {
+    const w = reminderWorld();
+    w.desk.rows.push(issued());
+    w.desk.issuedOn.set(ADV_INVOICE, "2026-10-07");
     w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
-    await expect(w.gate.approveStart({ tenantId: FIRM, dueId: adv.id }, ADMIN_ACTOR)).rejects.toBeInstanceOf(
-      StartNotApprovable,
-    );
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "20000.00", outstanding: "39000.00" });
-    await w.gate.approveStart({ tenantId: FIRM, dueId: adv.id }, ADMIN_ACTOR);
-    await expect(w.gate.approveStart({ tenantId: FIRM, dueId: adv.id }, ADMIN_ACTOR)).rejects.toBeInstanceOf(
-      StartNotApprovable,
-    );
+    const [a] = (await w.advances.list(FIRM)).advances;
+    expect(a).toMatchObject({ stage: "unpaid", reminder: { pendingSince: "2026-10-07", daysPending: 7, overdue: false } });
   });
 
-  it("lists every advance with where it stands", async () => {
-    const w = gateWorld();
-    w.desk.rows.push(raised(), advanceDue({ engagementLetterId: "00000000-0000-4000-8000-00000000a0ff" }));
-    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "20000.00", outstanding: "39000.00" });
-    expect((await w.gate.list(FIRM)).map((a) => a.state)).toEqual(["part_paid", "not_raised"]);
+  it("paid, or skipped, is not chased", async () => {
+    const w = reminderWorld();
+    w.desk.rows.push(
+      issued(),
+      advanceDue({ engagementLetterId: "00000000-0000-4000-8000-00000000a0ee", skipped: { at: "2026-10-06T00:00:00.000Z", by: null, reason: "Waived" } }),
+    );
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "59000.00", outstanding: "0.00" });
+    expect((await w.advances.list(FIRM)).advances.map((a) => [a.stage, a.reminder.pending])).toEqual([
+      ["paid", false],
+      ["not_raised", false],
+    ]);
+  });
+
+  it("says why there is no invoice: no tax rate, or an invoice raised by hand already bills it", async () => {
+    const w = reminderWorld();
+    const noRate = advanceDue({ lastTaxPercent: null });
+    const byHand = advanceDue({ engagementLetterId: "00000000-0000-4000-8000-00000000a0ee", lastTaxPercent: null });
+    w.desk.rows.push(noRate, byHand);
+    w.desk.handRaised.set(byHand.id, { invoiceId: "00000000-0000-4000-8000-00000000a0f1", number: "INV/2026-27/0001" });
+    expect((await w.advances.list(FIRM)).advances.map((a) => a.draftBlocked)).toEqual(["no_tax_rate", "billed_by_hand"]);
+    // A default tax rate for the company is enough to draft it.
+    w.taxDefaults.rates.set(ISSUER, "18");
+    expect((await w.advances.list(FIRM)).advances.map((a) => a.draftBlocked)).toEqual([null, "billed_by_hand"]);
+  });
+
+  it("is on My day for the SPOC, the Key Manager and the partner, each with why", async () => {
+    const w = reminderWorld();
+    w.desk.rows.push(drafted());
+    for (const [who, duty] of [
+      [SPOC, "spoc"],
+      [KEY_MANAGER, "key_manager"],
+      [PARTNER, "partner"],
+    ] as const) {
+      expect((await w.advances.mine(FIRM, who, false)).advances.map((a) => a.duties)).toEqual([[duty]]);
+    }
+    expect((await w.advances.mine(FIRM, STRANGER, false)).advances).toEqual([]);
+  });
+
+  it("is an admin's while it waits to be raised or issued, and once a week old whatever its step", async () => {
+    const w = reminderWorld("2026-10-06T06:00:00.000Z");
+    w.desk.rows.push(issued());
+    w.desk.issuedOn.set(ADV_INVOICE, "2026-10-05");
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    // Issued, unpaid, one day old: not the admin's yet.
+    expect((await w.advances.mine(FIRM, ADMIN, true)).advances).toEqual([]);
+    // A week after signing: escalated to the admins.
+    w.clock.set(new Date("2026-10-12T06:00:00.000Z"));
+    expect((await w.advances.mine(FIRM, ADMIN, true)).advances.map((a) => a.duties)).toEqual([["admin"]]);
+    // A draft is the admin's at once: only an admin issues.
+    const v = reminderWorld("2026-10-05T06:00:00.000Z");
+    v.desk.rows.push(drafted());
+    expect((await v.advances.mine(FIRM, ADMIN, true)).advances.map((a) => a.duties)).toEqual([["admin"]]);
+  });
+});
+
+function digestWorld(now: string) {
+  const r = reminderWorld(now);
+  const store = new FakeAdvanceDigestStore();
+  store.firms.push(FIRM);
+  store.names.set(FIRM, "10x Global");
+  const mailer = new FakeBillingMailer();
+  const events = new RecordingEventSink();
+  const digest = new AdvanceDigest({
+    store,
+    advances: r.advances,
+    people: r.people,
+    policy: r.policy,
+    mailer,
+    timeZones: r.timeZones,
+    clock: r.clock,
+    events,
+    advancesUrl: "https://app.example.test/invoices?tab=advances",
+  });
+  return { ...r, store, mailer, events, digest };
+}
+
+describe("the weekly summary to the admins (0322)", () => {
+  // Monday 12 October 2026, 10:00 in Kolkata, is 04:30 UTC. The advance was
+  // signed on the 5th, so it is a week old.
+  const MONDAY_TEN = "2026-10-12T04:30:00.000Z";
+  const pendingAdvance = () => advanceDue({ invoice: { id: ADV_INVOICE, number: "INV/2026-27/0003", status: "issued" } });
+
+  it("waits for the firm's own weekday and hour", async () => {
+    const w = digestWorld("2026-10-12T04:00:00.000Z");
+    w.desk.rows.push(pendingAdvance());
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    // 09:30 on Monday there: not yet. Nothing claimed, nothing sent.
+    expect(await w.digest.sweep()).toEqual([]);
+    expect(w.store.weeks.size).toBe(0);
+    // Tuesday: not the firm's day.
+    w.clock.set(new Date("2026-10-13T06:00:00.000Z"));
+    expect(await w.digest.sweep()).toEqual([]);
+  });
+
+  it("emails each admin once, the advances a week old, amounts only for one who sees fees", async () => {
+    const w = digestWorld(MONDAY_TEN);
+    w.desk.rows.push(pendingAdvance());
+    w.desk.issuedOn.set(ADV_INVOICE, "2026-10-06");
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    expect(await w.digest.sweep()).toEqual([
+      { tenantId: FIRM, weekOf: "2026-10-12", sent: true, advances: 1, recipients: 2 },
+    ]);
+    expect(w.mailer.sent.map((l) => [l.to, l.rows[0]?.amount])).toEqual([
+      ["ashish@example.test", "59000.00"],
+      ["sam@example.test", null],
+    ]);
+    expect(w.mailer.sent[0]).toMatchObject({
+      firmName: "10x Global",
+      weekOf: "2026-10-12",
+      advancesUrl: "https://app.example.test/invoices?tab=advances",
+      rows: [{ clientName: "Kaveri Foods", letterRef: "EL-2026-0007", stage: "unpaid", invoiceNumber: "INV/2026-27/0003", daysSinceSigned: 7 }],
+    });
+    expect(w.events.verbs()).toEqual(["tenant.advance_digest_sent"]);
+    expect(w.events.recorded[0]?.payload).toEqual({ weekOf: "2026-10-12", advances: 1, recipients: 2 });
+    // The same week again: nothing more.
+    expect(await w.digest.sweep()).toEqual([]);
+    expect(w.mailer.sent).toHaveLength(2);
+  });
+
+  it("claims a week with nothing a week old and sends nothing", async () => {
+    const w = digestWorld(MONDAY_TEN);
+    w.desk.rows.push(advanceDue({ billOn: "2026-10-10", periodStart: "2026-10-10", periodEnd: "2026-10-10" }));
+    expect(await w.digest.sweep()).toEqual([{ tenantId: FIRM, weekOf: "2026-10-12", sent: false, advances: 0, recipients: 0 }]);
+    expect(w.mailer.sent).toEqual([]);
+  });
+
+  it("does not let one refused address stop the others", async () => {
+    const w = digestWorld(MONDAY_TEN);
+    w.desk.rows.push(pendingAdvance());
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    w.mailer.refusing.add("ashish@example.test");
+    expect((await w.digest.sweep())[0]).toMatchObject({ sent: true, recipients: 1 });
+    expect(w.mailer.sent.map((l) => l.to)).toEqual(["sam@example.test"]);
+  });
+
+  it("follows the day and hour the firm chose, and never twice inside six days", async () => {
+    const w = digestWorld(MONDAY_TEN);
+    w.desk.rows.push(pendingAdvance());
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    expect((await w.digest.sweep())[0]?.weekOf).toBe("2026-10-12");
+    // The firm moves its summary to Friday 17:00 that same week: Friday the
+    // 16th is four days after Monday's, so it waits for the next Friday.
+    w.policy.policy = { ...w.policy.policy, digestWeekday: 5, digestHour: 17 };
+    w.clock.set(new Date("2026-10-16T11:30:00.000Z"));
+    expect(await w.digest.sweep()).toEqual([]);
+    w.clock.set(new Date("2026-10-23T11:30:00.000Z"));
+    expect((await w.digest.sweep())[0]?.weekOf).toBe("2026-10-23");
   });
 });
 
@@ -434,7 +608,7 @@ function deskWorld() {
   const desk = new FakeBillingDueDesk();
   const invoices = new FakeInvoiceDrafter();
   const events = new RecordingEventSink();
-  const moved: string[] = [];
+  const taxDefaults = new FakeIssuerTaxDefaults();
   const service = new BillingDeskService({
     desk,
     invoices,
@@ -444,14 +618,11 @@ function deskWorld() {
     timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
     clock: new FakeClock(new Date("2026-12-05T06:00:00.000Z")),
     events,
-    gate: {
-      moneyMoved: (_t, invoiceId) => {
-        moved.push(invoiceId);
-        return Promise.resolve({ released: [] });
-      },
-    },
+    taxDefaults,
+    policy: new FakeAdvancePolicy(),
+    firmEntities: new FakeFirmEntities(),
   });
-  return { desk, invoices, events, moved, service };
+  return { desk, invoices, events, taxDefaults, service };
 }
 
 const ADV_DUE = "00000000-0000-4000-8000-00000000adde";
@@ -520,7 +691,7 @@ describe("raising a bill the advance comes off (FIFO, before tax)", () => {
     expect(w.desk.holding).toEqual([]);
   });
 
-  it("links an advance only for an admin, to an invoice no other bill is on, and then asks the gate (0321)", async () => {
+  it("links an advance only for an admin, to an invoice no other bill is on (0321)", async () => {
     const w = deskWorld();
     const adv = advanceDue();
     w.desk.rows.push(adv);
@@ -540,7 +711,7 @@ describe("raising a bill the advance comes off (FIFO, before tax)", () => {
     ).rejects.toBeInstanceOf(InvoiceDoesNotFitDue);
     w.desk.rows.splice(w.desk.rows.indexOf(other), 1);
     await w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id, mayLinkAdvance: true }, ADMIN_ACTOR);
-    expect(w.moved).toEqual([id]);
+    expect(w.desk.rows.find((r) => r.id === adv.id)?.invoice?.id).toBe(id);
     expect(w.desk.holding).toEqual([]);
   });
 
@@ -695,3 +866,98 @@ describe("giving an unused advance back", () => {
     expect(w.events.verbs()).toEqual(["billing_due.refund_kept"]);
   });
 });
+
+describe("the advance's automatic draft (0322)", () => {
+  it("is raised alone at the last rate used on the work, as whoever asked", async () => {
+    const w = deskWorld();
+    const adv = advanceDue();
+    w.desk.rows.push(adv);
+    const out = await w.service.draftAdvance(FIRM, adv.id, SYSTEM_ACTOR);
+    expect(out).toEqual({ invoiceId: w.invoices.invoices[0]?.id });
+    expect(w.invoices.invoices[0]).toMatchObject({ number: null, status: "draft", managerUserId: MANAGER });
+    expect(w.invoices.invoices[0]?.lines[0]).toMatchObject({ unitAmount: "50000.00", taxPercent: "18.00", description: "Advance under EL-2026-0007" });
+    expect(w.invoices.actors).toEqual([SYSTEM_ACTOR]);
+  });
+
+  it("takes the issuing company's default rate when the work was never invoiced", async () => {
+    const w = deskWorld();
+    const adv = advanceDue({ lastTaxPercent: null });
+    w.desk.rows.push(adv);
+    expect(await w.service.draftAdvance(FIRM, adv.id, SYSTEM_ACTOR)).toEqual({ blocked: "no_tax_rate" });
+    expect(w.invoices.invoices).toEqual([]);
+    w.taxDefaults.rates.set(ISSUER, "18");
+    await w.service.draftAdvance(FIRM, adv.id, SYSTEM_ACTOR);
+    expect(w.invoices.invoices[0]?.lines[0]?.taxPercent).toBe("18");
+  });
+
+  it("is not made over an invoice raised by hand, nor a second time, nor after a person cancelled it", async () => {
+    const w = deskWorld();
+    const byHand = advanceDue();
+    w.desk.rows.push(byHand);
+    w.desk.handRaised.set(byHand.id, { invoiceId: "00000000-0000-4000-8000-00000000a0f1", number: "INV/2026-27/0001" });
+    expect(await w.service.draftAdvance(FIRM, byHand.id, SYSTEM_ACTOR)).toEqual({ blocked: "billed_by_hand" });
+
+    const once = advanceDue({ engagementLetterId: "00000000-0000-4000-8000-00000000a0ee" });
+    w.desk.rows.push(once);
+    await w.service.draftAdvance(FIRM, once.id, SYSTEM_ACTOR);
+    expect(await w.service.draftAdvance(FIRM, once.id, SYSTEM_ACTOR)).toEqual({ blocked: "not_open" });
+
+    const id = w.invoices.invoices[0]?.id ?? "";
+    w.desk.invoiceStatus.set(id, "cancelled");
+    // Open again, but the person who cancelled it raises it again if they want.
+    expect(await w.service.draftAdvance(FIRM, once.id, SYSTEM_ACTOR)).toEqual({ blocked: "not_open" });
+    expect(w.invoices.invoices).toHaveLength(1);
+  });
+});
+
+describe("the firm's advance settings (0322)", () => {
+  it("are read whole, and a policy out of range is refused", async () => {
+    const w = deskWorld();
+    expect(await w.service.settings(FIRM)).toMatchObject({
+      autoBilling: false,
+      advancePolicy: { draftOverdueDays: 3, unpaidOverdueDays: 15, partnerMinRank: 9, digestWeekday: 1, digestHour: 10 },
+      taxDefaults: [],
+    });
+    await expect(
+      w.service.setAdvancePolicy(FIRM, { draftOverdueDays: 0, unpaidOverdueDays: 15, partnerMinRank: 9, digestWeekday: 1, digestHour: 10 }, ADMIN_ACTOR),
+    ).rejects.toBeInstanceOf(InvalidBillingInput);
+    await w.service.setAdvancePolicy(FIRM, { draftOverdueDays: 2, unpaidOverdueDays: 10, partnerMinRank: 10, digestWeekday: 5, digestHour: 17 }, ADMIN_ACTOR);
+    expect(w.events.recorded.at(-1)).toMatchObject({ verb: "tenant.advance_policy_set" });
+    expect((await w.service.settings(FIRM)).advancePolicy.digestWeekday).toBe(5);
+  });
+
+  it("set a default tax rate for one of the firm's own companies only, 0 to 100", async () => {
+    const w = deskWorld();
+    await expect(w.service.setTaxDefault({ tenantId: FIRM, entityPartyId: ISSUER, taxPercent: "18" }, ADMIN_ACTOR)).rejects.toBeInstanceOf(
+      InvalidBillingInput,
+    );
+    const firm = new FakeFirmEntities();
+    firm.add(ISSUER);
+    const v = deskWorldWith(firm);
+    await expect(v.service.setTaxDefault({ tenantId: FIRM, entityPartyId: ISSUER, taxPercent: "180" }, ADMIN_ACTOR)).rejects.toBeInstanceOf(
+      InvalidBillingInput,
+    );
+    await v.service.setTaxDefault({ tenantId: FIRM, entityPartyId: ISSUER, taxPercent: "18" }, ADMIN_ACTOR);
+    expect(v.events.recorded.at(-1)).toMatchObject({ verb: "tenant.tax_default_set", payload: { entityPartyId: ISSUER, from: null, to: "18" } });
+    expect((await v.service.settings(FIRM)).taxDefaults).toEqual([{ entityPartyId: ISSUER, taxPercent: "18" }]);
+  });
+});
+
+function deskWorldWith(firmEntities: FakeFirmEntities) {
+  const desk = new FakeBillingDueDesk();
+  const events = new RecordingEventSink();
+  const service = new BillingDeskService({
+    desk,
+    invoices: new FakeInvoiceDrafter(),
+    schedules: new FakeBillingSchedules(),
+    setting: new FakeAutoBillingSetting(),
+    fiscalYears: new FakeFiscalYearSource(4),
+    timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
+    clock: new FakeClock(new Date("2026-12-05T06:00:00.000Z")),
+    events,
+    taxDefaults: new FakeIssuerTaxDefaults(),
+    policy: new FakeAdvancePolicy(),
+    firmEntities,
+  });
+  return { desk, events, service };
+}

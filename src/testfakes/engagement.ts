@@ -526,28 +526,6 @@ export class FakeEngagementRepo implements EngagementRepository {
     return Promise.resolve({ letter, engagements: created });
   }
 
-  recordAdvance(
-    tenantId: string,
-    letterId: string,
-    recordedByUserId: string,
-    at: string,
-  ): Promise<{ letter: EngagementLetter; released: readonly Engagement[] }> {
-    const letter = this.replace(tenantId, letterId, (l) => ({
-      ...l,
-      advanceRecordedAt: at,
-      advanceRecordedBy: recordedByUserId,
-    }));
-    const released: Engagement[] = [];
-    this.engagements.forEach((e, i) => {
-      if (e.engagementLetterId === letterId && e.status === "pending_advance") {
-        const updated: Engagement = { ...e, status: "active", activatedAt: at };
-        this.engagements[i] = updated;
-        released.push(updated);
-      }
-    });
-    return Promise.resolve({ letter, released });
-  }
-
   releaseEngagements(tenantId: string, engagementIds: readonly string[], at: string): Promise<readonly Engagement[]> {
     const released: Engagement[] = [];
     this.engagements.forEach((e, i) => {

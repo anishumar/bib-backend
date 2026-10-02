@@ -26,11 +26,9 @@ import {
 } from "../infrastructure/postgres/identity-repository";
 import { ScryptPasswordHasher } from "../infrastructure/crypto/scrypt-hasher";
 import { RandomTokenFactory, Sha256ContentHasher } from "../infrastructure/crypto/random-tokens";
-import { LoggingMailer } from "../infrastructure/mail/logging-mailer";
-import { SmtpMailer } from "../infrastructure/mail/smtp-mailer";
+import { mailerFor } from "./mailer";
 import { PostgresFirmTimeZone } from "../infrastructure/postgres/firm-timezone-repository";
-import type { Mailer } from "../usecase/identity/ports";
-import { NodemailerTransport } from "../infrastructure/mail/nodemailer-transport";
+
 import { PostgresConfigRepository } from "../infrastructure/postgres/config-repository";
 import { PostgresStaffGradeRepository } from "../infrastructure/postgres/staff-grade-repository";
 import { PostgresClientAssignmentRepository } from "../infrastructure/postgres/client-assignment-repository";
@@ -106,7 +104,12 @@ import { ReadinessService } from "../usecase/readiness/service";
 import { InvoiceService } from "../usecase/invoice/service";
 import { BillingDeskService } from "../usecase/billing/desk";
 import { GoLiveScheduler } from "../usecase/billing/golive";
-import { AdvanceBiller, AdvanceGate } from "../usecase/billing/advance";
+import { AdvanceBiller, AdvanceDesk } from "../usecase/billing/advance";
+import {
+  PostgresAdvancePolicy,
+  PostgresAdvanceReminderFacts,
+  PostgresIssuerTaxDefaults,
+} from "../infrastructure/postgres/advance-reminders";
 import { FinalBiller } from "../usecase/billing/final";
 import {
   PostgresAutoBillingSetting,
@@ -141,7 +144,6 @@ import { blobStoreFor } from "./blobs";
 import { signedCopyFiler } from "./signed-copies";
 import { proposalLinks, proposalPdfs } from "./proposal-delivery";
 import { invoiceIssuedCopies } from "./invoice-copies";
-import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { LetterPdf } from "../usecase/engagement/ports";
 import { TenancyService } from "../usecase/tenancy/service";
 import { PartyService } from "../usecase/party/service";
@@ -445,25 +447,30 @@ export function wire(cfg: Config, log: Logger): Wired {
     ids: systemIds,
     events: ledger,
   });
+  // 0322: the advance holds no work. Signing writes the bill and drafts its
+  // invoice through the billing desk (composed further down: a closure, reached
+  // only on a request, by which time it exists).
   const advanceBills = new AdvanceBiller({
     facts: new PostgresAdvanceBillFacts(pools.app),
     dues: new PostgresBillingDueWriter(pools.app),
     managers: new PostgresBillingManagerFacts(pools.app),
     ids: systemIds,
     events: ledger,
-  });
-  // The work an advance holds starts when its invoice is paid. The gate
-  // releases it through the engagement use case, composed further down: it is
-  // reached only when money moves, on a request, by which time it exists.
-  const advanceGate = new AdvanceGate({
-    desk: new PostgresBillingDueDesk(pools.app),
-    work: {
-      recordAdvance: (tenantId, letterId, byUserId, actor) =>
-        engagement.recordAdvance(tenantId, letterId, byUserId, actor),
-      releaseEngagementAdvance: (tenantId, engagementId, actor) =>
-        engagement.releaseEngagementAdvance(tenantId, engagementId, actor),
+    drafter: {
+      draftAdvance: (tenantId, dueId, actor) => billing.draftAdvance(tenantId, dueId, actor),
     },
-    events: ledger,
+  });
+  const advancePolicy = new PostgresAdvancePolicy(pools.app);
+  const taxDefaults = new PostgresIssuerTaxDefaults(pools.app);
+  // Where each advance stands and who is reminded (0322): My day and the
+  // Advances list read it.
+  const advanceDesk = new AdvanceDesk({
+    desk: new PostgresBillingDueDesk(pools.app),
+    policy: advancePolicy,
+    people: new PostgresAdvanceReminderFacts(pools.app),
+    taxDefaults,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
   });
 
   const orchestrator = new OrchestratorService({
@@ -591,8 +598,6 @@ export function wire(cfg: Config, log: Logger): Wired {
     // Its PDF, filed as it is issued: the copy of record (2026-09-29). Built
     // after the document store for this.
     issuedCopies: invoiceIssuedCopies(fileStore, log),
-    // Money moved: an advance paid in full starts its work (0320).
-    moneyMoved: advanceGate,
     // A manager a person names must be on the roster today (T4).
     staff: memberships,
   });
@@ -615,7 +620,11 @@ export function wire(cfg: Config, log: Logger): Wired {
     timeZones: new PostgresFirmTimeZone(pools.app),
     clock: systemClock,
     events: ledger,
-    gate: advanceGate,
+    // 0322: the automatic advance draft's rate, and how advances are chased.
+    taxDefaults,
+    policy: advancePolicy,
+    // A default tax rate is for one of the firm's own companies.
+    firmEntities: documents,
   });
 
   // THE LEADERSHIP FIGURES (T3.7). No writes: every number is derived from
@@ -1370,7 +1379,7 @@ export function wire(cfg: Config, log: Logger): Wired {
           }),
         },
         invoice: { service: invoices, dunning, authz },
-        billing: { service: billing, authz, gate: advanceGate, finals: finalBills },
+        billing: { service: billing, authz, advances: advanceDesk, finals: finalBills },
         filestore: { service: fileStore },
         dashboard: { service: dashboards, authz },
         readiness: { service: readiness },
@@ -1406,48 +1415,4 @@ export function wire(cfg: Config, log: Logger): Wired {
       await assertLedgerAppendOnly(pools.app);
     },
   };
-}
-
-/**
- * Which mailer is registered, and the ONLY place that decides.
- *
- * The honest registry's shape, applied to notifications: the stub says what it
- * is, `validateServer` refuses it in a public environment, and the real one is
- * a second adapter behind the same port. `logging-mailer.ts` predicted exactly
- * this — *"nothing in the use case changes when it arrives"* — and nothing did:
- * `IdentityService` is untouched by the swap.
- *
- * The config → adapter mapping happens HERE because an adapter never imports
- * the config module. `NodemailerTransport` declares the connection shape it
- * needs and this function fills it in, the same arrangement
- * `FilesystemBlobStore(cfg.storage.root)` already has.
- *
- * The null branches are unreachable by the time this runs — `validateServer`
- * has already refused `smtp` without a host or a From address, naming the
- * variable. They are here because the TYPE says nullable and a non-null
- * assertion would be a claim this file cannot make on its own.
- */
-function mailerFor(cfg: Config, log: Logger): Mailer & ProposalMailer {
-  if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
-  const { smtp, from, fromName } = cfg.mail;
-  if (smtp === null || from === null) {
-    throw new Error(
-      "BIB_MAIL_TRANSPORT=smtp without BIB_SMTP_HOST or BIB_MAIL_FROM. validateServer should " +
-        "have refused this configuration before wiring — if you are seeing this, that check " +
-        "was skipped or removed.",
-    );
-  }
-  return new SmtpMailer(
-    new NodemailerTransport(
-      {
-        host: smtp.host,
-        port: smtp.port,
-        secure: smtp.secure,
-        user: smtp.user,
-        password: smtp.password,
-      },
-      { address: from, name: fromName },
-      log,
-    ),
-  );
 }

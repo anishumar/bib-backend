@@ -8,11 +8,16 @@
 // Raising goes through `InvoiceDrafter`, which `setup/` satisfies with the
 // InvoiceService itself: the issuer must be the firm's, the client must not be,
 // each line's engagement must be the client's, signed by the same company and
-// priced in the same currency, and the number comes from the gapless series.
-// Nothing here re-implements any of it. What this adds is the checks a SET of
-// dues needs before a number is drawn — one client, one company, one currency,
-// one manager, an amount and a tax rate for each — because a refusal after the
-// draft exists would leave a numbered invoice behind.
+// priced in the same currency, and the number comes from the gapless series
+// when the draft is issued (0322). Nothing here re-implements any of it. What
+// this adds is the checks a SET of dues needs before a draft is made — one
+// client, one company, one currency, one manager, an amount and a tax rate for
+// each — because a refusal after the draft exists would leave a draft nobody
+// asked for.
+//
+// Since 0322 the desk also drafts a signed letter's ADVANCE invoice by itself
+// (`draftAdvance`), and holds the firm's advance settings: how the reminders
+// run, and each company's default tax rate.
 import type { Clock } from "../../platform/clock";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
@@ -20,7 +25,13 @@ import { dayInZone } from "../../domain/scheduler/zone";
 import { addDays, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
-import { billLineText, shouldRefund, takeFromAdvance } from "../../domain/billing/advance";
+import {
+  advancePolicyProblem,
+  billLineText,
+  shouldRefund,
+  takeFromAdvance,
+  type AdvancePolicy,
+} from "../../domain/billing/advance";
 import {
   AdvanceLinkNeedsAdmin,
   AdvanceNotSkippable,
@@ -41,6 +52,8 @@ import {
   PriceNotVisible,
 } from "../../domain/billing/errors";
 import type {
+  AdvanceDraftBlock,
+  AdvancePolicySource,
   AutoBillingSetting,
   BillingDueDesk,
   BillingDueRecord,
@@ -49,6 +62,7 @@ import type {
   FirmTimeZone,
   FiscalYearSource,
   InvoiceDrafter,
+  IssuerTaxDefaults,
   RefundCandidate,
   ScheduleRecord,
 } from "./ports";
@@ -62,11 +76,21 @@ export interface DeskDeps {
   readonly timeZones: FirmTimeZone;
   readonly clock: Clock;
   readonly events: EventSink;
-  /** The advance gate (0320), told when an advance bill is linked to an
-   *  invoice that may already be paid. Optional: absent, nothing is told. */
-  readonly gate?: {
-    moneyMoved(tenantId: string, invoiceId: string, actor: Actor): Promise<unknown>;
-  } | null;
+  /** The companies' default tax rates (0322): what an automatic advance draft
+   *  carries when the work was never invoiced. */
+  readonly taxDefaults: IssuerTaxDefaults;
+  /** The firm's advance reminder policy (0322). */
+  readonly policy: AdvancePolicySource;
+  /** Which parties are the firm's own companies: a default tax rate is set
+   *  for one of them only. */
+  readonly firmEntities: { isFirmEntity(tenantId: string, partyId: string): Promise<boolean> };
+}
+
+/** The firm's billing settings, as one screen shows them. */
+export interface BillingSettings {
+  readonly autoBilling: boolean;
+  readonly advancePolicy: AdvancePolicy;
+  readonly taxDefaults: readonly { readonly entityPartyId: string; readonly taxPercent: string }[];
 }
 
 /** A week: an untouched bill then shows to the manager's own manager too
@@ -132,25 +156,42 @@ export class BillingDeskService {
   // ── Reading ──────────────────────────────────────────────────────────────
 
   /**
-   * The dues, with how long each has waited. `mineFor` narrows to what a
-   * person should act on: their own open or drafted dues, and those of the
-   * people who report to them once a week has passed.
+   * The dues, with how long each has waited: pending ones unless the filter
+   * asks for others. `mineFor` narrows to what a person should act on: their
+   * own open or drafted dues, and those of the people who report to them once
+   * a week has passed.
    *
    * A BILL WITH NO PRICE is also the SPOC's (for that client and Dept, on the
    * firm's day) and every administrator's, from the day it falls due until an
    * amount is on a draft (Ashish, 2026-10-01: the SPOC, the manager and the
    * admin, in the app, every week). The weekly reminder is the screen counting
    * weeks from `daysSinceBillOn`; nothing is stored or sent.
+   *
+   * ALL OF IT IS DECIDED IN THE QUERY (review item 14), before the list's
+   * ceiling: filtered here afterwards, a large firm's newest bills fell off
+   * My day without a word. Advance bills are not in `mine`: since 0322 they
+   * have reminders of their own (`AdvanceDesk.mine`).
    */
   async list(input: {
     readonly tenantId: string;
-    readonly filters?: DueFilters;
+    readonly filters?: Omit<DueFilters, "mine">;
     readonly mineFor?: string | undefined;
     /** The caller holds `tenant:admin`; meaningful with `mineFor` only. */
     readonly mineIsAdmin?: boolean | undefined;
   }): Promise<{ readonly today: string; readonly dues: readonly DueOnDesk[] }> {
     const today = await this.today(input.tenantId);
-    const rows = await this.deps.desk.list(input.tenantId, input.filters ?? {});
+    const rows = await this.deps.desk.list(input.tenantId, {
+      ...input.filters,
+      mine:
+        input.mineFor === undefined
+          ? undefined
+          : {
+              userId: input.mineFor,
+              isAdmin: input.mineIsAdmin === true,
+              today,
+              escalateAfterDays: ESCALATE_AFTER_DAYS,
+            },
+    });
     const dues = rows.map((r): DueOnDesk => {
       const daysSinceBillOn = daysBetween(r.billOn, today);
       const pending = r.status === "open" || r.status === "drafted";
@@ -161,24 +202,7 @@ export class BillingDeskService {
         escalated: pending && daysSinceBillOn >= ESCALATE_AFTER_DAYS,
       };
     });
-    const mine = input.mineFor;
-    if (mine === undefined) return { today, dues };
-
-    const admin = input.mineIsAdmin === true;
-    const unpriced = dues.some((d) => !d.priced && d.status === "open");
-    const duties = unpriced && !admin ? await this.deps.desk.spocDutiesOf(input.tenantId, mine, today) : [];
-    const spocFor = (d: DueOnDesk): boolean =>
-      duties.some((s) => s.clientPartyId === d.party.id && d.deptCodes.includes(s.deptCode));
-    return {
-      today,
-      dues: dues.filter(
-        (d) =>
-          (d.status === "open" || d.status === "drafted") &&
-          (d.manager?.userId === mine ||
-            (d.escalated && d.managerReportsTo?.userId === mine) ||
-            (!d.priced && d.status === "open" && (admin || spocFor(d)))),
-      ),
-    };
+    return { today, dues };
   }
 
   /** Recurring engagements with no schedule, each with the default to offer. */
@@ -430,9 +454,8 @@ export class BillingDeskService {
    * that money is the advance, taken off bills as they are raised, and linking
    * a period to it billed the period with it while it was still being taken off
    * later bills. And an ADVANCE bill is linked only by an admin, to an invoice
-   * no other bill is on: a paid invoice starts the work, so linking one starts
-   * work as Approve start does, and linking an old invoice for other work
-   * started work with no advance paid.
+   * no other bill is on: the invoice it names becomes the advance every later
+   * bill is taken off, so an old invoice for other work must not become one.
    */
   async link(
     input: {
@@ -492,15 +515,37 @@ export class BillingDeskService {
       actor,
       payload: { invoiceId: invoice.id, invoiceLineId: null, how: "linked" },
     });
-    // An advance linked to an invoice already paid starts its work now (0320).
-    // After the link is committed, and never undoing it.
-    if (due.kind === "advance" && this.deps.gate) {
-      try {
-        await this.deps.gate.moneyMoved(input.tenantId, invoice.id, actor);
-      } catch {
-        // The admin's Approve start is the way on from here.
-      }
-    }
+  }
+
+  /**
+   * The advance invoice, drafted the moment its bill exists (0322, Ashish:
+   * "the invoice for advance should be created as draft invoice"). Through
+   * `raise` like any other, so every invoice rule and the claim apply, and a
+   * draft draws no number until an admin issues it (0322).
+   *
+   * Only a bill never on an invoice: one whose draft a person cancelled is
+   * theirs to raise again. Not when an invoice raised by hand already bills
+   * the work (very likely this advance, invoiced before 0322: Link it). The tax
+   * rate is the last one on that work, else the issuing company's default;
+   * with neither, nothing is drafted and the bill waits on To raise, never on
+   * a guessed 0%.
+   */
+  async draftAdvance(
+    tenantId: string,
+    dueId: string,
+    actor: Actor,
+  ): Promise<{ readonly invoiceId: string } | { readonly blocked: AdvanceDraftBlock }> {
+    const [due] = await this.deps.desk.advances(tenantId, { dueId });
+    if (due === undefined) throw new BillingDueNotFound(dueId);
+    if (due.kind !== "advance" || due.status !== "open" || due.invoice !== null) return { blocked: "not_open" };
+    if (due.handRaised !== null) return { blocked: "billed_by_hand" };
+    const tax =
+      due.lastTaxPercent ??
+      (await this.deps.taxDefaults.list(tenantId)).find((d) => d.entityPartyId === due.issuer.id)?.taxPercent ??
+      null;
+    if (tax === null) return { blocked: "no_tax_rate" };
+    const raised = await this.raise({ tenantId, dueIds: [dueId], lines: [{ dueId, taxPercent: tax }] }, actor);
+    return raised.invoiceId === null ? { blocked: "not_open" } : { invoiceId: raised.invoiceId };
   }
 
   /**
@@ -692,10 +737,68 @@ export class BillingDeskService {
     return after;
   }
 
-  // ── The switch ───────────────────────────────────────────────────────────
+  // ── The switch, and the advance's settings ───────────────────────────────
 
   autoBilling(tenantId: string): Promise<boolean> {
     return this.deps.setting.isOn(tenantId);
+  }
+
+  async settings(tenantId: string): Promise<BillingSettings> {
+    const [autoBilling, advancePolicy, taxDefaults] = await Promise.all([
+      this.deps.setting.isOn(tenantId),
+      this.deps.policy.policyFor(tenantId),
+      this.deps.taxDefaults.list(tenantId),
+    ]);
+    return { autoBilling, advancePolicy, taxDefaults };
+  }
+
+  /** How the firm's advances are chased (0322): its own numbers, checked. */
+  async setAdvancePolicy(tenantId: string, policy: AdvancePolicy, actor: Actor): Promise<AdvancePolicy> {
+    const problem = advancePolicyProblem(policy);
+    if (problem !== null) throw new InvalidBillingInput(problem);
+    const from = await this.deps.policy.policyFor(tenantId);
+    const same =
+      from.draftOverdueDays === policy.draftOverdueDays &&
+      from.unpaidOverdueDays === policy.unpaidOverdueDays &&
+      from.partnerMinRank === policy.partnerMinRank &&
+      from.digestWeekday === policy.digestWeekday &&
+      from.digestHour === policy.digestHour;
+    if (same) return from;
+    await this.deps.policy.setPolicy(tenantId, policy);
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "tenant.advance_policy_set",
+      objectId: tenantId,
+      actor,
+      payload: { from: { ...from }, to: { ...policy } },
+    });
+    return policy;
+  }
+
+  /** One of the firm's companies' default tax rate (0322): 0 to 100. */
+  async setTaxDefault(
+    input: { readonly tenantId: string; readonly entityPartyId: string; readonly taxPercent: string },
+    actor: Actor,
+  ): Promise<void> {
+    const tax = input.taxPercent.trim();
+    if (!isAmount(tax) || Number(tax) > 100) {
+      throw new InvalidBillingInput("A default tax rate must be a percentage from 0 to 100.");
+    }
+    if (!(await this.deps.firmEntities.isFirmEntity(input.tenantId, input.entityPartyId))) {
+      throw new InvalidBillingInput("A default tax rate is set for one of the firm's own companies.");
+    }
+    const from =
+      (await this.deps.taxDefaults.list(input.tenantId)).find((d) => d.entityPartyId === input.entityPartyId)?.taxPercent ??
+      null;
+    if (from !== null && compareAmounts(from, tax) === 0) return;
+    await this.deps.taxDefaults.set(input.tenantId, input.entityPartyId, tax);
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "tenant.tax_default_set",
+      objectId: input.tenantId,
+      actor,
+      payload: { entityPartyId: input.entityPartyId, from, to: tax },
+    });
   }
 
   async setAutoBilling(tenantId: string, on: boolean, actor: Actor): Promise<boolean> {

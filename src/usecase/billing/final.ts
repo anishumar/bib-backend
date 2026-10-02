@@ -85,9 +85,9 @@ export class FinalBiller {
   }
 
   /**
-   * "Bill it now": a one-time service the firm wrote no process for, billed by
-   * a person today. Refused where a process will bill it when its job is done,
-   * before its advance, or twice.
+   * "Bill it now": a one-time service the firm wrote no process for, or whose
+   * every job was cancelled (item 11), billed by a person today. Refused where
+   * a process will bill it when its job is done, or twice.
    */
   async billNow(input: { readonly tenantId: string; readonly engagementId: string }, actor: Actor): Promise<{ readonly dueId: string }> {
     if (!(await this.deps.setting.isOn(input.tenantId))) throw new AutoBillingOff();
@@ -218,16 +218,15 @@ function ready(s: FinalBillSubject): boolean {
 }
 
 /** Why a subject may not be billed now, or null. A group is judged by its
- *  services: any with a process waits for its job. */
+ *  services: any with a live process waits for its job; one whose every job
+ *  with a process was cancelled may be billed by a person (item 11). */
 function billNowRefusal(s: FinalBillSubject): string | null {
-  const withProcess = s.engagements.find((e) => e.job?.hasProcess === true);
-  const status = s.engagements.some((e) => e.status === "pending_advance")
-    ? "pending_advance"
-    : (s.engagements[0]?.status ?? "active");
+  const withProcess = s.engagements.filter((e) => e.job?.hasProcess === true);
+  const liveProcess = withProcess.some((e) => e.job?.status !== "cancelled");
   return mayBillNow({
     billingFrequency: s.billingFrequency,
-    status,
-    job: withProcess === undefined ? null : { hasProcess: true },
+    status: s.engagements[0]?.status ?? "active",
+    job: withProcess.length === 0 ? null : { hasProcess: true, cancelled: !liveProcess },
     hasFinalBill: s.hasFinalBill,
   });
 }

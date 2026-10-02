@@ -11,8 +11,8 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
-import type { BillingDeskService, DueOnDesk, UnscheduledRecord } from "../../usecase/billing/desk";
-import type { AdvanceGate, AdvanceOnDesk } from "../../usecase/billing/advance";
+import type { BillingDeskService, BillingSettings, DueOnDesk, UnscheduledRecord } from "../../usecase/billing/desk";
+import type { AdvanceDesk, AdvanceForMe, AdvanceOnDesk } from "../../usecase/billing/advance";
 import type { BillNowCandidate, FinalBiller } from "../../usecase/billing/final";
 import type { PersonRef, RefundCandidate, ScheduleRecord } from "../../usecase/billing/ports";
 import type { AuthzService } from "../../usecase/authz/service";
@@ -20,8 +20,8 @@ import type { Principal } from "../../platform/callctx";
 
 export interface BillingDeps {
   readonly service: BillingDeskService;
-  /** The advance's gate: where each stands, and an admin's Approve start (0320). */
-  readonly gate: AdvanceGate;
+  /** Where each advance stands and who is reminded (0322). */
+  readonly advances: AdvanceDesk;
   /** One-time services' final bills: Bill it now (0320). */
   readonly finals: FinalBiller;
   /** For the FEE AXIS only; gate 3 is middleware. */
@@ -32,14 +32,12 @@ const Decimal = z.string().regex(/^\d+(\.\d+)?$/);
 const Day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
 const STATUSES = ["open", "drafted", "billed", "skipped", "covered"] as const;
 const KINDS = ["period", "advance", "final"] as const;
+const STAGES = ["not_raised", "on_draft", "unpaid", "part_paid", "paid"] as const;
+const DUTIES = ["spoc", "key_manager", "partner", "admin"] as const;
 
 const PersonSchema = z
   .object({ userId: z.string().uuid(), displayName: z.string().nullable(), email: z.string() })
   .openapi("BillingPerson");
-
-const ReleasedSchema = z
-  .object({ at: z.string(), how: z.enum(["paid", "approved"]), by: PersonSchema.nullable() })
-  .openapi("AdvanceReleased");
 
 const DueSchema = z
   .object({
@@ -47,8 +45,9 @@ const DueSchema = z
     kind: z.enum(KINDS).openapi({
       description:
         "`period` (one period of recurring work), `advance` (the letter's advance, or one service's: " +
-        "raised on an invoice of its own, and the work waits until it is paid) or `final` (a one-time " +
-        "service whose work is done, billed for the balance after the advance) (0320).",
+        "raised on an invoice of its own, drafted automatically at signing since 0322, and holding no " +
+        "work) or `final` (a one-time service whose work is done, billed for the balance after the " +
+        "advance) (0320).",
     }),
     engagementLetterId: z.string().uuid().nullable().openapi({
       description: "The letter a LETTER-WIDE advance is for; null otherwise.",
@@ -122,14 +121,11 @@ const DueSchema = z
       .object({ invoiceId: z.string().uuid(), invoiceNumber: z.string(), amount: Decimal.nullable() })
       .nullable()
       .openapi({ description: "What this bill was reduced by, once raised or covered." }),
-    released: ReleasedSchema.nullable().openapi({
-      description: "An advance bill: when the work it held started, and how.",
-    }),
     advanceHoldsWork: z.boolean().openapi({
       description:
-        "An advance bill some engagement still waits on (pending_advance). Such an advance cannot be " +
-        "skipped (ADVANCE_NOT_SKIPPABLE); once nothing waits (the engagement ended before it started), " +
-        "it may be. Always false for other kinds of bill.",
+        "An advance bill some engagement still waits on (pending_advance: only work signed before 0322, " +
+        "until the daily catch-up starts it). Such an advance cannot be skipped (ADVANCE_NOT_SKIPPABLE). " +
+        "Always false for other kinds of bill.",
     }),
   })
   .openapi("BillingDue");
@@ -144,22 +140,68 @@ const AdvanceSchema = z
     engagementId: z.string().uuid().nullable(),
     serviceName: z.string().openapi({ description: "`All services` for the letter's own advance." }),
     letter: z.object({ id: z.string().uuid(), ref: z.string() }),
-    billOn: z.string(),
+    billOn: z.string().openapi({ description: "The day the letter was signed: the advance's bill date." }),
     amount: Decimal.nullable(),
     manager: PersonSchema.nullable(),
+    status: z.enum(STATUSES).openapi({ description: "The bill's own status; `skipped` is not chased." }),
     invoice: z.object({ id: z.string().uuid(), number: z.string().nullable(), status: z.string() }).nullable(),
+    invoiceIssuedOn: z.string().nullable(),
     balance: z
       .object({ invoiced: z.string().nullable(), paid: z.string().nullable(), outstanding: z.string().nullable() })
       .nullable()
       .openapi({ description: "The advance invoice's money, as the invoice reads it. Amounts null without fees." }),
-    state: z.enum(["not_raised", "on_draft", "unpaid", "part_paid", "paid", "started"]).openapi({
+    stage: z.enum(STAGES).openapi({
       description:
-        "Where the advance stands. `part_paid` waits for an admin's Approve start; `paid` starts by " +
-        "itself (an admin may push one that did not); `started` released the work.",
+        "Where the advance stands (0322; it holds no work): `not_raised` (no invoice: see `draftBlocked`, " +
+        "or its draft was cancelled), `on_draft` (waiting for an admin to issue it), `unpaid`, " +
+        "`part_paid`, `paid`.",
     }),
-    released: ReleasedSchema.nullable(),
+    pending: z.boolean().openapi({ description: "Still a draft, not raised or owed, and not skipped: it is chased." }),
+    pendingSince: z.string().nullable().openapi({
+      description: "Since when it has waited for its current step: signing (no invoice, or a draft) or issue (unpaid).",
+    }),
+    daysPending: z.number().int().nullable(),
+    overdue: z.boolean().openapi({
+      description:
+        "Past the firm's days for its step: a draft `advanceDraftOverdueDays` after signing, unpaid " +
+        "`advanceUnpaidOverdueDays` after issue (Your firm, Automatic billing).",
+    }),
+    escalated: z.boolean().openapi({
+      description: "Still pending a week or more after signing: the administrators hear about it weekly.",
+    }),
+    people: z
+      .object({
+        spocs: z.array(PersonSchema),
+        keyManager: PersonSchema.nullable(),
+        partner: PersonSchema.nullable(),
+      })
+      .openapi({
+        description:
+          "Who is reminded on My day: the client's SPOCs for the work, its Key Manager, and the first " +
+          "person above the Key Manager at the firm's partner grade. Active staff only.",
+      }),
+    draftBlocked: z.enum(["no_tax_rate", "billed_by_hand", "not_open"]).nullable().openapi({
+      description:
+        "Why it has no invoice yet: `no_tax_rate` (the work was never invoiced and the issuing company " +
+        "has no default tax rate: set one, or raise it by hand), `billed_by_hand` (see `handRaised`).",
+    }),
+    handRaised: z
+      .object({ invoiceId: z.string().uuid(), number: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "An issued invoice already billing this work, on no bill: very likely this advance invoiced by " +
+          "hand before 0322. No draft is made; an admin Links it instead.",
+      }),
+    advanceHoldsWork: z.boolean(),
   })
   .openapi("BillingAdvance");
+
+const AdvanceForMeSchema = AdvanceSchema.extend({
+  duties: z.array(z.enum(DUTIES)).openapi({
+    description: "Why it is the caller's: SPOC, Key Manager, partner, or an administrator's to issue or to know about.",
+  }),
+}).openapi("BillingAdvanceForMe");
 
 const RefundSchema = z
   .object({
@@ -228,13 +270,17 @@ const listRoute = createRoute({
   summary: "Bills that have fallen due, and what became of them",
   request: {
     query: z.object({
-      status: z.enum(STATUSES).optional(),
+      status: z.enum([...STATUSES, "pending", "all"]).optional().openapi({
+        description:
+          "`pending` (open or drafted, oldest first) when absent; `all` is history as well, newest " +
+          "first; or one status.",
+      }),
       partyId: z.string().uuid().optional(),
       mine: z.enum(["true", "false"]).optional().openapi({
         description:
           "Only what the caller should act on: their own open or drafted dues, their reports' once " +
           "a week has passed, and any open bill with no price where they are the client's SPOC for " +
-          "that Dept or a firm administrator.",
+          "that Dept or a firm administrator. Advance bills are not here: `/billing/advances?mine=true`.",
       }),
     }),
   },
@@ -391,7 +437,7 @@ const linkRoute = createRoute({
   description:
     "Same client, company and currency, not cancelled, and not another bill's advance invoice. An " +
     "ADVANCE bill is linked only by an admin (ADVANCE_LINK_NEEDS_ADMIN, 403), to an invoice no other " +
-    "bill is on: a paid invoice starts the work it holds, as Approve start does.",
+    "bill is on: that invoice becomes the advance later bills are taken off.",
   request: {
     params: z.object({ dueId: z.string().uuid() }),
     body: {
@@ -414,32 +460,25 @@ const advancesRoute = createRoute({
   method: "get",
   path: "/api/v1/billing/advances",
   tags: ["billing"],
-  summary: "Every advance bill, and where it stands",
+  summary: "Every advance, where it stands, and who is reminded",
+  description:
+    "Since 0322 an advance holds no work: signing starts it and drafts the advance invoice. This is " +
+    "what chases the money. With `mine=true`, only what the caller must chase (each with `duties`): " +
+    "pending advances where they are the client's SPOC for the work, its Key Manager or the partner " +
+    "above the Key Manager, and for an administrator, one waiting for an admin to raise or issue it " +
+    "or a week old and still not paid.",
+  request: { query: z.object({ mine: z.enum(["true", "false"]).optional() }) },
   responses: {
     200: {
       description: "The advances",
-      content: { "application/json": { schema: z.object({ advances: z.array(AdvanceSchema) }) } },
+      content: {
+        "application/json": {
+          schema: z.object({ today: z.string(), advances: z.array(AdvanceForMeSchema) }),
+        },
+      },
     },
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
-  },
-});
-
-const approveStartRoute = createRoute({
-  method: "post",
-  path: "/api/v1/billing/advances/{dueId}/approve-start",
-  tags: ["billing"],
-  summary: "Start the work on a part-paid advance",
-  description:
-    "An admin's decision (Ashish, 2026-10-01): the work an advance holds starts by itself when its " +
-    "invoice is paid in full, and on a part payment only when an admin approves it here.",
-  request: { params: z.object({ dueId: z.string().uuid() }) },
-  responses: {
-    200: { description: "Started", content: { "application/json": { schema: AdvanceSchema } } },
-    401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or not a firm administrator"),
-    404: errorResponse("No such advance bill at this firm"),
-    409: errorResponse("Not raised, not issued, nothing paid, or already started"),
   },
 });
 
@@ -528,7 +567,8 @@ const billNowRoute = createRoute({
   summary: "Bill a one-time service with no process now",
   description:
     "Writes its final bill, dated today, onto To raise. Only where the firm wrote no process for " +
-    "the service: with one, the bill comes when the job's last step is done.",
+    "the service, or every job that had one was cancelled: with a live one, the bill comes when the " +
+    "job's last step is done.",
   request: { params: z.object({ engagementId: z.string().uuid() }) },
   responses: {
     201: {
@@ -538,14 +578,49 @@ const billNowRoute = createRoute({
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such one-time engagement at this firm"),
-    409: errorResponse("It has a process, is waiting for its advance, is billed already, or billing is off"),
+    409: errorResponse("It has a live process, is billed already, or billing is off"),
   },
 });
+
+const AdvancePolicySchema = z
+  .object({
+    draftOverdueDays: z.number().int().min(1).max(90).openapi({
+      description: "A draft advance invoice turns Overdue this many days after signing (default 3).",
+    }),
+    unpaidOverdueDays: z.number().int().min(1).max(180).openapi({
+      description: "An issued, unpaid advance turns Overdue this many days after issue (default 15).",
+    }),
+    partnerMinRank: z.number().int().min(1).max(100).openapi({
+      description:
+        "The partner reminded: the first person above the client's Key Manager whose grade rank is at " +
+        "least this (default 9, the default ladder's Director).",
+    }),
+    digestWeekday: z.number().int().min(1).max(7).openapi({
+      description: "The weekly summary to the administrators: ISO weekday, 1 = Monday (default).",
+    }),
+    digestHour: z.number().int().min(0).max(23).openapi({
+      description: "Its hour, 0-23, in the firm's own time zone (default 10).",
+    }),
+  })
+  .openapi("AdvancePolicy");
+
+const TaxDefaultSchema = z
+  .object({
+    entityPartyId: z.string().uuid().openapi({ description: "One of the firm's own companies." }),
+    taxPercent: Decimal.openapi({
+      description: "0 to 100: the rate an automatic advance draft carries when the work was never invoiced.",
+    }),
+  })
+  .openapi("TaxDefault");
 
 const SettingsSchema = z
   .object({
     autoBilling: z.boolean().openapi({
       description: "Whether the daily sweep writes bill dues for this firm. Off until the firm turns it on.",
+    }),
+    advancePolicy: AdvancePolicySchema,
+    taxDefaults: z.array(TaxDefaultSchema).openapi({
+      description: "Each company's default tax rate. A company with none gets no automatic advance draft.",
     }),
   })
   .openapi("BillingSettings");
@@ -554,7 +629,7 @@ const getSettingsRoute = createRoute({
   method: "get",
   path: "/api/v1/billing/settings",
   tags: ["billing"],
-  summary: "The firm's billing switch",
+  summary: "The firm's billing switch, how advances are chased, and default tax rates",
   responses: {
     200: { description: "Settings", content: { "application/json": { schema: SettingsSchema } } },
     401: errorResponse("Not signed in"),
@@ -566,12 +641,30 @@ const putSettingsRoute = createRoute({
   method: "put",
   path: "/api/v1/billing/settings",
   tags: ["billing"],
-  summary: "Turn automatic billing on or off",
+  summary: "Change the firm's billing settings",
+  description:
+    "Any of the three, each saved as given: automatic billing on or off; how advances are chased " +
+    "(the whole policy); companies' default tax rates (one row per company sent, a company left out " +
+    "keeps its rate). Answers the settings as they now stand.",
   request: {
-    body: { content: { "application/json": { schema: SettingsSchema } }, required: true },
+    body: {
+      content: {
+        "application/json": {
+          schema: z
+            .object({
+              autoBilling: z.boolean().optional(),
+              advancePolicy: AdvancePolicySchema.optional(),
+              taxDefaults: z.array(TaxDefaultSchema).max(50).optional(),
+            })
+            .openapi("SetBillingSettings"),
+        },
+      },
+      required: true,
+    },
   },
   responses: {
     200: { description: "Set", content: { "application/json": { schema: SettingsSchema } } },
+    400: errorResponse("A number out of range, or a tax rate for a company that is not the firm's"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
   },
@@ -631,16 +724,11 @@ function dueBody(d: DueOnDesk, fees: boolean) {
             invoiceNumber: d.advanceApplied.invoiceNumber,
             amount: fees ? d.advanceApplied.amount : null,
           },
-    released: releasedBody(d.released),
     advanceHoldsWork: d.advanceHoldsWork,
   };
 }
 
-function releasedBody(r: DueOnDesk["released"]) {
-  return r === null ? null : { at: r.at, how: r.how, by: personBody(r.by) };
-}
-
-function advanceBody(a: AdvanceOnDesk, fees: boolean) {
+function advanceBody(a: AdvanceOnDesk | AdvanceForMe, fees: boolean) {
   return {
     id: a.id,
     party: { id: a.party.id, displayName: a.party.displayName },
@@ -653,7 +741,9 @@ function advanceBody(a: AdvanceOnDesk, fees: boolean) {
     billOn: a.billOn,
     amount: fees ? a.amount : null,
     manager: personBody(a.manager),
+    status: a.status,
     invoice: a.invoice === null ? null : { id: a.invoice.id, number: a.invoice.number, status: a.invoice.status },
+    invoiceIssuedOn: a.invoiceIssuedOn,
     balance:
       a.balance === null
         ? null
@@ -662,8 +752,35 @@ function advanceBody(a: AdvanceOnDesk, fees: boolean) {
             paid: fees ? a.balance.paid : null,
             outstanding: fees ? a.balance.outstanding : null,
           },
-    state: a.state,
-    released: releasedBody(a.released),
+    stage: a.stage,
+    pending: a.reminder.pending,
+    pendingSince: a.reminder.pendingSince,
+    daysPending: a.reminder.daysPending,
+    overdue: a.reminder.overdue,
+    escalated: a.reminder.escalated,
+    people: {
+      spocs: a.people.spocs.map((p) => ({ userId: p.userId, displayName: p.displayName, email: p.email })),
+      keyManager: personBody(a.people.keyManager),
+      partner: personBody(a.people.partner),
+    },
+    draftBlocked: a.draftBlocked,
+    handRaised: a.handRaised === null ? null : { invoiceId: a.handRaised.invoiceId, number: a.handRaised.number },
+    advanceHoldsWork: a.advanceHoldsWork,
+    duties: "duties" in a ? [...a.duties] : [],
+  };
+}
+
+function settingsBody(s: BillingSettings) {
+  return {
+    autoBilling: s.autoBilling,
+    advancePolicy: {
+      draftOverdueDays: s.advancePolicy.draftOverdueDays,
+      unpaidOverdueDays: s.advancePolicy.unpaidOverdueDays,
+      partnerMinRank: s.advancePolicy.partnerMinRank,
+      digestWeekday: s.advancePolicy.digestWeekday,
+      digestHour: s.advancePolicy.digestHour,
+    },
+    taxDefaults: s.taxDefaults.map((t) => ({ entityPartyId: t.entityPartyId, taxPercent: t.taxPercent })),
   };
 }
 
@@ -795,15 +912,17 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
   app.openapi(advancesRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const fees = seesFees(c.get("principal"));
-    return c.json({ advances: (await deps.gate.list(s.tenantId)).map((a) => advanceBody(a, fees)) }, 200);
-  });
-
-  app.openapi(approveStartRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
-    if (!s.ok) return c.json(s.deny, s.status);
-    const after = await deps.gate.approveStart({ tenantId: s.tenantId, dueId: c.req.valid("param").dueId }, s.actor);
-    return c.json(advanceBody(after, seesFees(c.get("principal"))), 200);
+    const principal = c.get("principal");
+    const fees = seesFees(principal);
+    const out =
+      c.req.valid("query").mine === "true"
+        ? await deps.advances.mine(
+            s.tenantId,
+            s.userId,
+            principal !== null && (await deps.authz.can(principal, "tenant:admin")),
+          )
+        : await deps.advances.list(s.tenantId);
+    return c.json({ today: out.today, advances: out.advances.map((a) => advanceBody(a, fees)) }, 200);
   });
 
   app.openapi(refundsRoute, async (c) => {
@@ -880,13 +999,21 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
   app.openapi(getSettingsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    return c.json({ autoBilling: await deps.service.autoBilling(s.tenantId) }, 200);
+    return c.json(settingsBody(await deps.service.settings(s.tenantId)), 200);
   });
 
   app.openapi(putSettingsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const on = await deps.service.setAutoBilling(s.tenantId, c.req.valid("json").autoBilling, s.actor);
-    return c.json({ autoBilling: on }, 200);
+    const body = c.req.valid("json");
+    if (body.autoBilling !== undefined) await deps.service.setAutoBilling(s.tenantId, body.autoBilling, s.actor);
+    if (body.advancePolicy !== undefined) await deps.service.setAdvancePolicy(s.tenantId, body.advancePolicy, s.actor);
+    for (const t of body.taxDefaults ?? []) {
+      await deps.service.setTaxDefault(
+        { tenantId: s.tenantId, entityPartyId: t.entityPartyId, taxPercent: t.taxPercent },
+        s.actor,
+      );
+    }
+    return c.json(settingsBody(await deps.service.settings(s.tenantId)), 200);
   });
 }

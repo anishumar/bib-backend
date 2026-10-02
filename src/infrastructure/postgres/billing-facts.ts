@@ -1,6 +1,6 @@
 // What the advance and the final bill need to know (auto-invoice, phase 2,
-// 0320): a signed letter's advance terms, the letters still owing an advance
-// bill, and the one-time services whose final bill may be due.
+// 0320; 0322): a signed letter's advance terms, the letters whose advance still
+// needs the catch-up, and the one-time services whose final bill may be due.
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type {
@@ -72,33 +72,68 @@ export class PostgresAdvanceBillFacts implements AdvanceBillFacts {
     });
   }
 
-  async lettersOwingAdvanceBills(tenantId: string): Promise<readonly string[]> {
+  /**
+   * The letters the daily catch-up visits (0322): work still waiting on an
+   * advance from before 0322, an advance asked for with no bill written
+   * (for work not called off), or an advance bill never put on an invoice and
+   * not skipped. A letter whose advance was recorded by hand before 0320 is
+   * left alone: its work started long ago.
+   */
+  async lettersOwingAdvance(tenantId: string): Promise<readonly string[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ id: string }[]>`
-        SELECT DISTINCT l.id
+        SELECT l.id
           FROM crm.engagement_letter l
-          JOIN crm.engagement e
-            ON e.engagement_letter_id = l.id AND e.tenant_id = l.tenant_id AND e.status = 'pending_advance'
-          JOIN crm.engagement_letter_line ll
-            ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
          WHERE l.status = 'signed'
-           AND ((l.advance_required AND l.advance_recorded_at IS NULL
+           AND NOT (l.advance_required AND l.advance_recorded_at IS NOT NULL)
+           AND (
+             EXISTS (SELECT 1 FROM crm.engagement e
+                      WHERE e.engagement_letter_id = l.id AND e.tenant_id = l.tenant_id
+                        AND e.status = 'pending_advance')
+             OR (l.advance_required
+                 AND EXISTS (SELECT 1 FROM crm.engagement e
+                              WHERE e.engagement_letter_id = l.id AND e.tenant_id = l.tenant_id
+                                AND e.status <> 'cancelled')
                  AND NOT EXISTS (SELECT 1 FROM crm.billing_due d
                                   WHERE d.tenant_id = l.tenant_id AND d.kind = 'advance'
                                     AND d.engagement_letter_id = l.id AND d.engagement_id IS NULL))
-             OR (ll.advance_amount IS NOT NULL
-                 AND NOT EXISTS (SELECT 1 FROM crm.billing_due d
-                                  WHERE d.tenant_id = l.tenant_id AND d.kind = 'advance'
-                                    AND d.engagement_id = e.id)))
+             OR EXISTS (SELECT 1
+                          FROM crm.engagement e
+                          JOIN crm.engagement_letter_line ll
+                            ON ll.id = e.engagement_letter_line_id AND ll.tenant_id = e.tenant_id
+                         WHERE e.engagement_letter_id = l.id AND e.tenant_id = l.tenant_id
+                           AND e.status <> 'cancelled'
+                           AND ll.advance_amount IS NOT NULL
+                           AND NOT EXISTS (SELECT 1 FROM crm.billing_due d
+                                            WHERE d.tenant_id = e.tenant_id AND d.kind = 'advance'
+                                              AND d.engagement_id = e.id))
+             OR EXISTS (SELECT 1 FROM crm.billing_due d
+                         WHERE d.tenant_id = l.tenant_id AND d.kind = 'advance'
+                           AND d.engagement_letter_id = l.id
+                           AND d.invoice_id IS NULL AND d.skipped_at IS NULL)
+           )
+         ORDER BY l.signed_at, l.id
       `;
       return rows.map((r) => r.id);
     });
   }
 
-  /** Every active firm: which of them owe a bill is only answerable inside
+  async undraftedAdvanceBills(tenantId: string, letterId: string): Promise<readonly string[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string }[]>`
+        SELECT id FROM crm.billing_due
+         WHERE kind = 'advance' AND engagement_letter_id = ${letterId}
+           AND invoice_id IS NULL AND skipped_at IS NULL
+         ORDER BY created_at, id
+      `;
+      return rows.map((r) => r.id);
+    });
+  }
+
+  /** Every active firm: which of them owe something is only answerable inside
    *  each one's wall, so the GLOBAL read is ids and nothing else, as
    *  `PostgresAutoBillingFirms`'s is. */
-  async firmsOwingAdvanceBills(): Promise<readonly string[]> {
+  async firmsOwingAdvance(): Promise<readonly string[]> {
     const rows = await this.app<{ id: string }[]>`
       SELECT id FROM tenancy.tenant WHERE status = 'active' ORDER BY created_at
     `;

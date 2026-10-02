@@ -789,8 +789,9 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // redacting the amounts. Raising, linking, skipping and setting a schedule
   // are `party:write`, the permission that raises an invoice by hand: SPOCs
   // and managers both raise bills (Ashish, 2026-10-01). Issuing stays
-  // `tenant:admin` on the invoice routes. The FIRM'S SWITCH is `tenant:admin`:
-  // turning it on starts a sweep across every client.
+  // `tenant:admin` on the invoice routes. The FIRM'S SETTINGS are
+  // `tenant:admin`: the switch starts a sweep across every client, and the
+  // advance policy and default tax rates (0322) change what every advance does.
   [routeKey("GET", "/api/v1/billing/dues"), "party:read" as const],
   [routeKey("GET", "/api/v1/billing/unscheduled"), "party:read" as const],
   [routeKey("PUT", "/api/v1/engagements/{engagementId}/billing"), "party:write" as const],
@@ -799,10 +800,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // default (0321), moved on the roles screen.
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/skip"), "billing:skip" as const],
   [routeKey("POST", "/api/v1/billing/dues/{dueId}/link"), "party:write" as const],
-  // The advance and the final bill (0320). Approve start, a refund's credit
-  // note and keeping an advance are an administrator's, as credit notes are.
+  // The advance and the final bill (0320). A refund's credit note and keeping
+  // an advance are an administrator's, as credit notes are. (Approve start went
+  // with 0322: the advance no longer holds the work.)
   [routeKey("GET", "/api/v1/billing/advances"), "party:read" as const],
-  [routeKey("POST", "/api/v1/billing/advances/{dueId}/approve-start"), "tenant:admin" as const],
   [routeKey("GET", "/api/v1/billing/refunds"), "party:read" as const],
   [routeKey("POST", "/api/v1/billing/refunds/{dueId}/credit-note"), "tenant:admin" as const],
   [routeKey("POST", "/api/v1/billing/refunds/{dueId}/keep"), "tenant:admin" as const],

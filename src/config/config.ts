@@ -150,6 +150,11 @@ const EnvSchema = z.object({
   // DAYS, so sweeping more often re-reads the same answer and buys nothing —
   // and the one thing it could buy, a reminder arriving at 3am, is not wanted.
   BIB_WORKER_DUNNING_CRON: z.string().min(1).default("0 7 * * *"),
+  // HOURLY (0322), at five past. The weekly summary of pending advances goes
+  // out at each FIRM's own weekday and hour in its own zone (Your firm), so the
+  // sweep has to look every hour; for every firm whose slot has not come, or
+  // whose week is already sent, it does nothing.
+  BIB_WORKER_ADVANCE_DIGEST_CRON: z.string().min(1).default("5 * * * *"),
   // EVERY FIVE MINUTES, and much finer than the other two on purpose. This one
   // is not a clock-driven policy — it is the engine noticing that work became
   // ready, and the person waiting on the next step is a colleague at their desk.
@@ -340,6 +345,9 @@ export interface WorkerConfig {
   /** How often the dunning ladder is climbed. Daily by default: the rungs are
    *  counted in DAYS, so sweeping more often only re-reads the same answer. */
   readonly dunningCron: string;
+  /** When the weekly advance summary looks for firms whose slot has come
+   *  (0322). Hourly: each firm chooses its own weekday and hour. */
+  readonly advanceDigestCron: string;
   readonly orchestratorCron: string;
   readonly obligationCron: string;
   /** When the escalation ladder is climbed (T4.5). Daily: the rungs are
@@ -455,6 +463,7 @@ export function load(): Config {
     worker: {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,
       dunningCron: env.BIB_WORKER_DUNNING_CRON,
+      advanceDigestCron: env.BIB_WORKER_ADVANCE_DIGEST_CRON,
       orchestratorCron: env.BIB_WORKER_ORCHESTRATOR_CRON,
       obligationCron: env.BIB_WORKER_OBLIGATION_CRON,
       escalationCron: env.BIB_WORKER_ESCALATION_CRON,

@@ -28,9 +28,23 @@ import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
 import { BillingService } from "../usecase/billing/service";
 import { GoLiveScheduler } from "../usecase/billing/golive";
-import { AdvanceBiller } from "../usecase/billing/advance";
+import { AdvanceBiller, AdvanceDesk, AdvanceDigest } from "../usecase/billing/advance";
 import { FinalBiller } from "../usecase/billing/final";
-import { PostgresAutoBillingSetting, PostgresBillingSchedules } from "../infrastructure/postgres/billing-desk";
+import { BillingDeskService } from "../usecase/billing/desk";
+import { InvoiceService } from "../usecase/invoice/service";
+import {
+  PostgresAutoBillingSetting,
+  PostgresBillingDueDesk,
+  PostgresBillingSchedules,
+} from "../infrastructure/postgres/billing-desk";
+import {
+  PostgresAdvanceDigestStore,
+  PostgresAdvancePolicy,
+  PostgresAdvanceReminderFacts,
+  PostgresIssuerTaxDefaults,
+} from "../infrastructure/postgres/advance-reminders";
+import { invoiceIssuedCopies } from "./invoice-copies";
+import { mailerFor } from "./mailer";
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { EscalationService } from "../usecase/escalation/service";
 import { ChaserService } from "../usecase/chaser/service";
@@ -138,6 +152,11 @@ export const DUNNING_QUEUE = "billing.dunning";
  *  silencing the other. */
 export const BILLING_QUEUE = "billing.dues";
 
+/** The weekly summary of pending advances to each firm's administrators
+ *  (0322). Its own queue and its own HOURLY cron: each firm picks its own
+ *  weekday and hour, and a failure here must not silence the daily bills. */
+export const ADVANCE_DIGEST_QUEUE = "billing.advance-digest";
+
 /** The queue the orchestrator sweep runs on. Its own name and its own cadence
  *  again — this one is minutes rather than hours or days, because what it is
  *  waiting for is not a clock but a colleague finishing a step. */
@@ -209,9 +228,11 @@ export interface WiredWorker {
   readonly scheduler: SchedulerService;
   readonly dunning: DunningService;
   readonly billing: BillingService;
-  /** The advance bill's and the final bill's catch-up (0320). */
+  /** The advance bill's and the final bill's catch-up (0320, 0322). */
   readonly advanceBills: AdvanceBiller;
   readonly finalBills: FinalBiller;
+  /** The weekly summary of pending advances to the admins (0322). */
+  readonly advanceDigest: AdvanceDigest;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
@@ -398,17 +419,27 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
   });
 
-  // THE ADVANCE AND THE FINAL BILL (0320). The advance bill is written at
-  // signing (this process settles e-signed letters) and caught up daily for
-  // every firm, whatever its switch says: it is how work waiting on an advance
-  // starts. A one-time service's final bill is written when its job finishes
-  // (the orchestrator below) and caught up daily for firms with the switch on.
-  const advanceBills = new AdvanceBiller({
+  // THE ADVANCE AND THE FINAL BILL (0320, 0322). The advance bill is written
+  // and its invoice DRAFTED at signing (this process settles e-signed letters)
+  // and caught up daily for every firm, whatever its switch says; the catch-up
+  // also starts work signed before 0322 that still waits on its advance. Both
+  // reach use cases composed further down, through closures called only once a
+  // sweep runs. A one-time service's final bill is written when its job
+  // finishes (the orchestrator below) and caught up daily for firms with the
+  // switch on.
+  const advanceBills: AdvanceBiller = new AdvanceBiller({
     facts: new PostgresAdvanceBillFacts(pools.app),
     dues: new PostgresBillingDueWriter(pools.app),
     managers: new PostgresBillingManagerFacts(pools.app),
     ids: systemIds,
     events: ledger,
+    drafter: {
+      draftAdvance: (tenantId, dueId, actor) => billingDesk.draftAdvance(tenantId, dueId, actor),
+    },
+    work: {
+      startWaitingWork: (tenantId, letterId, actor): Promise<{ readonly started: number }> =>
+        engagement.startWaitingWork(tenantId, letterId, actor),
+    },
   });
   const finalBills = new FinalBiller({
     facts: new PostgresFinalBillFacts(pools.app),
@@ -579,7 +610,66 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   });
   const tenantRepository = new PostgresTenantRepository(pools.app);
   const workerParties = new PostgresPartyRepository(pools.app);
-  const engagement = new EngagementService({
+
+  // THE ADVANCE'S DRAFT AND ITS REMINDERS (0322). The same invoice service and
+  // billing desk the API composes, from the same adapters: a draft this process
+  // makes (an e-signed letter, the catch-up) obeys every rule a person's does,
+  // and is numbered only when an admin issues it.
+  const invoices = new InvoiceService({
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    firmEntities: documents,
+    parties: workerParties,
+    invoices: invoiceRepository,
+    ids: systemIds,
+    clock: systemClock,
+    events: ledger,
+    issuedCopies: invoiceIssuedCopies(fileStore, log),
+    staff: memberships,
+  });
+  const advancePolicy = new PostgresAdvancePolicy(pools.app);
+  const taxDefaults = new PostgresIssuerTaxDefaults(pools.app);
+  const billingDesk = new BillingDeskService({
+    desk: new PostgresBillingDueDesk(pools.app),
+    invoices: {
+      raise: (input, actor) => invoices.raise(input, actor),
+      addLine: (input) => invoices.addLine(input),
+      find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
+      issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
+    },
+    schedules: new PostgresBillingSchedules(pools.app),
+    setting: new PostgresAutoBillingSetting(pools.app),
+    fiscalYears: configRepository,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    events: ledger,
+    taxDefaults,
+    policy: advancePolicy,
+    firmEntities: documents,
+  });
+  const reminderFacts = new PostgresAdvanceReminderFacts(pools.app);
+  const advanceDesk = new AdvanceDesk({
+    desk: new PostgresBillingDueDesk(pools.app),
+    policy: advancePolicy,
+    people: reminderFacts,
+    taxDefaults,
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+  });
+  // THE WEEKLY SUMMARY is the first letter a sweep sends, so this process
+  // holds a mailer now, built exactly as the API's (run_worker.tf gives it the
+  // relay's password since 0322).
+  const advanceDigest = new AdvanceDigest({
+    store: new PostgresAdvanceDigestStore(pools.app),
+    advances: advanceDesk,
+    people: reminderFacts,
+    policy: advancePolicy,
+    mailer: mailerFor(cfg, log),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    events: ledger,
+    advancesUrl: `${cfg.auth.appBaseUrl.replace(/\/+$/, "")}/invoices?tab=advances`,
+  });
+  const engagement: EngagementService = new EngagementService({
     // 0320: and writes the advance bill it owes.
     advanceBilling: advanceBills,
     // 0319: an e-signed letter settled here sets its engagements' billing
@@ -668,6 +758,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     billing,
     advanceBills,
     finalBills,
+    advanceDigest,
     orchestrator,
     obligations,
     escalations,
@@ -726,16 +817,41 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
             "billing sweep",
           );
         }
-        // The advance and the final bill's catch-up (0320), on the same day.
-        for (const r of [...(await advanceBills.catchUp()), ...(await finalBills.sweep())]) {
+        // The advance's catch-up (0322: start waiting work, write, draft) and
+        // the final bill's (0320), on the same day.
+        for (const r of await advanceBills.catchUp()) {
           if (r.failure !== undefined) {
-            log.error({ tenantId: r.tenantId, failure: r.failure }, "advance or final bill catch-up could not visit firm");
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "advance catch-up could not visit firm");
+          } else if (r.created > 0 || r.drafted > 0 || r.started > 0) {
+            log.info(
+              { tenantId: r.tenantId, created: r.created, drafted: r.drafted, started: r.started },
+              "advance catch-up",
+            );
+          }
+        }
+        for (const r of await finalBills.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "final bill catch-up could not visit firm");
           } else if (r.created > 0) {
-            log.info({ tenantId: r.tenantId, created: r.created }, "advance or final bills written");
+            log.info({ tenantId: r.tenantId, created: r.created }, "final bills written");
           }
         }
       });
       await queue.schedule(BILLING_QUEUE, cfg.worker.dunningCron);
+
+      await queue.register(ADVANCE_DIGEST_QUEUE, async () => {
+        for (const r of await advanceDigest.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, weekOf: r.weekOf, failure: r.failure }, "advance summary could not visit firm");
+          } else {
+            log.info(
+              { tenantId: r.tenantId, weekOf: r.weekOf, advances: r.advances, recipients: r.recipients },
+              "advance summary",
+            );
+          }
+        }
+      });
+      await queue.schedule(ADVANCE_DIGEST_QUEUE, cfg.worker.advanceDigestCron);
 
       await queue.register(ORCHESTRATOR_QUEUE, async () => {
         const reports = await orchestrator.sweep();
