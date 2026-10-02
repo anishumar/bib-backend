@@ -10,9 +10,7 @@ import { EngagementService } from "../../src/usecase/engagement/service";
 import { makeEngagementFakes } from "../../src/testfakes/engagement";
 import type { QuotedLine, QuotedProposal } from "../../src/usecase/engagement/ports";
 import {
-  AdvanceAlreadyRecorded,
   AdvanceAmountRequired,
-  AdvanceNotRequired,
   InvalidLineAdvance,
   OneKindOfAdvance,
   AlreadySuperseded,
@@ -757,66 +755,40 @@ describe("signature and fan-out", () => {
   });
 });
 
-describe("the advance-fee gate", () => {
-  it("holds every engagement until the advance is recorded", async () => {
+describe("the advance no longer holds the work (0322)", () => {
+  it("starts every engagement at signature, even when the letter asks for an advance", async () => {
+    // Ashish (2026-10-02): "work can be started and parallelly the system should
+    // keep on notifying". The advance is drafted and chased, not waited for.
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
     await s.service.send(TENANT, id, ACTOR);
-
-    const { engagements } = await s.service.sign(
-      { tenantId: TENANT, letterId: id, signedByName: "Priya" },
-      ACTOR,
-    );
-    expect(engagements.every((e) => e.engagement.status === "pending_advance")).toBe(true);
-    // The gate is real, not advisory: no advance, no spawn trigger, no jobs.
-    expect(s.events.verbs()).not.toContain("contract.activated");
-
-    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    expect(released).toHaveLength(1);
-    expect(released[0]?.engagement.status).toBe("active");
-    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(engagements.every((e) => e.engagement.status === "active")).toBe(true);
+    expect(engagements.every((e) => e.engagement.activatedAt !== null)).toBe(true);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(engagements.length);
   });
 
-  it("refuses an advance nobody asked for", async () => {
-    const s = setup();
-    const id = await draft(s);
-    await expect(s.service.recordAdvance(TENANT, id, USER, ACTOR)).rejects.toBeInstanceOf(
-      AdvanceNotRequired,
-    );
-  });
-
-  it("refuses to record the same advance twice", async () => {
-    // Two receipts in an uncorrectable log for one payment.
+  it("starts work signed before 0322 that still waits on its advance, once", async () => {
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
     await s.service.send(TENANT, id, ACTOR);
-    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    await expect(s.service.recordAdvance(TENANT, id, USER, ACTOR)).rejects.toBeInstanceOf(
-      AdvanceAlreadyRecorded,
-    );
-  });
-
-  it("names who recorded it, because it is an attestation and not a receipt", async () => {
-    // Until payments (T3.5) exist, a person asserts the money arrived. WHO said
-    // so is the whole value of the record.
-    const s = setup();
-    const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
-    await completeTerms(s, id);
-    await s.service.send(TENANT, id, ACTOR);
-    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-
-    const recorded = s.events.recorded.find(
-      (e) => e.verb === "engagement_letter.advance_recorded",
-    );
-    expect(recorded?.payload).toMatchObject({
-      recordedByUserId: USER,
-      amount: "10000",
-      currency: "INR",
-    });
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    // What the 0320 gate left behind: the engagement still pending_advance.
+    for (const e of engagements) {
+      const at = s.letters.engagements.findIndex((x) => x.id === e.engagement.id);
+      const row = s.letters.engagements[at];
+      if (row !== undefined) s.letters.engagements[at] = { ...row, status: "pending_advance", activatedAt: null };
+    }
+    const before = s.events.recorded.length;
+    expect(await s.service.startWaitingWork(TENANT, id, ACTOR)).toEqual({ started: engagements.length });
+    const after = s.events.recorded.slice(before).map((e) => e.verb);
+    expect(after[0]).toBe("engagement_letter.work_started_before_advance");
+    expect(after.filter((v) => v === "contract.activated")).toHaveLength(engagements.length);
+    expect(s.letters.engagements.every((e) => e.status === "active")).toBe(true);
+    // Twice is nothing: none waits any more.
+    expect(await s.service.startWaitingWork(TENANT, id, ACTOR)).toEqual({ started: 0 });
   });
 });
 
@@ -1247,10 +1219,8 @@ describe("when the work begins", () => {
   });
 
   it("keeps the fee gate ahead of the date gate", async () => {
-    // Money first. An engagement waiting on an advance is `pending_advance`
-    // whatever the calendar says — telling somebody their October work is
-    // "starting soon" when nobody has paid for it is the wrong reassurance —
-    // and it becomes `pending_start` only once the advance is in.
+    // Since 0322 the advance holds nothing: the work's state follows only the
+    // calendar, whatever the letter asks of the client.
     const s = setup();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
@@ -1259,11 +1229,8 @@ describe("when the work begins", () => {
       { tenantId: TENANT, letterId: id, signedByName: "Priya" },
       ACTOR,
     );
-    expect(engagements[0]?.state).toBe("pending_advance");
-    expect(s.events.verbs()).not.toContain("contract.activated");
-
-    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    expect(released[0]?.state).toBe("active");
+    expect(engagements[0]?.engagement.status).toBe("active");
+    expect(s.events.verbs()).toContain("contract.activated");
   });
 
   it("the signature commits to the dates — they are terms", async () => {
@@ -2517,15 +2484,13 @@ describe("asking the billing desk to schedule the work that went live", () => {
     ]);
   });
 
-  it("not at signature for work waiting on an advance, but when the advance is recorded", async () => {
+  it("at signature even when the letter asks for an advance (0322)", async () => {
     const s = withBilling();
     const id = await draft(s, { advanceRequired: true, advanceAmount: "10000" });
     await completeTerms(s, id);
     await s.service.send(TENANT, id, ACTOR);
-    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    expect(s.asked).toEqual([]);
-    const { released } = await s.service.recordAdvance(TENANT, id, USER, ACTOR);
-    expect(s.asked.map((a) => a.engagementIds)).toEqual([released.map((e) => e.engagement.id)]);
+    const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.asked.map((a) => a.engagementIds)).toEqual([engagements.map((e) => e.engagement.id)]);
   });
 
   it("never turns a signature into a failure when billing cannot be scheduled", async () => {
@@ -2652,7 +2617,7 @@ describe("a service's own advance (0320)", () => {
     ).rejects.toBeInstanceOf(InvalidLineAdvance);
   });
 
-  it("holds only its own service's work at signing; the rest starts", async () => {
+  it("holds no work since 0322: every service starts at signing, its own advance or not", async () => {
     const s = setup();
     const id = await draft(s);
     const { audit } = await twoLines(s, id);
@@ -2661,9 +2626,9 @@ describe("a service's own advance (0320)", () => {
     await s.service.send(TENANT, id, ACTOR);
     const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
     const byLine = new Map(engagements.map((e) => [e.engagement.engagementLetterLineId, e.engagement.status]));
-    expect(byLine.get(audit.id)).toBe("pending_advance");
-    expect([...byLine.values()].filter((st) => st === "active")).toHaveLength(1);
-    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
+    expect(byLine.get(audit.id)).toBe("active");
+    expect([...byLine.values()].filter((st) => st === "active")).toHaveLength(2);
+    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(2);
   });
 
   it("is a term: in the content hash when set, and absent when not", async () => {
@@ -2717,8 +2682,8 @@ describe("the advance bill and its release (0320)", () => {
     expect((await s.letters.findLetter(TENANT, id))?.status).toBe("signed");
   });
 
-  it("releases one service's work when its own advance is settled", async () => {
-    const s = setup();
+  it("starts a service with its own advance at signature, and asks for its advance bill (0322)", async () => {
+    const s = withAdvanceBilling();
     const id = await draft(s);
     const audit = await s.service.addLine({
       tenantId: TENANT, letterId: id, entityPartyId: ENTITY_B, serviceVersionId: GST,
@@ -2728,14 +2693,7 @@ describe("the advance bill and its release (0320)", () => {
     await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
     await s.service.send(TENANT, id, ACTOR);
     const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
-    const waiting = engagements[0]?.engagement;
-    if (waiting === undefined) throw new Error("no engagement");
-    expect(waiting.status).toBe("pending_advance");
-
-    const released = await s.service.releaseEngagementAdvance(TENANT, waiting.id, ACTOR);
-    expect(released.map((e) => e.engagement.status)).toEqual(["active"]);
-    expect(s.events.recorded.filter((e) => e.verb === "contract.activated")).toHaveLength(1);
-    // Twice is nothing: the second finds no engagement still waiting.
-    expect(await s.service.releaseEngagementAdvance(TENANT, waiting.id, ACTOR)).toEqual([]);
+    expect(engagements.map((e) => e.engagement.status)).toEqual(["active"]);
+    expect(s.asked).toEqual([id]);
   });
 });

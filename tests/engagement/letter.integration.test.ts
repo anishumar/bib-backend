@@ -919,20 +919,11 @@ describe("the pin", () => {
 });
 
 describe("the advance gate", () => {
-  it("holds the engagements, then releases them all at once", async () => {
+  it("starts every engagement at signature, advance or not (0322)", async () => {
     const id = await signedLetter("10000");
-    const held = await letters.listEngagements(tenantA, id);
-    expect(held.every((e) => e.status === "pending_advance")).toBe(true);
-
-    const [user] = await owner<{ id: string }[]>`
-      INSERT INTO tenancy.user_account (email)
-      VALUES (${`advance-${stamp}@example.test`}) RETURNING id
-    `;
-    if (!user) throw new Error("could not create the recorder");
-
-    const { released } = await service.recordAdvance(tenantA, id, user.id, SYSTEM_ACTOR);
-    expect(released).toHaveLength(2);
-    expect(released.every((e) => e.engagement.status === "active")).toBe(true);
+    const started = await letters.listEngagements(tenantA, id);
+    expect(started).toHaveLength(2);
+    expect(started.every((e) => e.status === "active" && e.activatedAt !== null)).toBe(true);
   });
 });
 

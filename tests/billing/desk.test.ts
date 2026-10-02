@@ -11,8 +11,11 @@ import {
   FakeBillingSchedules,
   FakeFiscalYearSource,
   FakeInvoiceDrafter,
+  FakeIssuerTaxDefaults,
+  FakeAdvancePolicy,
 } from "../../src/testfakes/billing";
 import { FakeClock } from "../../src/testfakes/clock";
+import { FakeFirmEntities } from "../../src/testfakes/invoice";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import type { BillingDueRecord, ScheduleRecord } from "../../src/usecase/billing/ports";
@@ -69,7 +72,6 @@ function due(over: Partial<BillingDueRecord> = {}): BillingDueRecord {
     engagementLetterId: null,
     advancePool: null,
     advanceApplied: null,
-    released: null,
     advanceHoldsWork: false,
     ...over,
   };
@@ -111,6 +113,9 @@ function world(opts: { fiscalYear?: number | null } = {}) {
     timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
     clock: new FakeClock(new Date("2026-12-05T06:00:00.000Z")),
     events,
+    taxDefaults: new FakeIssuerTaxDefaults(),
+    policy: new FakeAdvancePolicy(),
+    firmEntities: new FakeFirmEntities(),
   });
   return { desk, invoices, schedules, setting, events, fiscalYears, service };
 }
@@ -350,7 +355,7 @@ describe("the list a manager works from", () => {
     w.desk.rows.push(due({ fullAmount: null, amount: null }));
     await w.service.list({ tenantId: FIRM, mineFor: SPOC });
     // 06:00 UTC on 5 December is 11:30 the same day in Kolkata.
-    expect(w.desk.spocsAskedOn).toEqual([{ userId: SPOC, onDate: "2026-12-05" }]);
+    expect(w.desk.mineAskedOn).toEqual([{ userId: SPOC, onDate: "2026-12-05" }]);
   });
 
   it("stops reminding the SPOC and the administrators once an amount is on a draft", async () => {

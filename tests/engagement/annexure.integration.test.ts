@@ -446,8 +446,8 @@ describe("signing an Annexure letter (0083)", () => {
       { tenantId: tenant, letterId: id, signedByName: "Bowen Liu", reference: "paper-mrr" },
       SYSTEM_ACTOR,
     );
-    // The advance was required, so record it: MRR counts ACTIVE engagements.
-    await service.recordAdvance(tenant, id, signatoryUserId, SYSTEM_ACTOR);
+    // MRR counts ACTIVE engagements, which every signed one is since 0322 (the
+    // advance no longer holds the work).
 
     const rows = await owner<
       { excluded_because: string | null; billing_frequency: string; monthly_amount: string | null }[]

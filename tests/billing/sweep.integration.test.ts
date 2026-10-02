@@ -23,6 +23,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { load } from "../../src/config/config";
+import { PostgresAdvancePolicy, PostgresIssuerTaxDefaults } from "../../src/infrastructure/postgres/advance-reminders";
 import {
   PostgresAutoBillingFirms,
   PostgresBillingDueWriter,
@@ -416,6 +417,9 @@ describe("the billing desk on a real database (0318)", () => {
     timeZones: new FakeFirmTimeZone("Asia/Kolkata"),
     clock,
     events: new RecordingEventSink(),
+    taxDefaults: new PostgresIssuerTaxDefaults(app),
+    policy: new PostgresAdvancePolicy(app),
+    firmEntities: { isFirmEntity: () => Promise.resolve(true) },
   });
   let me: Actor = { type: "system", id: null };
   let invoiceId = "";
@@ -452,16 +456,20 @@ describe("the billing desk on a real database (0318)", () => {
     expect(group?.engagementIds).toHaveLength(2);
   });
 
-  it("reads whom a person is SPOC for on the firm's day, active staff only", async () => {
-    expect(await deskAdapter.spocDutiesOf(tenantId, spoc, "2026-12-05")).toEqual([
-      { clientPartyId: client, deptCode: "FRC" },
-    ]);
-    // Before the assignment began, and for somebody who is not a SPOC.
-    expect(await deskAdapter.spocDutiesOf(tenantId, spoc, "2025-12-31")).toEqual([]);
-    expect(await deskAdapter.spocDutiesOf(tenantId, manager, "2026-12-05")).toEqual([]);
+  it("decides My day in the query, before the ceiling (review item 14)", async () => {
+    const mineOn = (userId: string, today: string) =>
+      deskAdapter.list(tenantId, { mine: { userId, isAdmin: false, today, escalateAfterDays: 7 } });
+    const forManager = await mineOn(manager, "2026-12-05");
+    expect(forManager.length).toBeGreaterThan(0);
+    expect(forManager.every((d) => d.kind !== "advance" && (d.status === "open" || d.status === "drafted"))).toBe(true);
+    expect(
+      forManager.every((d) => d.manager?.userId === manager || d.managerReportsTo?.userId === manager || d.fullAmount === null),
+    ).toBe(true);
+    // Somebody with no bill, no report and no SPOC duty sees nothing.
+    expect(await mineOn(client, "2026-12-05")).toEqual([]);
   });
 
-  it("raises a numbered draft from two dues, a line each, in the manager's kitty", async () => {
+  it("raises a draft from two dues, a line each, in the manager's kitty", async () => {
     const mine = await monthlyDues();
     const out = await desk.raise(
       { tenantId, dueIds: mine.map((d) => d.id), lines: mine.map((d) => ({ dueId: d.id, taxPercent: "18" })) },
