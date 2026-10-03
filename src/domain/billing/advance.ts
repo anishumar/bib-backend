@@ -163,9 +163,22 @@ export interface AdvanceReminder {
   readonly daysPending: number | null;
   /** Past the firm's days for the step it is at. */
   readonly overdue: boolean;
+  /** The day it turns (or turned) Overdue at the step it is at: what My day
+   *  dates the reminder by. Null once paid. */
+  readonly overdueOn: string | null;
   /** Still pending a week or more after signing: the admins hear about it. */
   readonly escalated: boolean;
 }
+
+/** What an advance that is not chased (paid, or skipped) reads. */
+export const NOT_CHASED: AdvanceReminder = {
+  pending: false,
+  pendingSince: null,
+  daysPending: null,
+  overdue: false,
+  overdueOn: null,
+  escalated: false,
+};
 
 /** How an advance's reminder reads today, on the firm's calendar. */
 export function advanceReminder(input: {
@@ -177,17 +190,17 @@ export function advanceReminder(input: {
   readonly today: string;
   readonly policy: Pick<AdvancePolicy, "draftOverdueDays" | "unpaidOverdueDays">;
 }): AdvanceReminder {
-  if (input.stage === "paid") {
-    return { pending: false, pendingSince: null, daysPending: null, overdue: false, escalated: false };
-  }
+  if (input.stage === "paid") return NOT_CHASED;
   const issued = input.stage === "unpaid" || input.stage === "part_paid";
   const since = issued ? (input.issuedOn ?? input.billOn) : input.billOn;
   const days = Math.max(0, daysFrom(since, input.today));
+  const allowed = issued ? input.policy.unpaidOverdueDays : input.policy.draftOverdueDays;
   return {
     pending: true,
     pendingSince: since,
     daysPending: days,
-    overdue: days >= (issued ? input.policy.unpaidOverdueDays : input.policy.draftOverdueDays),
+    overdue: days >= allowed,
+    overdueOn: plusDays(since, allowed),
     escalated: daysFrom(input.billOn, input.today) >= ADVANCE_ESCALATE_AFTER_DAYS,
   };
 }
@@ -230,6 +243,12 @@ function daysFrom(from: string, to: string): number {
     return Date.UTC(y, m - 1, d);
   };
   return Math.round((ms(to) - ms(from)) / 86_400_000);
+}
+
+/** An ISO day plus `days`, on the calendar (no clock, no zone). */
+function plusDays(day: string, days: number): string {
+  const [y = 0, m = 1, d = 1] = day.split("-").map(Number);
+  return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
 
 // ── Giving it back ─────────────────────────────────────────────────────────

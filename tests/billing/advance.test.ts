@@ -128,6 +128,8 @@ describe("advanceReminder: when an advance turns overdue, and when the admins he
     expect(at("2026-10-05")).toMatchObject({ pending: true, pendingSince: signed, daysPending: 0, overdue: false });
     expect(at("2026-10-07")).toMatchObject({ daysPending: 2, overdue: false });
     expect(at("2026-10-08")).toMatchObject({ daysPending: 3, overdue: true });
+    // My day dates the reminder by the day it turns Overdue.
+    expect(at("2026-10-05").overdueOn).toBe("2026-10-08");
   });
 
   it("no invoice yet reads like a draft: it waits for a person since signing", () => {
@@ -141,7 +143,7 @@ describe("advanceReminder: when an advance turns overdue, and when the admins he
     const at = (today: string) =>
       advanceReminder({ stage: "unpaid", billOn: signed, issuedOn: "2026-10-07", today, policy });
     expect(at("2026-10-21")).toMatchObject({ pendingSince: "2026-10-07", daysPending: 14, overdue: false });
-    expect(at("2026-10-22")).toMatchObject({ daysPending: 15, overdue: true });
+    expect(at("2026-10-22")).toMatchObject({ daysPending: 15, overdue: true, overdueOn: "2026-10-22" });
     expect(advanceReminder({ stage: "part_paid", billOn: signed, issuedOn: "2026-10-07", today: "2026-10-22", policy }).overdue).toBe(true);
   });
 
@@ -158,6 +160,7 @@ describe("advanceReminder: when an advance turns overdue, and when the admins he
       pendingSince: null,
       daysPending: null,
       overdue: false,
+      overdueOn: null,
       escalated: false,
     });
   });

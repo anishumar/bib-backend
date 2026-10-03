@@ -41,6 +41,7 @@ import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import {
   advanceReminder,
+  NOT_CHASED,
   advanceStage,
   advancesOwed,
   digestDueOn,
@@ -275,7 +276,7 @@ export class AdvanceDesk {
       });
       const reminder =
         r.status === "skipped"
-          ? { pending: false, pendingSince: null, daysPending: null, overdue: false, escalated: false }
+          ? NOT_CHASED
           : advanceReminder({ stage, billOn: r.billOn, issuedOn: r.invoiceIssuedOn, today, policy });
       const hasRate = r.lastTaxPercent !== null || defaults.some((d) => d.entityPartyId === r.issuer.id);
       const draftBlocked: AdvanceDraftBlock | null =

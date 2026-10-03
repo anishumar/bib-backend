@@ -1652,12 +1652,21 @@ A proposal reference may gap: `PR-2026-0007` missing means somebody abandoned a 
 Indian GST a series must be consecutive, and an auditor who finds one missing is entitled to
 read it as a suppressed sale.
 
-So `InvoiceRepository.create` **both allocates and writes**, and the signature is the
-guarantee. The mechanism is a counter row taken under `SELECT … FOR UPDATE` inside the same
-transaction as the insert: a second writer blocks until the first commits or rolls back, and
-a rollback releases the number because the counter never moved. **Never a sequence** —
-`nextval` survives rollback by design, which is what makes it wrong here and unfixable
-afterwards. Never `max(number)+1`, which reads a snapshot.
+**The number is drawn at ISSUE, not at the draft (0322).** It used to be drawn when the draft
+was created, so an automatic draft a firm then cancelled left a cancelled number in the series,
+which is why the billing desk only ever wrote bills. GST's consecutive-serial rule is about
+ISSUED tax invoices, and a draft is not one (Tally and Zoho number at issue too). Now
+`InvoiceRepository.create` writes an UNNUMBERED draft (its financial year, "which year's
+books", is still chosen there) and `InvoiceRepository.issue` **both allocates and writes**: the
+next number of the draft's series, in the same transaction as the status change. The
+mechanism is a counter row taken under `SELECT … FOR UPDATE`: a second writer blocks until the
+first commits or rolls back, and a rollback releases the number because the counter never
+moved. **Never a sequence** — `nextval` survives rollback by design, which is what makes it
+wrong here and unfixable afterwards. Never `max(number)+1`, which reads a snapshot. A draft
+cancelled before issue spends nothing and stays unnumbered; drafts made before 0322 keep the
+number they drew (removing it would leave the gap this exists to prevent). CHECKs: number and
+`sequence_number` both or neither, and an issued invoice is always numbered. Screens and APIs
+treat `number: null` as "Draft". `tests/invoice/numbering.integration.test.ts` (24) proves it.
 
 The series is per **(entity, financial year)**, because two of a firm's companies each file
 their own returns and each owes its own consecutive series. Both correctly issue
@@ -1667,7 +1676,8 @@ year is 1 April and that is hardcoded — right for India, wrong for the UK and 
 generalising it through `core.legal_entity.financial_year_end` would make a series' year
 depend on a mutable column, which is a decision a firm has to take.
 
-**The number, the series and an issued invoice's money are frozen by a trigger**, not by a
+**The number, the series and an issued invoice's money are frozen by a trigger** (0322 admits
+one change: an empty number filled in the same write that issues the draft), not by a
 service check — "why is invoice 41 now numbered 43" is a question an auditor asks, and an
 application rule is one an import or a psql session walks past. A wrong invoice is CANCELLED
 and reissued; the cancelled row stays in the sequence saying so, which is exactly what shows
@@ -1730,21 +1740,18 @@ Phase 1 (0318/0319, `bib/prompts/auto-invoice/PLAN.md`) writes a `crm.billing_du
 recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `period`, `advance` or
 `final`. The rules, each the firm's (Ashish) or the user's, 2026-10-01:
 
-- **Every advance is a GST tax invoice, and it starts the work.** The "Record advance" tick and its
+- **Every advance is a GST tax invoice.** (0320 made its payment start the work; 0322 took that
+  away, see the next section.) The "Record advance" tick and its
   route are GONE. Signing writes an ADVANCE BILL (`AdvanceBiller`, through the engagement use case's
   `AdvanceBilling` port; the daily billing queue catches up every firm's letters still owing one,
-  WHATEVER the auto-billing switch says, because this is now the only way such work starts). A
+  WHATEVER the auto-billing switch says). A
   letter has ONE advance for the whole of it or one per service (`engagement_letter_line.advance_amount`,
   never on a grouped line), never both: refused by the service (`ONE_KIND_OF_ADVANCE`,
   `INVALID_LINE_ADVANCE`) and by a trigger each way. The amount is BEFORE tax. An advance bill is
   raised on an invoice of its own and cannot be skipped.
-- **The gate** (`AdvanceGate`): `InvoiceService` tells it after an issue, a payment or a credit note
-  (`MoneyMovedListener`), and the desk after a link. Paid in full (outstanding <= 0) releases the work:
-  the letter's advance through `recordAdvance` (which records `advance_recorded_by` = whoever moved the
-  money), a service's through `releaseEngagementAdvance`. A part payment waits for an admin's
-  **Approve start** (`tenant:admin`), which also pushes a paid one that did not start. Only a human's
-  act releases. Two locks: the engagements' `pending_advance` and the bill's `released_at IS NULL`.
-  A bounced cheque afterwards does not stop work: `started` wins.
+- **The gate (`AdvanceGate`, Approve start, `MoneyMovedListener`, `recordAdvance`) is REMOVED in
+  0322.** Paid in full used to release the work and a part payment waited for an admin's Approve
+  start; since 0322 nothing waits on the money.
 - **The final bill** of a one-time service (or one-time fee group) is written when its job is DONE
   (the orchestrator's `jobDone` port; the daily queue catches up), dated the day it finished, at the
   letter's price. A service with no process has a job that never finishes, so **Bill it now** writes
@@ -1763,6 +1770,59 @@ recurring work and a person raises the invoice. 0320 gives a bill a `kind`: `per
   goes back as a negative payment, as any refund. A firm may keep it instead, with a reason.
 - `crm.billing_due` now names an engagement letter, so it is the fourth entry in the signed-letter
   freeze test's `NOT_TERMS`: what the letter CAUSED, written after the signature.
+
+## The advance starts the work, and is chased (0322, 2026-10-02)
+
+Ashish changed the rule (client fact, verbatim in `bib/prompts/auto-invoice/NEXT-SESSION.md`): the
+advance invoice is created as a DRAFT and the jobs start at once; the SPOC, the Key Manager and the
+partner are reminded on the dashboard while it is a draft or unpaid; once a week it escalates to the
+CEO/COO by notification and email. *"generally it comes within 5 to 15 days of starting of work"*.
+The user's calls the same night (memory `bib-auto-invoice-answers-2026-10-01`, SESSION 5):
+
+- **Signing = every engagement `active` + the advance DRAFTED** (`EngagementService.sign` →
+  `AdvanceBiller.billAdvances`; DocuSign, recorded acceptance and the client import all go through
+  `sign`). The draft's tax rate: the last rate invoiced on that work, else the ISSUING COMPANY's
+  default (`crm.issuer_tax_default`, Your firm); neither = no draft, the bill waits under To raise
+  with `draftBlocked: no_tax_rate`, never a guessed 0%. Drafting draws no number (see Invoicing).
+- **Catch-up at deploy** (`AdvanceBiller.catchUp`, in the daily billing queue): letters left in
+  `pending_advance` start their work (`startWaitingWork`, ledger
+  `engagement_letter.work_started_before_advance`) and get a draft, EXCEPT where an issued invoice
+  already bills that work on no bill (`handRaised`, told apart by two instants, never a zone-less
+  day): no draft, an admin Links it.
+- **Where an advance stands** (`advanceStage`, pure): `not_raised` (no invoice, or its draft was
+  cancelled) · `on_draft` · `unpaid` · `part_paid` · `paid` (money arrived and nothing owed, 0321's
+  rule). `advanceReminder`: pending until paid; `pendingSince` = signing (no invoice or a draft) or
+  the issue (unpaid); **Overdue** at the firm's `advance_draft_overdue_days` (3) or
+  `advance_unpaid_overdue_days` (15); `overdueOn` = that day, which My day dates the row by;
+  **escalated** 7 days after signing (`ADVANCE_ESCALATE_AFTER_DAYS`).
+- **Who is reminded** (`AdvanceDesk`, adapter `advance-reminders.ts`): the client's SPOCs for the
+  advance's Depts (in force, active staff), its Key Manager, and the PARTNER = the first person up the
+  Key Manager's `reports_to` chain whose grade rank is at least the firm's `advance_partner_min_rank`
+  (9, the default ladder's Director; a recursive CTE, depth 20). `GET /billing/advances?mine=true`
+  answers only the pending advances the caller chases, each with `duties`
+  (`spoc`/`key_manager`/`partner`/`admin`); an admin gets those waiting for an admin (`not_raised`,
+  `on_draft`) or escalated.
+- **The weekly summary** (`AdvanceDigest`): queue `billing.advance-digest` on
+  `BIB_WORKER_ADVANCE_DIGEST_CRON` (hourly); a firm's summary is due ON its `advance_digest_weekday`
+  from its `advance_digest_hour` in ITS zone (`digestDueOn`), never caught up on another day. The
+  week is CLAIMED first (`crm.advance_digest`, one row per firm per week), then ONE email per admin
+  (`is_administering_role`) listing every advance still pending 7+ days after signing; a reader who
+  may not see fees gets no amounts. Ledger `tenant.advance_digest_sent`. Sent through `SmtpMailer`
+  (`setup/mailer.ts`, shared with the server): the worker needs the SMTP settings too (Terraform
+  `run_worker.tf` + `iam.tf`, DEPLOY NOTE for Anish).
+- **Settings** (`GET/PUT /billing/settings`, PUT `tenant:admin`): a partial body, any of
+  `autoBilling`, `advancePolicy` (the whole policy, validated by `advancePolicyProblem`; ledger
+  `tenant.advance_policy_set`) and `taxDefaults` (rows sent are set, 0 to 100; a company left out
+  keeps its rate; ledger `tenant.tax_default_set`).
+- **Client dunning is unchanged**: an issued advance invoice is chased like any invoice.
+- **Low review items with it**: a one-time service whose jobs were ALL cancelled is billed like one
+  with no process (Bill it now), and a cancelled job never holds a final bill back (item 11);
+  `/billing/dues` applies `mine` and the default status (`pending` = open or drafted; `all` = history,
+  newest first) IN SQL before `LIMIT 5000` (14a), and leaves advances out of `mine` (they have their
+  own reminders).
+- Tests: `tests/billing/advance.test.ts`, `advance-flow.test.ts`, `advance.integration.test.ts`
+  (catch-up, auto-draft, AdvanceDesk on real SQL, digest claim), `sweep.integration.test.ts`,
+  `tests/invoice/numbering.integration.test.ts`. Walk: `bib/demo-assets/tools/ai-adv-walk.mjs`.
 
 ## Billing safeguards: what the end-to-end review found (0321, 2026-10-02)
 
@@ -1832,8 +1892,8 @@ fee axis like the rest of `/dashboard`.
   the global `user_account`, so without it another firm's user could be credited. The raise
   dialog sends `managerUserId` (preselected to the client's Key Manager on the screen); a draft's
   manager changes with `PUT /invoices/{id}/manager` (`invoice.manager_set`; issued:
-  `INVOICE_MANAGER_FROZEN`, 409), because the number is drawn at the draft and a wrong pick
-  should not need a cancelled number. The billing desk passes `managerFromBills: true` and is
+  `INVOICE_MANAGER_FROZEN`, 409), because a wrong pick should not need a cancelled invoice.
+  The billing desk passes `managerFromBills: true` and is
   NOT checked: those managers were resolved from the firm's own SPOCs, and a manager who has
   left since still earned that period, so refusing would leave the bill stuck.
 

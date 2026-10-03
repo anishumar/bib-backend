@@ -308,7 +308,7 @@ describe("where an advance stands, and who is reminded (0322)", () => {
     const [a] = (await w.advances.list(FIRM)).advances;
     expect(a).toMatchObject({
       stage: "on_draft",
-      reminder: { pending: true, pendingSince: "2026-10-05", daysPending: 9, overdue: true, escalated: true },
+      reminder: { pending: true, pendingSince: "2026-10-05", daysPending: 9, overdue: true, overdueOn: "2026-10-08", escalated: true },
       people: { spocs: [{ userId: SPOC }], keyManager: { userId: KEY_MANAGER }, partner: { userId: PARTNER } },
       draftBlocked: null,
     });

@@ -166,6 +166,9 @@ const AdvanceSchema = z
         "Past the firm's days for its step: a draft `advanceDraftOverdueDays` after signing, unpaid " +
         "`advanceUnpaidOverdueDays` after issue (Your firm, Automatic billing).",
     }),
+    overdueOn: z.string().nullable().openapi({
+      description: "The day it turns (or turned) Overdue at its current step. Null once paid or skipped.",
+    }),
     escalated: z.boolean().openapi({
       description: "Still pending a week or more after signing: the administrators hear about it weekly.",
     }),
@@ -757,6 +760,7 @@ function advanceBody(a: AdvanceOnDesk | AdvanceForMe, fees: boolean) {
     pendingSince: a.reminder.pendingSince,
     daysPending: a.reminder.daysPending,
     overdue: a.reminder.overdue,
+    overdueOn: a.reminder.overdueOn,
     escalated: a.reminder.escalated,
     people: {
       spocs: a.people.spocs.map((p) => ({ userId: p.userId, displayName: p.displayName, email: p.email })),
