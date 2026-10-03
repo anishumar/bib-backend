@@ -1353,7 +1353,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         scheduler: { service: scheduler },
         party: { service: party },
         ledger: { service: ledger },
-        config: { service: config },
+        config: { service: config, authz },
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
         engagement: {

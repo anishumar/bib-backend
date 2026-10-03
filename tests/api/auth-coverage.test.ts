@@ -583,7 +583,7 @@ function deps(): RouterDeps {
     },
     party: { service: new PartyService(makePartyFakes()) },
     ledger: { service: new LedgerService(makeLedgerFakes()) },
-    config: { service: new ConfigService(makeConfigFakes()) },
+    config: { service: new ConfigService(makeConfigFakes()), authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }) },
     lead: {
       service: new LeadService(makeLeadFakes()),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
