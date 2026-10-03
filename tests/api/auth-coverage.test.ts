@@ -47,7 +47,7 @@ import {
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
-import { PORTAL_PATHS, PUBLIC_PATHS, compilePortalPaths, isPortalPath } from "../../src/api/guards";
+import { PORTAL_PATHS, PUBLIC_PATHS, PUBLIC_ROUTES, compilePortalPaths, isPortalPath, isPublicRoute } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -806,11 +806,33 @@ describe("every route is accounted for", () => {
     }
   });
 
+  it("exempts a public path for its own method only (B49)", async () => {
+    // PUBLIC_PATHS was matched on the path alone, so any method to a public
+    // path skipped the session guard. Harmless the day it was found (nothing
+    // else is registered there), and a GET added beside a public POST would
+    // have been public without anybody deciding it.
+    for (const key of PUBLIC_ROUTES) {
+      const [method, path] = key.split(" ");
+      expect(registeredRoutes().some((r) => r.method.toUpperCase() === method && r.path === path), key).toBe(true);
+      expect(isPublicRoute(method ?? "", path ?? "")).toBe(true);
+      expect(isPublicRoute("GET", path ?? "")).toBe(false);
+      expect(isPublicRoute("DELETE", path ?? "")).toBe(false);
+    }
+    const asGet = await app().request("/api/v1/auth/login", { method: "GET" });
+    expect(asGet.status).toBe(401);
+    const asPost = await app().request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(asPost.status).not.toBe(401);
+  });
+
   it("refuses every non-public route to an anonymous caller", async () => {
     const unguarded: string[] = [];
 
     for (const { method, path } of registeredRoutes()) {
-      if (PUBLIC_PATHS.has(path) || INTENTIONALLY_PUBLIC.has(path)) continue;
+      if (isPublicRoute(method, path) || INTENTIONALLY_PUBLIC.has(path)) continue;
       const init = bodylessOrJson(method);
       const res = await app().request(concrete(path), init);
       if (res.status !== 401) unguarded.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
