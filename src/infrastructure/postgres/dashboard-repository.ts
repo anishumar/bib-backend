@@ -119,7 +119,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async receivables(tenantId: string): Promise<ReceivableTotals> {
+  async receivables(tenantId: string, day: string): Promise<ReceivableTotals> {
     return withTenant(this.app, tenantId, async (db) => {
       // GROUPING SETS, so the per-bucket rows AND the grand total come from ONE
       // pass over the view. Two queries could disagree if a payment landed
@@ -130,7 +130,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
         SELECT bucket,
                COALESCE(sum(outstanding_reporting), 0)::text AS total,
                count(*)::text                                AS n
-        FROM crm.receivable_ageing
+        FROM crm.receivable_ageing_on(${day}::date)
         GROUP BY GROUPING SETS ((bucket), ())
       `;
       const byBucket = new Map(
@@ -156,14 +156,14 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async receivablesByClient(tenantId: string): Promise<readonly Slice[]> {
+  async receivablesByClient(tenantId: string, day: string): Promise<readonly Slice[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<{ key: string; label: string; total: string; n: string }[]>`
         SELECT a.party_id       AS key,
                p.display_name   AS label,
                sum(a.outstanding_reporting)::text AS total,
                count(*)::text   AS n
-        FROM crm.receivable_ageing a
+        FROM crm.receivable_ageing_on(${day}::date) a
         JOIN core.party p ON p.id = a.party_id
         GROUP BY 1, 2
         ORDER BY sum(a.outstanding_reporting) DESC
@@ -172,7 +172,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async creditSales(tenantId: string, sinceDays: number): Promise<string> {
+  async creditSales(tenantId: string, sinceDays: number, day: string): Promise<string> {
     return withTenant(this.app, tenantId, async (db) => {
       // ONE query, and the subtraction happens in SQL. Fetching gross and
       // credits separately and subtracting in TypeScript would be the same
@@ -199,7 +199,8 @@ export class PostgresDashboardRepository implements DashboardRepository {
         JOIN crm.invoice_totals t ON t.invoice_id = i.id AND t.tenant_id = i.tenant_id
         WHERE i.status NOT IN ('draft', 'cancelled')
           AND i.issued_on IS NOT NULL
-          AND i.issued_on >= CURRENT_DATE - ${sinceDays}::int
+          AND i.issued_on >= ${day}::date - ${sinceDays}::int
+          AND i.issued_on <= ${day}::date
       `;
       return row?.total ?? "0";
     });
@@ -403,7 +404,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
     });
   }
 
-  async owedByManager(tenantId: string): Promise<readonly ManagerOwedRow[]> {
+  async owedByManager(tenantId: string, day: string): Promise<readonly ManagerOwedRow[]> {
     return withTenant(this.app, tenantId, async (db) => {
       // The rows "Owed to the firm" sums (`receivables`), split by manager:
       // issued invoices still owed, overpayments left out, each at its stored
@@ -414,7 +415,7 @@ export class PostgresDashboardRepository implements DashboardRepository {
                GROUPING(i.manager_user_id)::int AS whole,
                coalesce(sum(a.outstanding_reporting), 0)::text AS total,
                count(a.invoice_id)::int AS n
-        FROM crm.receivable_ageing a
+        FROM crm.receivable_ageing_on(${day}::date) a
         JOIN crm.invoice i ON i.id = a.invoice_id AND i.tenant_id = a.tenant_id
         GROUP BY GROUPING SETS ((i.manager_user_id), ())
       `;
