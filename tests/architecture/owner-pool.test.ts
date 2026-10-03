@@ -4,7 +4,9 @@
 // credential loaded into the request process, and the first person to reach
 // for `pools.owner` would have had a tenant-wall bypass waiting for them.
 //
-// The owner credential is now dialled by one thing, the migrator.
+// The owner credential is now dialled by the migrator, plus one development-only
+// command, `demo-history.ts`, which refuses to run outside development and
+// back-dates the demo seed's one overdue invoice.
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -32,11 +34,11 @@ describe("the owner credential on the request path", () => {
     await pools.close();
   });
 
-  it("is read by the migrator and nothing else in src/", () => {
+  it("is read by the migrator (and the development-only demo history) and nothing else in src/", () => {
     const readers = sourceFiles(join(process.cwd(), "src"))
       .filter((f) => readFileSync(f, "utf8").includes(".ownerUrl"))
       .map((f) => f.replace(process.cwd(), "").replace(/\\/g, "/"))
       .sort();
-    expect(readers).toEqual(["/src/cmd/migrate.ts", "/src/config/config.ts"]);
+    expect(readers).toEqual(["/src/cmd/demo-history.ts", "/src/cmd/migrate.ts", "/src/config/config.ts"]);
   });
 });

@@ -660,16 +660,16 @@ export class InvoiceService {
       note: input.note ?? null,
     });
 
+    // The payload is ids and machine facts. NOT the reference (B26, audit
+    // 2026-10-03): it is free text up to 200 characters, and a UPI reference is
+    // very often a phone number ("98…@ybl"); the PII guard checks key names, not
+    // values, and this log cannot be erased. It stays on the payment row, which
+    // can be; the event says only whether there was one. Nor the note.
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,
       verb: "payment.recorded",
       objectId: payment.id,
       actor,
-      // Ids and machine facts. NOT the reference (B26, audit 2026-10-03):
-      // it is free text up to 200 characters, and a UPI reference is very
-      // often a phone number ("98…@ybl"); the PII guard checks key names, not
-      // values, and this log cannot be erased. It stays on the payment row,
-      // which can be; the event says only whether there was one. Nor the note.
       payload: {
         invoiceId: payment.invoiceId,
         invoiceNumber: invoice.number,
