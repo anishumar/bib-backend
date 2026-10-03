@@ -16,6 +16,7 @@ import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
 import { IdentifierTypeSchema } from "./party";
 import type { Lead, LeadSource, LeadStage } from "../../domain/lead/model";
+import { CONTACT_ROLES } from "../../domain/party/model";
 import type { LeadService } from "../../usecase/lead/service";
 import type { LeadRecord, LeadView } from "../../usecase/lead/ports";
 import type { AuthzService } from "../../usecase/authz/service";
@@ -255,6 +256,19 @@ const CaptureLeadBody = z
         "who must be active staff at this firm.",
     }),
     notes: z.string().optional(),
+    contact: z
+      .object({
+        name: z.string().min(1).max(300),
+        role: z.enum(CONTACT_ROLES),
+      })
+      .optional()
+      .openapi({
+        description:
+          "The person the firm deals with at a COMPANY prospect, and their role there (CA#20). " +
+          "With one named, the email and phone in `identifiers` are the contact's: they go on a " +
+          "person linked to the company in that role, and the company keeps the PAN and GSTIN. " +
+          "Refused for a person prospect (INVALID_LEAD_CONTACT).",
+      }),
     jurisdiction: z.string().length(2).optional().openapi({
       description:
         "Where the PROSPECT is, ISO 3166-1 alpha-2 in UPPER CASE. Optional — often nobody " +

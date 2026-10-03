@@ -256,7 +256,7 @@ version is exactly what gets asked about afterwards.
 
 | Verb | Object | Means |
 |---|---|---|
-| `lead.captured` | lead | A lead entered the pipeline. |
+| `lead.captured` | lead | A lead entered the pipeline. Payload carries `contactRecorded` (2026-10-03, CA#20): WHETHER a contact person was named at capture, never who. The person, their details and their role are the party module's own events (`party.created`, `party_identifier.added`, `party_relationship.added`). `lead.merged` carries the same flag. |
 | `lead.merged` | lead | A duplicate capture landed on an existing open lead instead of starting a rival one. Payload carries `titleDiscarded` — WHETHER the capture's title was dropped, never the title itself, which names the counterparty and is sometimes a person's name (§3.4). The words go back to the caller on the response (`discardedTitle`) and are stored nowhere. |
 | `lead.stage_changed` | lead | A lead moved through the pipeline. Reaching a terminal stage closes it. |
 | `lead.owner_assigned` | lead | A lead was put on somebody's desk, or taken off it. |

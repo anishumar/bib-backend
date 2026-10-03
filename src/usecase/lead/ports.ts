@@ -298,6 +298,24 @@ export interface ProspectPerson {
   readonly fullName: string;
 }
 
+export interface ProspectRelationship {
+  readonly tenantId: string;
+  readonly fromPartyId: string;
+  readonly toPartyId: string;
+  readonly type: string;
+  readonly validFrom: string;
+}
+
+/** The part of the party module's profile a capture reads. */
+export interface ProspectProfile {
+  readonly party: { readonly kind: PartyKind };
+  readonly relationships: readonly {
+    readonly relationship: { readonly type: string; readonly validTo: string | null };
+    readonly counterparty: { readonly id: string; readonly kind: PartyKind };
+    readonly direction: "outgoing" | "incoming";
+  }[];
+}
+
 export interface ProspectIdentifier {
   readonly tenantId: string;
   readonly partyId: string;
@@ -325,6 +343,12 @@ export interface ProspectDirectory {
   createOrganization(input: ProspectOrganization, actor: Actor): Promise<Organization>;
   createPerson(input: ProspectPerson, actor: Actor): Promise<Person>;
   addIdentifier(input: ProspectIdentifier, actor: Actor): Promise<PartyIdentifier>;
+  /** Link the contact person to the company, in the role given (CA#20). The
+   *  party module records `party_relationship.added` itself. */
+  addRelationship(input: ProspectRelationship, actor: Actor): Promise<unknown>;
+  /** A party's kind and its relationships, both ways round: how a capture
+   *  finds the company a contact's email belongs to (CA#20). */
+  partyProfile(tenantId: string, partyId: string, asOf?: string): Promise<ProspectProfile>;
   /** The dedup lookup. Normalises the value itself, so callers pass what the
    *  user typed and matching stays consistent with how it was stored. */
   findByIdentifier(
