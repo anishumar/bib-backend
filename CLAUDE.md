@@ -190,6 +190,30 @@ by a typo must not look like policy working as intended. The fee axis is `AuthzS
 **redacts** money rather than omitting the record, so "you may not see this" never looks
 like "there is no fee".
 
+### The fee wall covers PDFs, writes and the timeline too (audit 2026-10-03)
+
+Redacting the JSON was not the whole wall. Since the 2026-10-03 audit (branch `fix/audit-money`):
+
+- **Documents.** `showsFees(kind)` (`domain/filestore/model.ts`): a proposal, an engagement
+  letter, an invoice and a credit note open (`/content`, `/versions/{v}/content`), render and
+  preview only for a login that sees fees. Refused WHOLE, by kind, never redacted: a figure
+  prints in too many places to promise a redaction catches them all. `Document.showsFees` is on
+  the wire so a screen offers Download only where it works.
+- **Writes.** Seeing a figure and setting one are one question. `AuthzService.requireFees(p,
+  what)` throws `FeesNotVisible` (403, reason `FEES_NOT_VISIBLE`, plain words) and guards: a
+  manual invoice, invoice lines, payments, credit notes and an advance's refund; a lead's
+  value (capture and details; the details value is OPTIONAL now, absent keeps it); and every
+  write of a `service` config (it carries the list price, and that login reads it as null).
+- **Reads.** A service's `listPrice` is null on `/config/service*`, a lead's `estimatedValue`
+  is null, the client import's line fee is null, and the timeline nulls each verb's money
+  fields, named in `domain/ledger/fees.ts` (`tests/ledger/fees.test.ts` fails on a
+  money-shaped payload key nobody named, so a new verb is decided, not missed).
+- **A line with neither `unitAmount` nor `pricingNote`** on a proposal or a letter is quoted at
+  the pinned version's list price in the document's currency (`SERVICE_HAS_NO_LIST_PRICE`
+  when there is none). It is how a drafter who cannot see fees adds a priced service.
+- **Issuing is `invoice:issue`** (0323), not `tenant:admin`: issue, cancel, credit notes and an
+  advance's refund or keep. 0323 gave it to every role that held `tenant:admin`.
+
 ## The configuration registry — data, not code (P2 / T2.5)
 
 The things a firm changes weekly are rows, not deploys: `config.entry` is the thing being
