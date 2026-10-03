@@ -899,6 +899,16 @@ describe("inviting an address that ALREADY has a login", () => {
     expect(h.mailer.invites).toHaveLength(1);
     expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
   });
+
+  it("carries the firm's name to the password page, which has no session to ask (CA#55)", async () => {
+    // Display only: the token is what authorises, and a link whose name was
+    // edited carries a token that is no good for anything.
+    const user = await h.users.create({ id: uuidFor("user:anil@deccanagro.in"), email: "anil@deccanagro.in" });
+    await h.service.invitePortalContact(user.id, "Sharma Mehta & Co");
+    const url = new URL(h.mailer.invites[0]?.url ?? "");
+    expect(url.searchParams.get("firm")).toBe("Sharma Mehta & Co");
+    expect(url.searchParams.get("token")).not.toBeNull();
+  });
 });
 
 
@@ -935,6 +945,7 @@ describe("re-sending a portal invitation (T7.0b)", () => {
     // The password page, not the sign-in one: a contact with no password who
     // followed a `/auth/magic-link` would open a session and still have none.
     expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
+    expect(new URL(h.mailer.invites[0]?.url ?? "").searchParams.get("firm")).toBe("10x Global");
     expect(out.expiresAt).toBe(h.mailer.invites[0]?.expiresAt);
     // And it is not the sign-in letter wearing a different subject.
     expect(h.mailer.sent).toHaveLength(0);

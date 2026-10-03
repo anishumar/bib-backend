@@ -264,6 +264,19 @@ export interface StaffWelcome {
   readonly sent: boolean;
 }
 
+/**
+ * The password page a portal invitation opens, with the firm's NAME beside the
+ * token (CA#55). That page has no session to ask whose invitation it is, and a
+ * page that only says "Choose a password" is the one thing in the invitation
+ * that does not name the firm. The name is display only: the token is what
+ * authorises, so a link whose name was edited carries a token that is good for
+ * nothing, and the page caps what it shows.
+ */
+function inviteUrl(base: string, token: string, firmName: string | null): string {
+  const firm = firmName === null || firmName.trim() === "" ? "" : `&firm=${encodeURIComponent(firmName.trim())}`;
+  return `${base}/portal/accept-invite?token=${encodeURIComponent(token)}${firm}`;
+}
+
 export class IdentityService {
   constructor(private readonly deps: Deps) {}
 
@@ -613,7 +626,7 @@ export class IdentityService {
     }
     await this.deps.mailer.sendPortalInvite(
       user.email,
-      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      inviteUrl(this.deps.magicLinkBaseUrl, token, firmName),
       expiresAt,
       firmName,
       timeZone,
@@ -712,7 +725,7 @@ export class IdentityService {
     });
     await this.deps.mailer.sendPortalInvite(
       user.email,
-      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      inviteUrl(this.deps.magicLinkBaseUrl, token, firmName),
       expiresAt,
       firmName,
       timeZone,
