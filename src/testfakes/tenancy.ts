@@ -47,7 +47,10 @@ import type {
 
 export class FakeTenantRepo implements TenantRepository {
   readonly rows: Tenant[] = [];
+  /** Each firm's zone as created, by tenant id. */
+  readonly timeZones = new Map<string, string>();
   create(t: NewTenant): Promise<Tenant> {
+    this.timeZones.set(t.id, t.timeZone);
     const row: Tenant = {
       id: t.id,
       slug: t.slug,

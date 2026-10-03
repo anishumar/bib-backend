@@ -117,6 +117,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DISPLAY_NAME":
       case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
+      case "INVALID_TIME_ZONE":
+      case "INVALID_COUNTRY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":

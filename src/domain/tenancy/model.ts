@@ -230,3 +230,79 @@ export function isTimeZone(value: string): boolean {
     return false;
   }
 }
+
+// ── A firm's zone, when its country decides it (audit 2026-10-03, F07) ───────
+//
+// 0071 defaulted every firm to UTC, and a firm created since then ran on a
+// calendar that is no country's: for an Indian firm, the day turned at 05:30.
+// Nobody chose that; it was what the column said when nobody had.
+//
+// A new firm now starts on its country's zone, but ONLY where the country has
+// exactly one. India, the UAE and Singapore do; the United States has six and
+// Australia five, and picking one of them for a firm would be a guess that cuts
+// its months on somebody else's midnight. Where the country does not settle it
+// the firm stays on UTC and Setup asks it to choose, which is the honest
+// version of "unset": the value every reader already falls back to.
+//
+// The list is IANA's own answer (`zone1970.tab`: a country listed against one
+// zone), cut to the countries this product's firms and their clients are in.
+// A country missing from it is not refused; it simply settles nothing.
+const SINGLE_ZONE_COUNTRIES: Readonly<Record<string, string>> = {
+  AE: "Asia/Dubai",
+  BD: "Asia/Dhaka",
+  BH: "Asia/Bahrain",
+  CH: "Europe/Zurich",
+  FR: "Europe/Paris",
+  GB: "Europe/London",
+  HK: "Asia/Hong_Kong",
+  IE: "Europe/Dublin",
+  IN: "Asia/Kolkata",
+  IT: "Europe/Rome",
+  JP: "Asia/Tokyo",
+  KW: "Asia/Kuwait",
+  LK: "Asia/Colombo",
+  MU: "Indian/Mauritius",
+  NL: "Europe/Amsterdam",
+  NP: "Asia/Kathmandu",
+  OM: "Asia/Muscat",
+  QA: "Asia/Qatar",
+  SA: "Asia/Riyadh",
+  SG: "Asia/Singapore",
+};
+
+/**
+ * The one zone a country keeps, or null when it keeps several or is not on
+ * the list. Case-insensitive on the ISO 3166-1 alpha-2 code.
+ */
+export function zoneForCountry(country: string): string | null {
+  return SINGLE_ZONE_COUNTRIES[country.trim().toUpperCase()] ?? null;
+}
+
+/**
+ * The zone a set of companies' countries settles, or null.
+ *
+ * Settled only when every country given names the SAME single zone: a firm
+ * with an Indian and a Dubai company has two calendars and must pick which
+ * one its months are cut on. Countries that are missing (a company not yet
+ * registered) are ignored; no country at all settles nothing.
+ */
+export function zoneForCountries(countries: readonly (string | null)[]): string | null {
+  const zones = new Set<string | null>();
+  for (const c of countries) {
+    if (c === null || c.trim() === "") continue;
+    zones.add(zoneForCountry(c));
+  }
+  if (zones.size !== 1) return null;
+  const [only] = [...zones];
+  return only ?? null;
+}
+
+/**
+ * Has the firm chosen its zone? UTC is what 0071 gave every firm that had not,
+ * so it reads as "not chosen" for Setup (F07): no country keeps its calendar
+ * on UTC, and a firm that wants it anyway is told so, nothing more.
+ */
+export function isZoneChosen(timeZone: string): boolean {
+  const z = timeZone.trim();
+  return z !== "" && z !== DEFAULT_TIME_ZONE && z !== "Etc/UTC";
+}

@@ -18,6 +18,8 @@ export type TenancyErrorCode =
   | "INVALID_SLUG"
   | "INVALID_CURRENCY"
   | "INVALID_AUDIENCE"
+  | "INVALID_TIME_ZONE"
+  | "INVALID_COUNTRY"
   | "SLUG_TAKEN"
   | "EMAIL_TAKEN"
   | "TENANT_NOT_FOUND"
@@ -46,6 +48,29 @@ export class InvalidCurrency extends TenancyError {
     );
   }
 }
+/** A zone named at provisioning that this runtime does not know, or an
+ *  offset (`+05:30`), which cannot follow daylight saving (`isTimeZone`). */
+export class InvalidTimeZone extends TenancyError {
+  constructor(timeZone: string) {
+    super(
+      "INVALID_TIME_ZONE",
+      `Time zone ${JSON.stringify(timeZone)} is not a zone name this server knows, like ` +
+        `"Asia/Kolkata" or "Europe/London". An offset such as "+05:30" is refused: it cannot ` +
+        `follow daylight saving.`,
+    );
+  }
+}
+
+/** A country named at provisioning that is not an ISO 3166-1 alpha-2 code. */
+export class InvalidCountry extends TenancyError {
+  constructor(country: string) {
+    super(
+      "INVALID_COUNTRY",
+      `Country ${JSON.stringify(country)} is not a two-letter ISO 3166-1 code, like "IN" or "AE".`,
+    );
+  }
+}
+
 export class InvalidAudience extends TenancyError {
   constructor(audience: string) {
     super("INVALID_AUDIENCE", `Audience ${JSON.stringify(audience)} must be STAFF or CLIENT_PORTAL`);
