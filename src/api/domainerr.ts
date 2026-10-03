@@ -766,6 +766,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_QUANTITY":
       case "INVALID_UNIT_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
+      case "SERVICE_HAS_NO_LIST_PRICE":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_LINE_JURISDICTION":
@@ -864,6 +865,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_JURISDICTION":
       case "INVALID_AMOUNT":
       case "UNPRICED_LINE_NEEDS_REASON":
+      case "SERVICE_HAS_NO_LIST_PRICE":
       case "UNPRICED_LINE_HAS_DISCOUNT":
       case "INVALID_BILLING_FREQUENCY":
       case "INVALID_BILLING_TIMING":

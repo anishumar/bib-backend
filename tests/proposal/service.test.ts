@@ -17,7 +17,7 @@ import {
   InvalidLineJurisdiction,
   InvalidOutOfPocketEstimate,
   UnpricedLineHasDiscount,
-  UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   DiscountNeedsApproval,
   EmptyProposal,
   InvalidDecision,
@@ -626,22 +626,56 @@ describe("a line with no price — what a total MEANS then", () => {
     expect(totals.unpricedLineCount).toBe(1);
   });
 
-  it("refuses a line with no price and no reason", async () => {
-    // The acceptance says a line may say "as mutually agreed" WITH A REASON. A
-    // blank price with no reason is indistinguishable on the client's document
-    // from a figure somebody forgot to type.
+  it("quotes a line with neither a fee nor a reason at the catalogue's list price (B09)", async () => {
+    // A login that cannot see fees reads every list price as null, and the
+    // builder used to fill the fee in from it. So the API does it: a line that
+    // states neither is quoted at the pinned version's price, which the drafter
+    // never sees and never has to type.
     const s = setup();
     const id = await draftWith(s);
-    await expect(
-      s.service.addLine({
+    const line = await s.service.addLine({
+      tenantId: TENANT,
+      proposalId: id,
+      serviceVersionId: GST_VERSION,
+      description: "GST monthly filing",
+      quantity: "12",
+      discountPercent: "0",
+    });
+    expect(line.unitAmount).toBe("25000.00");
+    expect(line.pricingNote).toBeNull();
+  });
+
+  it("refuses a line with no price and no reason when the catalogue has no price in its currency", async () => {
+    // The acceptance says a line may say "as mutually agreed" WITH A REASON. A
+    // blank price with no reason is indistinguishable on the client's document
+    // from a figure somebody forgot to type, so with nothing to quote it at the
+    // refusal says what to send.
+    const s = setup();
+    const p = await s.service.draft(
+      {
         tenantId: TENANT,
-        proposalId: id,
+        partyId: PARTY,
+        title: "Acme — US entity",
+        currency: "USD",
+        fxRate: "84",
+        fxRateDate: "2026-06-01",
+      },
+      ACTOR,
+    );
+    const err = await s.service
+      .addLine({
+        tenantId: TENANT,
+        proposalId: p.id,
         serviceVersionId: GST_VERSION,
         description: "Incorporation",
         quantity: "1",
         discountPercent: "0",
-      }),
-    ).rejects.toBeInstanceOf(UnpricedLineNeedsReason);
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceHasNoListPrice);
+    expect((err as Error).message).toBe(
+      "GST monthly filing has no list price in USD in the catalogue. Enter the fee, or say why there is no fixed fee.",
+    );
   });
 
   it("refuses a discount off a price that does not exist", async () => {

@@ -792,7 +792,12 @@ const AddLineRequest = z
     quantity: AmountSchema.default("1"),
     /** OPTIONAL since G1.6: omit it for a line that is genuinely "as mutually
      *  agreed" and send `pricingNote`. Omitting it is NOT sending "0". */
-    unitAmount: AmountSchema.optional(),
+    unitAmount: AmountSchema.optional().openapi({
+      description:
+        "The fee. Omit it and `pricingNote` both to quote the catalogue's list price for this " +
+        "service in the letter's currency (B09): how a login that cannot see fees adds a priced " +
+        "service. SERVICE_HAS_NO_LIST_PRICE (400) when there is none.",
+    }),
     discountPercent: AmountSchema.default("0"),
     effectiveFrom: DaySchema.optional().openapi({
       description:

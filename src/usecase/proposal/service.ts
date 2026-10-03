@@ -81,6 +81,7 @@ import {
   ProseEdited,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   NotADraft,
   NotAService,
   ProposalExpired,
@@ -916,13 +917,7 @@ export class ProposalService {
     }
 
     checkQuantity(input.quantity);
-    const unitAmount = input.unitAmount ?? null;
     const pricingNote = blankToNull(input.pricingNote);
-    checkPricing(unitAmount, pricingNote, input.discountPercent);
-
-    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
-    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
-    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     // Resolve the pin BEFORE writing, so a bad version id is a 400 naming the
     // id rather than a foreign-key violation surfacing as a 500.
@@ -933,6 +928,26 @@ export class ProposalService {
     if (pinned === null) throw new ServiceNotFound(input.serviceVersionId);
     if (pinned.kind !== "service") throw new NotAService(input.serviceVersionId, pinned.kind);
     if (pinned.status === "draft") throw new ServiceNotPublished(input.serviceVersionId);
+
+    // NEITHER A FEE NOR A REASON: quoted at the pinned version's list price in
+    // the proposal's currency (B09, audit 2026-10-03). A login that cannot see
+    // fees reads every list price as null, and the builder used to fill the
+    // fee in from it; the API does that now, so the drafter is never shown the
+    // price and the quote is the same. With no price to quote, the refusal says
+    // what to send.
+    let unitAmount = input.unitAmount ?? null;
+    if (unitAmount === null && pricingNote === null) {
+      const service = readServiceBody(pinned.body);
+      if (service.listPrice === null || service.listPrice.currency !== proposal.currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, proposal.currency);
+      }
+      unitAmount = service.listPrice.amount;
+    }
+    checkPricing(unitAmount, pricingNote, input.discountPercent);
+
+    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
+    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     // A new line is a discount raised from nothing: past the limit after a
     // sign-off, the sign-off no longer covers the draft (T6.18).

@@ -39,6 +39,7 @@ export type ProposalErrorCode =
   | "INVALID_QUANTITY"
   | "INVALID_UNIT_AMOUNT"
   | "UNPRICED_LINE_NEEDS_REASON"
+  | "SERVICE_HAS_NO_LIST_PRICE"
   | "UNPRICED_LINE_HAS_DISCOUNT"
   | "INVALID_BILLING_FREQUENCY"
   | "INVALID_LINE_JURISDICTION"
@@ -467,6 +468,23 @@ export class InvalidUnitAmount extends ProposalError {
       `Unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
         `four decimal places — "25000", "1499.50" — never a number, because a float cannot hold ` +
         `1499.50 exactly and the error is invisible in one line and material in a total.`,
+    );
+  }
+}
+
+/**
+ * A line with neither a fee nor a reason, for a service the catalogue has no
+ * list price for in this proposal's currency (B09, audit 2026-10-03). Such a
+ * line is quoted at the list price when there is one, which is how a login
+ * that cannot see fees adds a priced service without being shown the price;
+ * with none, it has to be told what to send.
+ */
+export class ServiceHasNoListPrice extends ProposalError {
+  constructor(serviceName: string, currency: string) {
+    super(
+      "SERVICE_HAS_NO_LIST_PRICE",
+      `${serviceName} has no list price in ${currency} in the catalogue. ` +
+        "Enter the fee, or say why there is no fixed fee.",
     );
   }
 }
