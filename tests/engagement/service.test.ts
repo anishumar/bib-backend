@@ -632,6 +632,28 @@ describe("sending", () => {
     expect(sent.status).toBe("sent");
   });
 
+  it("records a migrated paper letter with no opening text: nobody is sent its cover (CA#2 vs T6.12)", async () => {
+    // The book import records a letter the client signed on paper by sending
+    // it `migrated`. A new firm has no standard opening yet, so the CA#2 guard
+    // refused every row of its first import ("marking it sent: This letter has
+    // no opening text…") and left a draft behind each one.
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    const sent = await s.service.send(TENANT, id, ACTOR, { migrated: true });
+    expect(sent.status).toBe("sent");
+  });
+
   it("refuses to change a letter once it has gone out", async () => {
     const s = setup();
     const id = await draft(s);

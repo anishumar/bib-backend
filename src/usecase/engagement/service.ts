@@ -2274,8 +2274,10 @@ export class EngagementService {
     // `requireCompleteTerms`, which also computes the hash a signature is
     // verified against: a letter already out with an empty cover must still
     // sign. Only the Annexure letter has a cover page; the classic layout is
-    // never drafted (0083).
-    if (letter.layout === "annexure") {
+    // never drafted (0083). Not for a MIGRATED letter (T6.12): the import
+    // records one the client already signed on paper, nobody is sent its
+    // cover, and a new firm's first import has no standard opening yet.
+    if (letter.layout === "annexure" && options.migrated !== true) {
       const blocks = await this.deps.documents.listBlocks(tenantId, { kind: "engagement_letter", id: letterId });
       const says = blocks.some((b) => b.kind === "cover" && !b.isHeading && b.body.trim() !== "");
       if (!says) throw new LetterHasNoBody();
