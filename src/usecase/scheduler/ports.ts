@@ -281,6 +281,8 @@ export interface SpawnPeriod {
   readonly label: string;
   /** The period's last day, `YYYY-MM-DD`. */
   readonly end: string;
+  /** The period's first day: the filings in it date the task (CA#11). */
+  readonly start: string;
 }
 
 export interface WorkItemSpawner {

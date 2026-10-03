@@ -1220,6 +1220,31 @@ describe("a period job's umbrella task is one month's task", () => {
     });
   });
 
+  it("is never due after the legal date of a filing its work is for (audit 2026-10-03, CA#11)", async () => {
+    // GST returns · Sep 2026 read due 20 Oct, period end plus the turnaround,
+    // while its GSTR-1 was legally due 11 Oct.
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "GST returns" }));
+    h.obligations.filingDue.set(ENGAGEMENT, "2026-10-11");
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { ...SEPTEMBER, start: "2026-09-01" });
+
+    expect(h.items.rows[0]).toMatchObject({ dueOn: "2026-10-11", isStatutoryDue: true });
+    expect(h.obligations.filingDueAsked).toEqual([{ engagementId: ENGAGEMENT, start: "2026-09-01", end: "2026-09-30" }]);
+  });
+
+  it("keeps the turnaround when it is the earlier date", async () => {
+    const h = await harness();
+    h.spocs.add(CLIENT, FRC, { userId: PRIYA, displayName: "Priya", email: "priya@10x.test" });
+    h.engagements.rows.push(engagementWork({ serviceName: "Monthly bookkeeping" }));
+    h.obligations.filingDue.set(ENGAGEMENT, "2026-11-30");
+
+    await h.service.spawnForEngagements(FIRM, JOB, [ENGAGEMENT], ACTOR, { ...SEPTEMBER, start: "2026-09-01" });
+
+    expect(h.items.rows[0]).toMatchObject({ dueOn: "2026-10-30", isStatutoryDue: false });
+  });
+
   it("an entity that files GST through one engagement still owes its bookkeeping task on the other", async () => {
     // Since T6.16 a rule reaches an engagement only through the service it
     // bought, so coverage is per ENGAGEMENT and "covered" and "a filing" are

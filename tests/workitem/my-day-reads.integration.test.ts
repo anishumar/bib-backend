@@ -15,6 +15,7 @@ import { load } from "../../src/config/config";
 import { PostgresJobRepository } from "../../src/infrastructure/postgres/job-repository";
 import { PostgresWorkItemApprovalRepository } from "../../src/infrastructure/postgres/work-item-approval-repository";
 import { PostgresEscalationNoticeRepository } from "../../src/infrastructure/postgres/escalation-repository";
+import { PostgresObligationCoverage } from "../../src/infrastructure/postgres/obligation-coverage";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
@@ -22,6 +23,7 @@ const app = postgres(cfg.db.appUrl, { max: 2 });
 const jobs = new PostgresJobRepository(app);
 const approvals = new PostgresWorkItemApprovalRepository(app);
 const notices = new PostgresEscalationNoticeRepository(app);
+const coverage = new PostgresObligationCoverage(app);
 
 const stamp = Date.now().toString(36);
 const ref = (): string => randomUUID();
@@ -277,6 +279,15 @@ describe("a job is never due after the law's date for its filings (audit 2026-10
     // engagement of the company, and this job's work is for it all the same.
     await filing({ engagementId: null, statutoryDueOn: "2026-10-07" });
     expect((await jobs.describeJobs(tenant, [jobId])).get(jobId)?.dueOn).toBe("2026-10-07");
+  });
+
+  it("dates a month's task by the same rule when it is created", async () => {
+    const { engagementId } = await septemberJob();
+    await filing({ engagementId: null, statutoryDueOn: "2026-10-11" });
+    await filing({ engagementId, statutoryDueOn: "2026-10-20" });
+    const sep = { start: "2026-09-01", end: "2026-09-30" };
+    expect(await coverage.earliestFilingDue(tenant, engagementId, sep)).toBe("2026-10-11");
+    expect(await coverage.earliestFilingDue(tenant, engagementId, { start: "2026-11-01", end: "2026-11-30" })).toBeNull();
   });
 
   it("ignores a filing already filed, withdrawn, or for another period", async () => {

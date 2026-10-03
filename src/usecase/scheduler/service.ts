@@ -531,6 +531,7 @@ export class SchedulerService {
         try {
           await this.deps.workItems.spawnForEngagements(tenantId, result.job.id, linked, actor, {
             label: period.label,
+            start: period.start,
             end: period.end,
           });
         } catch {
