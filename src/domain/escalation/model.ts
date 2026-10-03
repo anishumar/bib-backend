@@ -166,3 +166,17 @@ export function daysBetween(from: string, to: string): number {
   const b = Date.parse(`${to}T00:00:00Z`);
   return Math.round((b - a) / 86_400_000);
 }
+
+/**
+ * How far past the watched date a notice's work is on `today` (audit
+ * 2026-10-03, F11).
+ *
+ * `daysPast` is snapshotted on the day the rung fired and stays the record of
+ * what was true then; the queue showed it as "Days late" and so read 18 for a
+ * filing the calendar said was 26 days late. The watched date does not move
+ * under a notice, so the count today is the snapshot plus the days since it
+ * fired.
+ */
+export function daysPastOn(notice: { readonly daysPast: number; readonly raisedOn: string }, today: string): number {
+  return notice.daysPast + daysBetween(notice.raisedOn, today);
+}

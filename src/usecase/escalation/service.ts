@@ -35,7 +35,7 @@ import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import { dueEscalationRungs } from "../../domain/config/model";
 import type { EscalationBody, EscalationRung } from "../../domain/config/model";
-import { daysBetween, landingFor } from "../../domain/escalation/model";
+import { daysBetween, daysPastOn, landingFor } from "../../domain/escalation/model";
 import type { EscalationStaff } from "../../domain/escalation/model";
 import type {
   EscalationLadderSource,
@@ -225,8 +225,14 @@ export class EscalationService {
 
   /** The queue a screen reads. `viewer` null is the whole firm's, which is the
    *  default: see `EscalationNoticeRepository.listFor`. */
-  queue(tenantId: string, viewer: EscalationViewer | null): Promise<readonly EscalationRecord[]> {
-    return this.deps.notices.listFor(tenantId, viewer);
+  async queue(
+    tenantId: string,
+    viewer: EscalationViewer | null,
+  ): Promise<readonly (EscalationRecord & { readonly daysPastNow: number })[]> {
+    const [rows, today] = await Promise.all([this.deps.notices.listFor(tenantId, viewer), this.firmDay(tenantId)]);
+    // How late each one is TODAY, on the firm's calendar (F11); `daysPast`
+    // stays what was true when it fired.
+    return rows.map((r) => ({ ...r, daysPastNow: daysPastOn(r, today) }));
   }
 
   /**
