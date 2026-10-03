@@ -1425,8 +1425,9 @@ country in ONE transaction (`PostgresFirmEntityRepository`, reusing the party ad
 no role sitting in the CLIENT list; the three usual events are recorded after. A country another
 company already issues for is refused (`COUNTRY_ALREADY_SERVED`) rather than silently re-routed, and
 a company's registered country never moves (`JURISDICTION_FIXED`). `registered_address` is
-`{ "lines": [...] }` — the lines the firm prints, because the four countries do not agree on fields —
-stored and not printed yet (D15).
+`{ "lines": [...], "region", "postalCode" }` — the lines the firm prints, because the four countries
+do not agree on fields, plus the state and postal code a tax invoice names — and since 0334 it is
+PRINTED (see "Who a document is from and to" below).
 
 **One document, one issuer, one currency — deliberately kept** (D1). The lines are held to the
 document's currency by a composite key (0011), the firm invoices a client from one company, and a
@@ -1544,9 +1545,9 @@ one service across four companies (lines merge only when everything they print i
 company named once per section when every item covers the same ones and never on a one-company
 letter, lines priced on their own as a last section.
 
-**Not built, and said:** the firm's address and website in the footer (`registered_address` is a
-free-form record nothing writes a shape into), the signatory's phone, a page header, and fee
-groups on a PROPOSAL — a quote's lines carry across ungrouped and are grouped on the letter.
+**Not built, and said:** the signatory's phone, a page header, and fee groups on a PROPOSAL — a
+quote's lines carry across ungrouped and are grouped on the letter. (The firm's address, contact
+and registration numbers print under its name since 0334, below.)
 
 ## The proposal as a document — "Proposal For Services" (0084)
 
@@ -1666,6 +1667,12 @@ staff route can match them: `shared/decision` would have collided with `{proposa
 deployment (bib-qa: a personal Gmail, display name "10xcrm"). The user chose the firm's own
 mailbox; until its SMTP login is set, a proposal emailed from bib-qa comes from that Gmail under
 the firm's name. A second firm on one deployment would need a sender per firm — not built.
+**Every letter sent FOR a firm goes out under the firm's display name (CA#12, audit 2026-10-03):**
+the proposal, the portal invite, both welcomes, the decision notice and the weekly advances
+summary set `fromName`; only the sign-in link and the password reset, which belong to an account
+with no one firm, keep `BIB_MAIL_FROM_NAME`. So that setting should be the PRODUCT's name on a
+deployment that serves more than one firm, never one firm's. Per-firm addresses or domains wait for
+Sid and Anish (infrastructure).
 
 **Not built:** a confirmation copy to the client, reminders before expiry, a notice on first open,
 and a portal-authenticated answer.
@@ -1719,12 +1726,46 @@ claims them. `tests/render/anchors.test.ts` hashes a render with and without col
 document with and without anchor keys: equal both ways. `tests/render/layout.test.ts` is
 untouched and still matches its pinned hashes.
 
-**Rupees in lakhs on the PROPOSAL.** `wholeMoney` prints INR as "INR 12,50,000" (regrouped from
-the western string by `inLakhs`, never asked of `en-IN`: a Node built with small ICU answers that
-as en-US, which would make the bytes depend on the machine). Safe because a sent proposal keeps
-its pinned PDF. **Letters and invoices still group the western way** ("INR 1,250,000.00"): a
-signed letter must re-render byte for byte and `layout.test.ts` pins their hashes. Changing them
-is open, and is a decision about every issued letter's re-render.
+**Money: one formatter, the screens' shape (audit 2026-10-03, B19 / CA#49).** `documentMoney`
+(`domain/render/money.ts`) writes every amount on a document drawn since 0334: "₹12,50,000" in lakhs
+for rupees, "AED 5,000" with its code for every other currency, paise only when there are some, and
+always two places on a tax invoice ("₹5,900.00"). Digits regrouped by hand, never `Intl` and never
+a JS number (bytes must not depend on the machine's ICU). A letter or an invoice that went out
+BEFORE 0334 keeps the western "INR 1,250,000.00" it was issued in, recognised by having no
+`printed_parties` (below), and `layout.test.ts` still pins the classic letter and the invoice
+unchanged: the renderer only draws what a document carries, and everything new is opt-in.
+
+## Who a document is from and to (audit 2026-10-03, 0334)
+
+The "Tax Invoice" printed two names and nothing else; letters printed "Registered in IN".
+
+- **What is held.** A firm company's registered address gains its state and postal code; its tax
+  registration (GSTIN in India, held to the GSTIN's shape; TRN in the UAE; EIN in the US; a VAT
+  number elsewhere), PAN (India only), phone and email are the company's own PARTY IDENTIFIERS, set
+  from `PATCH /firm-entities/{id}` (each write voids the one in force; a value another party holds
+  is refused, writing nothing). A client has `core.party.billing_address` (`PATCH /parties/{id}`,
+  CA#22). Same jsonb shape both sides (`domain/party/address.ts`).
+- **One reading.** `crm.print_identity(party, day)`: name, address (billing, else registered),
+  country, the identifiers in force (tax registration, PAN, company number, phone, email), website.
+- **Frozen when it goes out.** `printed_parties` on `crm.invoice` and `crm.engagement_letter` is
+  written by the issuing (sending) statement from that reading on the firm's day, and a trigger
+  refuses it any other write. A draft reads live. A rename or a new address after issue does not
+  reach an issued invoice's paper. NULL on a document already out = the print before 0334.
+- **What prints.** The invoice's From and Billed to blocks (address, state and country BY NAME,
+  GSTIN or the country's tax number, PAN, the firm's phone and email) and the total in words
+  ("Indian Rupees ... Only", lakhs and crores for rupees); the letter's letterhead under the
+  company's name; the proposal's at the foot of every page after the cover.
+- **Not printed, and waiting for the firm (Sid):** CGST/SGST/IGST, SAC codes, place of supply,
+  bank details, LUT, e-invoicing. A credit note has no PDF at all yet.
+
+**And the rest of the documents cluster (audit 2026-10-03):** a draft (a `draft_copy`, or a copy
+drawn while its record was a draft) is never shared with the client (`DRAFT_NOT_SHAREABLE`, B10);
+a draft is dated on the firm's day, as Send or Issue will date it, in the preview and the draft
+copy alike (B42); a rendered PDF is named "Invoice draft - <client>.pdf", "Invoice INV-2026-27-0001
+- <client>.pdf" (CA#56); an Annexure letter with nothing on its cover page is not sent
+(`LETTER_HAS_NO_BODY`, checked in `send()` only, never in the hash a signature verifies, CA#2); a
+Summary of Fees kept on one page with its heading and total, and a 34pt logo, on proposals and on
+letters drawn since 0334 (CA#60).
 
 ## Invoicing — the one number in this product that may not gap (T3.4)
 

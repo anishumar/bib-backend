@@ -218,7 +218,7 @@ The authoritative list is `EVENT_VERBS`; this table is its rendering.
 | `party.unarchived` | party | An archived party was brought back into the pickers and lists. |
 | `firm_entity.edited` | party | One of the firm's OWN companies had its name, entity type or registered address changed (T6.18). Payload: `fields` (which of `name`, `entityType`, `registeredAddress` changed) — never the name or the address, which the row keeps. |
 | `legal_entity.registered` | legal_entity | An organization was registered in a jurisdiction. |
-| `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. |
+| `party_identifier.added` | party_identifier | A PAN / GSTIN / handle was attached to a party. Since the audit of 2026-10-03 also when one of the firm's OWN companies has its tax registration, PAN, phone or email set from its company form (`PATCH /firm-entities/{id}`), with `party_identifier.voided` for the one it replaced. Payload `partyId`, `identifierType`; never the value. |
 | `party_relationship.recorded` | party_relationship | An effective-dated relationship was recorded. |
 | `party_relationship.ended` | party_relationship | A relationship was closed with a valid_to date. |
 | `client_assignment.created` | client_assignment | Somebody at the firm was put in charge of a client — the Key Manager, or a SPOC for one Dept or delivery team. A key-manager handover carries `handedOverFrom`. |
