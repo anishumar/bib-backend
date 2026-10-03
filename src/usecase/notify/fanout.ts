@@ -202,10 +202,16 @@ export class NotificationFanout {
       case "work_item_assignee":
         return one(await d.workItemAssignee(t, who.workItemId));
       case "work_item_checkers":
-        return this.deps.checkers.workItemCheckers(t, who.approvalId);
+        return this.managerElseCheckers(
+          t,
+          who.approvalId,
+          "work_item",
+          await this.deps.checkers.workItemCheckers(t, who.approvalId),
+        );
       case "step_checkers": {
         const approvalId = await d.pendingStepApproval(t, who.jobId, who.stepKey);
-        return approvalId === null ? [] : this.deps.checkers.stepCheckers(t, approvalId);
+        if (approvalId === null) return [];
+        return this.managerElseCheckers(t, approvalId, "step", await this.deps.checkers.stepCheckers(t, approvalId));
       }
       case "proposal_preparer":
         return one(await d.proposalPreparer(t, who.proposalId));
@@ -233,6 +239,24 @@ export class NotificationFanout {
         return [...new Set([ask.raisedBy, ask.assigneeUserId].filter((x): x is string => x !== null))];
       }
     }
+  }
+
+  /**
+   * Who hears that work is waiting to be checked (DESIGN.md §J, Q2): the
+   * MANAGER of whoever sent it, when that manager may check it. Everybody else
+   * who may still sees it on the Checks list; a firm whose rule lets ten
+   * people check must not send ten notifications per check. With no manager,
+   * or one who may not check this, every eligible checker hears, so a check
+   * is never silent.
+   */
+  private async managerElseCheckers(
+    tenantId: string,
+    approvalId: string,
+    kind: "work_item" | "step",
+    eligible: readonly string[],
+  ): Promise<readonly string[]> {
+    const manager = await this.deps.directory.checkSendersManager(tenantId, approvalId, kind);
+    return manager !== null && eligible.includes(manager) ? [manager] : eligible;
   }
 
   /** Retention, daily: every firm's read or resolved rows past the window. */

@@ -222,13 +222,29 @@ const setMyPrefsRoute = createRoute({
   },
 });
 
+const FirmDefaultsResponse = {
+  description: "Every category and channel, and when the daily email goes out",
+  content: {
+    "application/json": {
+      schema: z.object({
+        categories: z.array(CategoryViewSchema),
+        digestHour: z.number().int().openapi({
+          description:
+            "The hour (0 to 23, the firm's own time zone) the daily email of unread notifications goes " +
+            "out. Escalations and missed filings go by email at once instead.",
+        }),
+      }),
+    },
+  },
+};
+
 const firmDefaultsRoute = createRoute({
   method: "get",
   path: "/api/v1/notifications/firm-defaults",
   tags: ["notifications"],
   summary: "What reaches everybody at the firm unless they choose otherwise",
   responses: {
-    200: SettingsResponse,
+    200: FirmDefaultsResponse,
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org"),
   },
@@ -249,6 +265,35 @@ const setFirmDefaultsRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or may not administer the firm"),
     409: errorResponse("A mandatory bell cannot be switched off"),
+  },
+});
+
+const digestHourRoute = createRoute({
+  method: "put",
+  path: "/api/v1/notifications/digest-hour",
+  tags: ["notifications"],
+  summary: "When the firm's daily notification email goes out",
+  description:
+    "The hour, in the firm's own time zone. Recorded in the audit trail " +
+    "(`tenant.notification_digest_hour_set`).",
+  request: {
+    body: {
+      required: true,
+      content: {
+        "application/json": {
+          schema: z.object({ digestHour: z.number().int().min(0).max(23) }).openapi("NotificationDigestHour"),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Saved",
+      content: { "application/json": { schema: z.object({ digestHour: z.number().int() }) } },
+    },
+    400: errorResponse("Not an hour from 0 to 23"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or may not administer the firm"),
   },
 });
 
@@ -337,8 +382,19 @@ export function registerNotificationRoutes(app: OpenAPIHono<AppEnv>, deps: Notif
   app.openapi(firmDefaultsRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
-    const categories = await deps.service.firmDefaults(s.tenantId);
-    return c.json({ categories: categories.map(viewToWire) }, 200);
+    const [categories, digestHour] = await Promise.all([
+      deps.service.firmDefaults(s.tenantId),
+      deps.service.digestHour(s.tenantId),
+    ]);
+    return c.json({ categories: categories.map(viewToWire), digestHour }, 200);
+  });
+
+  app.openapi(digestHourRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { digestHour } = c.req.valid("json");
+    const saved = await deps.service.setDigestHour(s.tenantId, { type: "human", id: s.userId }, digestHour);
+    return c.json({ digestHour: saved }, 200);
   });
 
   app.openapi(setFirmDefaultsRoute, async (c) => {

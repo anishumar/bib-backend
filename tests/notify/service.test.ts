@@ -2,7 +2,7 @@
 // proven in `inbox.integration.test.ts`; this is the service's own rules.
 import { beforeEach, describe, expect, it } from "vitest";
 import { NotificationService, UNREAD_CAP } from "../../src/usecase/notify/service";
-import { FakeNotificationInbox, FakeNotificationSettings } from "../../src/testfakes/notify";
+import { FakeNotificationInbox, FakeNotificationSettings, FakeNotifyFirmSetting } from "../../src/testfakes/notify";
 import { RecordingEventSink } from "../../src/testfakes/ledger";
 import { NotificationLocked, NotificationNotFound, NotificationSettingsEmpty } from "../../src/domain/notify/errors";
 import { findPiiKey } from "../../src/domain/ledger/model";
@@ -22,7 +22,7 @@ beforeEach(() => {
   inbox = new FakeNotificationInbox();
   settings = new FakeNotificationSettings();
   events = new RecordingEventSink();
-  service = new NotificationService({ inbox, settings, events });
+  service = new NotificationService({ inbox, settings, events, firm: new FakeNotifyFirmSetting() });
 });
 
 describe("the inbox", () => {

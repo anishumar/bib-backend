@@ -30,6 +30,7 @@ import type {
   NotificationSettingsStore,
 } from "../../usecase/notify/ports";
 import { isoInstant } from "./instant";
+import { MAX_LIST_ROWS } from "../../db/limits";
 
 const MS = (expr: string): string => `date_trunc('milliseconds', ${expr})`;
 
@@ -47,13 +48,24 @@ interface InboxRow {
   resolved_at: string | null;
 }
 
-export class PostgresNotificationInbox implements NotificationInbox {
-  constructor(private readonly app: Db) {}
+/** Which notifications a read wants: one person's page, or named rows (email). */
+type RecordFilter =
+  | { readonly kind: "inbox"; readonly userId: string; readonly q: InboxQuery }
+  | { readonly kind: "ids"; readonly ids: readonly string[] };
 
-  async list(tenantId: string, userId: string, q: InboxQuery): Promise<readonly NotificationRecord[]> {
-    return withRecipient(this.app, tenantId, userId, async (db) => {
-      const rows = await db<InboxRow[]>`
+/**
+ * Notifications with their names joined: the ONE query the bell, the list and
+ * the emails share, so a notification reads the same everywhere.
+ */
+export async function readRecords(
+  db: Db,
+  tenantId: string,
+  filter: RecordFilter,
+): Promise<readonly (NotificationRecord & { readonly recipientUserId: string })[]> {
+  const q = filter.kind === "inbox" ? filter.q : null;
+  const rows = await db<(InboxRow & { recipient_user_id: string })[]>`
         SELECT n.id,
+               n.recipient_user_id,
                n.category,
                n.source_type,
                n.source_id,
@@ -127,36 +139,48 @@ export class PostgresNotificationInbox implements NotificationInbox {
                                   ld.party_id, pr.party_id, el.party_id, inv.party_id,
                                   bd.party_id, oi.entity_party_id)
         WHERE n.tenant_id = ${tenantId}
-          AND n.recipient_user_id = ${userId}
-          AND (${!q.unreadOnly} OR (n.read_at IS NULL AND n.resolved_at IS NULL))
-          AND (${q.category}::text IS NULL OR n.category = ${q.category})
-          AND (${q.before?.createdAt ?? null}::timestamptz IS NULL
+        ${
+          filter.kind === "ids"
+            ? db`AND n.id = ANY(${filter.ids as string[]}::uuid[])`
+            : db`
+          AND n.recipient_user_id = ${filter.userId}
+          AND (${!(q?.unreadOnly ?? false)} OR (n.read_at IS NULL AND n.resolved_at IS NULL))
+          AND (${q?.category ?? null}::text IS NULL OR n.category = ${q?.category ?? null})
+          AND (${q?.before?.createdAt ?? null}::timestamptz IS NULL
                OR (${db.unsafe(MS("n.created_at"))}, n.id)
-                  < (${q.before?.createdAt ?? null}::timestamptz, ${q.before?.id ?? null}::uuid))
+                  < (${q?.before?.createdAt ?? null}::timestamptz, ${q?.before?.id ?? null}::uuid))`
+        }
         ORDER BY ${db.unsafe(MS("n.created_at"))} DESC, n.id DESC
-        LIMIT ${q.limit}
-      `;
-      return rows.flatMap((r) => {
-        // A category this build no longer knows is a row from a later release
-        // read by an older one; skipping it beats rendering a sentence for it.
-        if (!isNotifyCategory(r.category)) return [];
-        return [
-          {
-            id: r.id,
-            category: r.category,
-            sourceType: r.source_type,
-            sourceId: r.source_id,
-            payload: r.payload,
-            actorName: r.actor_name,
-            clientName: r.client_name,
-            subjectLabel: r.subject_label,
-            createdAt: r.created_at,
-            readAt: r.read_at,
-            resolvedAt: r.resolved_at,
-          },
-        ];
-      });
-    });
+        LIMIT ${q?.limit ?? MAX_LIST_ROWS}
+  `;
+  return rows.flatMap((r) => {
+    // A category this build no longer knows is a row from a later release
+    // read by an older one; skipping it beats rendering a sentence for it.
+    if (!isNotifyCategory(r.category)) return [];
+    return [
+      {
+        id: r.id,
+        recipientUserId: r.recipient_user_id,
+        category: r.category,
+        sourceType: r.source_type,
+        sourceId: r.source_id,
+        payload: r.payload,
+        actorName: r.actor_name,
+        clientName: r.client_name,
+        subjectLabel: r.subject_label,
+        createdAt: r.created_at,
+        readAt: r.read_at,
+        resolvedAt: r.resolved_at,
+      },
+    ];
+  });
+}
+
+export class PostgresNotificationInbox implements NotificationInbox {
+  constructor(private readonly app: Db) {}
+
+  async list(tenantId: string, userId: string, q: InboxQuery): Promise<readonly NotificationRecord[]> {
+    return withRecipient(this.app, tenantId, userId, (db) => readRecords(db, tenantId, { kind: "inbox", userId, q }));
   }
 
   async unreadCount(tenantId: string, userId: string, cap: number): Promise<number> {

@@ -18,23 +18,32 @@ import {
   NOTIFY_CATEGORY_KEYS,
   NOTIFY_CHANNELS,
   channelEnabled,
+  isDigestHour,
   isLocked,
   notificationPath,
   renderNotification,
 } from "../../domain/notify/model";
-import { NotificationLocked, NotificationNotFound, NotificationSettingsEmpty } from "../../domain/notify/errors";
+import {
+  NotificationDigestHourInvalid,
+  NotificationLocked,
+  NotificationNotFound,
+  NotificationSettingsEmpty,
+} from "../../domain/notify/errors";
 import type { EventSink } from "../ledger/ports";
 import type {
   ChannelSetting,
   InboxQuery,
   NotificationInbox,
   NotificationRecord,
+  NotificationEmailStore,
   NotificationSettingsStore,
 } from "./ports";
 
 export interface NotificationDeps {
   readonly inbox: NotificationInbox;
   readonly settings: NotificationSettingsStore;
+  /** The firm's hour for the daily email (0324). */
+  readonly firm: Pick<NotificationEmailStore, "digestHour" | "setDigestHour">;
   readonly events: EventSink;
 }
 
@@ -158,6 +167,26 @@ export class NotificationService {
       const spec = NOTIFY_CATEGORIES[category];
       return { category, label: spec.label, group: spec.group, channels };
     });
+  }
+
+  digestHour(tenantId: string): Promise<number> {
+    return this.deps.firm.digestHour(tenantId);
+  }
+
+  /** When the firm's daily email goes out, in its own zone. Recorded: it is the firm's call. */
+  async setDigestHour(tenantId: string, actor: Actor & { readonly id: string }, hour: number): Promise<number> {
+    if (!isDigestHour(hour)) throw new NotificationDigestHourInvalid();
+    const moved = await this.deps.firm.setDigestHour(tenantId, actor.id, hour);
+    if (moved.from !== moved.to) {
+      await this.deps.events.recordEvent({
+        tenantId,
+        verb: "tenant.notification_digest_hour_set",
+        objectId: tenantId,
+        actor,
+        payload: { from: moved.from, to: moved.to },
+      });
+    }
+    return moved.to;
   }
 
   /**

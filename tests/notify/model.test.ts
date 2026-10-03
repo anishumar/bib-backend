@@ -5,6 +5,8 @@ import {
   NOTIFY_CATEGORY_KEYS,
   NOTIFY_CHANNELS,
   channelEnabled,
+  dailyDigestDue,
+  emailMode,
   eventDedupeKey,
   isLocked,
   notificationPath,
@@ -19,8 +21,8 @@ function input(category: NotifyCategory, payload: Record<string, unknown> = {}):
 
 describe("who hears what", () => {
   it("the person beats the firm, and the firm beats the product", () => {
-    expect(channelEnabled("lead_assigned", "email", undefined, undefined)).toBe(false);
-    expect(channelEnabled("lead_assigned", "email", true, undefined)).toBe(true);
+    expect(channelEnabled("lead_assigned", "email", undefined, undefined)).toBe(true);
+    expect(channelEnabled("lead_assigned", "email", false, undefined)).toBe(false);
     expect(channelEnabled("lead_assigned", "email", true, false)).toBe(false);
     expect(channelEnabled("lead_assigned", "email", false, true)).toBe(true);
   });
@@ -34,14 +36,24 @@ describe("who hears what", () => {
     }
   });
 
-  it("every category is in the bell by default, and only the two mandatory ones email", () => {
+  it("every category is in the bell and by email by default; only the two mandatory ones email at once", () => {
     for (const category of NOTIFY_CATEGORY_KEYS) {
       expect(channelEnabled(category, "in_app", undefined, undefined)).toBe(true);
+      expect(channelEnabled(category, "email", undefined, undefined)).toBe(true);
       expect(channelEnabled(category, "push", undefined, undefined)).toBe(false);
-      expect(channelEnabled(category, "email", undefined, undefined)).toBe(
-        NOTIFY_CATEGORIES[category].mandatoryInApp,
-      );
+      expect(emailMode(category)).toBe(NOTIFY_CATEGORIES[category].mandatoryInApp ? "instant" : "digest");
     }
+    expect(emailMode("escalation")).toBe("instant");
+    expect(emailMode("filing_missed")).toBe("instant");
+  });
+
+  it("the daily email is due from the firm's hour, on the firm's day", () => {
+    // 03:00 UTC is 08:30 in Kolkata: not yet. 03:30 UTC is 09:00: due, that day.
+    expect(dailyDigestDue({ now: "2026-10-04T03:00:00.000Z", timeZone: "Asia/Kolkata", hour: 9 })).toBeNull();
+    expect(dailyDigestDue({ now: "2026-10-04T03:30:00.000Z", timeZone: "Asia/Kolkata", hour: 9 })).toBe("2026-10-04");
+    // 20:00 UTC on the 3rd is already the 4th in Kolkata (01:30): due only at hour 0 or 1.
+    expect(dailyDigestDue({ now: "2026-10-03T20:00:00.000Z", timeZone: "Asia/Kolkata", hour: 1 })).toBe("2026-10-04");
+    expect(dailyDigestDue({ now: "2026-10-03T20:00:00.000Z", timeZone: "Asia/Kolkata", hour: 9 })).toBeNull();
   });
 });
 

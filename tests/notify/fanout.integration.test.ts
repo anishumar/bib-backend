@@ -52,13 +52,16 @@ const permissions = {
   },
 } as unknown as ConstructorParameters<typeof NotificationFanout>[0]["permissions"];
 
+/** Who T2.9's rule says may check, as the test sets it. */
+let eligible: string[] = [];
+
 const outbox = new PostgresNotificationOutbox(appDb);
 const directory = new PostgresNotifyDirectory(appDb);
 const settings = new PostgresNotificationSettings(appDb);
 const fanout = new NotificationFanout({
   outbox,
   directory,
-  checkers: { workItemCheckers: () => Promise.resolve([]), stepCheckers: () => Promise.resolve([]) },
+  checkers: { workItemCheckers: () => Promise.resolve(eligible), stepCheckers: () => Promise.resolve(eligible) },
   permissions,
   settings,
   clock: systemClock,
@@ -224,11 +227,42 @@ describe("the outbox", () => {
     expect(told[0]?.category).toBe("dunning_decision");
   });
 
+  it("tells the sender's MANAGER that work waits for a check, else every eligible checker", async () => {
+    const dina = await user("dina");
+    await member(tenantA, dina, "associate");
+    // The maker of a check is the task's holder (the approval row takes it
+    // from the task), so Bilal holds it for this test.
+    await owner`UPDATE delivery.work_item SET assignee_user_id = ${bilal} WHERE id = ${workItem}`;
+    const [approval] = await owner<{ id: string }[]>`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, submitted_by)
+      VALUES (${tenantA}, ${workItem}, ${bilal}) RETURNING id
+    `;
+    if (!approval) throw new Error("no approval");
+    eligible = [asha, dina];
+
+    // Bilal reports to Asha, who may check: only Asha hears.
+    await owner`UPDATE tenancy.membership SET reports_to_user_id = ${asha} WHERE tenant_id = ${tenantA} AND user_id = ${bilal}`;
+    const one = await event(tenantA, "work_item.review_requested", "work_item_approval", approval.id, bilal, { workItemId: workItem });
+    await fanout.runForTenant(tenantA);
+    expect((await rows(tenantA)).filter((r) => r.event_id === one).map((r) => r.recipient_user_id)).toEqual([asha]);
+
+    // Nobody above Bilal: every eligible checker hears, so the check is not silent.
+    await owner`UPDATE tenancy.membership SET reports_to_user_id = NULL WHERE tenant_id = ${tenantA} AND user_id = ${bilal}`;
+    const two = await event(tenantA, "work_item.review_requested", "work_item_approval", approval.id, bilal, { workItemId: workItem });
+    await fanout.runForTenant(tenantA);
+    expect((await rows(tenantA)).filter((r) => r.event_id === two).map((r) => r.recipient_user_id).sort()).toEqual([asha, dina].sort());
+
+    await owner`DELETE FROM delivery.work_item_approval WHERE id = ${approval.id}`;
+    await owner`UPDATE delivery.work_item SET assignee_user_id = ${asha} WHERE id = ${workItem}`;
+    eligible = [];
+  });
+
   it("reads a relationship from the firm's own tables", async () => {
     expect(await directory.workItemAssignee(tenantA, workItem)).toBe(asha);
     expect(await directory.workItemAssignee(tenantB, workItem)).toBeNull();
     const staff = await directory.activeStaff(tenantA);
-    expect(staff.map((s) => s.userId).sort()).toEqual([asha, bilal].sort());
+    expect(staff.map((s) => s.userId)).toEqual(expect.arrayContaining([asha, bilal]));
+    expect(staff.some((s) => s.userId === chen)).toBe(false);
   });
 });
 

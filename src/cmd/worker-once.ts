@@ -340,6 +340,12 @@ async function main(): Promise<void> {
     const written = [...fanned, ...reminded].reduce((n, r) => n + r.created, 0);
     const closed = [...fanned, ...reminded].reduce((n, r) => n + r.resolved, 0);
     console.log(`  ${String(written)} notification(s) written, ${String(closed)} resolved`);
+    const emailed = [...(await wired.notifyEmails.sweepInstant()), ...(await wired.notifyEmails.sweepDigests())];
+    for (const r of emailed.filter((x) => x.failure !== undefined)) {
+      console.log(`  ! firm ${r.tenantId}: notification emails FAILED: ${r.failure ?? ""}`);
+    }
+    const letters = emailed.reduce((n, r) => n + r.letters, 0);
+    if (letters > 0) console.log(`  ${String(letters)} notification email(s) sent`);
     console.log();
   } finally {
     await wired.pools.close();

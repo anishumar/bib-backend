@@ -147,3 +147,18 @@ export class FakeNotificationSettings implements NotificationSettingsStore {
     return Promise.resolve();
   }
 }
+
+/** The firm's daily-email hour (0324), in memory. */
+export class FakeNotifyFirmSetting {
+  readonly hours = new Map<string, number>();
+
+  digestHour(tenantId: string): Promise<number> {
+    return Promise.resolve(this.hours.get(tenantId) ?? 9);
+  }
+
+  setDigestHour(tenantId: string, _byUserId: string, hour: number): Promise<{ readonly from: number; readonly to: number }> {
+    const from = this.hours.get(tenantId) ?? 9;
+    this.hours.set(tenantId, hour);
+    return Promise.resolve({ from, to: hour });
+  }
+}

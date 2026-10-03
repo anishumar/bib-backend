@@ -12,7 +12,11 @@ export class NotifyError extends Error {
   }
 }
 
-export type NotifyErrorCode = "NOTIFICATION_NOT_FOUND" | "NOTIFICATION_LOCKED" | "NOTIFICATION_SETTINGS_EMPTY";
+export type NotifyErrorCode =
+  | "NOTIFICATION_NOT_FOUND"
+  | "NOTIFICATION_LOCKED"
+  | "NOTIFICATION_SETTINGS_EMPTY"
+  | "NOTIFICATION_DIGEST_HOUR_INVALID";
 
 /**
  * Not yours, not this firm's, or not there. One answer for all three on
@@ -39,5 +43,12 @@ export class NotificationLocked extends NotifyError {
 export class NotificationSettingsEmpty extends NotifyError {
   constructor() {
     super("NOTIFICATION_SETTINGS_EMPTY", "Choose at least one setting to change.");
+  }
+}
+
+/** The daily email's hour is a whole hour of the day. */
+export class NotificationDigestHourInvalid extends NotifyError {
+  constructor() {
+    super("NOTIFICATION_DIGEST_HOUR_INVALID", "Choose an hour from 00:00 to 23:00.");
   }
 }

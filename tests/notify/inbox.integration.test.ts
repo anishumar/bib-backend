@@ -323,11 +323,11 @@ describe("settings", () => {
     expect(same).toEqual([]);
     const moved = await settings.setFirmDefaults(tenantA, asha, [
       { category: "escalation", channel: "email", enabled: false },
-      { category: "lead_assigned", channel: "email", enabled: true },
+      { category: "lead_assigned", channel: "email", enabled: false },
     ]);
     expect(moved).toEqual([
       { category: "escalation", channel: "email", from: true, to: false },
-      { category: "lead_assigned", channel: "email", from: null, to: true },
+      { category: "lead_assigned", channel: "email", from: null, to: false },
     ]);
     expect(await settings.firmDefaults(tenantB)).toEqual([]);
 

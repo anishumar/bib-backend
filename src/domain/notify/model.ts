@@ -43,35 +43,79 @@ export interface CategorySpec {
   readonly defaults: Readonly<Record<NotifyChannel, boolean>>;
 }
 
-const ON_IN_APP = { in_app: true, email: false, push: false } as const;
-const ON_IN_APP_AND_EMAIL = { in_app: true, email: true, push: false } as const;
+/** In the bell and by email (each person may switch their email off). Push
+ *  does not exist yet (phase 2), so it is off everywhere. */
+const ON = { in_app: true, email: true, push: false } as const;
 
 /**
  * Every category, in the order the preferences screen lists them.
  *
- * The defaults are the user's recommendation to Ashish (DESIGN.md, 2026-10-03):
- * everything in the bell; email only for the two that cost a client money.
- * Every firm may change all of it except the two mandatory bells.
+ * The defaults are the answers given for Ashish and Sid (DESIGN.md §J,
+ * 2026-10-04): everything in the bell and by email. HOW an email goes is the
+ * category's (`emailMode`): the two that cost a client money at once, the rest
+ * in one email a day. Every firm may change all of it except the two
+ * mandatory bells.
  */
 export const NOTIFY_CATEGORIES = {
-  task_assigned:     { label: "A task is given to you",                group: "work",      mandatoryInApp: false, defaults: ON_IN_APP },
-  step_assigned:     { label: "A step is given to you",                group: "work",      mandatoryInApp: false, defaults: ON_IN_APP },
-  check_requested:   { label: "Work is sent to you to check",          group: "work",      mandatoryInApp: false, defaults: ON_IN_APP },
-  escalation:        { label: "Work is escalated to you",              group: "work",      mandatoryInApp: true,  defaults: ON_IN_APP_AND_EMAIL },
-  lead_assigned:     { label: "A lead is given to you",                group: "clients",   mandatoryInApp: false, defaults: ON_IN_APP },
-  client_request:    { label: "A client sends a request or a reply",   group: "clients",   mandatoryInApp: false, defaults: ON_IN_APP },
-  client_answered:   { label: "A client answers what you asked for",   group: "clients",   mandatoryInApp: false, defaults: ON_IN_APP },
-  proposal_decided:  { label: "A client accepts or declines a proposal", group: "clients", mandatoryInApp: false, defaults: ON_IN_APP },
-  letter_signed:     { label: "A client signs an engagement letter",   group: "clients",   mandatoryInApp: false, defaults: ON_IN_APP },
-  bill_to_raise:     { label: "A bill is ready to raise",              group: "billing",   mandatoryInApp: false, defaults: ON_IN_APP },
-  advance_reminder:  { label: "An advance is overdue",                 group: "billing",   mandatoryInApp: false, defaults: ON_IN_APP },
-  advance_summary:   { label: "The weekly advances summary",           group: "billing",   mandatoryInApp: false, defaults: ON_IN_APP },
-  payment_received:  { label: "A payment is received",                 group: "billing",   mandatoryInApp: false, defaults: ON_IN_APP },
-  dunning_decision:  { label: "An overdue invoice needs your decision", group: "billing",  mandatoryInApp: false, defaults: ON_IN_APP },
-  filing_missed:     { label: "A filing deadline is missed",           group: "deadlines", mandatoryInApp: true,  defaults: ON_IN_APP_AND_EMAIL },
+  task_assigned:     { label: "A task is given to you",                group: "work",      mandatoryInApp: false, defaults: ON },
+  step_assigned:     { label: "A step is given to you",                group: "work",      mandatoryInApp: false, defaults: ON },
+  check_requested:   { label: "Work is sent to you to check",          group: "work",      mandatoryInApp: false, defaults: ON },
+  escalation:        { label: "Work is escalated to you",              group: "work",      mandatoryInApp: true,  defaults: ON },
+  lead_assigned:     { label: "A lead is given to you",                group: "clients",   mandatoryInApp: false, defaults: ON },
+  client_request:    { label: "A client sends a request or a reply",   group: "clients",   mandatoryInApp: false, defaults: ON },
+  client_answered:   { label: "A client answers what you asked for",   group: "clients",   mandatoryInApp: false, defaults: ON },
+  proposal_decided:  { label: "A client accepts or declines a proposal", group: "clients", mandatoryInApp: false, defaults: ON },
+  letter_signed:     { label: "A client signs an engagement letter",   group: "clients",   mandatoryInApp: false, defaults: ON },
+  bill_to_raise:     { label: "A bill is ready to raise",              group: "billing",   mandatoryInApp: false, defaults: ON },
+  advance_reminder:  { label: "An advance is overdue",                 group: "billing",   mandatoryInApp: false, defaults: ON },
+  advance_summary:   { label: "The weekly advances summary",           group: "billing",   mandatoryInApp: false, defaults: ON },
+  payment_received:  { label: "A payment is received",                 group: "billing",   mandatoryInApp: false, defaults: ON },
+  dunning_decision:  { label: "An overdue invoice needs your decision", group: "billing",  mandatoryInApp: false, defaults: ON },
+  filing_missed:     { label: "A filing deadline is missed",           group: "deadlines", mandatoryInApp: true,  defaults: ON },
 } as const satisfies Record<string, CategorySpec>;
 
 export type NotifyCategory = keyof typeof NOTIFY_CATEGORIES;
+
+/**
+ * How a category travels by email (DESIGN.md §J): `instant` for the two that
+ * cost a client money if they wait, `digest` (one email a day, at the firm's
+ * hour, of what is still unread) for everything else. The SAME two the bell
+ * will not let anybody silence: urgent in one channel is urgent in both.
+ */
+export function emailMode(category: NotifyCategory): "instant" | "digest" {
+  return NOTIFY_CATEGORIES[category].mandatoryInApp ? "instant" : "digest";
+}
+
+/** The hour a firm's daily email goes out when it has not chosen one. */
+export const DEFAULT_DIGEST_HOUR = 9;
+
+/**
+ * The firm's day whose daily email is due at `now`, or null before its hour.
+ * In the FIRM's zone: "9:00" means 9:00 in the office, not on the server.
+ * Never caught up on a later day: a day whose hour passed while the worker was
+ * down is simply that day, read the moment the worker is back.
+ */
+export function dailyDigestDue(input: {
+  readonly now: string;
+  readonly timeZone: string;
+  readonly hour: number;
+}): string | null {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: input.timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date(input.now));
+  const read = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+  if (Number(read("hour")) < input.hour) return null;
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
+export function isDigestHour(n: number): boolean {
+  return Number.isInteger(n) && n >= 0 && n <= 23;
+}
 
 export function isNotifyCategory(v: string): v is NotifyCategory {
   return Object.prototype.hasOwnProperty.call(NOTIFY_CATEGORIES, v);

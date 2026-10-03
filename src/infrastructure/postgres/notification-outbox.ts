@@ -306,6 +306,21 @@ export class PostgresNotifyDirectory implements NotifyDirectory {
     });
   }
 
+  async checkSendersManager(tenantId: string, approvalId: string, kind: "work_item" | "step"): Promise<string | null> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const table = kind === "work_item" ? "delivery.work_item_approval" : "delivery.step_approval";
+      const [row] = await db<{ manager: string | null }[]>`
+        SELECT m.reports_to_user_id AS manager
+        FROM ${db(table)} a
+        JOIN tenancy.membership m
+          ON m.tenant_id = a.tenant_id AND m.user_id = a.submitted_by AND m.audience = 'STAFF'
+        WHERE a.tenant_id = ${tenantId} AND a.id = ${approvalId}
+        LIMIT 1
+      `;
+      return row?.manager ?? null;
+    });
+  }
+
   private async oneUser(tenantId: string, table: string, column: string, id: string): Promise<string | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ user_id: string | null }[]>`

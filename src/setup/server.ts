@@ -129,6 +129,7 @@ import {
   PostgresNotificationInbox,
   PostgresNotificationSettings,
 } from "../infrastructure/postgres/notification-repository";
+import { PostgresNotificationEmailStore } from "../infrastructure/postgres/notification-email";
 import {
   PostgresDunningLadder,
   PostgresDunningRepository,
@@ -682,6 +683,7 @@ export function wire(cfg: Config, log: Logger): Wired {
   const notifications = new NotificationService({
     inbox: new PostgresNotificationInbox(pools.app),
     settings: new PostgresNotificationSettings(pools.app),
+    firm: new PostgresNotificationEmailStore(pools.app),
     events: ledger,
   });
 

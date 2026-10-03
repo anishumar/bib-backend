@@ -827,6 +827,7 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   // billing settings beside it. Reading the defaults is open to every colleague
   // (above), because each person's own screen shows what the firm chose.
   [routeKey("PUT", "/api/v1/notifications/firm-defaults"), "tenant:admin" as const],
+  [routeKey("PUT", "/api/v1/notifications/digest-hour"), "tenant:admin" as const],
 
   // THE DUNNING LADDER (T3.5). Reading how far a receivable has been chased is
   // `party:read` — the person on the phone to the client needs to know what has

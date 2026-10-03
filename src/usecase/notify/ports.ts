@@ -186,10 +186,72 @@ export interface NotifyDirectory {
   ): Promise<{ readonly raisedBy: string | null; readonly assigneeUserId: string | null } | null>;
   /** The open check on one step of a job, if there is one. */
   pendingStepApproval(tenantId: string, jobId: string, stepKey: string): Promise<string | null>;
+  /**
+   * The manager of whoever sent a check: the sender's `reports_to` (the firm's
+   * own chart). Null when nobody sent it (a machine's step) or the sender
+   * reports to nobody.
+   */
+  checkSendersManager(tenantId: string, approvalId: string, kind: "work_item" | "step"): Promise<string | null>;
 }
 
 /** Who may decide a check: T2.9's rule, asked of the module that owns it. */
 export interface CheckerSource {
   workItemCheckers(tenantId: string, approvalId: string): Promise<readonly string[]>;
   stepCheckers(tenantId: string, approvalId: string): Promise<readonly string[]>;
+}
+
+// ── email (0324) ─────────────────────────────────────────────────────────────
+
+/** A colleague an email can go to: active staff of the firm, with an address. */
+export interface EmailRecipient {
+  readonly userId: string;
+  readonly email: string;
+  readonly displayName: string | null;
+  /** The fee axis, per reader, exactly as the bell applies it. */
+  readonly seesFees: boolean;
+}
+
+/** A notification not yet emailed. */
+export interface Unemailed {
+  readonly id: string;
+  readonly recipientUserId: string;
+  readonly category: NotifyCategory;
+}
+
+export interface NotificationEmailStore {
+  activeTenantIds(): Promise<readonly string[]>;
+  firmName(tenantId: string): Promise<string | null>;
+  /** The firm's hour for the daily email; the default when it never chose. */
+  digestHour(tenantId: string): Promise<number>;
+  setDigestHour(tenantId: string, byUserId: string, hour: number): Promise<{ readonly from: number; readonly to: number }>;
+  /** Unread, unresolved, never emailed, of these categories, created after `since`. */
+  unemailed(tenantId: string, categories: readonly NotifyCategory[], since: string): Promise<readonly Unemailed[]>;
+  /** Marks them emailed where still unmarked; returns the ids THIS call claimed. */
+  claimEmailed(tenantId: string, ids: readonly string[]): Promise<readonly string[]>;
+  /** Gives a claim back after the relay refused. */
+  releaseEmailed(tenantId: string, ids: readonly string[]): Promise<void>;
+  /** The rows with their names joined: the same read the bell uses. */
+  recordsByIds(tenantId: string, ids: readonly string[]): Promise<readonly NotificationRecord[]>;
+  recipients(tenantId: string, userIds: readonly string[]): Promise<readonly EmailRecipient[]>;
+  /** Active staff with no daily-email claim for that firm day yet. */
+  staffWithoutDigest(tenantId: string, day: string): Promise<readonly string[]>;
+  /** True when THIS call claimed the person's daily email for that day. */
+  claimDigest(tenantId: string, userId: string, day: string): Promise<boolean>;
+  markDigest(tenantId: string, userId: string, day: string, notifications: number, sent: boolean): Promise<void>;
+}
+
+/** One email of notifications, words already rendered for its reader. */
+export interface NotificationLetter {
+  readonly to: string;
+  readonly recipientName: string | null;
+  readonly firmName: string | null;
+  readonly mode: "instant" | "digest";
+  readonly items: readonly { readonly title: string; readonly detail: string | null; readonly url: string }[];
+  /** The bell's list, and where the reader switches emails off. */
+  readonly inboxUrl: string;
+  readonly settingsUrl: string;
+}
+
+export interface NotificationMailer {
+  sendNotifications(letter: NotificationLetter): Promise<void>;
 }

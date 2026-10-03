@@ -11,6 +11,7 @@ import { NodemailerTransport } from "../infrastructure/mail/nodemailer-transport
 import type { Mailer } from "../usecase/identity/ports";
 import type { ProposalMailer } from "../usecase/proposal/ports";
 import type { BillingMailer } from "../usecase/billing/ports";
+import type { NotificationMailer } from "../usecase/notify/ports";
 
 /**
  * Which mailer is registered, and the ONLY place that decides.
@@ -31,7 +32,7 @@ import type { BillingMailer } from "../usecase/billing/ports";
  * variable. They are here because the TYPE says nullable and a non-null
  * assertion would be a claim this file cannot make on its own.
  */
-export function mailerFor(cfg: Config, log: Logger): Mailer & ProposalMailer & BillingMailer {
+export function mailerFor(cfg: Config, log: Logger): Mailer & ProposalMailer & BillingMailer & NotificationMailer {
   if (cfg.auth.mailTransport === "log") return new LoggingMailer(log);
   const { smtp, from, fromName } = cfg.mail;
   if (smtp === null || from === null) {

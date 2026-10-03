@@ -1049,6 +1049,7 @@ export function mapError(err: unknown): MappedError {
   if (err instanceof NotifyError) {
     switch (err.code) {
       case "NOTIFICATION_SETTINGS_EMPTY":
+      case "NOTIFICATION_DIGEST_HOUR_INVALID":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       // Not yours, not this firm's, or not there: one answer, so a guessed id
       // tells the caller nothing about whose it is.

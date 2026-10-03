@@ -13,6 +13,8 @@ import type { Logger } from "../platform/log";
 import { systemIds } from "../platform/ids";
 import { systemClock } from "../platform/clock";
 import { AdvanceReminders, NotificationFanout } from "../usecase/notify/fanout";
+import { NotificationEmails } from "../usecase/notify/email";
+import { PostgresNotificationEmailStore } from "../infrastructure/postgres/notification-email";
 import { PostgresNotificationOutbox, PostgresNotifyDirectory } from "../infrastructure/postgres/notification-outbox";
 import { PostgresNotificationSettings } from "../infrastructure/postgres/notification-repository";
 import { PostgresEventStore } from "../infrastructure/postgres/event-repository";
@@ -168,6 +170,10 @@ export const NOTIFY_FANOUT_QUEUE = "notify.fanout";
 export const NOTIFY_ADVANCE_QUEUE = "notify.advance-reminders";
 /** Retention (0323), daily on the escalation cron. */
 export const NOTIFY_PRUNE_QUEUE = "notify.prune";
+/** The daily notification email (0324), on the advance summary's HOURLY cron:
+ *  each firm picks its own hour, in its own zone. The urgent ones go on the
+ *  outbox's every-minute queue, straight after the outbox writes them. */
+export const NOTIFY_DIGEST_QUEUE = "notify.email-digest";
 
 /** The queue the orchestrator sweep runs on. Its own name and its own cadence
  *  again — this one is minutes rather than hours or days, because what it is
@@ -248,6 +254,8 @@ export interface WiredWorker {
   /** The notification outbox and the advance reminders in the bell (0323). */
   readonly notifyFanout: NotificationFanout;
   readonly advanceReminders: AdvanceReminders;
+  /** Notifications by email: urgent at once, the rest daily (0324). */
+  readonly notifyEmails: NotificationEmails;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
@@ -704,6 +712,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     settings: notifySettings,
     clock: systemClock,
   });
+  const notifyEmails = new NotificationEmails({
+    store: new PostgresNotificationEmailStore(pools.app),
+    settings: notifySettings,
+    mailer: mailerFor(cfg, log),
+    timeZones: new PostgresFirmTimeZone(pools.app),
+    clock: systemClock,
+    appBaseUrl: cfg.auth.appBaseUrl,
+  });
   const advanceReminders = new AdvanceReminders({
     outbox: notifyOutbox,
     advances: advanceDesk,
@@ -804,6 +820,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     advanceDigest,
     notifyFanout,
     advanceReminders,
+    notifyEmails,
     orchestrator,
     obligations,
     escalations,
@@ -906,6 +923,11 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
             log.info({ tenantId: r.tenantId, events: r.events, created: r.created, resolved: r.resolved }, "notifications");
           }
         }
+        // The urgent ones by email, straight after they were written.
+        for (const r of await notifyEmails.sweepInstant()) {
+          if (r.failure !== undefined) log.error({ tenantId: r.tenantId, failure: r.failure }, "urgent notification emails could not visit firm");
+          else log.info({ tenantId: r.tenantId, letters: r.letters, notifications: r.notifications, refused: r.refused }, "urgent notification emails");
+        }
       });
       await queue.schedule(NOTIFY_FANOUT_QUEUE, cfg.worker.notifyCron);
 
@@ -919,6 +941,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(NOTIFY_ADVANCE_QUEUE, cfg.worker.advanceDigestCron);
+
+      await queue.register(NOTIFY_DIGEST_QUEUE, async () => {
+        for (const r of await notifyEmails.sweepDigests()) {
+          if (r.failure !== undefined) log.error({ tenantId: r.tenantId, failure: r.failure }, "daily notification emails could not visit firm");
+          else log.info({ tenantId: r.tenantId, letters: r.letters, notifications: r.notifications, refused: r.refused }, "daily notification emails");
+        }
+      });
+      await queue.schedule(NOTIFY_DIGEST_QUEUE, cfg.worker.advanceDigestCron);
 
       await queue.register(ORCHESTRATOR_QUEUE, async () => {
         const reports = await orchestrator.sweep();
