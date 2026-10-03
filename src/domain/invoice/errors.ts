@@ -181,7 +181,7 @@ export class InvoiceNotEditable extends InvoiceError {
     super(
       "INVOICE_NOT_EDITABLE",
       `Invoice ${JSON.stringify(id)} is ${status}, so what it says the client owes cannot ` +
-        `change. Cancel it and issue a new one — both stay readable, which is the point.`,
+        `change. Cancel it and issue a new one: both stay readable, which is the point.`,
     );
   }
 }
@@ -248,7 +248,7 @@ export class InvalidSeriesPrefix extends InvoiceError {
     super(
       "INVALID_SERIES_PREFIX",
       `${JSON.stringify(given)} is not a series prefix. Up to twelve characters, upper-case ` +
-        `letters, digits, "-" and "/", starting with a letter or digit — it prints on a legal ` +
+        `letters, digits, "-" and "/", starting with a letter or digit: it prints on a legal ` +
         `document.`,
     );
   }

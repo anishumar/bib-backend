@@ -54,7 +54,7 @@ export class InvalidMagicLink extends IdentityError {
 
 export class SessionInvalid extends IdentityError {
   constructor() {
-    super("SESSION_INVALID", "The session is unknown, expired, or revoked — sign in again");
+    super("SESSION_INVALID", "The session is unknown, expired, or revoked: sign in again");
   }
 }
 
@@ -212,7 +212,7 @@ export class WeakPassword extends IdentityError {
     super(
       "WEAK_PASSWORD",
       `Password must be between ${String(min)} and ${String(max)} characters. ` +
-        `Length is the only rule — a long passphrase beats a short one with symbols.`,
+        `Length is the only rule: a long passphrase beats a short one with symbols.`,
     );
   }
 }
@@ -244,7 +244,7 @@ export class PasswordUnchanged extends IdentityError {
     super(
       "PASSWORD_UNCHANGED",
       `That is the password already on this account, so nothing would change. ` +
-        `Pick a different one — if you are changing it because somebody may have seen it, ` +
+        `Pick a different one: if you are changing it because somebody may have seen it, ` +
         `re-setting the same value leaves them exactly where they were.`,
     );
   }
@@ -278,7 +278,7 @@ export class NoPasswordSet extends IdentityError {
     super(
       "NO_PASSWORD_SET",
       `This account has no password yet, so there is none to change. Ask the sign-in page ` +
-        `to email you a link — setting the first one that way proves you can read the ` +
+        `to email you a link: setting the first one that way proves you can read the ` +
         `mailbox, which is the only thing standing in for the password you do not have.`,
     );
   }

@@ -71,7 +71,7 @@ export class FirmEntityNotFound extends DocumentError {
     super(
       "FIRM_ENTITY_NOT_FOUND",
       `No party ${JSON.stringify(partyId)} at this firm, so it cannot be named as the entity ` +
-        `that issues documents. The firm's own entities are parties in its own book — create ` +
+        `that issues documents. The firm's own entities are parties in its own book: create ` +
         `the organization first.`,
     );
   }
@@ -153,7 +153,7 @@ export class LetterOnlyBlockKind extends DocumentError {
   constructor(kind: string) {
     super(
       "LETTER_ONLY_BLOCK_KIND",
-      `A proposal has no ${kind === "cover" ? "cover letter" : "acceptance"} — "${kind}" lines ` +
+      `A proposal has no ${kind === "cover" ? "cover letter" : "acceptance"}: "${kind}" lines ` +
         `belong to an engagement letter, which opens with the firm's cover paragraphs and is ` +
         `accepted by the client's signature. Use an exclusion, a commercial note or a team line ` +
         `on a proposal.`,
@@ -229,7 +229,7 @@ export class DocumentBlockFrozen extends DocumentError {
   constructor() {
     super(
       "DOCUMENT_BLOCK_FROZEN",
-      `This letter is signed, so its prose is frozen with its terms — the database refuses ` +
+      `This letter is signed, so its prose is frozen with its terms: the database refuses ` +
         `the change, not just this code. The exclusions a client agreed to are part of what ` +
         `they agreed to. Draft a new letter that supersedes it; the old one stays readable ` +
         `as what was actually signed.`,
@@ -249,7 +249,7 @@ export class DocumentDeleted extends DocumentError {
   constructor() {
     super(
       "DOCUMENT_DELETED",
-      `This draft was deleted as made by mistake, so its wording no longer changes — a deleted ` +
+      `This draft was deleted as made by mistake, so its wording no longer changes: a deleted ` +
         `draft is final. If the work is real after all, draft a new one.`,
     );
   }

@@ -33,7 +33,7 @@ export class InvalidMonth extends PortalLibraryError {
   constructor(value: string) {
     super(
       "INVALID_MONTH",
-      `${JSON.stringify(value)} is not a month — it must be YYYY-MM, with a month between 01 and 12`,
+      `${JSON.stringify(value)} is not a month: it must be YYYY-MM, with a month between 01 and 12`,
     );
   }
 }

@@ -35,7 +35,7 @@ export class InvalidAxisKind extends ServiceAxisError {
     super(
       "INVALID_AXIS_KIND",
       `${JSON.stringify(kind)} is not one of the firm's two lists. Valid: ` +
-        `${valid.map((k) => JSON.stringify(k)).join(", ")} — "dept" is the revenue axis ` +
+        `${valid.map((k) => JSON.stringify(k)).join(", ")}: "dept" is the revenue axis ` +
         `(FRC, TRC, RAA) and "team" is who delivers the work (FINCOMPLIANCE, PAYROLL).`,
     );
   }
@@ -46,7 +46,7 @@ export class InvalidAxisCode extends ServiceAxisError {
     super(
       "INVALID_AXIS_CODE",
       `Code ${JSON.stringify(code)} is not in canonical form. Upper case letters and digits, ` +
-        `separated by single spaces, hyphens or underscores, at most 48 characters — "FRC", ` +
+        `separated by single spaces, hyphens or underscores, at most 48 characters: "FRC", ` +
         `"VCFO CONSOLE". The form is demanded at the write because this value is what a ` +
         `service body names and what work is grouped by, and "frc" beside "FRC" is one ` +
         `department to a person and two groups to the database.`,
@@ -59,7 +59,7 @@ export class InvalidAxisName extends ServiceAxisError {
     super(
       "INVALID_AXIS_NAME",
       `Name ${JSON.stringify(name)} must be a non-empty label of at most 120 characters. ` +
-        `Unlike the code it has no form requirement and may be changed freely — it is what ` +
+        `Unlike the code it has no form requirement and may be changed freely: it is what ` +
         `people read, while the code is what every service body joins on.`,
     );
   }
@@ -70,7 +70,7 @@ export class AxisCodeTaken extends ServiceAxisError {
     super(
       "AXIS_CODE_TAKEN",
       `This firm already has a ${axis === "dept" ? "Dept" : "delivery team"} with code ` +
-        `${JSON.stringify(code)}. Codes are unique within a list — the same code on the ` +
+        `${JSON.stringify(code)}. Codes are unique within a list: the same code on the ` +
         `OTHER list is fine, because the two are independent dimensions and nothing ` +
         `cross-validates them.`,
     );
@@ -106,7 +106,7 @@ export class UnknownAxisCode extends ServiceAxisError {
       `${JSON.stringify(code)} is not one of this firm's ` +
         `${axis === "dept" ? "Depts" : "delivery teams"}. ` +
         (known.length === 0
-          ? `This firm has not defined any yet — add them on the firm-structure screen first.`
+          ? `This firm has not defined any yet: add them on the firm-structure screen first.`
           : `Defined: ${known.map((k) => JSON.stringify(k)).join(", ")}.`) +
         ` The list is checked at the write because work is grouped by this value: a code ` +
         `nobody defined would silently become its own group.`,
@@ -119,7 +119,7 @@ export class InvalidWorkSplitAxis extends ServiceAxisError {
     super(
       "INVALID_WORK_SPLIT_AXIS",
       `${JSON.stringify(value)} is not a way of splitting work. Valid: ` +
-        `${valid.map((v) => JSON.stringify(v)).join(", ")} — "none" keeps one client's work ` +
+        `${valid.map((v) => JSON.stringify(v)).join(", ")}: "none" keeps one client's work ` +
         `in one job, which is what most firms want and what this product did before the ` +
         `setting existed.`,
     );
@@ -152,7 +152,7 @@ export class InvalidTimeZone extends ServiceAxisError {
     // this accepts and Postgres does not is still refused at the write.
     super(
       "INVALID_TIME_ZONE",
-      `${JSON.stringify(value)} is not a time zone this system knows. Use an IANA name — ` +
+      `${JSON.stringify(value)} is not a time zone this system knows. Use an IANA name: ` +
         `"Asia/Kolkata", "Europe/London", "America/New_York", or "UTC". This decides which ` +
         `calendar MONTH a document falls into on a client's month view, and which calendar ` +
         `DAY the chaser counts from; it does not change how any date is displayed.`,

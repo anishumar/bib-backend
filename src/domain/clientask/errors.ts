@@ -59,7 +59,7 @@ export class InvalidAskPrompt extends ClientAskError {
     super(
       "INVALID_ASK_PROMPT",
       `An ask needs to say what is wanted. The prompt is the only field the client reads as a ` +
-        `request — an ask with a blank one arrives on their screen as a row with a button and ` +
+        `request: an ask with a blank one arrives on their screen as a row with a button and ` +
         `no question.`,
     );
   }
@@ -79,7 +79,7 @@ export class AskDocumentKindMismatch extends ClientAskError {
   constructor(askKind: string) {
     super(
       "ASK_DOCUMENT_KIND_MISMATCH",
-      `A documentKind belongs to a ${JSON.stringify("document")} ask and nothing else — it ` +
+      `A documentKind belongs to a ${JSON.stringify("document")} ask and nothing else: it ` +
         `says what the uploaded file gets FILED as. This one is ${JSON.stringify(askKind)}: ` +
         `either it wants a document, or it does not need to say how to file one.`,
     );
@@ -92,7 +92,7 @@ export class AskAlreadySettled extends ClientAskError {
       "ASK_ALREADY_SETTLED",
       `Ask ${JSON.stringify(askId)} is already ${JSON.stringify(status)}. Closing it again ` +
         `would move the date somebody is answering questions about, and answering it again ` +
-        `would append to something the firm has finished with — raise a new one instead, so ` +
+        `would append to something the firm has finished with: raise a new one instead, so ` +
         `it reads as a fresh request rather than an edit of an old one.`,
     );
   }
