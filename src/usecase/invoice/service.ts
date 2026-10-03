@@ -93,6 +93,8 @@ import type {
   InvoiceSeriesRecord,
   InvoiceSummary,
   IssuedCopies,
+  NewInvoice,
+  NewInvoiceLine,
   PartyStanding,
   ReceivableRecord,
   StaffDirectory,
@@ -173,6 +175,19 @@ export class InvoiceService {
    * as on a proposal. The rate is stored even when the currencies match.
    */
   async raise(input: RaiseInvoiceInput, actor: Actor): Promise<Invoice> {
+    const invoice = await this.deps.invoices.create(await this.prepareDraft(input));
+    await this.recordRaised(invoice, actor);
+    return invoice;
+  }
+
+  /**
+   * Every rule a new draft answers to, and the row it would be, WITHOUT
+   * writing it (B34). `raise` writes it at once; the billing desk writes it in
+   * the same transaction as its lines and the bills they settle, so a request
+   * that fails half-way leaves neither a partial draft nor a bill marked
+   * raised on nothing.
+   */
+  async prepareDraft(input: RaiseInvoiceInput): Promise<NewInvoice> {
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidInvoiceCurrency(input.currency);
     const today = await this.today(input.tenantId, input.asOf);
@@ -218,7 +233,7 @@ export class InvoiceService {
       await this.requireStaff(input.tenantId, input.managerUserId);
     }
 
-    const invoice = await this.deps.invoices.create({
+    return {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       partyId: input.partyId,
@@ -230,8 +245,11 @@ export class InvoiceService {
       notes: input.notes ?? null,
       managerUserId: input.managerUserId ?? null,
       financialYear: financialYearOf(seriesDate, settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH),
-    });
+    };
+  }
 
+  /** The ledger's line for a draft that now exists, after its write committed. */
+  async recordRaised(invoice: Invoice, actor: Actor): Promise<void> {
     await this.deps.events.recordEvent({
       tenantId: invoice.tenantId,
       verb: "invoice.raised",
@@ -250,7 +268,6 @@ export class InvoiceService {
         managerUserId: invoice.managerUserId,
       },
     });
-    return invoice;
   }
 
   /**
@@ -315,6 +332,18 @@ export class InvoiceService {
 
   async addLine(input: AddInvoiceLineInput): Promise<InvoiceLine> {
     const invoice = await this.editableOrThrow(input.tenantId, input.invoiceId);
+    return this.deps.invoices.addLine(await this.prepareLine(invoice, input));
+  }
+
+  /**
+   * Every rule a line answers to, for an invoice that may not be written yet
+   * (B34: the billing desk writes the draft, its lines and its bills in one
+   * transaction), and the row it would be.
+   */
+  async prepareLine(
+    invoice: { readonly id: string; readonly partyId: string; readonly entityPartyId: string; readonly currency: string },
+    input: Omit<AddInvoiceLineInput, "invoiceId">,
+  ): Promise<NewInvoiceLine> {
     if (!isAmount(input.quantity) || Number(input.quantity) <= 0) {
       throw new InvalidInvoiceAmount("quantity", input.quantity);
     }
@@ -366,10 +395,10 @@ export class InvoiceService {
       }
     }
 
-    return this.deps.invoices.addLine({
+    return {
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
-      invoiceId: input.invoiceId,
+      invoiceId: invoice.id,
       engagementId: input.engagementId ?? null,
       description: input.description.trim(),
       quantity: input.quantity,
@@ -380,7 +409,7 @@ export class InvoiceService {
       currency: invoice.currency,
       discountPercent: discount,
       taxPercent: tax,
-    });
+    };
   }
 
   async removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void> {

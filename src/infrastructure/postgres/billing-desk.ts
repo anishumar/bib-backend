@@ -22,6 +22,8 @@ import type {
   BillingDueRecord,
   BillingSchedules,
   ClaimToken,
+  RaisePlan,
+  RaiseWritten,
   DueFilters,
   DueStatus,
   PersonRef,
@@ -29,6 +31,8 @@ import type {
   ScheduleRecord,
 } from "../../usecase/billing/ports";
 import { isoInstant } from "./instant";
+import { insertDraftInvoice, insertInvoiceLine } from "./invoice-repository";
+import type { Invoice } from "../../domain/invoice/model";
 import { BILLING_TIMINGS, type BillingTiming } from "../../domain/billing/model";
 import { BILL_KINDS, type BillKind } from "../../domain/billing/advance";
 
@@ -385,6 +389,73 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
         `;
       }
       return true;
+    });
+  }
+
+  async raiseAtomically(tenantId: string, plan: RaisePlan): Promise<RaiseWritten> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const covered: string[] = [];
+      const conflicts: string[] = [];
+      const invoiced: { dueId: string; lineId: string }[] = [];
+      for (const c of plan.covered) {
+        if (!(await takeFromPool(db, c.applied))) {
+          conflicts.push(c.dueId);
+          continue;
+        }
+        const rows = await db<{ id: string }[]>`
+          UPDATE crm.billing_due d
+             SET covered_at = now(), invoice_id = NULL, invoice_line_id = NULL,
+                 advance_invoice_id = ${c.applied.invoiceId}, advance_applied = ${c.applied.amount}::numeric
+           WHERE d.id = ${c.dueId}
+             AND ${db.unsafe(OPEN_DUE_SQL)}
+          RETURNING d.id
+        `;
+        if (rows.length === 1) covered.push(c.dueId);
+        else conflicts.push(c.dueId);
+      }
+
+      let invoice: Invoice | null = null;
+      for (const item of plan.invoiced) {
+        // Checked BEFORE anything is written for it, so a bill that cannot go
+        // on the invoice leaves no line behind: its advance still covers what
+        // it takes, and it is still open (held, so nobody settles it now).
+        if (item.applied !== null && !(await takeFromPool(db, item.applied))) {
+          conflicts.push(item.dueId);
+          continue;
+        }
+        const [open] = await db<{ kind: string; invoice_id: string | null }[]>`
+          SELECT d.kind, d.invoice_id FROM crm.billing_due d
+           WHERE d.id = ${item.dueId} AND ${db.unsafe(OPEN_DUE_SQL)}
+             FOR UPDATE OF d
+        `;
+        if (!open) {
+          conflicts.push(item.dueId);
+          continue;
+        }
+        if (invoice === null) {
+          if (plan.draft === null) throw new Error("a raise with bills to invoice came with no draft");
+          invoice = await insertDraftInvoice(db, plan.draft);
+        }
+        const line = await insertInvoiceLine(db, item.line);
+        await db`
+          UPDATE crm.billing_due d
+             SET invoice_id = ${invoice.id}, invoice_line_id = ${line.id},
+                 advance_invoice_id = ${item.applied?.invoiceId ?? null},
+                 advance_applied = ${item.applied?.amount ?? null}::numeric,
+                 covered_at = NULL
+           WHERE d.id = ${item.dueId}
+        `;
+        // AN ADVANCE RAISED AGAIN after its invoice was cancelled (0321): the
+        // bills that took from it move onto the new invoice, as `markInvoiced`.
+        if (open.kind === "advance" && open.invoice_id !== null) {
+          await db`
+            UPDATE crm.billing_due SET advance_invoice_id = ${invoice.id}
+             WHERE advance_invoice_id = ${open.invoice_id}
+          `;
+        }
+        invoiced.push({ dueId: item.dueId, lineId: line.id });
+      }
+      return { invoice, covered, invoiced, conflicts };
     });
   }
 

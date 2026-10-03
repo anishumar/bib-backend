@@ -123,8 +123,9 @@ const invoicing = new InvoiceService({
 const desk = new BillingDeskService({
   desk: deskAdapter,
   invoices: {
-    raise: (input, actor) => invoicing.raise(input, actor),
-    addLine: (input) => invoicing.addLine(input),
+    prepareDraft: (input) => invoicing.prepareDraft(input),
+    prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
+    recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
     find: (t, id) => invoiceRepository.find(t, id),
     issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
   },
@@ -768,5 +769,43 @@ describe("a claim is let go only by whoever holds it (B35, audit 2026-10-03)", (
     await deskAdapter.release(tenantId, [oct], fresh ?? "");
     const [after] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
     expect(after?.held).toBe(false);
+  });
+});
+
+describe("a raise is one transaction (B34, audit 2026-10-03)", () => {
+  it("leaves no draft, no line and no bill marked when a write fails half-way", async () => {
+    // It was several transactions: create the draft, add lines, mark bills.
+    // A crash or a conflict half-way left a draft with some lines, or a bill
+    // marked raised on an invoice that billed something else.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const nov = await periodDue(booksId, "11");
+    const draft = await invoicing.prepareDraft({
+      tenantId, partyId: client, entityPartyId: firm, currency: "INR", fxRate: "1", fxRateDate: "2026-12-05",
+    });
+    const line = (description: string) =>
+      invoicing.prepareLine(draft, { tenantId, description, quantity: "1", unitAmount: "30000", taxPercent: "18" });
+    const good = await line("Bookkeeping, Oct 2026");
+    // The second line names an engagement that is not there: its insert fails
+    // on the foreign key, after the draft, the first line and October were written.
+    const broken = { ...(await line("Bookkeeping, Nov 2026")), engagementId: systemIds.newId() };
+
+    await expect(
+      deskAdapter.raiseAtomically(tenantId, {
+        draft,
+        covered: [],
+        invoiced: [
+          { dueId: oct, line: good, applied: null },
+          { dueId: nov, line: broken, applied: null },
+        ],
+      }),
+    ).rejects.toThrow();
+
+    const [invoices] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice WHERE id = ${draft.id}`;
+    expect(invoices?.n).toBe(0);
+    const [lines] = await owner<{ n: number }[]>`SELECT count(*)::int AS n FROM crm.invoice_line WHERE invoice_id = ${draft.id}`;
+    expect(lines?.n).toBe(0);
+    const [bill] = await owner<{ invoice_id: string | null }[]>`SELECT invoice_id FROM crm.billing_due WHERE id = ${oct}`;
+    expect(bill?.invoice_id).toBeNull();
   });
 });

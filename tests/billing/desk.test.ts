@@ -267,9 +267,8 @@ describe("skipping and linking", () => {
     const w = world();
     const d = due();
     w.desk.rows.push(d);
-    const manual = await w.invoices.raise(
+    const manual = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     await w.service.link({ tenantId: FIRM, dueId: d.id, invoiceId: manual.id }, ME);
     expect((await w.desk.findMany(FIRM, [d.id]))[0]?.status).toBe("drafted");
@@ -280,16 +279,14 @@ describe("skipping and linking", () => {
     const w = world();
     const d = due();
     w.desk.rows.push(d);
-    const theirs = await w.invoices.raise(
+    const theirs = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: OTHER_CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     await expect(w.service.link({ tenantId: FIRM, dueId: d.id, invoiceId: theirs.id }, ME)).rejects.toMatchObject({
       code: "INVOICE_DOES_NOT_FIT_DUE",
     });
-    const cancelled = await w.invoices.raise(
+    const cancelled = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-11-01" },
-      ME,
     );
     const row = w.invoices.invoices.find((i) => i.id === cancelled.id);
     if (row) row.status = "cancelled";

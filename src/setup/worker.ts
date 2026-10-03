@@ -634,8 +634,9 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const billingDesk = new BillingDeskService({
     desk: new PostgresBillingDueDesk(pools.app),
     invoices: {
-      raise: (input, actor) => invoices.raise(input, actor),
-      addLine: (input) => invoices.addLine(input),
+      prepareDraft: (input) => invoices.prepareDraft(input),
+      prepareLine: (draft, input) => invoices.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoices.recordRaised(invoice, actor),
       find: (tenantId, invoiceId) => invoiceRepository.find(tenantId, invoiceId),
       issueCreditNote: (input, actor) => invoices.issueCreditNote(input, actor),
     },

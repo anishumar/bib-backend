@@ -377,15 +377,55 @@ export class BillingDeskService {
     const coveredInFull = planned.filter((p) => p.applied !== null && compareAmounts(p.balance, "0") === 0);
     const toInvoice = planned.filter((p) => !coveredInFull.includes(p));
 
-    const conflicts: string[] = [];
-    const covered: string[] = [];
-    for (const p of coveredInFull) {
-      if (p.applied === null) continue;
-      if (!(await this.deps.desk.markCovered(input.tenantId, p.due.id, p.applied))) {
-        conflicts.push(p.due.id);
-        continue;
+    // EVERY RULE FIRST, NOTHING WRITTEN (B34): the draft and each line are
+    // checked and built here, then written with the bills they settle in ONE
+    // transaction. It was several, so a crash or a refusal half-way left a
+    // draft with some lines, or a "less advance" line on no bill.
+    const draft =
+      toInvoice.length === 0
+        ? null
+        : await this.deps.invoices.prepareDraft({
+            tenantId: input.tenantId,
+            partyId: first.party.id,
+            entityPartyId: first.issuer.id,
+            currency: first.currency,
+            fxRate: rate.fxRate,
+            fxRateDate: rate.fxRateDate,
+            dueOn: input.dueOn,
+            asOf: input.asOf,
+            managerUserId: manager ?? undefined,
+            managerFromBills: true,
+          });
+    const lines: { p: (typeof toInvoice)[number]; line: Awaited<ReturnType<InvoiceDrafter["prepareLine"]>> }[] = [];
+    if (draft !== null) {
+      for (const p of toInvoice) {
+        const line = await this.deps.invoices.prepareLine(draft, {
+          tenantId: input.tenantId,
+          engagementId: p.due.engagementIds[0],
+          description: lineDescription(p.due, p.applied === null ? null : { invoiceNumber: p.applied.invoiceNumber }),
+          quantity: "1",
+          unitAmount: p.balance,
+          taxPercent: p.tax,
+        });
+        lines.push({ p, line });
       }
-      covered.push(p.due.id);
+    }
+    // Settled in the write's own WHERE: somebody who raised or skipped a due
+    // in the same minute keeps their answer, and it is reported. The advance
+    // each takes is re-checked there too, under a lock.
+    const written = await this.deps.desk.raiseAtomically(input.tenantId, {
+      draft,
+      covered: coveredInFull.flatMap((p) => (p.applied === null ? [] : [{ dueId: p.due.id, applied: p.applied }])),
+      invoiced: lines.map(({ p, line }) => ({
+        dueId: p.due.id,
+        line,
+        applied: p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount },
+      })),
+    });
+
+    // The ledger, after the commit.
+    for (const p of coveredInFull) {
+      if (p.applied === null || !written.covered.includes(p.due.id)) continue;
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "billing_due.covered",
@@ -394,42 +434,12 @@ export class BillingDeskService {
         payload: { advanceInvoiceId: p.applied.invoiceId, advanceApplied: p.applied.amount },
       });
     }
-    if (toInvoice.length === 0) return { invoiceId: null, number: null, covered, conflicts };
-
-    const invoice = await this.deps.invoices.raise(
-      {
-        tenantId: input.tenantId,
-        partyId: first.party.id,
-        entityPartyId: first.issuer.id,
-        currency: first.currency,
-        fxRate: rate.fxRate,
-        fxRateDate: rate.fxRateDate,
-        dueOn: input.dueOn,
-        asOf: input.asOf,
-        managerUserId: manager ?? undefined,
-        managerFromBills: true,
-      },
-      actor,
-    );
-
-    for (const p of toInvoice) {
-      const line = await this.deps.invoices.addLine({
-        tenantId: input.tenantId,
-        invoiceId: invoice.id,
-        engagementId: p.due.engagementIds[0],
-        description: lineDescription(p.due, p.applied === null ? null : { invoiceNumber: p.applied.invoiceNumber }),
-        quantity: "1",
-        unitAmount: p.balance,
-        taxPercent: p.tax,
-      });
-      // Settled in the write's own WHERE: somebody who raised or skipped this
-      // due in the same minute keeps their answer, and it is reported. The
-      // advance it took is re-checked there too, under a lock.
+    const invoice = written.invoice;
+    if (invoice !== null) await this.deps.invoices.recordRaised(invoice, actor);
+    for (const { p } of lines) {
+      const on = written.invoiced.find((w) => w.dueId === p.due.id);
+      if (on === undefined || invoice === null) continue;
       const applied = p.applied === null ? null : { invoiceId: p.applied.invoiceId, amount: p.applied.amount };
-      if (!(await this.deps.desk.markInvoiced(input.tenantId, p.due.id, invoice.id, line.id, applied))) {
-        conflicts.push(p.due.id);
-        continue;
-      }
       await this.deps.events.recordEvent({
         tenantId: input.tenantId,
         verb: "billing_due.invoiced",
@@ -437,7 +447,7 @@ export class BillingDeskService {
         actor,
         payload: {
           invoiceId: invoice.id,
-          invoiceLineId: line.id,
+          invoiceLineId: on.lineId,
           how: "raised",
           ...(applied === null ? {} : { advanceInvoiceId: applied.invoiceId, advanceApplied: applied.amount }),
           // A price the letter fixed, billed at another figure (0321): both, so
@@ -446,7 +456,12 @@ export class BillingDeskService {
         },
       });
     }
-    return { invoiceId: invoice.id, number: invoice.number, covered, conflicts };
+    return {
+      invoiceId: invoice?.id ?? null,
+      number: invoice?.number ?? null,
+      covered: written.covered,
+      conflicts: written.conflicts,
+    };
   }
 
   /**

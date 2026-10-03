@@ -408,8 +408,9 @@ describe("the billing desk on a real database (0318)", () => {
   const desk = new BillingDeskService({
     desk: deskAdapter,
     invoices: {
-      raise: (input, actor) => invoicing.raise(input, actor),
-      addLine: (input) => invoicing.addLine(input),
+      prepareDraft: (input) => invoicing.prepareDraft(input),
+      prepareLine: (draft, input) => invoicing.prepareLine(draft, input),
+      recordRaised: (invoice, actor) => invoicing.recordRaised(invoice, actor),
       find: (t, id) => invoiceRepository.find(t, id),
       issueCreditNote: (input, actor) => invoicing.issueCreditNote(input, actor),
     },

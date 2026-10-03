@@ -695,9 +695,8 @@ describe("raising a bill the advance comes off (FIFO, before tax)", () => {
     const w = deskWorld();
     const adv = advanceDue();
     w.desk.rows.push(adv);
-    const { id } = await w.invoices.raise(
+    const { id } = await w.invoices.prepareDraft(
       { tenantId: FIRM, partyId: CLIENT, entityPartyId: ISSUER, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01" },
-      ME,
     );
     // A non-admin linking a paid invoice would start the work with no advance.
     await expect(w.service.link({ tenantId: FIRM, dueId: adv.id, invoiceId: id }, ME)).rejects.toBeInstanceOf(

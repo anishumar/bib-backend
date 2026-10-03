@@ -193,6 +193,52 @@ async function ensureInvoiceSeries(db: Db, tenantId: string, entityPartyId: stri
   `;
 }
 
+/**
+ * A draft invoice row, unnumbered (0322), in a transaction the caller holds:
+ * `create`'s, or the billing desk's, which writes the draft, its lines and the
+ * bills they settle as one (B34).
+ */
+export async function insertDraftInvoice(db: Db, i: NewInvoice): Promise<Invoice> {
+  await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, i.financialYear);
+  const [row] = await db<InvoiceRow[]>`
+    INSERT INTO crm.invoice
+      (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
+       currency, fx_rate, fx_rate_date, due_on, notes, manager_user_id)
+    VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, NULL,
+            ${i.financialYear}, NULL, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
+            ${i.dueOn}, ${i.notes}, ${i.managerUserId ?? null})
+    RETURNING ${db.unsafe(INVOICE_COLUMNS)}
+  `;
+  if (!row) throw new Error("invoice insert returned no row");
+  return toInvoice(row);
+}
+
+/** A line on an invoice, in a transaction the caller holds (B34, B36). */
+export async function insertInvoiceLine(db: Db, l: NewInvoiceLine): Promise<InvoiceLine> {
+  // THE INVOICE ROW IS THE LOCK (B36). `MAX(position) + 1` inside the INSERT
+  // still reads a snapshot under READ COMMITTED, so two lines added at once
+  // both took the same position and one failed on the unique index as a
+  // 500. Holding the invoice row first makes the second add wait for the
+  // first to commit and then read its line.
+  await db`SELECT 1 FROM crm.invoice WHERE id = ${l.invoiceId} FOR UPDATE`;
+  const [row] = await db<InvoiceLineRow[]>`
+    INSERT INTO crm.invoice_line
+      (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
+       unit_amount, currency, discount_percent, tax_percent)
+    SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
+           -- The next position among LIVE lines: a struck-off line frees
+           -- its position (0326).
+           COALESCE(MAX(position), 0) + 1,
+           ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
+           ${l.taxPercent}
+    FROM crm.invoice_line
+    WHERE invoice_id = ${l.invoiceId} AND removed_at IS NULL
+    RETURNING ${db.unsafe(LINE_COLUMNS)}
+  `;
+  if (!row) throw new Error("invoice line insert returned no row");
+  return toLine(row);
+}
+
 export class PostgresInvoiceRepository implements InvoiceRepository {
   constructor(private readonly app: Db) {}
 
@@ -202,21 +248,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * the foreign key wants the row. Nothing is counted.
    */
   async create(i: NewInvoice): Promise<Invoice> {
-    const financialYear = i.financialYear;
-    return withTenant(this.app, i.tenantId, async (db) => {
-      await ensureInvoiceSeries(db, i.tenantId, i.entityPartyId, financialYear);
-      const [row] = await db<InvoiceRow[]>`
-        INSERT INTO crm.invoice
-          (id, tenant_id, party_id, entity_party_id, number, financial_year, sequence_number,
-           currency, fx_rate, fx_rate_date, due_on, notes, manager_user_id)
-        VALUES (${i.id}, ${i.tenantId}, ${i.partyId}, ${i.entityPartyId}, NULL,
-                ${financialYear}, NULL, ${i.currency}, ${i.fxRate}, ${i.fxRateDate},
-                ${i.dueOn}, ${i.notes}, ${i.managerUserId ?? null})
-        RETURNING ${db.unsafe(INVOICE_COLUMNS)}
-      `;
-      if (!row) throw new Error("invoice insert returned no row");
-      return toInvoice(row);
-    });
+    return withTenant(this.app, i.tenantId, (db) => insertDraftInvoice(db, i));
   }
 
   async find(tenantId: string, invoiceId: string): Promise<Invoice | null> {
@@ -410,30 +442,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
   }
 
   async addLine(l: NewInvoiceLine): Promise<InvoiceLine> {
-    return withTenant(this.app, l.tenantId, async (db) => {
-      // THE INVOICE ROW IS THE LOCK (B36). `MAX(position) + 1` inside the INSERT
-      // still reads a snapshot under READ COMMITTED, so two lines added at once
-      // both took the same position and one failed on the unique index as a
-      // 500. Holding the invoice row first makes the second add wait for the
-      // first to commit and then read its line.
-      await db`SELECT 1 FROM crm.invoice WHERE id = ${l.invoiceId} FOR UPDATE`;
-      const [row] = await db<InvoiceLineRow[]>`
-        INSERT INTO crm.invoice_line
-          (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
-           unit_amount, currency, discount_percent, tax_percent)
-        SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
-               -- The next position among LIVE lines: a struck-off line frees
-               -- its position (0326).
-               COALESCE(MAX(position), 0) + 1,
-               ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
-               ${l.taxPercent}
-        FROM crm.invoice_line
-        WHERE invoice_id = ${l.invoiceId} AND removed_at IS NULL
-        RETURNING ${db.unsafe(LINE_COLUMNS)}
-      `;
-      if (!row) throw new Error("invoice line insert returned no row");
-      return toLine(row);
-    });
+    return withTenant(this.app, l.tenantId, (db) => insertInvoiceLine(db, l));
   }
 
   async removeLine(tenantId: string, invoiceId: string, lineId: string): Promise<void> {

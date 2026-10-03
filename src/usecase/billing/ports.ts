@@ -4,6 +4,8 @@
 import type { BillingTiming, ManagerHow, SpocWithManager } from "../../domain/billing/model";
 import type { AdvancePolicy, AdvanceStage, BillKind } from "../../domain/billing/advance";
 import type { Actor } from "../../domain/ledger/model";
+import type { Invoice } from "../../domain/invoice/model";
+import type { NewInvoice, NewInvoiceLine } from "../invoice/ports";
 
 /**
  * Something that is billed on a schedule: one engagement priced on its own, or
@@ -266,6 +268,36 @@ export interface DueFilters {
   } | undefined;
 }
 
+/**
+ * One raise, written as ONE transaction (B34): the bills the advance pays in
+ * full marked covered, and the draft invoice with a line per remaining bill,
+ * each bill marked raised on its line. It was several transactions, so a crash
+ * or a conflict half-way left a draft with some lines, or a "less advance"
+ * line on no bill. A bill somebody else settled meanwhile is left out and
+ * reported; the draft is written only when at least one bill goes on it.
+ */
+export interface RaisePlan {
+  readonly draft: NewInvoice | null;
+  readonly covered: readonly {
+    readonly dueId: string;
+    readonly applied: { readonly invoiceId: string; readonly amount: string };
+  }[];
+  readonly invoiced: readonly {
+    readonly dueId: string;
+    readonly line: NewInvoiceLine;
+    readonly applied: { readonly invoiceId: string; readonly amount: string } | null;
+  }[];
+}
+
+export interface RaiseWritten {
+  /** The draft, when any bill went on it. */
+  readonly invoice: Invoice | null;
+  readonly covered: readonly string[];
+  readonly invoiced: readonly { readonly dueId: string; readonly lineId: string }[];
+  /** Bills somebody else settled meanwhile, or whose advance ran out. */
+  readonly conflicts: readonly string[];
+}
+
 /** Whose claim it is (B35): an opaque token `claim` hands back and `release`
  *  must show. Null from `claim` means somebody else holds a bill. */
 export type ClaimToken = string;
@@ -286,6 +318,8 @@ export interface BillingDueDesk {
     invoiceLineId: string | null,
     applied?: { readonly invoiceId: string; readonly amount: string } | null,
   ): Promise<boolean>;
+  /** A whole raise in one transaction (B34); see `RaisePlan`. */
+  raiseAtomically(tenantId: string, plan: RaisePlan): Promise<RaiseWritten>;
   /** The advance paid this bill in full: no invoice (0320). Same re-check. */
   markCovered(
     tenantId: string,
@@ -324,7 +358,8 @@ export interface BillingDueDesk {
  *  `setup/` so every rule an invoice has (the issuer, the client, the
  *  currency, the gapless number) is applied exactly as for a hand-raised one. */
 export interface InvoiceDrafter {
-  raise(
+  /** Every rule a new draft answers to, and its row, unwritten (B34). */
+  prepareDraft(
     input: {
       readonly tenantId: string;
       readonly partyId: string;
@@ -338,17 +373,21 @@ export interface InvoiceDrafter {
       /** Always true from the desk: the bills resolved the manager. */
       readonly managerFromBills?: boolean | undefined;
     },
-    actor: Actor,
-  ): Promise<{ readonly id: string; readonly number: string | null }>;
-  addLine(input: {
-    readonly tenantId: string;
-    readonly invoiceId: string;
-    readonly engagementId?: string | undefined;
-    readonly description: string;
-    readonly quantity: string;
-    readonly unitAmount: string;
-    readonly taxPercent?: string | undefined;
-  }): Promise<{ readonly id: string }>;
+  ): Promise<NewInvoice>;
+  /** Every rule a line answers to, for that unwritten draft, and its row. */
+  prepareLine(
+    draft: NewInvoice,
+    input: {
+      readonly tenantId: string;
+      readonly engagementId?: string | undefined;
+      readonly description: string;
+      readonly quantity: string;
+      readonly unitAmount: string;
+      readonly taxPercent?: string | undefined;
+    },
+  ): Promise<NewInvoiceLine>;
+  /** The ledger's `invoice.raised`, once the draft's transaction committed. */
+  recordRaised(invoice: Invoice, actor: Actor): Promise<void>;
   find(
     tenantId: string,
     invoiceId: string,
