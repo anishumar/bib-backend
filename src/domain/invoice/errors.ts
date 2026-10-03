@@ -43,7 +43,9 @@ export type InvoiceErrorCode =
   | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
   | "INVOICE_HAS_PAYMENTS"
   | "DUNNING_NOTHING_OWED"
-  | "CREDIT_EXCEEDS_UNUSED_ADVANCE";
+  | "CREDIT_EXCEEDS_UNUSED_ADVANCE"
+  | "FX_RATE_REQUIRED"
+  | "FX_RATE_NOT_ONE";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -480,6 +482,31 @@ export class CreditExceedsUnusedAdvance extends InvoiceError {
       `${number ?? "This invoice"} is an advance, and ${moneyInWords(takenByBills, currency)} of it (with its tax) ` +
         `has already been taken off later bills. At most ${moneyInWords(maxCredit, currency)} can be credited ` +
         `on it now. To give back more, credit the later invoices that took it.`,
+    );
+  }
+}
+
+/**
+ * An invoice in another currency than the firm's reporting one needs the rate
+ * a person typed (audit 2026-10-03, B07). It defaulted to 1, so USD 10,000
+ * counted as INR 10,000 in what is owed, the dashboard and revenue.
+ */
+export class FxRateRequired extends InvoiceError {
+  constructor(currency: string, reportingCurrency: string) {
+    super(
+      "FX_RATE_REQUIRED",
+      `This invoice is in ${currency} and the firm reports in ${reportingCurrency}, so it needs the rate: how ` +
+        `many ${reportingCurrency} one ${currency} was worth on the invoice date. Type the rate and the date it is from.`,
+    );
+  }
+}
+
+/** An invoice in the firm's own currency is converted at exactly 1 (B07). */
+export class FxRateNotOne extends InvoiceError {
+  constructor(currency: string, given: string) {
+    super(
+      "FX_RATE_NOT_ONE",
+      `This invoice is in ${currency}, the firm's own currency, so its rate is 1, not ${given}. Leave the rate empty.`,
     );
   }
 }

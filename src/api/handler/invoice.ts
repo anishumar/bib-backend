@@ -213,8 +213,13 @@ const RaiseInvoiceRequest = z
     partyId: z.string().uuid(),
     entityPartyId: z.string().uuid(),
     currency: z.string().length(3),
-    fxRate: Decimal,
-    fxRateDate: z.string(),
+    fxRate: Decimal.optional().openapi({
+      description:
+        "How many of the firm's reporting currency one unit of `currency` was worth. REQUIRED when " +
+        "`currency` is not the firm's reporting currency (FX_RATE_REQUIRED, 400; it used to default " +
+        "to 1, B07); in the reporting currency leave it out (it is 1; anything else is FX_RATE_NOT_ONE).",
+    }),
+    fxRateDate: z.string().optional().openapi({ description: "The day the rate is from. Defaults to today." }),
     dueOn: z.string().optional(),
     notes: z.string().max(2000).optional(),
     seriesDate: z.string().optional().openapi({

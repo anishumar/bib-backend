@@ -935,3 +935,36 @@ describe("a credit note is dated inside the invoice's life (B45, audit 2026-10-0
     expect(credit).toMatchObject({ issuedOn: "2027-04-02", financialYear: 2027, number: "CN/2027-28/0001" });
   });
 });
+
+describe("the rate to the firm's currency (B07, audit 2026-10-03)", () => {
+  // The raise dialog defaulted the rate to 1 and the API took it, so a USD
+  // 10,000 invoice counted as INR 10,000 in what is owed, the dashboard, DSO
+  // and revenue by manager.
+  it("refuses an invoice in another currency with no rate, in plain words", async () => {
+    const s = setup();
+    const refused = await s.service
+      .raise(raise({ currency: "USD", fxRate: undefined, fxRateDate: undefined }), ACTOR)
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "FX_RATE_REQUIRED" });
+    expect((refused as Error).message).toContain("USD");
+    expect((refused as Error).message).toContain("INR");
+  });
+
+  it("takes the rate a person typed for another currency", async () => {
+    const s = setup();
+    const invoice = await s.service.raise(raise({ currency: "USD", fxRate: "83.25", fxRateDate: "2026-07-01" }), ACTOR);
+    expect(invoice.fxRate).toBe("83.25");
+  });
+
+  it("needs no rate in the firm's own currency, and stores 1 dated today", async () => {
+    const s = setup();
+    s.clock.set("2026-07-09T06:00:00Z");
+    const invoice = await s.service.raise(raise({ fxRate: undefined, fxRateDate: undefined }), ACTOR);
+    expect(invoice).toMatchObject({ fxRate: "1", fxRateDate: "2026-07-09" });
+  });
+
+  it("refuses a rate other than 1 in the firm's own currency", async () => {
+    const s = setup();
+    await expect(s.service.raise(raise({ fxRate: "83" }), ACTOR)).rejects.toMatchObject({ code: "FX_RATE_NOT_ONE" });
+  });
+});

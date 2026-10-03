@@ -979,6 +979,8 @@ export function mapError(err: unknown): MappedError {
       case "BILLS_THE_FIRM":
       case "ENGAGEMENT_OF_ANOTHER_CLIENT":
       case "CREDIT_NOTE_DATE_OUT_OF_RANGE":
+      case "FX_RATE_REQUIRED":
+      case "FX_RATE_NOT_ONE":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "INVOICE_NOT_FOUND":
       case "INVOICE_LINE_NOT_FOUND":

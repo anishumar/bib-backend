@@ -42,6 +42,7 @@ import {
   isSeriesPrefix,
 } from "../../domain/invoice/model";
 import {
+  compareAmounts,
   isAmount, isExchangeRate,
   isCurrencyCode,
   isSignedAmount,
@@ -75,6 +76,8 @@ import {
   CreditNoteDateOutOfRange,
   InvoiceHasPayments,
   CreditExceedsUnusedAdvance,
+  FxRateNotOne,
+  FxRateRequired,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
@@ -117,8 +120,11 @@ export interface RaiseInvoiceInput {
   readonly partyId: string;
   readonly entityPartyId: string;
   readonly currency: string;
-  readonly fxRate: string;
-  readonly fxRateDate: string;
+  /** Required when the currency is not the firm's reporting one (B07); in the
+   *  reporting currency it is 1, and may be left out. */
+  readonly fxRate?: string | undefined;
+  /** The day the rate is from; defaults to today. */
+  readonly fxRateDate?: string | undefined;
   readonly dueOn?: string | undefined;
   readonly notes?: string | undefined;
   /** The draft's PROVISIONAL year (defaults to today). Since B03 the number's
@@ -166,19 +172,30 @@ export class InvoiceService {
   async raise(input: RaiseInvoiceInput, actor: Actor): Promise<Invoice> {
     const currency = normalizeCurrency(input.currency);
     if (!isCurrencyCode(currency)) throw new InvalidInvoiceCurrency(input.currency);
+    const today = await this.today(input.tenantId, input.asOf);
+    const seriesDate = input.seriesDate ?? today;
+    this.dateOrThrow("seriesDate", seriesDate);
+    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    // THE RATE IS A PERSON'S, NEVER A DEFAULT (B07). In another currency than
+    // the firm's reporting one it is required: a default of 1 counted USD
+    // 10,000 as INR 10,000 everywhere money is added up. In the firm's own
+    // currency it is exactly 1, stored and dated as the rule above says.
+    const ownCurrency = currency === normalizeCurrency(settings.reportingCurrency);
+    const typedRate = input.fxRate?.trim() ?? "";
+    if (!ownCurrency && typedRate === "") throw new FxRateRequired(currency, settings.reportingCurrency);
+    const fxRate = typedRate === "" ? "1" : typedRate;
     // Positive, not merely non-negative: a rate of zero would make every
     // converted total zero and nothing would look wrong until a report did.
     // A RATE, not a price: `numeric(20,10)` on this column, so a stored
     // rate read back at full scale ("1.0000000000") has to be acceptable
     // input. `isAmount` allows four places and refused it — see
     // `isExchangeRate`.
-    if (!isExchangeRate(input.fxRate) || Number(input.fxRate) <= 0) {
-      throw new InvalidInvoiceAmount("fxRate", input.fxRate);
+    if (!isExchangeRate(fxRate) || compareAmounts(fxRate, "0") <= 0) {
+      throw new InvalidInvoiceAmount("fxRate", fxRate);
     }
-    this.dateOrThrow("fxRateDate", input.fxRateDate);
-    const seriesDate = input.seriesDate ?? (await this.today(input.tenantId, input.asOf));
-    this.dateOrThrow("seriesDate", seriesDate);
-    const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
+    if (ownCurrency && compareAmounts(fxRate, "1") !== 0) throw new FxRateNotOne(currency, fxRate);
+    const fxRateDate = input.fxRateDate?.trim() || today;
+    this.dateOrThrow("fxRateDate", fxRateDate);
     if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
 
     // WHO issues it and WHO it bills, before anything is written (F-10-1). The
@@ -204,8 +221,8 @@ export class InvoiceService {
       partyId: input.partyId,
       entityPartyId: input.entityPartyId,
       currency,
-      fxRate: input.fxRate,
-      fxRateDate: input.fxRateDate,
+      fxRate,
+      fxRateDate,
       dueOn: input.dueOn ?? null,
       notes: input.notes ?? null,
       managerUserId: input.managerUserId ?? null,
