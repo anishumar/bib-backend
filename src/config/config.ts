@@ -39,7 +39,6 @@ const EnvSchema = z.object({
   BIB_DATABASE_URL: z.string().min(1),
   BIB_APP_DATABASE_URL: z.string().min(1),
   BIB_DB_POOL_APP: z.coerce.number().int().positive().default(10),
-  BIB_DB_POOL_OWNER: z.coerce.number().int().positive().default(2),
   // Serve the OpenAPI spec + Swagger UI. Unset ⇒ on for local dev, off for
   // production-like — the spec lists every endpoint, so a public environment
   // opts in explicitly rather than leaking it by default.
@@ -233,7 +232,6 @@ export interface DbConfig {
   /** Parsed out of appUrl so cmd/migrate can set the role's password. */
   readonly appPassword: string;
   readonly appPoolSize: number;
-  readonly ownerPoolSize: number;
 }
 
 export interface AuthConfig {
@@ -474,7 +472,6 @@ export function load(): Config {
       appUrl: env.BIB_APP_DATABASE_URL,
       appPassword,
       appPoolSize: env.BIB_DB_POOL_APP,
-      ownerPoolSize: env.BIB_DB_POOL_OWNER,
     },
   };
 }
@@ -563,7 +560,6 @@ export function redacted(cfg: Config): Record<string, unknown> {
       ownerUrl: maskUrl(cfg.db.ownerUrl),
       appUrl: maskUrl(cfg.db.appUrl),
       appPoolSize: cfg.db.appPoolSize,
-      ownerPoolSize: cfg.db.ownerPoolSize,
     },
   };
 }

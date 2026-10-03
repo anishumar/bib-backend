@@ -282,11 +282,11 @@ credential that cannot authenticate:**
 BIB_DATABASE_URL=postgres://bib_owner@PRIVATE_IP:5432/bib?sslmode=require
 ```
 
-`BIB_DATABASE_URL` is required by the config schema and `createPools` builds an owner pool
-from it, but nothing on the request path ever queries that pool — it is constructed in
-`src/db/pool.ts` and has no use site anywhere in `src/setup` or `src/cmd`, and postgres.js
-connects lazily, so it is a credential that is loaded, redacted into the boot log line, and
-never dialled.
+`BIB_DATABASE_URL` is required by the config schema, and since B37 (audit 2026-10-03)
+nothing in the server or the worker builds a connection from it: `createPools` opens the
+`bib_app` pool only, and `tests/architecture/owner-pool.test.ts` holds that the owner URL is
+read by `cmd/migrate.ts` and nothing else. It is a credential that is loaded, redacted into
+the boot log line, and never dialled.
 
 Handing the services the migrator credential instead would put a live
 `bib_owner`-inheriting login inside the request process, and **`bib_owner` owns every table
@@ -426,11 +426,9 @@ punctuation here and there is a concrete correctness argument against it.
 
 ## 7. Connection budget
 
-Each API or worker instance opens up to `BIB_DB_POOL_APP` (default 10) app connections plus
-`BIB_DB_POOL_OWNER` (default 2) on a pool that is never dialled — and is dialled never rather
-than rarely, per section 3c, so the honest per-instance number is **10**. Budget 12 anyway:
-postgres.js opens lazily, and a future use of the owner pool should find headroom rather than
-an outage.
+Each API or worker instance opens up to `BIB_DB_POOL_APP` (default 10) app connections and
+nothing else: the owner pool it used to build and never dial is gone (B37, section 3c), and
+`BIB_DB_POOL_OWNER` is no longer read. Budget 12 per instance anyway, for headroom.
 
 ```
 max_connections  ≥  (server max_instances + worker max_instances) × 12
