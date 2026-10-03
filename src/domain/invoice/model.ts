@@ -197,6 +197,58 @@ export function isSeriesPrefix(v: string): boolean {
 
 export const DEFAULT_SERIES_PREFIX = "INV";
 
+// ── A number drawn before 0322 (audit 2026-10-03, B51) ─────────────────────
+
+/**
+ * Whether a draft that ALREADY HOLDS A NUMBER may still be issued with it.
+ *
+ * Before 0322 the number was drawn when the draft was made, and those drafts
+ * keep it: NEVER RENUMBERED (the user, 2026-10-03), because taking a drawn
+ * number away leaves the gap the series exists to prevent. But issuing one
+ * late can put the series out of order, and that is refused instead.
+ *
+ * A SERIES is one company's invoices for one financial year, counted 1, 2, 3
+ * in the order they are issued (`crm.invoice_series`, keyed on the entity and
+ * the year). A drawn number is OUT OF ORDER when either:
+ *
+ *  1. A LATER NUMBER OF ITS SERIES HAS ALREADY BEEN ISSUED: an invoice of the
+ *     same company and year with a higher sequence number carries an issue
+ *     date. Issued and cancelled since counts (it went out with that number);
+ *     a later draft cancelled before it was issued does not (it never went out).
+ *     Issuing 7 after 9 would date 7 later than 9.
+ *  2. ITS SERIES IS NOT THE YEAR OF THE ISSUE DATE: an invoice dated in one
+ *     financial year with a number from another year's series. B03 (0326) made
+ *     the issue date decide the year; a drawn number cannot follow it.
+ *
+ * Otherwise it is IN ORDER and issues as it is. The adapter asks this under the
+ * series' row lock, so a later number cannot be issued between the check and
+ * the write.
+ */
+export type PreDrawnNumberOrder =
+  | { readonly inOrder: true }
+  | { readonly inOrder: false; readonly why: "later_number_issued"; readonly laterNumber: string }
+  | { readonly inOrder: false; readonly why: "another_year"; readonly issueFinancialYear: number };
+
+export type NumberOutOfOrder = Exclude<PreDrawnNumberOrder, { readonly inOrder: true }>;
+
+export function preDrawnNumberOrder(input: {
+  /** The draft's series year and its place in that series. */
+  readonly draft: { readonly financialYear: number; readonly sequenceNumber: number };
+  /** The financial year of the day it would be issued on. */
+  readonly issueFinancialYear: number;
+  /** The highest-numbered invoice of the draft's series that carries an issue
+   *  date, other than the draft itself. Null when none has. */
+  readonly latestIssued: { readonly number: string; readonly sequenceNumber: number } | null;
+}): PreDrawnNumberOrder {
+  if (input.latestIssued !== null && input.latestIssued.sequenceNumber > input.draft.sequenceNumber) {
+    return { inOrder: false, why: "later_number_issued", laterNumber: input.latestIssued.number };
+  }
+  if (input.issueFinancialYear !== input.draft.financialYear) {
+    return { inOrder: false, why: "another_year", issueFinancialYear: input.issueFinancialYear };
+  }
+  return { inOrder: true };
+}
+
 // ── Money against an invoice (T3.5) ────────────────────────────────────────
 
 /**

@@ -58,6 +58,7 @@ import {
   isCreditReason,
   isInvoiceStatus,
   isPaymentMethod,
+  preDrawnNumberOrder,
 } from "../../domain/invoice/model";
 import type {
   EngagementBilling,
@@ -70,6 +71,7 @@ import type {
   CancelOutcome,
   CreditNoteOutcome,
   IssueOn,
+  IssueOutcome,
   NewCreditNote,
   ReceivableRecord,
   NewInvoice,
@@ -191,6 +193,33 @@ async function ensureInvoiceSeries(db: Db, tenantId: string, entityPartyId: stri
     VALUES (${tenantId}, ${entityPartyId}, ${financialYear}, 'invoice', ${DEFAULT_SERIES_PREFIX})
     ON CONFLICT (tenant_id, entity_party_id, financial_year, document_type) DO NOTHING
   `;
+}
+
+/**
+ * The highest-numbered invoice of one series that carries an issue date (B51):
+ * issued, or issued and cancelled since (it went out with that number). A draft
+ * cancelled before issue never went out and is not counted. The series is the
+ * company and the year; `sequence_number` orders it whatever the prefix was.
+ */
+async function latestIssued(
+  db: Db,
+  tenantId: string,
+  entityPartyId: string,
+  financialYear: number,
+  exceptInvoiceId: string,
+): Promise<{ readonly number: string; readonly sequenceNumber: number } | null> {
+  const [row] = await db<{ number: string; sequence_number: number }[]>`
+    SELECT number, sequence_number FROM crm.invoice
+     WHERE tenant_id = ${tenantId}
+       AND entity_party_id = ${entityPartyId}
+       AND financial_year = ${financialYear}
+       AND issued_on IS NOT NULL
+       AND number IS NOT NULL
+       AND id <> ${exceptInvoiceId}
+     ORDER BY sequence_number DESC
+     LIMIT 1
+  `;
+  return row === undefined ? null : { number: row.number, sequenceNumber: row.sequence_number };
 }
 
 /**
@@ -503,17 +532,22 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * series' counter row under `FOR UPDATE`, then the counter moves and the
    * draft takes the number, the status and the date in one UPDATE. A draft
    * made before 0322 already holds a number: it keeps it (and its year) and
-   * counts nothing.
+   * counts nothing, unless that number is now OUT OF ORDER (B51): then nothing
+   * is written and the outcome says why. That is decided under the series'
+   * row lock, the one an unnumbered issue takes to draw the next number, so a
+   * later number cannot be issued between the check and the write.
    *
    * THE YEAR IS THE ISSUE DATE'S (B03, 0326): an unnumbered draft moves to the
    * series of `on.financialYear` in the same write that numbers it. It was the
    * draft's year, so a March draft issued in April took last year's series.
    */
-  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice> {
+  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<IssueOutcome> {
     const issuedOn = on.issuedOn;
-    return withTenant(this.app, tenantId, async (db) => {
-      const [draft] = await db<{ entity_party_id: string; financial_year: number; number: string | null }[]>`
-        SELECT entity_party_id, financial_year, number FROM crm.invoice
+    return withTenant(this.app, tenantId, async (db): Promise<IssueOutcome> => {
+      const [draft] = await db<
+        { entity_party_id: string; financial_year: number; number: string | null; sequence_number: number | null }[]
+      >`
+        SELECT entity_party_id, financial_year, number, sequence_number FROM crm.invoice
         WHERE id = ${invoiceId} AND status = 'draft'
         FOR UPDATE
       `;
@@ -527,6 +561,26 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
       let number = draft.number;
       let sequence: number | null = null;
       let financialYear = draft.financial_year;
+      if (number !== null && draft.sequence_number !== null) {
+        // NUMBERED BEFORE 0322 (B51). Its series' counter row, under the same
+        // lock an unnumbered issue takes, so nothing in this series is issued
+        // between the question and the answer.
+        await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, draft.financial_year);
+        await db`
+          SELECT 1 FROM crm.invoice_series
+          WHERE tenant_id = ${tenantId}
+            AND entity_party_id = ${draft.entity_party_id}
+            AND financial_year = ${draft.financial_year}
+            AND document_type = 'invoice'
+          FOR UPDATE
+        `;
+        const order = preDrawnNumberOrder({
+          draft: { financialYear: draft.financial_year, sequenceNumber: draft.sequence_number },
+          issueFinancialYear: on.financialYear,
+          latestIssued: await latestIssued(db, tenantId, draft.entity_party_id, draft.financial_year, invoiceId),
+        });
+        if (!order.inOrder) return { outOfOrder: { number, order } };
+      }
       if (number === null) {
         financialYear = on.financialYear;
         await ensureInvoiceSeries(db, tenantId, draft.entity_party_id, financialYear);
@@ -578,8 +632,18 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(INVOICE_COLUMNS)}
       `;
       if (!row) throw new Error(`could not issue invoice ${invoiceId}: no draft matched.`);
-      return toInvoice(row);
+      return { issued: toInvoice(row) };
     });
+  }
+
+  async latestIssuedInSeries(
+    tenantId: string,
+    series: { readonly entityPartyId: string; readonly financialYear: number },
+    exceptInvoiceId: string,
+  ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null> {
+    return withTenant(this.app, tenantId, (db) =>
+      latestIssued(db, tenantId, series.entityPartyId, series.financialYear, exceptInvoiceId),
+    );
   }
 
   async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {

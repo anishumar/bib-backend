@@ -36,7 +36,9 @@ import {
   PAYMENT_METHODS,
   canTransition,
   INDIAN_FY_START_MONTH,
+  financialYearLabel,
   financialYearOf,
+  preDrawnNumberOrder,
   isCreditReason,
   isPaymentMethod,
   isSeriesPrefix,
@@ -80,6 +82,7 @@ import {
   FxRateRequired,
   DueBeforeIssue,
   DueDateInThePast,
+  InvoiceNumberOutOfOrder,
 } from "../../domain/invoice/errors";
 import { addDays } from "../../domain/scheduler/model";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
@@ -88,10 +91,10 @@ import type {
   FirmTimeZone,
   InvoiceFilters,
   InvoiceFirmSettings,
-  InvoiceRecord,
   InvoiceRepository,
   InvoiceSeriesRecord,
   InvoiceSummary,
+  InvoiceView,
   IssuedCopies,
   NewInvoice,
   NewInvoiceLine,
@@ -448,12 +451,23 @@ export class InvoiceService {
     // due N days after its date when the firm has said N; never a guessed N.
     const dueOnIfUnset = settings.dueInDays === null ? null : addDays(issuedOn, settings.dueInDays);
     // THE NUMBER IS DRAWN HERE (0322), in the same transaction as the status.
-    const issued = await this.deps.invoices.issue(tenantId, invoiceId, {
+    // A draft numbered before 0322 keeps its number, and is refused when that
+    // number would now go out of order (B51): never renumbered.
+    const financialYear = financialYearOf(issuedOn, startMonth);
+    const outcome = await this.deps.invoices.issue(tenantId, invoiceId, {
       issuedOn,
-      financialYear: financialYearOf(issuedOn, startMonth),
+      financialYear,
       fiscalYearStartMonth: startMonth,
       dueOnIfUnset,
     });
+    if ("outOfOrder" in outcome) {
+      throw new InvoiceNumberOutOfOrder(
+        outcome.outOfOrder.number,
+        outcome.outOfOrder.order,
+        financialYearLabel(financialYear, startMonth),
+      );
+    }
+    const issued = outcome.issued;
     await this.deps.events.recordEvent({
       tenantId,
       verb: "invoice.issued",
@@ -541,10 +555,39 @@ export class InvoiceService {
     return saved;
   }
 
-  async describe(tenantId: string, invoiceId: string): Promise<InvoiceRecord> {
+  async describe(tenantId: string, invoiceId: string): Promise<InvoiceView> {
     const record = await this.deps.invoices.describe(tenantId, invoiceId);
     if (record === null) throw new InvoiceNotFound(invoiceId);
-    return record;
+    return { ...record, issueBlocked: await this.issueBlocked(tenantId, record.invoice) };
+  }
+
+  /**
+   * Whether Issue would be refused today for what the record alone shows (B51):
+   * a draft numbered before 0322 whose number is out of order now. The screen
+   * shows the same sentence the refusal would carry, where Issue is offered.
+   * Issue decides again under the series' lock; this is what to offer.
+   */
+  private async issueBlocked(tenantId: string, invoice: Invoice): Promise<InvoiceView["issueBlocked"]> {
+    if (invoice.status !== "draft" || invoice.number === null || invoice.sequenceNumber === null) return null;
+    const settings = await this.deps.settings.invoiceSettingsFor(tenantId);
+    const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
+    const issueFinancialYear = financialYearOf(await this.today(tenantId), startMonth);
+    const order = preDrawnNumberOrder({
+      draft: { financialYear: invoice.financialYear, sequenceNumber: invoice.sequenceNumber },
+      issueFinancialYear,
+      latestIssued: await this.deps.invoices.latestIssuedInSeries(
+        tenantId,
+        { entityPartyId: invoice.entityPartyId, financialYear: invoice.financialYear },
+        invoice.id,
+      ),
+    });
+    if (order.inOrder) return null;
+    const refusal = new InvoiceNumberOutOfOrder(
+      invoice.number,
+      order,
+      financialYearLabel(issueFinancialYear, startMonth),
+    );
+    return { reason: "INVOICE_NUMBER_OUT_OF_ORDER", message: refusal.message };
   }
 
   list(tenantId: string, filters: InvoiceFilters): Promise<readonly InvoiceSummary[]> {

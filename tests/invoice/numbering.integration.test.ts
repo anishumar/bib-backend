@@ -173,7 +173,7 @@ describe("the series is consecutive", () => {
       fiscalYearStartMonth: 4,
       dueOnIfUnset: null,
     });
-    expect(next).toMatchObject({ financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" });
+    expect(next).toMatchObject({ issued: { financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" } });
   });
 });
 

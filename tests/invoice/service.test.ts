@@ -23,6 +23,7 @@ import {
   InvoicePartyArchived,
   InvoiceManagerFrozen,
   ManagerNotStaff,
+  InvoiceNumberOutOfOrder,
 } from "../../src/domain/invoice/errors";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -1029,5 +1030,72 @@ describe("the due date (B20, B21, audit 2026-10-03)", () => {
     expect(issued.dueOn).toBe("2026-11-04");
     // A date somebody typed is kept.
     expect((await s.service.issue(TENANT, (await lined(s, { dueOn: "2026-10-25" })).id, ACTOR)).dueOn).toBe("2026-10-25");
+  });
+});
+
+// B51 (the user decided 2026-10-03: never renumber). A draft made before 0322
+// holds the number it drew then; it issues as it is while that number is still
+// in order, and is refused, with what to do, once it is not.
+describe("a draft numbered before 0322 (B51)", () => {
+  /** A pre-0322 draft: numbered at the draft, the counter moved for it then. */
+  async function preDrawn(s: ReturnType<typeof setup>, financialYear = 2026) {
+    const invoice = s.invoices.preDrawnDraft({
+      id: `00000000-0000-0000-0000-${String(s.invoices.invoices.length + 1).padStart(12, "0")}`,
+      tenantId: TENANT,
+      partyId: CLIENT,
+      entityPartyId: ENTITY,
+      financialYear,
+    });
+    await s.service.addLine({ tenantId: TENANT, invoiceId: invoice.id, description: "Advisory", quantity: "1", unitAmount: "1000" });
+    return invoice;
+  }
+
+  it("issues as it is while its number is still in order, and draws nothing", async () => {
+    const s = setup();
+    await issuedOne(s); // INV/2026-27/0001
+    const draft = await preDrawn(s); // INV/2026-27/0002
+    expect(draft.number).toBe("INV/2026-27/0002");
+    const issued = await s.service.issue(TENANT, draft.id, ACTOR);
+    expect(issued).toMatchObject({ status: "issued", number: "INV/2026-27/0002", sequenceNumber: 2 });
+    expect((await issuedOne(s)).number).toBe("INV/2026-27/0003");
+  });
+
+  it("refuses it once a later number of its series has been issued, and says to cancel it and raise it again", async () => {
+    const s = setup();
+    const draft = await preDrawn(s); // INV/2026-27/0001, drawn and never issued
+    await issuedOne(s); // INV/2026-27/0002 goes out first
+    const refused = await s.service.issue(TENANT, draft.id, ACTOR).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(InvoiceNumberOutOfOrder);
+    expect(refused).toMatchObject({ code: "INVOICE_NUMBER_OUT_OF_ORDER" });
+    expect((refused as Error).message).toContain("INV/2026-27/0002");
+    expect((refused as Error).message).toContain("Cancel this draft and raise it again");
+    // Nothing moved: still a draft, still its own number, no event, no copy.
+    expect(await s.invoices.find(TENANT, draft.id)).toMatchObject({ status: "draft", number: "INV/2026-27/0001" });
+    expect(s.events.verbs().filter((v) => v === "invoice.issued")).toHaveLength(1);
+    expect(s.issuedCopies.filed.map((f) => f.invoiceId)).not.toContain(draft.id);
+    // And cancelling it is the way out: allowed, and it keeps its number.
+    expect((await s.service.cancel(TENANT, draft.id, ACTOR)).status).toBe("cancelled");
+  });
+
+  it("refuses it when today's issue date is in another financial year than its series", async () => {
+    const s = setup();
+    const draft = await preDrawn(s, 2025); // INV/2025-26/0001, issued now (FY 2026-27)
+    const refused = await s.service.issue(TENANT, draft.id, ACTOR).catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "INVOICE_NUMBER_OUT_OF_ORDER" });
+    expect((refused as Error).message).toContain("2026-27");
+  });
+
+  it("says so on the invoice before anyone presses Issue, and says nothing for any other invoice", async () => {
+    const s = setup();
+    const early = await preDrawn(s); // 0001
+    const later = await preDrawn(s); // 0002
+    const fresh = await s.service.raise(raise(), ACTOR);
+    expect((await s.service.describe(TENANT, early.id)).issueBlocked).toBeNull();
+    expect((await s.service.describe(TENANT, fresh.id)).issueBlocked).toBeNull();
+    await s.service.issue(TENANT, later.id, ACTOR);
+    const blocked = (await s.service.describe(TENANT, early.id)).issueBlocked;
+    expect(blocked).toMatchObject({ reason: "INVOICE_NUMBER_OUT_OF_ORDER" });
+    expect(blocked?.message).toContain("Cancel this draft and raise it again");
+    expect((await s.service.describe(TENANT, later.id)).issueBlocked).toBeNull();
   });
 });

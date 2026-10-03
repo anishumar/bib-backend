@@ -2,6 +2,7 @@
 // domain; `api/domainerr.ts` maps them to HTTP status codes. Match with
 // `instanceof`, never by string.
 import { amountProblem } from "../money/model";
+import type { NumberOutOfOrder } from "./model";
 
 export class InvoiceError extends Error {
   constructor(
@@ -48,7 +49,8 @@ export type InvoiceErrorCode =
   | "FX_RATE_REQUIRED"
   | "FX_RATE_NOT_ONE"
   | "DUE_DATE_IN_THE_PAST"
-  | "DUE_BEFORE_ISSUE";
+  | "DUE_BEFORE_ISSUE"
+  | "INVOICE_NUMBER_OUT_OF_ORDER";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -552,6 +554,33 @@ export class DueBeforeIssue extends InvoiceError {
       "DUE_BEFORE_ISSUE",
       `This invoice is due on ${dayInWords(dueOn)}, which is before today's issue date, ${dayInWords(issuedOn)}. ` +
         `Change the due date on the draft, then issue it.`,
+    );
+  }
+}
+
+/**
+ * A draft numbered before 0322 whose number would now issue out of order (B51;
+ * the user decided 2026-10-03: never renumber). See `preDrawnNumberOrder` for
+ * what "out of order" means. The way out is the one a person can take: cancel
+ * the draft (its number stays in the series, marked cancelled, which is how an
+ * auditor accounts for it) and raise it again; the new draft is numbered when
+ * it is issued.
+ */
+export class InvoiceNumberOutOfOrder extends InvoiceError {
+  constructor(
+    readonly number: string,
+    readonly order: NumberOutOfOrder,
+    /** How the year of today's issue date is written, e.g. "2026-27". */
+    issueYearLabel: string,
+  ) {
+    super(
+      "INVOICE_NUMBER_OUT_OF_ORDER",
+      (order.why === "later_number_issued"
+        ? `${number} was numbered when the draft was made, and ${order.laterNumber} has already been ` +
+          `issued, so issuing this one now would put the invoices out of order. `
+        : `${number} was numbered in another financial year's series when the draft was made, and an ` +
+          `invoice issued today belongs to ${issueYearLabel}. `) +
+        `Cancel this draft and raise it again: the new draft is numbered when it is issued.`,
     );
   }
 }
