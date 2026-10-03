@@ -670,13 +670,13 @@ inv() {
 }
 # THE OLD, UNPAID ONE FIRST, so the series runs in date order. Issued through
 # the product, due today; then its two dates are moved back as if it had gone
-# out three months ago on 15-day terms (scripts/demo-history.mjs, demo history
+# out three months ago on 15-day terms (src/cmd/demo-history.ts, demo history
 # only). The product will not issue an invoice already overdue (B21, audit
 # 2026-10-03), which is what this seed used to do.
 I3=$(inv "$TODAY")
 asp partner "$API/api/v1/invoices/$I3/lines" -d '{"description":"Statutory audit - FY26","quantity":"1","unitAmount":"175000.00","taxPercent":"18"}' | ok
 asp partner "$API/api/v1/invoices/$I3/issue" | ok
-(cd "$(dirname "$0")/.." && node scripts/demo-history.mjs "$I3" 90 75 | sed 's/^/    /')
+(cd "$(dirname "$0")/.." && npx tsx src/cmd/demo-history.ts "$I3" 90 75 | sed 's/^/    /')
 step "one 75 days overdue: the ladder will climb it to the credit-hold rung"
 
 I1=$(inv "$DUE_SOON")
