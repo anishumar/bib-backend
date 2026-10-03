@@ -193,7 +193,9 @@ export interface SetLeadDetailsInput {
   readonly tenantId: string;
   readonly leadId: string;
   readonly jurisdiction: string | null;
-  readonly estimatedValue: string | null;
+  /** Absent (undefined) KEEPS the value: a login that cannot see fees saves the
+   *  country without touching a figure it never saw (B33). Null clears it. */
+  readonly estimatedValue?: string | null | undefined;
 }
 
 export interface CaptureResult {
@@ -559,9 +561,12 @@ export class LeadService {
   async setDetails(input: SetLeadDetailsInput, actor: Actor): Promise<Lead> {
     const jurisdiction =
       input.jurisdiction === null ? null : this.parseJurisdiction(input.jurisdiction);
-    const estimate = this.parseEstimatedValue(input.estimatedValue);
+    const keepValue = input.estimatedValue === undefined;
+    const estimate = keepValue ? null : this.parseEstimatedValue(input.estimatedValue ?? null);
     const lead = await this.liveLeadOrThrow(input.tenantId, input.leadId);
-    const estimatedValue = await this.priced(input.tenantId, estimate);
+    const estimatedValue = keepValue
+      ? lead.estimatedValue
+      : await this.priced(input.tenantId, estimate);
 
     const sameCountry = lead.jurisdiction === jurisdiction;
     const sameValue =

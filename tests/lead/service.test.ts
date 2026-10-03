@@ -1453,6 +1453,25 @@ describe("0310 — a lead says where the prospect is and what it could be worth"
     expect(cleared.estimatedValue).toBeNull();
   });
 
+  it("keeps the value when the save does not mention it (B33: a login that cannot see it changes the country)", async () => {
+    const { service, events } = setup();
+    const { lead } = await service.capture(
+      capture({ jurisdiction: "IN", estimatedValue: "100000" }),
+      ACTOR,
+    );
+    const saved = await service.setDetails(
+      { tenantId: TENANT, leadId: lead.id, jurisdiction: "AE", estimatedValue: undefined },
+      ACTOR,
+    );
+    expect(saved.jurisdiction).toBe("AE");
+    expect(saved.estimatedValue).toEqual({ amount: "100000.00", currency: "INR" });
+    expect(events.recorded.at(-1)?.payload).toMatchObject({
+      jurisdictionTo: "AE",
+      estimatedValueFrom: "100000.00",
+      estimatedValueTo: "100000.00",
+    });
+  });
+
   it("refuses a country that is not an upper-case ISO code, and an unknown lead", async () => {
     const { service } = setup();
     const { lead } = await service.capture(capture(), ACTOR);
