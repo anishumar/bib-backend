@@ -131,6 +131,22 @@ describe("addIdentifier", () => {
     ).rejects.toBeInstanceOf(DuplicateIdentifier);
   });
 
+  it("says, in words, WHO already has it (CA#20, CA#39)", async () => {
+    // It said "Identifier email ... already exists for this tenant": a word no
+    // CA firm uses, and no clue where the email had gone.
+    const { service, partyId } = await withOrg();
+    await service.addIdentifier({ tenantId: TENANT, partyId, type: "email", value: "anil@deccan.in", validFrom: "2020-04-01" }, ACTOR);
+    const person = await service.createPerson({ tenantId: TENANT, fullName: "Anil Deshpande" }, ACTOR);
+    const refused = service.addIdentifier(
+      { tenantId: TENANT, partyId: person.partyId, type: "email", value: "Anil@Deccan.in", validFrom: "2021-04-01" },
+      ACTOR,
+    );
+    await expect(refused).rejects.toBeInstanceOf(DuplicateIdentifier);
+    await expect(refused).rejects.toThrow(
+      'The email anil@deccan.in is already recorded on Acme. An email, phone or registration number can be on one client or contact at a time.',
+    );
+  });
+
   it("rejects an inverted date range", async () => {
     const { service, partyId } = await withOrg();
     await expect(

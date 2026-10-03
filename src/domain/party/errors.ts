@@ -137,11 +137,38 @@ export class SelfRelationship extends PartyError {
     super("SELF_RELATIONSHIP", "A party cannot hold a relationship to itself");
   }
 }
+/** What each identifier is called on a screen. */
+const IDENTIFIER_WORDS: Readonly<Record<string, string>> = {
+  email: "email",
+  phone: "phone number",
+  pan: "PAN",
+  gstin: "GSTIN",
+  cin: "CIN",
+  llpin: "LLPIN",
+  tan: "TAN",
+  din: "DIN",
+  uen: "UEN",
+  trn: "TRN",
+  ein: "EIN",
+  crn: "CRN",
+  vat: "VAT number",
+  passport: "passport number",
+};
+
+/**
+ * The same contact detail is already on another party (CA#20, CA#39).
+ *
+ * It said "Identifier email ... already exists for this tenant", which names a
+ * word no CA firm uses and gives no clue where the email went. It now says who
+ * holds it, so the reader can find it and move it (end it there, add it here).
+ */
 export class DuplicateIdentifier extends PartyError {
-  constructor(type: string, value: string) {
+  constructor(type: string, value: string, holder?: string | null) {
+    const what = IDENTIFIER_WORDS[type] ?? type;
     super(
       "DUPLICATE_IDENTIFIER",
-      `Identifier ${type} ${JSON.stringify(value)} already exists for this tenant`,
+      `The ${what} ${value} is already recorded on ${holder ?? "another client"}. An email, ` +
+        `phone or registration number can be on one client or contact at a time.`,
     );
   }
 }

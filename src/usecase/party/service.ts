@@ -248,7 +248,10 @@ export class PartyService {
     }
 
     const existing = await this.deps.identifiers.findByValue(input.tenantId, input.type, value);
-    if (existing) throw new DuplicateIdentifier(input.type, value);
+    if (existing) {
+      const holder = await this.deps.parties.findParty(input.tenantId, existing.partyId);
+      throw new DuplicateIdentifier(input.type, value, holder?.displayName ?? null);
+    }
 
     const identifier = await this.deps.identifiers.add({
       id: this.deps.ids.newId(),
