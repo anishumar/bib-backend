@@ -66,6 +66,8 @@ export interface DunningSweepReport {
   /** Terminal rungs reached and left for a partner. Counted separately because
    *  it is the number somebody has to act on. */
   readonly awaitingApproval: number;
+  /** Set when this firm could not be visited at all; the worker logs it. */
+  readonly failure?: string;
 }
 
 export class DunningService {
@@ -78,11 +80,24 @@ export class DunningService {
    * every read below it is tenant-scoped by RLS — so it asks the global
    * registry and then does each firm's work under that firm's context. Never a
    * bypass; always a scope chosen deliberately.
+   *
+   * ONE FIRM'S FAILURE NEVER STOPS THE OTHERS (audit 2026-10-03, B13): caught
+   * per firm and reported in `failure`, which the worker logs at error.
    */
   async sweep(): Promise<readonly DunningSweepReport[]> {
     const reports: DunningSweepReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
-      reports.push(await this.sweepTenant(tenantId));
+      try {
+        reports.push(await this.sweepTenant(tenantId));
+      } catch (err) {
+        reports.push({
+          tenantId,
+          escalated: 0,
+          alreadyTaken: 0,
+          awaitingApproval: 0,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return reports;
   }
