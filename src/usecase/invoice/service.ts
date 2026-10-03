@@ -42,12 +42,10 @@ import {
   isSeriesPrefix,
 } from "../../domain/invoice/model";
 import {
-  compareAmounts,
   isAmount, isExchangeRate,
   isCurrencyCode,
   isSignedAmount,
   normalizeCurrency,
-  subtractAmounts,
 } from "../../domain/money/model";
 import {
   EmptyInvoice,
@@ -76,6 +74,7 @@ import {
   ManagerNotStaff,
   CreditNoteDateOutOfRange,
   InvoiceHasPayments,
+  CreditExceedsUnusedAdvance,
 } from "../../domain/invoice/errors";
 import { dayInZone, isCallersToday } from "../../domain/scheduler/zone";
 import type {
@@ -638,26 +637,13 @@ export class InvoiceService {
     const settings = await this.deps.settings.invoiceSettingsFor(input.tenantId);
     const startMonth = settings.fiscalYearStartMonth ?? INDIAN_FY_START_MONTH;
 
-    // A firm cannot credit more than it billed. Checked here rather than in a
-    // CHECK constraint because the limit depends on the SUM of every OTHER
-    // credit note against this invoice, which a row-level constraint cannot
-    // see — the honest place for it is the one that can read the siblings.
-    const balance = await this.deps.invoices.balanceOf(input.tenantId, input.invoiceId);
-    if (balance !== null) {
-      // ON THE DIGITS, never on a float. This was
-      // `Number(invoiced) - Number(credited)` compared with `Number(amount)`,
-      // which is the one rule this codebase states about money broken on the
-      // one check that decides whether money may leave: 100.10 less 100.00 is
-      // 0.09999999999999432 in binary floating point, so the last ten paise of
-      // a legitimate credit note were refused — and a cap could be passed by
-      // the same error in the other direction.
-      const remaining = subtractAmounts(balance.invoiced, balance.credited);
-      if (compareAmounts(input.amount, remaining) > 0) {
-        throw new CreditExceedsInvoice(input.invoiceId, input.amount, remaining);
-      }
-    }
-
-    const credit = await this.deps.invoices.issueCreditNote({
+    // A firm cannot credit more than it billed, nor give back an advance that
+    // later bills already took (B06). Checked by the repository INSIDE the
+    // transaction that writes the credit note, under the invoice's row lock
+    // and the advance's lock (B15): read here and written there, two credits
+    // at once both passed the same cap. Not a CHECK constraint, because the
+    // limit is a sum over sibling rows.
+    const outcome = await this.deps.invoices.issueCreditNote({
       id: this.deps.ids.newId(),
       tenantId: input.tenantId,
       invoiceId: input.invoiceId,
@@ -671,6 +657,13 @@ export class InvoiceService {
       financialYear: financialYearOf(issuedOn, startMonth),
       fiscalYearStartMonth: startMonth,
     });
+    if (!("credit" in outcome)) {
+      if (outcome.takenByBills !== null) {
+        throw new CreditExceedsUnusedAdvance(invoice.number, outcome.takenByBills, outcome.maxCredit, invoice.currency);
+      }
+      throw new CreditExceedsInvoice(invoice.number ?? input.invoiceId, input.amount, outcome.maxCredit);
+    }
+    const credit = outcome.credit;
 
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,

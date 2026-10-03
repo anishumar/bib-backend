@@ -1003,6 +1003,7 @@ export function mapError(err: unknown): MappedError {
       case "IRN_ALREADY_REGISTERED":
       case "INVOICE_NOT_ISSUED":
       case "CREDIT_EXCEEDS_INVOICE":
+      case "CREDIT_EXCEEDS_UNUSED_ADVANCE":
       case "DUNNING_NOT_AWAITING_APPROVAL":
       case "DUNNING_ALREADY_DECIDED":
       case "PARTY_ARCHIVED":

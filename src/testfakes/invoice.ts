@@ -31,6 +31,7 @@ import type {
   InvoiceFirmSettings,
   InvoiceSummary,
   CancelOutcome,
+  CreditNoteOutcome,
   IssueOn,
   IssuedCopies,
   NewCreditNote,
@@ -256,7 +257,16 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return Promise.resolve(this.payments.filter((p) => p.invoiceId === invoiceId));
   }
 
-  issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
+  async issueCreditNote(c: NewCreditNote): Promise<CreditNoteOutcome> {
+    // The adapter's cap without the advance half (bills are not faked here):
+    // no more than has not been credited. The advance half is proven against
+    // Postgres in advance.integration.test.ts.
+    const invoice = await this.find(c.tenantId, c.invoiceId);
+    if (invoice !== null) {
+      const b = this.balance(invoice);
+      const left = scaled(b.invoiced) - scaled(b.credited);
+      if (scaled(c.amount) > left) return { maxCredit: unscaled(left), takenByBills: null };
+    }
     const financialYear = c.financialYear;
     // A SEPARATE key from the invoice series — the correction 0028 made after
     // 0027 shipped without a document type. A fake that shared the counter
@@ -281,7 +291,7 @@ export class FakeInvoiceRepo implements InvoiceRepository {
       note: c.note,
     };
     this.creditNotes.push(note);
-    return Promise.resolve(note);
+    return { credit: note };
   }
 
   listCreditNotes(_tenantId: string, invoiceId: string): Promise<readonly CreditNote[]> {

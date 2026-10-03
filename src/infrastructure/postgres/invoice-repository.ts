@@ -68,6 +68,7 @@ import type {
   InvoiceSeriesRecord,
   InvoiceSummary,
   CancelOutcome,
+  CreditNoteOutcome,
   IssueOn,
   NewCreditNote,
   ReceivableRecord,
@@ -716,9 +717,40 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
    * sequence, which is worse than a gap: an invoice number missing because it
    * went to a credit note is a number an auditor cannot account for.
    */
-  async issueCreditNote(c: NewCreditNote): Promise<CreditNote> {
+  async issueCreditNote(c: NewCreditNote): Promise<CreditNoteOutcome> {
     const financialYear = c.financialYear;
-    return withTenant(this.app, c.tenantId, async (db) => {
+    return withTenant(this.app, c.tenantId, async (db): Promise<CreditNoteOutcome> => {
+      // THE CAP, IN THIS TRANSACTION (B15). The invoice row first, so a second
+      // credit note on it waits for this one; then the advance's lock, the one
+      // a bill taking from this advance holds (`takeFromPool`), so a raise and
+      // a credit cannot both spend the last of it.
+      await db`SELECT 1 FROM crm.invoice WHERE id = ${c.invoiceId} FOR UPDATE`;
+      await db`SELECT pg_advisory_xact_lock(hashtext(${`advance:${c.invoiceId}`}))`;
+      // What may still be credited: what has not been credited, and on an
+      // advance only what later bills have not taken (B06), with its share of
+      // the tax: exactly the refund's own figure (`refundCandidates`), so
+      // "Give it back" is never refused by a paisa.
+      const [cap] = await db<{ max_credit: string; taken: string | null; ok: boolean }[]>`
+        WITH m AS (
+          SELECT CASE WHEN ap.invoice_id IS NULL THEN b.invoiced - b.credited
+                      ELSE least(round(ap.remaining * t.total / nullif(t.net, 0), 2), b.invoiced - b.credited)
+                 END AS max_credit,
+                 CASE WHEN coalesce(ap.applied, 0) > 0
+                      THEN round(ap.applied * t.total / nullif(t.net, 0), 2) END AS taken
+            FROM crm.invoice_balance b
+            JOIN crm.invoice_totals t ON t.invoice_id = b.invoice_id AND t.tenant_id = b.tenant_id
+            LEFT JOIN (
+              SELECT invoice_id, sum(remaining) AS remaining, sum(applied) AS applied
+                FROM crm.advance_pool GROUP BY invoice_id
+            ) ap ON ap.invoice_id = b.invoice_id
+           WHERE b.invoice_id = ${c.invoiceId}
+        )
+        SELECT greatest(m.max_credit, 0)::text AS max_credit, m.taken::text AS taken,
+               ${c.amount}::numeric <= m.max_credit AS ok
+          FROM m
+      `;
+      if (cap !== undefined && !cap.ok) return { maxCredit: cap.max_credit, takenByBills: cap.taken };
+
       await db`
         INSERT INTO crm.invoice_series
           (tenant_id, entity_party_id, financial_year, document_type, prefix)
@@ -768,7 +800,7 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         RETURNING ${db.unsafe(CREDIT_NOTE_COLUMNS)}
       `;
       if (!row) throw new Error("credit note insert returned no row");
-      return toCreditNote(row);
+      return { credit: toCreditNote(row) };
     });
   }
 

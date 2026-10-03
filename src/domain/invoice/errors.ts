@@ -42,7 +42,8 @@ export type InvoiceErrorCode =
   | "INVOICE_MANAGER_FROZEN"
   | "CREDIT_NOTE_DATE_OUT_OF_RANGE"
   | "INVOICE_HAS_PAYMENTS"
-  | "DUNNING_NOTHING_OWED";
+  | "DUNNING_NOTHING_OWED"
+  | "CREDIT_EXCEEDS_UNUSED_ADVANCE";
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`).
  *  A document that genuinely belongs to another day has its own field. */
@@ -307,9 +308,9 @@ export class CreditExceedsInvoice extends InvoiceError {
   constructor(id: string, requested: string, remaining: string) {
     super(
       "CREDIT_EXCEEDS_INVOICE",
-      `Crediting ${requested} against invoice ${JSON.stringify(id)} would exceed it — only ` +
-        `${remaining} of it is uncredited. Credit the remainder, or check whether this belongs ` +
-        `against a different invoice.`,
+      `A credit of ${requested} is more than is left on invoice ${JSON.stringify(id)}: only ` +
+        `${remaining} of it has not been credited already. Credit at most that, or check whether ` +
+        `this belongs against a different invoice.`,
     );
   }
 }
@@ -462,6 +463,23 @@ export class DunningNothingOwed extends InvoiceError {
       "DUNNING_NOTHING_OWED",
       `${number ?? "This invoice"} ${why === "cancelled" ? "was cancelled" : "is paid in full"}, so nothing is ` +
         `owed on it and this step cannot be approved. Reject it instead; the rejection is kept on record.`,
+    );
+  }
+}
+
+/**
+ * A credit note on an ADVANCE invoice gives back only what later bills have
+ * not already taken from it (audit 2026-10-03, B06). The plain route capped a
+ * credit at invoiced less credited, so a client was credited the whole advance
+ * after part of it had paid for October: the advance went to -10,000.
+ */
+export class CreditExceedsUnusedAdvance extends InvoiceError {
+  constructor(number: string | null, takenByBills: string, maxCredit: string, currency: string) {
+    super(
+      "CREDIT_EXCEEDS_UNUSED_ADVANCE",
+      `${number ?? "This invoice"} is an advance, and ${moneyInWords(takenByBills, currency)} of it (with its tax) ` +
+        `has already been taken off later bills. At most ${moneyInWords(maxCredit, currency)} can be credited ` +
+        `on it now. To give back more, credit the later invoices that took it.`,
     );
   }
 }

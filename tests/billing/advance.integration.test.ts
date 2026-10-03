@@ -704,3 +704,46 @@ describe("a claim on a bill that is not there (0321)", () => {
     ).rejects.toMatchObject({ code: "BILLING_DUE_NOT_FOUND" });
   });
 });
+
+describe("a credit note on an advance (B06, B15, audit 2026-10-03)", () => {
+  // The plain credit-note route capped a credit at invoiced - credited and
+  // never asked what the advance had already paid for. Advance 40,000 (47,200
+  // with tax), October takes 30,000 of it: a credit note of 23,600 was issued
+  // and the advance pool went to -10,000: the client got the advance back and
+  // kept the deduction. And the cap was read in one transaction and the credit
+  // note written in another, with no lock.
+  async function advanceWithOctoberTaken() {
+    const { letterId, advId, booksId } = await advancedLetter("40000");
+    const adv = await raiseAndIssue(advId);
+    await invoicing.recordPayment({ tenantId, invoiceId: adv, amount: "47200", receivedOn: "2026-12-05", method: "bank_transfer" }, me);
+    const oct = await periodDue(booksId, "10");
+    expect((await desk.raise({ tenantId, dueIds: [oct], lines: [{ dueId: oct, taxPercent: "18" }] }, me)).covered).toEqual([oct]);
+    return { letterId, adv };
+  }
+
+  it("refuses to credit what bills have already taken, in plain words", async () => {
+    const { letterId, adv } = await advanceWithOctoberTaken();
+    const refused = await invoicing
+      .issueCreditNote({ tenantId, invoiceId: adv, amount: "23600", reason: "advance_refund" }, me)
+      .catch((e: unknown) => e);
+    expect(refused).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+    expect((refused as Error).message).toContain("INR 11,800.00");
+
+    // What is left with its tax may go back, and the pool reaches 0, not below.
+    await invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me);
+    const [pool] = await owner<{ remaining: string }[]>`
+      SELECT remaining::text FROM crm.advance_pool WHERE engagement_letter_id = ${letterId}
+    `;
+    expect(pool?.remaining).toBe("0.00");
+  });
+
+  it("lets only one of two credit notes for the last of it through at the same moment", async () => {
+    const { adv } = await advanceWithOctoberTaken();
+    const both = await Promise.allSettled(
+      [0, 1].map(() => invoicing.issueCreditNote({ tenantId, invoiceId: adv, amount: "11800", reason: "advance_refund" }, me)),
+    );
+    expect(both.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const rejected = both.find((r) => r.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
+  });
+});

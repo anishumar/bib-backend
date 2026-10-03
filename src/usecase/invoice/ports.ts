@@ -35,6 +35,17 @@ export interface NewInvoice {
   readonly financialYear: number;
 }
 
+/**
+ * A credit note, or why its amount is more than may be credited (B06, B15):
+ * checked inside the transaction that writes it, under the invoice's row lock
+ * and the advance's lock, so two credits cannot both take the last of it.
+ * `maxCredit` is what may still be credited; `takenByBills` (with its tax) is
+ * set when the invoice is an advance part of which later bills already took.
+ */
+export type CreditNoteOutcome =
+  | { readonly credit: CreditNote }
+  | { readonly maxCredit: string; readonly takenByBills: string | null };
+
 /** A cancellation, or the money that stopped it (B05). */
 export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
 
@@ -254,7 +265,7 @@ export interface InvoiceRepository {
    * legal document with its own consecutive series, so it cannot borrow the
    * invoice counter and cannot be numbered by a caller.
    */
-  issueCreditNote(c: NewCreditNote): Promise<CreditNote>;
+  issueCreditNote(c: NewCreditNote): Promise<CreditNoteOutcome>;
   listCreditNotes(tenantId: string, invoiceId: string): Promise<readonly CreditNote[]>;
 
   /** What one invoice still owes, computed by Postgres. */
