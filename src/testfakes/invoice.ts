@@ -123,8 +123,12 @@ export class FakeInvoiceRepo implements InvoiceRepository {
           ? null
           : { userId: invoice.managerUserId, displayName: null, email: "manager@example.test" },
       letters: [],
+      taxSuggestions: { companyDefault: this.companyTaxDefault, byEngagement: [] },
     };
   }
+
+  /** The issuing company's default tax rate, as a test sets it (CA#5). */
+  companyTaxDefault: string | null = null;
 
   list(tenantId: string, filters: InvoiceFilters): Promise<readonly InvoiceSummary[]> {
     return Promise.resolve(

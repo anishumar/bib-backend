@@ -159,6 +159,17 @@ const InvoiceRecordSchema = z
     letters: z.array(z.object({ id: z.string().uuid(), ref: z.string() })).openapi({
       description: "The engagement letters this invoice's lines bill, by reference (0318).",
     }),
+    taxSuggestions: z
+      .object({
+        companyDefault: Decimal.nullable(),
+        byEngagement: z.array(z.object({ engagementId: z.string().uuid(), taxPercent: Decimal })),
+      })
+      .openapi({
+        description:
+          "The tax rate a line added by hand starts at (CA#5), by the automatic advance's rule: the " +
+          "rate last invoiced on that engagement, else the issuing company's default tax rate (Your " +
+          "firm), else none. A tax rate is a statutory fact, not a price: never redacted.",
+      }),
   })
   .openapi("InvoiceRecord");
 
@@ -1238,5 +1249,12 @@ function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof Invo
         ? null
         : { userId: record.manager.userId, displayName: record.manager.displayName, email: record.manager.email },
     letters: record.letters.map((l) => ({ id: l.id, ref: l.ref })),
+    taxSuggestions: {
+      companyDefault: record.taxSuggestions.companyDefault,
+      byEngagement: record.taxSuggestions.byEngagement.map((t) => ({
+        engagementId: t.engagementId,
+        taxPercent: t.taxPercent,
+      })),
+    },
   };
 }

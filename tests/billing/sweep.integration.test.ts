@@ -501,6 +501,20 @@ describe("the billing desk on a real database (0318)", () => {
     expect(after[0]?.lastTaxPercent).toBe("18.00");
   });
 
+  it("offers a manual line the rate last used on that work, else the company's default (CA#5)", async () => {
+    // A line typed by hand started at 0% tax although the firm had saved 18%:
+    // a hurried accounts person issued a tax invoice with no tax on it.
+    const record = await new PostgresInvoiceRepository(app).describe(tenantId, invoiceId);
+    expect(record?.taxSuggestions.byEngagement).toEqual([{ engagementId: monthly, taxPercent: "18.00" }]);
+    expect(record?.taxSuggestions.companyDefault).toBeNull();
+    await owner`
+      INSERT INTO crm.issuer_tax_default (tenant_id, entity_party_id, tax_percent) VALUES (${tenantId}, ${firm}, 12)
+    `;
+    const after = await new PostgresInvoiceRepository(app).describe(tenantId, invoiceId);
+    await owner`DELETE FROM crm.issuer_tax_default WHERE tenant_id = ${tenantId}`;
+    expect(after?.taxSuggestions.companyDefault).toBe("12.00");
+  });
+
   it("refuses to raise a due that is already on an invoice", async () => {
     const [drafted] = await monthlyDues();
     if (drafted === undefined) throw new Error("no drafted due");

@@ -282,10 +282,31 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
         FROM crm.invoice_totals WHERE invoice_id = ${invoiceId}
       `;
 
+      // THE RATE A LINE TYPED BY HAND STARTS AT (CA#5): 0322's rule for the
+      // automatic advance, offered to a person. The last rate on each of this
+      // client's engagements billed before, and the issuing company's default.
+      const lastRates = await db<{ engagement_id: string; tax_percent: string }[]>`
+        SELECT DISTINCT ON (il.engagement_id) il.engagement_id, il.tax_percent::text
+          FROM crm.invoice_line il
+          JOIN crm.invoice ii ON ii.id = il.invoice_id AND ii.tenant_id = il.tenant_id
+         WHERE ii.party_id = ${head.party_id}
+           AND il.engagement_id IS NOT NULL
+           AND il.removed_at IS NULL
+           AND ii.status <> 'cancelled'
+         ORDER BY il.engagement_id, ii.created_at DESC, il.position DESC
+      `;
+      const [companyRate] = await db<{ tax_percent: string }[]>`
+        SELECT tax_percent::text FROM crm.issuer_tax_default WHERE entity_party_id = ${head.entity_party_id}
+      `;
+
       return {
         invoice: toInvoice(head),
         party: { id: head.party_id, displayName: head.party_name },
         entity: { id: head.entity_party_id, displayName: head.entity_name },
+        taxSuggestions: {
+          companyDefault: companyRate?.tax_percent ?? null,
+          byEngagement: lastRates.map((r) => ({ engagementId: r.engagement_id, taxPercent: r.tax_percent })),
+        },
         lines: lines.map((r): InvoiceLineRecord => ({ line: toLine(r), net: r.net, tax: r.tax })),
         // An invoice with no live lines has no row in the totals view at all —
         // `sum()` over nothing is NULL and `GROUP BY` emits no group. Zeroes are

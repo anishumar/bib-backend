@@ -104,6 +104,15 @@ export interface InvoiceRecord {
   /** The engagement letters its lines bill, by reference (0318): an invoice
    *  can always be traced back to what the client signed. */
   readonly letters: readonly { readonly id: string; readonly ref: string }[];
+  /**
+   * The tax rate a line typed by hand starts at (CA#5), by 0322's own rule for
+   * the automatic advance: the rate last invoiced on that work, else the
+   * issuing company's default (Your firm), else nothing (the person types it).
+   */
+  readonly taxSuggestions: {
+    readonly companyDefault: string | null;
+    readonly byEngagement: readonly { readonly engagementId: string; readonly taxPercent: string }[];
+  };
 }
 
 export interface InvoiceLineRecord {
