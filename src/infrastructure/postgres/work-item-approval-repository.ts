@@ -23,6 +23,7 @@ interface ApprovalRow {
   submitted_at: string;
   policy_version_id: string | null;
   policy_key: string | null;
+  request_note: string | null;
   decision: string;
   notes: string | null;
   decided_by: string | null;
@@ -47,6 +48,7 @@ function toApproval(r: ApprovalRow): WorkItemApproval {
     submittedAt: r.submitted_at,
     policyVersionId: r.policy_version_id,
     policyKey: r.policy_key,
+    requestNote: r.request_note,
     // The CHECK constraint guarantees this, so the cast states a fact the
     // database already enforces rather than hoping for one.
     decision: r.decision as ApprovalDecision,
@@ -71,7 +73,7 @@ function toCheck(r: CheckRow): WorkItemCheck {
 
 const COLUMNS =
   "id, tenant_id, work_item_id, submitted_by, submitted_at, policy_version_id, " +
-  "policy_key, decision, notes, decided_by, decided_at";
+  "policy_key, request_note, decision, notes, decided_by, decided_at";
 
 /**
  * The queue's row, resolved.
@@ -83,7 +85,7 @@ const COLUMNS =
  */
 const CHECK_SELECT = `
   SELECT a.id, a.tenant_id, a.work_item_id, a.submitted_by, a.submitted_at,
-         a.policy_version_id, a.policy_key, a.decision, a.notes, a.decided_by,
+         a.policy_version_id, a.policy_key, a.request_note, a.decision, a.notes, a.decided_by,
          a.decided_at,
          w.title AS work_item_title,
          cp.display_name AS client_name,
@@ -120,9 +122,9 @@ export class PostgresWorkItemApprovalRepository implements WorkItemApprovalRepos
     return withTenant(this.app, approval.tenantId, async (db) => {
       const rows = await db<ApprovalRow[]>`
         INSERT INTO delivery.work_item_approval
-          (id, tenant_id, work_item_id, policy_version_id, policy_key)
+          (id, tenant_id, work_item_id, policy_version_id, policy_key, request_note)
         VALUES (${approval.id}, ${approval.tenantId}, ${approval.workItemId},
-                ${approval.policyVersionId}, ${approval.policyKey})
+                ${approval.policyVersionId}, ${approval.policyKey}, ${approval.requestNote})
         ON CONFLICT (work_item_id) WHERE decision = 'pending' DO NOTHING
         RETURNING ${db.unsafe(COLUMNS)}
       `;

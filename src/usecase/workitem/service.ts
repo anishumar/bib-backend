@@ -29,6 +29,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -36,6 +37,7 @@ import type {
 import {
   DEFAULT_WORK_ITEM_PRIORITIES,
   DEFAULT_WORK_ITEM_STATES,
+  MAX_NOTE_LENGTH,
   TAKEN_OFF_BY_HAND_NOTE,
   boardOrder,
   catchUpMove,
@@ -77,6 +79,8 @@ import {
   NoDefaultPriority,
   NoInitialState,
   NoCancelledState,
+  NoteRequired,
+  NoteTooLong,
   PriorityNotFound,
   PriorityRetired,
   ReviewAlreadyDecided,
@@ -672,6 +676,16 @@ export interface RequestReviewInput {
    * it" had its tasks checked by anybody but the maker.
    */
   readonly policyKey?: string | null | undefined;
+  /** What the maker says to the checker (0330, CA#30). Blank means none. */
+  readonly note?: string | null | undefined;
+}
+
+export interface AddNoteInput {
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly body: string;
+  /** The session's user, always: who wrote a note is not a field anybody sets. */
+  readonly authorUserId: string;
 }
 
 export interface DecideReviewInput {
@@ -773,6 +787,8 @@ export interface WorkItemDetail {
   /** Every review it has ever had, newest first — the rejections are the
    *  point. */
   readonly reviews: readonly WorkItemCheck[];
+  /** The task's own notes, oldest first (0330, CA#30). */
+  readonly notes: readonly WorkItemNote[];
   /**
    * MAY THE CALLER DECIDE THE OPEN REVIEW — the same verdict the queue puts on
    * every one of its rows, and null when there is no open review.
@@ -842,6 +858,7 @@ export class WorkItemService {
       // needs every edge; a detail read that borrowed it grew with the firm.
       dependencies: await this.deps.items.listDependenciesFor(tenantId, workItemId),
       reviews,
+      notes: await this.deps.items.listNotes(tenantId, workItemId),
       openReviewViewer: await this.verdictOnOpenReview(tenantId, reviews, viewer ?? null),
     };
   }
@@ -1720,6 +1737,37 @@ export class WorkItemService {
     await this.deps.items.removeChecklistItem(tenantId, checklistItemId);
   }
 
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+
+  /**
+   * Write a note on a task: "challan shared with the client on WhatsApp".
+   *
+   * Append-only, and the ledger records only THAT one was written: the text
+   * is prose about a client's work that routinely names a person, and the log
+   * cannot be erased (the rule a block reason and a send-back note follow).
+   */
+  async addNote(input: AddNoteInput, actor: Actor): Promise<WorkItemNote> {
+    const body = noteText(input.body);
+    if (body === null) throw new NoteRequired();
+    await this.requireItem(input.tenantId, input.workItemId);
+    const note = await this.deps.items.addNote({
+      id: this.deps.ids.newId(),
+      tenantId: input.tenantId,
+      workItemId: input.workItemId,
+      authorUserId: input.authorUserId,
+      body,
+      createdAt: this.deps.clock.now().toISOString(),
+    });
+    await this.deps.events.recordEvent({
+      tenantId: input.tenantId,
+      verb: "work_item.note_added",
+      objectId: input.workItemId,
+      actor,
+      payload: { noteId: note.id },
+    });
+    return note;
+  }
+
   // ── dependencies ─────────────────────────────────────────────────────────
 
   /**
@@ -1832,6 +1880,7 @@ export class WorkItemService {
     // A process step's sub-steps hold its Done shut the same way (T6.15).
     const open = openChecklistLines(await this.deps.items.listChecklist(input.tenantId, item.id));
     if (open.length > 0) throw new ChecklistOpen(open, "doer");
+    const requestNote = noteText(input.note);
 
     let policyVersionId: string | null = null;
     let policyKey: string | null = null;
@@ -1871,6 +1920,7 @@ export class WorkItemService {
       workItemId: item.id,
       policyVersionId,
       policyKey,
+      requestNote,
     });
     // Null means the unique partial index refused a second open check —
     // somebody clicked twice, or two people clicked together.
@@ -2376,4 +2426,16 @@ export class WorkItemService {
       },
     });
   }
+}
+
+/**
+ * A note as stored (0330): trimmed, null when nothing is left, and refused past
+ * the bound the database also holds. One definition for a task note and the
+ * maker's note on a review, so the two cannot disagree about "blank".
+ */
+function noteText(raw: string | null | undefined): string | null {
+  const body = (raw ?? "").trim();
+  if (body.length === 0) return null;
+  if (body.length > MAX_NOTE_LENGTH) throw new NoteTooLong(MAX_NOTE_LENGTH);
+  return body;
 }

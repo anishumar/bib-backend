@@ -209,11 +209,33 @@ export interface WorkItemApproval {
   readonly submittedAt: string;
   readonly policyVersionId: string | null;
   readonly policyKey: string | null;
+  /** What the MAKER said when sending it (0330, CA#30). Null when nothing. */
+  readonly requestNote: string | null;
   readonly decision: ApprovalDecision;
+  /** What the CHECKER said: required on a send-back, optional on approval. */
   readonly notes: string | null;
   readonly decidedBy: string | null;
   readonly decidedAt: string | null;
 }
+
+/**
+ * One note on a task (0330, CA#30): one person's sentence at one moment.
+ * Append-only; a correction is a second note. Never in the ledger, which
+ * records only that one was written.
+ */
+export interface WorkItemNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly authorUserId: string;
+  /** The author's name, joined in the read; null for an account with none. */
+  readonly authorName: string | null;
+  readonly body: string;
+  readonly createdAt: string;
+}
+
+/** A note, trimmed, is at most this long: the database's bound too. */
+export const MAX_NOTE_LENGTH = 2000;
 
 // ── Read models ────────────────────────────────────────────────────────────
 //

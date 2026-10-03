@@ -28,6 +28,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -39,6 +40,7 @@ import type {
   JobStepHandover,
   NewWorkItem,
   NewWorkItemApproval,
+  NewWorkItemNote,
   NewWorkItemPriority,
   NewWorkItemState,
   ObligationCoverage,
@@ -215,6 +217,7 @@ export class FakeWorkVocabularyRepo implements WorkVocabularyRepository {
 export class FakeWorkItemRepo implements WorkItemRepository {
   readonly rows: WorkItem[] = [];
   readonly checklist: ChecklistItem[] = [];
+  readonly notes: WorkItemNote[] = [];
   readonly dependencies: WorkItemDependency[] = [];
   /** Set by the test harness so the read model can resolve names and flags —
    *  the joins the real query does. */
@@ -509,6 +512,27 @@ export class FakeWorkItemRepo implements WorkItemRepository {
     return next;
   }
 
+  addNote(note: NewWorkItemNote): Promise<WorkItemNote> {
+    // The composite foreign key, reproduced: a note hangs off a task of THIS firm.
+    if (!this.rows.some((r) => r.tenantId === note.tenantId && r.id === note.workItemId)) {
+      throw new Error(`no work item ${note.workItemId} at this firm`);
+    }
+    const row: WorkItemNote = {
+      ...note,
+      authorName: this.people.get(note.authorUserId)?.displayName ?? null,
+    };
+    this.notes.push(row);
+    return Promise.resolve(row);
+  }
+
+  listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]> {
+    return Promise.resolve(
+      this.notes
+        .filter((n) => n.tenantId === tenantId && n.workItemId === workItemId)
+        .sort((a, b) => a.createdAt.localeCompare(b.createdAt)),
+    );
+  }
+
   private async toRecord(r: WorkItem): Promise<WorkItemRecord> {
     const state = await this.vocabulary.findState(r.tenantId, r.stateId);
     const priority = await this.vocabulary.findPriority(r.tenantId, r.priorityId);
@@ -562,6 +586,7 @@ export class FakeWorkItemApprovalRepo implements WorkItemApprovalRepository {
       submittedAt: "2026-08-30T00:00:00.000Z",
       policyVersionId: approval.policyVersionId,
       policyKey: approval.policyKey,
+      requestNote: approval.requestNote,
       decision: "pending",
       notes: null,
       decidedBy: null,

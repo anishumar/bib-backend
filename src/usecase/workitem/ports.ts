@@ -19,6 +19,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -453,6 +454,23 @@ export interface WorkItemRepository {
     tenantId: string,
     workItemId: string,
   ): Promise<readonly { readonly workItemId: string; readonly title: string }[]>;
+
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+  /** Append one note. There is no update and no delete, here or in the grant. */
+  addNote(note: NewWorkItemNote): Promise<WorkItemNote>;
+  /** One task's notes, oldest first, each with its author's name joined. */
+  listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]>;
+}
+
+export interface NewWorkItemNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly authorUserId: string;
+  /** Already trimmed and bounded by the service. */
+  readonly body: string;
+  /** The service's clock, as every other instant this module writes. */
+  readonly createdAt: string;
 }
 
 // ── review ─────────────────────────────────────────────────────────────────
@@ -475,6 +493,8 @@ export interface NewWorkItemApproval {
    */
   readonly policyVersionId: string | null;
   readonly policyKey: string | null;
+  /** What the maker says on sending it (0330), trimmed; null for nothing. */
+  readonly requestNote: string | null;
 }
 
 export interface ApprovalDecisionWrite {

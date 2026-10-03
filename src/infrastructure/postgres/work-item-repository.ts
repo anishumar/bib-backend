@@ -16,17 +16,20 @@ import type {
   WorkItemBlocker,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemRecord,
 } from "../../domain/workitem/model";
 import type {
   CatchUpCandidate,
   NewWorkItem,
+  NewWorkItemNote,
   WorkItemFilter,
   WorkItemPatch,
   WorkItemRepository,
   WorkItemStateWrite,
 } from "../../usecase/workitem/ports";
 import { MAX_LIST_ROWS } from "../../db/limits";
+import { isoInstant } from "./instant";
 
 interface ItemRow {
   id: string;
@@ -689,6 +692,46 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
   }
 
   /** Unfinished is the blocker's state FLAG, never its code. */
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+
+  /** Append one. `bib_app` holds SELECT and INSERT on the table and nothing
+   *  else, so there is no update or delete to write here. */
+  async addNote(note: NewWorkItemNote): Promise<WorkItemNote> {
+    return withTenant(this.app, note.tenantId, async (db) => {
+      const [row] = await db<NoteRow[]>`
+        WITH n AS (
+          INSERT INTO delivery.work_item_note (id, tenant_id, work_item_id, author_user_id, body, created_at)
+          VALUES (${note.id}, ${note.tenantId}, ${note.workItemId}, ${note.authorUserId},
+                  ${note.body}, ${note.createdAt}::timestamptz)
+          RETURNING id, tenant_id, work_item_id, author_user_id, body, created_at
+        )
+        SELECT n.id, n.tenant_id, n.work_item_id, n.author_user_id, n.body,
+               ${db.unsafe(isoInstant("n.created_at", "created_at"))},
+               u.display_name AS author_name
+        FROM n
+        -- By id alone: tenancy.user_account is GLOBAL (ADR-02).
+        LEFT JOIN tenancy.user_account u ON u.id = n.author_user_id
+      `;
+      if (!row) throw new Error("work_item_note insert returned no row");
+      return toNote(row);
+    });
+  }
+
+  async listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<NoteRow[]>`
+        SELECT n.id, n.tenant_id, n.work_item_id, n.author_user_id, n.body,
+               ${db.unsafe(isoInstant("n.created_at", "created_at"))},
+               u.display_name AS author_name
+        FROM delivery.work_item_note n
+        LEFT JOIN tenancy.user_account u ON u.id = n.author_user_id
+        WHERE n.work_item_id = ${workItemId}
+        ORDER BY n.created_at, n.id
+      `;
+      return rows.map(toNote);
+    });
+  }
+
   async openBlockers(
     tenantId: string,
     workItemId: string,
@@ -729,6 +772,28 @@ export class PostgresWorkItemRepository implements WorkItemRepository {
       RETURNING ${db.unsafe(COLUMNS)}
     `;
   }
+}
+
+interface NoteRow {
+  id: string;
+  tenant_id: string;
+  work_item_id: string;
+  author_user_id: string;
+  author_name: string | null;
+  body: string;
+  created_at: string;
+}
+
+function toNote(r: NoteRow): WorkItemNote {
+  return {
+    id: r.id,
+    tenantId: r.tenant_id,
+    workItemId: r.work_item_id,
+    authorUserId: r.author_user_id,
+    authorName: r.author_name,
+    body: r.body,
+    createdAt: r.created_at,
+  };
 }
 
 function toChecklist(r: ChecklistRow): ChecklistItem {

@@ -624,6 +624,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
     "work:write" as const,
   ],
   [routeKey("POST", "/api/v1/work-items/{workItemId}/review"), "work:write" as const],
+  // A note on a task (0330, CA#30): the same permission as the work itself.
+  [routeKey("POST", "/api/v1/work-items/{workItemId}/notes"), "work:write" as const],
   // The work-item review queue, split exactly as T2.9's step queue is: the two
   // reads are `party:read` so everybody can see what is waiting, and DECIDING is
   // `work:write`, because approving somebody's filing writes to the record of

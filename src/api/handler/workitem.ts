@@ -16,6 +16,7 @@ import type {
   ChecklistItem,
   WorkItemCheck,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -242,6 +243,11 @@ const WorkItemReviewSchema = z
     }),
     submittedAt: z.string(),
     policyKey: z.string().nullable(),
+    requestNote: z.string().nullable().openapi({
+      description:
+        "What the MAKER said when sending it to be checked (0330). Null when nothing was " +
+        "said. Prose: on the row, never in the ledger.",
+    }),
     policyLabel: z.string().nullable().openapi({
       description:
         "The rule's own label as it was PINNED when the check opened — so a firm raising its " +
@@ -267,6 +273,17 @@ const CheckerOptionSchema = z
     }),
   })
   .openapi("WorkItemCheckerOption");
+
+const WorkItemNoteSchema = z
+  .object({
+    id: z.string().uuid(),
+    workItemId: z.string().uuid(),
+    authorUserId: z.string().uuid(),
+    authorName: z.string().nullable(),
+    body: z.string(),
+    createdAt: z.string(),
+  })
+  .openapi("WorkItemNote");
 
 const BoardResponse = z.object({ items: z.array(WorkItemSchema) }).openapi("WorkBoardResponse");
 
@@ -303,6 +320,11 @@ const WorkItemDetailResponse = z
         "Every review this item has ever had, newest first. The REJECTIONS are the point: a " +
         "list of only open ones makes work that came back twice read as work that sailed " +
         "through.",
+    }),
+    notes: z.array(WorkItemNoteSchema).openapi({
+      description:
+        "The task's own notes, oldest first (0330). Append-only: a correction is a second " +
+        "note. Staff only; the client portal never reads them.",
     }),
     openReviewViewer: viewerVerdict().nullable().openapi({
       description:
@@ -430,8 +452,21 @@ const RequestReviewRequest = z
         "(REVIEW_RULE_NEEDED) naming them so the sender picks; with none, maker != checker " +
         "alone. `GET /api/v1/review-rules` lists them.",
     }),
+    note: z.string().nullable().optional().openapi({
+      description:
+        "What the maker says to the checker (0330), at most 2,000 characters. Blank means none.",
+    }),
   })
   .openapi("RequestWorkItemReviewRequest");
+
+const AddNoteRequest = z
+  .object({
+    body: z.string().openapi({
+      description:
+        "The note, at most 2,000 characters once trimmed. Who wrote it is the session's user.",
+    }),
+  })
+  .openapi("AddWorkItemNoteRequest");
 
 const DecideReviewRequest = z
   .object({
@@ -625,11 +660,23 @@ function toReviewWire(c: WorkItemCheck): z.infer<typeof WorkItemReviewSchema> {
     submittedByName: c.submittedByName,
     submittedAt: c.approval.submittedAt,
     policyKey: c.approval.policyKey,
+    requestNote: c.approval.requestNote,
     policyLabel: c.policyLabel,
     decision: c.approval.decision,
     notes: c.approval.notes,
     decidedBy: c.approval.decidedBy,
     decidedAt: c.approval.decidedAt,
+  };
+}
+
+function toNoteWire(n: WorkItemNote): z.infer<typeof WorkItemNoteSchema> {
+  return {
+    id: n.id,
+    workItemId: n.workItemId,
+    authorUserId: n.authorUserId,
+    authorName: n.authorName,
+    body: n.body,
+    createdAt: n.createdAt,
   };
 }
 
@@ -867,6 +914,27 @@ const removeDependencyRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such dependency on this task"),
+  },
+});
+
+const addNoteRoute = createRoute({
+  method: "post",
+  path: "/api/v1/work-items/{workItemId}/notes",
+  tags: ["work"],
+  summary: "Write a note on a task",
+  description:
+    "Append-only (0330): a correction is a second note. The ledger records that a note was " +
+    "written and never what it says.",
+  request: {
+    params: WorkItemParam,
+    body: { content: { "application/json": { schema: AddNoteRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Written", content: { "application/json": { schema: WorkItemNoteSchema } } },
+    400: errorResponse("A blank note, or one over 2,000 characters"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item at this firm"),
   },
 });
 
@@ -1226,6 +1294,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         checklist: detail.checklist.map(toChecklistWire),
         dependencies: detail.dependencies.map(toDependencyWire),
         reviews: detail.reviews.map(toReviewWire),
+        notes: detail.notes.map(toNoteWire),
         openReviewViewer:
           detail.openReviewViewer === null ? null : { ...detail.openReviewViewer },
       },
@@ -1376,13 +1445,25 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     return c.body(null, 204);
   });
 
+  app.openapi(addNoteRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    const { body } = c.req.valid("json");
+    const note = await deps.service.addNote(
+      { tenantId: s.tenantId, workItemId, body, authorUserId: s.userId },
+      s.actor,
+    );
+    return c.json(toNoteWire(note), 201);
+  });
+
   app.openapi(requestReviewRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { workItemId } = c.req.valid("param");
-    const { policyKey } = c.req.valid("json");
+    const { policyKey, note } = c.req.valid("json");
     const approval = await deps.service.requestReview(
-      { tenantId: s.tenantId, workItemId, policyKey },
+      { tenantId: s.tenantId, workItemId, policyKey, note },
       s.actor,
     );
     const reviews = await deps.service.detail(s.tenantId, workItemId);
@@ -1566,6 +1647,7 @@ export const workItemRoutes = {
   addDependency: addDependencyRoute,
   removeDependency: removeDependencyRoute,
   requestReview: requestReviewRoute,
+  addNote: addNoteRoute,
   checkers: checkersRoute,
   reviewRules: reviewRulesRoute,
   decideReview: decideReviewRoute,

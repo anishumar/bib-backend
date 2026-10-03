@@ -1349,6 +1349,99 @@ describe("review — and the rule no firm may configure away", () => {
   });
 });
 
+describe("notes on a task (audit 2026-10-03, CA#30)", () => {
+  // The roleplay's article had nowhere to write "challan shared on WhatsApp",
+  // and nothing to say when she sent the work to be checked.
+
+  it("keeps a note with who wrote it and when, and records only THAT one was written", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "GSTR-3B Sep", assigneeUserId: PRIYA },
+      ACTOR,
+    );
+
+    const note = await h.service.addNote(
+      { tenantId: FIRM, workItemId: item.id, body: "  Challan shared with Ravi on WhatsApp  ", authorUserId: PRIYA },
+      ACTOR,
+    );
+
+    expect(note).toMatchObject({
+      workItemId: item.id,
+      authorUserId: PRIYA,
+      authorName: "Priya",
+      body: "Challan shared with Ravi on WhatsApp",
+      createdAt: NOW,
+    });
+    expect(h.recorded().at(-1)).toMatchObject({
+      verb: "work_item.note_added",
+      objectId: item.id,
+      payload: { noteId: note.id },
+    });
+    // Prose about a client and a colleague, in a log that cannot be erased.
+    expect(JSON.stringify(h.recorded())).not.toContain("WhatsApp");
+  });
+
+  it("shows the notes on the task's own page, oldest first", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "first", authorUserId: PRIYA }, ACTOR);
+    h.clock.set(new Date("2026-09-10T05:00:00.000Z"));
+    await h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "second", authorUserId: ANAND }, ACTOR);
+
+    const detail = await h.service.detail(FIRM, item.id);
+    expect(detail.notes.map((n) => [n.body, n.authorName])).toEqual([
+      ["first", "Priya"],
+      ["second", "Anand"],
+    ]);
+  });
+
+  it("refuses an empty note, an over-long one, and one on a task the firm does not have", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await expect(
+      h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: " \n\t", authorUserId: PRIYA }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_REQUIRED" });
+    await expect(
+      h.service.addNote({ tenantId: FIRM, workItemId: item.id, body: "x".repeat(2001), authorUserId: PRIYA }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_TOO_LONG" });
+    await expect(
+      h.service.addNote(
+        { tenantId: FIRM, workItemId: "00000000-0000-4000-8000-00000000dead", body: "x", authorUserId: PRIYA },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "WORK_ITEM_NOT_FOUND" });
+  });
+
+  it("keeps the maker's note on the review when the work is sent to be checked, never in the log", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, title: "x", assigneeUserId: PRIYA },
+      ACTOR,
+    );
+
+    const approval = await h.service.requestReview(
+      { tenantId: FIRM, workItemId: item.id, note: "  Two purchase bills added late, see sheet 2  " },
+      ACTOR,
+    );
+
+    expect(approval.requestNote).toBe("Two purchase bills added late, see sheet 2");
+    expect((await h.service.detail(FIRM, item.id)).reviews[0]?.approval.requestNote).toBe(
+      "Two purchase bills added late, see sheet 2",
+    );
+    expect(JSON.stringify(h.recorded())).not.toContain("purchase bills");
+  });
+
+  it("treats a blank note on Send for review as no note, and refuses an over-long one", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: CLIENT, title: "x" }, ACTOR);
+    await expect(
+      h.service.requestReview({ tenantId: FIRM, workItemId: item.id, note: "y".repeat(2001) }, ACTOR),
+    ).rejects.toMatchObject({ code: "NOTE_TOO_LONG" });
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id, note: "   " }, ACTOR);
+    expect(approval.requestNote).toBeNull();
+  });
+});
+
 describe("editing a work item", () => {
   it("records BOTH sides of a moved due date", async () => {
     // "Why was this late" is answered by somebody having moved it, and a

@@ -55,7 +55,9 @@ export type WorkItemErrorCode =
   | "REVIEW_REJECTION_NEEDS_NOTE"
   | "REVIEWER_NOT_ELIGIBLE"
   | "CHECKLIST_OPEN"
-  | "REVIEW_RULE_NEEDED";
+  | "REVIEW_RULE_NEEDED"
+  | "NOTE_REQUIRED"
+  | "NOTE_TOO_LONG";
 
 // ── the firm's vocabulary ──────────────────────────────────────────────────
 
@@ -443,5 +445,17 @@ export class ReviewRuleNeeded extends WorkItemError {
         .map((l) => `"${l}"`)
         .join(", ")}. Pick the one this task is checked under.`,
     );
+  }
+}
+
+export class NoteRequired extends WorkItemError {
+  constructor() {
+    super("NOTE_REQUIRED", "Write something in the note first.");
+  }
+}
+
+export class NoteTooLong extends WorkItemError {
+  constructor(max: number) {
+    super("NOTE_TOO_LONG", `A note can be at most ${String(max)} characters. Shorten it, or add a file instead.`);
   }
 }
