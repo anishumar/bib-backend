@@ -4543,3 +4543,27 @@ a partial unique index, which is what makes a duplicate capture *append* rather 
 Capture goes through `PartyService` behind the lead use case's own `ProspectDirectory` port,
 so prospects get the same validation and the same `party.created` events as any other party.
 A lead has no timeline table: its history is the ledger.
+
+## Audit 2026-10-03, the UX cluster: rules that came out of it
+
+- **A country is one of the 249 codes ISO 3166-1 assigns today** (`domain/country.ts`).
+  `isJurisdiction` (lead, territory rules, proposal and letter lines, firm companies, documents)
+  requires one, and so do filing rules, a client's registration and the import's Country and Where
+  columns. A retired or reserved code (DD, UK, SU, YU…) is refused with `countryCodeProblem()`,
+  which names what was meant ("For Germany, use DE"). Two capital letters is no longer enough: a
+  dead code is silently matched by no rule. Config bodies' `jurisdictions` arrays are NOT checked
+  against the list yet (published bodies are frozen; the screens only offer real codes).
+- **A refused amount says what is wrong with it** (`amountProblem()` in `domain/money`): "The
+  amount cannot be 0.", "The tax rate cannot be more than 100%.". The wire rule (decimal strings)
+  is unchanged; it is just not what a person is told.
+- **A lead's contact person** (`CaptureLeadInput.contact`, CA#20): with one named on a company
+  prospect, the email and phone go on a PERSON linked to the company in a contact's role, and the
+  company keeps the PAN and GSTIN. Dedup follows the person to the company through that
+  relationship, and a detail an older capture put on the company still matches the company.
+- **A relationship must be able to be true** (`relationshipFits`): nobody is a director or
+  shareholder OF a person, only a person is an employee or signatory, a parent and a subsidiary
+  are both companies. A company as a director is allowed (some countries allow it).
+- **Duplicate identifiers name the holder** ("The email x is already recorded on Acme…"), never
+  "for this tenant". The shipped rule pack's notes no longer speak as one firm; the pack KEY
+  (`in-firm-sheet@2026.08`) is unchanged because it is part of the seeding conflict key, and the
+  frontend prints it as words.
