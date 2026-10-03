@@ -21,6 +21,7 @@ export type PartyErrorCode =
   | "INVALID_IDENTIFIER"
   | "INVALID_IDENTIFIER_TYPE"
   | "INVALID_RELATIONSHIP_TYPE"
+  | "RELATIONSHIP_DOES_NOT_FIT"
   | "INVALID_DATE_RANGE"
   | "SELF_RELATIONSHIP"
   | "DUPLICATE_IDENTIFIER"
@@ -77,6 +78,28 @@ export class InvalidRelationshipType extends PartyError {
     super("INVALID_RELATIONSHIP_TYPE", `Unknown relationship type ${JSON.stringify(type)}`);
   }
 }
+/**
+ * A relationship that cannot be true of these two kinds of party (CA#53): a
+ * company as somebody's director, a person as a company's parent. Names the
+ * two parties so the reader sees which way round they had it.
+ */
+export class RelationshipDoesNotFit extends PartyError {
+  constructor(
+    fromName: string,
+    fromKind: "organization" | "person",
+    label: string,
+    toName: string,
+    toKind: "organization" | "person",
+  ) {
+    const kind = (k: "organization" | "person"): string => (k === "organization" ? "company" : "person");
+    super(
+      "RELATIONSHIP_DOES_NOT_FIT",
+      `"${fromName} is ${label} ${toName}" cannot be true: a ${kind(fromKind)} cannot be ${label} ` +
+        `a ${kind(toKind)}. Choose the sentence that is true.`,
+    );
+  }
+}
+
 export class InvalidDateRange extends PartyError {
   constructor(from: string, to: string | null) {
     super(

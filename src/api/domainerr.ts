@@ -674,6 +674,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":
+      case "RELATIONSHIP_DOES_NOT_FIT":
       case "INVALID_DATE_RANGE":
       case "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN":
       case "SELF_RELATIONSHIP":

@@ -21,6 +21,7 @@ import {
   isValidDateRange,
   isValidIdentifier,
   normalizeIdentifier,
+  relationshipFits,
 } from "../../domain/party/model";
 import {
   DuplicateIdentifier,
@@ -37,6 +38,7 @@ import {
   PartyNotArchived,
   PartyNotFound,
   RelationshipAlreadyEnded,
+  RelationshipDoesNotFit,
   RelationshipEndsBeforeItBegan,
   RelationshipNotFound,
   SelfRelationship,
@@ -307,6 +309,12 @@ export class PartyService {
     if (!from) throw new PartyNotFound(input.fromPartyId);
     if (!to) throw new PartyNotFound(input.toPartyId);
     if (!typeOk) throw new InvalidRelationshipType(input.type);
+    if (!relationshipFits(input.type, from.kind, to.kind)) {
+      const label =
+        (await this.deps.relationships.listRelationshipTypes()).find((t) => t.code === input.type)?.label ??
+        input.type;
+      throw new RelationshipDoesNotFit(from.displayName, from.kind, label, to.displayName, to.kind);
+    }
 
     const relationship = await this.deps.relationships.add({
       id: this.deps.ids.newId(),
