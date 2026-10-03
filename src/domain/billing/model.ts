@@ -314,3 +314,28 @@ function earlier(a: string, b: string): string {
 function iso(year: number, month: number, day: number): string {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
+
+const MONTH_NAMES = ["January", "February", "March", "April", "May", "June", "July", "August",
+  "September", "October", "November", "December"];
+
+/** "3 October 2026" from an ISO day, on the string. */
+function dayWords(iso: string): string {
+  const [y = "", m = "", d = ""] = iso.split("-");
+  return `${String(Number(d))} ${MONTH_NAMES[Number(m) - 1] ?? m} ${y}`;
+}
+
+/**
+ * What a person must be told when "Bill from" is earlier than the day the work
+ * started (audit 2026-10-03, CA#35). A period is billed only for the days the
+ * work ran (pro-rata by days, Ashish), so the months before the start get no
+ * bill however early "Bill from" is set. That rule is not changed here (whether
+ * a firm bills the months before it took a client over is the firm's question);
+ * it is SAID, where the schedule is set. Null when there is nothing to say.
+ */
+export function scheduleNotice(billingFrom: string, workStartedOn: string): string | null {
+  if (billingFrom >= workStartedOn) return null;
+  return (
+    `This work started on ${dayWords(workStartedOn)}, and a period is billed only for the days the work ran. ` +
+    `So nothing before ${dayWords(workStartedOn)} is billed, even though billing is set from ${dayWords(billingFrom)}.`
+  );
+}

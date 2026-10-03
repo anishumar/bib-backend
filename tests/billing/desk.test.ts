@@ -574,3 +574,26 @@ describe("the firm's own payment terms (B20, audit 2026-10-03)", () => {
     await expect(w.service.setInvoiceDueDays(FIRM, -1, ME)).rejects.toMatchObject({ code: "INVALID_BILLING_INPUT" });
   });
 });
+
+describe("a schedule set before the work started says so (CA#35)", () => {
+  it("answers with a plain-words notice, and saves what was asked", async () => {
+    const w = world();
+    w.schedules.rows.push(schedule({ effectiveFrom: "2026-10-03" }));
+    const saved = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-09-01", firstInvoiceOn: "2026-10-01" },
+      ME,
+    );
+    expect(saved.billingFrom).toBe("2026-09-01");
+    expect(saved.notice).toContain("nothing before 3 October 2026 is billed");
+    const later = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-10-01", firstInvoiceOn: "2026-11-01" },
+      ME,
+    );
+    expect(later.notice).toContain("nothing before 3 October 2026");
+    const clean = await w.service.setSchedule(
+      { tenantId: FIRM, engagementId: ENG, billingFrom: "2026-11-01", firstInvoiceOn: "2026-12-01" },
+      ME,
+    );
+    expect(clean.notice).toBeNull();
+  });
+});

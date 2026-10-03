@@ -259,6 +259,14 @@ const ScheduleSchema = z
   })
   .openapi("BillingSchedule");
 
+const ScheduleSetSchema = ScheduleSchema.extend({
+  notice: z.string().nullable().openapi({
+    description:
+      "Plain words to show the person who set it, or null: e.g. that \"Bill from\" is before the work " +
+      "started, so nothing before the start is billed (a period is billed only for the days the work ran).",
+  }),
+}).openapi("BillingScheduleSet");
+
 const UnscheduledSchema = ScheduleSchema.extend({
   suggestion: z
     .object({ billingFrom: z.string(), firstInvoiceOn: z.string(), periodLabel: z.string() })
@@ -333,7 +341,7 @@ const scheduleRoute = createRoute({
     },
   },
   responses: {
-    200: { description: "Set", content: { "application/json": { schema: ScheduleSchema } } },
+    200: { description: "Set", content: { "application/json": { schema: ScheduleSetSchema } } },
     400: errorResponse("Not a real date, or only one of the two given"),
     401: errorResponse("Not signed in"),
     403: errorResponse("No org selected, or the role does not permit it"),
@@ -896,7 +904,7 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
       },
       s.actor,
     );
-    return c.json(scheduleBody(set), 200);
+    return c.json({ ...scheduleBody(set), notice: set.notice }, 200);
   });
 
   app.openapi(raiseRoute, async (c) => {

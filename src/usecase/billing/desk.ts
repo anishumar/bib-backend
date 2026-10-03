@@ -24,6 +24,7 @@ import type { EventSink } from "../ledger/ports";
 import { dayInZone } from "../../domain/scheduler/zone";
 import { addDays, periodsFrom, recurrenceOfService } from "../../domain/scheduler/model";
 import { isCalendarDay } from "../../domain/engagement/model";
+import { scheduleNotice } from "../../domain/billing/model";
 import { compareAmounts, isAmount, isExchangeRate } from "../../domain/money/model";
 import {
   advancePolicyProblem,
@@ -700,7 +701,7 @@ export class BillingDeskService {
       readonly firstInvoiceOn: string | null;
     },
     actor: Actor,
-  ): Promise<ScheduleRecord> {
+  ): Promise<ScheduleRecord & { readonly notice: string | null }> {
     const current = await this.deps.schedules.find(input.tenantId, input.engagementId);
     if (current === null) throw new BillingEngagementNotFound(input.engagementId);
 
@@ -755,7 +756,9 @@ export class BillingDeskService {
     }
     const after = await this.deps.schedules.find(input.tenantId, input.engagementId);
     if (after === null) throw new BillingEngagementNotFound(input.engagementId);
-    return after;
+    // SAID, NOT HIDDEN (CA#35): a "Bill from" before the work started bills
+    // nothing for those days, and the sweep used to just write no bill.
+    return { ...after, notice: billingFrom === null ? null : scheduleNotice(billingFrom, after.effectiveFrom) };
   }
 
   // ── The switch, and the advance's settings ───────────────────────────────
