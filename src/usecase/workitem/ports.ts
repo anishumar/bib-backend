@@ -19,6 +19,7 @@ import type {
   WorkItemCheck,
   WorkItemDependency,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
@@ -255,6 +256,37 @@ export interface ObligationFiling {
     discharged: boolean,
     actor: Actor,
   ): Promise<void>;
+  /**
+   * The filing this task files, if any, and the company's open filings with
+   * no task yet (audit 2026-10-03, CA#36): what the task page offers to link.
+   */
+  filingsForTask(
+    tenantId: string,
+    workItemId: string,
+    entityPartyId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }>;
+  /** Make this task the one that files that filing; filed at once when the
+   *  task is already done. The calendar's rules refuse, in words. */
+  linkTask(
+    tenantId: string,
+    obligationId: string,
+    task: { readonly id: string; readonly entityPartyId: string; readonly discharged: boolean },
+    actor: Actor,
+  ): Promise<void>;
+  /** Take this task off the filing it files, while that is not filed. */
+  unlinkTask(tenantId: string, workItemId: string, actor: Actor): Promise<void>;
+}
+
+/** One filing as the task page shows it (CA#36): what it is, for when, and
+ *  whether it is filed. The calendar's read, in this module's own words. */
+export interface LinkableFiling {
+  readonly obligationId: string;
+  readonly name: string;
+  readonly periodLabel: string;
+  readonly statutoryDueOn: string;
+  readonly entityName: string | null;
+  readonly stateName: string;
+  readonly filedOn: string | null;
 }
 
 export interface NewWorkItem {
@@ -453,6 +485,23 @@ export interface WorkItemRepository {
     tenantId: string,
     workItemId: string,
   ): Promise<readonly { readonly workItemId: string; readonly title: string }[]>;
+
+  // ── notes (0330, CA#30) ──────────────────────────────────────────────────
+  /** Append one note. There is no update and no delete, here or in the grant. */
+  addNote(note: NewWorkItemNote): Promise<WorkItemNote>;
+  /** One task's notes, oldest first, each with its author's name joined. */
+  listNotes(tenantId: string, workItemId: string): Promise<readonly WorkItemNote[]>;
+}
+
+export interface NewWorkItemNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly authorUserId: string;
+  /** Already trimmed and bounded by the service. */
+  readonly body: string;
+  /** The service's clock, as every other instant this module writes. */
+  readonly createdAt: string;
 }
 
 // ── review ─────────────────────────────────────────────────────────────────
@@ -475,6 +524,8 @@ export interface NewWorkItemApproval {
    */
   readonly policyVersionId: string | null;
   readonly policyKey: string | null;
+  /** What the maker says on sending it (0330), trimmed; null for nothing. */
+  readonly requestNote: string | null;
 }
 
 export interface ApprovalDecisionWrite {
@@ -697,6 +748,13 @@ export interface ResolvedReviewPolicy {
 export interface ReviewPolicySource {
   publishedPolicy(tenantId: string, key: string): Promise<ResolvedReviewPolicy | null>;
   pinnedPolicy(tenantId: string, versionId: string): Promise<ResolvedReviewPolicy | null>;
+  /**
+   * Every rule the firm has in force, ordered by key (audit 2026-10-03, CA#27).
+   * A task names no rule, so when the sender names none the firm's own is
+   * applied: the one, or the sender picks among several. A version that no
+   * longer reads as a policy is left out, `publishedPolicy`'s answer for it.
+   */
+  publishedPolicies(tenantId: string): Promise<readonly ResolvedReviewPolicy[]>;
 }
 
 /**

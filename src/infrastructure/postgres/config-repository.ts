@@ -660,6 +660,24 @@ export class PostgresConfigRepository
     });
   }
 
+  /** Every rule in force at the firm (CA#27): what a task is checked under
+   *  when its sender names none. Ordered by key, so "the first" is stable. */
+  async publishedPolicies(tenantId: string): Promise<readonly ResolvedPolicy[]> {
+    return withTenant(this.app, tenantId, async (db) => {
+      const rows = await db<{ id: string; key: string; body: Record<string, unknown> }[]>`
+        SELECT v.id, e.key, v.body
+        FROM config.entry e
+        JOIN config.version v ON v.entry_id = e.id AND v.status = 'published'
+        WHERE e.kind = 'verification_policy'
+        ORDER BY e.key
+      `;
+      return rows.flatMap((r) => {
+        const resolved = toResolvedPolicy(r.id, r.key, r.body);
+        return resolved === null ? [] : [resolved];
+      });
+    });
+  }
+
   async pinnedPolicy(tenantId: string, versionId: string): Promise<ResolvedPolicy | null> {
     return withTenant(this.app, tenantId, async (db) => {
       // By VERSION id with no status filter, exactly as `pinnedTemplate` does:

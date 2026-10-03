@@ -620,6 +620,15 @@ export class FakeObligationInstanceRepo implements ObligationInstanceRepository 
     return Promise.resolve(true);
   }
 
+  detachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean> {
+    const i = this.rows.findIndex((r) => r.tenantId === tenantId && r.id === obligationId);
+    const row = this.rows[i];
+    // `WHERE work_item_id = $task AND filed_on IS NULL`, modelled.
+    if (!row || row.workItemId !== workItemId || row.filedOn !== null) return Promise.resolve(false);
+    this.rows[i] = { ...row, workItemId: null };
+    return Promise.resolve(true);
+  }
+
   findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null> {
     return Promise.resolve(
       this.rows.find((r) => r.tenantId === tenantId && r.workItemId === workItemId) ?? null,

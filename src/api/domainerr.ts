@@ -372,6 +372,7 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "LAST_INITIAL_STATE":
       case "LAST_DESTINATION_STATE":
+      case "FILING_NOT_LINKABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -604,6 +605,9 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "BLOCK_REASON_REQUIRED":
       case "REVIEW_REJECTION_NEEDS_NOTE":
+      case "REVIEW_RULE_NEEDED":
+      case "NOTE_REQUIRED":
+      case "NOTE_TOO_LONG":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "WORK_ITEM_NOT_FOUND":
       case "ROUTING_LETTER_NOT_FOUND":
@@ -645,6 +649,7 @@ export function mapError(err: unknown): MappedError {
       case "DEPENDENCY_EXISTS":
       case "REVIEW_ALREADY_OPEN":
       case "REVIEW_ALREADY_DECIDED":
+      case "CHECKLIST_OPEN": // a line on the task's own list is open (CA#30)
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

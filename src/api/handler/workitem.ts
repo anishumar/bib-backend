@@ -16,11 +16,13 @@ import type {
   ChecklistItem,
   WorkItemCheck,
   WorkItemDependencyRecord,
+  WorkItemNote,
   WorkItemPriority,
   WorkItemRecord,
   WorkItemState,
 } from "../../domain/workitem/model";
 import { scopeOf } from "../scope";
+import type { LinkableFiling } from "../../usecase/workitem/ports";
 
 export interface WorkItemDeps {
   readonly service: WorkItemService;
@@ -173,6 +175,19 @@ const WorkItemSchema = z
         "non-empty — that is what a dependency SAYS. Moving straight to a terminal state is " +
         "still allowed, because cancelling something that never started is a real act.",
     }),
+    sentBack: z
+      .object({
+        notes: z.string().nullable(),
+        decidedAt: z.string(),
+        decidedByName: z.string().nullable(),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "Sent back and not yet sent again (CA#29): the latest decided review was a " +
+          "send-back, none is open, and the task is not finished. The checker's note, when, " +
+          "and by whom. Null otherwise. My day shows it on the maker's desk.",
+      }),
   })
   .openapi("WorkItem");
 
@@ -242,6 +257,11 @@ const WorkItemReviewSchema = z
     }),
     submittedAt: z.string(),
     policyKey: z.string().nullable(),
+    requestNote: z.string().nullable().openapi({
+      description:
+        "What the MAKER said when sending it to be checked (0330). Null when nothing was " +
+        "said. Prose: on the row, never in the ledger.",
+    }),
     policyLabel: z.string().nullable().openapi({
       description:
         "The rule's own label as it was PINNED when the check opened — so a firm raising its " +
@@ -267,6 +287,51 @@ const CheckerOptionSchema = z
     }),
   })
   .openapi("WorkItemCheckerOption");
+
+const WorkItemNoteSchema = z
+  .object({
+    id: z.string().uuid(),
+    workItemId: z.string().uuid(),
+    authorUserId: z.string().uuid(),
+    authorName: z.string().nullable(),
+    body: z.string(),
+    createdAt: z.string(),
+  })
+  .openapi("WorkItemNote");
+
+// A FACTORY, for `viewerVerdict`'s reason: `.nullable()` on a schema that has
+// been `.openapi(name)`d mutates the registered component, and `linked` is
+// nullable where `open`'s rows are not.
+const linkableFiling = () =>
+  z.object({
+    obligationId: z.string().uuid(),
+    name: z.string().openapi({ description: "The filing, e.g. GSTR-3B." }),
+    periodLabel: z.string(),
+    statutoryDueOn: IsoDate,
+    entityName: z.string().nullable(),
+    stateName: z.string().openapi({ description: "The firm's own word for where the filing stands." }),
+    filedOn: IsoDate.nullable(),
+  });
+const LinkableFilingSchema = linkableFiling().openapi("LinkableFiling");
+
+const TaskFilingResponse = z
+  .object({
+    linked: linkableFiling().nullable().openapi({
+      description:
+        "The filing this task files (CA#36): completing the task marks it filed, as completing " +
+        "the calendar's own task does. Null when it files none.",
+    }),
+    open: z.array(LinkableFilingSchema).openapi({
+      description:
+        "The company's open filings with no task yet, by due date: what this task could file. " +
+        "The company is the task's entity, or else its client.",
+    }),
+  })
+  .openapi("TaskFilingResponse");
+
+const LinkFilingRequest = z
+  .object({ obligationId: z.string().uuid() })
+  .openapi("LinkTaskFilingRequest");
 
 const BoardResponse = z.object({ items: z.array(WorkItemSchema) }).openapi("WorkBoardResponse");
 
@@ -303,6 +368,11 @@ const WorkItemDetailResponse = z
         "Every review this item has ever had, newest first. The REJECTIONS are the point: a " +
         "list of only open ones makes work that came back twice read as work that sailed " +
         "through.",
+    }),
+    notes: z.array(WorkItemNoteSchema).openapi({
+      description:
+        "The task's own notes, oldest first (0330). Append-only: a correction is a second " +
+        "note. Staff only; the client portal never reads them.",
     }),
     openReviewViewer: viewerVerdict().nullable().openapi({
       description:
@@ -343,6 +413,10 @@ const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
   // On the QUEUE's row, not the review's: a list of checks links the client and
   // says when the work is due (V2.1's My day); a task's own page has both.
   clientPartyId: z.string().uuid(),
+  entityPartyId: z.string().uuid().nullable().openapi({
+    description: "The company the work is for, when the task names one (F32).",
+  }),
+  entityName: z.string().nullable(),
   dueOn: IsoDate.nullable().openapi({
     description: "The task's own due day, or null when it has none.",
   }),
@@ -351,6 +425,16 @@ const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
 const ChecksResponse = z
   .object({ checks: z.array(WorkItemCheckRowSchema) })
   .openapi("WorkItemChecksResponse");
+
+const ReviewRulesResponse = z
+  .object({
+    rules: z.array(z.object({ key: z.string(), label: z.string() })).openapi({
+      description:
+        "The firm's review rules in force, by key. One is applied to a task sent with no rule " +
+        "named; with several the sender picks.",
+    }),
+  })
+  .openapi("ReviewRulesResponse");
 
 const CheckersResponse = z
   .object({ checkers: z.array(CheckerOptionSchema) })
@@ -416,12 +500,25 @@ const RequestReviewRequest = z
     policyKey: z.string().nullable().optional().openapi({
       description:
         "Which of the firm's published verification policies decides who may check this. " +
-        "OPTIONAL, and no default is invented: there is no template step here to name one, " +
-        "and picking a rule on the firm's behalf would be this product deciding who signs " +
-        "off its work. Absent means maker != checker alone.",
+        "Absent means the FIRM'S OWN: its one published rule, applied; with several, a 400 " +
+        "(REVIEW_RULE_NEEDED) naming them so the sender picks; with none, maker != checker " +
+        "alone. `GET /api/v1/review-rules` lists them.",
+    }),
+    note: z.string().nullable().optional().openapi({
+      description:
+        "What the maker says to the checker (0330), at most 2,000 characters. Blank means none.",
     }),
   })
   .openapi("RequestWorkItemReviewRequest");
+
+const AddNoteRequest = z
+  .object({
+    body: z.string().openapi({
+      description:
+        "The note, at most 2,000 characters once trimmed. Who wrote it is the session's user.",
+    }),
+  })
+  .openapi("AddWorkItemNoteRequest");
 
 const DecideReviewRequest = z
   .object({
@@ -579,6 +676,10 @@ function toWire(r: WorkItemRecord): z.infer<typeof WorkItemSchema> {
     checklistTotal: r.checklistTotal,
     hasOpenReview: r.hasOpenReview,
     blockedByOpen: r.blockedByOpen.map((b) => ({ workItemId: b.workItemId, title: b.title })),
+    sentBack:
+      r.sentBack === null
+        ? null
+        : { notes: r.sentBack.notes, decidedAt: r.sentBack.decidedAt, decidedByName: r.sentBack.decidedByName },
   };
 }
 
@@ -615,6 +716,7 @@ function toReviewWire(c: WorkItemCheck): z.infer<typeof WorkItemReviewSchema> {
     submittedByName: c.submittedByName,
     submittedAt: c.approval.submittedAt,
     policyKey: c.approval.policyKey,
+    requestNote: c.approval.requestNote,
     policyLabel: c.policyLabel,
     decision: c.approval.decision,
     notes: c.approval.notes,
@@ -623,11 +725,43 @@ function toReviewWire(c: WorkItemCheck): z.infer<typeof WorkItemReviewSchema> {
   };
 }
 
+function toNoteWire(n: WorkItemNote): z.infer<typeof WorkItemNoteSchema> {
+  return {
+    id: n.id,
+    workItemId: n.workItemId,
+    authorUserId: n.authorUserId,
+    authorName: n.authorName,
+    body: n.body,
+    createdAt: n.createdAt,
+  };
+}
+
+function toLinkableWire(f: LinkableFiling): z.infer<typeof LinkableFilingSchema> {
+  return {
+    obligationId: f.obligationId,
+    name: f.name,
+    periodLabel: f.periodLabel,
+    statutoryDueOn: f.statutoryDueOn,
+    entityName: f.entityName,
+    stateName: f.stateName,
+    filedOn: f.filedOn,
+  };
+}
+
+function filingWire(r: {
+  readonly linked: LinkableFiling | null;
+  readonly open: readonly LinkableFiling[];
+}): z.infer<typeof TaskFilingResponse> {
+  return { linked: r.linked === null ? null : toLinkableWire(r.linked), open: r.open.map(toLinkableWire) };
+}
+
 function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRowSchema> {
   return {
     ...toReviewWire(c),
     viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason },
     clientPartyId: c.clientPartyId,
+    entityPartyId: c.entityPartyId,
+    entityName: c.entityName,
     dueOn: c.dueOn,
   };
 }
@@ -742,8 +876,8 @@ const moveStateRoute = createRoute({
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item, or no such state at this firm"),
     409: errorResponse(
-      "It is already in that state, the state has been retired, or it is still waiting on " +
-        "unfinished work",
+      "It is already in that state, the state has been retired, it is still waiting on " +
+        "unfinished work, or (into a finished-and-done state) a checklist line is unticked",
     ),
   },
 });
@@ -860,6 +994,81 @@ const removeDependencyRoute = createRoute({
   },
 });
 
+const addNoteRoute = createRoute({
+  method: "post",
+  path: "/api/v1/work-items/{workItemId}/notes",
+  tags: ["work"],
+  summary: "Write a note on a task",
+  description:
+    "Append-only (0330): a correction is a second note. The ledger records that a note was " +
+    "written and never what it says.",
+  request: {
+    params: WorkItemParam,
+    body: { content: { "application/json": { schema: AddNoteRequest } }, required: true },
+  },
+  responses: {
+    201: { description: "Written", content: { "application/json": { schema: WorkItemNoteSchema } } },
+    400: errorResponse("A blank note, or one over 2,000 characters"),
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item at this firm"),
+  },
+});
+
+const taskFilingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "The filing this task files, and the ones it could",
+  request: { params: WorkItemParam },
+  responses: {
+    200: { description: "The filing link", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read work"),
+    404: errorResponse("No such work item at this firm"),
+  },
+});
+
+const linkFilingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "Make this task the one that files a filing",
+  description:
+    "Audit 2026-10-03, CA#36. Writes the task into the column the calendar's own raised task " +
+    "uses, so completing it marks the filing filed and the calendar raises no second task. A " +
+    "task already finished files it at once. Refused (409) for another company's filing, one " +
+    "already filed, taken off the calendar, decided after a missed deadline, or with a task of " +
+    "its own, and when the task already files a different filing.",
+  request: {
+    params: WorkItemParam,
+    body: { content: { "application/json": { schema: LinkFilingRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Linked", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item or filing at this firm"),
+    409: errorResponse("The filing cannot be linked to this task; the message says why"),
+  },
+});
+
+const unlinkFilingRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "Take this task off the filing it files",
+  description: "Only while the filing is not filed. The calendar raises its own task when it is due.",
+  request: { params: WorkItemParam },
+  responses: {
+    200: { description: "Unlinked", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item at this firm"),
+    409: errorResponse("The filing is already filed by this task"),
+  },
+});
+
 const requestReviewRoute = createRoute({
   method: "post",
   path: "/api/v1/work-items/{workItemId}/review",
@@ -868,9 +1077,11 @@ const requestReviewRoute = createRoute({
   description:
     "The MAKER is not a parameter and cannot be: the database derives it from the item's " +
     "assignee and freezes it, because a maker the caller could choose is not a maker-checker " +
-    "control. The state is deliberately not moved to 'Under Review' — there is no flag " +
-    "saying which of the firm's states means that, and comparing the name is the one thing " +
-    "this module never does.",
+    "control. The item moves into the firm's 'with a checker' state when the firm has " +
+    "flagged one (0073); without one, a task still in its starting state moves to the firm's " +
+    "working state (F28). Refused while a checklist line is unticked (CHECKLIST_OPEN): " +
+    "sending work to be checked says it is done, as a process step's Done waits for its " +
+    "sub-steps.",
   request: {
     params: WorkItemParam,
     body: { content: { "application/json": { schema: RequestReviewRequest } }, required: true },
@@ -880,10 +1091,28 @@ const requestReviewRoute = createRoute({
       description: "Waiting to be checked",
       content: { "application/json": { schema: WorkItemReviewSchema } },
     },
+    400: errorResponse("No rule named, and the firm has more than one in force (REVIEW_RULE_NEEDED)"),
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    403: errorResponse(
+      "The session has not selected an org, the role may not write work, or the rule named is not in force",
+    ),
     404: errorResponse("No such work item at this firm"),
-    409: errorResponse("A review is already open on it"),
+    409: errorResponse("A review is already open on it, or a checklist line is unticked"),
+  },
+});
+
+const reviewRulesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/review-rules",
+  tags: ["work"],
+  summary: "The firm's rules for who checks work, as a task's sender picks from them",
+  description:
+    "Labels and keys only, on `party:read`: whoever sends a task to be checked sees which " +
+    "rule it will be checked under. The rules themselves are written on Who checks work.",
+  responses: {
+    200: { description: "The rules", content: { "application/json": { schema: ReviewRulesResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read work"),
   },
 });
 
@@ -913,6 +1142,12 @@ const decideReviewRoute = createRoute({
   path: "/api/v1/work-item-checks/{approvalId}/decide",
   tags: ["work"],
   summary: "Approve a work item, or send it back",
+  description:
+    "Approving FINISHES the task: it moves to the firm's finished-and-done state (terminal " +
+    "and a success), which stamps the completion and tells the compliance calendar, exactly " +
+    "as moving it there by hand does. Sending it back puts a task that is in the firm's " +
+    "'with a checker' state back into its working state. A task already finished or " +
+    "cancelled is left where it is. Approve is refused while a checklist line is unticked.",
   request: {
     params: ReviewParam,
     body: { content: { "application/json": { schema: DecideReviewRequest } }, required: true },
@@ -928,7 +1163,7 @@ const decideReviewRoute = createRoute({
       "You did the work, or the firm's published rule says somebody else checks this",
     ),
     404: errorResponse("No such review at this firm"),
-    409: errorResponse("Somebody else already decided it"),
+    409: errorResponse("Somebody else already decided it, or (Approve) a checklist line is unticked"),
   },
 });
 
@@ -1191,6 +1426,7 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
         checklist: detail.checklist.map(toChecklistWire),
         dependencies: detail.dependencies.map(toDependencyWire),
         reviews: detail.reviews.map(toReviewWire),
+        notes: detail.notes.map(toNoteWire),
         openReviewViewer:
           detail.openReviewViewer === null ? null : { ...detail.openReviewViewer },
       },
@@ -1341,19 +1577,62 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     return c.body(null, 204);
   });
 
+  app.openapi(taskFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
+  app.openapi(linkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    const { obligationId } = c.req.valid("json");
+    await deps.service.linkFiling(s.tenantId, workItemId, obligationId, s.actor);
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
+  app.openapi(unlinkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    await deps.service.unlinkFiling(s.tenantId, workItemId, s.actor);
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
+  app.openapi(addNoteRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    const { body } = c.req.valid("json");
+    const note = await deps.service.addNote(
+      { tenantId: s.tenantId, workItemId, body, authorUserId: s.userId },
+      s.actor,
+    );
+    return c.json(toNoteWire(note), 201);
+  });
+
   app.openapi(requestReviewRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const { workItemId } = c.req.valid("param");
-    const { policyKey } = c.req.valid("json");
+    const { policyKey, note } = c.req.valid("json");
     const approval = await deps.service.requestReview(
-      { tenantId: s.tenantId, workItemId, policyKey },
+      { tenantId: s.tenantId, workItemId, policyKey, note },
       s.actor,
     );
     const reviews = await deps.service.detail(s.tenantId, workItemId);
     const check = reviews.reviews.find((r) => r.approval.id === approval.id);
     if (!check) throw new Error(`review ${approval.id} was not readable after opening`);
     return c.json(toReviewWire(check), 201);
+  });
+
+  app.openapi(reviewRulesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const rules = await deps.service.reviewRules(s.tenantId);
+    return c.json({ rules: rules.map((r) => ({ key: r.key, label: r.label })) }, 200);
   });
 
   app.openapi(checkersRoute, async (c) => {
@@ -1524,7 +1803,12 @@ export const workItemRoutes = {
   addDependency: addDependencyRoute,
   removeDependency: removeDependencyRoute,
   requestReview: requestReviewRoute,
+  addNote: addNoteRoute,
+  taskFiling: taskFilingRoute,
+  linkFiling: linkFilingRoute,
+  unlinkFiling: unlinkFilingRoute,
   checkers: checkersRoute,
+  reviewRules: reviewRulesRoute,
   decideReview: decideReviewRoute,
   pendingChecks: pendingChecksRoute,
   vocabulary: vocabularyRoute,

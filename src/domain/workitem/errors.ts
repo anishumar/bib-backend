@@ -53,7 +53,11 @@ export type WorkItemErrorCode =
   | "REVIEW_ALREADY_DECIDED"
   | "REVIEW_SELF_APPROVAL"
   | "REVIEW_REJECTION_NEEDS_NOTE"
-  | "REVIEWER_NOT_ELIGIBLE";
+  | "REVIEWER_NOT_ELIGIBLE"
+  | "CHECKLIST_OPEN"
+  | "REVIEW_RULE_NEEDED"
+  | "NOTE_REQUIRED"
+  | "NOTE_TOO_LONG";
 
 // ── the firm's vocabulary ──────────────────────────────────────────────────
 
@@ -402,5 +406,56 @@ export class ReviewRejectionNeedsNote extends WorkItemError {
 export class ReviewerNotEligible extends WorkItemError {
   constructor(reason: string) {
     super("REVIEWER_NOT_ELIGIBLE", reason);
+  }
+}
+
+/**
+ * A checklist line is still open (audit 2026-10-03, CA#30): the task's own
+ * gate, the way a process step's sub-steps hold Done shut (T6.15). Five lines
+ * by name and then a count, the step gate's shape. Who it is said to decides
+ * the second sentence: the doer ticks or removes a line; the CHECKER cannot,
+ * and sends it back.
+ */
+export class ChecklistOpen extends WorkItemError {
+  constructor(open: readonly string[], to: "doer" | "checker") {
+    const named = open.slice(0, 5).map((l) => `"${l}"`).join(", ");
+    const more = open.length > 5 ? ` and ${String(open.length - 5)} more` : "";
+    super(
+      "CHECKLIST_OPEN",
+      `${open.length === 1 ? "One checklist line is" : `${String(open.length)} checklist lines are`} ` +
+        `not ticked yet: ${named}${more}. ` +
+        (to === "doer"
+          ? "Tick them, or remove a line that does not apply, first."
+          : "Send it back so the person doing it can finish them."),
+    );
+  }
+}
+
+/**
+ * The firm has published more than one review rule and the sender named none
+ * (CA#27). Which of them a task raised by hand is checked under is the firm's
+ * call, so the sender picks; opening it under none would be the product
+ * lowering the firm's bar, which is the bug this replaced.
+ */
+export class ReviewRuleNeeded extends WorkItemError {
+  constructor(labels: readonly string[]) {
+    super(
+      "REVIEW_RULE_NEEDED",
+      `Your firm has more than one rule for who checks work: ${labels
+        .map((l) => `"${l}"`)
+        .join(", ")}. Pick the one this task is checked under.`,
+    );
+  }
+}
+
+export class NoteRequired extends WorkItemError {
+  constructor() {
+    super("NOTE_REQUIRED", "Write something in the note first.");
+  }
+}
+
+export class NoteTooLong extends WorkItemError {
+  constructor(max: number) {
+    super("NOTE_TOO_LONG", `A note can be at most ${String(max)} characters. Shorten it, or add a file instead.`);
   }
 }

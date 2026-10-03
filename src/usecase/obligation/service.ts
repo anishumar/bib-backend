@@ -57,6 +57,7 @@ import {
   InvalidRuleStatus,
   InvalidWindow,
   AlreadyDecided,
+  FilingNotLinkable,
   NoFiledState,
   NoInitialState,
   NoMissedState,
@@ -2290,6 +2291,131 @@ export class ObligationService {
       objectId: obligation.id,
       actor,
       payload: { workItemId, filedOn: obligation.filedOn, statutoryDueOn: obligation.statutoryDueOn },
+    });
+  }
+
+  // ── a task raised by hand files a filing (audit 2026-10-03, CA#36) ────────
+  //
+  // The roleplay firm approved "File GSTR-3B for September", an ad-hoc task,
+  // and the calendar and the client's portal still said "Pending": the task
+  // and the filing were not joined. The join exists already: it is
+  // `obligation_instance.work_item_id`, the column the calendar's own raised
+  // task is written into. Linking writes a hand-raised task there instead, so
+  // `reconcileFiling` files the filing when that task is completed (or now, if
+  // it already was), and the raise pass, which only raises where the column is
+  // empty, raises no second task for it.
+
+  /**
+   * The filing this task files, if any, and the company's open filings that
+   * have no task yet, by due date: what the task page offers to link. Open
+   * means not filed, not withdrawn and not waiting on a partner's decision
+   * about a missed deadline (that queue is decided, not linked).
+   */
+  async filingsForTask(
+    tenantId: string,
+    workItemId: string,
+    entityPartyId: string,
+  ): Promise<{ readonly linked: CalendarRow | null; readonly open: readonly CalendarRow[] }> {
+    // OPEN ones only, and the read's widest page: a company with years of
+    // filed history would push its open filings off a settled-inclusive page.
+    const rows = await this.deps.instances.calendar(tenantId, {
+      entityPartyId,
+      includeSettled: false,
+      limit: 500,
+    });
+    const open = rows
+      .filter((r) => r.entityPartyId === entityPartyId)
+      .filter((r) => r.workItemId === null && !r.isTerminal && !r.needsDecision && r.filedOn === null)
+      .sort((a, b) => a.statutoryDueOn.localeCompare(b.statutoryDueOn) || a.name.localeCompare(b.name));
+    // The linked one by its own day, settled or not: one narrow read.
+    const linkedRow = await this.deps.instances.findByWorkItem(tenantId, workItemId);
+    const linked =
+      linkedRow === null
+        ? null
+        : ((
+            await this.deps.instances.calendar(tenantId, {
+              entityPartyId: linkedRow.entityPartyId,
+              from: linkedRow.internalTargetOn,
+              to: linkedRow.internalTargetOn,
+              includeSettled: true,
+            })
+          ).find((r) => r.id === linkedRow.id) ?? null);
+    return { linked, open };
+  }
+
+  /**
+   * Make this task the one that files this filing (CA#36). The task's facts
+   * are the work-item side's to read and are handed in: which company it is
+   * for (`entityPartyId`, the task's entity or else its client) and whether it
+   * is already done. Refused, in words, when the filing is another company's,
+   * already filed, withdrawn, decided, or has a task; and when the task
+   * already files a different filing.
+   */
+  async linkWorkItem(
+    tenantId: string,
+    obligationId: string,
+    task: { readonly id: string; readonly entityPartyId: string; readonly discharged: boolean },
+    actor: Actor,
+  ): Promise<void> {
+    const o = await this.deps.instances.findById(tenantId, obligationId);
+    if (!o) throw new ObligationNotFound(obligationId);
+    if (o.workItemId === task.id) return;
+    if (o.entityPartyId !== task.entityPartyId) {
+      throw new FilingNotLinkable(
+        "This filing is another company's. A task can only file a filing of the company it is for.",
+      );
+    }
+    if (o.withdrawnAt !== null) {
+      throw new FilingNotLinkable("This filing was taken off the calendar, so there is nothing to file.");
+    }
+    if (o.filedOn !== null) throw new FilingNotLinkable("This filing is already marked filed.");
+    if (o.resolutionOptionId !== null) {
+      throw new FilingNotLinkable("A partner has already decided about this filing's missed deadline.");
+    }
+    if (o.workItemId !== null) {
+      throw new FilingNotLinkable(
+        "This filing already has its own task. Open that task from the calendar and work it there.",
+      );
+    }
+    const already = await this.deps.instances.findByWorkItem(tenantId, task.id);
+    if (already !== null) {
+      throw new FilingNotLinkable(
+        `This task already files ${already.periodLabel}. Take it off that filing first.`,
+      );
+    }
+    if (!(await this.deps.instances.attachWorkItem(tenantId, obligationId, task.id))) {
+      throw new FilingNotLinkable("This filing changed a moment ago. Reload the page and try again.");
+    }
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation.work_linked",
+      objectId: obligationId,
+      actor,
+      payload: { workItemId: task.id, statutoryDueOn: o.statutoryDueOn },
+    });
+    // Already done: the filing is filed now, by the one path that writes it.
+    if (task.discharged) await this.reconcileFiling(tenantId, task.id, true, actor);
+  }
+
+  /** Take this task off the filing it files, while that filing is not filed
+   *  (CA#36). The calendar then raises its own task when the filing is due. */
+  async unlinkWorkItem(tenantId: string, workItemId: string, actor: Actor): Promise<void> {
+    const o = await this.deps.instances.findByWorkItem(tenantId, workItemId);
+    if (o === null) return;
+    if (o.filedOn !== null) {
+      throw new FilingNotLinkable(
+        "This filing is marked filed by this task. Reopen the task first if it was not filed.",
+      );
+    }
+    if (!(await this.deps.instances.detachWorkItem(tenantId, o.id, workItemId))) {
+      throw new FilingNotLinkable("This filing changed a moment ago. Reload the page and try again.");
+    }
+    await this.deps.events.recordEvent({
+      tenantId,
+      verb: "obligation.work_unlinked",
+      objectId: o.id,
+      actor,
+      payload: { workItemId, statutoryDueOn: o.statutoryDueOn },
     });
   }
 

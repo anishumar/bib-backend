@@ -209,11 +209,33 @@ export interface WorkItemApproval {
   readonly submittedAt: string;
   readonly policyVersionId: string | null;
   readonly policyKey: string | null;
+  /** What the MAKER said when sending it (0330, CA#30). Null when nothing. */
+  readonly requestNote: string | null;
   readonly decision: ApprovalDecision;
+  /** What the CHECKER said: required on a send-back, optional on approval. */
   readonly notes: string | null;
   readonly decidedBy: string | null;
   readonly decidedAt: string | null;
 }
+
+/**
+ * One note on a task (0330, CA#30): one person's sentence at one moment.
+ * Append-only; a correction is a second note. Never in the ledger, which
+ * records only that one was written.
+ */
+export interface WorkItemNote {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly workItemId: string;
+  readonly authorUserId: string;
+  /** The author's name, joined in the read; null for an account with none. */
+  readonly authorName: string | null;
+  readonly body: string;
+  readonly createdAt: string;
+}
+
+/** A note, trimmed, is at most this long: the database's bound too. */
+export const MAX_NOTE_LENGTH = 2000;
 
 // ── Read models ────────────────────────────────────────────────────────────
 //
@@ -251,6 +273,22 @@ export interface WorkItemRecord {
   /** The items this one is still waiting on — ids and titles only, because the
    *  question a screen asks is "what is in the way", not "tell me about it". */
   readonly blockedByOpen: readonly WorkItemBlocker[];
+  /**
+   * SENT BACK AND NOT YET SENT AGAIN (audit 2026-10-03, CA#29): the latest
+   * DECIDED review was a send-back, no review is open, and the task is not
+   * finished. The checker's note, when, and by whom. Null otherwise. My day
+   * puts it on the maker's desk as "Sent back to you"; before this the
+   * roleplay's article was sent back with a note and My day said she was up
+   * to date.
+   */
+  readonly sentBack: WorkItemSentBack | null;
+}
+
+/** What a send-back said, as the maker's desk shows it (CA#29). */
+export interface WorkItemSentBack {
+  readonly notes: string | null;
+  readonly decidedAt: string;
+  readonly decidedByName: string | null;
 }
 
 /** An unfinished item that another one waits on. */
@@ -290,6 +328,11 @@ export interface WorkItemCheck {
   readonly clientName: string;
   /** The client by id, so a list can LINK it (V2.1's My day). */
   readonly clientPartyId: string;
+  /** WHICH of the client's companies the work is for, when it names one
+   *  (audit 2026-10-03, F32): a group of four files four sets of returns, and
+   *  My day printed the group on a task titled for one of its companies. */
+  readonly entityPartyId: string | null;
+  readonly entityName: string | null;
   /** The task's own due day, `YYYY-MM-DD`, or null when it has none. */
   readonly dueOn: string | null;
   /** Who made it, by name. Null when the item was unassigned — "—" is the
@@ -437,6 +480,55 @@ export function cancelledState(states: readonly WorkItemState[]): WorkItemState 
  */
 export function underReviewState(states: readonly WorkItemState[]): WorkItemState | null {
   return states.find((s) => s.isUnderReview) ?? null;
+}
+
+/**
+ * Where APPROVED work goes (audit 2026-10-03, CA#28): the firm's own state that
+ * is TERMINAL and a SUCCESS, active, first in the firm's order. The mirror of
+ * `cancelledState`, and read by the same two flags 0054 added for exactly this
+ * question ("was the work DONE, or abandoned"). Null when the firm has none:
+ * the approval still stands and the task stays where it is.
+ *
+ * Before this an approval moved nothing, on the ground that picking one of a
+ * firm's terminal states would be deciding what approval means. `isSuccess`
+ * already answers that: Completed and Cancelled are told apart by it, and an
+ * approval is not a cancellation. The roleplay's manager approved a GSTR-3B
+ * and the task went on reading "In Progress" with Send for review offered
+ * again.
+ */
+export function completedState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter((s) => s.isActive && s.isTerminal && s.isSuccess)
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
+}
+
+/**
+ * Where SENT-BACK work goes, when it is sitting in the firm's "with a checker"
+ * state (CA#28): the first active state in the firm's order that is none of
+ * the special ones. Not the starting state (somebody has started it), not a
+ * blocked one (a send-back is not a block and has no block reason to give),
+ * not terminal, not "with a checker". The product seeds "In Progress" there.
+ * Null when the firm has no such state, and the task then stays where it is.
+ */
+export function reworkState(states: readonly WorkItemState[]): WorkItemState | null {
+  return (
+    [...states]
+      .filter(
+        (s) => s.isActive && !s.isInitial && !s.isTerminal && !s.isBlocked && !s.isUnderReview,
+      )
+      .sort((a, b) => a.sortOrder - b.sortOrder)[0] ?? null
+  );
+}
+
+/** The labels of a task's checklist lines nobody has ticked, in the list's
+ *  own order: what holds Send for review and completion shut (CA#30). */
+export function openChecklistLines(lines: readonly ChecklistItem[]): readonly string[] {
+  return [...lines]
+    .filter((l) => l.doneAt === null)
+    .sort((a, b) => a.sortOrder - b.sortOrder)
+    .map((l) => l.label);
 }
 
 /**

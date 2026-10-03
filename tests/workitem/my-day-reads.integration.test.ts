@@ -16,6 +16,8 @@ import { PostgresJobRepository } from "../../src/infrastructure/postgres/job-rep
 import { PostgresWorkItemApprovalRepository } from "../../src/infrastructure/postgres/work-item-approval-repository";
 import { PostgresEscalationNoticeRepository } from "../../src/infrastructure/postgres/escalation-repository";
 import { PostgresObligationCoverage } from "../../src/infrastructure/postgres/obligation-coverage";
+import { PostgresWorkItemRepository } from "../../src/infrastructure/postgres/work-item-repository";
+import { PostgresStepApprovalRepository } from "../../src/infrastructure/postgres/step-approval-repository";
 
 const cfg = load();
 const owner = postgres(cfg.db.ownerUrl, { max: 1 });
@@ -24,6 +26,8 @@ const jobs = new PostgresJobRepository(app);
 const approvals = new PostgresWorkItemApprovalRepository(app);
 const notices = new PostgresEscalationNoticeRepository(app);
 const coverage = new PostgresObligationCoverage(app);
+const items = new PostgresWorkItemRepository(app);
+const stepChecks = new PostgresStepApprovalRepository(app);
 
 const stamp = Date.now().toString(36);
 const ref = (): string => randomUUID();
@@ -310,6 +314,8 @@ describe("the task check queue carries the task's client by id and its due day (
     `;
     const row = (await approvals.listPending(tenant)).find((c) => c.workItemId === item);
     expect(row).toMatchObject({ clientName: "Kaveri Foods", clientPartyId: client, dueOn: "2026-10-12" });
+    // And the company the work is for (audit 2026-10-03, F32).
+    expect(row).toMatchObject({ entityPartyId: entity, entityName: "Kaveri Foods Private Limited" });
   });
 });
 
@@ -324,5 +330,83 @@ describe("the escalation queue carries the task's client by id (V2.1)", () => {
     `;
     const row = (await notices.listFor(tenant, null)).find((r) => r.workItemId === item);
     expect(row).toMatchObject({ clientName: "Kaveri Foods", clientPartyId: client, dueOn: "2026-09-20" });
+  });
+});
+
+describe("sent back shows on the maker's desk (audit 2026-10-03, CA#29)", () => {
+  let ravi: string;
+
+  beforeAll(async () => {
+    const [u] = await owner<{ id: string }[]>`
+      INSERT INTO tenancy.user_account (email, display_name)
+      VALUES (${`ravi-${stamp}@myday.test`}, 'Ravi Kumar') RETURNING id
+    `;
+    if (!u) throw new Error("no checker");
+    ravi = u.id;
+  });
+
+  it("carries the latest send-back's note on the task until it is sent again", async () => {
+    const item = await task({ dueOn: "2026-10-20" });
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${item}, 'approved', NULL, ${ravi}, '2026-10-01T04:00:00Z'),
+             (${tenant}, ${item}, 'rejected', 'Two bills missing from the ITC working', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, item))?.sentBack).toEqual({
+      notes: "Two bills missing from the ITC working",
+      decidedAt: "2026-10-02T05:30:00.000Z",
+      decidedByName: "Ravi Kumar",
+    });
+
+    await owner`INSERT INTO delivery.work_item_approval (tenant_id, work_item_id) VALUES (${tenant}, ${item})`;
+    expect((await items.findRecord(tenant, item))?.sentBack).toBeNull();
+  });
+
+  it("is not said of a finished task, or of one whose latest decision was an approval", async () => {
+    const done = await task({ state: completed });
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${done}, 'rejected', 'redo', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, done))?.sentBack).toBeNull();
+
+    const approved = await task({});
+    await owner`
+      INSERT INTO delivery.work_item_approval (tenant_id, work_item_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${approved}, 'rejected', 'redo', ${ravi}, '2026-10-01T05:30:00Z'),
+             (${tenant}, ${approved}, 'approved', NULL, ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    expect((await items.findRecord(tenant, approved))?.sentBack).toBeNull();
+  });
+
+  it("names the steps whose latest check sent them back, and none with a check open", async () => {
+    const { jobId } = await septemberJob();
+    const step = async (key: string): Promise<string> => {
+      const id = ref();
+      await owner`
+        INSERT INTO delivery.job_step
+          (id, tenant_id, job_id, step_key, label, executor, status, started_at, performed_by)
+        VALUES (${id}, ${tenant}, ${jobId}, ${key}, 'Reconcile the bank', 'human', 'blocked', now(), ${asha})
+      `;
+      return id;
+    };
+    const back = await step("reconcile");
+    const again = await step("collect");
+    const neverChecked = await step("file");
+    await owner`
+      INSERT INTO delivery.step_approval (tenant_id, job_id, job_step_id, decision, notes, decided_by, decided_at)
+      VALUES (${tenant}, ${jobId}, ${back}, 'rejected', 'Bank charges not booked', ${ravi}, '2026-10-02T05:30:00Z'),
+             (${tenant}, ${jobId}, ${again}, 'rejected', 'redo', ${ravi}, '2026-10-02T05:30:00Z')
+    `;
+    await owner`INSERT INTO delivery.step_approval (tenant_id, job_id, job_step_id) VALUES (${tenant}, ${jobId}, ${again})`;
+
+    expect(await stepChecks.sentBackFor(tenant, [back, again, neverChecked])).toEqual([
+      {
+        jobStepId: back,
+        notes: "Bank charges not booked",
+        decidedAt: "2026-10-02T05:30:00.000Z",
+        decidedByName: "Ravi Kumar",
+      },
+    ]);
   });
 });

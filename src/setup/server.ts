@@ -165,6 +165,7 @@ import { PortalLibraryService } from "../usecase/portallibrary/service";
 import { ClientRequestService } from "../usecase/clientrequest/service";
 import { ClientAskService } from "../usecase/clientask/service";
 import { ChaserService } from "../usecase/chaser/service";
+import { obligationFilingPort } from "./filing-link";
 import { WorkItemService, WorkVocabularyService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { ObligationVocabularyService } from "../usecase/obligation/vocabulary";
@@ -331,10 +332,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     // first, so this closure defers the lookup to CALL time — by which point
     // `obligations` has long been assigned, since nothing calls it before a
     // request. Neither use case imports the other; only this line knows both.
-    filings: {
-      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
-        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
-    },
+    // Built once for both processes in `setup/filing-link.ts` (CA#36).
+    filings: obligationFilingPort(() => obligations),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

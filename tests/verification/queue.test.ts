@@ -456,3 +456,29 @@ describe("a rule the firm has withdrawn", () => {
     ).toEqual({ Priya: "IS_THE_MAKER", Anand: "eligible", Sidharth: "eligible" });
   });
 });
+
+describe("work sent back shows on the maker's desk (audit 2026-10-03, CA#29)", () => {
+  it("names the steps whose latest check sent them back, with the note, until they go again", async () => {
+    const w = await world();
+    // The adapter joins the decider's name; the fake is told it.
+    w.checks.names.set(ANAND, "Anand");
+    await w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "prepare" }, SYSTEM_ACTOR, PRIYA);
+    const [check] = await w.checks.listPending(TENANT);
+    if (!check) throw new Error("no check opened");
+    const stepId = (await w.steps.listForJob(TENANT, JOB)).find((s) => s.stepKey === "prepare")?.id ?? "";
+    expect(await w.service.sentBackSteps(TENANT, [stepId])).toEqual([]);
+
+    await w.service.decideCheck(
+      { tenantId: TENANT, approvalId: check.approval.id, decision: "rejected", notes: "Bank charges not booked" },
+      SYSTEM_ACTOR,
+      ANAND,
+    );
+    expect(await w.service.sentBackSteps(TENANT, [stepId])).toEqual([
+      { jobStepId: stepId, notes: "Bank charges not booked", decidedAt: "2026-08-30T09:00:00.000Z", decidedByName: "Anand" },
+    ]);
+
+    // Done again: a second check is open, and it is the checker's turn.
+    await w.service.completeStep({ tenantId: TENANT, jobId: JOB, stepKey: "prepare" }, SYSTEM_ACTOR, PRIYA);
+    expect(await w.service.sentBackSteps(TENANT, [stepId])).toEqual([]);
+  });
+});
