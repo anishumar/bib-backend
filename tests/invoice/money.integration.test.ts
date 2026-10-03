@@ -279,6 +279,57 @@ describe("the balance is arithmetic, done by the database", () => {
   });
 });
 
+describe("an invoice adds up to whole paise (B02, 0325)", () => {
+  // The audit found drafts totalling 91,354.833: tax was rounded to four places,
+  // the PDF printed two, the client paid the printed figure and 0.003 stayed
+  // "owed" for ever, so reminders, dunning and the advance escalation never
+  // stopped. Each line's net and tax are rounded to the currency's minor unit,
+  // and a total is the sum of those rounded lines.
+  it("lets a client who pays the printed total owe exactly nothing", async () => {
+    // A pro-rata bill of 27,419.35 at 18%: tax 4,935.483 unrounded.
+    const invoice = await issued("27419.35", "18");
+    const before = await service.balanceOf(tenant, invoice);
+    expect(before.invoiced).toBe("32354.8300");
+
+    const record = await service.describe(tenant, invoice);
+    expect(record.lines.map((l) => [l.net, l.tax])).toEqual([["27419.3500", "4935.4800"]]);
+    expect(record.totals.total).toBe("32354.8300");
+
+    await service.recordPayment(
+      { tenantId: tenant, invoiceId: invoice, amount: "32354.83", receivedOn: "2026-07-10", method: "bank_transfer" },
+      SYSTEM_ACTOR,
+    );
+    expect((await service.balanceOf(tenant, invoice)).outstanding).toBe("0.0000");
+    const receivables = await service.outstanding(tenant);
+    expect(receivables.map((r) => r.balance.invoiceId)).not.toContain(invoice);
+  });
+
+  it("totals the rounded lines, never a rounding of the unrounded sum", async () => {
+    // Two lines of 0.25 at 18%: 0.045 of tax each, 0.05 each once rounded, so
+    // the invoice's tax is 0.10 (the sum of what each line prints), not 0.09.
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    for (const description of ["Stamp", "Courier"]) {
+      await service.addLine({ tenantId: tenant, invoiceId: draft.id, description, quantity: "1", unitAmount: "0.25", taxPercent: "18" });
+    }
+    const totals = (await service.describe(tenant, draft.id)).totals;
+    expect([totals.net, totals.tax, totals.total]).toEqual(["0.5000", "0.1000", "0.6000"]);
+  });
+
+  it("rounds to the currency's own minor unit: none for yen", async () => {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "JPY", fxRate: "0.56", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: "Filing", quantity: "1", unitAmount: "1235", taxPercent: "10" });
+    const totals = (await service.describe(tenant, draft.id)).totals;
+    // 123.5 of tax is 124 yen; there is no such thing as half a yen on a bill.
+    expect([totals.tax, totals.total]).toEqual(["124.0000", "1359.0000"]);
+  });
+});
+
 async function lastNumber(documentType: string): Promise<number> {
   const [row] = await owner<{ last_number: number }[]>`
     SELECT last_number FROM crm.invoice_series
