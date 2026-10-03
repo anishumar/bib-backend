@@ -66,7 +66,7 @@ import {
 } from "../../src/infrastructure/postgres/obligation-instance-repository";
 import { PostgresRuleServiceLinkRepository } from "../../src/infrastructure/postgres/obligation-link-repository";
 import { ObligationService } from "../../src/usecase/obligation/service";
-import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
+import { FakeAcceptedQuotes, writeOpening } from "../../src/testfakes/engagement";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
 
 const cfg = load();
@@ -382,6 +382,7 @@ async function fullyFilledSignedLetter(): Promise<string> {
     effectiveFrom: "2026-12-01",
   });
   await service.addClause(tenantA, letter.id, scopeV1);
+  await writeOpening(documents, tenantA, letter.id);
   await service.send(tenantA, letter.id, SYSTEM_ACTOR);
   await service.sign(
     {
@@ -460,6 +461,7 @@ async function signedLetter(advance?: string, layout?: "classic"): Promise<strin
     discountPercent: "0",
   });
   await service.addClause(tenantA, letter.id, scopeV1);
+  await writeOpening(documents, tenantA, letter.id);
   await service.send(tenantA, letter.id, SYSTEM_ACTOR);
   await service.sign(
     { tenantId: tenantA, letterId: letter.id, signedByName: "Priya Menon", reference: "paper-001" },
@@ -836,6 +838,7 @@ describe("the pin", () => {
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     await service.sign(
       {
@@ -1221,6 +1224,7 @@ describe("effective dates", () => {
       effectiveFrom: "2026-12-01",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     const { engagements } = await service.sign(
       { tenantId: tenantA, letterId: letter.id, signedByName: "Priya Menon" },
@@ -1382,6 +1386,7 @@ describe("a letter's signature request, in the database (0080)", () => {
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     return letter.id;
   }
@@ -1832,6 +1837,7 @@ describe("a letter the client accepted outside bib, in the database (0317)", () 
       discountPercent: "0",
     });
     await service.addClause(tenantA, letter.id, scopeV1);
+    await writeOpening(documents, tenantA, letter.id);
     await service.send(tenantA, letter.id, SYSTEM_ACTOR);
     const [doc] = await owner<{ id: string }[]>`
       INSERT INTO files.document (tenant_id, title, origin, kind, party_id)

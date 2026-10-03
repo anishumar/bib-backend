@@ -855,6 +855,12 @@ chk "…and one for the sister company"      201 "$(code -b $J/partner.txt -XPOS
 chk "a letter with no terms cannot go out"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 chk "a UAE clause on an Indian letter"       400 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$AEV'"}')"
 chk "the right clause goes on"               204 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}')"
+# CA#2 (audit 2026-10-03): a letter whose cover page says nothing ("Dear X, /
+# Yours sincerely,") cannot go out. This firm has no standard opening, so the
+# drafter writes one on the letter, as a person at a new firm does.
+chk "a letter with no opening cannot go out" 409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
+OPENING='{"kind":"cover","body":"This letter confirms the services you have engaged us for.","sortOrder":1'
+chk "write the letter's opening"             201 "$(code -b $J/partner.txt -XPOST $API/api/v1/document-blocks -H "$H" -d "$OPENING"',"engagementLetterId":"'$EL'"}')"
 chk "now it can be sent"                     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/send -H "$H" -d "$SIGNER")"
 
 SIGNED=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-001"}')
@@ -1148,6 +1154,7 @@ BOOKV=$BKV1
 EL2=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/engagement-letters -H "$H" -d '{"partyId":"'$PID'","jurisdiction":"IN","title":"Lakeview - bookkeeping","currency":"INR","fxRate":"1","fxRateDate":"2026-08-28"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/lines -H "$H" -d '{"entityPartyId":"'$ENT1'","serviceVersionId":"'$BOOKV'","description":"Monthly bookkeeping","quantity":"12","unitAmount":"18000","discountPercent":"0"}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/clauses -H "$H" -d '{"clauseVersionId":"'$SCOPEV'"}'
+curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/document-blocks -H "$H" -d "$OPENING"',"engagementLetterId":"'$EL2'"}'
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/send -H "$H" -d "$SIGNER"
 curl -s -o /dev/null -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL2/signature -H "$H" -d '{"signedByName":"A Director","reference":"paper-002"}'
 (cd "$(dirname "$0")/.." && npm run --silent worker:once > /dev/null 2>&1)

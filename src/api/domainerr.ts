@@ -938,6 +938,7 @@ export function mapError(err: unknown): MappedError {
       case "LETTER_NOT_SIGNABLE":
       case "EMPTY_LETTER":
       case "NO_CLAUSES":
+      case "LETTER_HAS_NO_BODY":
       case "INVALID_LETTER_TRANSITION":
       case "ADVANCE_NOT_REQUIRED":
       case "ADVANCE_ALREADY_RECORDED":

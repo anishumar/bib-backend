@@ -16,6 +16,7 @@ import {
   FakeSignatureTenants,
   FakeSignedCopyFiler,
   makeEngagementFakes,
+  writeOpening,
 } from "../../src/testfakes/engagement";
 import { EnvelopeAlreadySigned, InvalidLetterTransition } from "../../src/domain/engagement/errors";
 import {
@@ -86,6 +87,7 @@ async function sent(s: Setup, withEnvelope: boolean): Promise<string> {
     discountPercent: "0",
   });
   await s.service.addClause(TENANT, letter.id, SCOPE);
+  await writeOpening(s.prose, TENANT, letter.id);
   await s.service.send(TENANT, letter.id, { type: "human", id: USER }, withEnvelope ? { signer: SIGNER } : undefined);
   return letter.id;
 }

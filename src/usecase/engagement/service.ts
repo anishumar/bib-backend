@@ -65,6 +65,7 @@ import {
   ClauseNotPublished,
   ClauseWrongJurisdiction,
   EmptyLetter,
+  LetterHasNoBody,
   InvalidAmount,
   InvalidLineAdvance,
   OneKindOfAdvance,
@@ -2269,6 +2270,16 @@ export class EngagementService {
     // `canTransition` check here would be unreachable.
     const letter = await this.editableOrThrow(tenantId, letterId);
     await this.requireCompleteTerms(tenantId, letterId);
+    // AND SOMETHING TO SAY (CA#2, audit 2026-10-03). Checked here and not in
+    // `requireCompleteTerms`, which also computes the hash a signature is
+    // verified against: a letter already out with an empty cover must still
+    // sign. Only the Annexure letter has a cover page; the classic layout is
+    // never drafted (0083).
+    if (letter.layout === "annexure") {
+      const blocks = await this.deps.documents.listBlocks(tenantId, { kind: "engagement_letter", id: letterId });
+      const says = blocks.some((b) => b.kind === "cover" && !b.isHeading && b.body.trim() !== "");
+      if (!says) throw new LetterHasNoBody();
+    }
     // THE DATE ON THE LETTER, when the drafter left it blank: the caller's
     // today, or the firm's. It was Greenwich's, which dated a letter sent at
     // 01:00 in Delhi the day before it went out. Settled before anything is

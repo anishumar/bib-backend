@@ -25,6 +25,7 @@ export type EngagementErrorCode =
   | "LETTER_NOT_SIGNABLE"
   | "EMPTY_LETTER"
   | "NO_CLAUSES"
+  | "LETTER_HAS_NO_BODY"
   | "INVALID_LETTER_TRANSITION"
   | "INVALID_JURISDICTION"
   | "CLAUSE_NOT_FOUND"
@@ -323,6 +324,24 @@ export class NoClauses extends EngagementError {
       `An engagement letter with no clauses has no terms — no scope, no liability limit, no ` +
         `termination. Signing one leaves the firm bound by whatever is read into it. Add at ` +
         `least one clause from the library first.`,
+    );
+  }
+}
+
+/**
+ * CA#2 (audit 2026-10-03): a letter whose cover page says nothing. A new firm
+ * has no standard opening, so its first letter went out as "Dear Anil
+ * Deshpande, / Yours sincerely," with nothing between. The product writes no
+ * letter prose (0083), so it refuses to send one with none and says where the
+ * words go.
+ */
+export class LetterHasNoBody extends EngagementError {
+  constructor() {
+    super(
+      "LETTER_HAS_NO_BODY",
+      `This letter has no opening text: page 1 goes from the greeting straight to "Yours ` +
+        `sincerely,". Write a few lines under Cover letter before sending it. Once the firm's ` +
+        `standard opening is set in Standard wording, every new letter starts with it.`,
     );
   }
 }

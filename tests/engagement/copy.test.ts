@@ -4,7 +4,7 @@
 // letter and terms, and the withdrawn letter stays on record as it was.
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import { LetterDeleted, LetterNotCopyable } from "../../src/domain/engagement/errors";
 
 const TENANT = "00000000-0000-0000-0000-0000000000aa";
@@ -287,6 +287,7 @@ describe("which letters can be copied", () => {
       discountPercent: "0",
     });
     await s.service.addClause(TENANT, letter.id, SCOPE_V1);
+    await writeOpening(s.prose, TENANT, letter.id);
     await s.service.send(TENANT, letter.id, ACTOR);
 
     const err = await s.service.copyAsDraft(TENANT, letter.id, ACTOR).catch((e: unknown) => e);
