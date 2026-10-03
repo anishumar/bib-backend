@@ -60,6 +60,18 @@ export const NO_PERMISSION_REQUIRED: ReadonlySet<RouteKey> = new Set([
   // able to stop somebody correcting how their name is spelt, and the route
   // takes no id, so it can reach nobody else's account.
   routeKey("PATCH", "/api/v1/tenancy/me"),
+  // Your OWN notifications and your own choices about them (0323). Every one of
+  // these is the caller's, by construction: none takes a user id, and the
+  // database's restrictive policy refuses another person's rows. A role that
+  // could stop somebody reading their own bell would be one every role holds.
+  // A portal session never reaches them: they are not in PORTAL_PATHS.
+  routeKey("GET", "/api/v1/notifications"),
+  routeKey("GET", "/api/v1/notifications/unread-count"),
+  routeKey("POST", "/api/v1/notifications/{notificationId}/read"),
+  routeKey("POST", "/api/v1/notifications/read-all"),
+  routeKey("GET", "/api/v1/notifications/preferences"),
+  routeKey("PUT", "/api/v1/notifications/preferences"),
+  routeKey("GET", "/api/v1/notifications/firm-defaults"),
   routeKey("GET", "/api/v1/portal/home"),
   // The action centre's LIST, for the same reason as the home above it, and it
   // is what makes T6.6's read-only portal role coherent: `client_viewer` holds
@@ -811,6 +823,10 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
   [routeKey("POST", "/api/v1/billing/engagements/{engagementId}/bill-now"), "party:write" as const],
   [routeKey("GET", "/api/v1/billing/settings"), "party:read" as const],
   [routeKey("PUT", "/api/v1/billing/settings"), "tenant:admin" as const],
+  // Who hears what across the firm (0323): an administrator's call, like the
+  // billing settings beside it. Reading the defaults is open to every colleague
+  // (above), because each person's own screen shows what the firm chose.
+  [routeKey("PUT", "/api/v1/notifications/firm-defaults"), "tenant:admin" as const],
 
   // THE DUNNING LADDER (T3.5). Reading how far a receivable has been chased is
   // `party:read` — the person on the phone to the client needs to know what has

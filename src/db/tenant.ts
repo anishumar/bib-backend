@@ -11,6 +11,8 @@
 //   withPortal  — a CLIENT PORTAL request: the firm, AND the companies that one
 //                 login was granted. Gate 4 (migration 0059). Narrower than
 //                 withTenant, never wider.
+//   withRecipient — one colleague's notifications (0323): the firm, AND whose
+//                 inbox. Narrower than withTenant, never wider.
 import type { Db } from "./pool";
 
 export async function withTenant<T>(
@@ -57,6 +59,30 @@ export async function withPortal<T>(
       ["app.tenant_id", tenantId],
       ["app.portal", "on"],
       ["app.portal_parties", clientPartyIds.join(",")],
+    ],
+    fn,
+  );
+}
+
+/**
+ * ONE colleague's notifications (0323): the firm, and the person whose inbox it
+ * is. `app.notify_recipient` arms the restrictive policy on
+ * `notify.notification`, so a query in here cannot see another person's rows
+ * even if it forgot its WHERE. Narrower than `withTenant`, never wider; the
+ * worker, which writes for many people, uses `withTenant` and is the only
+ * caller that should.
+ */
+export async function withRecipient<T>(
+  app: Db,
+  tenantId: string,
+  userId: string,
+  fn: (db: Db) => Promise<T>,
+): Promise<T> {
+  return runScoped(
+    app,
+    [
+      ["app.tenant_id", tenantId],
+      ["app.notify_recipient", userId],
     ],
     fn,
   );

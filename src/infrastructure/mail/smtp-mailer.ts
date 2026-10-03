@@ -30,6 +30,7 @@ import type {
 } from "../../usecase/proposal/ports";
 import type { AdvanceDigestLetter, AdvanceDigestRow, BillingMailer } from "../../usecase/billing/ports";
 import { longDay } from "../../domain/day";
+import { displayMoney } from "../../domain/money/model";
 
 /**
  * A rendered letter, ready to hand over.
@@ -596,32 +597,9 @@ function digestLine(r: AdvanceDigestRow): string {
           : r.stage === "not_raised"
             ? "no invoice yet"
             : "paid";
-  const owed = r.amount === null ? "" : `, ${digestMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
+  const owed = r.amount === null ? "" : `, ${displayMoney(r.amount, r.currency)} ${r.stage === "on_draft" || r.stage === "not_raised" ? "before tax" : "still owed"}`;
   const days = r.daysSinceSigned === 1 ? "1 day" : `${String(r.daysSinceSigned)} days`;
   return `${r.clientName}, ${r.letterRef} (${r.serviceName}): ${stage}${owed}. Signed ${days} ago.`;
-}
-
-/**
- * Money as the screens write it: rupees in lakhs ("INR 1,18,000"), every other
- * currency in its own thousands, no ".00" on a whole amount. Grouped from the
- * western string rather than asked of `en-IN`, which a Node built with small
- * ICU silently answers as en-US. Never a JavaScript number: Intl formats the
- * decimal string exactly.
- */
-function digestMoney(amount: string, currency: string): string {
-  const whole = /^-?\d+(\.0+)?$/.test(amount);
-  const western = new Intl.NumberFormat("en-US", {
-    minimumFractionDigits: whole ? 0 : 2,
-    maximumFractionDigits: whole ? 0 : 2,
-  }).format(amount as unknown as number);
-  if (currency !== "INR") return `${currency} ${western}`;
-  const negative = western.startsWith("-");
-  const [integer = "", fraction] = (negative ? western.slice(1) : western).split(".");
-  const digits = integer.replace(/,/g, "");
-  const last = digits.slice(-3);
-  const rest = digits.slice(0, -3);
-  const pairs = rest.length === 0 ? [] : (rest.match(/(\d{1,2})(?=(\d{2})*$)/g) ?? []);
-  return `INR ${negative ? "-" : ""}${[...pairs, last].join(",")}${fraction === undefined ? "" : `.${fraction}`}`;
 }
 
 /**

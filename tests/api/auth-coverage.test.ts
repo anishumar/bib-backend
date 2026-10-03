@@ -19,6 +19,8 @@
 // any future plain-Hono route would have been. The middleware guards still
 // covered them, but a test that claims "every route is accounted for" must be
 // able to SEE every route.
+import { NotificationService } from "../../src/usecase/notify/service";
+import { FakeNotificationInbox, FakeNotificationSettings } from "../../src/testfakes/notify";
 import { ReadinessService } from "../../src/usecase/readiness/service";
 import { FakeReadinessFacts } from "../../src/testfakes/readiness";
 import { FakeClock } from "../../src/testfakes/clock";
@@ -634,6 +636,14 @@ function deps(): RouterDeps {
         renderSource: new FakeRenderSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+      }),
+    },
+    notifications: {
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+      service: new NotificationService({
+        inbox: new FakeNotificationInbox(),
+        settings: new FakeNotificationSettings(),
+        events: new RecordingEventSink(),
       }),
     },
     billing: {

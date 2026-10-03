@@ -36,6 +36,7 @@ import { DocumentError } from "../domain/document/errors";
 import { BillingError } from "../domain/billing/errors";
 import { FileStoreError } from "../domain/filestore/errors";
 import { RenderError } from "../domain/render/errors";
+import { NotifyError } from "../domain/notify/errors";
 
 /** The closed set, as a runtime value so the OpenAPI error schema and the
  *  ErrorCode type derive from ONE source and cannot drift apart. */
@@ -1041,6 +1042,20 @@ export function mapError(err: unknown): MappedError {
       case "ADVANCE_LINK_NEEDS_ADMIN":
       case "PRICE_NOT_VISIBLE":
         return { status: 403, code: "FORBIDDEN", message: err.message, reason: err.code };
+      default:
+        return unmapped(err.code);
+    }
+  }
+  if (err instanceof NotifyError) {
+    switch (err.code) {
+      case "NOTIFICATION_SETTINGS_EMPTY":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // Not yours, not this firm's, or not there: one answer, so a guessed id
+      // tells the caller nothing about whose it is.
+      case "NOTIFICATION_NOT_FOUND":
+        return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
+      case "NOTIFICATION_LOCKED":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
     }

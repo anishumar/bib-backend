@@ -3,6 +3,8 @@
 //   1. the spec is generated from the routes (single source of truth),
 //   2. a validation failure returns the SAME envelope as every other error,
 //   3. the principal gate still answers 401 with that envelope.
+import { NotificationService } from "../../src/usecase/notify/service";
+import { FakeNotificationInbox, FakeNotificationSettings } from "../../src/testfakes/notify";
 import { ReadinessService } from "../../src/usecase/readiness/service";
 import { FakeReadinessFacts } from "../../src/testfakes/readiness";
 import { FakeClock } from "../../src/testfakes/clock";
@@ -564,6 +566,14 @@ function deps(): RouterDeps {
         renderSource: new FakeRenderSource(),
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
+      }),
+    },
+    notifications: {
+      authz: new AuthzService({ permissions }),
+      service: new NotificationService({
+        inbox: new FakeNotificationInbox(),
+        settings: new FakeNotificationSettings(),
+        events: new RecordingEventSink(),
       }),
     },
     billing: {
