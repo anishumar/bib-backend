@@ -540,10 +540,11 @@ describe("the welcome link — pushed, not pulled (0072)", () => {
     expect(await h.service.resolveSession(result.token)).not.toBeNull();
   });
 
-  it("points at the SIGN-IN page, not at a password form", async () => {
-    // Staff have no password to set — no product route sets one — so a link to
-    // `/portal/accept-invite` would land a colleague on a page whose only
-    // action is impossible for them.
+  it("points a colleague who HAS a password at the SIGN-IN page, never the portal's form", async () => {
+    // A link to `/portal/accept-invite` would land a colleague on a page whose
+    // only action is impossible for them. One with no password goes to
+    // `/auth/welcome` instead, where the first one is chosen (CA#38, see
+    // password.test.ts); this seeded colleague has one.
     const userId = await seedUser(h);
     await h.service.welcomeStaff(userId, "10x Global");
     expect(h.mailer.welcomes[0]?.url).toContain("/auth/magic-link?token=");
@@ -643,9 +644,12 @@ describe("per-account throttling", () => {
         h.service.login("priya@harbourpoint.in", `guess-${String(i)}`, GUESSER),
       ).rejects.toBeInstanceOf(InvalidCredentials);
     }
-    await expect(
-      h.service.login("priya@harbourpoint.in", "guess-again", GUESSER),
-    ).rejects.toBeInstanceOf(TooManyAttempts);
+    const refused = h.service.login("priya@harbourpoint.in", "guess-again", GUESSER);
+    await expect(refused).rejects.toBeInstanceOf(TooManyAttempts);
+    // In words a person reads, not "retry in 3582s".
+    await expect(refused).rejects.toThrow(
+      /^Too many sign-in attempts for this account\. Try again in (\d+ (seconds|minutes)|an hour|\d+ hours)\.$/,
+    );
   });
 
   it("CANNOT be aimed at somebody — a stranger's guesses do not lock the owner out", async () => {
@@ -895,6 +899,16 @@ describe("inviting an address that ALREADY has a login", () => {
     expect(h.mailer.invites).toHaveLength(1);
     expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
   });
+
+  it("carries the firm's name to the password page, which has no session to ask (CA#55)", async () => {
+    // Display only: the token is what authorises, and a link whose name was
+    // edited carries a token that is no good for anything.
+    const user = await h.users.create({ id: uuidFor("user:anil@deccanagro.in"), email: "anil@deccanagro.in" });
+    await h.service.invitePortalContact(user.id, "Sharma Mehta & Co");
+    const url = new URL(h.mailer.invites[0]?.url ?? "");
+    expect(url.searchParams.get("firm")).toBe("Sharma Mehta & Co");
+    expect(url.searchParams.get("token")).not.toBeNull();
+  });
 });
 
 
@@ -931,6 +945,7 @@ describe("re-sending a portal invitation (T7.0b)", () => {
     // The password page, not the sign-in one: a contact with no password who
     // followed a `/auth/magic-link` would open a session and still have none.
     expect(h.mailer.invites[0]?.url).toContain("/portal/accept-invite?token=");
+    expect(new URL(h.mailer.invites[0]?.url ?? "").searchParams.get("firm")).toBe("10x Global");
     expect(out.expiresAt).toBe(h.mailer.invites[0]?.expiresAt);
     // And it is not the sign-in letter wearing a different subject.
     expect(h.mailer.sent).toHaveLength(0);

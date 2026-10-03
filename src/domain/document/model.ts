@@ -6,6 +6,8 @@
 // a table or a clock: given a number it formats a reference, and given the
 // firm's preference rows it names an entity. Both halves are decisions, and a
 // decision is the thing worth testing without infrastructure.
+import { isCountryCode } from "../country";
+
 /**
  * The two documents that carry a reference and an issuing entity. These string
  * literals are also the values in the `document_type` CHECK on
@@ -260,8 +262,10 @@ export function normalizeJurisdiction(raw: string): string {
   return raw.trim().toUpperCase();
 }
 
+/** Two capital letters AND a country ISO assigns today (F04): a retired code
+ *  such as DD, or UK for GB, is matched by no rule and is refused. */
 export function isJurisdiction(v: string): boolean {
-  return JURISDICTION_PATTERN.test(v);
+  return JURISDICTION_PATTERN.test(v) && isCountryCode(v);
 }
 
 /**

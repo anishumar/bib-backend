@@ -1,4 +1,5 @@
 import type { LeadDeletionBlock } from "./model";
+import { countryCodeProblem } from "../country";
 
 // Sentinel errors — the closed vocabulary of ways lead capture and pipeline
 // movement fail. Owned here in the domain; the api layer maps them to HTTP
@@ -28,6 +29,7 @@ export type LeadErrorCode =
   | "BLANK_TITLE"
   | "INVALID_LEAD_JURISDICTION"
   | "INVALID_ESTIMATED_VALUE"
+  | "INVALID_LEAD_CONTACT"
   | "PARTY_ARCHIVED"
   | "CLIENT_IS_OWN_COMPANY"
   | "NOT_CALLERS_TODAY"
@@ -35,6 +37,24 @@ export type LeadErrorCode =
   | "LEAD_CONVERTED"
   | "CLOSED_LEAD_NEEDS_ADMIN"
   | "LEAD_HAS_PROPOSALS";
+
+/**
+ * The contact person named at capture cannot be recorded as given (CA#20): a
+ * contact is somebody AT a company, in one of the roles a letter may be
+ * addressed to, and has a name.
+ */
+export class InvalidLeadContact extends LeadError {
+  constructor(problem: "for_person" | "no_name" | "role", given?: string) {
+    super(
+      "INVALID_LEAD_CONTACT",
+      problem === "for_person"
+        ? "A contact person is for a company. For a person, their own email and phone are theirs: leave the contact out."
+        : problem === "no_name"
+          ? "Give the contact person's name, or leave the contact out."
+          : `${JSON.stringify(given ?? "")} is not a contact's role. Choose director, authorised signatory, employee or shareholder.`,
+    );
+  }
+}
 
 /** `asOf` is the caller's TODAY, not a date to choose (see `isCallersToday`). */
 export class LeadNotCallersToday extends LeadError {
@@ -110,11 +130,11 @@ export class AmbiguousMatch extends LeadError {
   constructor(partyIds: readonly string[]) {
     super(
       "AMBIGUOUS_MATCH",
-      `These contact details already belong to ${String(partyIds.length)} different parties ` +
-        `(${partyIds.join(", ")}), so there is no single prospect to attach this lead to. ` +
-        `That means the firm's records already hold the same counterparty twice — merging those ` +
-        `parties is a decision with consequences for everything attached to them, so it is not ` +
-        `made here on a guess. Resolve the duplicate, then capture the lead.`,
+      // In words (CA#39): it listed the parties' ids, which mean nothing to
+      // the person at the form.
+      `These details are already recorded on ${String(partyIds.length)} different clients or ` +
+        `contacts, so this lead cannot be attached to just one. Check the client list for the ` +
+        `same client entered twice, then capture the lead again.`,
     );
   }
 }
@@ -201,9 +221,8 @@ export class InvalidLeadJurisdiction extends LeadError {
   constructor(given: string) {
     super(
       "INVALID_LEAD_JURISDICTION",
-      `${JSON.stringify(given)} is not a jurisdiction. Give an ISO 3166-1 alpha-2 code in ` +
-        `upper case ("IN", "AE", "US"), or leave it out — an unknown country is a real answer ` +
-        `and the assignment rotation covers it.`,
+      // In words (F04). Leaving the country out stays a real answer.
+      countryCodeProblem(given),
     );
   }
 }

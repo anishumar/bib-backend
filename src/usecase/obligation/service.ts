@@ -113,6 +113,7 @@ import type {
 } from "./ports.js";
 import type { FirmTimeZone } from "./ports.js";
 import { dayInZone } from "../../domain/scheduler/zone.js";
+import { isCountryCode } from "../../domain/country";
 
 const SYSTEM_ACTOR: Actor = { type: "system", id: null };
 
@@ -744,7 +745,7 @@ export class ObligationService {
   ): Promise<{ readonly rule: ObligationTemplate; readonly effect: RuleEffect }> {
     const name = input.name.trim();
     if (name.length === 0) throw new TemplateNameRequired();
-    if (!/^[A-Z]{2}$/.test(input.jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
+    if (!isCountryCode(input.jurisdiction)) throw new InvalidJurisdiction(input.jurisdiction);
     if (!isObligationRecurrence(input.recurrence)) throw new InvalidRecurrence(input.recurrence);
     if (!Number.isInteger(input.fiscalYearStartMonth) ||
         input.fiscalYearStartMonth < 1 || input.fiscalYearStartMonth > 12) {

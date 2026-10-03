@@ -24,7 +24,7 @@ import { isJurisdiction } from "../../domain/document/model";
 import type { TerritoryRule } from "../../domain/lead/model";
 import type { EventSink } from "../ledger/ports";
 import type { IdentifierType, PartyKind } from "../../domain/party/model";
-import { isValidIdentifier, normalizeIdentifier } from "../../domain/party/model";
+import { CONTACT_ROLES, isValidIdentifier, normalizeIdentifier } from "../../domain/party/model";
 import { InvalidIdentifier } from "../../domain/party/errors";
 import type {
   Lead,
@@ -62,6 +62,7 @@ import {
   LostReasonRequired,
   NoContactDetail,
   InvalidLeadJurisdiction,
+  InvalidLeadContact,
   InvalidEstimatedValue,
   LeadNotCallersToday,
   LeadPartyArchived,
@@ -165,6 +166,15 @@ export interface CaptureLeadInput {
    */
   readonly ownerUserId?: string | null | undefined;
   readonly notes?: string | undefined;
+  /**
+   * The person the firm deals with AT a company prospect (CA#20), and their
+   * role there. With one named, the email and phone typed are THEIRS: they go
+   * on a person linked to the company in that role, so the director's own
+   * email is his rather than the company's (it used to be the company's, and
+   * he could then never be given it). The company keeps the PAN and GSTIN.
+   * Absent: the old shape, every detail on the prospect itself.
+   */
+  readonly contact?: { readonly name: string; readonly role: string } | undefined;
   /**
    * Where the PROSPECT is — the axis territory assignment matches on, and the
    * answer a proposal drafted from this lead needs for `clientJurisdiction`.
@@ -276,6 +286,9 @@ export interface AssignOwnerInput {
   readonly ownerUserId: string | null;
 }
 
+/** A contact person's own details, rather than the company's (CA#20). */
+const CONTACT_DETAIL_TYPES: readonly IdentifierType[] = ["email", "phone"];
+
 export class LeadService {
   constructor(private readonly deps: Deps) {}
 
@@ -299,6 +312,7 @@ export class LeadService {
     // G1.8 applies to a clause's terms: this value is COMPARED — against a
     // territory rule — and "in" is what a comparison would get.
     const jurisdiction = this.parseJurisdiction(typed.jurisdiction);
+    const contact = this.parseContact(typed.kind, typed.contact);
     // Every contact detail normalised and shape-checked BEFORE the dedup
     // lookup and before anything is written: a bad phone used to be refused
     // by the party module only after the prospect had been created. A phone
@@ -322,7 +336,11 @@ export class LeadService {
       await this.requireStaff(input.tenantId, requestedOwner);
     }
 
-    const match = await this.resolve(input.tenantId, input.identifiers);
+    const resolved =
+      contact === null
+        ? { match: await this.resolve(input.tenantId, input.identifiers), contactPartyId: null }
+        : await this.resolveWithContact(input.tenantId, input.identifiers, today);
+    const match = resolved.match;
     if (isAmbiguous(match)) throw new AmbiguousMatch(match.parties);
 
     const existingPartyId = matchedParty(match);
@@ -348,7 +366,19 @@ export class LeadService {
 
     // Only the identifiers nobody has yet. Re-adding one would be refused by
     // the party module as a duplicate, and rightly — it is the same fact.
-    const added = await this.attachNewIdentifiers(input, partyId, match, today, actor);
+    // The contact (CA#20): the person already holding one of their details,
+    // else a new one, linked to the company in the role given unless they
+    // already hold a contact's role there.
+    const contactPartyId =
+      contact === null
+        ? null
+        : (resolved.contactPartyId ??
+          (await this.deps.prospects.createPerson({ tenantId: input.tenantId, fullName: contact.name }, actor))
+            .partyId);
+    const added = await this.attachNewIdentifiers(input, partyId, match, today, actor, contactPartyId);
+    if (contact !== null && contactPartyId !== null) {
+      await this.linkContact(input.tenantId, contactPartyId, partyId, contact.role, today, actor);
+    }
 
     const open = existingPartyId === null
       ? null
@@ -403,6 +433,8 @@ export class LeadService {
           // reconstruct otherwise. The words themselves are in the response, to
           // the one person who can act on them, and nowhere else.
           titleDiscarded: discardedTitle !== null,
+          // THAT a contact person was named, never who (a name is PII).
+          contactRecorded: contact !== null,
         },
       });
       return { lead: open, merged: true, matchedExistingParty: true, discardedTitle };
@@ -459,6 +491,7 @@ export class LeadService {
         ownerAssignedBy,
         matchedExistingParty: existingPartyId !== null,
         identifierTypes: input.identifiers.map((i) => i.type),
+        contactRecorded: contact !== null,
       },
     });
     // Nothing was discarded: this capture's title is on the lead it just made.
@@ -881,6 +914,94 @@ export class LeadService {
     return { parties: [...parties], existingByIndex };
   }
 
+  /** The contact person, checked before anything is written (CA#20). */
+  private parseContact(
+    kind: PartyKind,
+    raw: CaptureLeadInput["contact"],
+  ): { readonly name: string; readonly role: string } | null {
+    if (raw === undefined) return null;
+    if (kind !== "organization") throw new InvalidLeadContact("for_person");
+    const name = raw.name.trim();
+    if (name === "") throw new InvalidLeadContact("no_name");
+    if (!(CONTACT_ROLES as readonly string[]).includes(raw.role)) {
+      throw new InvalidLeadContact("role", raw.role);
+    }
+    return { name, role: raw.role };
+  }
+
+  /**
+   * Dedup when a contact is named (CA#20). A company detail (PAN, GSTIN ...)
+   * matches the company holding it, as before. A contact's detail (email,
+   * phone) matches the PERSON holding it, who is then this capture's contact,
+   * and through them every company they hold a contact's role at: that is how
+   * a second enquiry from the same director still finds the company's open
+   * lead. A detail an older capture put on the company itself still matches
+   * the company.
+   */
+  private async resolveWithContact(
+    tenantId: string,
+    identifiers: readonly CaptureIdentifier[],
+    today: string,
+  ): Promise<{ readonly match: DedupMatch; readonly contactPartyId: string | null }> {
+    const found = await Promise.all(
+      identifiers.map((i) => this.deps.prospects.findByIdentifier(tenantId, i.type, i.value)),
+    );
+    const existingByIndex = new Map<number, string>();
+    const parties = new Set<string>();
+    const people = new Set<string>();
+    for (const [index, hit] of found.entries()) {
+      if (!hit) continue;
+      existingByIndex.set(index, hit.id);
+      const identifier = identifiers[index];
+      if (!identifier || !isDedupIdentifier(identifier.type)) continue;
+      if (!CONTACT_DETAIL_TYPES.includes(identifier.type)) {
+        parties.add(hit.partyId);
+        continue;
+      }
+      const holder = await this.deps.prospects.partyProfile(tenantId, hit.partyId, today);
+      if (holder.party.kind !== "person") {
+        parties.add(hit.partyId);
+        continue;
+      }
+      people.add(hit.partyId);
+      for (const r of holder.relationships) {
+        if (
+          r.direction === "outgoing" &&
+          r.counterparty.kind === "organization" &&
+          (CONTACT_ROLES as readonly string[]).includes(r.relationship.type)
+        ) {
+          parties.add(r.counterparty.id);
+        }
+      }
+    }
+    if (people.size > 1) throw new AmbiguousMatch([...people]);
+    return { match: { parties: [...parties], existingByIndex }, contactPartyId: [...people][0] ?? null };
+  }
+
+  /** Link the contact to the company unless they already hold a contact's
+   *  role there today. The party module records the relationship event. */
+  private async linkContact(
+    tenantId: string,
+    personPartyId: string,
+    companyPartyId: string,
+    role: string,
+    today: string,
+    actor: Actor,
+  ): Promise<void> {
+    const person = await this.deps.prospects.partyProfile(tenantId, personPartyId, today);
+    const already = person.relationships.some(
+      (r) =>
+        r.direction === "outgoing" &&
+        r.counterparty.id === companyPartyId &&
+        (CONTACT_ROLES as readonly string[]).includes(r.relationship.type),
+    );
+    if (already) return;
+    await this.deps.prospects.addRelationship(
+      { tenantId, fromPartyId: personPartyId, toPartyId: companyPartyId, type: role, validFrom: today },
+      actor,
+    );
+  }
+
   private async createProspect(input: CaptureLeadInput, actor: Actor): Promise<string> {
     if (input.kind === "organization") {
       const org = await this.deps.prospects.createOrganization(
@@ -911,6 +1032,8 @@ export class LeadService {
     match: DedupMatch,
     validFrom: string,
     actor: Actor,
+    /** With a contact named, their email and phone go on THEM (CA#20). */
+    contactPartyId: string | null = null,
   ): Promise<readonly IdentifierType[]> {
     const attached: IdentifierType[] = [];
     for (const [index, identifier] of input.identifiers.entries()) {
@@ -918,7 +1041,10 @@ export class LeadService {
       await this.deps.prospects.addIdentifier(
         {
           tenantId: input.tenantId,
-          partyId,
+          partyId:
+            contactPartyId !== null && CONTACT_DETAIL_TYPES.includes(identifier.type)
+              ? contactPartyId
+              : partyId,
           type: identifier.type,
           value: identifier.value,
           validFrom,

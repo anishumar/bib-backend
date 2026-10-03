@@ -1,4 +1,6 @@
 import type { LetterDeletionBlock } from "./model";
+import { countryCodeProblem } from "../country";
+import { amountProblem } from "../money/model";
 
 // Sentinel errors — the closed vocabulary of ways engagement letters fail.
 // Owned here in the domain; the api layer maps them to HTTP status codes.
@@ -342,9 +344,7 @@ export class InvalidJurisdiction extends EngagementError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `Jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two letters, ` +
-        `like "IN" or "AE". The letter records the jurisdiction it was WRITTEN for, which is ` +
-        `not always the client's or the firm's, so it has to be stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }
@@ -491,9 +491,10 @@ export class InvalidAmount extends EngagementError {
   constructor(field: string, value: string) {
     super(
       "INVALID_AMOUNT",
-      `${field} ${JSON.stringify(value)} must be a non-negative decimal STRING with at most ` +
-        `four decimal places — "25000", "1499.50" — never a number, because a float cannot ` +
-        `hold 1499.50 exactly.`,
+      amountProblem(`The ${field}`, value, {
+        ...(field === "discount" ? { percent: true } : {}),
+        ...(field === "exchange rate" ? { places: 10 } : {}),
+      }),
     );
   }
 }

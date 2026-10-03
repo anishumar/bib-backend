@@ -34,10 +34,12 @@ import {
   staffWelcomeExpiryFrom,
 } from "../../domain/identity/model";
 import {
+  CurrentPasswordIncorrect,
   InvalidCredentials,
   InvalidMagicLink,
   InvitationAlreadyAccepted,
   NoPasswordSet,
+  PasswordAlreadySet,
   PasswordUnchanged,
   retryIn,
   SessionInvalid,
@@ -260,6 +262,19 @@ export interface ResentInvitation {
 export interface StaffWelcome {
   readonly expiresAt: string | null;
   readonly sent: boolean;
+}
+
+/**
+ * The password page a portal invitation opens, with the firm's NAME beside the
+ * token (CA#55). That page has no session to ask whose invitation it is, and a
+ * page that only says "Choose a password" is the one thing in the invitation
+ * that does not name the firm. The name is display only: the token is what
+ * authorises, so a link whose name was edited carries a token that is good for
+ * nothing, and the page caps what it shows.
+ */
+function inviteUrl(base: string, token: string, firmName: string | null): string {
+  const firm = firmName === null || firmName.trim() === "" ? "" : `&firm=${encodeURIComponent(firmName.trim())}`;
+  return `${base}/portal/accept-invite?token=${encodeURIComponent(token)}${firm}`;
 }
 
 export class IdentityService {
@@ -611,7 +626,7 @@ export class IdentityService {
     }
     await this.deps.mailer.sendPortalInvite(
       user.email,
-      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      inviteUrl(this.deps.magicLinkBaseUrl, token, firmName),
       expiresAt,
       firmName,
       timeZone,
@@ -710,7 +725,7 @@ export class IdentityService {
     });
     await this.deps.mailer.sendPortalInvite(
       user.email,
-      `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
+      inviteUrl(this.deps.magicLinkBaseUrl, token, firmName),
       expiresAt,
       firmName,
       timeZone,
@@ -753,13 +768,32 @@ export class IdentityService {
    * The adapter has already shouted about the underlying failure; this decides
    * only what the screen says.
    */
-  async welcomeStaff(userId: string, firmName: string | null, timeZone?: string | null): Promise<StaffWelcome> {
+  async welcomeStaff(
+    userId: string,
+    firmName: string | null,
+    timeZone?: string | null,
+    /** The colleague who added them, named in the letter (CA#50). */
+    addedByUserId?: string | null,
+  ): Promise<StaffWelcome> {
     const user = await this.deps.users.findById(userId);
     // The caller has just created or found this account, so a miss is a race or
     // a deactivated login rather than a typo — and either way there is nobody to
     // write to. Not an error: the membership stands, and the admin is told the
     // letter did not go.
     if (!user || user.status !== "active") return { expiresAt: null, sent: false };
+
+    // ── THE FIRST PASSWORD IS CHOSEN ON THIS LINK (CA#38) ──────────────────
+    //
+    // An account with no password is sent to the page that chooses one, and
+    // `redeemWelcome` sets it on the same link that signs them in: holding the
+    // link is the proof of the mailbox, exactly as on a reset. An account that
+    // already has one (a second firm's welcome; identity is global) is sent to
+    // the sign-in page, and nothing about its password changes.
+    const choosePassword = (await this.deps.credentials.findByUserId(user.id)) === null;
+    const adder =
+      addedByUserId === undefined || addedByUserId === null
+        ? null
+        : await this.deps.users.findById(addedByUserId);
 
     const token = this.deps.tokens.newToken();
     const expiresAt = staffWelcomeExpiryFrom(this.deps.clock.now());
@@ -773,10 +807,11 @@ export class IdentityService {
     try {
       await this.deps.mailer.sendStaffWelcome(
         user.email,
-        `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
+        `${this.deps.magicLinkBaseUrl}/auth/${choosePassword ? "welcome" : "magic-link"}?token=${encodeURIComponent(token)}`,
         expiresAt,
         firmName,
         timeZone,
+        { addedBy: adder?.displayName ?? null, choosePassword },
       );
     } catch {
       // Deliberately empty, and REPORTED rather than hidden — see above. The
@@ -786,6 +821,42 @@ export class IdentityService {
       return { expiresAt, sent: false };
     }
     return { expiresAt, sent: true };
+  }
+
+  /**
+   * Redeem a colleague's WELCOME link by choosing their first password, and
+   * sign in, in one call (CA#38).
+   *
+   * `acceptPortalInvite`'s shape, for its reasons: the link is checked for
+   * strength before it is spent, so a password typed too short can be typed
+   * again on the same link. Only a `welcome` link, and only for an account
+   * with NO password: the welcome must never REPLACE one (accounts are global,
+   * and a second firm's welcome reaches people who already sign in), so that
+   * case is refused WITHOUT spending the link, which still signs them in at
+   * `redeemMagicLink` ("continue without changing it").
+   *
+   * Skipping the password is `redeemMagicLink` on the same link. Sign-in links
+   * stay a way in for every account, so a colleague who skips is not stuck.
+   */
+  async redeemWelcome(token: string, password: string): Promise<SignInResult> {
+    const link = await this.deps.magicLinks.findByTokenHash(this.deps.tokens.hash(token));
+    if (!link || !isUsableMagicLink(link, this.deps.clock.now(), "welcome")) {
+      throw new InvalidMagicLink();
+    }
+    const user = await this.deps.users.findById(link.userId);
+    if (!user || user.status !== "active") throw new InvalidMagicLink();
+
+    if ((await this.deps.credentials.findByUserId(user.id)) !== null) {
+      throw new PasswordAlreadySet();
+    }
+    if (!isAcceptablePassword(password)) {
+      throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);
+    }
+    const won = await this.deps.magicLinks.consume(link.id, this.deps.clock.now().toISOString());
+    if (!won) throw new InvalidMagicLink();
+
+    await this.setPassword(user.id, password);
+    return this.openSession(user);
   }
 
   /**
@@ -905,7 +976,14 @@ export class IdentityService {
       PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW,
       PASSWORD_CHANGE_WINDOW_SECONDS,
     );
-    if (!budget.allowed) throw new TooManyAttempts(budget.retryAfterSeconds);
+    if (!budget.allowed) {
+      // About THIS act. The default sentence is the sign-in page's, and
+      // nobody here was signing in.
+      throw new TooManyAttempts(
+        budget.retryAfterSeconds,
+        `Too many tries at your current password. Try again in ${retryIn(budget.retryAfterSeconds)}.`,
+      );
+    }
 
     const user = await this.deps.users.findById(userId);
     // Unreachable through the guard, which resolved a session for this id a
@@ -922,7 +1000,9 @@ export class IdentityService {
     // caller knows perfectly well which field they got wrong, and the family's
     // one word for "that is not the password" is already this.
     if (!(await this.deps.passwords.verify(currentPassword, stored.passwordHash))) {
-      throw new InvalidCredentials();
+      // Its own sentence (F26): the sign-in page's "Email or password is
+      // incorrect" sent people looking for an email box this form has not got.
+      throw new CurrentPasswordIncorrect();
     }
     if (!isAcceptablePassword(newPassword)) {
       throw new WeakPassword(MIN_PASSWORD_LENGTH, MAX_PASSWORD_LENGTH);

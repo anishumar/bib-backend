@@ -30,7 +30,7 @@ import { internalGuard, permissionGuard, sessionGuard } from "./guards";
 import type { PrincipalResolver } from "./principal";
 import type { AuthzService } from "../usecase/authz/service";
 import type { RateLimiter } from "../platform/ratelimit";
-import { rateLimit } from "./ratelimit";
+import { rateLimit, sessionRateLimit } from "./ratelimit";
 import type { RateLimitConfig } from "./ratelimit";
 import { originGuard } from "./origin";
 import { boundedStrings } from "./bounds";
@@ -368,6 +368,9 @@ export function buildRouter(
       // fails if this list falls behind them again.
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
+      // Readable by the workspace, which waits this long before asking again
+      // when the API is busy (429) instead of treating it as signed out (F15).
+      exposeHeaders: ["Retry-After"],
       maxAge: 600,
     }),
   );
@@ -447,6 +450,10 @@ export function buildRouter(
   // rather than a 400 that tells an anonymous caller about the request shape.
   app.use("/internal/*", internalGuard(opts.internalClients));
   app.use("/api/v1/*", sessionGuard(opts.principalOf));
+  // The general budget for a SIGNED-IN request is the session's, not the
+  // office's address (audit 2026-10-03, B28). Straight after the guard, so the
+  // principal it counts against is the one the guard just resolved.
+  app.use("/api/v1/*", sessionRateLimit(opts.rateLimiter, opts.rateLimit));
   // Gate 3 rides behind the session guard: by here the caller is authenticated
   // and their audience is settled, so the only question left is whether their
   // ROLE carries what this route needs.

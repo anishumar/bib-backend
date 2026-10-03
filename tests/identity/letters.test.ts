@@ -118,8 +118,45 @@ describe("the portal invite — the letter that must not read as phishing", () =
   });
 });
 
-describe("the staff welcome — unasked-for too, and it must not sell a password", () => {
+describe("the staff welcome — unasked-for too, and it hands over the first password (CA#38)", () => {
   const WELCOME = "https://app.example.com/auth/magic-link?token=abc123";
+  const CHOOSE = "https://app.example.com/auth/welcome?token=abc123";
+
+  it("asks a colleague with no password to CHOOSE one, on the link itself", () => {
+    // The roleplay's new colleague signed in from the welcome, was never asked
+    // for a password, and next week found only "Reset your BiB password" for a
+    // password they never had. The first one is chosen here, on the link that
+    // proves the mailbox.
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", CHOOSE, EXPIRES, "10x Global", null, {
+      choosePassword: true,
+    });
+    const letter = only(t);
+
+    expect(letter.text).toMatch(/choose (a|your) password/i);
+    expect(letter.html).toContain(">Choose your password<");
+    expect(letter.text).toContain(CHOOSE);
+    expect(letter.text).not.toMatch(/reset/i);
+  });
+
+  it("names the colleague who added them, not 'somebody there' (CA#50)", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", CHOOSE, EXPIRES, "10x Global", null, {
+      addedBy: "Rajesh Sharma",
+      choosePassword: true,
+    });
+    const letter = only(t);
+
+    expect(letter.text).toContain("Rajesh Sharma at 10x Global");
+    expect(letter.html).toContain("Rajesh Sharma");
+    expect(letter.text).not.toContain("somebody there");
+  });
+
+  it("comes from the FIRM's name, as a proposal does, and never from another firm's", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@sharmamehta.in", CHOOSE, EXPIRES, "Sharma Mehta & Co");
+    expect(only(t).fromName).toBe("Sharma Mehta & Co");
+  });
 
   it("names the firm in the SUBJECT, for the same reason the invite does", () => {
     const t = new Captured();
@@ -131,16 +168,15 @@ describe("the staff welcome — unasked-for too, and it must not sell a password
     expect(letter.html).toContain("10x Global");
   });
 
-  it("does NOT tell a colleague to choose a password — there is no such screen", () => {
-    // The one thing it must not copy from the portal invite. Staff sign in with
-    // the link; no product route sets a staff password, so an instruction to
-    // pick one would send somebody looking for a page that does not exist.
+  it("does NOT ask a colleague who already has a password to choose one", () => {
+    // Accounts are global: somebody added to a second firm may already have a
+    // password, and the link then only signs them in.
     const t = new Captured();
     void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", WELCOME, EXPIRES, "10x Global");
     const letter = only(t);
 
-    expect(letter.text).not.toMatch(/password/i);
-    expect(letter.html).not.toMatch(/password/i);
+    expect(letter.text).not.toMatch(/choose (a|your) password/i);
+    expect(letter.html).toContain(">Sign in<");
     expect(letter.text).toContain(WELCOME);
     expect(letter.html).toContain(WELCOME);
   });
@@ -336,6 +372,19 @@ describe("a letter from a firm says the time on the firm's clock (audit 2026-10-
   // name that zone in words; the two a person asked for themselves (sign-in,
   // password reset) belong to a global account with no one firm, and stay UTC.
   const IN_INDIA = "2 September 2026, 19:35 India Standard Time";
+
+  it("sends the portal invite and the portal welcome under the FIRM's name (CA#40)", () => {
+    const invite = new Captured();
+    void new SmtpMailer(invite).sendPortalInvite("anil@deccanagro.in", URL, EXPIRES, "Sharma Mehta & Co");
+    expect(only(invite).fromName).toBe("Sharma Mehta & Co");
+    const welcome = new Captured();
+    void new SmtpMailer(welcome).sendPortalWelcome("anil@deccanagro.in", URL, EXPIRES, "Sharma Mehta & Co");
+    expect(only(welcome).fromName).toBe("Sharma Mehta & Co");
+    // No firm resolved: the deployment's own name, rather than a blank.
+    const unnamed = new Captured();
+    void new SmtpMailer(unnamed).sendPortalInvite("anil@deccanagro.in", URL, EXPIRES, null);
+    expect(only(unnamed).fromName).toBeUndefined();
+  });
 
   it("puts the portal invite's expiry on the firm's clock", () => {
     const t = new Captured();

@@ -8,6 +8,7 @@ import {
   InvalidDateRange,
   InvalidIdentifier,
   InvalidRelationshipType,
+  RelationshipDoesNotFit,
   NotAnOrganization,
   PartyAlreadyArchived,
   PartyHasReferences,
@@ -131,6 +132,22 @@ describe("addIdentifier", () => {
     ).rejects.toBeInstanceOf(DuplicateIdentifier);
   });
 
+  it("says, in words, WHO already has it (CA#20, CA#39)", async () => {
+    // It said "Identifier email ... already exists for this tenant": a word no
+    // CA firm uses, and no clue where the email had gone.
+    const { service, partyId } = await withOrg();
+    await service.addIdentifier({ tenantId: TENANT, partyId, type: "email", value: "anil@deccan.in", validFrom: "2020-04-01" }, ACTOR);
+    const person = await service.createPerson({ tenantId: TENANT, fullName: "Anil Deshpande" }, ACTOR);
+    const refused = service.addIdentifier(
+      { tenantId: TENANT, partyId: person.partyId, type: "email", value: "Anil@Deccan.in", validFrom: "2021-04-01" },
+      ACTOR,
+    );
+    await expect(refused).rejects.toBeInstanceOf(DuplicateIdentifier);
+    await expect(refused).rejects.toThrow(
+      'The email anil@deccan.in is already recorded on Acme. An email, phone or registration number can be on one client or contact at a time.',
+    );
+  });
+
   it("rejects an inverted date range", async () => {
     const { service, partyId } = await withOrg();
     await expect(
@@ -193,6 +210,26 @@ describe("addRelationship", () => {
     await expect(
       service.addRelationship({ tenantId: TENANT, fromPartyId: personId, toPartyId: orgId, type: "wizard_of", validFrom: "2021-04-01" }, ACTOR),
     ).rejects.toBeInstanceOf(InvalidRelationshipType);
+  });
+
+  it("refuses a relationship that cannot be true of these two kinds of party (CA#53)", async () => {
+    // The screen offered every type both ways round, so "Acme is a director
+    // of Priya Menon" could be recorded. Only the plainly impossible is
+    // refused: a company may still be a director where a country allows it.
+    const { service, orgId, personId } = await twoParties();
+    const refuse = (fromPartyId: string, toPartyId: string, type: string) =>
+      expect(
+        service.addRelationship({ tenantId: TENANT, fromPartyId, toPartyId, type, validFrom: "2021-04-01" }, ACTOR),
+      ).rejects.toBeInstanceOf(RelationshipDoesNotFit);
+    await refuse(orgId, personId, "director_of");
+    await refuse(orgId, personId, "shareholder_of");
+    await refuse(orgId, personId, "employee_of");
+    await refuse(orgId, personId, "authorised_signatory_of");
+    await refuse(personId, orgId, "parent_of");
+    const other = await service.createOrganization({ tenantId: TENANT, legalName: "Acme Holdings" }, ACTOR);
+    await expect(
+      service.addRelationship({ tenantId: TENANT, fromPartyId: other.partyId, toPartyId: orgId, type: "director_of", validFrom: "2021-04-01" }, ACTOR),
+    ).resolves.toBeDefined();
   });
 
   it("rejects a relationship whose party is missing", async () => {

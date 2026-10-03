@@ -251,3 +251,26 @@ export function isIsoDate(s: string): boolean {
   // passed the shape and reached Postgres as an unmapped 22008, a 500.
   return isCalendarDay(s);
 }
+
+/**
+ * Whether a relationship can be true of these two kinds of party, this way
+ * round (CA#53). Only the plainly impossible is refused: nobody is a director
+ * or a shareholder OF a person, only a person is somebody's employee or
+ * authorised signatory, and a parent and its subsidiary are both companies. A
+ * company as a director stays allowed, because some countries allow it. A code
+ * this table does not know (the product's list is open) fits either way.
+ */
+export function relationshipFits(type: string, fromKind: PartyKind, toKind: PartyKind): boolean {
+  switch (type) {
+    case "director_of":
+    case "shareholder_of":
+      return toKind === "organization";
+    case "employee_of":
+    case "authorised_signatory_of":
+      return fromKind === "person";
+    case "parent_of":
+      return fromKind === "organization" && toKind === "organization";
+    default:
+      return true;
+  }
+}

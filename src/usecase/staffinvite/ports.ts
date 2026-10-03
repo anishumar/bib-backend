@@ -21,6 +21,9 @@ export interface StaffWelcomeIdentity {
     firmName: string | null,
     /** The firm's zone, for the expiry in the letter (CA#50). */
     timeZone?: string | null,
+    /** Who is adding them, named in the letter (CA#50). Null for a system
+     *  actor (provisioning), which has no name to give. */
+    addedByUserId?: string | null,
   ): Promise<{ readonly expiresAt: string | null; readonly sent: boolean }>;
 }
 

@@ -679,6 +679,7 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_IDENTIFIER":
       case "INVALID_IDENTIFIER_TYPE":
       case "INVALID_RELATIONSHIP_TYPE":
+      case "RELATIONSHIP_DOES_NOT_FIT":
       case "INVALID_DATE_RANGE":
       case "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN":
       case "SELF_RELATIONSHIP":
@@ -701,6 +702,7 @@ export function mapError(err: unknown): MappedError {
       case "BLANK_TITLE":
       case "INVALID_LEAD_JURISDICTION":
       case "INVALID_ESTIMATED_VALUE":
+      case "INVALID_LEAD_CONTACT":
       case "NOT_CALLERS_TODAY":
       case "LOST_REASON_REQUIRED":
       case "LOST_REASON_NOT_APPLICABLE":
@@ -1226,6 +1228,14 @@ export function mapError(err: unknown): MappedError {
       // that is in the wrong state — no credential to swap — and the fix is a
       // different flow, which the message names.
       case "NO_PASSWORD_SET":
+        return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
+      // 400, not the sign-in page's 401: the session is fine, and a 401 is
+      // what a screen reads as "signed out". The value in the field is wrong.
+      case "CURRENT_PASSWORD_INCORRECT":
+        return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
+      // 409: the account is in the wrong state for this act (it already has a
+      // password), and the link that was presented still works for signing in.
+      case "PASSWORD_ALREADY_SET":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       // 404, and it only ever reaches a provisioning caller — see the error's
       // own note for why naming it is safe there. It answered 500 before, from

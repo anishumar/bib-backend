@@ -21,6 +21,7 @@ import {
   isValidDateRange,
   isValidIdentifier,
   normalizeIdentifier,
+  relationshipFits,
 } from "../../domain/party/model";
 import {
   DuplicateIdentifier,
@@ -37,6 +38,7 @@ import {
   PartyNotArchived,
   PartyNotFound,
   RelationshipAlreadyEnded,
+  RelationshipDoesNotFit,
   RelationshipEndsBeforeItBegan,
   RelationshipNotFound,
   SelfRelationship,
@@ -48,6 +50,7 @@ import type {
   RelationshipType,
   RelationshipRepository,
 } from "./ports";
+import { countryCodeProblem, isCountryCode } from "../../domain/country";
 
 export interface Deps {
   readonly parties: PartyRepository;
@@ -247,7 +250,10 @@ export class PartyService {
     }
 
     const existing = await this.deps.identifiers.findByValue(input.tenantId, input.type, value);
-    if (existing) throw new DuplicateIdentifier(input.type, value);
+    if (existing) {
+      const holder = await this.deps.parties.findParty(input.tenantId, existing.partyId);
+      throw new DuplicateIdentifier(input.type, value, holder?.displayName ?? null);
+    }
 
     const identifier = await this.deps.identifiers.add({
       id: this.deps.ids.newId(),
@@ -303,6 +309,12 @@ export class PartyService {
     if (!from) throw new PartyNotFound(input.fromPartyId);
     if (!to) throw new PartyNotFound(input.toPartyId);
     if (!typeOk) throw new InvalidRelationshipType(input.type);
+    if (!relationshipFits(input.type, from.kind, to.kind)) {
+      const label =
+        (await this.deps.relationships.listRelationshipTypes()).find((t) => t.code === input.type)?.label ??
+        input.type;
+      throw new RelationshipDoesNotFit(from.displayName, from.kind, label, to.displayName, to.kind);
+    }
 
     const relationship = await this.deps.relationships.add({
       id: this.deps.ids.newId(),
@@ -601,8 +613,8 @@ export class PartyService {
     const [current] = await this.deps.parties.listLegalEntities(input.tenantId, input.partyId);
     if (!current) throw new NotALegalEntity();
     const jurisdiction = input.jurisdiction?.trim().toUpperCase();
-    if (jurisdiction !== undefined && !/^[A-Z]{2}$/.test(jurisdiction)) {
-      throw new InvalidPartyDetails("Give the country as its two-letter code, e.g. IN or AE.");
+    if (jurisdiction !== undefined && !isCountryCode(jurisdiction)) {
+      throw new InvalidPartyDetails(countryCodeProblem(jurisdiction));
     }
     const entityType = input.entityType?.trim();
     if (entityType !== undefined && entityType === "") {

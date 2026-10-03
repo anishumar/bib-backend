@@ -31,6 +31,8 @@ export type IdentityErrorCode =
   | "INVITATION_ALREADY_ACCEPTED"
   | "PASSWORD_UNCHANGED"
   | "NO_PASSWORD_SET"
+  | "CURRENT_PASSWORD_INCORRECT"
+  | "PASSWORD_ALREADY_SET"
   | "USER_NOT_FOUND";
 
 export class InvalidCredentials extends IdentityError {
@@ -99,7 +101,7 @@ export class UserDisabled extends IdentityError {
 export class TooManyAttempts extends IdentityError {
   constructor(
     readonly retryAfterSeconds: number,
-    message = `too many sign-in attempts for this account; retry in ${String(retryAfterSeconds)}s`,
+    message = `Too many sign-in attempts for this account. Try again in ${retryIn(retryAfterSeconds)}.`,
   ) {
     super("TOO_MANY_ATTEMPTS", message);
   }
@@ -167,6 +169,38 @@ export class InvitationAlreadyAccepted extends IdentityError {
  * the credential upsert's foreign key failed, nothing mapped it, and the
  * provisioning system got a 500 saying "internal error" for its own typo.
  */
+/**
+ * The CURRENT password typed on "Change your password" is not this account's.
+ *
+ * Its own sentence (audit 2026-10-03, F26). It used to be `InvalidCredentials`,
+ * whose "Email or password is incorrect" belongs to the sign-in page: this form
+ * has no email box, and the reader went looking for one. Nothing here needs to
+ * be vague: the caller is signed in and already knows which account it is.
+ */
+export class CurrentPasswordIncorrect extends IdentityError {
+  constructor() {
+    super(
+      "CURRENT_PASSWORD_INCORRECT",
+      "That is not your current password. Check it and try again.",
+    );
+  }
+}
+
+/**
+ * A welcome link was asked to set a FIRST password on an account that has one
+ * (CA#38). Accounts are global, so a welcome to a second firm can reach
+ * somebody who already signs in with a password, and the welcome must never
+ * replace it. The link is NOT spent: it still signs them in.
+ */
+export class PasswordAlreadySet extends IdentityError {
+  constructor() {
+    super(
+      "PASSWORD_ALREADY_SET",
+      "You already have a password. Sign in with it, or continue without changing it.",
+    );
+  }
+}
+
 export class UserNotFound extends IdentityError {
   constructor(userId: string) {
     super("USER_NOT_FOUND", `No user ${userId}`);

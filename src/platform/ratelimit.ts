@@ -26,6 +26,15 @@ export interface RateLimiter {
    * whether the counter moved.
    */
   check(key: string, limit: number, windowSeconds: number): Promise<RateLimitDecision>;
+  /**
+   * What `check` would answer for the next attempt, WITHOUT counting one.
+   *
+   * For a bucket that is charged only after the fact: the edge charges an
+   * address for a session credential that did not resolve, once the lookup has
+   * failed, and must still refuse an address that has spent its budget BEFORE
+   * paying for the next lookup (api/ratelimit.ts).
+   */
+  peek(key: string, limit: number, windowSeconds: number): Promise<RateLimitDecision>;
   /** Forget a key. Used after a successful login, so one person fat-fingering
    *  their password three times is not then locked out by their own success. */
   reset(key: string): Promise<void>;
@@ -77,6 +86,17 @@ export class InMemoryRateLimiter implements RateLimiter {
     this.hits.set(key, { at: recent, windowSeconds, blockedUntil: 0 });
     this.evictIfNeeded(now);
     return Promise.resolve({ allowed: true, retryAfterSeconds: 0 });
+  }
+
+  peek(key: string, limit: number, windowSeconds: number): Promise<RateLimitDecision> {
+    const now = this.clock.now().getTime();
+    const recent = (this.hits.get(key)?.at ?? []).filter((t) => t > now - windowSeconds * 1000);
+    if (recent.length < limit) return Promise.resolve({ allowed: true, retryAfterSeconds: 0 });
+    const blockedUntil = (recent[0] ?? now) + windowSeconds * 1000;
+    return Promise.resolve({
+      allowed: false,
+      retryAfterSeconds: Math.max(1, Math.ceil((blockedUntil - now) / 1000)),
+    });
   }
 
   reset(key: string): Promise<void> {

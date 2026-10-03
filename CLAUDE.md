@@ -1138,6 +1138,24 @@ long as the link is left alone. It names no firm, unlike the three unasked-for l
 it was asked for seconds ago and the account is GLOBAL (ADR-02) — naming one firm would say
 something false about which password is being reset.
 
+**A colleague's FIRST password is chosen on the welcome link (audit 2026-10-03, CA#38).** The
+welcome used to sign a new colleague in and stop; their only way to a password was "Email me a
+link to set one", which arrived as "Reset your BiB password" for a password they never had.
+Now `welcomeStaff` asks whether the account has a credential: with none, the letter's button is
+"Choose your password" and the link goes to `/auth/welcome`, whose form calls
+`POST /auth/magic-link/redeem` WITH a `password` (`redeemWelcome`: welcome purpose only, account
+with no password only, checked for length before the link is spent, then set + signed in in one
+call). "Skip" on that page is the same route without a password, so sign-in links stay the way
+in for anybody who skips. An account that already has a password (identity is global; a second
+firm's welcome) is sent to `/auth/magic-link` as before, and a password sent for it is refused
+`PASSWORD_ALREADY_SET` (409) WITHOUT spending the link. No new public route: the redeem route
+already proved the mailbox. The letter also names the colleague who added them (CA#50) and goes
+out under the firm's name, as the portal invite and welcome now do (CA#40, `fromName`).
+
+A wrong CURRENT password on `POST /auth/password` is `CURRENT_PASSWORD_INCORRECT` (400, "That is
+not your current password.") rather than the sign-in page's 401 "Email or password is
+incorrect" (F26): the form has no email box, and a 401 is what a screen reads as signed out.
+
 **`/auth/me` carries `hasPassword`** so the account screen offers the form that will work. It
 is the same rule the permissions list follows: most colleagues have never had a password, and
 showing all of them a change form whose only outcome is a 409 is the product discovering its
@@ -1172,6 +1190,30 @@ definition and each hash holds ~32 MB.
 The store is a port with an in-process implementation — **per-process, so behind N pods
 every limit is N times looser**. That is fine at one pod and is why the interface is async:
 Redis drops in unchanged.
+
+**The signed-in surface is counted per SESSION (audit 2026-10-03, B28 / F15 / CA#14).** Keying
+every request on the address put a whole office behind one NAT gateway in one 300-a-minute
+bucket, and the frontend read the resulting 429 on `/auth/me` as "signed out". Now:
+
+| Request | Bucket | Key |
+|---|---|---|
+| a sign-in route (`PUBLIC_PATHS`) | `auth` (10/min) | the address, as before |
+| `/api/v1/*` whose credential resolves | `general` (300/min) | `session:` + SHA-256 of the session id (`sessionRateLimit`, mounted straight after `sessionGuard`) |
+| `/api/v1/*` with no credential, or one that does not resolve | `general` | the address, charged AFTER the lookup failed; an address that has spent it is refused BEFORE the next lookup (`RateLimiter.peek`) |
+| `/internal`, `/health`, the docs | `general` | the address |
+
+The third row is what stops the session key being a way out of the limit: a credential is
+only known to be real after the lookup, so inventing a fresh cookie per request would
+otherwise buy a fresh bucket and a free lookup each time. Its cost is that an address which
+has spent its budget on bad credentials holds back everyone at it until the window clears,
+which is no worse than before. A real session's own requests never touch the address
+bucket. The numbers (`BIB_RATELIMIT_*`) did not move. Tests: `tests/api/auth-coverage.test.ts`
+"the rate limit keys a signed-in caller on the SESSION", `tests/platform/ratelimit.test.ts`
+"peeks without counting".
+
+One thing the session key does NOT bound: somebody who signs in N times holds N buckets.
+Sessions come from the sign-in routes, which stay on the address and the account budgets;
+if that ever matters, a per-USER key on the same middleware is the next step.
 
 ## The audit ledger
 
@@ -4595,3 +4637,27 @@ a partial unique index, which is what makes a duplicate capture *append* rather 
 Capture goes through `PartyService` behind the lead use case's own `ProspectDirectory` port,
 so prospects get the same validation and the same `party.created` events as any other party.
 A lead has no timeline table: its history is the ledger.
+
+## Audit 2026-10-03, the UX cluster: rules that came out of it
+
+- **A country is one of the 249 codes ISO 3166-1 assigns today** (`domain/country.ts`).
+  `isJurisdiction` (lead, territory rules, proposal and letter lines, firm companies, documents)
+  requires one, and so do filing rules, a client's registration and the import's Country and Where
+  columns. A retired or reserved code (DD, UK, SU, YU…) is refused with `countryCodeProblem()`,
+  which names what was meant ("For Germany, use DE"). Two capital letters is no longer enough: a
+  dead code is silently matched by no rule. Config bodies' `jurisdictions` arrays are NOT checked
+  against the list yet (published bodies are frozen; the screens only offer real codes).
+- **A refused amount says what is wrong with it** (`amountProblem()` in `domain/money`): "The
+  amount cannot be 0.", "The tax rate cannot be more than 100%.". The wire rule (decimal strings)
+  is unchanged; it is just not what a person is told.
+- **A lead's contact person** (`CaptureLeadInput.contact`, CA#20): with one named on a company
+  prospect, the email and phone go on a PERSON linked to the company in a contact's role, and the
+  company keeps the PAN and GSTIN. Dedup follows the person to the company through that
+  relationship, and a detail an older capture put on the company still matches the company.
+- **A relationship must be able to be true** (`relationshipFits`): nobody is a director or
+  shareholder OF a person, only a person is an employee or signatory, a parent and a subsidiary
+  are both companies. A company as a director is allowed (some countries allow it).
+- **Duplicate identifiers name the holder** ("The email x is already recorded on Acme…"), never
+  "for this tenant". The shipped rule pack's notes no longer speak as one firm; the pack KEY
+  (`in-firm-sheet@2026.08`) is unchanged because it is part of the seeding conflict key, and the
+  frontend prints it as words.

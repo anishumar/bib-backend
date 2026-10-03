@@ -31,6 +31,7 @@ import {
   normalizeIdentifier,
   type IdentifierType,
 } from "../party/model";
+import { countryCodeProblem, countryWords, entityKindWords, isCountryCode, withArticle } from "../country";
 
 // ── The column contract ──────────────────────────────────────────────────────
 //
@@ -861,8 +862,8 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
           : "has an Entity Type but no Country. A registration needs both",
       );
     }
-    if (hasCountry && !/^[A-Za-z]{2}$/.test(row.jurisdiction ?? "")) {
-      bad(`Country "${row.jurisdiction ?? ""}" is not a two-letter code`);
+    if (hasCountry && !isCountryCode((row.jurisdiction ?? "").trim().toUpperCase())) {
+      bad(`Country: ${countryCodeProblem(row.jurisdiction ?? "")}`);
     }
     const registered = hasCountry && hasType;
     const isGroupParent = namedAsGroup.has(key);
@@ -1031,7 +1032,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
         parentName !== null
           ? `a company under "${parentName}"`
           : c.registered
-            ? `a ${c.row.entityType ?? ""} in ${(c.row.jurisdiction ?? "").toUpperCase()}`
+            ? `${withArticle(entityKindWords(c.row.entityType ?? ""))} in ${countryWords(c.row.jurisdiction ?? "")}`
             : "a group, with companies under it",
     });
   }
@@ -1236,7 +1237,7 @@ export function validateImport(rows: ImportRows, snap: ImportSnapshot): ImportRe
     if (fee === null && !blocked) {
       warn("engagements", e.lineNo, name, "no Fee. The line will read 'as per the paper letter' and carry no amount");
     }
-    if (e.where !== null && !/^[A-Za-z]{2}$/.test(e.where)) bad(`Where "${e.where}" is not a two-letter country code`);
+    if (e.where !== null && !isCountryCode(e.where.trim().toUpperCase())) bad(`Where: ${countryCodeProblem(e.where)}`);
 
     if (company !== null && service !== undefined) {
       const k = `${normaliseName(company.name)}:${normaliseName(service.code)}`;

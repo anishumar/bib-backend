@@ -5,6 +5,8 @@ import type { ProposalDeletionBlock } from "./model";
 // Match with `instanceof`, never by string.
 
 import { longDay } from "../day";
+import { countryCodeProblem } from "../country";
+import { amountProblem } from "../money/model";
 
 export class ProposalError extends Error {
   constructor(
@@ -454,9 +456,7 @@ export class InvalidQuantity extends ProposalError {
   constructor(quantity: string) {
     super(
       "INVALID_QUANTITY",
-      `Quantity ${JSON.stringify(quantity)} must be a positive decimal STRING with at most four ` +
-        `decimal places — "1", "2.5". A number is refused for the same reason an amount is: a ` +
-        `float does not hold it exactly.`,
+      amountProblem("The quantity", quantity),
     );
   }
 }
@@ -465,9 +465,7 @@ export class InvalidUnitAmount extends ProposalError {
   constructor(amount: string) {
     super(
       "INVALID_UNIT_AMOUNT",
-      `Unit amount ${JSON.stringify(amount)} must be a non-negative decimal STRING with at most ` +
-        `four decimal places — "25000", "1499.50" — never a number, because a float cannot hold ` +
-        `1499.50 exactly and the error is invisible in one line and material in a total.`,
+      amountProblem("The fee", amount),
     );
   }
 }
@@ -528,8 +526,7 @@ export class InvalidLineJurisdiction extends ProposalError {
   constructor(value: string) {
     super(
       "INVALID_LINE_JURISDICTION",
-      `Line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
-        `letters, like "IN" or "AE". It is where the WORK is, stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }
@@ -550,7 +547,7 @@ export class InvalidDiscount extends ProposalError {
   constructor(percent: string) {
     super(
       "INVALID_DISCOUNT",
-      `Discount ${JSON.stringify(percent)} must be a decimal STRING between "0" and "100".`,
+      amountProblem("The discount", percent, { percent: true }),
     );
   }
 }
@@ -559,9 +556,8 @@ export class InvalidFxRate extends ProposalError {
   constructor(rate: string) {
     super(
       "INVALID_FX_RATE",
-      `Exchange rate ${JSON.stringify(rate)} must be a positive decimal STRING. Quote in the ` +
-        `firm's own currency and it is "1" — stored, not omitted, so that "did we convert this?" ` +
-        `is never a question about a missing value.`,
+      // Quote in the firm's own currency and it is "1", stored, not omitted.
+      amountProblem("The exchange rate", rate, { places: 10 }),
     );
   }
 }

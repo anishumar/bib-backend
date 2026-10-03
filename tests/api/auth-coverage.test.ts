@@ -1343,6 +1343,14 @@ describe("CORS — the frontend is a separate origin", () => {
     expect(res.headers.get("access-control-allow-credentials")).toBe("true");
   });
 
+  it("lets the browser read Retry-After, so a busy screen can wait the right time", async () => {
+    // A cross-origin script sees only the safelisted response headers unless
+    // the API exposes more. The workspace's "busy, retrying" state (F15) reads
+    // this one to know when to ask again.
+    const res = await app(STAFF_SESSION).request("/api/v1/auth/me", { headers: { Origin: ALLOWED } });
+    expect(res.headers.get("access-control-expose-headers") ?? "").toContain("Retry-After");
+  });
+
   it("does not hand credentials to an origin that is not on the list", async () => {
     // The dangerous version of CORS reflects whatever Origin arrived. Combined
     // with credentials that lets ANY site call this API as the logged-in user
@@ -1495,5 +1503,135 @@ describe("the /internal surface authorizes, not just authenticates", () => {
     // service records rather than reaching into them: covered end to end by the
     // smoke test, and by the tenancy service unit tests for the payload itself.
     expect(capabilityFor("POST", "/internal/v1/tenants")).toBe("tenant.provision");
+  });
+});
+
+describe("the rate limit keys a signed-in caller on the SESSION (F15, B28, CA#14)", () => {
+  // The edge limiter keyed every request on the client ADDRESS. A firm of
+  // forty behind one office NAT gateway then shared one 300-a-minute bucket,
+  // and a 429 on `/auth/me` signed people out. The signed-in surface is now
+  // counted per session; the anonymous surface, and every request whose
+  // credential does not resolve, are still counted per address.
+  const SESSION_A: Principal = { ...STAFF_SESSION, sessionId: "00000000-0000-4000-8000-0000000000a1" };
+  const SESSION_B: Principal = { ...STAFF_SESSION, sessionId: "00000000-0000-4000-8000-0000000000b2" };
+
+  /** A router with tiny budgets. `Bearer a` / `Bearer b` resolve to two
+   *  sessions; any other credential resolves to nobody. `lookups` counts the
+   *  session lookups, which is what an unauthenticated flood would spend. */
+  function limited(general = 3, auth = 2) {
+    const lookups = { count: 0 };
+    const router = buildRouter(deps(), silentLog, {
+      docsEnabled: true,
+      internalClients: INTERNAL_CLIENTS,
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
+      rateLimiter: new InMemoryRateLimiter(systemClock),
+      corsOrigins: ["http://localhost:3000"],
+      maxUploadBytes: 25 * 1024 * 1024,
+      hstsEnabled: false,
+      build: { commit: null, builtAt: null },
+      rateLimit: {
+        auth: { limit: auth, windowSeconds: 60 },
+        general: { limit: general, windowSeconds: 60 },
+        trustProxy: true,
+        trustedProxyHops: 1,
+      },
+      principalOf: (header) => {
+        lookups.count += 1;
+        const credential = header("authorization");
+        if (credential === "Bearer a") return Promise.resolve(SESSION_A);
+        if (credential === "Bearer b") return Promise.resolve(SESSION_B);
+        return Promise.resolve(null);
+      },
+    });
+    return { router, lookups };
+  }
+
+  const from = (address: string, credential?: string): RequestInit => ({
+    headers: {
+      "x-forwarded-for": address,
+      ...(credential === undefined ? {} : { authorization: credential }),
+    },
+  });
+
+  it("gives two people in one office a budget each", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"))).status).not.toBe(429);
+    }
+    // Under address keying the office's bucket is now spent and B is refused.
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer b"))).status).not.toBe(429);
+    }
+  });
+
+  it("still stops one session that goes over its own budget", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    const refused = await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    expect(refused.status).toBe(429);
+    expect(refused.headers.get("retry-after")).not.toBeNull();
+  });
+
+  it("follows the session, not the address it calls from", async () => {
+    // A phone moving from the office Wi-Fi to mobile data is the same caller.
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    expect((await router.request("/api/v1/auth/me", from("198.51.100.4", "Bearer a"))).status).toBe(429);
+  });
+
+  it("keeps the sign-in routes on the caller's address", async () => {
+    const { router } = limited(100, 2);
+    const login = (address: string) =>
+      router.request("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "x-forwarded-for": address, "content-type": "application/json" },
+        body: JSON.stringify({ email: "nobody@example.com", password: "not the password at all" }),
+      });
+    expect((await login("203.0.113.7")).status).not.toBe(429);
+    expect((await login("203.0.113.7")).status).not.toBe(429);
+    expect((await login("203.0.113.7")).status).toBe(429);
+    // Another address has its own.
+    expect((await login("198.51.100.4")).status).not.toBe(429);
+  });
+
+  it("counts a credential that does not resolve against the address, and stops looking it up", async () => {
+    // Without this, inventing a fresh cookie per request would be a way out of
+    // every limit: each one is a session lookup nobody counts.
+    const { router, lookups } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      expect((await router.request("/api/v1/auth/me", from("203.0.113.7", `Bearer junk-${String(i)}`))).status).toBe(401);
+    }
+    const before = lookups.count;
+    expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer junk-4"))).status).toBe(429);
+    expect(lookups.count).toBe(before);
+    // Another address is not touched by it. (The same address IS held back
+    // until its window clears, credential or not: a lookup is what is being
+    // rationed, and a credential is only known to be good after one. That is
+    // no worse than before, when every request was counted on the address, and
+    // a real session's own requests never spend this bucket.)
+    expect((await router.request("/api/v1/auth/me", from("198.51.100.4", "Bearer a"))).status).not.toBe(429);
+  });
+
+  it("never charges the office's address for a colleague whose session is real", async () => {
+    const { router } = limited(3);
+    for (let i = 0; i < 3; i += 1) {
+      await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    }
+    // A's own budget is spent; the address's is untouched, so one stale cookie
+    // in the same office still gets its plain 401 rather than a 429.
+    expect((await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer stale"))).status).toBe(401);
+  });
+
+  it("says it in words a person can act on", async () => {
+    const { router } = limited(1);
+    await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    const refused = await router.request("/api/v1/auth/me", from("203.0.113.7", "Bearer a"));
+    const body = (await refused.json()) as { error: { code: string; message: string } };
+    expect(body.error.code).toBe("RATE_LIMITED");
+    expect(body.error.message).toMatch(/^Too many requests at once\. Wait \d+ seconds? and try again\.$/);
   });
 });

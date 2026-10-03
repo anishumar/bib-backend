@@ -180,14 +180,14 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
   dayOfMonth("Income Tax", "Advance Tax", "Income Tax", "quarterly", 0, 15,
     "Tax payable for year >= Rs 10,000"),
   unresolved("Income Tax", "Corporate Income Tax Return", "Income Tax", "annual",
-    "The sheet gives the due date as depending on audit and transfer-pricing status, which " +
-      "this system does not record. Which date applies to a company with no tax audit, and " +
+    "The due date depends on audit and transfer-pricing status, which BiB does not record " +
+      "yet. Which date applies to a company with no tax audit, and " +
       "which with one?",
     "All companies"),
   unresolved("Income Tax", "Tax Audit", "Income Tax", "annual",
-    "Two things missing. The sheet's date is 'applicable statutory due date' rather than a " +
+    "Two things missing. The date is 'the applicable statutory due date' rather than a fixed " +
       "day, and applicability is a turnover threshold (Rs 1 Cr, or Rs 10 Cr where both cash " +
-      "tests are met), and nothing here stores a turnover.",
+      "tests are met), and BiB does not store a turnover yet.",
     "Business turnover > Rs 1 Cr; Rs 10 Cr where cash receipts and payments each <= 5%; " +
       "profession > Rs 50 Lakh"),
 
@@ -206,8 +206,8 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       dueMonthOffset: 1,
       dueDayOfMonth: 30,
       dueDaysAfter: null,
-      note: "March's deduction is due 30 April rather than 7 April. The firm confirmed this " +
-        "is statutory rather than their own practice.",
+      note: "March's deduction is due 30 April rather than 7 April. This is the statutory " +
+        "date, not a practice of one firm.",
     }],
   ),
   // Q1 -> 31 Jul, Q2 -> 31 Oct, Q3 -> 31 Jan, and Q4 -> 31 MAY: two months
@@ -221,15 +221,15 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       dueDayOfMonth: 31,
       dueDaysAfter: null,
       note: "The Jan-Mar statement is due 31 May, two months after its quarter rather than " +
-        "one. From the firm's own sheet: 31 Jul / 31 Oct / 31 Jan / 31 May.",
+        "one. The four dates are 31 Jul, 31 Oct, 31 Jan and 31 May.",
     }],
   ),
 
   // ── GST ──────────────────────────────────────────────────────────────────
   unresolved("GST", "GST registration", "GST", "event",
     "Triggered by crossing a turnover threshold (Rs 20 Lakh services, Rs 40 Lakh goods in " +
-      "eligible States) or by a compulsory-registration condition. Both are facts this system " +
-      "does not hold, and neither is a period.",
+      "eligible States) or by a compulsory-registration condition. Both are facts BiB does not " +
+      "hold yet, and neither is a period.",
     "Generally > Rs 20 Lakh services; goods threshold may be Rs 40 Lakh in eligible States"),
   dayOfMonth("GST", "GSTR-1", "GST", "monthly", 1, 11,
     "GST registered taxpayer filing monthly"),
@@ -240,12 +240,12 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
   dayOfMonth("GST", "GSTR-3B", "GST", "monthly", 1, 20,
     "GST registered taxpayer filing monthly"),
   unresolved("GST", "GSTR-3B (QRMP quarterly)", "GST", "quarterly",
-    "The sheet says 'applicable QRMP date', which varies by State group and by the taxpayer's " +
-      "QRMP election, neither of which this system records.",
+    "The QRMP date varies by State group and by the taxpayer's QRMP election, and BiB " +
+      "records neither yet.",
     "GST registered taxpayer under QRMP"),
   unresolved("GST", "GSTR-2B / ITC reconciliation", "GST", "monthly",
-    "The sheet's timing is 'before GSTR-3B', a deadline relative to another filing rather " +
-      "than to the period. Which day of the month does the firm want this done by?",
+    "It is due 'before GSTR-3B', a deadline relative to another filing rather than to the " +
+      "period. Which day of the month should it be done by?",
     "GST-registered entity claiming ITC"),
   unresolved("GST", "GSTR-9", "GST", "annual",
     "'Notified annual due date' is set by notification each year rather than by a standing " +
@@ -257,13 +257,13 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Taxpayers for whom the reconciliation statement is applicable"),
   unresolved("GST", "E-invoicing", "GST", "event",
     "Continuous, at invoice issuance, not a period. Applicability is PAN-level AATO >= Rs 5 " +
-      "Cr in any preceding FY, a turnover fact this system does not hold.",
+      "Cr in any preceding FY, a turnover fact BiB does not hold yet.",
     "AATO Rs 5 Cr or more in any preceding FY, subject to exemptions"),
   unresolved("GST", "E-way bill", "GST", "event",
     "Raised before each movement of goods. A transaction, not a period.",
     "Applicable movement of goods; generally consignment value > Rs 50,000"),
   unresolved("GST", "LUT for exports", "GST", "annual",
-    "'Before the relevant FY exports' is the firm's own timing rather than a statutory day. " +
+    "'Before the relevant FY exports' is a practice rather than a statutory day. " +
       "How many days before the year starts should this be raised?",
     "Eligible exporters supplying zero-rated goods/services without IGST"),
 
@@ -277,7 +277,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "carries one country code rather than a State. Which States do your clients operate in?",
     "State-specific"),
   unresolved("Payroll", "Labour Welfare Fund", "State", "half_yearly",
-    "State-specific, like Professional Tax, and the sheet gives no day.",
+    "State-specific, like Professional Tax, and no single day applies.",
     "State-specific"),
 
   // ── MCA ──────────────────────────────────────────────────────────────────
@@ -291,7 +291,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Companies"),
   unresolved("MCA", "MGT-7 / MGT-7A", "MCA", "annual",
     "Also measured from the AGM date, and which of the two forms applies depends on company " +
-      "size, a threshold this system cannot test.",
+      "size, a threshold BiB cannot test yet.",
     "Applicable companies; form depends on status/size"),
   unresolved("MCA", "Small Company classification", "MCA", "annual",
     "An assessment rather than a filing, decided on paid-up capital and turnover thresholds " +
@@ -302,12 +302,12 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
   dayOfMonth("MCA", "DPT-3", "MCA", "annual", 3, 30,
     "Reportable deposits / specified outstanding amounts"),
   unresolved("MCA", "MSME-1", "MCA", "half_yearly",
-    "The sheet says 'applicable half-yearly deadlines' without naming them. Half-yearly is " +
-      "recorded; the two dates are not, and this file does not invent a statutory date the " +
-      "firm did not state.",
+    "The law says 'applicable half-yearly deadlines' without a day in the rule. Half-yearly is " +
+      "recorded; the two dates are not, and BiB does not invent a statutory date that " +
+      "has not been confirmed.",
     "Qualifying outstanding dues to micro/small enterprises"),
   unresolved("MCA", "BEN-2 / SBO", "MCA", "event",
-    "Triggered by a significant-beneficial-ownership change. An event, and nothing here sees " +
+    "Triggered by a significant-beneficial-ownership change. An event, and BiB does not see " +
       "the cap table.",
     "Significant beneficial ownership trigger"),
   unresolved("MCA", "DIR-12", "MCA", "event",
@@ -331,10 +331,10 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Net worth >= Rs 500 Cr OR turnover >= Rs 1,000 Cr OR net profit >= Rs 5 Cr in the " +
       "immediately preceding FY"),
   unresolved("MCA", "Internal Audit", "MCA", "annual",
-    "Applies by company class and prescribed financial thresholds; the sheet gives no day.",
+    "Applies by company class and prescribed financial thresholds; no single day applies.",
     "Depends on company class and prescribed financial thresholds"),
   unresolved("MCA", "Secretarial Audit", "MCA", "annual",
-    "Applies on listed status and financial thresholds; the sheet gives no day.",
+    "Applies on listed status and financial thresholds; no single day applies.",
     "Listed status + prescribed company thresholds"),
   unresolved("MCA", "Cost Records / Cost Audit", "MCA", "annual",
     "Applies only to prescribed industries and turnover thresholds. Industry is not recorded " +
@@ -350,11 +350,11 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "'Contemporaneous' means maintained continuously rather than filed on a day.",
     "Applicable international transactions"),
   unresolved("Transfer Pricing", "Master File", "Income Tax", "annual",
-    "Applies on group turnover and international-transaction thresholds, and the sheet gives " +
-      "no day.",
+    "Applies on group turnover and international-transaction thresholds, and no single day " +
+      "applies.",
     "Applicable multinational groups meeting prescribed thresholds"),
   unresolved("Transfer Pricing", "CbCR", "Income Tax", "annual",
-    "Applies on consolidated group revenue, which is not a fact this system holds.",
+    "Applies on consolidated group revenue, which BiB does not hold yet.",
     "Applicable large multinational groups"),
 
   // ── FEMA / RBI ───────────────────────────────────────────────────────────
@@ -378,16 +378,16 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "issue is captured here.",
   },
   unresolved("FEMA / RBI", "FC-TRS", "RBI", "event",
-    "Triggered by a share transfer involving a non-resident, and the sheet gives the period " +
-      "as 'applicable RBI period' rather than a number of days.",
+    "Triggered by a share transfer involving a non-resident, and the period is the " +
+      "'applicable RBI period' rather than a number of days.",
     "Applicable resident/non-resident transfer"),
   unresolved("FEMA / RBI", "ODI / APR", "RBI", "annual",
-    "Two obligations in one row on the sheet (an event-driven ODI filing and an annual APR " +
+    "Two obligations in one (an event-driven ODI filing and an annual APR " +
       "per foreign entity), and neither carries a stated date.",
     "Indian entity with overseas investment"),
   unresolved("FEMA / RBI", "ECB-2", "RBI", "monthly",
-    "'Within 7 working days from month-end'. Working days are not days, and this system holds " +
-      "no holiday calendar. A calendar-day equivalent would be a rule the firm never agreed to.",
+    "'Within 7 working days from month-end'. Working days are not days, and BiB holds no " +
+      "holiday calendar yet. A calendar-day equivalent would be a rule nobody agreed to.",
     "ECB borrower"),
   unresolved("FEMA / RBI", "Form 15CA / 15CB assessment", "Income Tax", "event",
     "Run before each non-resident remittance. A transaction, not a period.",
@@ -399,7 +399,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "due on a day.",
     "Business turnover > Rs 50 Cr"),
   unresolved("POSH", "POSH Internal Committee / annual compliance", null, "annual",
-    "Employee-count driven, and this system stores no employee count. The annual filing has " +
+    "Employee-count driven, and BiB stores no employee count yet. The annual filing has " +
       "no stated day either.",
     "Covered establishments; generally employee-count driven"),
   unresolved("Labour", "Shops & Establishments", "State", "annual",
@@ -409,8 +409,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
     "Continuous rather than filed: registers kept, not a return submitted on a day.",
     "Employer; State/category/employee driven"),
   unresolved("Data Privacy", "DPDP compliance", null, "annual",
-    "Applicability follows the notified framework, which the sheet itself describes as still " +
-      "settling.",
+    "Applicability follows the notified framework, which is still settling.",
     "Applicable data fiduciaries/processors under the notified framework"),
   unresolved("Industry", "FSSAI", "FSSAI", "annual",
     "A licence and return cycle that starts from the licence date, which is not recorded " +
@@ -421,7 +420,7 @@ export const INDIA_SEED_RULES: readonly SeedRule[] = [
       "status are recorded here.",
     "RBI-regulated NBFC"),
   unresolved("Industry", "SEBI", "SEBI", "annual",
-    "A regulatory cycle for SEBI-regulated entities; the sheet names no dates.",
+    "A regulatory cycle for SEBI-regulated entities; no dates are set.",
     "SEBI-regulated entity"),
   unresolved("Industry", "Factory / pollution / fire / local licences", "State", "annual",
     "State and local law, per licence, from each licence's own date. Nothing here holds a " +

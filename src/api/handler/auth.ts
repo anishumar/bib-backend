@@ -169,7 +169,22 @@ const MagicLinkBody = z
   .openapi("MagicLinkRequest");
 
 const RedeemBody = z
-  .object({ token: z.string().min(1).max(MAX_TOKEN_LENGTH) })
+  .object({
+    token: z.string().min(1).max(MAX_TOKEN_LENGTH),
+    password: z
+      .string()
+      .min(1)
+      .max(MAX_PASSWORD_LENGTH)
+      .optional()
+      .openapi({
+        description:
+          "A colleague's FIRST password, chosen on their welcome link (CA#38). Only a " +
+          "welcome link takes one, and only for an account with no password: the same " +
+          "call sets it and signs them in. Left out, the link only signs them in. An " +
+          "account that already has a password is refused (409 PASSWORD_ALREADY_SET) and " +
+          "the link is NOT spent, so it can still be used without one.",
+      }),
+  })
   .openapi("RedeemMagicLinkRequest");
 
 const SwitchTenantBody = z
@@ -256,9 +271,10 @@ const redeemRoute = createRoute({
   request: { body: { content: { "application/json": { schema: RedeemBody } }, required: true } },
   responses: {
     200: { description: "Signed in", content: { "application/json": { schema: SignInSchema } } },
-    400: errorResponse("Request failed validation"),
+    400: errorResponse("Request failed validation, or the password is too short or too long"),
     401: errorResponse("The link is unknown, expired, or already used"),
     403: errorResponse("No active membership"),
+    409: errorResponse("A password was sent and the account already has one (the link is not spent)"),
   },
 });
 
@@ -514,8 +530,11 @@ export function registerAuthRoutes(app: OpenAPIHono<AppEnv>, deps: AuthDeps): vo
   });
 
   app.openapi(redeemRoute, async (c) => {
-    const { token } = c.req.valid("json");
-    const result = await deps.service.redeemMagicLink(token);
+    const { token, password } = c.req.valid("json");
+    const result =
+      password === undefined
+        ? await deps.service.redeemMagicLink(token)
+        : await deps.service.redeemWelcome(token, password);
     issue(c, result);
     return c.json(await signInBody(result), 200);
   });
