@@ -48,6 +48,7 @@ import type {
   RelationshipType,
   RelationshipRepository,
 } from "./ports";
+import { countryCodeProblem, isCountryCode } from "../../domain/country";
 
 export interface Deps {
   readonly parties: PartyRepository;
@@ -601,8 +602,8 @@ export class PartyService {
     const [current] = await this.deps.parties.listLegalEntities(input.tenantId, input.partyId);
     if (!current) throw new NotALegalEntity();
     const jurisdiction = input.jurisdiction?.trim().toUpperCase();
-    if (jurisdiction !== undefined && !/^[A-Z]{2}$/.test(jurisdiction)) {
-      throw new InvalidPartyDetails("Give the country as its two-letter code, e.g. IN or AE.");
+    if (jurisdiction !== undefined && !isCountryCode(jurisdiction)) {
+      throw new InvalidPartyDetails(countryCodeProblem(jurisdiction));
     }
     const entityType = input.entityType?.trim();
     if (entityType !== undefined && entityType === "") {

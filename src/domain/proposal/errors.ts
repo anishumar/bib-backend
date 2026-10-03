@@ -5,6 +5,7 @@ import type { ProposalDeletionBlock } from "./model";
 // Match with `instanceof`, never by string.
 
 import { longDay } from "../day";
+import { countryCodeProblem } from "../country";
 
 export class ProposalError extends Error {
   constructor(
@@ -528,8 +529,7 @@ export class InvalidLineJurisdiction extends ProposalError {
   constructor(value: string) {
     super(
       "INVALID_LINE_JURISDICTION",
-      `Line jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two ` +
-        `letters, like "IN" or "AE". It is where the WORK is, stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }

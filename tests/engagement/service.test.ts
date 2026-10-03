@@ -271,7 +271,7 @@ describe("drafting", () => {
     expect(s.letters.letters).toHaveLength(0);
   });
 
-  it.each([["India"], ["ind"], [""], ["I1"]])("refuses %j as a jurisdiction", async (j) => {
+  it.each([["India"], ["ind"], [""], ["I1"], ["DD"], ["UK"]])("refuses %j as a jurisdiction", async (j) => {
     const s = setup();
     await expect(draft(s, { jurisdiction: j })).rejects.toBeInstanceOf(InvalidJurisdiction);
   });

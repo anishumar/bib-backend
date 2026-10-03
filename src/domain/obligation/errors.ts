@@ -15,6 +15,7 @@
 // refusal a partner cannot act on just becomes a support ticket.
 
 import { longDay } from "../day";
+import { countryCodeProblem } from "../country";
 
 export class ObligationError extends Error {
   constructor(
@@ -93,9 +94,7 @@ export class InvalidJurisdiction extends ObligationError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `Jurisdiction ${JSON.stringify(value)} must be a two-letter ISO 3166-1 country code in ` +
-        `upper case — "IN", "SG", "AE". It is matched exactly against the entity's own ` +
-        `registered jurisdiction, so a mismatch means the rule reaches nobody.`,
+      countryCodeProblem(value),
     );
   }
 }

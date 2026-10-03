@@ -1336,6 +1336,20 @@ describe("T2.1b — a territory rule overrides the rotation", () => {
       ),
     ).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
   });
+
+  it("refuses a retired or reserved code, and says which one was meant (F04)", async () => {
+    // The old picker saved DD for the first "Germany" and could save UK, which
+    // the GB rule never matches. Both are two capital letters.
+    const s = firmWithTerritory();
+    const dd = s.service.capture(capture({ jurisdiction: "DD" }), ACTOR);
+    await expect(dd).rejects.toBeInstanceOf(InvalidLeadJurisdiction);
+    await expect(dd).rejects.toThrow(`"DD" is no longer a country code. For Germany, use DE.`);
+    const uk = s.service.setTerritoryRule(
+      { tenantId: TENANT, jurisdiction: "UK", ownerUserId: SPECIALIST },
+      ACTOR,
+    );
+    await expect(uk).rejects.toThrow(`"UK" is not the code for the United Kingdom. Use GB.`);
+  });
 });
 
 describe("the day a captured contact detail is in force from (item 4, 2026-09-25)", () => {

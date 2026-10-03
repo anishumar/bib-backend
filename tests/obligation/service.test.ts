@@ -538,6 +538,25 @@ describe("writing a rule", () => {
     ).rejects.toThrow(/needs a reason saying what is missing/);
   });
 
+  it("refuses a retired country code, which no client's registration would match (F04)", async () => {
+    await expect(
+      h.service.createRule(
+        {
+          tenantId: FIRM,
+          jurisdiction: "DD",
+          name: "Old filing",
+          recurrence: "annual",
+          fiscalYearStartMonth: 4,
+          dueRule: null,
+          unresolvedReason: "not known",
+          leadTimeDays: 0,
+          rulePack: "x@1",
+        },
+        ACTOR,
+      ),
+    ).rejects.toThrow(`"DD" is no longer a country code. For Germany, use DE.`);
+  });
+
   it("refuses a rule that carries both", async () => {
     await expect(
       h.service.createRule(

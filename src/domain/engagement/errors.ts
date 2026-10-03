@@ -1,4 +1,5 @@
 import type { LetterDeletionBlock } from "./model";
+import { countryCodeProblem } from "../country";
 
 // Sentinel errors — the closed vocabulary of ways engagement letters fail.
 // Owned here in the domain; the api layer maps them to HTTP status codes.
@@ -342,9 +343,7 @@ export class InvalidJurisdiction extends EngagementError {
   constructor(value: string) {
     super(
       "INVALID_JURISDICTION",
-      `Jurisdiction ${JSON.stringify(value)} is not an ISO 3166 country code — two letters, ` +
-        `like "IN" or "AE". The letter records the jurisdiction it was WRITTEN for, which is ` +
-        `not always the client's or the firm's, so it has to be stated rather than inferred.`,
+      countryCodeProblem(value),
     );
   }
 }

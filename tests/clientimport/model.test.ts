@@ -247,6 +247,16 @@ describe("a date in a sheet", () => {
 // ── Clients ──────────────────────────────────────────────────────────────────
 
 describe("a client row", () => {
+  it("refuses a retired or reserved country code in Country and in Where (F04)", () => {
+    const report = validateImport(
+      { clients: [client({ jurisdiction: "UK" })], people: [], engagements: [engagement({ where: "DD" })] },
+      snapshot(),
+    );
+    const blocking = blockingMessages(report);
+    expect(blocking.some((m) => m.includes(`"UK" is not the code for the United Kingdom. Use GB.`))).toBe(true);
+    expect(blocking.some((m) => m.includes(`"DD" is no longer a country code. For Germany, use DE.`))).toBe(true);
+  });
+
   it("loads with its registration, identifiers and account team", () => {
     const report = validateImport({ clients: [client()], people: [], engagements: [] }, snapshot());
     expect(report.blocking).toBe(0);

@@ -1,4 +1,5 @@
 import type { LeadDeletionBlock } from "./model";
+import { countryCodeProblem } from "../country";
 
 // Sentinel errors — the closed vocabulary of ways lead capture and pipeline
 // movement fail. Owned here in the domain; the api layer maps them to HTTP
@@ -201,9 +202,8 @@ export class InvalidLeadJurisdiction extends LeadError {
   constructor(given: string) {
     super(
       "INVALID_LEAD_JURISDICTION",
-      `${JSON.stringify(given)} is not a jurisdiction. Give an ISO 3166-1 alpha-2 code in ` +
-        `upper case ("IN", "AE", "US"), or leave it out — an unknown country is a real answer ` +
-        `and the assignment rotation covers it.`,
+      // In words (F04). Leaving the country out stays a real answer.
+      countryCodeProblem(given),
     );
   }
 }
