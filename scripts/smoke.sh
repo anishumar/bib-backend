@@ -870,30 +870,32 @@ chk "…and all billed to the client"        "$PID" "$(echo "$SIGNED" | python3 
 import sys, json
 ids = {e["partyId"] for e in json.load(sys.stdin)["engagements"]}
 print(ids.pop() if len(ids) == 1 else "MIXED")')"
-chk "…held back by the advance"            pending_advance "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
+# 0322 (Ashish): the advance holds no work. Signing starts every engagement.
+chk "…and starts, advance or not (0322)"  active "$(echo "$SIGNED" | python3 -c 'import sys,json;print(json.load(sys.stdin)["engagements"][0]["status"])')"
 chk "a signed letter cannot be edited"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/lines -H "$H" -d "$ELLINE")"
 chk "…nor withdrawn"                       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/engagement-letters/$EL/withdraw -H "$H")"
 
-# Nothing may spawn while the advance is outstanding — the gate is real.
-BEFORE=$(curl -s -b $J/partner.txt "$API/api/v1/objects/engagement_letter/$EL/events" | python3 -c '
+# 0320: the advance is a TAX INVOICE, not a tick. 0322: signing drafts it at the
+# company's default tax rate; this firm has none, so no draft is made (never a
+# guessed 0%) and the advance says why. It is raised like any bill (here at 0%
+# so the total is the advance) and issued.
+NODRAFT=$(curl -s -b $J/partner.txt "$API/api/v1/billing/advances" | python3 -c '
 import sys, json
-print(sum(1 for r in json.load(sys.stdin)["events"] if r["event"]["verb"] == "contract.activated"))')
-chk "no spawn trigger before the advance"    0 "$BEFORE"
-# 0320: the advance is a TAX INVOICE, not a tick. Signing wrote its bill; it is
-# raised like any bill (here at 0% so the total is the advance), issued, and
-# the work starts by itself when that invoice is paid in full.
+a = [x for x in json.load(sys.stdin)["advances"] if x["letter"]["id"] == "'$EL'"]
+print("%s/%s" % (a[0]["stage"], a[0]["draftBlocked"]) if len(a) == 1 else "count=%d" % len(a))')
+chk "no tax rate: no automatic draft, and it says so" "not_raised/no_tax_rate" "$NODRAFT"
 ADVDUE=$(curl -s -b $J/partner.txt "$API/api/v1/billing/dues?partyId=$PID" | python3 -c '
 import sys, json
 ds = [d for d in json.load(sys.stdin)["dues"] if d["kind"] == "advance"]
 print(ds[0]["id"] if len(ds) == 1 else "count=%d" % len(ds))')
 ADVINV=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/billing/raise -H "$H" -d '{"dueIds":["'$ADVDUE'"],"lines":[{"dueId":"'$ADVDUE'","taxPercent":"0"}]}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["invoiceId"])')
 chk "signing wrote the advance bill; it is raised and issued" 200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/issue -H "$H")"
-chk "…and paying it in full starts the work" 201 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/payments -H "$H" -d '{"amount":"10000","receivedOn":"2026-08-29","method":"bank_transfer"}')"
+chk "…and the client pays it"              201 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$ADVINV/payments -H "$H" -d '{"amount":"10000","receivedOn":"2026-08-29","method":"bank_transfer"}')"
 ACTIVE=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
 import sys, json
 d = json.load(sys.stdin)
 print("%s/%s/%s" % (d["engagements"][0]["status"], len(d["clauses"]), d["clauses"][0]["text"][:8]))')
-chk "the engagement is released, terms pinned" "active/1/The firm" "$ACTIVE"
+chk "the engagement is active, terms pinned" "active/1/The firm" "$ACTIVE"
 # A read model carries NAMES, not ids: this is exactly where a group client's
 # companies have to be told apart, so a column of uuids is what it must not be.
 NAMED=$(curl -s -b $J/partner.txt $API/api/v1/engagement-letters/$EL | python3 -c '
@@ -1307,14 +1309,14 @@ echo; echo "── 16d. Invoicing — the one number that may not gap ───�
 # T3.4. A proposal reference may gap: PR-2026-0007 missing means somebody
 # abandoned a quote. A TAX INVOICE NUMBER MAY NOT — an auditor is entitled to
 # read a missing one as a suppressed sale — so the counter is a row taken under
-# SELECT ... FOR UPDATE inside the same transaction as the insert, and a
-# rollback releases the number. That property is proven against real Postgres in
-# tests/invoice/numbering.integration.test.ts, including six simultaneous
-# invoices; what this section walks is the surface and the freeze.
+# SELECT ... FOR UPDATE inside the same transaction as the ISSUE (0322: a draft
+# has no number), and a rollback releases the number. That property is proven
+# against real Postgres in tests/invoice/numbering.integration.test.ts,
+# including six simultaneous issues; what this section walks is the surface and
+# the freeze.
 INVC=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/parties/organizations -H "$H" -d '{"legalName":"Cobalt Foods Private Limited"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["partyId"])')
 INV1=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}')
-# 0002: the firm's series already holds the advance invoice raised in 14.
-chk "an invoice is numbered on creation"  "INV/2026-27/0002" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
+chk "a draft has no number yet (0322)"    "None" "$(python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])' <<< "$INV1")"
 INV1ID=$(python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])' <<< "$INV1")
 chk "an empty invoice cannot be issued"   409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
 chk "a line goes on"                      204 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"GST filing, 12 months","quantity":"12","unitAmount":"2000","discountPercent":"10","taxPercent":"18"}')"
@@ -1325,20 +1327,20 @@ t = json.load(sys.stdin)["totals"]
 print("%s/%s/%s" % (t["net"], t["tax"], t["total"]))')
 chk "…and the totals come from the schema" "21600.0000/3888.0000/25488.0000" "$TOT"
 chk "…an associate cannot issue it"       403 "$(code -b $J/associate.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
-chk "…the partner can"                    200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H")"
+# 0002: the firm's series already holds the advance invoice raised in 14.
+chk "…the partner can, and it is numbered then" "INV/2026-27/0002" "$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/issue -H "$H" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("number"))')"
 chk "…and then its lines are fixed"       409 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV1ID/lines -H "$H" -d '{"description":"One more thing","quantity":"1","unitAmount":"500"}')"
 
-# Cancelling does NOT release the number: the row stays in the sequence saying
-# it was cancelled, which is what an auditor needs to see where a number went.
+# Cancelling an ISSUED invoice does not release its number (the row stays in
+# the sequence saying so). A DRAFT cancelled before issue never drew one
+# (0322), so it leaves no hole at all.
 INV2ID=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')
-chk "a second invoice takes the next"     200 "$(code -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H")"
-INV3=$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices -H "$H" -d '{"partyId":"'$INVC'","entityPartyId":"'$FIRMENT'","currency":"INR","fxRate":"1","fxRateDate":"2026-08-29","seriesDate":"2026-08-29"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["number"])')
-chk "…and a cancelled one leaves no hole" "INV/2026-27/0004" "$INV3"
+chk "a draft cancelled before issue spends no number" "cancelled/None" "$(curl -s -b $J/partner.txt -XPOST $API/api/v1/invoices/$INV2ID/cancel -H "$H" | python3 -c 'import sys,json;d=json.load(sys.stdin);print("%s/%s" % (d.get("status"), d.get("number")))')"
 SEQ=$(curl -s -b $J/partner.txt "$API/api/v1/invoices" | python3 -c '
 import sys, json
 inv = [r["invoice"] for r in json.load(sys.stdin)["invoices"]]
-print(sorted(i["sequenceNumber"] for i in inv))')
-chk "…the series is 1..N with nothing missing" "[1, 2, 3, 4]" "$SEQ"
+print(sorted(i["sequenceNumber"] for i in inv if i["sequenceNumber"] is not None))')
+chk "…the series is 1..N with nothing missing" "[1, 2]" "$SEQ"
 
 # THE FEE AXIS, on the module where it matters most. An invoice is money end to
 # end, so a delivery colleague seeing the work but not what it was worth is the
