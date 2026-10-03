@@ -110,8 +110,8 @@ describe("where it opens", () => {
     expect(notificationPath("proposal_decided", "proposal", id, {})).toBe(`/proposals/${id}`);
     expect(notificationPath("bill_to_raise", "billing_due", id, {})).toBe("/invoices?tab=raise");
     expect(notificationPath("dunning_decision", "invoice", id, {})).toBe("/receivables");
-    expect(notificationPath("advance_reminder", "engagement_letter", id, {})).toBe("/invoices?tab=advances");
-    expect(notificationPath("advance_reminder", "engagement_letter", id, { invoiceId: "inv-1" })).toBe(
+    expect(notificationPath("advance_reminder", "billing_due", id, {})).toBe("/invoices?tab=advances");
+    expect(notificationPath("advance_reminder", "billing_due", id, { invoiceId: "inv-1" })).toBe(
       "/invoices/inv-1",
     );
     expect(notificationPath("filing_missed", "obligation_instance", id, {})).toBe("/calendar");

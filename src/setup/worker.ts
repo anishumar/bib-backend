@@ -12,6 +12,9 @@ import type { Config } from "../config/config";
 import type { Logger } from "../platform/log";
 import { systemIds } from "../platform/ids";
 import { systemClock } from "../platform/clock";
+import { AdvanceReminders, NotificationFanout } from "../usecase/notify/fanout";
+import { PostgresNotificationOutbox, PostgresNotifyDirectory } from "../infrastructure/postgres/notification-outbox";
+import { PostgresNotificationSettings } from "../infrastructure/postgres/notification-repository";
 import { PostgresEventStore } from "../infrastructure/postgres/event-repository";
 import {
   PostgresJobRepository,
@@ -156,6 +159,15 @@ export const BILLING_QUEUE = "billing.dues";
  *  (0322). Its own queue and its own HOURLY cron: each firm picks its own
  *  weekday and hour, and a failure here must not silence the daily bills. */
 export const ADVANCE_DIGEST_QUEUE = "billing.advance-digest";
+/** The notification outbox (0323): each firm's new ledger events become
+ *  notifications. Every minute, on its own queue: a bell a day late is a bell
+ *  nobody trusts, and a poisoned run must not hold up any billing sweep. */
+export const NOTIFY_FANOUT_QUEUE = "notify.fanout";
+/** The advance reminders in the bell (0323), on the advance summary's HOURLY
+ *  cron: an advance turns overdue on a DAY, so an hour is plenty. */
+export const NOTIFY_ADVANCE_QUEUE = "notify.advance-reminders";
+/** Retention (0323), daily on the escalation cron. */
+export const NOTIFY_PRUNE_QUEUE = "notify.prune";
 
 /** The queue the orchestrator sweep runs on. Its own name and its own cadence
  *  again — this one is minutes rather than hours or days, because what it is
@@ -233,6 +245,9 @@ export interface WiredWorker {
   readonly finalBills: FinalBiller;
   /** The weekly summary of pending advances to the admins (0322). */
   readonly advanceDigest: AdvanceDigest;
+  /** The notification outbox and the advance reminders in the bell (0323). */
+  readonly notifyFanout: NotificationFanout;
+  readonly advanceReminders: AdvanceReminders;
   readonly orchestrator: OrchestratorService;
   readonly obligations: ObligationService;
   readonly escalations: EscalationService;
@@ -669,6 +684,34 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     events: ledger,
     advancesUrl: `${cfg.auth.appBaseUrl.replace(/\/+$/, "")}/invoices?tab=advances`,
   });
+  // NOTIFICATIONS (0323). Who may check a piece of work is asked of the two
+  // modules that own the rule (T2.9), never re-derived here.
+  const notifyOutbox = new PostgresNotificationOutbox(pools.app);
+  const notifyDirectory = new PostgresNotifyDirectory(pools.app);
+  const notifySettings = new PostgresNotificationSettings(pools.app);
+  const notifyFanout = new NotificationFanout({
+    outbox: notifyOutbox,
+    directory: notifyDirectory,
+    checkers: {
+      async workItemCheckers(tenantId, approvalId) {
+        return (await workItems.eligibleCheckers(tenantId, approvalId)).filter((c) => c.eligible).map((c) => c.userId);
+      },
+      async stepCheckers(tenantId, approvalId) {
+        return (await orchestrator.eligibleCheckers(tenantId, approvalId)).filter((c) => c.eligible).map((c) => c.userId);
+      },
+    },
+    permissions: configRepository,
+    settings: notifySettings,
+    clock: systemClock,
+  });
+  const advanceReminders = new AdvanceReminders({
+    outbox: notifyOutbox,
+    advances: advanceDesk,
+    directory: notifyDirectory,
+    permissions: configRepository,
+    settings: notifySettings,
+  });
+
   const engagement: EngagementService = new EngagementService({
     // 0320: and writes the advance bill it owes.
     advanceBilling: advanceBills,
@@ -759,6 +802,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     advanceBills,
     finalBills,
     advanceDigest,
+    notifyFanout,
+    advanceReminders,
     orchestrator,
     obligations,
     escalations,
@@ -852,6 +897,28 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         }
       });
       await queue.schedule(ADVANCE_DIGEST_QUEUE, cfg.worker.advanceDigestCron);
+
+      await queue.register(NOTIFY_FANOUT_QUEUE, async () => {
+        for (const r of await notifyFanout.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "notification fan-out could not visit firm");
+          } else if (r.created > 0 || r.resolved > 0) {
+            log.info({ tenantId: r.tenantId, events: r.events, created: r.created, resolved: r.resolved }, "notifications");
+          }
+        }
+      });
+      await queue.schedule(NOTIFY_FANOUT_QUEUE, cfg.worker.notifyCron);
+
+      await queue.register(NOTIFY_ADVANCE_QUEUE, async () => {
+        for (const r of await advanceReminders.sweep()) {
+          if (r.failure !== undefined) {
+            log.error({ tenantId: r.tenantId, failure: r.failure }, "advance reminders could not visit firm");
+          } else {
+            log.info({ tenantId: r.tenantId, created: r.created, resolved: r.resolved }, "advance reminders");
+          }
+        }
+      });
+      await queue.schedule(NOTIFY_ADVANCE_QUEUE, cfg.worker.advanceDigestCron);
 
       await queue.register(ORCHESTRATOR_QUEUE, async () => {
         const reports = await orchestrator.sweep();
@@ -1026,6 +1093,12 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
         );
       });
       await queue.schedule(CREDENTIAL_SWEEP_QUEUE, cfg.worker.escalationCron);
+
+      await queue.register(NOTIFY_PRUNE_QUEUE, async () => {
+        const pruned = await notifyFanout.prune();
+        if (pruned > 0) log.info({ pruned }, "pruned old notifications");
+      });
+      await queue.schedule(NOTIFY_PRUNE_QUEUE, cfg.worker.escalationCron);
     },
   };
 }

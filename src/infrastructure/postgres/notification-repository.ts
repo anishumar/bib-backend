@@ -57,7 +57,12 @@ export class PostgresNotificationInbox implements NotificationInbox {
                n.category,
                n.source_type,
                n.source_id,
-               n.payload,
+               -- What the read adds for the words and the link: a step's own
+               -- label, and the task an ask was raised on.
+               n.payload || jsonb_strip_nulls(jsonb_build_object(
+                 'stepLabel', js.label,
+                 'workItemId', ca.work_item_id
+               )) AS payload,
                COALESCE(NULLIF(btrim(au.display_name), ''), au.email) AS actor_name,
                client.display_name AS client_name,
                CASE n.source_type
@@ -68,7 +73,8 @@ export class PostgresNotificationInbox implements NotificationInbox {
                  WHEN 'proposal'            THEN pr.ref
                  WHEN 'engagement_letter'   THEN el.ref
                  WHEN 'invoice'             THEN inv.number
-                 WHEN 'billing_due'         THEN bd.period_label
+                 WHEN 'billing_due'         THEN COALESCE(bel.ref, bd.period_label)
+                 WHEN 'client_ask'          THEN caw.title
                  WHEN 'obligation_instance' THEN concat_ws(' ', ot.name, oi.period_label)
                END AS subject_label,
                ${db.unsafe(isoInstant("n.created_at", "created_at"))},
@@ -87,6 +93,13 @@ export class PostgresNotificationInbox implements NotificationInbox {
           ORDER BY w.created_at, w.id
           LIMIT 1
         ) jwi ON n.source_type = 'job'
+        LEFT JOIN delivery.job_step js
+          ON n.source_type = 'job' AND js.job_id = n.source_id AND js.tenant_id = n.tenant_id
+         AND js.step_key = n.payload->>'stepKey'
+        LEFT JOIN delivery.client_ask ca
+          ON n.source_type = 'client_ask' AND ca.id = n.source_id AND ca.tenant_id = n.tenant_id
+        LEFT JOIN delivery.work_item caw
+          ON caw.id = ca.work_item_id AND caw.tenant_id = ca.tenant_id
         LEFT JOIN delivery.client_request cr
           ON n.source_type = 'client_request' AND cr.id = n.source_id AND cr.tenant_id = n.tenant_id
         LEFT JOIN crm.lead ld
@@ -99,6 +112,9 @@ export class PostgresNotificationInbox implements NotificationInbox {
           ON n.source_type = 'invoice' AND inv.id = n.source_id AND inv.tenant_id = n.tenant_id
         LEFT JOIN crm.billing_due bd
           ON n.source_type = 'billing_due' AND bd.id = n.source_id AND bd.tenant_id = n.tenant_id
+        -- An advance is named by its letter.
+        LEFT JOIN crm.engagement_letter bel
+          ON bel.id = bd.engagement_letter_id AND bel.tenant_id = bd.tenant_id
         LEFT JOIN delivery.obligation_instance oi
           ON n.source_type = 'obligation_instance' AND oi.id = n.source_id AND oi.tenant_id = n.tenant_id
         LEFT JOIN delivery.obligation_template ot
@@ -107,7 +123,7 @@ export class PostgresNotificationInbox implements NotificationInbox {
         -- which is the company its notification should name.
         LEFT JOIN core.party client
           ON client.tenant_id = n.tenant_id
-         AND client.id = COALESCE(wi.client_party_id, jwi.client_party_id, cr.client_party_id,
+         AND client.id = COALESCE(wi.client_party_id, jwi.client_party_id, ca.client_party_id, cr.client_party_id,
                                   ld.party_id, pr.party_id, el.party_id, inv.party_id,
                                   bd.party_id, oi.entity_party_id)
         WHERE n.tenant_id = ${tenantId}

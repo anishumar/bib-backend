@@ -155,6 +155,11 @@ const EnvSchema = z.object({
   // sweep has to look every hour; for every firm whose slot has not come, or
   // whose week is already sent, it does nothing.
   BIB_WORKER_ADVANCE_DIGEST_CRON: z.string().min(1).default("5 * * * *"),
+  // EVERY MINUTE (0323): the notification outbox reads each firm's new ledger
+  // events. The bell is how a colleague learns a task landed on them, and a
+  // minute is the finest pg-boss cron there is. A run with nothing new is one
+  // indexed read per firm.
+  BIB_WORKER_NOTIFY_CRON: z.string().min(1).default("* * * * *"),
   // EVERY FIVE MINUTES, and much finer than the other two on purpose. This one
   // is not a clock-driven policy — it is the engine noticing that work became
   // ready, and the person waiting on the next step is a colleague at their desk.
@@ -348,6 +353,8 @@ export interface WorkerConfig {
   /** When the weekly advance summary looks for firms whose slot has come
    *  (0322). Hourly: each firm chooses its own weekday and hour. */
   readonly advanceDigestCron: string;
+  /** How often the notification outbox reads the ledger (0323). Every minute. */
+  readonly notifyCron: string;
   readonly orchestratorCron: string;
   readonly obligationCron: string;
   /** When the escalation ladder is climbed (T4.5). Daily: the rungs are
@@ -464,6 +471,7 @@ export function load(): Config {
       spawnCron: env.BIB_WORKER_SPAWN_CRON,
       dunningCron: env.BIB_WORKER_DUNNING_CRON,
       advanceDigestCron: env.BIB_WORKER_ADVANCE_DIGEST_CRON,
+      notifyCron: env.BIB_WORKER_NOTIFY_CRON,
       orchestratorCron: env.BIB_WORKER_ORCHESTRATOR_CRON,
       obligationCron: env.BIB_WORKER_OBLIGATION_CRON,
       escalationCron: env.BIB_WORKER_ESCALATION_CRON,

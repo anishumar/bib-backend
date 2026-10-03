@@ -78,3 +78,112 @@ export interface NotificationSettingsStore {
   ): Promise<readonly ChannelChange[]>;
   setUserPreferences(tenantId: string, userId: string, rows: readonly ChannelSetting[]): Promise<void>;
 }
+
+// ── the fan-out's ports (the worker's side) ─────────────────────────────────
+
+/** A notification to write. `dedupeKey` makes a second write of it a no-op. */
+export interface NewNotification {
+  readonly tenantId: string;
+  readonly recipientUserId: string;
+  readonly category: NotifyCategory;
+  readonly sourceType: string;
+  readonly sourceId: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly eventId: string | null;
+  readonly actorUserId: string | null;
+  readonly dedupeKey: string;
+}
+
+/** One ledger event as the outbox reads it, with when it was recorded. */
+export interface OutboxEvent {
+  readonly id: string;
+  readonly verb: string;
+  readonly objectId: string;
+  readonly actorUserId: string | null;
+  readonly payload: Readonly<Record<string, unknown>>;
+  /** ISO instant, microseconds kept: the cursor must not round. */
+  readonly recordedAt: string;
+}
+
+/** What one event closes. Only rows CAUSED BEFORE `causedBefore` are touched. */
+export interface ResolveCriteria {
+  readonly sourceType: string;
+  readonly sourceId: string;
+  readonly categories: readonly NotifyCategory[];
+  readonly stepKey?: string;
+  readonly exceptRecipient?: string | null;
+  readonly causedBefore: string;
+}
+
+/** An open reminder, for the sweep that decides whether it still stands. */
+export interface OpenReminder {
+  readonly id: string;
+  readonly sourceId: string;
+  readonly stage: string | null;
+}
+
+export interface NotificationOutbox {
+  activeTenantIds(): Promise<readonly string[]>;
+  /** How far through the firm's ledger the outbox has read; null before the first run. */
+  cursor(tenantId: string): Promise<string | null>;
+  /** The first run: start from now, never replay a firm's history. */
+  startCursor(tenantId: string): Promise<void>;
+  /**
+   * Events of these verbs, oldest first: EVERY one recorded in the overlap
+   * window (`overlapFrom`, `cursor`], read again in case one committed late,
+   * and the first `limit` after the cursor. The limit is on the new ones only,
+   * so a busy window can never pin the cursor in place.
+   */
+  eventsAfter(
+    tenantId: string,
+    overlapFrom: string,
+    cursor: string,
+    verbs: readonly string[],
+    limit: number,
+  ): Promise<readonly OutboxEvent[]>;
+  /** Moves the cursor forward, never back. */
+  advanceCursor(tenantId: string, to: string): Promise<void>;
+  /** How many were new; a duplicate is refused by its dedupe key, silently. */
+  insert(rows: readonly NewNotification[]): Promise<number>;
+  resolve(tenantId: string, criteria: ResolveCriteria): Promise<number>;
+  openReminders(tenantId: string, category: NotifyCategory): Promise<readonly OpenReminder[]>;
+  resolveIds(tenantId: string, ids: readonly string[]): Promise<number>;
+  /** Retention: this firm's read or resolved rows older than `before` (at least 30 days). */
+  prune(tenantId: string, before: string): Promise<number>;
+}
+
+export interface StaffMember {
+  readonly userId: string;
+  readonly role: string;
+  readonly gradeRank: number | null;
+}
+
+/**
+ * The relationships a notification is addressed by, read as they stand now.
+ * Every method answers for ONE firm and returns user ids; who is still on the
+ * staff is `activeStaff`'s answer, applied by the service.
+ */
+export interface NotifyDirectory {
+  activeStaff(tenantId: string): Promise<readonly StaffMember[]>;
+  /** The client's Key Manager in force today, by the firm's own day. */
+  keyManagerOf(tenantId: string, clientPartyId: string): Promise<string | null>;
+  workItemAssignee(tenantId: string, workItemId: string): Promise<string | null>;
+  proposalPreparer(tenantId: string, proposalId: string): Promise<string | null>;
+  /** Whoever sent the letter for signature (its `engagement_letter.sent` actor). */
+  letterSender(tenantId: string, letterId: string): Promise<string | null>;
+  invoiceOwner(tenantId: string, invoiceId: string): Promise<{ readonly managerUserId: string | null; readonly clientPartyId: string } | null>;
+  dueOwner(tenantId: string, dueId: string): Promise<{ readonly managerUserId: string | null; readonly clientPartyId: string } | null>;
+  requestOwner(tenantId: string, requestId: string): Promise<{ readonly assigneeUserId: string | null; readonly clientPartyId: string } | null>;
+  askOwner(
+    tenantId: string,
+    askId: string,
+  ): Promise<{ readonly raisedBy: string | null; readonly assigneeUserId: string | null } | null>;
+  /** The open check on one step of a job, if there is one. */
+  pendingStepApproval(tenantId: string, jobId: string, stepKey: string): Promise<string | null>;
+}
+
+/** Who may decide a check: T2.9's rule, asked of the module that owns it. */
+export interface CheckerSource {
+  workItemCheckers(tenantId: string, approvalId: string): Promise<readonly string[]>;
+  stepCheckers(tenantId: string, approvalId: string): Promise<readonly string[]>;
+}

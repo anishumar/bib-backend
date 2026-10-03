@@ -137,6 +137,12 @@ export function notificationPath(
   sourceId: string,
   payload: Readonly<Record<string, unknown>>,
 ): string {
+  // An advance reminder is about the money: the invoice when there is one,
+  // else the Advances list.
+  if (category === "advance_reminder") {
+    const invoiceId = text(payload, "invoiceId");
+    return invoiceId === null ? "/invoices?tab=advances" : `/invoices/${invoiceId}`;
+  }
   switch (sourceType) {
     case "work_item":
       return `/work-items/${sourceId}`;
@@ -148,14 +154,11 @@ export function notificationPath(
       return `/leads/${sourceId}`;
     case "proposal":
       return `/proposals/${sourceId}`;
-    case "engagement_letter": {
-      // An advance reminder is about the money, and the invoice is where it is
-      // issued or chased; without one, the Advances list.
-      if (category === "advance_reminder") {
-        const invoiceId = text(payload, "invoiceId");
-        return invoiceId === null ? "/invoices?tab=advances" : `/invoices/${invoiceId}`;
-      }
+    case "engagement_letter":
       return `/engagement-letters/${sourceId}`;
+    case "client_ask": {
+      const workItemId = text(payload, "workItemId");
+      return workItemId === null ? "/work-items" : `/work-items/${workItemId}`;
     }
     case "invoice":
       return category === "dunning_decision" ? "/receivables" : `/invoices/${sourceId}`;
@@ -214,7 +217,10 @@ export function renderNotification(n: RenderInput, seesFees: boolean): Rendered 
       };
 
     case "check_requested":
-      return { title: by === null ? "Work is waiting for your check" : `${by} sent you work to check`, detail: about };
+      return {
+        title: by === null ? "Work is waiting for your check" : `${by} sent you work to check`,
+        detail: joinParts(text(p, "stepLabel"), about),
+      };
 
     case "escalation": {
       const watch = text(p, "watch");
