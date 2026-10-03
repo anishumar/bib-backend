@@ -604,6 +604,7 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "BLOCK_REASON_REQUIRED":
       case "REVIEW_REJECTION_NEEDS_NOTE":
+      case "REVIEW_RULE_NEEDED":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "WORK_ITEM_NOT_FOUND":
       case "ROUTING_LETTER_NOT_FOUND":

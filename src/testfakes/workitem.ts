@@ -737,6 +737,10 @@ export class FakeReviewPolicies implements ReviewPolicySource {
       [...this.published.values()].find((p) => p.versionId === versionId) ?? null,
     );
   }
+
+  publishedPolicies(_tenantId: string): Promise<readonly ResolvedReviewPolicy[]> {
+    return Promise.resolve([...this.published.values()].sort((a, b) => a.key.localeCompare(b.key)));
+  }
 }
 
 export class FakeReviewers implements ReviewerDirectory {

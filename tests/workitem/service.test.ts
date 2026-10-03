@@ -1017,13 +1017,86 @@ describe("review — and the rule no firm may configure away", () => {
     expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
   });
 
+  // ── THE FIRM'S RULE APPLIES TO A TASK TOO (audit 2026-10-03, CA#27) ──────
+  //
+  // The roleplay firm published "Manager review" and its ad-hoc tasks went on
+  // being checked under "Anyone but the maker", so one Analyst approved
+  // another's GSTR-3B. A task names no rule (there is no template step to name
+  // one), so the firm's published rule is applied when the sender names none.
+
+  function publish(h: Awaited<ReturnType<typeof harness>>, key: string, label: string, minGradeRank: number) {
+    h.policies.published.set(key, {
+      versionId: `00000000-0000-4000-8000-0000000000${key === "manager_review" ? "p1" : "p2"}`,
+      key,
+      policy: { label, rule: "rank_threshold", minGradeRank, minGradeCode: key },
+    });
+  }
+
+  it("applies the firm's ONLY published rule when the sender names none", async () => {
+    const { h, item } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    // Another Associate, who under "anyone but the maker" could approve.
+    const SNEHA = "00000000-0000-4000-8000-0000000000d4";
+    h.reviewers.rows.push({
+      userId: SNEHA,
+      displayName: "Sneha",
+      role: "associate",
+      gradeRank: 2,
+      gradeName: "Analyst",
+      reportsToUserId: ANAND,
+    });
+
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+
+    expect(approval.policyKey).toBe("manager_review");
+    await expect(
+      h.service.decideReview(
+        { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: SNEHA },
+        ACTOR,
+      ),
+    ).rejects.toMatchObject({ code: "REVIEWER_NOT_ELIGIBLE" });
+    expect(h.recorded().find((e) => e.verb === "work_item.review_requested")?.payload).toMatchObject({
+      policyKey: "manager_review",
+      policyVersionId: "00000000-0000-4000-8000-0000000000p1",
+    });
+  });
+
+  it("asks WHICH rule when the firm has published several, naming them, and opens nothing", async () => {
+    const { h, item } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    publish(h, "eqcr", "Quality review by a partner", 10);
+
+    const refused = h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await expect(refused).rejects.toMatchObject({ code: "REVIEW_RULE_NEEDED" });
+    await expect(refused).rejects.toThrow(/Manager review.*Quality review by a partner|Quality review by a partner.*Manager review/);
+    expect(await h.service.pendingChecks(FIRM, ANAND)).toEqual([]);
+
+    const chosen = await h.service.requestReview(
+      { tenantId: FIRM, workItemId: item.id, policyKey: "eqcr" },
+      ACTOR,
+    );
+    expect(chosen.policyKey).toBe("eqcr");
+  });
+
+  it("opens under maker != checker alone when the firm has published no rule", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect(approval.policyKey).toBeNull();
+  });
+
+  it("lists the firm's published rules for the screen that sends work to be checked", async () => {
+    const { h } = await readyForReview();
+    publish(h, "manager_review", "Manager review", 7);
+    expect(await h.service.reviewRules(FIRM)).toEqual([{ key: "manager_review", label: "Manager review" }]);
+  });
+
   it("refuses a policy key the firm has not published, rather than falling through", async () => {
     // The caller asked for a particular bar; quietly opening the check without
     // it would be this product lowering it.
     const { h, item } = await readyForReview();
     await expect(
       h.service.requestReview({ tenantId: FIRM, workItemId: item.id, policyKey: "eqcr" }, ACTOR),
-    ).rejects.toThrow(/published no verification policy/i);
+    ).rejects.toThrow(/no rule in force called "eqcr"/i);
   });
 
   it("allows only ONE open review at a time", async () => {

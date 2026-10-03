@@ -352,6 +352,16 @@ const ChecksResponse = z
   .object({ checks: z.array(WorkItemCheckRowSchema) })
   .openapi("WorkItemChecksResponse");
 
+const ReviewRulesResponse = z
+  .object({
+    rules: z.array(z.object({ key: z.string(), label: z.string() })).openapi({
+      description:
+        "The firm's review rules in force, by key. One is applied to a task sent with no rule " +
+        "named; with several the sender picks.",
+    }),
+  })
+  .openapi("ReviewRulesResponse");
+
 const CheckersResponse = z
   .object({ checkers: z.array(CheckerOptionSchema) })
   .openapi("WorkItemCheckersResponse");
@@ -416,9 +426,9 @@ const RequestReviewRequest = z
     policyKey: z.string().nullable().optional().openapi({
       description:
         "Which of the firm's published verification policies decides who may check this. " +
-        "OPTIONAL, and no default is invented: there is no template step here to name one, " +
-        "and picking a rule on the firm's behalf would be this product deciding who signs " +
-        "off its work. Absent means maker != checker alone.",
+        "Absent means the FIRM'S OWN: its one published rule, applied; with several, a 400 " +
+        "(REVIEW_RULE_NEEDED) naming them so the sender picks; with none, maker != checker " +
+        "alone. `GET /api/v1/review-rules` lists them.",
     }),
   })
   .openapi("RequestWorkItemReviewRequest");
@@ -881,10 +891,28 @@ const requestReviewRoute = createRoute({
       description: "Waiting to be checked",
       content: { "application/json": { schema: WorkItemReviewSchema } },
     },
+    400: errorResponse("No rule named, and the firm has more than one in force (REVIEW_RULE_NEEDED)"),
     401: errorResponse("No authenticated session"),
-    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    403: errorResponse(
+      "The session has not selected an org, the role may not write work, or the rule named is not in force",
+    ),
     404: errorResponse("No such work item at this firm"),
     409: errorResponse("A review is already open on it, or a checklist line is unticked"),
+  },
+});
+
+const reviewRulesRoute = createRoute({
+  method: "get",
+  path: "/api/v1/review-rules",
+  tags: ["work"],
+  summary: "The firm's rules for who checks work, as a task's sender picks from them",
+  description:
+    "Labels and keys only, on `party:read`: whoever sends a task to be checked sees which " +
+    "rule it will be checked under. The rules themselves are written on Who checks work.",
+  responses: {
+    200: { description: "The rules", content: { "application/json": { schema: ReviewRulesResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read work"),
   },
 });
 
@@ -1363,6 +1391,13 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     return c.json(toReviewWire(check), 201);
   });
 
+  app.openapi(reviewRulesRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const rules = await deps.service.reviewRules(s.tenantId);
+    return c.json({ rules: rules.map((r) => ({ key: r.key, label: r.label })) }, 200);
+  });
+
   app.openapi(checkersRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1532,6 +1567,7 @@ export const workItemRoutes = {
   removeDependency: removeDependencyRoute,
   requestReview: requestReviewRoute,
   checkers: checkersRoute,
+  reviewRules: reviewRulesRoute,
   decideReview: decideReviewRoute,
   pendingChecks: pendingChecksRoute,
   vocabulary: vocabularyRoute,

@@ -82,6 +82,7 @@ import {
   ReviewAlreadyDecided,
   ReviewAlreadyOpen,
   ReviewNotFound,
+  ReviewRuleNeeded,
   ReviewRejectionNeedsNote,
   ReviewSelfApproval,
   ReviewerNotEligible,
@@ -663,12 +664,12 @@ export interface RequestReviewInput {
   /**
    * Which of the firm's published rules decides who may check this.
    *
-   * OPTIONAL, and a default was deliberately not invented. There is no template
-   * step here to name one (that is where T2.9 gets its key), and picking a rule
-   * on the firm's behalf would be this product deciding who signs off its work.
-   * Absent means maker != checker alone — exactly what T2.9 does for a step
-   * whose firm has published no rule, and strictly more than the nothing that
-   * existed before.
+   * OPTIONAL. There is no template step here to name one (that is where T2.9
+   * gets its key), so absent means THE FIRM'S OWN (audit 2026-10-03, CA#27):
+   * its one published rule, or a refusal asking which when it has several.
+   * Absent at a firm with none is maker != checker alone. It meant that at
+   * every firm until the audit, and a firm whose rule was "a Manager checks
+   * it" had its tasks checked by anybody but the maker.
    */
   readonly policyKey?: string | null | undefined;
 }
@@ -1834,7 +1835,21 @@ export class WorkItemService {
 
     let policyVersionId: string | null = null;
     let policyKey: string | null = null;
-    if (input.policyKey !== undefined && input.policyKey !== null && input.policyKey.length > 0) {
+    if (input.policyKey === undefined || input.policyKey === null || input.policyKey.length === 0) {
+      // NO RULE NAMED: THE FIRM'S OWN APPLIES (audit 2026-10-03, CA#27). A task
+      // has no template step to name one, and this used to open the check under
+      // maker != checker alone, so at a firm whose rule is "a Manager checks
+      // it" an Analyst approved another Analyst's GSTR-3B. One rule in force is
+      // that rule; several is the sender's pick, asked rather than guessed; none
+      // is maker != checker alone, as before (the floor, never a setting).
+      const rules = await this.deps.policies.publishedPolicies(input.tenantId);
+      if (rules.length > 1) throw new ReviewRuleNeeded(rules.map((r) => r.policy.label));
+      const only = rules[0];
+      if (only !== undefined) {
+        policyVersionId = only.versionId;
+        policyKey = only.key;
+      }
+    } else {
       const resolved = await this.deps.policies.publishedPolicy(
         input.tenantId,
         input.policyKey,
@@ -1843,9 +1858,8 @@ export class WorkItemService {
       // fall-through to "no rule": the caller asked for a particular bar, and
       // quietly opening the check without it would be this product lowering it.
       if (!resolved) throw new ReviewerNotEligible(
-        `This firm has published no verification policy called ${JSON.stringify(input.policyKey)}. ` +
-          `Publish it on the verification screen, or send the work for review with no ` +
-          `particular rule — the maker still cannot be the checker.`,
+        `Your firm has no rule in force called ${JSON.stringify(input.policyKey)}. Publish it ` +
+          `on Who checks work, or send the task without naming one and your firm's rule applies.`,
       );
       policyVersionId = resolved.versionId;
       policyKey = resolved.key;
@@ -1941,6 +1955,16 @@ export class WorkItemService {
       },
     });
     return to.id;
+  }
+
+  /**
+   * The rules a task can be checked under, for the screen that sends it
+   * (CA#27): the firm's published ones, by key, with their own labels. One
+   * means it is applied without asking; several means the sender picks.
+   */
+  async reviewRules(tenantId: string): Promise<readonly { key: string; label: string }[]> {
+    const rules = await this.deps.policies.publishedPolicies(tenantId);
+    return rules.map((r) => ({ key: r.key, label: r.policy.label }));
   }
 
   /**

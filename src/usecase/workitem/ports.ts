@@ -697,6 +697,13 @@ export interface ResolvedReviewPolicy {
 export interface ReviewPolicySource {
   publishedPolicy(tenantId: string, key: string): Promise<ResolvedReviewPolicy | null>;
   pinnedPolicy(tenantId: string, versionId: string): Promise<ResolvedReviewPolicy | null>;
+  /**
+   * Every rule the firm has in force, ordered by key (audit 2026-10-03, CA#27).
+   * A task names no rule, so when the sender names none the firm's own is
+   * applied: the one, or the sender picks among several. A version that no
+   * longer reads as a policy is left out, `publishedPolicy`'s answer for it.
+   */
+  publishedPolicies(tenantId: string): Promise<readonly ResolvedReviewPolicy[]>;
 }
 
 /**

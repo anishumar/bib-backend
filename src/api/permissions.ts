@@ -720,6 +720,8 @@ export const ROUTE_PERMISSIONS: ReadonlyMap<RouteKey, Permission> = new Map([
 
   [routeKey("GET", "/api/v1/work-item-checks"), "party:read" as const],
   [routeKey("GET", "/api/v1/work-item-checks/{approvalId}/checkers"), "party:read" as const],
+  // The firm's review rules by label (CA#27): what a task's sender picks from.
+  [routeKey("GET", "/api/v1/review-rules"), "party:read" as const],
   [routeKey("POST", "/api/v1/work-item-checks/{approvalId}/decide"), "work:write" as const],
 
   // THE FIRM'S OWN WORDS FOR WORK (T3.1). The same split the grade ladder and

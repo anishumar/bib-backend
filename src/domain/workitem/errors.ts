@@ -54,7 +54,8 @@ export type WorkItemErrorCode =
   | "REVIEW_SELF_APPROVAL"
   | "REVIEW_REJECTION_NEEDS_NOTE"
   | "REVIEWER_NOT_ELIGIBLE"
-  | "CHECKLIST_OPEN";
+  | "CHECKLIST_OPEN"
+  | "REVIEW_RULE_NEEDED";
 
 // ── the firm's vocabulary ──────────────────────────────────────────────────
 
@@ -424,6 +425,23 @@ export class ChecklistOpen extends WorkItemError {
         (to === "doer"
           ? "Tick them, or remove a line that does not apply, first."
           : "Send it back so the person doing it can finish them."),
+    );
+  }
+}
+
+/**
+ * The firm has published more than one review rule and the sender named none
+ * (CA#27). Which of them a task raised by hand is checked under is the firm's
+ * call, so the sender picks; opening it under none would be the product
+ * lowering the firm's bar, which is the bug this replaced.
+ */
+export class ReviewRuleNeeded extends WorkItemError {
+  constructor(labels: readonly string[]) {
+    super(
+      "REVIEW_RULE_NEEDED",
+      `Your firm has more than one rule for who checks work: ${labels
+        .map((l) => `"${l}"`)
+        .join(", ")}. Pick the one this task is checked under.`,
     );
   }
 }
