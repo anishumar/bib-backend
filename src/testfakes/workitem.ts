@@ -806,6 +806,19 @@ export class FakeObligationCoverage implements ObligationCoverage {
     const covered = await this.coveredEngagements(tenantId, engagementIds);
     return new Set([...covered].filter((id) => !this.ownProcess.has(id)));
   }
+
+  /** The earliest unfiled filing's legal date per engagement, as a test sets it. */
+  readonly filingDue = new Map<string, string>();
+  readonly filingDueAsked: { engagementId: string; start: string; end: string }[] = [];
+
+  earliestFilingDue(
+    _tenantId: string,
+    engagementId: string,
+    period: { readonly start: string; readonly end: string },
+  ): Promise<string | null> {
+    this.filingDueAsked.push({ engagementId, start: period.start, end: period.end });
+    return Promise.resolve(this.filingDue.get(engagementId) ?? null);
+  }
 }
 
 /**

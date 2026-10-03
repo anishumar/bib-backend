@@ -109,6 +109,10 @@ async function main(): Promise<void> {
     const onDesks = walked.reduce((n, r) => n + r.awaitingPeople, 0);
     const finished = walked.reduce((n, r) => n + r.completed, 0);
     const noProcess = walked.reduce((n, r) => n + r.awaitingTemplate, 0);
+    // A firm, or a job, the walk could not move (B11): printed first, loudly.
+    for (const r of walked) {
+      if (r.failure !== undefined) console.log(`  !! walk failed for firm ${r.tenantId}: ${r.failure}`);
+    }
 
     if (started === 0 && advanced === 0 && noProcess === 0) {
       console.log("  nothing to walk — no job has a step that can move.\n");
@@ -129,6 +133,9 @@ async function main(): Promise<void> {
     const dunning = await wired.dunning.sweep();
     const escalated = dunning.reduce((n, r) => n + r.escalated, 0);
     const waiting = dunning.reduce((n, r) => n + r.awaitingApproval, 0);
+    for (const r of dunning) {
+      if (r.failure !== undefined) console.log(`  !! dunning skipped firm ${r.tenantId}: ${r.failure}`);
+    }
 
     if (escalated === 0) {
       console.log("  nothing to chase — no receivable has reached a rung it has not had.\n");

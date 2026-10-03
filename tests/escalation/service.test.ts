@@ -455,3 +455,36 @@ describe("which day it is, for the firm (T6.14)", () => {
     expect(g?.raised).toBe(0);
   });
 });
+
+describe("how late it is NOW, not on the day it fired (audit 2026-10-03, F11)", () => {
+  // The queue printed `daysPast`, snapshotted when the rung fired: a task due
+  // 7 Sep escalated on 25 Sep read 18 days late on 3 Oct, while the calendar
+  // said 26 for the same filing.
+  it("counts days late on the firm's today, from the snapshot and the day it fired", async () => {
+    const { service, subjects, notices } = setup();
+    subjects.workItems.set(TENANT, [task(10, ASSOCIATE)]);
+    await service.sweep();
+    notices.subjectFacts.set(ITEM, {
+      open: true,
+      title: "TDS deposit",
+      clientName: "Kaveri Foods",
+      entityName: "Kaveri Logistics Private Limited",
+      holderUserId: ASSOCIATE,
+      holderName: "Anand",
+      holderEmail: "anand@harbour.example",
+      dueOn: "2026-08-21",
+      stateName: "Pending",
+    });
+    const [fired] = await service.queue(TENANT, null);
+    expect(fired?.daysPast).toBe(10);
+    expect(fired?.daysPastNow).toBe(10);
+
+    // Eight days later, in India: 20:00 UTC on 8 Sep is the 9th there.
+    const later = setup(LADDER, { now: new Date("2026-09-08T20:00:00Z"), zone: "Asia/Kolkata" });
+    later.notices.rows.push(...notices.rows);
+    for (const [k, v] of notices.subjectFacts) later.notices.subjectFacts.set(k, v);
+    const [row] = await later.service.queue(TENANT, null);
+    expect(row?.daysPast).toBe(10);
+    expect(row?.daysPastNow).toBe(10 + 9);
+  });
+});

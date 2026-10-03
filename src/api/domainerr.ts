@@ -117,6 +117,8 @@ export function mapError(err: unknown): MappedError {
       case "INVALID_DISPLAY_NAME":
       case "INVALID_CURRENCY":
       case "INVALID_AUDIENCE":
+      case "INVALID_TIME_ZONE":
+      case "INVALID_COUNTRY":
         return { status: 400, code: "VALIDATION", message: err.message, reason: err.code };
       case "SLUG_TAKEN":
       case "EMAIL_TAKEN":
@@ -1238,6 +1240,19 @@ export function mapError(err: unknown): MappedError {
   // Deliberately last, after every domain family: a service that has its own
   // word for this conflict (`MembershipExists`, `AlreadyAttached`) has already
   // been matched above and says something far more useful. This is the floor.
+  // A date Postgres could not make a day of (22008 datetime_field_overflow,
+  // 22007 invalid_datetime_format): the caller's typo, never ours (audit
+  // 2026-10-03, B43). The validators refuse these first; this is the floor
+  // for any path that still reaches the database with one.
+  if (isBadDateFromDatabase(err)) {
+    return {
+      status: 400,
+      code: "VALIDATION",
+      message: "That is not a real date. Check the day and the month.",
+      reason: "INVALID_DATE",
+    };
+  }
+
   const violation = uniqueViolationOf(err);
   if (violation !== null) {
     return {
@@ -1275,6 +1290,13 @@ export function mapError(err: unknown): MappedError {
  * The constraint name goes in `reason` and never in `message` — it is a schema
  * detail, useful in a log and not the caller's business.
  */
+/** SQLSTATE 22008 or 22007, duck-typed for `uniqueViolationOf`'s reason. */
+function isBadDateFromDatabase(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  const code = (err as { code?: unknown }).code;
+  return code === "22008" || code === "22007";
+}
+
 function uniqueViolationOf(err: unknown): string | null {
   if (typeof err !== "object" || err === null) return null;
   const candidate = err as { code?: unknown; constraint_name?: unknown };

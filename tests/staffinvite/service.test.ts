@@ -40,7 +40,7 @@ function membership(audience: Audience): Membership {
 /** Records what it was asked to do, and can be told to refuse. */
 class Recorder {
   readonly invited: AddMemberInput[] = [];
-  readonly welcomed: { userId: string; firmName: string | null }[] = [];
+  readonly welcomed: { userId: string; firmName: string | null; timeZone?: string | null }[] = [];
   /** Set to make the relay refuse — the mail-is-down case. */
   relayDown = false;
   /** Set to make the tenant row not resolve. */
@@ -57,8 +57,9 @@ class Recorder {
   welcomeStaff(
     userId: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<{ expiresAt: string | null; sent: boolean }> {
-    this.welcomed.push({ userId, firmName });
+    this.welcomed.push({ userId, firmName, ...(timeZone === undefined || timeZone === null ? {} : { timeZone }) });
     return Promise.resolve(
       this.relayDown
         ? { expiresAt: "2026-09-06T09:00:00.000Z", sent: false }
@@ -164,5 +165,19 @@ describe("the order is the design", () => {
 
     await expect(subject(r).add(input("STAFF"), ACTOR)).rejects.toThrow("duplicate membership");
     expect(r.welcomed).toEqual([]);
+  });
+});
+
+describe("the welcome letter's clock (audit 2026-10-03, CA#50)", () => {
+  it("is the firm's: its zone goes to the letter with its name", async () => {
+    const r = new Recorder();
+    const service = new StaffInviteService({
+      identity: r,
+      memberships: r,
+      firms: r,
+      timeZones: { timeZoneFor: () => Promise.resolve("Asia/Kolkata") },
+    });
+    await service.add(input("STAFF"), ACTOR);
+    expect(r.welcomed).toEqual([expect.objectContaining({ firmName: "10x Global", timeZone: "Asia/Kolkata" })]);
   });
 });

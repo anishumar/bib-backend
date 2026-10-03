@@ -15,6 +15,9 @@ export interface NewTenant {
    *  No default anywhere in the stack, the column included, so a firm cannot
    *  come into existence without somebody having said what its books are in. */
   readonly reportingCurrency: CurrencyCode;
+  /** The firm's calendar (0071): the zone its country settles, a zone the
+   *  platform named, or 'UTC', which Setup reads as not chosen yet. */
+  readonly timeZone: string;
 }
 
 // There is deliberately no updateReportingCurrency, here or anywhere above it.

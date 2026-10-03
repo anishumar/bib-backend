@@ -1648,6 +1648,34 @@ export class ObligationService {
   }
 
   /**
+   * Fill the firm's calendar NOW, the way tonight's sweep would (audit
+   * 2026-10-03, CA#24).
+   *
+   * Called when work goes live (a letter signed). Until then a client signed
+   * on 3 Oct saw "Nothing is on the calendar" while September's returns, due
+   * in October, were waiting for the nightly pass. It is the sweep's own
+   * generate step, on the same window and floor, so the two cannot disagree
+   * and the sweep then finds nothing to add: idempotent by the generator's
+   * unique key. It generates only; raising tasks and flagging missed filings
+   * stay the sweep's, for `spawnFor`'s reason. Which periods a new client is
+   * owed is unchanged (taking over mid-year is the firm's question).
+   *
+   * Returns how many filings it wrote or brought back.
+   */
+  async fillCalendar(tenantId: string, actor: Actor = SYSTEM_ACTOR): Promise<number> {
+    const today = await this.firmDay(tenantId);
+    const floor = await this.deps.compliancePolicy.missedFromOn(tenantId);
+    const r = await this.generate(
+      tenantId,
+      { from: addDays(today, -REACH_BACK_DAYS), to: addDays(today, HORIZON_DAYS) },
+      actor,
+      undefined,
+      floor,
+    );
+    return r.created + r.restored;
+  }
+
+  /**
    * Create every obligation falling due in a window, for one firm.
    *
    * Idempotent — the unique key on (tenant, lineage, entity, period start)
@@ -2048,6 +2076,15 @@ export class ObligationService {
    */
   async decisionQueue(tenantId: string): Promise<readonly DecisionRow[]> {
     return this.deps.instances.decisionQueue(tenantId, DECISION_QUEUE_LIMIT);
+  }
+
+  /**
+   * The day the decision queue counts days late from: the caller's when it
+   * sent one, else the FIRM's, from the injected clock (audit 2026-10-03,
+   * B44: the route used `new Date()`, the server's UTC day).
+   */
+  async decisionDay(tenantId: string, asOf?: IsoDate): Promise<IsoDate> {
+    return asOf ?? (await this.firmDay(tenantId));
   }
 
   /**

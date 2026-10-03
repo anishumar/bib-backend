@@ -232,7 +232,8 @@ refused: it is unrecoverable from inside the product.
 
 ## Setup readiness — is the firm set up well enough to run its work (V2.6, 2026-09-28)
 
-`GET /api/v1/tenancy/readiness` (`tenant:admin`): eight lines, each `done` or naming its gaps.
+`GET /api/v1/tenancy/readiness` (`tenant:admin`): thirteen lines (eight until 2026-10-03), each
+`done`, `to_do` naming its gaps, or `nothing_to_check`.
 Setting up a firm is about sixteen ordered steps and several fail SILENTLY (a client with no
 SPOC gets work on nobody's desk, no ladder escalates nothing, an unconfirmed rule files
 nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
@@ -257,6 +258,23 @@ nothing); the QA firm stopped half-way on 27 Sep 2026 and no screen said so.
   Dept its services name), `portal_contacts` (each such client has a live portal login).
 - **The API ships codes, the screen ships words.** `gaps[].missing` is a closed vocabulary per
   line (documented on the schema); `id`/`ref` let the screen link the client or service.
+- **Nothing to check is not done (audit 2026-10-03, CA#15).** An empty firm read "4 of 8 done":
+  `reporting_lines` with no reporting-line check rule, `processes` with no live service, and
+  `account_team` / `portal_contacts` with no active client now answer `state: nothing_to_check`
+  (`done: false`), and the screen counts only the lines that apply. `done` stays on the wire.
+- **The first-week lines (2026-10-03), first in the order:** `company_details` (every firm
+  company, not archived or retired, has a country and a registered address), `time_zone` (not
+  done while UTC: it was every firm's default; `ref` offers the ONE zone the companies'
+  countries settle, never applied), `staff` (a second active staff login), `services` (a live
+  service) and `standard_terms` (a published clause; no letter can be written without one). No
+  line for the firm's GSTIN or PAN: there is nowhere to record them yet.
+
+**A NEW FIRM STARTS ON ITS COUNTRY'S CALENDAR WHEN THE COUNTRY SETTLES IT (F07).**
+`POST /internal/v1/tenants` takes optional `country` and `timeZone`: a named zone wins; else a
+country with ONE zone (`zoneForCountry`, IN -> Asia/Kolkata) sets it; else the firm stays on UTC
+and Setup asks. Never from the currency (a Dubai firm may keep rupee books). `tenant.created`
+records `timeZone` and `timeZoneFrom` (`provisioning` | `country` | `unset`). Existing firms were
+NOT moved: their zone is their call, and Setup flags UTC. The setting itself is on Your firm.
 
 ## Firm administration — the roster is the other half of access control
 
@@ -789,6 +807,45 @@ Letters already sent or signed keep their stored days.
 
 `tests/architecture/instant-format.test.ts` bans a bare `_at::date` across the adapters, beside
 the `_at::text` ban it already carried. Same family, same reason: **name the zone**.
+
+**THE AUDIT OF 2026-10-03 FOUND FIVE MORE UTC DAYS, ALL FIXED (fix/audit-dates).**
+- **Proposal expiry (B24):** every `isPastValidity` caller passed the UTC instant;
+  `ProposalService.firmToday` decides it on every path, the shared link included.
+- **Dashboard ageing and DSO (B29, 0328):** `crm.receivable_ageing` buckets on CURRENT_DATE,
+  the database session's day. The dashboard reads `crm.receivable_ageing_on(<firm's day>)`
+  (security invoker, the view's body); the view stays, unread, and
+  `tests/architecture/firm-day-reads.test.ts` bans it and CURRENT_DATE in the dashboard adapter.
+- **The chaser (B41):** its today and a lifted freeze's default day were the server's.
+- **Handlers (B44):** the decision queue and the portal-scope echo used `new Date()`;
+  `ObligationService.decisionDay` and `scopeFor(...).onDate` answer from the injected clock.
+- **Escalations (F11):** each row also ships `daysPastNow` = `daysPast` + days since `raisedOn`
+  on the firm's day; `daysPast` stays the record of the day it fired.
+- **Emails (CA#50):** letters FROM a firm (portal invite and welcome, staff welcome, proposal
+  decision notice) print times on the firm's clock, zone named in words; the sign-in and reset
+  letters belong to a global account and stay UTC.
+
+**A date is a real day (B43).** `domain/day.ts` `isCalendarDay` is the one check (split
+arithmetic, no `Date`); `isDay` and the shape-only `isIsoDate`s use it, and `mapError` answers
+SQLSTATE 22008/22007 as a 400 as the floor.
+
+**A job is never due after the legal date of its filings (CA#11).** `describeJobs.dueOn` is the
+earlier of the open tasks' date and `filingDueOn`, the earliest UNFILED filing of the same
+company for a rule on the engagement's service (or generated for it) in a period inside the
+job's; a period's umbrella task is created with the same cap (`earliestFilingDue`) and
+`isStatutoryDue` when the law's date won. Tasks created before keep their stored date.
+
+**Signing fills the calendar (CA#24).** `ObligationService.fillCalendar` (the sweep's own
+generate step: same window and floor, no task raised, nothing flagged) runs through the
+engagement use case's `CalendarFiller` port after a signature that made work active, so the
+calendar is not empty until tonight. A failure is swallowed; the sweep fills it.
+
+**Sweeps isolate firms and say so (B11, B13, B14, B16, B32).** The orchestrator sweep catches per
+firm and per job (`failed`, `failure`), dunning per firm, the chaser and nudge lists are ACTIVE
+firms only, the weekly advance digest releases its claim when every send failed, and
+`setup/sweep-log.ts` logs any `failure` at error first (the spawn sweep used to skip a failed
+report with nothing spawned). B54, measured: at 96 firms the slowest sweep (the nightly
+calendar) takes 2.8 s and the five-minute orchestrator walk 0.9 s, about 9 ms a firm; serial is
+fine at this size (see `bib/qa/audit-2026-10-03/fix-dates.md`).
 
 ## Migrations
 

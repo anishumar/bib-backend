@@ -460,6 +460,29 @@ describe("the weekly summary to the admins (0322)", () => {
     expect(w.mailer.sent.map((l) => l.to)).toEqual(["sam@example.test"]);
   });
 
+  it("is not marked sent when every send failed, and is retried on the next pass (B16)", async () => {
+    // With the relay down at the digest hour the week was claimed, marked
+    // sent and recorded as sent with 0 recipients, and that week's escalation
+    // to the admins was never retried.
+    const w = digestWorld(MONDAY_TEN);
+    w.desk.rows.push(pendingAdvance());
+    w.desk.balances.set(ADV_INVOICE, { invoiced: "59000.00", paid: "0.00", outstanding: "59000.00" });
+    w.mailer.refusing.add("ashish@example.test");
+    w.mailer.refusing.add("sam@example.test");
+    const [failed] = await w.digest.sweep();
+    expect(failed).toMatchObject({ weekOf: "2026-10-12", sent: false, recipients: 0, advances: 1 });
+    expect(failed?.failure).toContain("2");
+    expect(w.store.weeks.get(`${FIRM}|2026-10-12`)?.sent ?? false).toBe(false);
+    expect(w.events.verbs()).toEqual([]);
+
+    // An hour later the relay is back: the same week goes out, once.
+    w.mailer.refusing.clear();
+    w.clock.set(new Date("2026-10-12T05:30:00.000Z"));
+    expect((await w.digest.sweep())[0]).toMatchObject({ weekOf: "2026-10-12", sent: true, recipients: 2 });
+    expect(w.events.verbs()).toEqual(["tenant.advance_digest_sent"]);
+    expect(await w.digest.sweep()).toEqual([]);
+  });
+
   it("follows the day and hour the firm chose, and never twice inside six days", async () => {
     const w = digestWorld(MONDAY_TEN);
     w.desk.rows.push(pendingAdvance());

@@ -4,6 +4,7 @@
 // RELATIONSHIPS between parties, never separate tables.
 
 import { isValidPhone, normalizePhone } from "./phone";
+import { isCalendarDay } from "../day";
 
 export type PartyKind = "organization" | "person";
 
@@ -246,5 +247,7 @@ export function isValidDateRange(validFrom: string, validTo: string | null): boo
 }
 
 export function isIsoDate(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  // A day that EXISTS, not just the shape (audit 2026-10-03, B43): 2026-13-45
+  // passed the shape and reached Postgres as an unmapped 22008, a 500.
+  return isCalendarDay(s);
 }

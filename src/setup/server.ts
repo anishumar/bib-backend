@@ -827,6 +827,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     identity,
     memberships: tenancy,
     firms: tenancy,
+    // CA#50: the welcome letter's expiry on the firm's clock.
+    timeZones: new PostgresFirmTimeZone(pools.app),
   });
 
   const tenancyDeps: TenancyDeps = { service: tenancy, staffInvite };
@@ -918,6 +920,8 @@ export function wire(cfg: Config, log: Logger): Wired {
       memberships: tenancy,
       access: portalAccess,
       firms: tenancy,
+      // CA#50: the invitation's expiry on the firm's clock.
+      timeZones: new PostgresFirmTimeZone(pools.app),
       // `invite` records nothing itself — its three writes each emit their own
       // event. `resend` writes no row at all, so this is the only record that a
       // credential was mailed outside the firm and who said so.
@@ -1227,6 +1231,9 @@ export function wire(cfg: Config, log: Logger): Wired {
   const engagement = new EngagementService({
     // 0320: a signed letter's advance becomes a bill to raise.
     advanceBilling: advanceBills,
+    // CA#24: a signed letter's filings reach the calendar at once, through the
+    // nightly sweep's own generator, not tonight.
+    calendar: obligations,
     // 0319: a signed letter's billing terms set each engagement's schedule.
     goLiveBilling: new GoLiveScheduler({
       schedules: new PostgresBillingSchedules(pools.app),

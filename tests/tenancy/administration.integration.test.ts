@@ -228,6 +228,32 @@ describe("the roster, against real rows", () => {
   });
 });
 
+describe("a new firm's calendar (audit 2026-10-03, F07)", () => {
+  it("is stored as its country settled it, and UTC when nothing did", async () => {
+    const india = await tenancy.createTenant({
+      name: "Sharma Mehta",
+      slug: `admin-test-in-${stamp}`,
+      reportingCurrency: "INR",
+      country: "IN",
+    });
+    const usa = await tenancy.createTenant({
+      name: "Hudson",
+      slug: `admin-test-us-${stamp}`,
+      reportingCurrency: "USD",
+      country: "US",
+    });
+    const rows = await owner<{ id: string; time_zone: string }[]>`
+      SELECT id, time_zone FROM tenancy.tenant WHERE id IN (${india.id}, ${usa.id})
+    `;
+    expect(new Map(rows.map((r) => [r.id, r.time_zone]))).toEqual(
+      new Map([
+        [india.id, "Asia/Kolkata"],
+        [usa.id, "UTC"],
+      ]),
+    );
+  });
+});
+
 describe("revocation reaches a live session", () => {
   it("the colleague's session works before anything is revoked", async () => {
     const principal = await identity.resolveSession(colleagueToken);

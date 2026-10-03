@@ -1087,6 +1087,20 @@ export class WorkItemService {
     let created = 0;
     for (const w of work) {
       if (covered.has(w.engagementId)) continue;
+      // NEVER AFTER THE LAW'S DATE (audit 2026-10-03, CA#11). A month's task
+      // is due its period's end plus the service's turnaround, unless a
+      // filing the work is for falls due sooner: GST returns · Sep 2026 read
+      // 20 Oct while its GSTR-1 was due 11 Oct. Then the task carries the
+      // statute's date, and says so.
+      const turnaround = dueOnFrom(period ? period.end : w.effectiveFrom, w.slaDays);
+      const filingDue =
+        period?.start === undefined
+          ? null
+          : await this.deps.obligations.earliestFilingDue(tenantId, w.engagementId, {
+              start: period.start,
+              end: period.end,
+            });
+      const statutory = filingDue !== null && (turnaround === null || filingDue < turnaround);
       // Statutory work is what a STATUTE dates, and an engagement's SLA is the
       // firm's own promise. So a work item spawned from an engagement is NOT
       // statutory — T3.2's obligations are what set that flag, from the law.
@@ -1117,9 +1131,9 @@ export class WorkItemService {
         assignmentNote: routing.outcome.note,
         // From the END of the period for a month's task, from SIGNING for a
         // one-time one. Same field, same snapshot; the clock starts at the
-        // event that makes sense for the work.
-        dueOn: dueOnFrom(period ? period.end : w.effectiveFrom, w.slaDays),
-        isStatutoryDue: false,
+        // event that makes sense for the work. Earlier when a filing is (CA#11).
+        dueOn: statutory ? filingDue : turnaround,
+        isStatutoryDue: statutory,
         // The SLA in force AT CREATION, copied. A later catalogue revision must
         // not make finished work retroactively late — G2.3's whole argument.
         slaDaysSnapshot: w.slaDays,

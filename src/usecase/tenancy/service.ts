@@ -10,10 +10,13 @@ import type { Membership, Tenant, UserAccount } from "../../domain/tenancy/model
 import {
   activeMemberships,
   hasActiveAdministrator,
+  DEFAULT_TIME_ZONE,
   isAudience,
+  isTimeZone,
   isValidSlug,
   normalizeEmail,
   rosterAfter,
+  zoneForCountry,
 } from "../../domain/tenancy/model";
 import { ADMIN_PERMISSION } from "../../domain/authz/model";
 import { isCurrencyCode, normalizeCurrency } from "../../domain/money/model";
@@ -21,8 +24,10 @@ import {
   InvalidDisplayName,
   EmailTaken,
   InvalidAudience,
+  InvalidCountry,
   InvalidCurrency,
   InvalidSlug,
+  InvalidTimeZone,
   LastAdministrator,
   MembershipExists,
   MembershipNotFound,
@@ -170,21 +175,40 @@ export class TenancyService {
    * money that cannot be corrected later without silently invalidating
    * everything stored against it, so the only safe moment to insist on it is
    * the one before the firm exists.
+   *
+   * ── AND ITS CALENDAR, WHEN THE COUNTRY SETTLES IT (audit 2026-10-03, F07) ──
+   *
+   * `timeZone` when the platform names one; else the one zone `country` keeps
+   * (India: Asia/Kolkata); else UTC, which Setup reads as not chosen and asks
+   * the firm about. Never derived from the currency: a currency is not a
+   * place, and a firm in Dubai may keep its books in rupees. Applies to a NEW
+   * firm only; nothing here moves an existing firm's zone, which is its call.
    */
   async createTenant(
     input: {
       name: string;
       slug: string;
       reportingCurrency: string;
+      /** ISO 3166-1 alpha-2: where the firm is. Optional. */
+      country?: string | undefined;
+      /** An IANA zone, over the country's. Optional. */
+      timeZone?: string | undefined;
       provisionedBy?: string | undefined;
     },
     actor: Actor = SYSTEM_ACTOR,
-  ): Promise<Tenant> {
+  ): Promise<Tenant & { readonly timeZone: string }> {
     if (!isValidSlug(input.slug)) throw new InvalidSlug(input.slug);
     // Normalised before it is validated, and stored normalised: "inr" and "INR"
     // are one currency to a person and two strings to Postgres.
     const reportingCurrency = normalizeCurrency(input.reportingCurrency);
     if (!isCurrencyCode(reportingCurrency)) throw new InvalidCurrency(input.reportingCurrency);
+    if (input.timeZone !== undefined && !isTimeZone(input.timeZone)) throw new InvalidTimeZone(input.timeZone);
+    if (input.country !== undefined && !/^[A-Za-z]{2}$/.test(input.country.trim())) {
+      throw new InvalidCountry(input.country);
+    }
+    const fromCountry = input.country === undefined ? null : zoneForCountry(input.country);
+    const timeZone = input.timeZone?.trim() ?? fromCountry ?? DEFAULT_TIME_ZONE;
+    const timeZoneFrom = input.timeZone !== undefined ? "provisioning" : fromCountry !== null ? "country" : "unset";
     const existing = await this.deps.tenants.findBySlug(input.slug);
     if (existing) throw new SlugTaken(input.slug);
     const tenant = await this.deps.tenants.create({
@@ -192,6 +216,7 @@ export class TenancyService {
       slug: input.slug,
       name: input.name,
       reportingCurrency,
+      timeZone,
     });
     // A tenant's own creation is the first row in its own timeline. The currency
     // rides along because it is a machine fact that can never be restated: when
@@ -205,6 +230,10 @@ export class TenancyService {
       payload: {
         slug: tenant.slug,
         reportingCurrency: tenant.reportingCurrency,
+        // Which calendar it started on, and why: "why was this firm on UTC"
+        // is answered here, by `unset`.
+        timeZone,
+        timeZoneFrom,
         ...byline(input.provisionedBy),
       },
     });
@@ -282,7 +311,7 @@ export class TenancyService {
       actor,
       payload: { kind: "organization", isFirmSelf: true, ...byline(input.provisionedBy) },
     });
-    return tenant;
+    return { ...tenant, timeZone };
   }
 
   /**

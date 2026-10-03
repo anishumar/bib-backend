@@ -7,6 +7,12 @@ import type { ReadinessFactSource } from "../usecase/readiness/ports";
 /** A firm that has set up nothing: the shape a new tenant starts in. */
 export function emptyFacts(): Omit<ReadinessFacts, "day"> {
   return {
+    // A new firm: itself as its only company, unregistered; the founding
+    // partner alone; UTC, the zone nobody chose; no terms.
+    companies: [{ partyId: "00000000-0000-4000-8000-00000000f00d", name: "New firm", country: null, hasAddress: false }],
+    timeZone: "UTC",
+    activeStaff: 1,
+    publishedTerms: 0,
     activeClients: [],
     reportingLinePolicies: [],
     staffWithoutManager: [],

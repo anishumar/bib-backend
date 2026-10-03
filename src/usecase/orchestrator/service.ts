@@ -253,16 +253,40 @@ export interface WalkReport {
    *  them. NOT an error — see `NoTemplatePublished`. Counted so the worker's
    *  log says how much work is waiting on a partner rather than on the engine. */
   readonly awaitingTemplate: number;
+  /** Jobs this tick could not move for a reason nobody expected. */
+  readonly failed?: number;
+  /** Why: the firm could not be visited at all, or the first job that failed
+   *  and its id. Set only when something failed; the worker logs it. */
+  readonly failure?: string;
 }
 
 export class OrchestratorService {
   constructor(private readonly deps: Deps) {}
 
-  /** Every firm, one after another. The outer loop of the worker's third sweep. */
+  /**
+   * Every firm, one after another. The outer loop of the worker's third sweep.
+   *
+   * ONE FIRM'S FAILURE NEVER STOPS THE OTHERS (audit 2026-10-03, B11). This
+   * loop had no catch, so an error in firm #3 left firms #4..N with no step
+   * moved on every tick until somebody fixed #3. It is caught per firm and
+   * REPORTED, never swallowed: the worker logs `failure` at error.
+   */
   async sweep(actor: Actor = SYSTEM_ACTOR): Promise<readonly WalkReport[]> {
     const reports: WalkReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
-      reports.push(await this.walkForTenant(tenantId, actor));
+      try {
+        reports.push(await this.walkForTenant(tenantId, actor));
+      } catch (err) {
+        reports.push({
+          tenantId,
+          started: 0,
+          advanced: 0,
+          awaitingPeople: 0,
+          completed: 0,
+          awaitingTemplate: 0,
+          failure: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
     return reports;
   }
@@ -277,12 +301,16 @@ export class OrchestratorService {
     let awaitingPeople = 0;
     let completed = 0;
     let awaitingTemplate = 0;
+    let failed = 0;
+    let failure: string | undefined;
 
     for (const job of jobs) {
       // One firm's broken job must not stop the rest of that firm's work, let
       // alone every other firm's. The two expected refusals are counted and
-      // carried on from; anything else is re-thrown, because a bug that gets
-      // swallowed in a worker is a bug nobody ever hears about.
+      // carried on from. Anything else is counted and REPORTED (the first one,
+      // with its job's id) rather than re-thrown: re-throwing stopped every
+      // later job of the firm on every tick (B11), and a bug swallowed in a
+      // worker is one nobody hears about, so the report carries it to the log.
       let outcome;
       try {
         outcome = await this.advance(tenantId, job, actor);
@@ -291,7 +319,9 @@ export class OrchestratorService {
           awaitingTemplate += 1;
           continue;
         }
-        throw err;
+        failed += 1;
+        failure ??= `job ${job.id}: ${err instanceof Error ? err.message : String(err)}`;
+        continue;
       }
       started += outcome.started ? 1 : 0;
       advanced += outcome.advanced;
@@ -299,7 +329,15 @@ export class OrchestratorService {
       completed += outcome.completed ? 1 : 0;
     }
 
-    return { tenantId, started, advanced, awaitingPeople, completed, awaitingTemplate };
+    return {
+      tenantId,
+      started,
+      advanced,
+      awaitingPeople,
+      completed,
+      awaitingTemplate,
+      ...(failure === undefined ? {} : { failed, failure }),
+    };
   }
 
   /**

@@ -335,3 +335,35 @@ describe("the terminal rung needs a partner — the acceptance", () => {
     ).rejects.toBeInstanceOf(DunningAlreadyDecided);
   });
 });
+
+describe("one firm's failure (audit 2026-10-03, B13)", () => {
+  it("never stops the sweep for the firms after it, and is reported", async () => {
+    // The dunning sweep had no per-firm catch: one firm's bad ladder or zone
+    // read stopped dunning for every later firm, every day.
+    const BROKEN = "00000000-0000-0000-0000-0000000000b1";
+    const s = setup();
+    s.ladders.ladders.set(TENANT, LADDER);
+    await overdueInvoice(s, "2026-07-15");
+    const ladders = {
+      ladderFor: (tenantId: string) =>
+        tenantId === BROKEN ? Promise.reject(new Error("firm BROKEN's ladder is unreadable")) : s.ladders.ladderFor(tenantId),
+    };
+    const service = new DunningService({
+      timeZones: new FakeFirmTimeZone(),
+      dunning: s.dunning,
+      ladders,
+      invoices: s.invoices,
+      tenants: new FakeTenantDirectory([BROKEN, TENANT]),
+      ids: new FakeIds(),
+      clock: new FakeClock(TODAY),
+      events: s.events,
+    });
+
+    const reports = await service.sweep();
+
+    expect(reports.map((r) => r.tenantId)).toEqual([BROKEN, TENANT]);
+    expect(reports[0]).toMatchObject({ escalated: 0, failure: expect.stringContaining("BROKEN") });
+    expect(reports[1]).toMatchObject({ escalated: 1 });
+    expect(reports[1]?.failure).toBeUndefined();
+  });
+});

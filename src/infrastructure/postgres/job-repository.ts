@@ -48,6 +48,7 @@ interface DetailRow {
   client_party_id: string | null;
   period_label: string | null;
   due_on: string | null;
+  filing_due_on: string | null;
 }
 
 interface ActivationRow {
@@ -251,7 +252,34 @@ export class PostgresJobRepository
                ON ws.id = wi.state_id AND ws.tenant_id = wi.tenant_id
             WHERE wi.job_id = je.job_id
               AND wi.tenant_id = je.tenant_id
-              AND NOT ws.is_terminal) AS due_on
+              AND NOT ws.is_terminal) AS due_on,
+          -- THE LAW'S DATE FOR THE FILINGS THIS WORK IS FOR (audit 2026-10-03,
+          -- CA#11). A GST job read due 20 Oct, its period's end plus the
+          -- service's turnaround, while its GSTR-1 was legally due 11 Oct; and
+          -- a TDS or ITR job with no task date read "No due date". The
+          -- earliest UNFILED filing of the same company, for a rule on this
+          -- engagement's service (or generated for this engagement), in a
+          -- period inside the job's. Not withdrawn, not filed, not closed.
+          -- The generator hands a period's row to ONE engagement of a company
+          -- (T6.16), so the service link is what finds it from the others.
+          (SELECT min(oi.statutory_due_on)::text
+             FROM delivery.obligation_instance oi
+             JOIN delivery.obligation_state os
+               ON os.id = oi.state_id AND os.tenant_id = oi.tenant_id
+            WHERE oi.tenant_id = je.tenant_id
+              AND oi.withdrawn_at IS NULL
+              AND NOT os.is_terminal
+              AND NOT os.is_filed
+              AND oi.entity_party_id = e.entity_party_id
+              AND (oi.engagement_id = je.engagement_id
+                   OR EXISTS (SELECT 1 FROM delivery.obligation_rule_service k
+                               WHERE k.tenant_id = oi.tenant_id
+                                 AND k.lineage_id = oi.lineage_id
+                                 AND k.service_entry_id = pinned.entry_id
+                                 AND k.unlinked_at IS NULL))
+              AND (j.period_start IS NULL
+                   OR (oi.period_start <= j.period_end AND oi.period_end >= j.period_start))
+          ) AS filing_due_on
         FROM delivery.job_engagement je
         JOIN delivery.job j
           ON j.id = je.job_id AND j.tenant_id = je.tenant_id
@@ -288,7 +316,13 @@ export class PostgresJobRepository
         serviceName: r.service_name ?? "(unnamed service)",
       };
       if (existing) {
-        out.set(r.job_id, { ...existing, services: [...existing.services, service] });
+        const filingDueOn = earlierDay(existing.filingDueOn, r.filing_due_on);
+        out.set(r.job_id, {
+          ...existing,
+          filingDueOn,
+          dueOn: earlierDay(existing.dueOn, filingDueOn),
+          services: [...existing.services, service],
+        });
       } else {
         out.set(r.job_id, {
           entityName: r.entity_name,
@@ -296,7 +330,9 @@ export class PostgresJobRepository
           entityPartyId: r.entity_party_id,
           clientPartyId: r.client_party_id,
           periodLabel: r.period_label,
-          dueOn: r.due_on,
+          // Never after the law's date (CA#11).
+          dueOn: earlierDay(r.due_on, r.filing_due_on),
+          filingDueOn: r.filing_due_on,
           services: [service],
         });
       }
@@ -631,4 +667,12 @@ export class PostgresTenantDirectory implements TenantDirectory {
     `;
     return rows.map((r) => r.id);
   }
+}
+
+/** The earlier of two `YYYY-MM-DD` days, either of which may be missing. A
+ *  string comparison is a date comparison here, and no `Date` is built. */
+function earlierDay(a: string | null, b: string | null): string | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a <= b ? a : b;
 }

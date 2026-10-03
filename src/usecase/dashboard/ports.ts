@@ -32,9 +32,12 @@ export interface DashboardRepository {
    *  one slice per version. */
   mrrBy(tenantId: string, axis: "client" | "service"): Promise<readonly Slice[]>;
 
-  receivables(tenantId: string): Promise<ReceivableTotals>;
+  /** Bucketed as of `day`, the FIRM's calendar day (audit 2026-10-03, B29):
+   *  the database's own day is UTC, which is yesterday in India until 05:30. */
+  receivables(tenantId: string, day: string): Promise<ReceivableTotals>;
 
-  receivablesByClient(tenantId: string): Promise<readonly Slice[]>;
+  /** What each client owes as of `day`, the firm's day. */
+  receivablesByClient(tenantId: string, day: string): Promise<readonly Slice[]>;
 
   /**
    * What the firm actually billed in a window — the denominator of DSO.
@@ -44,7 +47,7 @@ export interface DashboardRepository {
    * was reversed was not a sale, and leaving it in would flatter DSO by
    * inflating the denominator.
    */
-  creditSales(tenantId: string, sinceDays: number): Promise<string>;
+  creditSales(tenantId: string, sinceDays: number, day: string): Promise<string>;
 
   /**
    * The firm's own companies (`crm.is_firm_entity`, live and not archived),
@@ -75,7 +78,7 @@ export interface DashboardRepository {
 
   /** What each manager's issued invoices are owed now, and the firm's total,
    *  from `crm.receivable_ageing` (the rows "Owed to the firm" sums). */
-  owedByManager(tenantId: string): Promise<readonly ManagerOwedRow[]>;
+  owedByManager(tenantId: string, day: string): Promise<readonly ManagerOwedRow[]>;
 
   /** Names for these users, from this firm's own memberships only (a user
    *  account is global; the membership is behind the tenant wall). */

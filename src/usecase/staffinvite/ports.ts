@@ -19,7 +19,15 @@ export interface StaffWelcomeIdentity {
   welcomeStaff(
     userId: string,
     firmName: string | null,
+    /** The firm's zone, for the expiry in the letter (CA#50). */
+    timeZone?: string | null,
   ): Promise<{ readonly expiresAt: string | null; readonly sent: boolean }>;
+}
+
+/** The firm's zone, so the letter's expiry reads on its clock (CA#50).
+ *  Satisfied by `PostgresFirmTimeZone`. */
+export interface StaffFirmTimeZone {
+  timeZoneFor(tenantId: string): Promise<string>;
 }
 
 /** The membership. Satisfied by `TenancyService`. */

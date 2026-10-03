@@ -4,7 +4,7 @@ import { createRoute } from "@hono/zod-openapi";
 import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
-import { READINESS_KEYS } from "../../domain/readiness/model";
+import { READINESS_KEYS, READINESS_STATES } from "../../domain/readiness/model";
 import type { ReadinessService } from "../../usecase/readiness/service";
 import { scopeOf } from "../scope";
 
@@ -17,15 +17,21 @@ const GapSchema = z
     id: z.string().nullable().openapi({
       description:
         "The subject: a client's party id (account_team, portal_contacts), a person's user id " +
-        "(reporting_lines) or a rule's id (compliance_rules). Null for a gap that is the firm's own.",
+        "(reporting_lines), a rule's id (compliance_rules) or one of the firm's companies " +
+        "(company_details). Null for a gap that is the firm's own.",
     }),
     ref: z.string().nullable().openapi({
-      description: "A key to link with: the service's catalogue key on `processes`. Null elsewhere.",
+      description:
+        "A key to link with: the service's catalogue key on `processes`; on `time_zone`, the one " +
+        "zone the firm's companies' countries settle between them (offered, never applied), or " +
+        "null when they settle none. Null elsewhere.",
     }),
     name: z.string().openapi({ description: "The subject's name as the firm wrote it; empty for the firm's own gap." }),
     missing: z.array(z.string()).openapi({
       description:
-        "What is missing, as a closed vocabulary per line: deadlines go_live_floor | " +
+        "What is missing, as a closed vocabulary per line: company_details company | country | " +
+        "address; time_zone time_zone; staff colleagues; services service; standard_terms " +
+        "standard_terms; deadlines go_live_floor | " +
         "fiscal_year_start; reporting_lines manager; request_routing routing; processes process " +
         "| published_process; compliance_rules confirmed_linked_rule | confirmed; ladders " +
         "escalation | chaser | nudge; account_team key_manager | spoc:<Dept code>; " +
@@ -37,7 +43,13 @@ const GapSchema = z
 const LineSchema = z
   .object({
     key: z.enum(READINESS_KEYS),
-    done: z.boolean(),
+    state: z.enum(READINESS_STATES).openapi({
+      description:
+        "done, to_do, or nothing_to_check: the line has no subject yet (no clients, no services, " +
+        "no check rule that reads reporting lines), so it is neither done nor to do. A screen " +
+        "counts only the lines that apply.",
+    }),
+    done: z.boolean().openapi({ description: "state is done." }),
     gaps: z.array(GapSchema),
     context: z.array(z.string()).openapi({
       description:
@@ -52,7 +64,7 @@ const ReadinessResponse = z
     asOf: z.string().openapi({ description: "The firm's calendar day the lines were computed on." }),
     lines: z.array(LineSchema).openapi({
       description:
-        "The eight lines in the order a firm sets itself up. Computed on every read and never " +
+        "The thirteen lines in the order a firm sets itself up. Computed on every read and never " +
         "stored, so fixing a gap turns its line done on the next one. A ladder line asks that a " +
         "ladder is PUBLISHED, never which days are on it: the firm has not given its numbers (D3).",
     }),
@@ -65,7 +77,8 @@ const readinessRoute = createRoute({
   tags: ["tenancy"],
   summary: "Is this firm set up well enough to run its work?",
   description:
-    "Eight lines: go-live floor and financial year, reporting lines where a check rule reads " +
+    "Thirteen lines: the firm's companies' country and address, its time zone, colleagues " +
+    "added, go-live floor and financial year, a service, standard terms, reporting lines where a check rule reads " +
     "them, client-request routing, a published process for every service, confirmed and linked " +
     "compliance rules, the three ladders published, every active client's Key Manager and SPOCs, " +
     "and a portal login per active client. Each lists what is missing, by name.",
@@ -86,6 +99,7 @@ export function registerReadinessRoutes(app: OpenAPIHono<AppEnv>, deps: Readines
         asOf: r.asOf,
         lines: r.lines.map((l) => ({
           key: l.key,
+          state: l.state,
           done: l.done,
           gaps: l.gaps.map((g) => ({ id: g.id, ref: g.ref, name: g.name, missing: [...g.missing] })),
           context: [...l.context],

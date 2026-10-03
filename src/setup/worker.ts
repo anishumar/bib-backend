@@ -44,6 +44,7 @@ import {
   PostgresIssuerTaxDefaults,
 } from "../infrastructure/postgres/advance-reminders";
 import { invoiceIssuedCopies } from "./invoice-copies";
+import { logDunningSweep, logOrchestratorSweep, logSpawnSweep } from "./sweep-log";
 import { mailerFor } from "./mailer";
 import { PostgresAdvanceBillFacts, PostgresFinalBillFacts } from "../infrastructure/postgres/billing-facts";
 import { EscalationService } from "../usecase/escalation/service";
@@ -672,6 +673,9 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
   const engagement: EngagementService = new EngagementService({
     // 0320: and writes the advance bill it owes.
     advanceBilling: advanceBills,
+    // CA#24: a signed letter's filings reach the calendar at once, through the
+    // nightly sweep's own generator, not tonight.
+    calendar: obligations,
     // 0319: an e-signed letter settled here sets its engagements' billing
     // schedules from its terms, exactly as one signed on the server does.
     goLiveBilling: new GoLiveScheduler({
@@ -768,38 +772,14 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     async run(): Promise<void> {
       await queue.start();
       await queue.register(SPAWN_QUEUE, async () => {
-        const reports = await scheduler.sweepActivations();
-        for (const r of reports) {
-          if (r.spawned === 0 && r.alreadySpawned === 0) continue;
-          // `alreadySpawned` is logged rather than dropped: it is the number
-          // that shows idempotency working. A sweep reporting spawned:0 and
-          // alreadySpawned:40 is the system correctly doing nothing, which
-          // looks identical to a broken sweep if it says nothing at all.
-          log.info(
-            { tenantId: r.tenantId, spawned: r.spawned, alreadySpawned: r.alreadySpawned },
-            "spawn sweep",
-          );
-        }
+        // A failed firm is logged first, whatever it spawned (B32): see
+        // `sweep-log.ts`.
+        logSpawnSweep(log, await scheduler.sweepActivations());
       });
       await queue.schedule(SPAWN_QUEUE, cfg.worker.spawnCron);
 
       await queue.register(DUNNING_QUEUE, async () => {
-        const reports = await dunning.sweep();
-        for (const r of reports) {
-          if (r.escalated === 0 && r.alreadyTaken === 0) continue;
-          // `awaitingApproval` is logged because it is the number somebody has
-          // to ACT on: the worker has climbed to a credit hold and stopped, and
-          // nothing further happens until a partner decides.
-          log.info(
-            {
-              tenantId: r.tenantId,
-              escalated: r.escalated,
-              alreadyTaken: r.alreadyTaken,
-              awaitingApproval: r.awaitingApproval,
-            },
-            "dunning sweep",
-          );
-        }
+        logDunningSweep(log, await dunning.sweep());
       });
       await queue.schedule(DUNNING_QUEUE, cfg.worker.dunningCron);
 
@@ -854,26 +834,7 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
       await queue.schedule(ADVANCE_DIGEST_QUEUE, cfg.worker.advanceDigestCron);
 
       await queue.register(ORCHESTRATOR_QUEUE, async () => {
-        const reports = await orchestrator.sweep();
-        for (const r of reports) {
-          if (r.started === 0 && r.advanced === 0 && r.awaitingTemplate === 0) continue;
-          // `awaitingPeople` and `awaitingTemplate` are the two numbers somebody
-          // has to ACT on, and they are different people: the first is work on
-          // colleagues' desks, the second is a partner who has not written a
-          // process yet. A sweep that logged only what it moved would say the
-          // engine is idle when it is actually waiting on the firm.
-          log.info(
-            {
-              tenantId: r.tenantId,
-              started: r.started,
-              advanced: r.advanced,
-              awaitingPeople: r.awaitingPeople,
-              completed: r.completed,
-              awaitingTemplate: r.awaitingTemplate,
-            },
-            "orchestrator sweep",
-          );
-        }
+        logOrchestratorSweep(log, await orchestrator.sweep());
       });
       await queue.schedule(ORCHESTRATOR_QUEUE, cfg.worker.orchestratorCron);
 

@@ -32,6 +32,7 @@ import type { Actor } from "../../domain/ledger/model";
 import { SYSTEM_ACTOR } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
 import type { ChaseSweepReport } from "../../domain/chaser/model";
+import { dayInZone } from "../../domain/scheduler/zone";
 import { dueRungs, freezeInForceOn, mayChase } from "../../domain/chaser/model";
 import {
   FreezeAlreadyInForce,
@@ -95,11 +96,12 @@ export class ChaserService {
   /** One pass over every firm. The outer loop is the tenant list because a
    *  worker holds no session; every read below it is tenant-scoped by RLS. */
   async sweep(asOf?: IsoDate): Promise<readonly ChaseSweepReport[]> {
-    const day = asOf ?? this.today();
     const reports: ChaseSweepReport[] = [];
     for (const tenantId of await this.deps.tenants.activeTenantIds()) {
       try {
-        reports.push(await this.sweepTenant(tenantId, day));
+        // Each firm's own day unless a caller named one (T6.14, audit
+        // 2026-10-03 B41): resolved inside `sweepTenant`, per firm.
+        reports.push(await this.sweepTenant(tenantId, asOf));
       } catch (err) {
         // ONE FIRM'S BAD DATA NEVER STOPS THE OTHERS — T3.1's lesson, where one
         // firm with no work states stopped the calendar for every firm after it
@@ -118,8 +120,6 @@ export class ChaserService {
   }
 
   async sweepTenant(tenantId: string, asOf?: IsoDate): Promise<ChaseSweepReport> {
-    const day = asOf ?? this.today();
-
     // NO LADDER MEANS CHASE NOBODY, and it is the shipped state. Returned before
     // the candidate read, so a firm that has published nothing costs one config
     // lookup per sweep rather than a scan of its open asks.
@@ -133,6 +133,11 @@ export class ChaserService {
     // of Greenwich, because a request raised after 18:30 UTC has already "aged"
     // by the time the row is read.
     const timeZone = await this.deps.timeZones.timeZoneFor(tenantId);
+    // TODAY ON THE SAME CALENDAR (audit 2026-10-03, B41). The ask's age was
+    // already counted in the firm's zone, and "today" was still the server's
+    // UTC day, so the two ends of the subtraction were cut on different
+    // calendars. Harmless only because the cron runs at 06:15 UTC.
+    const day = asOf ?? dayInZone(this.deps.clock.now().toISOString(), timeZone);
     const { candidates, frozenClients } = await this.deps.candidates.openAsks(
       tenantId,
       day,
@@ -259,7 +264,7 @@ export class ChaserService {
     // partner pressing resume expects the next sweep to chase, and a row dated
     // tomorrow means one more silent day. The row then understates the freeze by
     // part of a day and nothing is lost, because the ledger carries the instant.
-    const on = input.on ?? this.today();
+    const on = input.on ?? (await this.firmDay(input.tenantId));
     const record = await this.deps.freezes.lift({
       tenantId: input.tenantId,
       freezeId: input.freezeId,
@@ -297,10 +302,11 @@ export class ChaserService {
     return actor.id;
   }
 
-  /** The server's calendar day — the honest fallback for a caller that did not
-   *  say which day it is on, and never the answer when one did. */
-  private today(): string {
-    return this.deps.clock.now().toISOString().slice(0, 10);
+  /** The FIRM's calendar day: the fallback for a caller that did not say which
+   *  day it is on, and never the answer when one did. It was the server's UTC
+   *  day until 2026-10-03 (B41). */
+  private async firmDay(tenantId: string): Promise<string> {
+    return dayInZone(this.deps.clock.now().toISOString(), await this.deps.timeZones.timeZoneFor(tenantId));
   }
 }
 

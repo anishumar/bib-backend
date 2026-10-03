@@ -36,6 +36,20 @@ const TenantSchema = z
   })
   .openapi("Tenant");
 
+/** A firm as created: with the calendar it started on (audit 2026-10-03). */
+const CreatedTenantSchema = z
+  .object({
+    id: z.string().uuid(),
+    slug: z.string(),
+    name: z.string(),
+    status: z.enum(["active", "suspended"]),
+    reportingCurrency: z.string().length(3),
+    timeZone: z.string().openapi({
+      description: "The zone the firm starts on. UTC when nothing settled it; Setup then asks the firm.",
+    }),
+  })
+  .openapi("CreatedTenant");
+
 /** Who binds the firm — the "Yours sincerely, …, Director" block on every
  *  letter it sends. Null when the firm has not named anybody. */
 const FirmSignatorySchema = z
@@ -209,6 +223,14 @@ const CreateTenantRequest = z
     name: z.string().min(1),
     slug: z.string().min(1),
     reportingCurrency: z.string().min(1),
+    country: z.string().optional().openapi({
+      description:
+        "Where the firm is, ISO 3166-1 alpha-2 (IN, AE). When the country keeps one time zone the " +
+        "firm starts on it (IN: Asia/Kolkata); otherwise it starts on UTC and Setup asks it to choose.",
+    }),
+    timeZone: z.string().optional().openapi({
+      description: "An IANA zone (Asia/Kolkata), over the country's. Never an offset.",
+    }),
   })
   .openapi("CreateTenantRequest");
 
@@ -320,7 +342,7 @@ const createTenantRoute = createRoute({
     body: { content: { "application/json": { schema: CreateTenantRequest } }, required: true },
   },
   responses: {
-    201: { description: "Tenant created", content: { "application/json": { schema: TenantSchema } } },
+    201: { description: "Tenant created", content: { "application/json": { schema: CreatedTenantSchema } } },
     400: errorResponse("Request failed validation"),
     401: errorResponse("Missing or wrong platform key"),
     409: errorResponse("Slug already taken"),
@@ -720,6 +742,7 @@ export function registerTenancyRoutes(app: OpenAPIHono<AppEnv>, deps: TenancyDep
         name: tenant.name,
         status: tenant.status,
         reportingCurrency: tenant.reportingCurrency,
+        timeZone: tenant.timeZone,
       },
       201,
     );

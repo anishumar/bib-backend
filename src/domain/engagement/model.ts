@@ -16,6 +16,7 @@
 // exactly once — and it does not know what the firm's clause library contains.
 import type { Amount, CurrencyCode } from "../money/model";
 import type { BillingFrequency, OutOfPocketEstimate } from "../document/model";
+import { isCalendarDay } from "../day";
 
 /**
  * Where a letter has got to.
@@ -625,35 +626,19 @@ export function resolveEffectiveFrom(
   return lineEffectiveFrom ?? letterEffectiveFrom ?? signatureDay;
 }
 
-/** An ISO calendar day, as this product stores and compares one. */
-const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
-
-export function isDay(v: string): boolean {
-  return DAY_PATTERN.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`));
-}
-
 /**
- * A day that EXISTS (V2.3). `isDay` takes 2026-02-31, because V8 parses it and
- * rolls it into March; an engagement's last day is a date somebody will act
- * on, so it must survive the round trip unchanged.
- */
-export function isCalendarDay(v: string): boolean {
-  if (!DAY_PATTERN.test(v)) return false;
-  const at = new Date(`${v}T00:00:00Z`);
-  return !Number.isNaN(at.getTime()) && at.toISOString().slice(0, 10) === v;
-}
-
-/**
- * The UTC day of an instant.
+ * An ISO calendar day that EXISTS, as this product stores and compares one.
  *
- * UTC and not the server's zone, for the same reason `refYear` is: two pods in
- * two regions must not disagree about which day a contract started. The cost is
- * the same and is equally visible — a letter signed late on 31 December in
- * Sydney starts on 1 January.
+ * It took 2026-02-31 until 2026-10-03 (B43): V8 parses it and rolls it into
+ * March, Postgres then refused the cast (22008) and the caller got a 500. Both
+ * names are the shared rule in `domain/day.ts` now; `isCalendarDay` was the
+ * strict one V2.3 added beside it.
  */
-export function utcDay(at: Date): string {
-  return at.toISOString().slice(0, 10);
+export function isDay(v: string): boolean {
+  return isCalendarDay(v);
 }
+
+export { isCalendarDay };
 
 /** The billing timing as a hash field, or nothing at all when none was
  *  chosen, so a letter from before 0319 keeps its hash. */

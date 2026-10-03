@@ -61,7 +61,11 @@ export class FakeDashboardRepo implements DashboardRepository {
     return Promise.resolve(this.slices);
   }
 
-  receivables(): Promise<ReceivableTotals> {
+  /** The day each ageing and credit-sales read was asked on. */
+  readonly askedOn: string[] = [];
+
+  receivables(_tenantId: string, day: string): Promise<ReceivableTotals> {
+    this.askedOn.push(day);
     return Promise.resolve({
       outstanding: this.outstanding,
       // Every bucket, always — the real adapter guarantees it and a fake that
@@ -79,7 +83,8 @@ export class FakeDashboardRepo implements DashboardRepository {
     return Promise.resolve(this.slices);
   }
 
-  creditSales(): Promise<string> {
+  creditSales(_tenantId: string, _sinceDays: number, day: string): Promise<string> {
+    this.askedOn.push(day);
     return Promise.resolve(this.sales);
   }
 

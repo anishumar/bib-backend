@@ -64,7 +64,6 @@ import {
   engagementState,
   isDay,
   resolveEffectiveFrom,
-  utcDay,
 } from "../../src/domain/engagement/model";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
@@ -1282,10 +1281,8 @@ describe("the effective-date rules themselves", () => {
     expect(isDay("2026-10-1")).toBe(false);
     expect(isDay("01/10/2026")).toBe(false);
     expect(isDay("2026-10-01T00:00:00Z")).toBe(false); // an instant is not a day
-    // UTC, not the machine's zone: two pods in two regions must not disagree
-    // about which day a contract started.
-    expect(utcDay(new Date("2026-10-01T23:30:00Z"))).toBe("2026-10-01");
-    expect(utcDay(new Date("2026-10-01T00:30:00Z"))).toBe("2026-10-01");
+    // A day that does not exist (B43): it used to pass, and reach Postgres.
+    expect(isDay("2026-02-31")).toBe(false);
   });
 });
 
@@ -2501,6 +2498,43 @@ describe("asking the billing desk to schedule the work that went live", () => {
     const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
     expect(letter.status).toBe("signed");
     expect(s.asked).toHaveLength(1);
+  });
+});
+
+describe("filling the compliance calendar when work goes live (audit 2026-10-03, CA#24)", () => {
+  function withCalendar(fail = false) {
+    const s = setup();
+    const filled: string[] = [];
+    const service = new EngagementService({
+      ...s,
+      calendar: {
+        fillCalendar: (tenantId) => {
+          filled.push(tenantId);
+          return fail ? Promise.reject(new Error("calendar is down")) : Promise.resolve(3);
+        },
+      },
+    });
+    return { ...s, service, filled };
+  }
+
+  it("asks for the firm's calendar to be filled on signature, once", async () => {
+    const s = withCalendar();
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(s.filled).toEqual([TENANT]);
+  });
+
+  it("never turns a signature into a failure when the calendar cannot be filled", async () => {
+    // Tonight's sweep fills it either way; the client has already signed.
+    const s = withCalendar(true);
+    const id = await draft(s);
+    await completeTerms(s, id);
+    await s.service.send(TENANT, id, ACTOR);
+    const { letter } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
+    expect(letter.status).toBe("signed");
+    expect(s.filled).toEqual([TENANT]);
   });
 });
 

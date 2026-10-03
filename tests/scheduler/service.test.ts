@@ -476,7 +476,7 @@ describe("a recurring engagement gets a job PER PERIOD, not one at activation", 
     expect(workItems.calls).toEqual([
       expect.objectContaining({
         engagementIds: [ENGAGEMENT_1],
-        period: { label: "Aug 2026", end: "2026-08-31" },
+        period: { label: "Aug 2026", start: "2026-08-01", end: "2026-08-31" },
       }),
     ]);
     expect(events.verbs()).toEqual(["job.spawned"]);

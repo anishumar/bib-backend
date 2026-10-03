@@ -802,9 +802,11 @@ describe("the spec and the wire agree", () => {
     // added to the aggregate and would have reached the wire undocumented, which
     // in a frontend generated from this spec means invisible.
     const spec = (await (await app().request("/openapi.json")).json()) as {
-      components: { schemas: { Tenant: { properties: Record<string, unknown> } } };
+      components: { schemas: { CreatedTenant: { properties: Record<string, unknown> } } };
     };
-    const documented = Object.keys(spec.components.schemas.Tenant.properties).sort();
+    // `CreatedTenant` since 2026-10-03: a firm as created also says which
+    // calendar it started on (F07), which the other tenant routes do not.
+    const documented = Object.keys(spec.components.schemas.CreatedTenant.properties).sort();
 
     const res = await app().request("/internal/v1/tenants", {
       method: "POST",

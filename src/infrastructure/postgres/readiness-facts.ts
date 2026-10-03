@@ -12,10 +12,16 @@
 //     `valid_from <= day < valid_to` (half-open, G3.2 and 0061);
 //   - a rule generates when it is active, dated, not event-driven, CONFIRMED
 //     and has a live link to a service (the generator's own predicate,
-//     obligation-rule-repository.ts `generatingRules`).
+//     obligation-rule-repository.ts `generatingRules`);
+//   - one of the firm's companies is `crm.is_firm_entity`'s two sources (the
+//     firm itself, or a live member of 0313's list), not archived, as the
+//     Our companies list reads them (firm-entity-repository.ts);
+//   - a standard term is a `clause` entry with a published version, which is
+//     what a letter is offered (the Standard terms screen).
 import type { Db } from "../../db/pool";
 import { withTenant } from "../../db/tenant";
 import type { ReadinessFacts } from "../../domain/readiness/model";
+import { DEFAULT_TIME_ZONE } from "../../domain/tenancy/model";
 import type { ReadinessFactSource } from "../../usecase/readiness/ports";
 
 interface ClientRow {
@@ -165,11 +171,48 @@ export class PostgresReadinessFacts implements ReadinessFactSource {
          ORDER BY v.body ->> 'name'
       `;
 
-      const [tenant] = await db<{ client_request_routing: string }[]>`
-        SELECT client_request_routing FROM tenancy.tenant WHERE id = ${tenantId}
+      const [tenant] = await db<{ client_request_routing: string; time_zone: string }[]>`
+        SELECT client_request_routing, time_zone FROM tenancy.tenant WHERE id = ${tenantId}
+      `;
+
+      // ── The firm's own companies (2026-10-03) ────────────────────────────
+      const companies = await db<{ party_id: string; name: string; country: string | null; has_address: boolean }[]>`
+        SELECT p.id AS party_id, p.display_name AS name, le.jurisdiction AS country,
+               COALESCE(jsonb_array_length(
+                 CASE WHEN jsonb_typeof(le.registered_address -> 'lines') = 'array'
+                      THEN le.registered_address -> 'lines' END) > 0, false) AS has_address
+          FROM core.party p
+          JOIN core.organization o ON o.party_id = p.id AND o.tenant_id = p.tenant_id
+          LEFT JOIN core.legal_entity le ON le.party_id = p.id AND le.tenant_id = p.tenant_id
+         WHERE p.archived_at IS NULL
+           AND (o.is_firm_self
+                OR EXISTS (SELECT 1 FROM crm.firm_entity m
+                            WHERE m.party_id = p.id AND m.tenant_id = p.tenant_id
+                              AND m.retired_at IS NULL))
+         ORDER BY o.is_firm_self DESC, p.display_name
+      `;
+      const [people] = await db<{ n: number }[]>`
+        SELECT count(*)::int AS n FROM tenancy.membership
+         WHERE audience = 'STAFF' AND is_active
+      `;
+      const [terms] = await db<{ n: number }[]>`
+        SELECT count(DISTINCT en.id)::int AS n
+          FROM config.entry en
+          JOIN config.version v
+            ON v.entry_id = en.id AND v.tenant_id = en.tenant_id AND v.status = 'published'
+         WHERE en.kind = 'clause'
       `;
 
       return {
+        companies: companies.map((c) => ({
+          partyId: c.party_id,
+          name: c.name,
+          country: c.country,
+          hasAddress: c.has_address,
+        })),
+        timeZone: tenant?.time_zone ?? DEFAULT_TIME_ZONE,
+        activeStaff: people?.n ?? 0,
+        publishedTerms: terms?.n ?? 0,
         activeClients: clients.map((c) => ({
           partyId: c.party_id,
           name: c.name,

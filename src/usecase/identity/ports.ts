@@ -183,6 +183,9 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    /** The firm's zone, so the expiry reads on the firm's clock (CA#50).
+     *  Absent or null: UTC, named. */
+    timeZone?: string | null,
   ): Promise<void>;
 
   /**
@@ -202,6 +205,7 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void>;
 
   /**
@@ -226,6 +230,7 @@ export interface Mailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void>;
 
   /**

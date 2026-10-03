@@ -192,6 +192,19 @@ export interface ObligationCoverage {
     tenantId: string,
     engagementIds: readonly string[],
   ): Promise<ReadonlySet<string>>;
+
+  /**
+   * The earliest legal due day of an UNFILED filing this engagement's work is
+   * for in a period (audit 2026-10-03, CA#11): same company, a rule on its
+   * service or generated for it, a period overlapping `[start, end]`; not
+   * withdrawn, filed or closed. Null when there is none. A period's task is
+   * never due after it.
+   */
+  earliestFilingDue(
+    tenantId: string,
+    engagementId: string,
+    period: { readonly start: string; readonly end: string },
+  ): Promise<string | null>;
 }
 
 /**
@@ -202,6 +215,9 @@ export interface ObligationCoverage {
 export interface SpawnPeriod {
   readonly label: string;
   readonly end: string;
+  /** The period's first day. When given, the task is never due after the
+   *  legal date of a filing in the period (CA#11). */
+  readonly start?: string;
 }
 
 /**

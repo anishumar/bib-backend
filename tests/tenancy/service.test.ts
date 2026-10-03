@@ -5,7 +5,9 @@ import {
   EmailTaken,
   InvalidAudience,
   InvalidCurrency,
+  InvalidCountry,
   InvalidSlug,
+  InvalidTimeZone,
   SlugTaken,
   TenantNotFound,
   UserNotFound,
@@ -71,6 +73,61 @@ describe("createTenant", () => {
     });
     const created = f.events.recorded.find((e) => e.verb === "tenant.created");
     expect(created?.payload).toMatchObject({ slug: t.slug, reportingCurrency: "AED" });
+  });
+
+  describe("its time zone (audit 2026-10-03, F07)", () => {
+    // 0071 gave every firm UTC, and the demo firm, an Indian firm, ran on a
+    // calendar whose day turned at 05:30. A country that keeps ONE zone
+    // settles it; anything else is left on UTC for Setup to ask about.
+    it("starts a firm in a one-zone country on that country's calendar", async () => {
+      const { service, f } = svc();
+      const t = await service.createTenant({ name: "Sharma Mehta", slug: "sharma-mehta", reportingCurrency: "INR", country: "in" });
+      expect(t.timeZone).toBe("Asia/Kolkata");
+      expect(f.tenants.timeZones.get(t.id)).toBe("Asia/Kolkata");
+      const created = f.events.recorded.find((e) => e.verb === "tenant.created");
+      expect(created?.payload).toMatchObject({ timeZone: "Asia/Kolkata", timeZoneFrom: "country" });
+    });
+
+    it("leaves a country with several zones unset, on UTC, rather than guessing one", async () => {
+      const { service, f } = svc();
+      const t = await service.createTenant({ name: "Hudson", slug: "hudson", reportingCurrency: "USD", country: "US" });
+      expect(t.timeZone).toBe("UTC");
+      const created = f.events.recorded.find((e) => e.verb === "tenant.created");
+      expect(created?.payload).toMatchObject({ timeZone: "UTC", timeZoneFrom: "unset" });
+    });
+
+    it("leaves a firm with no country unset, as before, and never reads the currency as a country", async () => {
+      const { service } = svc();
+      const t = await service.createTenant({ name: "Harbour Point", slug: "harbour-point", reportingCurrency: "INR" });
+      expect(t.timeZone).toBe("UTC");
+    });
+
+    it("takes a zone the platform names over the country's", async () => {
+      const { service, f } = svc();
+      const t = await service.createTenant({
+        name: "Gulf Advisory",
+        slug: "gulf-advisory",
+        reportingCurrency: "INR",
+        country: "IN",
+        timeZone: "Asia/Dubai",
+      });
+      expect(t.timeZone).toBe("Asia/Dubai");
+      expect(f.events.recorded.find((e) => e.verb === "tenant.created")?.payload).toMatchObject({ timeZoneFrom: "provisioning" });
+    });
+
+    it.each([["+05:30"], ["Mars/Olympus"], [""]])("refuses %j as a zone", async (timeZone) => {
+      const { service } = svc();
+      await expect(
+        service.createTenant({ name: "X", slug: "firm-x", reportingCurrency: "INR", timeZone }),
+      ).rejects.toBeInstanceOf(InvalidTimeZone);
+    });
+
+    it.each([["IND"], ["India"], ["1N"], [""]])("refuses %j as a country", async (country) => {
+      const { service } = svc();
+      await expect(
+        service.createTenant({ name: "X", slug: "firm-x", reportingCurrency: "INR", country }),
+      ).rejects.toBeInstanceOf(InvalidCountry);
+    });
   });
 
   it("rejects a duplicate slug", async () => {

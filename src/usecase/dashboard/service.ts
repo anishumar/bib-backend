@@ -109,11 +109,14 @@ export class DashboardService {
   async overview(tenantId: string): Promise<Overview> {
     // Fetched together: this is one screen, and five sequential round trips to
     // render one page is the shape that makes a dashboard feel slow.
+    // ONE day for both, the firm's (B29): ageing and the DSO window used
+    // CURRENT_DATE, the database's day, which is not the firm's.
+    const today = await this.firmDay(tenantId);
     const [currency, mrr, receivables, sales] = await Promise.all([
       this.deps.dashboards.reportingCurrency(tenantId),
       this.deps.dashboards.mrr(tenantId),
-      this.deps.dashboards.receivables(tenantId),
-      this.deps.dashboards.creditSales(tenantId, DSO_WINDOW_DAYS),
+      this.deps.dashboards.receivables(tenantId, today),
+      this.deps.dashboards.creditSales(tenantId, DSO_WINDOW_DAYS, today),
     ]);
 
     return {
@@ -157,7 +160,7 @@ export class DashboardService {
 
   /** Who owes the firm money, biggest first. */
   async receivablesByClient(tenantId: string): Promise<readonly Slice[]> {
-    return this.deps.dashboards.receivablesByClient(tenantId);
+    return this.deps.dashboards.receivablesByClient(tenantId, await this.firmDay(tenantId));
   }
 
   /**
@@ -185,7 +188,7 @@ export class DashboardService {
     const [reportingCurrency, rows, owed, financialYearStartMonth] = await Promise.all([
       this.deps.dashboards.reportingCurrency(tenantId),
       this.deps.dashboards.billingByManager(tenantId, window),
-      this.deps.dashboards.owedByManager(tenantId),
+      this.deps.dashboards.owedByManager(tenantId, await this.firmDay(tenantId)),
       this.deps.fiscalYears.fiscalYearStartMonth(tenantId),
     ]);
 
@@ -248,8 +251,13 @@ export class DashboardService {
 
   /** The last `months` months on the FIRM's calendar (T6.14). */
   private async window(tenantId: string, months: number) {
+    return billingWindow(await this.firmDay(tenantId), months);
+  }
+
+  /** Today on the firm's calendar (0071). */
+  private async firmDay(tenantId: string): Promise<string> {
     const zone = await this.deps.timeZones.timeZoneFor(tenantId);
-    return billingWindow(dayInZone(this.deps.clock.now().toISOString(), zone), months);
+    return dayInZone(this.deps.clock.now().toISOString(), zone);
   }
 
   async revenueByCompany(tenantId: string, months: number): Promise<RevenueByCompany> {
