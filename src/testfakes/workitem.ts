@@ -560,6 +560,23 @@ export class FakeWorkItemRepo implements WorkItemRepository {
         this.approvals?.rows.some((a) => a.workItemId === r.id && a.decision === "pending") ??
         false,
       blockedByOpen: await this.openBlockers(r.tenantId, r.id),
+      sentBack: this.sentBackOf(r, state.isTerminal),
+    };
+  }
+
+  /** The SQL's rule (CA#29), reproduced: the latest decided review was a
+   *  send-back, none is open, and the task is not finished. */
+  private sentBackOf(r: WorkItem, finished: boolean): WorkItemRecord["sentBack"] {
+    const reviews = (this.approvals?.rows ?? []).filter((a) => a.workItemId === r.id);
+    if (finished || reviews.some((a) => a.decision === "pending")) return null;
+    const decided = reviews.filter((a) => a.decision !== "pending" && a.decidedAt !== null);
+    const latest = decided.at(-1);
+    if (latest?.decision !== "rejected" || latest.decidedAt === null) return null;
+    return {
+      notes: latest.notes,
+      decidedAt: latest.decidedAt,
+      decidedByName:
+        latest.decidedBy === null ? null : (this.people.get(latest.decidedBy)?.displayName ?? null),
     };
   }
 }

@@ -1272,6 +1272,44 @@ describe("review — and the rule no firm may configure away", () => {
     expect((await h.service.detail(FIRM, item.id)).record.item.stateId).toBe(before);
   });
 
+  // ── sent back shows on the maker's desk (CA#29) ───────────────────────────
+
+  it("marks a sent-back task on the maker's own board with the checker's note, until it goes again", async () => {
+    // The roleplay's article was sent back with a note and My day said
+    // "Nothing due. You are up to date." The board row now carries it.
+    const { h, item } = await readyForReview();
+    const first = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0]?.sentBack).toBeNull();
+
+    h.clock.set(new Date("2026-09-10T06:30:00.000Z"));
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: first.id, decision: "rejected", notes: "ITC for two bills is missing", decidedBy: ANAND },
+      ACTOR,
+    );
+
+    const row = (await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0];
+    expect(row?.sentBack).toEqual({
+      notes: "ITC for two bills is missing",
+      decidedAt: "2026-09-10T06:30:00.000Z",
+      decidedByName: "Anand",
+    });
+
+    // Sent again: it is the checker's turn, not hers.
+    await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    expect((await h.service.board(FIRM, { assigneeUserId: PRIYA }))[0]?.sentBack).toBeNull();
+  });
+
+  it("does not call approved work sent back", async () => {
+    const { h, item } = await readyForReview();
+    const approval = await h.service.requestReview({ tenantId: FIRM, workItemId: item.id }, ACTOR);
+    await h.service.decideReview(
+      { tenantId: FIRM, approvalId: approval.id, decision: "approved", decidedBy: ANAND },
+      ACTOR,
+    );
+    const row = (await h.service.board(FIRM, { assigneeUserId: PRIYA, openOnly: false }))[0];
+    expect(row?.sentBack).toBeNull();
+  });
+
   // ── the checklist is a gate, the way a step's sub-steps are (CA#30) ───────
 
   it("refuses Send for review while a checklist line is open, and names it", async () => {

@@ -368,6 +368,7 @@ describe("the order a board reads in", () => {
       checklistTotal: 0,
       hasOpenReview: false,
       blockedByOpen: [],
+      sentBack: null,
     };
   }
 

@@ -77,6 +77,7 @@ import type {
   CheckerDirectory,
   PendingCheck,
   StepApprovalRepository,
+  StepSentBack,
   VerificationPolicySource,
 } from "../verification/ports";
 import type {
@@ -1154,6 +1155,15 @@ export class OrchestratorService {
   /** Every open step on one person's desk, across the firm's jobs. */
   async myOpenSteps(tenantId: string, userId: string): Promise<readonly JobStep[]> {
     return this.deps.steps.listOpenForUser(tenantId, userId);
+  }
+
+  /**
+   * Of these steps, the ones a checker sent back and nobody has done again
+   * (audit 2026-10-03, CA#29), with the note: what My day says as "Sent back
+   * to you". One read for the whole desk.
+   */
+  async sentBackSteps(tenantId: string, stepIds: readonly string[]): Promise<readonly StepSentBack[]> {
+    return this.deps.checks.sentBackFor(tenantId, stepIds);
   }
 
   /** Who may do a step: active staff inside its band, for a hand-over picker. */

@@ -273,6 +273,22 @@ export interface WorkItemRecord {
   /** The items this one is still waiting on — ids and titles only, because the
    *  question a screen asks is "what is in the way", not "tell me about it". */
   readonly blockedByOpen: readonly WorkItemBlocker[];
+  /**
+   * SENT BACK AND NOT YET SENT AGAIN (audit 2026-10-03, CA#29): the latest
+   * DECIDED review was a send-back, no review is open, and the task is not
+   * finished. The checker's note, when, and by whom. Null otherwise. My day
+   * puts it on the maker's desk as "Sent back to you"; before this the
+   * roleplay's article was sent back with a note and My day said she was up
+   * to date.
+   */
+  readonly sentBack: WorkItemSentBack | null;
+}
+
+/** What a send-back said, as the maker's desk shows it (CA#29). */
+export interface WorkItemSentBack {
+  readonly notes: string | null;
+  readonly decidedAt: string;
+  readonly decidedByName: string | null;
 }
 
 /** An unfinished item that another one waits on. */

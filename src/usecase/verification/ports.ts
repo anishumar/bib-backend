@@ -108,6 +108,21 @@ export interface StepApprovalRepository {
   /** Every check this job has ever had, including the ones that were sent back.
    *  The job screen's read; the rejections are the point. */
   listForJob(tenantId: string, jobId: string): Promise<readonly PendingCheck[]>;
+
+  /**
+   * Of these steps, the ones SENT BACK AND NOT YET DONE AGAIN (audit
+   * 2026-10-03, CA#29): the latest decided check was a send-back and none is
+   * open. One read for a whole desk, never one per step.
+   */
+  sentBackFor(tenantId: string, jobStepIds: readonly string[]): Promise<readonly StepSentBack[]>;
+}
+
+/** What a send-back said about one step, as the maker's desk shows it. */
+export interface StepSentBack {
+  readonly jobStepId: string;
+  readonly notes: string | null;
+  readonly decidedAt: string;
+  readonly decidedByName: string | null;
 }
 
 /**

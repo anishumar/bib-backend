@@ -174,6 +174,19 @@ const WorkItemSchema = z
         "non-empty — that is what a dependency SAYS. Moving straight to a terminal state is " +
         "still allowed, because cancelling something that never started is a real act.",
     }),
+    sentBack: z
+      .object({
+        notes: z.string().nullable(),
+        decidedAt: z.string(),
+        decidedByName: z.string().nullable(),
+      })
+      .nullable()
+      .openapi({
+        description:
+          "Sent back and not yet sent again (CA#29): the latest decided review was a " +
+          "send-back, none is open, and the task is not finished. The checker's note, when, " +
+          "and by whom. Null otherwise. My day shows it on the maker's desk.",
+      }),
   })
   .openapi("WorkItem");
 
@@ -624,6 +637,10 @@ function toWire(r: WorkItemRecord): z.infer<typeof WorkItemSchema> {
     checklistTotal: r.checklistTotal,
     hasOpenReview: r.hasOpenReview,
     blockedByOpen: r.blockedByOpen.map((b) => ({ workItemId: b.workItemId, title: b.title })),
+    sentBack:
+      r.sentBack === null
+        ? null
+        : { notes: r.sentBack.notes, decidedAt: r.sentBack.decidedAt, decidedByName: r.sentBack.decidedByName },
   };
 }
 
