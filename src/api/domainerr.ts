@@ -672,6 +672,7 @@ export function mapError(err: unknown): MappedError {
       case "RELATIONSHIP_ALREADY_ENDED":
       case "IDENTIFIER_CLOSED":
       case "NOT_A_LEGAL_ENTITY":
+      case "ALREADY_REGISTERED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "NOT_AN_ORGANIZATION":
       case "INVALID_PARTY_DETAILS":

@@ -3,6 +3,7 @@
 // (domainerr.ts). Adapters translate their own failures INTO these, never the
 // reverse. Match with `instanceof`, never by string.
 
+import { countryWords } from "../country";
 import { longDay } from "../day";
 
 export class PartyError extends Error {
@@ -18,6 +19,7 @@ export class PartyError extends Error {
 export type PartyErrorCode =
   | "PARTY_NOT_FOUND"
   | "NOT_AN_ORGANIZATION"
+  | "ALREADY_REGISTERED"
   | "INVALID_IDENTIFIER"
   | "INVALID_IDENTIFIER_TYPE"
   | "INVALID_RELATIONSHIP_TYPE"
@@ -47,6 +49,21 @@ export class NotAnOrganization extends PartyError {
     super(
       "NOT_AN_ORGANIZATION",
       `Party ${JSON.stringify(ref)} is not an organization; a legal entity can only register against one`,
+    );
+  }
+}
+/**
+ * ONE REGISTRATION PER COMPANY (audit 2026-10-03). `core.legal_entity` is
+ * keyed on the party: a company in another country is another company, its
+ * own client, linked to this one by group. The screen offered "Register in
+ * another country" and the key refused it with a message that read like a race.
+ */
+export class AlreadyRegistered extends PartyError {
+  constructor(jurisdiction: string) {
+    super(
+      "ALREADY_REGISTERED",
+      `This company is already registered in ${countryWords(jurisdiction)}. A company in another ` +
+        `country is its own client: add it as a client and link the two as one group.`,
     );
   }
 }

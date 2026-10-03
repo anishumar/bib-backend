@@ -35,6 +35,7 @@ import {
   NothingToChange,
   InvalidIdentifier,
   InvalidRelationshipType,
+  AlreadyRegistered,
   NotAnOrganization,
   PartyAlreadyArchived,
   PartyNotArchived,
@@ -217,6 +218,8 @@ export class PartyService {
   ): Promise<LegalEntity> {
     const org = await this.deps.parties.findOrganization(input.tenantId, input.organizationPartyId);
     if (!org) throw new NotAnOrganization(input.organizationPartyId);
+    const [registered] = await this.deps.parties.listLegalEntities(input.tenantId, input.organizationPartyId);
+    if (registered !== undefined) throw new AlreadyRegistered(registered.jurisdiction);
     const entity = await this.deps.parties.addLegalEntity({
       partyId: input.organizationPartyId,
       tenantId: input.tenantId,

@@ -85,6 +85,18 @@ describe("registerLegalEntity", () => {
       }, ACTOR),
     ).rejects.toBeInstanceOf(NotAnOrganization);
   });
+
+  it("refuses a second registration in plain words: another country is another company (audit 2026-10-03)", async () => {
+    // The screen offered "Register in another country", and the primary key on
+    // `core.legal_entity.party_id` refused it with a message that read like a
+    // race. A company in another country is its own client, linked by group.
+    const { service } = svc();
+    const org = await service.createOrganization({ tenantId: TENANT, legalName: "Acme Pvt Ltd" }, ACTOR);
+    await service.registerLegalEntity({ tenantId: TENANT, organizationPartyId: org.partyId, jurisdiction: "IN", entityType: "private_limited" }, ACTOR);
+    await expect(
+      service.registerLegalEntity({ tenantId: TENANT, organizationPartyId: org.partyId, jurisdiction: "SG", entityType: "pte_ltd" }, ACTOR),
+    ).rejects.toMatchObject({ code: "ALREADY_REGISTERED", message: expect.stringMatching(/already registered in India.*own client/s) });
+  });
 });
 
 describe("addIdentifier", () => {
