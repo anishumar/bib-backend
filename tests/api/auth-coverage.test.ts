@@ -1343,6 +1343,14 @@ describe("CORS — the frontend is a separate origin", () => {
     expect(res.headers.get("access-control-allow-credentials")).toBe("true");
   });
 
+  it("lets the browser read Retry-After, so a busy screen can wait the right time", async () => {
+    // A cross-origin script sees only the safelisted response headers unless
+    // the API exposes more. The workspace's "busy, retrying" state (F15) reads
+    // this one to know when to ask again.
+    const res = await app(STAFF_SESSION).request("/api/v1/auth/me", { headers: { Origin: ALLOWED } });
+    expect(res.headers.get("access-control-expose-headers") ?? "").toContain("Retry-After");
+  });
+
   it("does not hand credentials to an origin that is not on the list", async () => {
     // The dangerous version of CORS reflects whatever Origin arrived. Combined
     // with credentials that lets ANY site call this API as the logged-in user

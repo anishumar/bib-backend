@@ -368,6 +368,9 @@ export function buildRouter(
       // fails if this list falls behind them again.
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type", "Authorization"],
+      // Readable by the workspace, which waits this long before asking again
+      // when the API is busy (429) instead of treating it as signed out (F15).
+      exposeHeaders: ["Retry-After"],
       maxAge: 600,
     }),
   );
