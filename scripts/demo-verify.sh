@@ -346,12 +346,13 @@ is "...and the partner sees it"           "True" \
 say "The money"
 INV=$(as partner "$API/api/v1/invoices")
 is "three invoices"                             "3" "$(pick "len(d['invoices'])" <<< "$INV")"
-at_least "...one cancelled, keeping its number" 1 \
+at_least "...one cancelled before it went out" 1 \
    "$(pick "sum(1 for i in d['invoices'] if i['invoice']['status']=='cancelled')" <<< "$INV")"
-# CONSECUTIVE WITH NOTHING MISSING — the cancelled one included, which is
-# exactly what shows an auditor where a number went.
+# CONSECUTIVE WITH NOTHING MISSING. Since 0322 a number is drawn at issue, so a
+# draft cancelled before it went out holds none and leaves no hole: the
+# numbered invoices run 1, 2, ... with nothing missing.
 is "...and the series has no gap"               "True" \
-   "$(pick "sorted(i['invoice']['sequenceNumber'] for i in d['invoices']) == list(range(1, 1+len(d['invoices'])))" <<< "$INV")"
+   "$(pick "(lambda n: n == list(range(1, 1+len(n))))(sorted(i['invoice']['sequenceNumber'] for i in d['invoices'] if i['invoice']['sequenceNumber'] is not None))" <<< "$INV")"
 DUN=$(as partner "$API/api/v1/dunning/pending")
 at_least "a dunning decision waiting on a partner" 1 "$(pick "len(d['actions'])" <<< "$DUN")"
 # A queue of uuids asks somebody to approve something they cannot see.
