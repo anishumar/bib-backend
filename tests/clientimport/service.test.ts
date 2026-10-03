@@ -261,7 +261,7 @@ describe("confirming an import", () => {
     expect(drafts[1]).toMatchObject({ partyId: "party-0002", effectiveFrom: "2026-08-01" });
     const lines = h.letters.of("addLine").map((c) => c.input as Record<string, unknown>);
     expect(lines[0]).toMatchObject({ entityPartyId: "party-0003", serviceVersionId: "ver-a1", unitAmount: "6000", billingFrequency: "monthly", effectiveFrom: "2025-04-01", discountPercent: "0" });
-    expect(lines[2]).toMatchObject({ entityPartyId: "party-0002", serviceVersionId: "ver-h1", billingFrequency: "quarterly", pricingNote: "As per the paper letter — see the signature reference" });
+    expect(lines[2]).toMatchObject({ entityPartyId: "party-0002", serviceVersionId: "ver-h1", billingFrequency: "quarterly", pricingNote: "As per the paper letter: see the signature reference" });
     expect(lines[2]).not.toHaveProperty("unitAmount", expect.anything());
     // Only clauses whose law is India's or unstated — never the US-law one.
     expect(h.letters.of("addClause").map((c) => (c.input as { clauseVersionId: string }).clauseVersionId)).toEqual([
@@ -368,7 +368,7 @@ describe("confirming an import", () => {
     const first = confirmed.outcome?.letters[0];
     expect(first?.action).toBe("failed");
     expect(first?.letterId).toBe("letter-0001");
-    expect(first?.detail).toMatch(/^marking it sent: letter refused send — the draft is left/);
+    expect(first?.detail).toMatch(/^marking it sent: letter refused send\. The draft is left/);
   });
 });
 

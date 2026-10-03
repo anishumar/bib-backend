@@ -1290,7 +1290,7 @@ export function mapError(err: unknown): MappedError {
       status: 409,
       code: "CONFLICT",
       message:
-        "that already exists — something else created it between this request being " +
+        "that already exists: something else created it between this request being " +
         "checked and being written",
       reason: violation,
     };

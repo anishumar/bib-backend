@@ -681,7 +681,7 @@ export class ClientImportService {
           description: line.serviceName,
           quantity: "1",
           unitAmount: line.unitAmount ?? undefined,
-          pricingNote: line.unitAmount === null ? "As per the paper letter — see the signature reference" : undefined,
+          pricingNote: line.unitAmount === null ? "As per the paper letter: see the signature reference" : undefined,
           discountPercent: "0",
           effectiveFrom: line.startedOn,
           jurisdiction: line.jurisdiction ?? undefined,
@@ -718,7 +718,7 @@ export class ClientImportService {
         engagementIds: signed.engagements.map((e) => e.engagement.id),
       };
     } catch (err) {
-      return failed(`${step}: ${messageOf(err)}${letterId === null ? "" : " — the draft is left for somebody to finish or withdraw"}`, letterId);
+      return failed(`${step}: ${messageOf(err)}${letterId === null ? "" : ". The draft is left for somebody to finish or withdraw"}`, letterId);
     }
   }
 
@@ -785,7 +785,7 @@ export class ClientImportService {
         clientName: plan.clientName,
         email: plan.email,
         action: "granted",
-        detail: "already had a portal login here — granted this company, no second mail sent",
+        detail: "already had a portal login here: granted this company, no second mail sent",
       };
     } catch (err) {
       if (err instanceof PortalGrantDuplicate) {

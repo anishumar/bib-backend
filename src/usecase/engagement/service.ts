@@ -1122,7 +1122,7 @@ export class EngagementService {
           description: line.description,
           reason:
             "This line does not say which company the work is for. A letter line has to, " +
-            "because signing it creates an engagement — one service for one legal entity. " +
+            "because signing it creates an engagement: one service for one legal entity. " +
             "Add it to the letter by hand, naming the company.",
         });
         continue;
@@ -2606,7 +2606,7 @@ export class EngagementService {
           tenantId,
           letterId: letter.id,
           partyId: letter.partyId,
-          title: `${letter.ref} — signed by ${request.signer.name}`,
+          title: `${letter.ref}: signed by ${request.signer.name}`,
           which: "signed",
           document: copies.signed,
         });
@@ -2614,7 +2614,7 @@ export class EngagementService {
           tenantId,
           letterId: letter.id,
           partyId: letter.partyId,
-          title: `${letter.ref} — ${dispatch.method} certificate of completion`,
+          title: `${letter.ref}: ${dispatch.method} certificate of completion`,
           which: "certificate",
           document: copies.certificate,
         });
@@ -3244,7 +3244,7 @@ function signerOrThrow(signer: SignatureSigner | undefined): SignatureSigner {
   const email = signer?.email.trim().toLowerCase() ?? "";
   if (name === "") {
     throw new SignatureIncomplete(
-      "the name of the person DocuSign should ask to sign, in signer.name — the client's " +
+      "the name of the person DocuSign should ask to sign, in signer.name: the client's " +
         "signatory, as the envelope will address them",
     );
   }

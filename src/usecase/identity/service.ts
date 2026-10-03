@@ -696,7 +696,7 @@ export class IdentityService {
           `invitations in the last hour, so the next one will not go for about ` +
           `${retryIn(budget.retryAfterSeconds)}. The limit is per contact rather than per ` +
           `sender, because the cost of getting this wrong lands on their inbox. If none of ` +
-          `them arrived, the address on the account is probably wrong — and changing it is ` +
+          `them arrived, the address on the account is probably wrong, and changing it is ` +
           `not something this route can do.`,
       );
     }
