@@ -215,3 +215,32 @@ export interface Money {
   readonly amount: Amount;
   readonly currency: CurrencyCode;
 }
+
+/**
+ * Why an amount a person typed was refused, in words (audit 2026-10-03, F12).
+ *
+ * The refusals used to explain the WIRE format ("must be a decimal STRING ... a
+ * float cannot hold 1499.50 exactly"), which is true and is for a developer.
+ * The person at the form typed 0, or -5, or 120% and needs to hear that. The
+ * string rule still holds; it is just not what the screen says.
+ */
+export function amountProblem(
+  label: string,
+  given: string,
+  opts: { readonly percent?: boolean; readonly places?: number } = {},
+): string {
+  const trimmed = given.trim();
+  const looksNumeric = /^-?\d+(?:\.\d+)?$/.test(trimmed);
+  const places = opts.places ?? MAX_AMOUNT_SCALE;
+  if (looksNumeric) {
+    const decimals = trimmed.split(".")[1]?.length ?? 0;
+    if (/^-?0+(?:\.0+)?$/.test(trimmed)) return `${label} cannot be 0.`;
+    if (trimmed.startsWith("-")) return `${label} cannot be less than 0.`;
+    if (opts.percent === true && Number(trimmed) > 100) return `${label} cannot be more than 100%.`;
+    if (decimals <= places) return `${label} cannot be ${trimmed}.`;
+  }
+  return (
+    `${label} ${JSON.stringify(given)} is not a number. Use digits, with up to ${String(places)} ` +
+    `decimal places, e.g. 1499.50.`
+  );
+}

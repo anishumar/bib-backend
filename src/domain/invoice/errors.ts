@@ -1,6 +1,7 @@
 // Sentinel errors — the closed vocabulary of ways invoicing fails. Owned in the
 // domain; `api/domainerr.ts` maps them to HTTP status codes. Match with
 // `instanceof`, never by string.
+import { amountProblem } from "../money/model";
 
 export class InvoiceError extends Error {
   constructor(
@@ -205,13 +206,29 @@ export class InvalidInvoiceCurrency extends InvoiceError {
   }
 }
 
+/** What each field is called on the invoice screens, for the refusal (F12). */
+const INVOICE_AMOUNT_LABELS: Readonly<Record<string, { label: string; percent?: boolean; places?: number }>> = {
+  amount: { label: "The amount" },
+  fxRate: { label: "The exchange rate", places: 10 },
+  quantity: { label: "The quantity" },
+  unitAmount: { label: "The rate" },
+  discountPercent: { label: "The discount", percent: true },
+  taxPercent: { label: "The tax rate", percent: true },
+};
+
 export class InvalidInvoiceAmount extends InvoiceError {
-  constructor(field: string, given: string) {
+  constructor(
+    /** The API field, kept for logs and for the label. */
+    readonly field: string,
+    given: string,
+  ) {
+    const known = INVOICE_AMOUNT_LABELS[field];
     super(
       "INVALID_INVOICE_AMOUNT",
-      `${field} must be a decimal STRING, and ${JSON.stringify(given)} is not one. Amounts ` +
-        `cross the wire as strings because a float cannot hold 1499.50 exactly and the error ` +
-        `is invisible in one line and material in a total.`,
+      amountProblem(known?.label ?? `The ${field}`, given, {
+        ...(known?.percent === true ? { percent: true } : {}),
+        ...(known?.places === undefined ? {} : { places: known.places }),
+      }),
     );
   }
 }
