@@ -68,6 +68,7 @@ import { PostgresRuleServiceLinkRepository } from "../../src/infrastructure/post
 import { ObligationService } from "../../src/usecase/obligation/service";
 import { FakeAcceptedQuotes } from "../../src/testfakes/engagement";
 import { FakeFirmTimeZone } from "../../src/testfakes/tenancy";
+import { FakeClock } from "../../src/testfakes/clock";
 
 const cfg = load();
 const app = postgres(cfg.db.appUrl, { max: 2 });
@@ -165,7 +166,7 @@ const documents = new DocumentService({
   ids: systemIds,
   events: ledger,
 });
-const service = new EngagementService({
+const serviceDeps = {
   letters,
   library: configRepository,
   documents,
@@ -198,7 +199,8 @@ const service = new EngagementService({
   ids: systemIds,
   clock: systemClock,
   events: ledger,
-});
+};
+const service = new EngagementService(serviceDeps);
 
 const stamp = Date.now().toString(36);
 let tenantA = "";
@@ -1185,6 +1187,12 @@ describe("effective dates", () => {
   it("carries the resolved start date onto every engagement", async () => {
     // The acceptance, end to end: a letter signed today opening work that
     // begins in October, with one line that begins later still.
+    //
+    // TODAY IS PINNED to 15 July 2026. It was the real today, so from
+    // 2 October 2026 the October work had already started and the test went
+    // red on the calendar alone (audit 2026-10-03). Signing, the start dates
+    // and the state all read this one clock.
+    const service = new EngagementService({ ...serviceDeps, clock: new FakeClock(new Date("2026-07-15T06:30:00Z")) });
     const letter = await service.draft(
       {
         tenantId: tenantA,
