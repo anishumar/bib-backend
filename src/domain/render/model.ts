@@ -46,6 +46,17 @@ export interface LineTable {
   /** Which piece of the record each row prints, by the same position as
    *  `rows` — see `Anchor`. Never drawn. */
   readonly rowAnchors?: readonly (Anchor | null)[] | undefined;
+  /**
+   * Kept on ONE page when it fits on one (CA#60, audit 2026-10-03): a Summary
+   * of Fees that would start at the foot of a page with one row on it starts
+   * on the next page instead. A table longer than a page still breaks, with
+   * its header repeated. Absent, the table breaks wherever the page ends, as
+   * every document already out was drawn.
+   */
+  readonly keepTogether?: boolean | undefined;
+  /** How many lines of the flow after the table to keep with it (the total
+   *  under a Summary of Fees). Only with `keepTogether`. */
+  readonly keepWithNextLines?: number | undefined;
 }
 
 /**
@@ -290,6 +301,12 @@ export interface ProposalDocument {
    *  reference and the date, which is how a client refers to it. */
   readonly running: string;
   readonly flow: readonly Flow[];
+  /**
+   * The issuing company's letterhead (CA#18, audit 2026-10-03): its address,
+   * how to reach it and its registration numbers, at the foot of every page
+   * after the cover, one entry per line. Absent or empty, nothing is drawn.
+   */
+  readonly letterhead?: readonly string[] | undefined;
 }
 
 export interface RenderableDocument {
@@ -305,6 +322,12 @@ export interface RenderableDocument {
   readonly sections: readonly Section[];
   readonly table: LineTable | null;
   readonly totals: readonly TotalRow[];
+  /**
+   * The emphasised total in words, printed under the totals (B12 / CA#1, audit
+   * 2026-10-03): "Indian Rupees Five Thousand Nine Hundred Only". Absent on
+   * every document drawn before it, whose bytes therefore do not move.
+   */
+  readonly amountInWords?: string | undefined;
   /**
    * The agreement's TERMS — an engagement letter's pinned clauses.
    *
