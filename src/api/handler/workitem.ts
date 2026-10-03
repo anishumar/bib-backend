@@ -22,6 +22,7 @@ import type {
   WorkItemState,
 } from "../../domain/workitem/model";
 import { scopeOf } from "../scope";
+import type { LinkableFiling } from "../../usecase/workitem/ports";
 
 export interface WorkItemDeps {
   readonly service: WorkItemService;
@@ -297,6 +298,37 @@ const WorkItemNoteSchema = z
     createdAt: z.string(),
   })
   .openapi("WorkItemNote");
+
+const LinkableFilingSchema = z
+  .object({
+    obligationId: z.string().uuid(),
+    name: z.string().openapi({ description: "The filing, e.g. GSTR-3B." }),
+    periodLabel: z.string(),
+    statutoryDueOn: IsoDate,
+    entityName: z.string().nullable(),
+    stateName: z.string().openapi({ description: "The firm's own word for where the filing stands." }),
+    filedOn: IsoDate.nullable(),
+  })
+  .openapi("LinkableFiling");
+
+const TaskFilingResponse = z
+  .object({
+    linked: LinkableFilingSchema.nullable().openapi({
+      description:
+        "The filing this task files (CA#36): completing the task marks it filed, as completing " +
+        "the calendar's own task does. Null when it files none.",
+    }),
+    open: z.array(LinkableFilingSchema).openapi({
+      description:
+        "The company's open filings with no task yet, by due date: what this task could file. " +
+        "The company is the task's entity, or else its client.",
+    }),
+  })
+  .openapi("TaskFilingResponse");
+
+const LinkFilingRequest = z
+  .object({ obligationId: z.string().uuid() })
+  .openapi("LinkTaskFilingRequest");
 
 const BoardResponse = z.object({ items: z.array(WorkItemSchema) }).openapi("WorkBoardResponse");
 
@@ -697,6 +729,25 @@ function toNoteWire(n: WorkItemNote): z.infer<typeof WorkItemNoteSchema> {
   };
 }
 
+function toLinkableWire(f: LinkableFiling): z.infer<typeof LinkableFilingSchema> {
+  return {
+    obligationId: f.obligationId,
+    name: f.name,
+    periodLabel: f.periodLabel,
+    statutoryDueOn: f.statutoryDueOn,
+    entityName: f.entityName,
+    stateName: f.stateName,
+    filedOn: f.filedOn,
+  };
+}
+
+function filingWire(r: {
+  readonly linked: LinkableFiling | null;
+  readonly open: readonly LinkableFiling[];
+}): z.infer<typeof TaskFilingResponse> {
+  return { linked: r.linked === null ? null : toLinkableWire(r.linked), open: r.open.map(toLinkableWire) };
+}
+
 function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRowSchema> {
   return {
     ...toReviewWire(c),
@@ -952,6 +1003,60 @@ const addNoteRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("The session has not selected an org, or the role may not write work"),
     404: errorResponse("No such work item at this firm"),
+  },
+});
+
+const taskFilingRoute = createRoute({
+  method: "get",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "The filing this task files, and the ones it could",
+  request: { params: WorkItemParam },
+  responses: {
+    200: { description: "The filing link", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not read work"),
+    404: errorResponse("No such work item at this firm"),
+  },
+});
+
+const linkFilingRoute = createRoute({
+  method: "put",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "Make this task the one that files a filing",
+  description:
+    "Audit 2026-10-03, CA#36. Writes the task into the column the calendar's own raised task " +
+    "uses, so completing it marks the filing filed and the calendar raises no second task. A " +
+    "task already finished files it at once. Refused (409) for another company's filing, one " +
+    "already filed, taken off the calendar, decided after a missed deadline, or with a task of " +
+    "its own, and when the task already files a different filing.",
+  request: {
+    params: WorkItemParam,
+    body: { content: { "application/json": { schema: LinkFilingRequest } }, required: true },
+  },
+  responses: {
+    200: { description: "Linked", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item or filing at this firm"),
+    409: errorResponse("The filing cannot be linked to this task; the message says why"),
+  },
+});
+
+const unlinkFilingRoute = createRoute({
+  method: "delete",
+  path: "/api/v1/work-items/{workItemId}/filing",
+  tags: ["work"],
+  summary: "Take this task off the filing it files",
+  description: "Only while the filing is not filed. The calendar raises its own task when it is due.",
+  request: { params: WorkItemParam },
+  responses: {
+    200: { description: "Unlinked", content: { "application/json": { schema: TaskFilingResponse } } },
+    401: errorResponse("No authenticated session"),
+    403: errorResponse("The session has not selected an org, or the role may not write work"),
+    404: errorResponse("No such work item at this firm"),
+    409: errorResponse("The filing is already filed by this task"),
   },
 });
 
@@ -1462,6 +1567,30 @@ export function registerWorkItemRoutes(app: OpenAPIHono<AppEnv>, deps: WorkItemD
     return c.body(null, 204);
   });
 
+  app.openapi(taskFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
+  app.openapi(linkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    const { obligationId } = c.req.valid("json");
+    await deps.service.linkFiling(s.tenantId, workItemId, obligationId, s.actor);
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
+  app.openapi(unlinkFilingRoute, async (c) => {
+    const s = scopeOf(c.get("principal"));
+    if (!s.ok) return c.json(s.deny, s.status);
+    const { workItemId } = c.req.valid("param");
+    await deps.service.unlinkFiling(s.tenantId, workItemId, s.actor);
+    return c.json(filingWire(await deps.service.filingFor(s.tenantId, workItemId)), 200);
+  });
+
   app.openapi(addNoteRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
@@ -1665,6 +1794,9 @@ export const workItemRoutes = {
   removeDependency: removeDependencyRoute,
   requestReview: requestReviewRoute,
   addNote: addNoteRoute,
+  taskFiling: taskFilingRoute,
+  linkFiling: linkFilingRoute,
+  unlinkFiling: unlinkFilingRoute,
   checkers: checkersRoute,
   reviewRules: reviewRulesRoute,
   decideReview: decideReviewRoute,

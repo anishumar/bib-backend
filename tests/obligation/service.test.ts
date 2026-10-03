@@ -470,6 +470,127 @@ describe("the filing closes when its task does, and opens again if the task reop
   });
 });
 
+describe("a task raised by hand can be the one that files a filing (audit 2026-10-03, CA#36)", () => {
+  // The roleplay firm approved "File GSTR-3B for September", an ad-hoc task,
+  // and the calendar and the client's portal went on saying "GSTR-3B Sep 2026,
+  // Pending": nothing joined the two. The join already exists
+  // (`obligation_instance.work_item_id`, the calendar's own raised task uses
+  // it), so linking puts the hand-raised task there and completing it files
+  // the filing exactly as completing a raised one does.
+  const TASK = "00000000-0000-4000-8000-0000000000a1";
+  const OTHER_TASK = "00000000-0000-4000-8000-0000000000a2";
+  const OTHER_ENTITY = "00000000-0000-4000-8000-0000000000e2";
+  let h: H;
+
+  /** August's GSTR-3B, generated and NOT raised (its target is ahead). */
+  async function openFiling(): Promise<string> {
+    await firmWithGst(h);
+    await h.service.generate(FIRM, { from: "2026-08-01", to: "2026-08-31" }, ACTOR);
+    const row = h.instances.rows[0];
+    if (!row || row.workItemId !== null) throw new Error("the harness should leave the filing unraised");
+    return row.id;
+  }
+
+  beforeEach(() => {
+    h = harness();
+  });
+
+  it("links the task to the filing, and the calendar raises no second task for it", async () => {
+    const obligationId = await openFiling();
+
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR);
+
+    expect(h.instances.rows[0]?.workItemId).toBe(TASK);
+    expect(h.events.recorded.at(-1)).toMatchObject({
+      verb: "obligation.work_linked",
+      objectId: obligationId,
+      payload: { workItemId: TASK },
+    });
+    await h.service.raise(FIRM, "2026-09-30", ACTOR);
+    expect(h.workItems.raised).toHaveLength(0);
+  });
+
+  it("files it once the task is completed, as a raised task does", async () => {
+    const obligationId = await openFiling();
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR);
+
+    await h.service.reconcileFiling(FIRM, TASK, true, ACTOR);
+
+    expect(h.instances.rows[0]?.filedOn).toBe(TODAY);
+  });
+
+  it("files it AT ONCE when the task was already approved", async () => {
+    // The roleplay's order: the firm finished the task, then noticed the
+    // calendar still said Pending.
+    const obligationId = await openFiling();
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: true }, ACTOR);
+    expect(h.instances.rows[0]?.filedOn).toBe(TODAY);
+    expect(h.events.verbs()).toContain("obligation.filed");
+  });
+
+  it("refuses another company's filing, one that already has a task, and a task already filing something else", async () => {
+    const obligationId = await openFiling();
+    await expect(
+      h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: OTHER_ENTITY, discharged: false }, ACTOR),
+    ).rejects.toMatchObject({ code: "FILING_NOT_LINKABLE" });
+
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR);
+    await expect(
+      h.service.linkWorkItem(FIRM, obligationId, { id: OTHER_TASK, entityPartyId: ENTITY, discharged: false }, ACTOR),
+    ).rejects.toMatchObject({ code: "FILING_NOT_LINKABLE" });
+
+    // September's, for the same task.
+    await h.service.generate(FIRM, { from: "2026-09-01", to: "2026-09-30" }, ACTOR);
+    const september = h.instances.rows.find((r) => r.id !== obligationId);
+    if (!september) throw new Error("no September filing");
+    await expect(
+      h.service.linkWorkItem(FIRM, september.id, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR),
+    ).rejects.toMatchObject({ code: "FILING_NOT_LINKABLE" });
+  });
+
+  it("refuses a filing already filed", async () => {
+    const obligationId = await openFiling();
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: true }, ACTOR);
+    await h.service.unlinkWorkItem(FIRM, TASK, ACTOR).catch(() => undefined);
+    await expect(
+      h.service.linkWorkItem(FIRM, obligationId, { id: OTHER_TASK, entityPartyId: ENTITY, discharged: false }, ACTOR),
+    ).rejects.toMatchObject({ code: "FILING_NOT_LINKABLE" });
+  });
+
+  it("lists the company's open filings with no task, and the one this task files", async () => {
+    const obligationId = await openFiling();
+    await h.service.generate(FIRM, { from: "2026-09-01", to: "2026-09-30" }, ACTOR);
+
+    const before = await h.service.filingsForTask(FIRM, TASK, ENTITY);
+    expect(before.linked).toBeNull();
+    expect(before.open.map((r) => r.periodLabel)).toEqual(["Aug 2026", "Sep 2026"]);
+
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR);
+    const after = await h.service.filingsForTask(FIRM, TASK, ENTITY);
+    expect(after.linked?.id).toBe(obligationId);
+    expect(after.open.map((r) => r.periodLabel)).toEqual(["Sep 2026"]);
+    expect((await h.service.filingsForTask(FIRM, TASK, OTHER_ENTITY)).open).toEqual([]);
+  });
+
+  it("unlinks a filing nobody has filed yet, and refuses once it is filed", async () => {
+    const obligationId = await openFiling();
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: false }, ACTOR);
+
+    await h.service.unlinkWorkItem(FIRM, TASK, ACTOR);
+    expect(h.instances.rows[0]?.workItemId).toBeNull();
+    expect(h.events.recorded.at(-1)).toMatchObject({
+      verb: "obligation.work_unlinked",
+      objectId: obligationId,
+      payload: { workItemId: TASK },
+    });
+
+    await h.service.linkWorkItem(FIRM, obligationId, { id: TASK, entityPartyId: ENTITY, discharged: true }, ACTOR);
+    await expect(h.service.unlinkWorkItem(FIRM, TASK, ACTOR)).rejects.toMatchObject({
+      code: "FILING_NOT_LINKABLE",
+    });
+  });
+});
+
 describe("one firm's failure never stops the others", () => {
   it("catches per tenant and REPORTS the failure", async () => {
     // T3.1's lesson, written as a test this time. `sweepActivations` carried a

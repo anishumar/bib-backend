@@ -372,6 +372,7 @@ export function mapError(err: unknown): MappedError {
       case "CONFLICTING_STATE_FLAGS":
       case "LAST_INITIAL_STATE":
       case "LAST_DESTINATION_STATE":
+      case "FILING_NOT_LINKABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);

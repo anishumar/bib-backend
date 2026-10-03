@@ -23,6 +23,7 @@ import { PostgresSessionRepository } from "../infrastructure/postgres/identity-r
 import { LedgerService } from "../usecase/ledger/service";
 import { PostgresWorkSplitSetting } from "../infrastructure/postgres/service-axis-repository";
 import { SchedulerService } from "../usecase/scheduler/service";
+import { obligationFilingPort } from "./filing-link";
 import { WorkItemService } from "../usecase/workitem/service";
 import { ObligationService } from "../usecase/obligation/service";
 import { DunningService } from "../usecase/dunning/service";
@@ -320,10 +321,8 @@ export function wireWorker(cfg: Config, log: Logger): WiredWorker {
     // processes for this file's own stated reason: a work-item service that
     // behaved differently here would file an obligation when a person ticked a
     // task and not when the worker did.
-    filings: {
-      reconcileFiling: (tenantId, workItemId, discharged, actor): Promise<void> =>
-        obligations.reconcileFiling(tenantId, workItemId, discharged, actor),
-    },
+    // Built once for both processes in `setup/filing-link.ts` (CA#36).
+    filings: obligationFilingPort(() => obligations),
     ids: systemIds,
     clock: systemClock,
     events: ledger,

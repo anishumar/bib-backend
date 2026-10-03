@@ -1387,6 +1387,43 @@ describe("review — and the rule no firm may configure away", () => {
   });
 });
 
+describe("the filing a task raised by hand files (audit 2026-10-03, CA#36)", () => {
+  const FILING = "00000000-0000-4000-8000-00000000f111";
+
+  it("hands the calendar the task's company and whether it is done", async () => {
+    const h = await harness();
+    const item = await h.service.create(
+      { tenantId: FIRM, clientPartyId: CLIENT, entityPartyId: ENTITY, title: "File GSTR-3B for September" },
+      ACTOR,
+    );
+
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)).toEqual({
+      obligationId: FILING,
+      task: { id: item.id, entityPartyId: ENTITY, discharged: false },
+    });
+
+    const done = await stateNamed(h, "completed");
+    await h.service.moveToState({ tenantId: FIRM, workItemId: item.id, stateId: done.id }, ACTOR);
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)?.task.discharged).toBe(true);
+  });
+
+  it("reads the CLIENT as the company when the task names no entity", async () => {
+    const h = await harness();
+    const item = await h.service.create({ tenantId: FIRM, clientPartyId: ENTITY, title: "x" }, ACTOR);
+    await h.service.linkFiling(FIRM, item.id, FILING, ACTOR);
+    expect(h.filings.links.at(-1)?.task.entityPartyId).toBe(ENTITY);
+  });
+
+  it("refuses a task the firm does not have", async () => {
+    const h = await harness();
+    await expect(
+      h.service.linkFiling(FIRM, "00000000-0000-4000-8000-00000000dead", FILING, ACTOR),
+    ).rejects.toMatchObject({ code: "WORK_ITEM_NOT_FOUND" });
+  });
+});
+
 describe("notes on a task (audit 2026-10-03, CA#30)", () => {
   // The roleplay's article had nowhere to write "challan shared on WhatsApp",
   // and nothing to say when she sent the work to be checked.

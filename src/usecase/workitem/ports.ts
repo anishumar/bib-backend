@@ -256,6 +256,37 @@ export interface ObligationFiling {
     discharged: boolean,
     actor: Actor,
   ): Promise<void>;
+  /**
+   * The filing this task files, if any, and the company's open filings with
+   * no task yet (audit 2026-10-03, CA#36): what the task page offers to link.
+   */
+  filingsForTask(
+    tenantId: string,
+    workItemId: string,
+    entityPartyId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }>;
+  /** Make this task the one that files that filing; filed at once when the
+   *  task is already done. The calendar's rules refuse, in words. */
+  linkTask(
+    tenantId: string,
+    obligationId: string,
+    task: { readonly id: string; readonly entityPartyId: string; readonly discharged: boolean },
+    actor: Actor,
+  ): Promise<void>;
+  /** Take this task off the filing it files, while that is not filed. */
+  unlinkTask(tenantId: string, workItemId: string, actor: Actor): Promise<void>;
+}
+
+/** One filing as the task page shows it (CA#36): what it is, for when, and
+ *  whether it is filed. The calendar's read, in this module's own words. */
+export interface LinkableFiling {
+  readonly obligationId: string;
+  readonly name: string;
+  readonly periodLabel: string;
+  readonly statutoryDueOn: string;
+  readonly entityName: string | null;
+  readonly stateName: string;
+  readonly filedOn: string | null;
 }
 
 export interface NewWorkItem {

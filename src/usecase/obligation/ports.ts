@@ -823,6 +823,12 @@ export interface ObligationInstanceRepository {
    */
   attachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean>;
   /**
+   * Take this task off the filing it was linked to (CA#36), only while the
+   * filing is not filed. False when nothing was written: it was filed, or the
+   * task no longer files it.
+   */
+  detachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean>;
+  /**
    * The obligation a work item was raised for, if it was raised for one.
    *
    * The reverse of `attachWorkItem`, and the only lookup the closing path

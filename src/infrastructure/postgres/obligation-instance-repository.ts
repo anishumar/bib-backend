@@ -432,6 +432,19 @@ export class PostgresObligationInstanceRepository implements ObligationInstanceR
     });
   }
 
+  async detachWorkItem(tenantId: string, obligationId: string, workItemId: string): Promise<boolean> {
+    return withTenant(this.app, tenantId, async (db) => {
+      // Guarded in the WHERE (CA#36): a filed filing keeps the task that filed
+      // it, and a task that no longer files this one detaches nothing.
+      const rows = await db<{ id: string }[]>`
+        UPDATE delivery.obligation_instance SET work_item_id = NULL
+        WHERE id = ${obligationId} AND work_item_id = ${workItemId} AND filed_on IS NULL
+        RETURNING id
+      `;
+      return rows.length > 0;
+    });
+  }
+
   async findByWorkItem(tenantId: string, workItemId: string): Promise<ObligationInstance | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<InstanceRow[]>`

@@ -38,6 +38,7 @@ import type {
   EngagementWork,
   EngagementWorkSource,
   JobStepHandover,
+  LinkableFiling,
   NewWorkItem,
   NewWorkItemApproval,
   NewWorkItemNote,
@@ -877,6 +878,40 @@ export class FakeObligationCoverage implements ObligationCoverage {
  */
 export class FakeObligationFiling implements ObligationFiling {
   readonly calls: { workItemId: string; discharged: boolean }[] = [];
+  /** What `filingsForTask` answers, and what `linkTask` was told (CA#36). */
+  readonly filings: LinkableFiling[] = [];
+  readonly links: {
+    obligationId: string;
+    task: { id: string; entityPartyId: string; discharged: boolean };
+  }[] = [];
+  readonly unlinked: string[] = [];
+
+  filingsForTask(
+    _tenantId: string,
+    workItemId: string,
+    _entityPartyId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+    const link = this.links.find((l) => l.task.id === workItemId);
+    return Promise.resolve({
+      linked: link === undefined ? null : (this.filings.find((f) => f.obligationId === link.obligationId) ?? null),
+      open: this.filings.filter((f) => !this.links.some((l) => l.obligationId === f.obligationId)),
+    });
+  }
+
+  linkTask(
+    _tenantId: string,
+    obligationId: string,
+    task: { readonly id: string; readonly entityPartyId: string; readonly discharged: boolean },
+    _actor: Actor,
+  ): Promise<void> {
+    this.links.push({ obligationId, task: { ...task } });
+    return Promise.resolve();
+  }
+
+  unlinkTask(_tenantId: string, workItemId: string, _actor: Actor): Promise<void> {
+    this.unlinked.push(workItemId);
+    return Promise.resolve();
+  }
 
   reconcileFiling(
     _tenantId: string,

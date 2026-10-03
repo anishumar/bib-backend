@@ -69,7 +69,8 @@ export type ObligationErrorCode =
   | "INVALID_CUTOVER"
   | "CUTOVER_BEFORE_START"
   | "ALREADY_SUPERSEDED"
-  | "SUCCESSOR_NEEDS_ITS_OWN_PACK";
+  | "SUCCESSOR_NEEDS_ITS_OWN_PACK"
+  | "FILING_NOT_LINKABLE";
 
 // ── the rule ───────────────────────────────────────────────────────────────
 
@@ -587,5 +588,16 @@ export class InvalidWindow extends ObligationError {
       `The window ${JSON.stringify(from)}..${JSON.stringify(to)} is not a pair of dates with ` +
         `the earlier one first. Dates are YYYY-MM-DD and name a day, never an instant.`,
     );
+  }
+}
+
+/**
+ * A task cannot be made the one that files this filing, or taken off it
+ * (audit 2026-10-03, CA#36). The sentence says which of the reasons it is,
+ * because each is fixed somewhere different.
+ */
+export class FilingNotLinkable extends ObligationError {
+  constructor(why: string) {
+    super("FILING_NOT_LINKABLE", why);
   }
 }

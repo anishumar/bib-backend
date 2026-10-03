@@ -110,6 +110,7 @@ import {
 import type { CheckerCandidate, Maker, VerificationPolicy } from "../../domain/verification/model";
 import { INELIGIBILITY_MESSAGES, isEligible } from "../../domain/verification/model";
 import type {
+  LinkableFiling,
   EngagementWorkSource,
   JobStepHandover,
   LetterWorkSource,
@@ -1735,6 +1736,53 @@ export class WorkItemService {
     if (!line) throw new ChecklistItemNotFound(checklistItemId);
     if (line.doneAt !== null) throw new ChecklistItemDone();
     await this.deps.items.removeChecklistItem(tenantId, checklistItemId);
+  }
+
+  // ── the filing a task files (audit 2026-10-03, CA#36) ────────────────────
+
+  /**
+   * The filing this task files, and the ones it could: the company's open
+   * filings with no task yet. The company is the task's entity, or else its
+   * client (a task raised for one company names it as the client).
+   */
+  async filingFor(
+    tenantId: string,
+    workItemId: string,
+  ): Promise<{ readonly linked: LinkableFiling | null; readonly open: readonly LinkableFiling[] }> {
+    const item = await this.requireItem(tenantId, workItemId);
+    return this.deps.filings.filingsForTask(tenantId, item.id, item.entityPartyId ?? item.clientPartyId);
+  }
+
+  /**
+   * Make this task the one that files that filing (CA#36). The task's two
+   * facts are read here: the company it is for, and whether it is DONE
+   * (terminal and a success, the flag `reconcileFiling` is told on every
+   * move), so a task already approved files the filing at once.
+   */
+  async linkFiling(
+    tenantId: string,
+    workItemId: string,
+    obligationId: string,
+    actor: Actor,
+  ): Promise<void> {
+    const item = await this.requireItem(tenantId, workItemId);
+    const state = await this.requireStateRow(tenantId, item.stateId);
+    await this.deps.filings.linkTask(
+      tenantId,
+      obligationId,
+      {
+        id: item.id,
+        entityPartyId: item.entityPartyId ?? item.clientPartyId,
+        discharged: state.isTerminal && state.isSuccess,
+      },
+      actor,
+    );
+  }
+
+  /** Take this task off the filing it files, while that is not filed. */
+  async unlinkFiling(tenantId: string, workItemId: string, actor: Actor): Promise<void> {
+    await this.requireItem(tenantId, workItemId);
+    await this.deps.filings.unlinkTask(tenantId, workItemId, actor);
   }
 
   // ── notes (0330, CA#30) ──────────────────────────────────────────────────
