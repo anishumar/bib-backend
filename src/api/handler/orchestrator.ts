@@ -51,6 +51,7 @@ interface JobContextSource {
   readonly entityName: string | null;
   readonly periodLabel: string | null;
   readonly dueOn: string | null;
+  readonly filingDueOn: string | null;
   readonly services: readonly { readonly serviceName: string }[];
 }
 
@@ -66,8 +67,13 @@ const StepJobContextSchema = z
     }),
     dueOn: z.string().nullable().openapi({
       description:
-        "`YYYY-MM-DD`: the earliest due day of the job's unfinished tasks, which is what a step " +
-        "on it is due by. Null when none carries a date.",
+        "`YYYY-MM-DD`: what a step on this job is due by: the earliest due day of the job's " +
+        "unfinished tasks, and never after `filingDueOn`. Null when neither carries a date.",
+    }),
+    filingDueOn: z.string().nullable().openapi({
+      description:
+        "`YYYY-MM-DD`: the earliest legal due day of an unfiled filing this job's work is for " +
+        "(same company, a rule on its service, a period inside the job's). Null when none.",
     }),
   })
   .openapi("StepJobContext");
@@ -82,6 +88,7 @@ function jobContextWire(d: JobContextSource | undefined): z.infer<typeof StepJob
     periodLabel: d.periodLabel,
     services: d.services.map((s) => s.serviceName),
     dueOn: d.dueOn,
+    filingDueOn: d.filingDueOn,
   };
 }
 

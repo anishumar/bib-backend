@@ -65,10 +65,14 @@ export interface JobDetail {
   readonly entityPartyId: string | null;
   /** The job's own period ("Aug 2026"), null on a job that is not per period. */
   readonly periodLabel: string | null;
-  /** The EARLIEST due day of the job's unfinished tasks, `YYYY-MM-DD` — what a
-   *  step on this job is due by, as the person doing it reads it. Null when no
-   *  open task of the job carries a date. */
+  /** What a step on this job is due by, `YYYY-MM-DD`: the EARLIEST due day of
+   *  the job's unfinished tasks, and never after `filingDueOn` (audit
+   *  2026-10-03, CA#11). Null when neither carries a date. */
   readonly dueOn: string | null;
+  /** The earliest legal due day of an unfiled filing this job's work is for
+   *  (same company, a rule on its service, a period inside the job's), or
+   *  null when it has none. */
+  readonly filingDueOn: string | null;
   /** In the order their advances were recorded — the order the client bought
    *  them in, which is the order a merged card should read. */
   readonly services: readonly JobService[];
