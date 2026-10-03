@@ -338,3 +338,43 @@ async function lastNumber(documentType: string): Promise<number> {
   `;
   return row?.last_number ?? 0;
 }
+
+describe("a draft's lines can be struck off and added again (B04, B36)", () => {
+  async function draftWith(lines: number): Promise<string> {
+    const draft = await service.raise(
+      { tenantId: tenant, partyId: client, entityPartyId: entity, currency: "INR", fxRate: "1", fxRateDate: "2026-07-01", seriesDate: "2026-07-01" },
+      SYSTEM_ACTOR,
+    );
+    for (let i = 1; i <= lines; i += 1) {
+      await service.addLine({ tenantId: tenant, invoiceId: draft.id, description: `Line ${String(i)}`, quantity: "1", unitAmount: "100" });
+    }
+    return draft.id;
+  }
+
+  it("adds a line after the last line was struck off", async () => {
+    // The unique position counted STRUCK lines too: strike line 2, add one, and
+    // the new line took position 2 again and failed with a duplicate key.
+    const draft = await draftWith(2);
+    const [, second] = await service.describe(tenant, draft).then((r) => r.lines);
+    if (second === undefined) throw new Error("no second line");
+    await service.removeLine(tenant, draft, second.line.id);
+
+    const added = await service.addLine({ tenantId: tenant, invoiceId: draft, description: "Again", quantity: "1", unitAmount: "50" });
+    expect(added.position).toBe(2);
+    const lines = (await service.describe(tenant, draft)).lines.map((l) => [l.line.position, l.line.description]);
+    expect(lines).toEqual([[1, "Line 1"], [2, "Again"]]);
+  });
+
+  it("gives eight lines added at once eight positions", async () => {
+    // MAX()+1 inside the INSERT reads a snapshot under READ COMMITTED: two adds
+    // at once both took the same position and one surfaced as a 500.
+    const draft = await draftWith(0);
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) =>
+        service.addLine({ tenantId: tenant, invoiceId: draft, description: `Line ${String(i)}`, quantity: "1", unitAmount: "10" }),
+      ),
+    );
+    const positions = (await service.describe(tenant, draft)).lines.map((l) => l.line.position);
+    expect(positions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+  });
+});

@@ -388,14 +388,19 @@ export class PostgresInvoiceRepository implements InvoiceRepository {
 
   async addLine(l: NewInvoiceLine): Promise<InvoiceLine> {
     return withTenant(this.app, l.tenantId, async (db) => {
+      // THE INVOICE ROW IS THE LOCK (B36). `MAX(position) + 1` inside the INSERT
+      // still reads a snapshot under READ COMMITTED, so two lines added at once
+      // both took the same position and one failed on the unique index as a
+      // 500. Holding the invoice row first makes the second add wait for the
+      // first to commit and then read its line.
+      await db`SELECT 1 FROM crm.invoice WHERE id = ${l.invoiceId} FOR UPDATE`;
       const [row] = await db<InvoiceLineRow[]>`
         INSERT INTO crm.invoice_line
           (id, tenant_id, invoice_id, engagement_id, description, position, quantity,
            unit_amount, currency, discount_percent, tax_percent)
         SELECT ${l.id}, ${l.tenantId}, ${l.invoiceId}, ${l.engagementId}, ${l.description},
-               -- The next position, computed in the INSERT rather than read and
-               -- then written: two lines added at once would otherwise both
-               -- read the same maximum and collide on the UNIQUE constraint.
+               -- The next position among LIVE lines: a struck-off line frees
+               -- its position (0326).
                COALESCE(MAX(position), 0) + 1,
                ${l.quantity}, ${l.unitAmount}, ${l.currency}, ${l.discountPercent},
                ${l.taxPercent}
