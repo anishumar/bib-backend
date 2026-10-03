@@ -314,6 +314,8 @@ describe("the task check queue carries the task's client by id and its due day (
     `;
     const row = (await approvals.listPending(tenant)).find((c) => c.workItemId === item);
     expect(row).toMatchObject({ clientName: "Kaveri Foods", clientPartyId: client, dueOn: "2026-10-12" });
+    // And the company the work is for (audit 2026-10-03, F32).
+    expect(row).toMatchObject({ entityPartyId: entity, entityName: "Kaveri Foods Private Limited" });
   });
 });
 

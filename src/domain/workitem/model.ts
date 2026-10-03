@@ -328,6 +328,11 @@ export interface WorkItemCheck {
   readonly clientName: string;
   /** The client by id, so a list can LINK it (V2.1's My day). */
   readonly clientPartyId: string;
+  /** WHICH of the client's companies the work is for, when it names one
+   *  (audit 2026-10-03, F32): a group of four files four sets of returns, and
+   *  My day printed the group on a task titled for one of its companies. */
+  readonly entityPartyId: string | null;
+  readonly entityName: string | null;
   /** The task's own due day, `YYYY-MM-DD`, or null when it has none. */
   readonly dueOn: string | null;
   /** Who made it, by name. Null when the item was unassigned — "—" is the

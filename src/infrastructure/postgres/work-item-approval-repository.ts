@@ -34,6 +34,8 @@ interface CheckRow extends ApprovalRow {
   work_item_title: string;
   client_name: string;
   client_party_id: string;
+  entity_party_id: string | null;
+  entity_name: string | null;
   due_on: string | null;
   submitted_by_name: string | null;
   policy_label: string | null;
@@ -65,6 +67,8 @@ function toCheck(r: CheckRow): WorkItemCheck {
     workItemTitle: r.work_item_title,
     clientName: r.client_name,
     clientPartyId: r.client_party_id,
+    entityPartyId: r.entity_party_id,
+    entityName: r.entity_name,
     dueOn: r.due_on,
     submittedByName: r.submitted_by_name,
     policyLabel: r.policy_label,
@@ -90,6 +94,8 @@ const CHECK_SELECT = `
          w.title AS work_item_title,
          cp.display_name AS client_name,
          w.client_party_id,
+         -- The company the work is for, when it names one (F32).
+         w.entity_party_id, ep.display_name AS entity_name,
          -- A DAY, read as text: no Date is built, so no zone can move it.
          w.due_on::text AS due_on,
          mk.display_name AS submitted_by_name,
@@ -97,6 +103,7 @@ const CHECK_SELECT = `
   FROM delivery.work_item_approval a
   JOIN delivery.work_item w ON w.id = a.work_item_id AND w.tenant_id = a.tenant_id
   JOIN core.party cp ON cp.id = w.client_party_id AND cp.tenant_id = w.tenant_id
+  LEFT JOIN core.party ep ON ep.id = w.entity_party_id AND ep.tenant_id = w.tenant_id
   -- By id alone: tenancy.user_account is GLOBAL and has no tenant_id to join on.
   LEFT JOIN tenancy.user_account mk ON mk.id = a.submitted_by
   LEFT JOIN config.version v ON v.id = a.policy_version_id AND v.tenant_id = a.tenant_id

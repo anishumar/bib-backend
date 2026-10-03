@@ -664,6 +664,8 @@ export class FakeWorkItemApprovalRepo implements WorkItemApprovalRepository {
     workItemTitle: this.items?.rows.find((r) => r.id === a.workItemId)?.title ?? "",
     clientName: "",
     clientPartyId: this.items?.rows.find((r) => r.id === a.workItemId)?.clientPartyId ?? "",
+    entityPartyId: this.items?.rows.find((r) => r.id === a.workItemId)?.entityPartyId ?? null,
+    entityName: null,
     dueOn: this.items?.rows.find((r) => r.id === a.workItemId)?.dueOn ?? null,
     submittedByName: null,
     policyLabel: null,

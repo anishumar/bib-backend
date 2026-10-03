@@ -413,6 +413,10 @@ const WorkItemCheckRowSchema = WorkItemReviewSchema.extend({
   // On the QUEUE's row, not the review's: a list of checks links the client and
   // says when the work is due (V2.1's My day); a task's own page has both.
   clientPartyId: z.string().uuid(),
+  entityPartyId: z.string().uuid().nullable().openapi({
+    description: "The company the work is for, when the task names one (F32).",
+  }),
+  entityName: z.string().nullable(),
   dueOn: IsoDate.nullable().openapi({
     description: "The task's own due day, or null when it has none.",
   }),
@@ -756,6 +760,8 @@ function toCheckRowWire(c: WorkItemCheckOnDesk): z.infer<typeof WorkItemCheckRow
     ...toReviewWire(c),
     viewer: { eligible: c.viewer.eligible, reason: c.viewer.reason },
     clientPartyId: c.clientPartyId,
+    entityPartyId: c.entityPartyId,
+    entityName: c.entityName,
     dueOn: c.dueOn,
   };
 }
