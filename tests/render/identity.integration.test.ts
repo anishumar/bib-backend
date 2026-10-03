@@ -129,7 +129,8 @@ describe("who an invoice is from and to (B12 / CA#1)", () => {
       "Maharashtra 411001, India",
       "GSTIN 27ABCDE1234F1Z5",
       "PAN ABCDE1234F",
-      "+912026123456  ·  office@sharmamehta.in",
+      "+912026123456",
+      "office@sharmamehta.in",
     ]);
     expect(d?.recipient.lines).toEqual(["Plot 4, MIDC Bhosari", "Maharashtra 411026, India", "GSTIN 27AAACD1234E1Z2"]);
     expect(d?.table?.rows[0]).toEqual(["GST returns for September 2026", "1", "₹5,000.00", "₹5,000.00"]);

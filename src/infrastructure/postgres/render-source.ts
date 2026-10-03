@@ -1838,12 +1838,14 @@ function contact(p: PrintedParty): string | null {
  * firm's own block also says how to reach it and its company number.
  */
 function invoicePartyLines(p: PrintedParty, firm: boolean): string[] {
-  const reach = firm ? contact(p) : null;
+  // The firm's phone, email and website one a line: the column is half the
+  // page, and run together they wrap mid-address.
+  const reach = firm ? [p.phone, p.email, p.website] : [];
   return [
     ...(p.address?.lines ?? []),
     placeLine(p),
     ...registrations(p, firm),
-    reach,
+    ...reach,
   ].filter((x): x is string => x !== null);
 }
 

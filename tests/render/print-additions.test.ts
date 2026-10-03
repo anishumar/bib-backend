@@ -64,7 +64,7 @@ function proposal(filler: number, table: Partial<LineTable>, letterhead?: readon
   const rows = ["A1", "A2", "B1", "B2"].map((code) => [code, `Service ${code}`, "Monthly", "₹12,000"]);
   const flow: Flow[] = [
     ...Array.from({ length: filler }, (_, i): Flow => ({ kind: "paragraph", text: `Paragraph ${String(i + 1)} of the work.` })),
-    { kind: "heading", level: 1, text: "Summary of Fees" },
+    { kind: "heading", level: 1, text: "Summary of Fees", anchor: "summary" },
     {
       kind: "table",
       table: {
@@ -105,11 +105,11 @@ function proposal(filler: number, table: Partial<LineTable>, letterhead?: readon
 
 async function rowPages(doc: RenderableDocument): Promise<number[]> {
   const drawn = await new PdfLibRenderer().renderWithAnchors(doc);
-  return drawn.anchors.filter((a) => a.key.startsWith("fee:")).map((a) => a.page);
+  return drawn.anchors.filter((a) => a.key.startsWith("fee:") || a.key === "summary").map((a) => a.page);
 }
 
 describe("a Summary of Fees kept on one page (CA#60)", () => {
-  it("starts on the next page rather than leave a row behind, when it asks to", async () => {
+  it("starts on the next page, its heading with it, rather than leave a row behind", async () => {
     // Find where the table, left alone, splits across a page.
     let split = -1;
     for (let n = 30; n < 80 && split < 0; n += 1) {

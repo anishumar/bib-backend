@@ -1008,6 +1008,21 @@ export class PdfLibRenderer implements DocumentRenderer {
     }
   }
 
+  /** How tall a flow table draws in full, with the lines kept after it: the
+   *  measure `drawFlowTable` lays rows out by, used to keep one together. */
+  private flowTableHeight(table: LineTable, body: Face, style: FlowStyle): number {
+    const size = style.body;
+    const totalWeight = table.columns.reduce((n, c) => n + c.weight, 0);
+    const widths = table.columns.map((c) => (c.weight / totalWeight) * CONTENT_WIDTH);
+    const rows = table.rows.reduce((n, row) => {
+      const lines = row.map(
+        (cell, i) => wrapParagraph(cell, (widths[i] ?? CONTENT_WIDTH) - 8, (t) => body.widthOfTextAtSize(t, size)).length,
+      );
+      return n + Math.max(1, ...lines) * size * LEADING + 8;
+    }, 0);
+    return 20 + 14 + rows + (table.keepWithNextLines ?? 0) * size * LEADING + 8;
+  }
+
   /** How much a fresh page holds for running text: the proposal's pages start
    *  under their logo, every other page at the top margin. */
   private bodyHeight(cursor: Cursor): number {
@@ -1028,7 +1043,17 @@ export class PdfLibRenderer implements DocumentRenderer {
     bold: Face,
     style: FlowStyle = LETTER_FLOW,
   ): void {
-    for (const piece of flow) {
+    for (const [i, piece] of flow.entries()) {
+      // A HEADING GOES WITH A TABLE KEPT TOGETHER (CA#60): "Summary of Fees"
+      // left at the foot of a page with its table on the next is the split
+      // the table is kept whole to avoid.
+      const next = flow[i + 1];
+      if (piece.kind === "heading" && next?.kind === "table" && next.table.keepTogether === true) {
+        const { size, before } = style.headings[piece.level];
+        const lines = wrapParagraph(piece.text, CONTENT_WIDTH, (t) => bold.widthOfTextAtSize(t, size));
+        const needed = before + lines.length * size * LEADING + 2 + this.flowTableHeight(next.table, body, style);
+        if (needed <= this.bodyHeight(cursor) && cursor.y - needed < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+      }
       body.begin(piece.anchor);
       if (piece.kind === "heading") this.drawFlowHeading(pdf, cursor, piece.level, piece.text, bold, style);
       else if (piece.kind === "paragraph") {
@@ -1179,11 +1204,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     // Fees split one row from the rest reads as two tables. Only a table that
     // asks for it, so every document drawn before keeps its pages.
     if (table.keepTogether === true) {
-      const whole =
-        20 + 14 + wrappedRows.reduce((n, cells) => n + heightOf(cells), 0) +
-        (table.keepWithNextLines ?? 0) * size * LEADING + 8;
-      const pageRoom = this.bodyHeight(cursor);
-      if (whole <= pageRoom && cursor.y - whole < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+      const whole = this.flowTableHeight(table, body, style);
+      if (whole <= this.bodyHeight(cursor) && cursor.y - whole < MARGIN_BOTTOM) this.newPage(pdf, cursor);
     }
     body.quiet(header);
     for (const [r, cells] of wrappedRows.entries()) {
