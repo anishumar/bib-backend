@@ -1330,7 +1330,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         staffGrades: { service: staffGrades },
         serviceAxes: { service: serviceAxes },
         clientAssignments: { service: clientAssignments },
-        clientImports: { service: clientImports },
+        clientImports: { service: clientImports, authz },
         portalAccess: { service: portalAccess },
         portalHome: { service: portalHome },
         clientAsks: { service: clientAsks },

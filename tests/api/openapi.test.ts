@@ -434,6 +434,7 @@ function deps(): RouterDeps {
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
         events: new RecordingEventSink(),
       }),
+      authz: new AuthzService({ permissions }),
     },
     portalAccess: {
       service: new PortalAccessService({
