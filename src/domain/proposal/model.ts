@@ -426,9 +426,10 @@ export function proposalDeletionBlock(
  * Whether a date has passed, in whole days.
  *
  * `validUntil` is a DATE and `on` is compared as one, so a proposal valid until
- * the 30th is still valid all day on the 30th in whoever's calendar is reading
- * it. Comparing an instant against a date would expire it at midnight UTC,
- * which is the previous afternoon in half the world.
+ * the 30th is still valid all day on the 30th. Comparing an instant against a
+ * date would expire it at midnight UTC, which is the previous afternoon in half
+ * the world. `on` is the FIRM's calendar day (`dayInZone`, audit 2026-10-03,
+ * B24): every caller passed the UTC instant, so the slice below cut it on UTC.
  */
 export function isPastValidity(validUntil: string | null, on: string): boolean {
   if (validUntil === null) return false;
