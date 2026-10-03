@@ -9,7 +9,7 @@
 //
 //   FILES NOTHING. A preview adds no document, no version, no link and no event.
 //
-//   LAKHS. A proposal in rupees prints "INR 12,50,000".
+//   LAKHS. A proposal in rupees prints "₹12,50,000" (one formatter, audit 2026-10-03).
 //
 // Run with:  npm run test:integration   (needs a migrated local database)
 import { PostgresLeadRepository } from "../../src/infrastructure/postgres/lead-repository";
@@ -345,7 +345,7 @@ describe("the preview of a proposal", () => {
     const text = flow
       .map((p) => (p.kind === "paragraph" ? `${p.lead === undefined ? "" : `[${p.lead}] `}${p.text}` : ""))
       .join("\n");
-    expect(text).toContain("INR 12,50,000");
+    expect(text).toContain("₹12,50,000");
     expect(text).not.toContain("1,250,000");
   });
 });

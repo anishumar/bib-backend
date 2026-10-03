@@ -36,6 +36,17 @@ export interface PartyDeps {
 
 // ── Response schemas ────────────────────────────────────────────────────────
 
+/** Where a party is billed (0334, audit 2026-10-03, CA#22): the lines an
+ *  invoice's "Billed to" prints, then the state, postal code and country. */
+const BillingAddressSchema = z
+  .object({
+    lines: z.array(z.string().max(200)).max(8),
+    region: z.string().max(100).nullable(),
+    postalCode: z.string().max(20).nullable(),
+    country: z.string().nullable().openapi({ description: "ISO 3166-1 alpha-2: IN" }),
+  })
+  .openapi("BillingAddress");
+
 const PartySchema = z
   .object({
     id: z.string().uuid(),
@@ -56,6 +67,7 @@ const PartySchema = z
         "engagement letter, a lead and an invoice all refuse it. Listed all the same, so a " +
         "screen that may name the firm (a task about it) still can; the client screens hide it.",
     }),
+    billingAddress: BillingAddressSchema.nullable(),
   })
   .openapi("Party");
 
@@ -69,6 +81,15 @@ function partyWire(p: Party) {
     displayName: p.displayName,
     archivedAt: p.archivedAt,
     isOwnCompany: p.isOwnCompany,
+    billingAddress:
+      p.billingAddress === null
+        ? null
+        : {
+            lines: [...p.billingAddress.lines],
+            region: p.billingAddress.region,
+            postalCode: p.billingAddress.postalCode,
+            country: p.billingAddress.country,
+          },
   };
 }
 
@@ -325,6 +346,20 @@ const UpdatePartyBody = z
     tradeName: z.string().max(400).nullable().optional(),
     industry: z.string().max(400).nullable().optional(),
     website: z.string().max(400).nullable().optional(),
+    billingAddress: z
+      .object({
+        lines: z.array(z.string().max(200)).max(8),
+        region: z.string().max(100).nullable().optional(),
+        postalCode: z.string().max(20).nullable().optional(),
+        country: z.string().max(2).nullable().optional(),
+      })
+      .nullable()
+      .optional()
+      .openapi({
+        description:
+          "Where the client is billed (CA#22): printed in an invoice's Billed to block from the next " +
+          "invoice issued. Null clears it. An issued invoice keeps the address it went out with.",
+      }),
   })
   .openapi("UpdateParty");
 
@@ -332,7 +367,7 @@ const updatePartyRoute = createRoute({
   method: "patch",
   path: "/api/v1/parties/{partyId}",
   tags: ["party"],
-  summary: "Correct a client's name, trade name, industry or website",
+  summary: "Correct a client's name, trade name, industry, website or billing address",
   description:
     "Absent means unchanged; null or blank clears an optional field. Every list and every NEW " +
     "PDF reads the new name; a signed letter and a filed PDF do not change. The audit trail " +

@@ -1942,6 +1942,7 @@ export class ProposalService {
         declinedReason,
         proposalUrl: this.deps.links.staffUrl(decided.id),
         timeZone: await this.deps.timeZones.timeZoneFor(decided.tenantId),
+        firmName: record.firmName,
       })
       .catch(() => undefined);
   }

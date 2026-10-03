@@ -12,7 +12,7 @@
 import { describe, expect, it } from "vitest";
 import { DocusignSigner } from "../../src/infrastructure/esign/docusign-signer";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import type { ContentHasher } from "../../src/usecase/engagement/ports";
 import {
   ENVELOPE,
@@ -290,6 +290,7 @@ async function sentLetter(docs: FakeDocusignTransport): Promise<{
     discountPercent: "0",
   });
   await service.addClause(TENANT, letter.id, SCOPE_CLAUSE);
+  await writeOpening(fakes.prose, TENANT, letter.id);
   await service.send(TENANT, letter.id, ACTOR);
 
   return { service, fakes, letterId: letter.id, hashes };

@@ -484,7 +484,8 @@ describe("rendering one of the product's own records", () => {
 
     expect(record.document.origin).toBe("generated");
     expect(record.document.title).toContain("EL-2026-0007");
-    expect(record.latestVersion.filename).toBe("EL-2026-0007.pdf");
+    // CA#56: what it is, its number and whose.
+    expect(record.latestVersion.filename).toBe("Engagement letter EL-2026-0007 - Kaveri Foods.pdf");
     expect(record.latestVersion.mediaType).toBe("application/pdf");
 
     // Attached in the same act, so the letter's own page shows it. The
@@ -588,7 +589,7 @@ describe("the copy of record: an invoice or a letter is filed ONCE after it goes
     });
 
     expect(record.document.isClientVisible).toBe(true);
-    expect(record.latestVersion.filename).toBe("INV/2026-27/0004.pdf");
+    expect(record.latestVersion.filename).toBe("Invoice INV-2026-27-0004 - Kaveri Foods.pdf");
     const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
     expect(listed.map((d) => d.role)).toEqual(["copy_of_record"]);
   });
@@ -646,7 +647,7 @@ describe("the copy of record: an invoice or a letter is filed ONCE after it goes
 
     expect(first.document.title).toBe("Draft Engagement Letter INV/2026-27/0005");
     expect(first.document.isClientVisible).toBe(false);
-    expect(first.latestVersion.filename).toBe("INV/2026-27/0005-draft.pdf");
+    expect(first.latestVersion.filename).toBe("Invoice INV-2026-27-0005 draft - Kaveri Foods.pdf");
     const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
     expect(listed.map((d) => d.role)).toEqual(["draft_copy", "draft_copy"]);
   });
@@ -692,6 +693,30 @@ describe("the copy of record: an invoice or a letter is filed ONCE after it goes
     });
     const listed = await service.listForSubject(TENANT, "invoice", INVOICE);
     expect(listed.map((d) => d.role)).toEqual(["copy_of_record"]);
+  });
+
+  it("a draft copy is never shared with the client, and nothing is recorded (B10)", async () => {
+    const { service, renderSource, events } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0008"));
+    renderSource.parties.set(INVOICE, PARTY);
+    renderSource.drafts.add(INVOICE);
+    const draft = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    const before = events.recorded.length;
+
+    const shared = service.setClientVisible({
+      tenantId: TENANT, documentId: draft.document.id, visible: true, actor,
+    });
+    await expect(shared).rejects.toMatchObject({ code: "DRAFT_NOT_SHAREABLE" });
+    await expect(shared).rejects.toThrow(/is a draft, and a draft is never shown to the client/);
+    expect(events.recorded.length).toBe(before);
+
+    // Taking it off is always allowed.
+    const off = await service.setClientVisible({
+      tenantId: TENANT, documentId: draft.document.id, visible: false, actor,
+    });
+    expect(off.document.isClientVisible).toBe(false);
   });
 
   it("a proposal is untouched: its record is pinned at Send, and its page may copy it again", async () => {
@@ -782,12 +807,12 @@ describe("previewing a record — drawn, and filed nowhere (2026-09-28)", () => 
     expect(renderSource.asked).toEqual(["2026-09-29"]);
   });
 
-  it("an invoice is drawn as it stands", async () => {
+  it("an invoice is drawn as Issue will date it, on the firm's day (B42)", async () => {
     const { service, renderSource } = makeService();
     renderSource.documents.set(ENGAGEMENT, aRenderableDocument("INV-1"));
-    const preview = await service.preview({ tenantId: TENANT, kind: "invoice", subjectRef: ENGAGEMENT });
-    expect(renderSource.asked).toEqual([undefined]);
-    expect(preview.datedAsIfSent).toBeNull();
+    await service.preview({ tenantId: TENANT, kind: "invoice", subjectRef: ENGAGEMENT });
+    // 20:30 UTC on 28 September is 29 September in Kolkata.
+    expect(renderSource.asked).toEqual(["2026-09-29"]);
   });
 
   it("says which of the issuer's marks the page wanted and found none of", async () => {

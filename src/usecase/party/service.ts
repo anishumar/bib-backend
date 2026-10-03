@@ -1,6 +1,8 @@
 // The party use case — orchestration + business rules against ports. No I/O, no
 // SQL, no HTTP: every outside thing is an injected port, so this reads like a
 // description of what the business does and is testable with in-memory fakes.
+import { postalAddressProblem, tidyPostalAddress } from "../../domain/party/address";
+import type { PostalAddress } from "../../domain/party/address";
 import type { IdGen } from "../../platform/ids";
 import type { Actor } from "../../domain/ledger/model";
 import type { EventSink } from "../ledger/ports";
@@ -560,6 +562,17 @@ export class PartyService {
       readonly tradeName?: string | null | undefined;
       readonly industry?: string | null | undefined;
       readonly website?: string | null | undefined;
+      /** Where it is billed (audit 2026-10-03, CA#22): printed lines, state,
+       *  postal code, country. Null clears it. */
+      readonly billingAddress?:
+        | {
+            readonly lines: readonly string[];
+            readonly region?: string | null | undefined;
+            readonly postalCode?: string | null | undefined;
+            readonly country?: string | null | undefined;
+          }
+        | null
+        | undefined;
     },
     actor: Actor,
   ): Promise<Party> {
@@ -585,10 +598,22 @@ export class PartyService {
     if (tradeName !== undefined && tradeName !== org?.tradeName) patch["tradeName"] = tradeName;
     if (industry !== undefined && industry !== org?.industry) patch["industry"] = industry;
     if (website !== undefined && website !== org?.website) patch["website"] = website;
-    const fields = Object.keys(patch);
+    // THE BILLING ADDRESS (CA#22), tidied and checked; null or nothing left
+    // clears it. A field changed only when it reads differently.
+    let billingAddress: PostalAddress | null | undefined;
+    if (input.billingAddress !== undefined) {
+      billingAddress = input.billingAddress === null ? null : tidyPostalAddress(input.billingAddress);
+      const problem = billingAddress === null ? null : postalAddressProblem(billingAddress);
+      if (problem !== null) throw new InvalidPartyDetails(problem);
+      if (JSON.stringify(billingAddress) === JSON.stringify(party.billingAddress)) billingAddress = undefined;
+    }
+    const fields = [...Object.keys(patch), ...(billingAddress === undefined ? [] : ["billingAddress"])];
     if (fields.length === 0) throw new NothingToChange();
 
-    const updated = await this.deps.parties.updateDetails(input.tenantId, input.partyId, patch);
+    const updated = await this.deps.parties.updateDetails(input.tenantId, input.partyId, {
+      ...patch,
+      ...(billingAddress === undefined ? {} : { billingAddress }),
+    });
     if (!updated) throw new PartyNotFound(input.partyId);
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,

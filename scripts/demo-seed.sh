@@ -458,7 +458,12 @@ block '{"kind":"team","body":"Engagement Partner","sortOrder":1,"isHeading":true
 block '{"kind":"team","body":"Siddharth Rao - signs off every filing.","sortOrder":2}'
 block '{"kind":"team","body":"Delivery Team","sortOrder":3,"isHeading":true}'
 block '{"kind":"team","body":"Ravi Iyer (Manager), with Ananya Nair and Farhan Qureshi.","sortOrder":4}'
-step "3 exclusions, 2 commercial notes (one India-only), a team block"
+# THE COVER LETTER'S OPENING, in the firm's own words (its July 2026 engagement
+# letter). A letter with nothing on its cover page cannot be sent (CA#2, audit
+# 2026-10-03), and the product writes no letter prose of its own.
+block '{"kind":"cover","body":"This Engagement Letter confirms that you have engaged us to provide the services described in Annexure 1.","sortOrder":1}'
+block '{"kind":"cover","body":"Please sign this letter in the space provided below to indicate your agreement.","sortOrder":2}'
+step "3 exclusions, 2 commercial notes (one India-only), a team block, the cover letter's opening"
 
 say "Territories"
 asp partner "$API/api/v1/territory-rules" \

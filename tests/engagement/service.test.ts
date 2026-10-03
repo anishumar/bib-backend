@@ -7,7 +7,7 @@
 // would prove nothing. See letter.integration.test.ts.
 import { describe, expect, it } from "vitest";
 import { EngagementService } from "../../src/usecase/engagement/service";
-import { makeEngagementFakes } from "../../src/testfakes/engagement";
+import { makeEngagementFakes, writeOpening } from "../../src/testfakes/engagement";
 import type { QuotedLine, QuotedProposal } from "../../src/usecase/engagement/ports";
 import {
   AdvanceAmountRequired,
@@ -26,6 +26,7 @@ import {
   LetterNotFound,
   LetterNotSupersedable,
   NoClauses,
+  LetterHasNoBody,
   NotAClause,
   QuoteHasNoLines,
   QuoteJurisdictionUnclear,
@@ -203,6 +204,7 @@ async function completeTerms(
     ...(lineEffectiveFrom === undefined ? {} : { effectiveFrom: lineEffectiveFrom }),
   });
   await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+  await writeOpening(s.prose, TENANT, id);
 }
 
 /** Draft → terms → send → sign, which is the only path an engagement exists
@@ -593,6 +595,43 @@ describe("sending", () => {
     await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(NoClauses);
   });
 
+  it("refuses a letter whose cover page says nothing, and names where the words go (CA#2)", async () => {
+    // A new firm's first letter went out as "Dear Anil Deshpande, / Yours
+    // sincerely," with nothing between: the firm had no standard opening and
+    // nothing said so.
+    const s = setup();
+    const id = await draft(s);
+    await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: GST,
+      description: "GST filing",
+      quantity: "1",
+      unitAmount: "2000",
+      discountPercent: "0",
+    });
+    await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    const refused = s.service.send(TENANT, id, ACTOR);
+    await expect(refused).rejects.toBeInstanceOf(LetterHasNoBody);
+    await expect(refused).rejects.toThrow(/no opening text.*Cover letter.*Standard wording/s);
+    // A heading alone is not an opening either.
+    await s.prose.addBlock({
+      tenantId: TENANT,
+      owner: { kind: "engagement_letter", id },
+      kind: "cover",
+      body: "Engagement letter",
+      isHeading: true,
+      sortOrder: 1,
+    });
+    await expect(s.service.send(TENANT, id, ACTOR)).rejects.toBeInstanceOf(LetterHasNoBody);
+    expect(s.events.recorded.some((e) => e.verb === "engagement_letter.sent")).toBe(false);
+
+    await writeOpening(s.prose, TENANT, id);
+    const sent = await s.service.send(TENANT, id, ACTOR);
+    expect(sent.status).toBe("sent");
+  });
+
   it("refuses to change a letter once it has gone out", async () => {
     const s = setup();
     const id = await draft(s);
@@ -693,6 +732,7 @@ describe("signature and fan-out", () => {
       discountPercent: "0",
     });
     await s.service.addClause(TENANT, forB, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, forB);
     await s.service.send(TENANT, forB, ACTOR);
     const signedB = await s.service.sign(
       { tenantId: TENANT, letterId: forB, signedByName: "Priya" },
@@ -761,6 +801,7 @@ describe("signature and fan-out", () => {
       discountPercent: "0",
     });
     await s.service.addClause(TENANT, b, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, b);
     await s.service.send(TENANT, b, ACTOR);
     const signedB = await s.service.sign(
       { tenantId: TENANT, letterId: b, signedByName: "Priya" },
@@ -1577,6 +1618,7 @@ describe("G1.8 — a letter cannot print another country's law", () => {
     const id = await draft(s, { jurisdiction: "US" });
     await completeTerms(s, id);
     await s.service.addClause(TENANT, id, LAW_US);
+    await writeOpening(s.prose, TENANT, id);
     await s.service.send(TENANT, id, ACTOR);
     await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya Menon" }, ACTOR);
 
@@ -2390,6 +2432,7 @@ describe("fee groups (0083)", () => {
       await s.service.editFeeGroup(TENANT, id, groupId, { amount });
       await s.service.addLine(groupedLine(id, groupId));
       await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+      await writeOpening(s.prose, TENANT, id);
       await s.service.send(TENANT, id, ACTOR);
       const signed = await s.service.sign(
         { tenantId: TENANT, letterId: id, signedByName: "Priya Menon" },
@@ -2687,6 +2730,7 @@ describe("a service's own advance (0320)", () => {
     const { audit } = await twoLines(s, id);
     await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
     await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
     await s.service.send(TENANT, id, ACTOR);
     const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
     const byLine = new Map(engagements.map((e) => [e.engagement.engagementLetterLineId, e.engagement.status]));
@@ -2755,6 +2799,7 @@ describe("the advance bill and its release (0320)", () => {
     });
     await s.service.updateLine({ tenantId: TENANT, letterId: id, lineId: audit.id, advanceAmount: "50000" });
     await s.service.addClause(TENANT, id, SCOPE_CLAUSE);
+    await writeOpening(s.prose, TENANT, id);
     await s.service.send(TENANT, id, ACTOR);
     const { engagements } = await s.service.sign({ tenantId: TENANT, letterId: id, signedByName: "Priya" }, ACTOR);
     expect(engagements.map((e) => e.engagement.status)).toEqual(["active"]);

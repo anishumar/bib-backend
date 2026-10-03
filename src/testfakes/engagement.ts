@@ -1427,3 +1427,20 @@ export class FakeEngagementLifecycle implements EngagementLifecycle {
     );
   }
 }
+
+/**
+ * What a drafter writes under Cover letter, for the tests that send a letter.
+ * A letter goes out only with something on its cover page (CA#2, audit
+ * 2026-10-03), and the firm's standard set starts empty (see
+ * `FakeStandardBlockRepo`), so a test that sends writes the opening itself,
+ * on the letter, as a person at a new firm does.
+ */
+export async function writeOpening(prose: DocumentService, tenantId: string, letterId: string): Promise<void> {
+  await prose.addBlock({
+    tenantId,
+    owner: { kind: "engagement_letter", id: letterId },
+    kind: "cover",
+    body: "This letter confirms the services you have engaged us for.",
+    sortOrder: 1,
+  });
+}

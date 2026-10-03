@@ -112,7 +112,7 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     readonly tenantId: string;
     readonly documentId: string;
     readonly visible: boolean;
-  }): Promise<DocumentRecord | null> {
+  }): Promise<DocumentRecord | null | "draft"> {
     const i = this.documents.findIndex(
       (d) => d.tenantId === input.tenantId && d.id === input.documentId,
     );
@@ -121,6 +121,11 @@ export class FakeDocumentStoreRepo implements DocumentStoreRepository {
     // fake that accepted a write the database refuses is a fixture that can
     // describe an impossible state.
     if (i === -1 || doc === undefined || doc.partyId === null) return Promise.resolve(null);
+    // B10: a draft copy is never shared. The fake knows the role; the real
+    // adapter also asks the record the copy was drawn from.
+    if (input.visible && this.links.some((l) => l.documentId === doc.id && l.role === "draft_copy")) {
+      return Promise.resolve("draft");
+    }
     const next = { ...doc, isClientVisible: input.visible };
     this.documents[i] = next;
     return Promise.resolve(this.recordOf(next));

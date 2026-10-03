@@ -120,10 +120,16 @@ const ON_ARTWORK = rgb(1, 1, 1);
 const PREPARED_FOR_AT = { x: 0.616, y: 0.409 } as const;
 const PREPARED_BY_AT = { x: 0.603, y: 0.779 } as const;
 
-/** Where the header's logo sits on a proposal page, and where its text starts. */
+/** Where the header's logo sits on a proposal page, and where its text starts.
+ *  The logo was 20pt tall, a smudge in the corner (CA#60, audit 2026-10-03);
+ *  it is now as tall as the letter's letterhead mark. Proposals carry no
+ *  pinned hash: a sent one is read from its PDF of record. */
 const PROPOSAL_HEADER_TOP = 35;
-const PROPOSAL_LOGO_MAX_HEIGHT = 20;
-const PROPOSAL_BODY_TOP = 80;
+const PROPOSAL_LOGO_MAX_HEIGHT = 34;
+const PROPOSAL_LOGO_MAX_WIDTH = 180;
+const PROPOSAL_BODY_TOP = 94;
+/** At most this many letterhead lines at the foot of a proposal page. */
+const PROPOSAL_LETTERHEAD_LINES = 3;
 
 interface Cursor {
   page: PDFPage;
@@ -374,6 +380,8 @@ export class PdfLibRenderer implements DocumentRenderer {
     for (const section of doc.sections) this.drawSection(cursor, section, body, bold, pdf);
     if (doc.table !== null) this.drawTable(cursor, doc, body, bold, pdf);
     if (doc.totals.length > 0) this.drawTotals(cursor, doc, body, bold, pdf);
+    // The total in words (CA#1), only on a document that carries it.
+    if (doc.amountInWords !== undefined) this.drawInWords(cursor, doc.amountInWords, body, bold, pdf);
     // THE TERMS, after the commercials and before the signatures — where an
     // engagement letter has always put them, and where the client is reading
     // when they reach the line they sign on.
@@ -492,12 +500,19 @@ export class PdfLibRenderer implements DocumentRenderer {
     this.text(cursor, doc.recipient.name, { x: rightX, font: bold });
 
     // Two columns advancing together, so the block is as tall as the longer of
-    // the two rather than overlapping.
-    const rows = Math.max(doc.issuer.lines.length, doc.recipient.lines.length);
+    // the two rather than overlapping. Each line WRAPS inside its own column
+    // (since the 2026-10-03 audit put addresses here): a short line, which is
+    // all a document drew before, is one line exactly as it was.
+    const column = CONTENT_WIDTH / 2 - 12;
+    const fit = (lines: readonly string[]): string[] =>
+      lines.flatMap((l) => wrapParagraph(l, column, (s) => body.widthOfTextAtSize(s, SIZE_BODY)));
+    const issuerLines = fit(doc.issuer.lines);
+    const recipientLines = fit(doc.recipient.lines);
+    const rows = Math.max(issuerLines.length, recipientLines.length);
     for (let i = 0; i < rows; i += 1) {
       this.advance(pdf, cursor, SIZE_BODY * LEADING);
-      const left = doc.issuer.lines[i];
-      const right = doc.recipient.lines[i];
+      const left = issuerLines[i];
+      const right = recipientLines[i];
       if (left !== undefined) this.text(cursor, left, { font: body, color: MUTED });
       if (right !== undefined) this.text(cursor, right, { x: rightX, font: body, color: MUTED });
     }
@@ -630,6 +645,21 @@ export class PdfLibRenderer implements DocumentRenderer {
     }
   }
 
+  /** "Amount in words" and the words, across the page under the totals. Kept
+   *  together: a label at the foot of a page with its words over the break
+   *  reads as nothing. */
+  private drawInWords(cursor: Cursor, words: string, body: Face, bold: Face, pdf: PDFDocument): void {
+    const lines = wrapParagraph(words, CONTENT_WIDTH, (s) => body.widthOfTextAtSize(s, SIZE_BODY));
+    const height = 18 + SIZE_SMALL * LEADING + lines.length * SIZE_BODY * LEADING;
+    if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+    this.advance(pdf, cursor, 18);
+    this.text(cursor, "Amount in words", { size: SIZE_SMALL, font: bold, color: MUTED });
+    for (const line of lines) {
+      this.advance(pdf, cursor, SIZE_BODY * LEADING);
+      this.text(cursor, line, { font: body });
+    }
+  }
+
   /**
    * One signature block: the heading, room to sign, a line, and what goes
    * under it. Kept on ONE page — `advance` is asked for the whole height first
@@ -751,7 +781,11 @@ export class PdfLibRenderer implements DocumentRenderer {
       font: body,
       color: MUTED,
     });
-    for (const line of doc.issuer.lines) {
+    // The letterhead under the name, each line wrapped to the page (an
+    // address is long; "Registered in IN" was not, and draws as it did).
+    for (const line of doc.issuer.lines.flatMap((l) =>
+      wrapParagraph(l, CONTENT_WIDTH, (s) => body.widthOfTextAtSize(s, SIZE_SMALL)),
+    )) {
       this.advance(pdf, cursor, SIZE_SMALL * LEADING);
       this.text(cursor, line, { size: SIZE_SMALL, font: body, color: MUTED });
     }
@@ -876,11 +910,14 @@ export class PdfLibRenderer implements DocumentRenderer {
 
     // Every page after the cover: the logo, the running line, then the text.
     const logo = doc.logo === null ? null : await this.embed(pdf, doc.logo);
+    const letterhead = (proposal.letterhead ?? [])
+      .flatMap((l) => wrapParagraph(l, CONTENT_WIDTH, (t) => body.widthOfTextAtSize(t, SIZE_SMALL)))
+      .slice(0, PROPOSAL_LETTERHEAD_LINES);
     const turn = (c: Cursor): void => {
       c.page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
       const baseline = PAGE_HEIGHT - PROPOSAL_HEADER_TOP - PROPOSAL_LOGO_MAX_HEIGHT;
       if (logo !== null) {
-        const scale = Math.min(PROPOSAL_LOGO_MAX_HEIGHT / logo.height, 140 / logo.width, 1);
+        const scale = Math.min(PROPOSAL_LOGO_MAX_HEIGHT / logo.height, PROPOSAL_LOGO_MAX_WIDTH / logo.width, 1);
         c.page.drawImage(logo, {
           x: MARGIN_X,
           y: baseline,
@@ -901,6 +938,16 @@ export class PdfLibRenderer implements DocumentRenderer {
           MUTED,
         );
       });
+      // THE LETTERHEAD at the foot (CA#18): the issuing company's address,
+      // contact and registration numbers, below where the text stops.
+      if (letterhead.length > 0) {
+        body.quiet(() => {
+          letterhead.forEach((line, i) => {
+            const y = MARGIN_BOTTOM - 34 + (letterhead.length - 1 - i) * SIZE_SMALL * LEADING;
+            body.draw(c.page, line, MARGIN_X, y, SIZE_SMALL, MUTED);
+          });
+        });
+      }
       c.y = PAGE_HEIGHT - PROPOSAL_BODY_TOP;
     };
     const cursor: Cursor = { page: coverPage, y: 0, turn };
@@ -961,6 +1008,28 @@ export class PdfLibRenderer implements DocumentRenderer {
     }
   }
 
+  /** How tall a flow table draws in full, with the lines kept after it: the
+   *  measure `drawFlowTable` lays rows out by, used to keep one together. */
+  private flowTableHeight(table: LineTable, body: Face, style: FlowStyle): number {
+    const size = style.body;
+    const totalWeight = table.columns.reduce((n, c) => n + c.weight, 0);
+    const widths = table.columns.map((c) => (c.weight / totalWeight) * CONTENT_WIDTH);
+    const rows = table.rows.reduce((n, row) => {
+      const lines = row.map(
+        (cell, i) => wrapParagraph(cell, (widths[i] ?? CONTENT_WIDTH) - 8, (t) => body.widthOfTextAtSize(t, size)).length,
+      );
+      return n + Math.max(1, ...lines) * size * LEADING + 8;
+    }, 0);
+    return 20 + 14 + rows + (table.keepWithNextLines ?? 0) * size * LEADING + 8;
+  }
+
+  /** How much a fresh page holds for running text: the proposal's pages start
+   *  under their logo, every other page at the top margin. */
+  private bodyHeight(cursor: Cursor): number {
+    const top = cursor.turn === undefined ? PAGE_HEIGHT - MARGIN_TOP : PAGE_HEIGHT - PROPOSAL_BODY_TOP;
+    return top - MARGIN_BOTTOM;
+  }
+
   /** Start a page when fewer than `height` points are left on this one. */
   private ensureRoom(pdf: PDFDocument, cursor: Cursor, height: number): void {
     if (cursor.y - height < MARGIN_BOTTOM) this.newPage(pdf, cursor);
@@ -974,7 +1043,17 @@ export class PdfLibRenderer implements DocumentRenderer {
     bold: Face,
     style: FlowStyle = LETTER_FLOW,
   ): void {
-    for (const piece of flow) {
+    for (const [i, piece] of flow.entries()) {
+      // A HEADING GOES WITH A TABLE KEPT TOGETHER (CA#60): "Summary of Fees"
+      // left at the foot of a page with its table on the next is the split
+      // the table is kept whole to avoid.
+      const next = flow[i + 1];
+      if (piece.kind === "heading" && next?.kind === "table" && next.table.keepTogether === true) {
+        const { size, before } = style.headings[piece.level];
+        const lines = wrapParagraph(piece.text, CONTENT_WIDTH, (t) => bold.widthOfTextAtSize(t, size));
+        const needed = before + lines.length * size * LEADING + 2 + this.flowTableHeight(next.table, body, style);
+        if (needed <= this.bodyHeight(cursor) && cursor.y - needed < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+      }
       body.begin(piece.anchor);
       if (piece.kind === "heading") this.drawFlowHeading(pdf, cursor, piece.level, piece.text, bold, style);
       else if (piece.kind === "paragraph") {
@@ -1121,6 +1200,13 @@ export class PdfLibRenderer implements DocumentRenderer {
 
     // The header and the first row together, or neither.
     this.ensureRoom(pdf, cursor, 20 + 14 + heightOf(wrappedRows[0] ?? []));
+    // THE WHOLE TABLE TOGETHER when it fits on one page (CA#60): a Summary of
+    // Fees split one row from the rest reads as two tables. Only a table that
+    // asks for it, so every document drawn before keeps its pages.
+    if (table.keepTogether === true) {
+      const whole = this.flowTableHeight(table, body, style);
+      if (whole <= this.bodyHeight(cursor) && cursor.y - whole < MARGIN_BOTTOM) this.newPage(pdf, cursor);
+    }
     body.quiet(header);
     for (const [r, cells] of wrappedRows.entries()) {
       const height = heightOf(cells);
@@ -1301,6 +1387,8 @@ function assertRenderable(doc: RenderableDocument, fonts: FontSet): ReadonlySet<
     proposal.cover.preparedBy.forEach((l, i) => { check(`"Prepared by" line ${String(i + 1)}`, l.text); });
     check("the running line", proposal.running);
     flow("the proposal", proposal.flow);
+    proposal.letterhead?.forEach((l, i) => { check(`the letterhead's line ${String(i + 1)}`, l); });
   }
+  check("the amount in words", doc.amountInWords ?? null);
   return seen;
 }

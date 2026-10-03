@@ -7,7 +7,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { PdfLibRenderer } from "../../src/infrastructure/render/pdf-renderer";
-import { inLakhs, wholeMoney } from "../../src/infrastructure/postgres/render-source";
 import type { Flow, RenderableDocument, RenderableImage } from "../../src/domain/render/model";
 
 const sha = (b: Uint8Array): string => createHash("sha256").update(b).digest("hex");
@@ -279,24 +278,4 @@ describe("where each piece was drawn", () => {
   });
 });
 
-describe("rupees in lakhs, on the proposal only", () => {
-  it("groups the Indian way, keeping the ISO code", () => {
-    expect(wholeMoney("1250000.0000", "INR")).toBe("INR 12,50,000");
-    expect(wholeMoney("125000000", "INR")).toBe("INR 12,50,00,000");
-    expect(wholeMoney("50000", "INR")).toBe("INR 50,000");
-    expect(wholeMoney("999", "INR")).toBe("INR 999");
-    expect(wholeMoney("1250000.50", "INR")).toBe("INR 12,50,000.50");
-  });
-
-  it("leaves every other currency grouped as before", () => {
-    expect(wholeMoney("1250000", "USD")).toBe("USD 1,250,000");
-    expect(wholeMoney("1250000", "AED")).toBe("AED 1,250,000");
-  });
-
-  it("regroups a western string exactly", () => {
-    expect(inLakhs("1,250,000")).toBe("12,50,000");
-    expect(inLakhs("12,345,678.90")).toBe("1,23,45,678.90");
-    expect(inLakhs("-1,000")).toBe("-1,000");
-    expect(inLakhs("100,000")).toBe("1,00,000");
-  });
-});
+// Money on documents, lakhs included, is tested in document-money.test.ts.

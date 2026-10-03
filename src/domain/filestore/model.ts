@@ -431,6 +431,49 @@ export function safeFilename(raw: string): string | null {
   return cleaned.slice(0, 255);
 }
 
+/** What a person calls each kind of document the product draws itself. */
+const RENDERED_KIND_WORDS: Partial<Record<DocumentKind, string>> = {
+  proposal: "Proposal",
+  engagement_letter: "Engagement letter",
+  invoice: "Invoice",
+  credit_note: "Credit note",
+};
+
+/** Longest file name a rendered PDF gets, extension included. */
+const RENDERED_FILENAME_MAX = 150;
+
+/**
+ * The name a PDF the product draws is SAVED under (CA#56, audit 2026-10-03):
+ * what it is, its number, "draft" when it is one, and whose it is, so a
+ * download folder of them can be read. "Invoice draft - Deccan Agro Foods
+ * Private Limited.pdf", "Invoice INV-2026-27-0001 - Deccan Agro Foods Private
+ * Limited.pdf". It was the reference alone, so a draft invoice (no number
+ * until it is issued, 0322) downloaded as "Draft-draft.pdf".
+ *
+ * A file name, not a path: the characters Windows refuses in one (`\ / : * ?
+ * " < > |`, and an invoice number has slashes) become dashes, and it is cut
+ * short before the extension.
+ */
+export function renderedFilename(input: {
+  readonly kind: DocumentKind;
+  /** The document's number, or null when it has none yet (a draft invoice). */
+  readonly reference: string | null;
+  readonly clientName: string;
+  readonly draft: boolean;
+}): string {
+  const clean = (s: string): string =>
+    // eslint-disable-next-line no-control-regex
+    s.replace(/[\u0000-\u001f\u007f]/g, "").replace(/[\\/:*?"<>|]+/g, "-").replace(/\s+/g, " ").trim();
+  const what = RENDERED_KIND_WORDS[input.kind] ?? "Document";
+  const head = [what, input.reference === null ? null : clean(input.reference), input.draft ? "draft" : null]
+    .filter((p): p is string => p !== null && p !== "")
+    .join(" ");
+  const client = clean(input.clientName);
+  const stem = client === "" ? head : `${head} - ${client}`;
+  const room = RENDERED_FILENAME_MAX - ".pdf".length;
+  return `${stem.length > room ? stem.slice(0, room).trimEnd() : stem}.pdf`;
+}
+
 /**
  * The `Content-Disposition` header value that names a stored file.
  *

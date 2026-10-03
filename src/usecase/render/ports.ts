@@ -54,8 +54,10 @@ export interface RenderSource {
      * A PREVIEW's day (2026-09-28). Given, and the record an unsent DRAFT, the
      * source describes it as Send would leave it on that day: the proposal's
      * date, and the letter's date and the firm's signature block, which Send
-     * stamps. Absent, or a record already out, and it describes the record as
-     * it stands, exactly as before.
+     * stamps; an invoice's date, which Issue stamps (B42, 2026-10-03). Absent,
+     * or a record already out, and it describes the record as it stands.
+     * Since B42 a draft COPY filed through `render` is described the same way,
+     * on the firm's day, so the copy on file is the preview on the screen.
      */
     readonly asIfSentOn?: string | undefined;
   }): Promise<DescribedDocument | null>;
@@ -101,6 +103,10 @@ export interface DescribedDocument {
   /** The day a draft was described as sent on (`asIfSentOn` applied), or
    *  absent when the record was described as it stands. */
   readonly datedAsIfSent?: string | undefined;
+  /** True for a draft invoice, which has no number until it is issued (0322):
+   *  its page prints "Draft" where the number goes, and neither a file nor a
+   *  title is named after that (CA#56). */
+  readonly unnumbered?: boolean | undefined;
 }
 
 /**
