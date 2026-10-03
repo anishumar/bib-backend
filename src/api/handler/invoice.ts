@@ -270,7 +270,10 @@ const raiseRoute = createRoute({
     201: { description: "Raised", content: { "application/json": { schema: InvoiceSchema } } },
     400: errorResponse("Bad currency, rate, or date"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
   },
 });
 
@@ -327,7 +330,10 @@ const addLineRoute = createRoute({
     204: { description: "Added" },
     400: errorResponse("Bad quantity, amount, discount or tax rate"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse(
       "The invoice has been issued (its lines are fixed), or the engagement's letter was signed " +
@@ -345,7 +351,10 @@ const removeLineRoute = createRoute({
   responses: {
     204: { description: "Struck off" },
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice or line at this firm"),
     409: errorResponse("The invoice has been issued — its lines are fixed"),
   },
@@ -586,7 +595,10 @@ const recordPaymentRoute = createRoute({
     201: { description: "Recorded", content: { "application/json": { schema: PaymentSchema } } },
     400: errorResponse("Bad amount, method or date"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is not issued — a draft owes nothing, a cancelled one is a refund"),
   },
@@ -626,7 +638,10 @@ const creditNoteRoute = createRoute({
     201: { description: "Issued", content: { "application/json": { schema: CreditNoteSchema } } },
     400: errorResponse("Bad amount, or not one of the credit reasons"),
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or the role does not permit it"),
+    403: errorResponse(
+      "No org selected, or the role does not permit it" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such invoice at this firm"),
     409: errorResponse("The invoice is not issued, or this would credit more than was billed"),
   },
@@ -799,10 +814,20 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
    *  allowed. */
   const seesFees = (principal: Principal | null): boolean =>
     principal !== null && deps.authz.seesFees(principal);
+  /**
+   * B27 (audit 2026-10-03): a route that WRITES an amount refuses a login that
+   * cannot see fees, before the use case is asked. Seeing a figure and setting
+   * one are one question; the billing desk already refused a changed price to
+   * the same login (PRICE_NOT_VISIBLE).
+   */
+  const requireFees = (principal: Principal | null, what: string): void => {
+    if (principal !== null) deps.authz.requireFees(principal, what);
+  };
 
   app.openapi(raiseRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "raise an invoice by hand");
     const { managerUserId, ...body } = c.req.valid("json");
     const raised = await deps.service.raise(
       {
@@ -863,6 +888,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(addLineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "change the lines on an invoice");
     await deps.service.addLine({
       tenantId: s.tenantId,
       invoiceId: c.req.valid("param").invoiceId,
@@ -874,6 +900,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(removeLineRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "change the lines on an invoice");
     const p = c.req.valid("param");
     await deps.service.removeLine(s.tenantId, p.invoiceId, p.lineId);
     return c.body(null, 204);
@@ -955,6 +982,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(recordPaymentRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "record a payment");
     const payment = await deps.service.recordPayment(
       { tenantId: s.tenantId, invoiceId: c.req.valid("param").invoiceId, ...c.req.valid("json") },
       s.actor,
@@ -973,6 +1001,7 @@ export function registerInvoiceRoutes(app: OpenAPIHono<AppEnv>, deps: InvoiceDep
   app.openapi(creditNoteRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
+    requireFees(c.get("principal"), "issue a credit note");
     const credit = await deps.service.issueCreditNote(
       {
         tenantId: s.tenantId,

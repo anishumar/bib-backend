@@ -47,7 +47,7 @@ import {
 } from "../../src/testfakes/filestore";
 import { systemClock } from "../../src/platform/clock";
 import type { RouterDeps } from "../../src/api/router";
-import { PORTAL_PATHS, PUBLIC_PATHS, compilePortalPaths, isPortalPath } from "../../src/api/guards";
+import { PORTAL_PATHS, PUBLIC_PATHS, PUBLIC_ROUTES, compilePortalPaths, isPortalPath, isPublicRoute } from "../../src/api/guards";
 import { decideRoute } from "../../src/api/permissions";
 import { capabilityFor } from "../../src/api/capabilities";
 import { TenancyService } from "../../src/usecase/tenancy/service";
@@ -512,6 +512,7 @@ function deps(): RouterDeps {
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
         events: new RecordingEventSink(),
       }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
     portalAccess: {
       service: new PortalAccessService({
@@ -582,8 +583,8 @@ function deps(): RouterDeps {
       }),
     },
     party: { service: new PartyService(makePartyFakes()) },
-    ledger: { service: new LedgerService(makeLedgerFakes()) },
-    config: { service: new ConfigService(makeConfigFakes()) },
+    ledger: { service: new LedgerService(makeLedgerFakes()), authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }) },
+    config: { service: new ConfigService(makeConfigFakes()), authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }) },
     lead: {
       service: new LeadService(makeLeadFakes()),
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
@@ -635,6 +636,7 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
+      authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
     },
     billing: {
       authz: new AuthzService({ permissions: withDefaultRoles(SESSION_TENANT) }),
@@ -804,11 +806,33 @@ describe("every route is accounted for", () => {
     }
   });
 
+  it("exempts a public path for its own method only (B49)", async () => {
+    // PUBLIC_PATHS was matched on the path alone, so any method to a public
+    // path skipped the session guard. Harmless the day it was found (nothing
+    // else is registered there), and a GET added beside a public POST would
+    // have been public without anybody deciding it.
+    for (const key of PUBLIC_ROUTES) {
+      const [method, path] = key.split(" ");
+      expect(registeredRoutes().some((r) => r.method.toUpperCase() === method && r.path === path), key).toBe(true);
+      expect(isPublicRoute(method ?? "", path ?? "")).toBe(true);
+      expect(isPublicRoute("GET", path ?? "")).toBe(false);
+      expect(isPublicRoute("DELETE", path ?? "")).toBe(false);
+    }
+    const asGet = await app().request("/api/v1/auth/login", { method: "GET" });
+    expect(asGet.status).toBe(401);
+    const asPost = await app().request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    expect(asPost.status).not.toBe(401);
+  });
+
   it("refuses every non-public route to an anonymous caller", async () => {
     const unguarded: string[] = [];
 
     for (const { method, path } of registeredRoutes()) {
-      if (PUBLIC_PATHS.has(path) || INTENTIONALLY_PUBLIC.has(path)) continue;
+      if (isPublicRoute(method, path) || INTENTIONALLY_PUBLIC.has(path)) continue;
       const init = bodylessOrJson(method);
       const res = await app().request(concrete(path), init);
       if (res.status !== 401) unguarded.push(`${method.toUpperCase()} ${path} -> ${String(res.status)}`);
@@ -1241,6 +1265,28 @@ describe("gate 3 — role", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { permissions: { key: string }[] };
     expect(body.permissions.map((p) => p.key)).toContain("tenant:admin");
+  });
+
+  it("issuing, cancelling and crediting take invoice:issue, not the whole of tenant:admin (CA#6)", () => {
+    // An accounts person issues invoices and credit notes; making them a full
+    // administrator to do it handed them the roster and the roles too.
+    const issuing = { kind: "permission", permission: "invoice:issue" };
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/issue")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/cancel")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/invoices/00000000-0000-4000-8000-000000000001/credit-notes")).toEqual(issuing);
+    // A refund is a credit note on the advance, and keeping it is the other answer to the same question.
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/credit-note")).toEqual(issuing);
+    expect(decideRoute("POST", "/api/v1/billing/refunds/00000000-0000-4000-8000-000000000001/keep")).toEqual(issuing);
+    // Raising a draft is still bookkeeping.
+    expect(decideRoute("POST", "/api/v1/invoices")).toEqual({ kind: "permission", permission: "party:write" });
+  });
+
+  it("names invoice:issue on the roles screen in plain words (CA#6)", async () => {
+    const res = await app(as("partner")).request("/api/v1/config/permissions");
+    const body = (await res.json()) as { permissions: { key: string; description: string }[] };
+    const issue = body.permissions.find((p) => p.key === "invoice:issue");
+    expect(issue?.description).toMatch(/^Issue and cancel invoices, and issue credit notes/);
+    expect(issue?.description).not.toMatch(/tenant|:/);
   });
 
   it("the preview takes what rendering takes, though it files nothing (2026-09-28)", async () => {

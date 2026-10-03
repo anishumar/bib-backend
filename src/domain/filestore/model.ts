@@ -220,6 +220,41 @@ export function hasCopyOfRecord(kind: DocumentKind): kind is CopyOfRecordKind {
 }
 
 /**
+ * THE KINDS THAT PRINT THE FIRM'S FEES (audit 2026-10-03, B01): a proposal, an
+ * engagement letter, an invoice and a credit note. Their bytes open, and they
+ * are drawn, only for a login that sees fees.
+ *
+ * The fee axis redacted the JSON of all four and handed the PDF to anybody: an
+ * associate read "Hidden" on an invoice and downloaded its issued copy. A
+ * redacted PDF was weighed and refused: a figure prints in a table cell, a
+ * total, a "Fees H3: INR 50,000 Yearly" lead, a fee group's sentence and a
+ * Summary of Fees, and a redaction that misses one cannot be taken back. So
+ * the document is refused whole, by its KIND.
+ *
+ * By kind and not by what the bytes say, which nothing here reads: a kind is
+ * what the firm filed it as. An invoice uploaded as `other` opens for anybody,
+ * as any `other` does; the four are what the product draws itself.
+ *
+ * Exhaustive, so a kind added later is decided here, not defaulted.
+ */
+export function showsFees(kind: DocumentKind): boolean {
+  switch (kind) {
+    case "proposal":
+    case "engagement_letter":
+    case "invoice":
+    case "credit_note":
+      return true;
+    case "identity_proof":
+    case "statutory_filing":
+    case "working_paper":
+    case "correspondence":
+    case "brand_asset":
+    case "other":
+      return false;
+  }
+}
+
+/**
  * How a rendered file hangs off the record it was drawn from: the `role` on
  * its `files.document_link` row. The column is free text (0037); these are
  * the values the renderer writes.

@@ -434,6 +434,7 @@ function deps(): RouterDeps {
         timeZones: { timeZoneFor: () => Promise.resolve("UTC") },
         events: new RecordingEventSink(),
       }),
+      authz: new AuthzService({ permissions }),
     },
     portalAccess: {
       service: new PortalAccessService({
@@ -512,8 +513,8 @@ function deps(): RouterDeps {
       }),
     },
     party: { service: new PartyService(makePartyFakes()) },
-    ledger: { service: new LedgerService(makeLedgerFakes()) },
-    config: { service: new ConfigService(makeConfigFakes()) },
+    ledger: { service: new LedgerService(makeLedgerFakes()), authz: new AuthzService({ permissions }) },
+    config: { service: new ConfigService(makeConfigFakes()), authz: new AuthzService({ permissions }) },
     lead: {
       service: new LeadService(makeLeadFakes()),
       authz: new AuthzService({ permissions }),
@@ -565,6 +566,7 @@ function deps(): RouterDeps {
         timeZones: new FakeFirmTimeZone(),
         clock: new FakeClock(),
       }),
+      authz: new AuthzService({ permissions }),
     },
     billing: {
       authz: new AuthzService({ permissions }),

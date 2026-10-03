@@ -9,6 +9,8 @@
 //
 // Both are 403 on the wire. Collapsing them into one error would hide a firm
 // whose staff were all locked out by a typo in a role name.
+import { PERMISSION_ACTS, isPermission } from "./model";
+
 export class AuthzError extends Error {
   constructor(
     readonly code: AuthzErrorCode,
@@ -19,14 +21,44 @@ export class AuthzError extends Error {
   }
 }
 
-export type AuthzErrorCode = "NOT_PERMITTED" | "UNKNOWN_ROLE";
+export type AuthzErrorCode = "NOT_PERMITTED" | "UNKNOWN_ROLE" | "FEES_NOT_VISIBLE";
+
+/**
+ * A money act asked for by a login that may not see money (audit 2026-10-03).
+ *
+ * The fee axis was a REDACTION only: a login without fees read "Hidden" and
+ * could still add an invoice line at any price, record a payment, or open the
+ * PDF that printed every figure. Seeing and writing the same figures are one
+ * question, so a login that may not see a fee may not set one either.
+ *
+ * `what` is the act in the caller's words ("record a payment"), so the sentence
+ * says what was refused. No code, no "visibility": the reader is a person at a
+ * CA firm, and the box on People reads "Can see fees".
+ */
+export class FeesNotVisible extends AuthzError {
+  constructor(what: string) {
+    super(
+      "FEES_NOT_VISIBLE",
+      `Your login is not set to see fees, so it cannot ${what}. Ask somebody who can see fees.`,
+    );
+  }
+}
 
 export class NotPermitted extends AuthzError {
+  /** The role and the permission, for a LOG: the sentence a person reads says
+   *  what they may not do, in words (F21, audit 2026-10-03). It named the role
+   *  key and the permission code, which nobody at a CA firm can act on. */
+  readonly role: string;
+  readonly permission: string;
+
   constructor(role: string, permission: string) {
     super(
       "NOT_PERMITTED",
-      `Role ${JSON.stringify(role)} does not carry ${JSON.stringify(permission)}`,
+      `Your role does not let you ${isPermission(permission) ? PERMISSION_ACTS[permission] : "do this"}. ` +
+        "Ask an administrator if you need to.",
     );
+    this.role = role;
+    this.permission = permission;
   }
 }
 

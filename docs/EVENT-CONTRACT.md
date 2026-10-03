@@ -416,6 +416,11 @@ session, so a caller can no longer name the firm whose audit trail they would li
 Both require `ledger:read`, which is a partner-and-manager permission — the firm's whole
 trail names every client it has.
 
+**Money is redacted on the way out (B08, audit 2026-10-03).** For a login that does not see
+fees, each verb's money fields (an amount paid, credited, billed or owed, an exchange rate,
+a discount percentage) are `null` in the payload it reads. The stored row is untouched. The
+fields are NAMED per verb in `src/domain/ledger/fees.ts`, never guessed from key names.
+
 There is **no POST**. Events are written by the service that causes them, naming its own
 actor. An endpoint that let a caller post an arbitrary event would make the audit trail
 unfalsifiable in precisely the way an audit trail must not be.
@@ -425,7 +430,10 @@ unfalsifiable in precisely the way an audit trail must not be.
 1. Add the entry to `EVENT_VERBS` in `src/domain/ledger/model.ts` — verb, object type,
    lane, one-line description.
 2. Add the row to §6 above.
-3. `npm run check`. The registry's own test asserts the naming convention.
+3. If its payload carries an amount, a rate or a discount, name those fields in
+   `MONEY_IN_PAYLOAD` (`src/domain/ledger/fees.ts`). `tests/ledger/fees.test.ts` reads every
+   `recordEvent` in the source and fails on a money-shaped key nobody decided.
+4. `npm run check`. The registry's own test asserts the naming convention.
 
 No migration. The vocabulary is code precisely so that it is reviewed like code — a lookup
 table would let a typo become a permanent new verb at runtime.

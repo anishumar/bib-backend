@@ -733,7 +733,12 @@ const AddLineRequest = z
      * schema could not express the difference until now, and quoting an unpriced
      * line at zero says something completely different to a client.
      */
-    unitAmount: AmountSchema.optional(),
+    unitAmount: AmountSchema.optional().openapi({
+      description:
+        "The fee. Omit it and `pricingNote` both to quote the catalogue's list price for this " +
+        "service in the proposal's currency (B09): how a login that cannot see fees adds a " +
+        "priced service. SERVICE_HAS_NO_LIST_PRICE (400) when there is none.",
+    }),
     discountPercent: AmountSchema.default("0"),
     /** Where the WORK is — the country the user picked. Not derived. */
     jurisdiction: JurisdictionSchema.optional(),

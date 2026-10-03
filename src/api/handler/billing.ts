@@ -519,7 +519,10 @@ const refundRoute = createRoute({
       },
     },
     401: errorResponse("Not signed in"),
-    403: errorResponse("No org selected, or not a firm administrator"),
+    403: errorResponse(
+      "No org selected, or not a firm administrator" +
+        ", or this login does not see fees (FEES_NOT_VISIBLE)",
+    ),
     404: errorResponse("No such advance at this firm"),
     409: errorResponse("Nothing left, the work goes on, or the firm kept it"),
   },
@@ -937,8 +940,11 @@ export function registerBillingRoutes(app: OpenAPIHono<AppEnv>, deps: BillingDep
   });
 
   app.openapi(refundRoute, async (c) => {
-    const s = scopeOf(c.get("principal"));
+    const principal = c.get("principal");
+    const s = scopeOf(principal);
     if (!s.ok) return c.json(s.deny, s.status);
+    // B27: a credit note writes money, like the invoice route's.
+    if (principal !== null) deps.authz.requireFees(principal, "give an advance back");
     const note = await deps.service.refund(
       { tenantId: s.tenantId, dueId: c.req.valid("param").dueId, asOf: c.req.valid("query").asOf },
       s.actor,

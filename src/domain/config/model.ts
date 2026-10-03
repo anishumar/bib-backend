@@ -1521,6 +1521,24 @@ function readServiceListPrice(raw: unknown): Money | null {
   return isCurrencyCode(normalised) ? { amount, currency: normalised } : null;
 }
 
+/**
+ * A config body as a login that cannot see fees reads it (B09, audit
+ * 2026-10-03): a SERVICE's `listPrice` is the one figure any kind carries, and
+ * it is nulled (not dropped, so "you may not see this" never looks like a
+ * field nobody wrote). Every other kind, and every other field, is as stored.
+ * A new object: the stored body is never touched.
+ */
+export function bodyWithoutFees(kind: ConfigKind, body: Readonly<Record<string, unknown>>): Record<string, unknown> {
+  if (kind !== "service" || !("listPrice" in body)) return { ...body };
+  return { ...body, listPrice: null };
+}
+
+/** Whether writing this kind writes a price (B09): a service carries its list
+ *  price, so a login that cannot see fees cannot define, draft or publish one. */
+export function kindCarriesFees(kind: ConfigKind): boolean {
+  return kind === "service";
+}
+
 // ── The dunning ladder (T3.5) ──────────────────────────────────────────────
 
 /**

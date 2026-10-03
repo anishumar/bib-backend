@@ -19,8 +19,16 @@ import type { OpenAPIHono } from "@hono/zod-openapi";
 import type { AppEnv } from "../guards";
 import { z, errorResponse } from "../openapi";
 import { scopeOf } from "../scope";
-import type { Party } from "../../domain/party/model";
+import type {
+  LegalEntity,
+  Organization,
+  Party,
+  PartyIdentifier,
+  PartyRelationship,
+  Person,
+} from "../../domain/party/model";
 import type { PartyService } from "../../usecase/party/service";
+import type { RelationshipRecord, RelationshipType } from "../../usecase/party/ports";
 
 export interface PartyDeps {
   readonly service: PartyService;
@@ -598,6 +606,88 @@ const partyProfileRoute = createRoute({
   },
 });
 
+// ── Mapping ─────────────────────────────────────────────────────────────────
+//
+// FIELD BY FIELD (B48, audit 2026-10-03). These answers forwarded the domain
+// object, or spread it, and zod-openapi documents a response without
+// validating it: a field added to the aggregate would reach the browser
+// undocumented, and the generated client would never learn it existed.
+
+function organizationWire(o: Organization): z.infer<typeof OrganizationSchema> {
+  return {
+    partyId: o.partyId,
+    tenantId: o.tenantId,
+    legalName: o.legalName,
+    tradeName: o.tradeName,
+    industry: o.industry,
+    website: o.website,
+    isFirmSelf: o.isFirmSelf,
+  };
+}
+
+function personWire(p: Person): z.infer<typeof PersonSchema> {
+  return {
+    partyId: p.partyId,
+    tenantId: p.tenantId,
+    fullName: p.fullName,
+    nationality: p.nationality,
+    dateOfBirth: p.dateOfBirth,
+  };
+}
+
+function legalEntityWire(e: LegalEntity): z.infer<typeof LegalEntitySchema> {
+  return {
+    partyId: e.partyId,
+    tenantId: e.tenantId,
+    jurisdiction: e.jurisdiction,
+    entityType: e.entityType,
+    incorporatedOn: e.incorporatedOn,
+    financialYearEnd: e.financialYearEnd,
+    registeredAddress: e.registeredAddress === null ? null : { ...e.registeredAddress },
+    status: e.status,
+  };
+}
+
+function identifierWire(i: PartyIdentifier): z.infer<typeof IdentifierSchema> {
+  return {
+    id: i.id,
+    tenantId: i.tenantId,
+    partyId: i.partyId,
+    type: i.type,
+    value: i.value,
+    jurisdiction: i.jurisdiction,
+    isPrimary: i.isPrimary,
+    validFrom: i.validFrom,
+    validTo: i.validTo,
+    voidedAt: i.voidedAt,
+  };
+}
+
+function relationshipWire(r: PartyRelationship): z.infer<typeof RelationshipSchema> {
+  return {
+    id: r.id,
+    tenantId: r.tenantId,
+    fromPartyId: r.fromPartyId,
+    toPartyId: r.toPartyId,
+    type: r.type,
+    validFrom: r.validFrom,
+    validTo: r.validTo,
+    attributes: { ...r.attributes },
+  };
+}
+
+function relationshipRecordWire(r: RelationshipRecord): z.infer<typeof RelationshipRecordSchema> {
+  return {
+    relationship: relationshipWire(r.relationship),
+    counterparty: { id: r.counterparty.id, kind: r.counterparty.kind, displayName: r.counterparty.displayName },
+    direction: r.direction,
+  };
+}
+
+function relationshipTypeWire(t: RelationshipType): z.infer<typeof RelationshipTypeSchema> {
+  return { code: t.code, label: t.label, inverseLabel: t.inverseLabel, category: t.category };
+}
+
 // ── Registration ────────────────────────────────────────────────────────────
 
 export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): void {
@@ -606,7 +696,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
     const org = await deps.service.createOrganization({ tenantId: s.tenantId, ...body }, s.actor);
-    return c.json(org, 201);
+    return c.json(organizationWire(org), 201);
   });
 
   app.openapi(createPersonRoute, async (c) => {
@@ -614,7 +704,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     if (!s.ok) return c.json(s.deny, s.status);
     const body = c.req.valid("json");
     const person = await deps.service.createPerson({ tenantId: s.tenantId, ...body }, s.actor);
-    return c.json(person, 201);
+    return c.json(personWire(person), 201);
   });
 
   app.openapi(registerLegalEntityRoute, async (c) => {
@@ -626,7 +716,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, organizationPartyId: partyId, ...body },
       s.actor,
     );
-    return c.json(entity, 201);
+    return c.json(legalEntityWire(entity), 201);
   });
 
   app.openapi(updatePartyRoute, async (c) => {
@@ -644,7 +734,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     const { partyId } = c.req.valid("param");
     const body = c.req.valid("json");
     const entity = await deps.service.correctLegalEntity({ tenantId: s.tenantId, partyId, ...body }, s.actor);
-    return c.json(entity, 200);
+    return c.json(legalEntityWire(entity), 200);
   });
 
   app.openapi(endIdentifierRoute, async (c) => {
@@ -656,7 +746,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, partyId, identifierId, validTo },
       s.actor,
     );
-    return c.json(identifier, 200);
+    return c.json(identifierWire(identifier), 200);
   });
 
   app.openapi(voidIdentifierRoute, async (c) => {
@@ -667,7 +757,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, partyId, identifierId },
       s.actor,
     );
-    return c.json(identifier, 200);
+    return c.json(identifierWire(identifier), 200);
   });
 
   app.openapi(addIdentifierRoute, async (c) => {
@@ -679,14 +769,14 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, partyId, ...body },
       s.actor,
     );
-    return c.json(identifier, 201);
+    return c.json(identifierWire(identifier), 201);
   });
 
   app.openapi(relationshipTypesRoute, async (c) => {
     const s = scopeOf(c.get("principal"));
     if (!s.ok) return c.json(s.deny, s.status);
     const types = await deps.service.relationshipTypes();
-    return c.json({ types: types.map((t) => ({ ...t })) }, 200);
+    return c.json({ types: types.map(relationshipTypeWire) }, 200);
   });
 
   app.openapi(addRelationshipRoute, async (c) => {
@@ -697,7 +787,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, ...body },
       s.actor,
     );
-    return c.json(relationship, 201);
+    return c.json(relationshipWire(relationship), 201);
   });
 
   app.openapi(endRelationshipRoute, async (c) => {
@@ -709,7 +799,7 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
       { tenantId: s.tenantId, relationshipId, validTo },
       s.actor,
     );
-    return c.json(relationship, 200);
+    return c.json(relationshipWire(relationship), 200);
   });
 
   app.openapi(archivePartyRoute, async (c) => {
@@ -747,15 +837,11 @@ export function registerPartyRoutes(app: OpenAPIHono<AppEnv>, deps: PartyDeps): 
     return c.json(
       {
         party: partyWire(profile.party),
-        organization: profile.organization === null ? null : { ...profile.organization },
-        person: profile.person === null ? null : { ...profile.person },
-        legalEntities: profile.legalEntities.map((e) => ({ ...e })),
-        identifiers: profile.identifiers.map((i) => ({ ...i })),
-        relationships: profile.relationships.map((r) => ({
-          relationship: { ...r.relationship },
-          counterparty: { ...r.counterparty },
-          direction: r.direction,
-        })),
+        organization: profile.organization === null ? null : organizationWire(profile.organization),
+        person: profile.person === null ? null : personWire(profile.person),
+        legalEntities: profile.legalEntities.map(legalEntityWire),
+        identifiers: profile.identifiers.map(identifierWire),
+        relationships: profile.relationships.map(relationshipRecordWire),
       },
       200,
     );

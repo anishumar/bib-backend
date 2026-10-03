@@ -14,19 +14,27 @@ export interface Pools {
   /** RLS-enforced, NOBYPASSRLS. Every business query. Reached only via the
    *  resolver in tenant.ts — never used raw. */
   readonly app: postgres.Sql;
-  /** Migrations, role management, boot checks. Bypasses RLS. Never a request path. */
-  readonly owner: postgres.Sql;
   close(): Promise<void>;
 }
 
+/**
+ * The API's and the worker's ONE pool: `bib_app`.
+ *
+ * There was a second, the OWNER pool (`BIB_DATABASE_URL`), and nothing ever
+ * queried it (B37, audit 2026-10-03). It is the RLS-bypassing credential:
+ * `bib_owner` owns every table and no table forces its row policies. A pool
+ * nothing uses is still that credential loaded into the request process,
+ * waiting for the first person to reach for it. The migrator, the one thing
+ * that needs the owner, opens its own connection (`cmd/migrate.ts`); the boot
+ * check asks its questions as `bib_app`, the role whose powers it checks.
+ * `tests/architecture/owner-pool.test.ts` keeps it that way.
+ */
 export function createPools(cfg: DbConfig): Pools {
   const app = postgres(cfg.appUrl, { max: cfg.appPoolSize });
-  const owner = postgres(cfg.ownerUrl, { max: cfg.ownerPoolSize });
   return {
     app,
-    owner,
     close: async () => {
-      await Promise.all([app.end({ timeout: 5 }), owner.end({ timeout: 5 })]);
+      await app.end({ timeout: 5 });
     },
   };
 }

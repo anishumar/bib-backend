@@ -93,6 +93,7 @@ import {
   EnvelopeAlreadySigned,
   UnpricedLineHasDiscount,
   UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   AddresseeNotAPerson,
   AddresseeNotLinked,
   EntityOutsideClient,
@@ -1319,20 +1320,6 @@ export class EngagementService {
     if (feeGroupId !== null) {
       await this.liveFeeGroupOrThrow(input.tenantId, letter.id, feeGroupId);
     }
-    const { unitAmount, pricingNote } = this.pricingOrThrow({
-      grouped: feeGroupId !== null,
-      unitAmount: input.unitAmount,
-      discountPercent: input.discountPercent,
-      pricingNote: input.pricingNote,
-    });
-    if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
-      throw new InvalidDate("effective date", input.effectiveFrom);
-    }
-
-    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
-    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
-    const oopEstimate = this.outOfPocket(input.oopEstimate);
-
     const pinned = await this.deps.library.readPinnedVersion(
       input.tenantId,
       input.serviceVersionId,
@@ -1347,6 +1334,32 @@ export class EngagementService {
         "it is still a draft and was never in force, so it cannot be sold",
       );
     }
+
+    // NEITHER A FEE NOR A REASON, outside a section: quoted at the pinned
+    // version's list price in the letter's currency (B09, audit 2026-10-03), as
+    // ProposalService.addLine does and for its reason: a login that cannot see
+    // fees reads every list price as null.
+    let stated = input.unitAmount;
+    if (feeGroupId === null && stated === undefined && blankToNull(input.pricingNote) === null) {
+      const service = readServiceBody(pinned.body);
+      if (service.listPrice === null || service.listPrice.currency !== letter.currency) {
+        throw new ServiceHasNoListPrice(service.name === "" ? input.description : service.name, letter.currency);
+      }
+      stated = service.listPrice.amount;
+    }
+    const { unitAmount, pricingNote } = this.pricingOrThrow({
+      grouped: feeGroupId !== null,
+      unitAmount: stated,
+      discountPercent: input.discountPercent,
+      pricingNote: input.pricingNote,
+    });
+    if (input.effectiveFrom !== undefined && !isDay(input.effectiveFrom)) {
+      throw new InvalidDate("effective date", input.effectiveFrom);
+    }
+
+    const jurisdiction = this.lineJurisdiction(input.jurisdiction);
+    const billingFrequency = this.statedBillingFrequency(input.billingFrequency);
+    const oopEstimate = this.outOfPocket(input.oopEstimate);
 
     const resolvedFrequency = billingFrequency ?? readServiceBody(pinned.body).recurrence;
     return this.deps.letters.addLine({

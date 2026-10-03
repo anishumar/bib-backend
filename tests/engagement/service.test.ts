@@ -37,7 +37,7 @@ import {
   InvalidLetterBillingTiming,
   InvalidOutOfPocketEstimate,
   UnpricedLineHasDiscount,
-  UnpricedLineNeedsReason,
+  ServiceHasNoListPrice,
   LetterPartyArchived,
   LetterClientIsOwnCompany,
   LetterNotCallersToday,
@@ -424,10 +424,40 @@ describe("a line with no price, and the wording that goes with it", () => {
       quantity: "1",
       discountPercent: "0",
     };
-    await expect(s.service.addLine(line)).rejects.toBeInstanceOf(UnpricedLineNeedsReason);
+    // This service has no list price, so there is nothing to quote it at.
+    const err = await s.service.addLine(line).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ServiceHasNoListPrice);
+    expect((err as Error).message).toBe(
+      "GST monthly filing has no list price in INR in the catalogue. Enter the fee, or say why there is no fixed fee.",
+    );
     await expect(
       s.service.addLine({ ...line, pricingNote: "As mutually agreed", discountPercent: "10" }),
     ).rejects.toBeInstanceOf(UnpricedLineHasDiscount);
+  });
+
+  it("quotes a line with neither a fee nor a reason at the catalogue's list price (B09)", async () => {
+    // A login that cannot see fees reads every list price as null, so the API
+    // fills the fee in from the pinned version, as the builder used to.
+    const s = setup();
+    const PRICED = "00000000-0000-0000-0000-0000000000d9";
+    s.library.publishService(PRICED, "bookkeeping", {
+      name: "Bookkeeping",
+      billingBasis: "fixed",
+      listPrice: { amount: "25000.00", currency: "INR" },
+    });
+    const id = await draft(s);
+    const added = await s.service.addLine({
+      tenantId: TENANT,
+      letterId: id,
+      entityPartyId: ENTITY_A,
+      serviceVersionId: PRICED,
+      description: "Bookkeeping",
+      quantity: "12",
+      discountPercent: "0",
+    });
+    expect(added.unitAmount).toBe("25000.00");
+    // Priced, so it carries no reason.
+    expect(added.pricingNote).toBeNull();
   });
 
   it("carries this client's OWN wording, and says which blocks are theirs", async () => {

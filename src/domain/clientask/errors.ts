@@ -29,14 +29,17 @@ export type ClientAskErrorCode =
   | "ASK_ANSWER_EMPTY";
 
 export class AskNotFound extends ClientAskError {
+  readonly askId: string;
+
   constructor(askId: string) {
     super(
       "ASK_NOT_FOUND",
-      `No ask ${JSON.stringify(askId)} you can reach. On the client portal this is also the ` +
-        `answer for an ask belonging to a company you were not granted — the row is filtered ` +
-        `in the database (gate 4), so there is nothing here to tell the two apart, and that ` +
-        `is the point: a 403 would confirm it exists.`,
+      // One sentence for "none" and "another company's": gate 4 filters the row
+      // in the database, and a different answer would confirm it exists. In
+      // words (F21, audit 2026-10-03); the id is on the log.
+      "This request could not be found, or you do not have access to it.",
     );
+    this.askId = askId;
   }
 }
 
