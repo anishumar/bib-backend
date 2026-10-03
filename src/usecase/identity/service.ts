@@ -553,7 +553,7 @@ export class IdentityService {
    * member of the firm is inviting a person they already named, so there is no
    * account to confirm the existence of and nothing to be quiet about.
    */
-  async invitePortalContact(userId: string, firmName: string | null): Promise<string> {
+  async invitePortalContact(userId: string, firmName: string | null, timeZone?: string | null): Promise<string> {
     const user = await this.deps.users.findById(userId);
     // The caller has just created or found this account, so a miss here is a
     // race or a deactivated login rather than a typo — and the invite must not
@@ -605,6 +605,7 @@ export class IdentityService {
         `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
         expiresAt,
         firmName,
+        timeZone,
       );
       return expiresAt;
     }
@@ -613,6 +614,7 @@ export class IdentityService {
       `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
       expiresAt,
       firmName,
+      timeZone,
     );
     return expiresAt;
   }
@@ -657,7 +659,11 @@ export class IdentityService {
    * same reason: a client has no other door and a member of the firm is
    * watching a screen that must not say the letter went when it did not.
    */
-  async resendPortalInvite(userId: string, firmName: string | null): Promise<ResentInvitation> {
+  async resendPortalInvite(
+    userId: string,
+    firmName: string | null,
+    timeZone?: string | null,
+  ): Promise<ResentInvitation> {
     const budget = await this.deps.attempts.check(
       `portal-invite:${userId}`,
       PORTAL_INVITE_RESENDS_PER_WINDOW,
@@ -707,6 +713,7 @@ export class IdentityService {
       `${this.deps.magicLinkBaseUrl}/portal/accept-invite?token=${encodeURIComponent(token)}`,
       expiresAt,
       firmName,
+      timeZone,
     );
     return { expiresAt, supersededLinks };
   }
@@ -746,7 +753,7 @@ export class IdentityService {
    * The adapter has already shouted about the underlying failure; this decides
    * only what the screen says.
    */
-  async welcomeStaff(userId: string, firmName: string | null): Promise<StaffWelcome> {
+  async welcomeStaff(userId: string, firmName: string | null, timeZone?: string | null): Promise<StaffWelcome> {
     const user = await this.deps.users.findById(userId);
     // The caller has just created or found this account, so a miss is a race or
     // a deactivated login rather than a typo — and either way there is nobody to
@@ -769,6 +776,7 @@ export class IdentityService {
         `${this.deps.magicLinkBaseUrl}/auth/magic-link?token=${encodeURIComponent(token)}`,
         expiresAt,
         firmName,
+        timeZone,
       );
     } catch {
       // Deliberately empty, and REPORTED rather than hidden — see above. The

@@ -827,6 +827,8 @@ export function wire(cfg: Config, log: Logger): Wired {
     identity,
     memberships: tenancy,
     firms: tenancy,
+    // CA#50: the welcome letter's expiry on the firm's clock.
+    timeZones: new PostgresFirmTimeZone(pools.app),
   });
 
   const tenancyDeps: TenancyDeps = { service: tenancy, staffInvite };
@@ -918,6 +920,8 @@ export function wire(cfg: Config, log: Logger): Wired {
       memberships: tenancy,
       access: portalAccess,
       firms: tenancy,
+      // CA#50: the invitation's expiry on the firm's clock.
+      timeZones: new PostgresFirmTimeZone(pools.app),
       // `invite` records nothing itself — its three writes each emit their own
       // event. `resend` writes no row at all, so this is the only record that a
       // credential was mailed outside the firm and who said so.

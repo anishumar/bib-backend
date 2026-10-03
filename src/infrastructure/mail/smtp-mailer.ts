@@ -114,6 +114,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void> {
     // Null is a real state — `PortalInviteService` passes it when the tenant row
     // does not resolve, and its comment is explicit that the letter should go
@@ -126,7 +127,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       firm === null
         ? `You have been invited to a client portal`
         : `${firm} has invited you to their client portal`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
 
     const text = [
       `${who} uses ${PRODUCT} to work with its clients, and has invited you to`,
@@ -193,12 +194,13 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work at";
     const subject =
       firm === null ? `You have been given access to ${PRODUCT}` : `${firm} has added you to ${PRODUCT}`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
 
     const text = [
       `${who} runs its practice on ${PRODUCT}, and somebody there has given you`,
@@ -271,6 +273,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     url: string,
     expiresAt: string,
     firmName: string | null,
+    timeZone?: string | null,
   ): Promise<void> {
     const firm = headerSafe(firmName);
     const who = firm ?? "The firm you work with";
@@ -278,7 +281,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       firm === null
         ? `You have been given access to a client portal`
         : `${firm} has given you access to their client portal`;
-    const when = readableInstant(expiresAt);
+    const when = readableInstant(expiresAt, timeZone);
 
     const text = [
       `${who} uses ${PRODUCT} to work with its clients, and has given you access`,
@@ -492,7 +495,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
     const verb = accepted ? "accepted" : "declined";
     const client = headerSafe(notice.clientName) ?? "The client";
     const ref = headerSafe(notice.ref) ?? notice.ref;
-    const when = readableInstant(notice.decidedAt);
+    const when = readableInstant(notice.decidedAt, notice.timeZone);
     const headline =
       `${notice.signerName} ${verb} proposal ${notice.ref} (${notice.title}) for ` +
       `${notice.clientName}, on the proposal's link, at ${when}.`;
@@ -625,17 +628,42 @@ function digestMoney(amount: string, currency: string): string {
 }
 
 /**
- * An ISO instant as words, in UTC, WITH the zone said out loud.
+ * An ISO instant as words, WITH the zone said out loud.
  *
  * The reader's own zone would be better and this server does not know it: an
  * email has no browser to ask. So the choice is between a zone nobody chose and
  * a zone that is named, and naming it is the same rule `instant.ts` applies to
  * every date this product renders — "2 September 2026, 14:05 UTC" is
  * unambiguous everywhere, and a bare "14:05" is wrong for most of the planet.
+ *
+ * A letter that comes FROM A FIRM is written on the firm's clock (audit
+ * 2026-10-03, CA#50): an Indian firm's new colleague read "06:53 UTC" for a
+ * link that stopped at 12:23 their time. With `timeZone` the time is that
+ * zone's and the zone is named in words ("19:35 India Standard Time"); without
+ * it, or for UTC, it is UTC as before. The sign-in and reset letters belong to
+ * a global account with no one firm, and pass none.
  */
-function readableInstant(iso: string): string {
+function readableInstant(iso: string, timeZone?: string | null): string {
   const at = new Date(iso);
   if (Number.isNaN(at.getTime())) return iso;
+  if (timeZone !== undefined && timeZone !== null && timeZone !== "UTC" && timeZone !== "Etc/UTC") {
+    try {
+      const parts = new Intl.DateTimeFormat("en-GB", {
+        timeZone,
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+        timeZoneName: "long",
+      }).formatToParts(at);
+      const read = (type: string): string => parts.find((p) => p.type === type)?.value ?? "";
+      return `${read("day")} ${read("month")} ${read("year")}, ${read("hour")}:${read("minute")} ${read("timeZoneName")}`;
+    } catch {
+      // A zone this runtime does not know: UTC, named, rather than no letter.
+    }
+  }
   const day = at.toLocaleDateString("en-GB", {
     timeZone: "UTC",
     day: "numeric",

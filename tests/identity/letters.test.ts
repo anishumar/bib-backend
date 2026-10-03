@@ -329,3 +329,34 @@ describe("the HTML is built for mail clients, not for a browser", () => {
     expect(letter.html).toMatch(/copy this into your browser/);
   });
 });
+
+describe("a letter from a firm says the time on the firm's clock (audit 2026-10-03, CA#50)", () => {
+  // An Indian firm's new colleague read "works until 6 Oct 06:53 UTC". The
+  // letters that come FROM a firm now say the time where the firm is, and
+  // name that zone in words; the two a person asked for themselves (sign-in,
+  // password reset) belong to a global account with no one firm, and stay UTC.
+  const IN_INDIA = "2 September 2026, 19:35 India Standard Time";
+
+  it("puts the portal invite's expiry on the firm's clock", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendPortalInvite("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", "Asia/Kolkata");
+    expect(only(t).text).toContain(IN_INDIA);
+    expect(only(t).html).toContain(IN_INDIA);
+    expect(only(t).text).not.toContain("UTC");
+  });
+
+  it("and the staff welcome's, and the portal welcome's", () => {
+    const staff = new Captured();
+    void new SmtpMailer(staff).sendStaffWelcome("priya@10xglobal.in", URL, EXPIRES, "10x Global", "Asia/Kolkata");
+    expect(only(staff).text).toContain(IN_INDIA);
+    const portal = new Captured();
+    void new SmtpMailer(portal).sendPortalWelcome("meera@cobaltfoods.in", URL, EXPIRES, "10x Global", "Asia/Kolkata");
+    expect(only(portal).text).toContain(IN_INDIA);
+  });
+
+  it("says UTC, as before, when the firm's zone is not known", () => {
+    const t = new Captured();
+    void new SmtpMailer(t).sendStaffWelcome("priya@10xglobal.in", URL, EXPIRES, "10x Global");
+    expect(only(t).text).toContain("2 September 2026, 14:05 UTC");
+  });
+});

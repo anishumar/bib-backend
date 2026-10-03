@@ -490,6 +490,8 @@ export interface DecisionNotice {
   readonly decidedAt: string;
   readonly declinedReason: string | null;
   readonly proposalUrl: string;
+  /** The firm's zone, so "at 14:05" is the firm's clock (CA#50). */
+  readonly timeZone?: string | null;
 }
 
 /**

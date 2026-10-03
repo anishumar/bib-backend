@@ -1926,6 +1926,7 @@ export class ProposalService {
         decidedAt: decided.decidedAt ?? this.deps.clock.now().toISOString(),
         declinedReason,
         proposalUrl: this.deps.links.staffUrl(decided.id),
+        timeZone: await this.deps.timeZones.timeZoneFor(decided.tenantId),
       })
       .catch(() => undefined);
   }
