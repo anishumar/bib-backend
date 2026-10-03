@@ -64,7 +64,6 @@ import {
   engagementState,
   isDay,
   resolveEffectiveFrom,
-  utcDay,
 } from "../../src/domain/engagement/model";
 import { SEEDED_FIRM_ENTITY } from "../../src/testfakes/document";
 
@@ -1282,10 +1281,8 @@ describe("the effective-date rules themselves", () => {
     expect(isDay("2026-10-1")).toBe(false);
     expect(isDay("01/10/2026")).toBe(false);
     expect(isDay("2026-10-01T00:00:00Z")).toBe(false); // an instant is not a day
-    // UTC, not the machine's zone: two pods in two regions must not disagree
-    // about which day a contract started.
-    expect(utcDay(new Date("2026-10-01T23:30:00Z"))).toBe("2026-10-01");
-    expect(utcDay(new Date("2026-10-01T00:30:00Z"))).toBe("2026-10-01");
+    // A day that does not exist (B43): it used to pass, and reach Postgres.
+    expect(isDay("2026-02-31")).toBe(false);
   });
 });
 

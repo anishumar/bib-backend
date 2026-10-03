@@ -2051,6 +2051,15 @@ export class ObligationService {
   }
 
   /**
+   * The day the decision queue counts days late from: the caller's when it
+   * sent one, else the FIRM's, from the injected clock (audit 2026-10-03,
+   * B44: the route used `new Date()`, the server's UTC day).
+   */
+  async decisionDay(tenantId: string, asOf?: IsoDate): Promise<IsoDate> {
+    return asOf ?? (await this.firmDay(tenantId));
+  }
+
+  /**
    * Record what a partner decided about a deadline already missed.
    *
    * ── THE REASON IS THE HALF THIS EXISTS FOR ────────────────────────────────

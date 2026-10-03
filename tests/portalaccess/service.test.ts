@@ -263,6 +263,13 @@ describe("ending a grant", () => {
     expect((await w.service.scopeFor(FIRM, PORTAL_LOGIN)).clientPartyIds).toEqual([]);
   });
 
+  it("says which day a scope was read on: the firm's, from the injected clock (B44)", async () => {
+    // The route echoed `new Date()`'s UTC day, which could disagree with the
+    // firm's day the grants were actually read on.
+    expect((await w.service.scopeFor(FIRM, PORTAL_LOGIN)).onDate).toBe("2026-09-01");
+    expect((await w.service.scopeFor(FIRM, PORTAL_LOGIN, "2026-08-15")).onDate).toBe("2026-08-15");
+  });
+
   it("takes back a grant made the same morning — an EMPTY range, in force on no day", async () => {
     // Granted at 10:00, withdrawn at 10:01. Unrepresentable before 0061: the
     // firm's only options were to leave it standing until tomorrow or to have
@@ -338,7 +345,7 @@ describe("the scope one session gets", () => {
     // granted anything. Empty means NOTHING, and `withPortal` must still set the
     // scope rather than skip it — the one silent mistake available here.
     const scope = await w.service.scopeFor(FIRM, PORTAL_LOGIN);
-    expect(scope).toEqual({ membershipId: PORTAL_LOGIN, clientPartyIds: [] });
+    expect(scope).toEqual({ membershipId: PORTAL_LOGIN, clientPartyIds: [], onDate: "2026-09-01" });
   });
 
   it("holds exactly the clients in force on the day asked about", async () => {

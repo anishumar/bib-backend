@@ -503,3 +503,13 @@ describe("which day it is, for the firm (T6.14)", () => {
     expect(greenwich.stateOf(notYet)).toBe("pending");
   });
 });
+
+describe("the decision queue's today (audit 2026-10-03, B44)", () => {
+  // The route counted days late from `new Date()`, the server's UTC day and
+  // not the injected clock, when the browser sent no day. It is the firm's.
+  it("is the firm's day when the caller sends none, and the caller's when it does", async () => {
+    const h = harness({ now: "2026-10-02T20:00:00Z", zone: "Asia/Kolkata" });
+    expect(await h.service.decisionDay(TENANT)).toBe("2026-10-03");
+    expect(await h.service.decisionDay(TENANT, "2026-10-02")).toBe("2026-10-02");
+  });
+});
