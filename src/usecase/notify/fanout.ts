@@ -120,7 +120,7 @@ export class NotificationFanout {
   async runForTenant(tenantId: string): Promise<FanoutReport> {
     const cursor = await this.deps.outbox.cursor(tenantId);
     if (cursor === null) {
-      await this.deps.outbox.startCursor(tenantId);
+      await this.deps.outbox.startCursor(tenantId, OVERLAP_MS);
       return { tenantId, events: 0, created: 0, resolved: 0 };
     }
     const overlapFrom = new Date(new Date(cursor).getTime() - OVERLAP_MS).toISOString();

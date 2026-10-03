@@ -126,8 +126,14 @@ export interface NotificationOutbox {
   activeTenantIds(): Promise<readonly string[]>;
   /** How far through the firm's ledger the outbox has read; null before the first run. */
   cursor(tenantId: string): Promise<string | null>;
-  /** The first run: start from now, never replay a firm's history. */
-  startCursor(tenantId: string): Promise<void>;
+  /**
+   * The first run. The cursor starts `aheadMs` AFTER now, one overlap window
+   * ahead, so the window every run reads behind the cursor never reaches an
+   * event from before the start: a firm's history is not replayed into bells.
+   * Until the clock passes it, every new event sits inside that window, which
+   * is read whole on every run.
+   */
+  startCursor(tenantId: string, aheadMs: number): Promise<void>;
   /**
    * Events of these verbs, oldest first: EVERY one recorded in the overlap
    * window (`overlapFrom`, `cursor`], read again in case one committed late,

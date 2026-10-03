@@ -22,9 +22,8 @@ import type {
   ResolveCriteria,
   StaffMember,
 } from "../../usecase/notify/ports";
+import { fullInstant } from "./instant";
 
-const FULL_INSTANT = `'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'`;
-const full = (expr: string, alias: string): string => `to_char(${expr} AT TIME ZONE 'UTC', ${FULL_INSTANT}) AS ${alias}`;
 
 interface EventRow {
   id: string;
@@ -48,18 +47,18 @@ export class PostgresNotificationOutbox implements NotificationOutbox {
   async cursor(tenantId: string): Promise<string | null> {
     return withTenant(this.app, tenantId, async (db) => {
       const [row] = await db<{ at: string }[]>`
-        SELECT ${db.unsafe(full("recorded_through", "at"))}
+        SELECT ${db.unsafe(fullInstant("recorded_through", "at"))}
         FROM notify.fanout_cursor WHERE tenant_id = ${tenantId}
       `;
       return row?.at ?? null;
     });
   }
 
-  async startCursor(tenantId: string): Promise<void> {
+  async startCursor(tenantId: string, aheadMs: number): Promise<void> {
     await withTenant(this.app, tenantId, async (db) => {
       await db`
         INSERT INTO notify.fanout_cursor (tenant_id, recorded_through)
-        VALUES (${tenantId}, now())
+        VALUES (${tenantId}, now() + make_interval(secs => ${aheadMs / 1000}))
         ON CONFLICT (tenant_id) DO NOTHING
       `;
     });
@@ -74,7 +73,7 @@ export class PostgresNotificationOutbox implements NotificationOutbox {
   ): Promise<readonly OutboxEvent[]> {
     return withTenant(this.app, tenantId, async (db) => {
       const rows = await db<EventRow[]>`
-        SELECT id, verb, object_id, actor_user_id, payload, ${db.unsafe(full("recorded_at", "recorded_at"))}
+        SELECT id, verb, object_id, actor_user_id, payload, ${db.unsafe(fullInstant("recorded_at", "recorded_at"))}
         FROM (
           (SELECT e.id, e.verb, e.object_id, e.payload, e.recorded_at,
                   CASE WHEN e.actor_type = 'human' THEN e.actor_id END AS actor_user_id
