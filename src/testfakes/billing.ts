@@ -611,6 +611,12 @@ export class FakeAdvanceDigestStore implements AdvanceDigestStore {
     this.weeks.set(`${tenantId}|${weekOf}`, { sent: true, recipients, advances });
     return Promise.resolve();
   }
+
+  release(tenantId: string, weekOf: string): Promise<void> {
+    const key = `${tenantId}|${weekOf}`;
+    if (this.weeks.get(key)?.sent === false) this.weeks.delete(key);
+    return Promise.resolve();
+  }
 }
 
 export class FakeBillingMailer implements BillingMailer {

@@ -372,9 +372,11 @@ export class AdvanceDigest {
         const listed = await this.deps.advances.list(tenantId);
         const due = listed.advances.filter((a) => a.reminder.pending && a.reminder.escalated);
         let recipients = 0;
+        let attempted = 0;
         if (due.length > 0) {
           const [admins, firmName] = await Promise.all([this.deps.people.admins(tenantId), this.deps.store.firmName(tenantId)]);
           for (const admin of admins) {
+            attempted += 1;
             try {
               await this.deps.mailer.sendAdvanceDigest({
                 to: admin.email,
@@ -390,6 +392,21 @@ export class AdvanceDigest {
               // how many went, and the adapter logged why this one did not.
             }
           }
+        }
+        // EVERY SEND FAILED (audit 2026-10-03, B16): not sent, so not marked
+        // and not recorded as sent. The claim is given back and the next
+        // hourly pass, still on the firm's day, tries the week again.
+        if (attempted > 0 && recipients === 0) {
+          await this.deps.store.release(tenantId, weekOf);
+          reports.push({
+            tenantId,
+            weekOf,
+            sent: false,
+            advances: due.length,
+            recipients: 0,
+            failure: `all ${String(attempted)} sends failed; the summary will be tried again on the next pass`,
+          });
+          continue;
         }
         await this.deps.store.markSent(tenantId, weekOf, recipients, due.length);
         await this.deps.events.recordEvent({

@@ -269,6 +269,17 @@ export class PostgresAdvanceDigestStore implements AdvanceDigestStore {
     });
   }
 
+  /** The claim's stamp moved out of its lifetime, so `claim`'s own stale-claim
+   *  branch takes the week again on the next pass. Never on a week sent. */
+  async release(tenantId: string, weekOf: string): Promise<void> {
+    await withTenant(this.app, tenantId, async (db) => {
+      await db`
+        UPDATE crm.advance_digest SET claimed_at = '-infinity'
+         WHERE week_of = ${weekOf}::date AND sent_at IS NULL
+      `;
+    });
+  }
+
   async markSent(tenantId: string, weekOf: string, recipients: number, advances: number): Promise<void> {
     await withTenant(this.app, tenantId, async (db) => {
       await db`

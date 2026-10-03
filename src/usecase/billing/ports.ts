@@ -468,6 +468,10 @@ export interface AdvanceDigestStore {
    *  this day already, or another went out in the six days before it. */
   claim(tenantId: string, weekOf: string): Promise<boolean>;
   markSent(tenantId: string, weekOf: string, recipients: number, advances: number): Promise<void>;
+  /** Give up this week's claim without sending, so the next pass may claim it
+   *  again: every send failed (audit 2026-10-03, B16). A week already sent is
+   *  left alone. */
+  release(tenantId: string, weekOf: string): Promise<void>;
 }
 
 /** One advance on the weekly summary. */
