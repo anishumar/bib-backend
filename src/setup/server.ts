@@ -1352,7 +1352,7 @@ export function wire(cfg: Config, log: Logger): Wired {
         orchestrator: { service: orchestrator, grades: staffGrades, jobs: scheduler },
         scheduler: { service: scheduler },
         party: { service: party },
-        ledger: { service: ledger },
+        ledger: { service: ledger, authz },
         config: { service: config, authz },
         lead: { service: lead, authz },
         proposal: { service: proposal, authz },
