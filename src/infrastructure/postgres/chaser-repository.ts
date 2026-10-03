@@ -304,8 +304,11 @@ export class PostgresChaserTenants implements ChaserTenantDirectory {
   async activeTenantIds(): Promise<readonly string[]> {
     // Above RLS, and the only read in this module that is: a worker holds no
     // session, so the tenant list has to come from somewhere. Everything under
-    // it is `withTenant`.
-    const rows = await this.app<{ id: string }[]>`SELECT id FROM tenancy.tenant ORDER BY created_at`;
+    // it is `withTenant`. ACTIVE firms only, like every other sweep (audit
+    // 2026-10-03, B14): a suspended firm's clients were still being emailed.
+    const rows = await this.app<{ id: string }[]>`
+      SELECT id FROM tenancy.tenant WHERE status = 'active' ORDER BY created_at
+    `;
     return rows.map((r) => r.id);
   }
 }
