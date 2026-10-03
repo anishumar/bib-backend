@@ -300,24 +300,29 @@ export class FakeBillingDueDesk implements BillingDueDesk {
   readonly heldElsewhere = new Set<string>();
   /** Every claim and release, in order, so a test sees what was held. */
   readonly claims: { readonly op: "claim" | "release"; readonly ids: readonly string[] }[] = [];
-  private readonly held = new Set<string>();
+  /** Held bill to the token of the claim holding it. */
+  private readonly heldBy = new Map<string, string>();
+  private tokens = 0;
 
-  claim(_t: string, dueIds: readonly string[]): Promise<boolean> {
-    if (dueIds.some((id) => this.held.has(id) || this.heldElsewhere.has(id))) return Promise.resolve(false);
-    for (const id of dueIds) this.held.add(id);
+  claim(_t: string, dueIds: readonly string[]): Promise<string | null> {
+    if (dueIds.some((id) => this.heldBy.has(id) || this.heldElsewhere.has(id))) return Promise.resolve(null);
+    this.tokens += 1;
+    const token = `claim-${String(this.tokens)}`;
+    for (const id of dueIds) this.heldBy.set(id, token);
     this.claims.push({ op: "claim", ids: [...dueIds] });
-    return Promise.resolve(true);
+    return Promise.resolve(token);
   }
 
-  release(_t: string, dueIds: readonly string[]): Promise<void> {
-    for (const id of dueIds) this.held.delete(id);
+  /** As the adapter: only the bills this token still holds (B35). */
+  release(_t: string, dueIds: readonly string[], token: string): Promise<void> {
+    for (const id of dueIds) if (this.heldBy.get(id) === token) this.heldBy.delete(id);
     this.claims.push({ op: "release", ids: [...dueIds] });
     return Promise.resolve();
   }
 
   /** Held right now (a test asserts it is empty after an act). */
   get holding(): readonly string[] {
-    return [...this.held];
+    return [...this.heldBy.keys()];
   }
 
   invoiceUse(_t: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }> {

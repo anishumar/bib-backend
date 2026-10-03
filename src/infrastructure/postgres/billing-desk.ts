@@ -21,6 +21,7 @@ import type {
   BillingDueDesk,
   BillingDueRecord,
   BillingSchedules,
+  ClaimToken,
   DueFilters,
   DueStatus,
   PersonRef,
@@ -563,9 +564,9 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
     });
   }
 
-  async claim(tenantId: string, dueIds: readonly string[]): Promise<boolean> {
+  async claim(tenantId: string, dueIds: readonly string[]): Promise<ClaimToken | null> {
     const ids = [...new Set(dueIds)].sort();
-    if (ids.length === 0) return true;
+    if (ids.length === 0) return "nothing-claimed";
     return withTenant(this.app, tenantId, async (db) => {
       // Locked in id order, so two claims over overlapping bills cannot
       // deadlock; then all free or none claimed. An id that is no bill here is
@@ -577,16 +578,30 @@ export class PostgresBillingDueDesk implements BillingDueDesk {
          ORDER BY id
            FOR UPDATE
       `;
-      if (rows.some((r) => !r.free)) return false;
+      if (rows.some((r) => !r.free)) return null;
+      // THE CLAIM'S OWN INSTANT IS ITS TOKEN (B35): `now()` is this
+      // transaction's, held to the microsecond as text, and a later claim of
+      // the same bill can only come after this one lapsed, so it differs.
+      // An id that is no bill here still gets a token: the caller's read says
+      // "not found", not "busy".
+      const [stamp] = await db<{ at: string }[]>`SELECT now()::text AS at`;
       await db`UPDATE crm.billing_due SET claimed_at = now() WHERE id = ANY(${db.array(ids)}::uuid[])`;
-      return true;
+      if (!stamp) throw new Error("now() returned no row");
+      return stamp.at;
     });
   }
 
-  async release(tenantId: string, dueIds: readonly string[]): Promise<void> {
+  async release(tenantId: string, dueIds: readonly string[], token: ClaimToken): Promise<void> {
     if (dueIds.length === 0) return;
     await withTenant(this.app, tenantId, async (db) => {
-      await db`UPDATE crm.billing_due SET claimed_at = NULL WHERE id = ANY(${db.array([...dueIds])}::uuid[])`;
+      // Only this request's claim: a newer one on the same bills stays.
+      // Compared as TEXT: a parameter typed timestamptz goes through a JS Date
+      // in postgres.js and loses its microseconds, so it never matched.
+      await db`
+        UPDATE crm.billing_due SET claimed_at = NULL
+         WHERE id = ANY(${db.array([...dueIds])}::uuid[])
+           AND claimed_at::text = ${token}::text
+      `;
     });
   }
 

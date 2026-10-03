@@ -747,3 +747,26 @@ describe("a credit note on an advance (B06, B15, audit 2026-10-03)", () => {
     expect(rejected?.status === "rejected" ? rejected.reason : null).toMatchObject({ code: "CREDIT_EXCEEDS_UNUSED_ADVANCE" });
   });
 });
+
+describe("a claim is let go only by whoever holds it (B35, audit 2026-10-03)", () => {
+  it("does not clear a newer request's claim when an older, slow one finishes", async () => {
+    // A raise that ran past the two-minute claim lifetime cleared whatever
+    // claim was on its bills when it finished, including a newer request's.
+    const { booksId } = await advancedLetter("1000");
+    const oct = await periodDue(booksId, "10");
+    const slow = await deskAdapter.claim(tenantId, [oct]);
+    expect(slow).not.toBeNull();
+    // Two minutes pass: the slow claim has lapsed, and somebody else claims.
+    await owner`UPDATE crm.billing_due SET claimed_at = claimed_at - interval '3 minutes' WHERE id = ${oct}`;
+    const fresh = await deskAdapter.claim(tenantId, [oct]);
+    expect(fresh).not.toBeNull();
+
+    await deskAdapter.release(tenantId, [oct], slow ?? "");
+    const [row] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(row?.held).toBe(true);
+
+    await deskAdapter.release(tenantId, [oct], fresh ?? "");
+    const [after] = await owner<{ held: boolean }[]>`SELECT claimed_at IS NOT NULL AS held FROM crm.billing_due WHERE id = ${oct}`;
+    expect(after?.held).toBe(false);
+  });
+});

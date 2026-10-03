@@ -271,14 +271,15 @@ export class BillingDeskService {
     for (const id of ids) {
       if (!seen.some((d) => d.id === id)) throw new BillingDueNotFound(id);
     }
-    const claimed = [...ids, ...poolsOf(seen)];
-    if (!(await this.deps.desk.claim(input.tenantId, claimed))) {
-      throw new BillBusy("one of these bills, or the advance it is taken off,");
-    }
+    const first = [...ids, ...poolsOf(seen)];
+    const token = await this.deps.desk.claim(input.tenantId, first);
+    if (token === null) throw new BillBusy("one of these bills, or the advance it is taken off,");
+    // Every claim this raise makes, each let go with its own token (B35).
+    const claims: { ids: string[]; token: string }[] = [{ ids: first, token }];
     try {
-      return await this.raiseClaimed(input, ids, claimed, actor);
+      return await this.raiseClaimed(input, ids, claims, actor);
     } finally {
-      await this.deps.desk.release(input.tenantId, claimed);
+      for (const c of claims) await this.deps.desk.release(input.tenantId, c.ids, c.token);
     }
   }
 
@@ -288,7 +289,7 @@ export class BillingDeskService {
   private async raiseClaimed(
     input: RaiseFromDuesInput,
     ids: readonly string[],
-    claimed: string[],
+    claims: { ids: string[]; token: string }[],
     actor: Actor,
   ): Promise<{
     readonly invoiceId: string | null;
@@ -302,12 +303,11 @@ export class BillingDeskService {
     }
     // An advance a bill now takes from that was not held (another advance ran
     // out meanwhile): hold it too, or refuse.
-    const extra = poolsOf(found).filter((id) => !claimed.includes(id));
+    const extra = poolsOf(found).filter((id) => !claims.some((c) => c.ids.includes(id)));
     if (extra.length > 0) {
-      if (!(await this.deps.desk.claim(input.tenantId, extra))) {
-        throw new BillBusy("the advance these bills are taken off");
-      }
-      claimed.push(...extra);
+      const token = await this.deps.desk.claim(input.tenantId, extra);
+      if (token === null) throw new BillBusy("the advance these bills are taken off");
+      claims.push({ ids: extra, token });
     }
     const dues = [...found].sort(
       (a, b) =>
@@ -469,11 +469,12 @@ export class BillingDeskService {
     },
     actor: Actor,
   ): Promise<void> {
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this bill");
     try {
       await this.linkClaimed(input, actor);
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -566,7 +567,8 @@ export class BillingDeskService {
     const reason = input.reason.trim();
     if (reason.length === 0) throw new InvalidBillingInput("Say why this bill is being skipped.");
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this bill");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this bill");
     try {
       const due = await this.openDue(input.tenantId, input.dueId);
       if (due.kind === "advance" && due.advanceHoldsWork) throw new AdvanceNotSkippable();
@@ -582,7 +584,7 @@ export class BillingDeskService {
         payload: { partyId: due.party.id, periodStart: due.periodStart },
       });
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -606,7 +608,8 @@ export class BillingDeskService {
     // Held while the credit note is written (0321): a double click credited
     // the same remainder twice. The second waits out the claim, then finds
     // nothing left.
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this advance");
     try {
       const c = await this.refundCandidate(input.tenantId, input.dueId);
       return await this.deps.invoices.issueCreditNote(
@@ -621,7 +624,7 @@ export class BillingDeskService {
         actor,
       );
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 
@@ -636,7 +639,8 @@ export class BillingDeskService {
     if (reason.length > 500) throw new InvalidBillingInput("Keep the reason to 500 characters.");
     if (actor.type !== "human" || actor.id === null) throw new InvalidBillingInput("A person decides to keep an advance.");
     const by = actor.id;
-    if (!(await this.deps.desk.claim(input.tenantId, [input.dueId]))) throw new BillBusy("this advance");
+    const token = await this.deps.desk.claim(input.tenantId, [input.dueId]);
+    if (token === null) throw new BillBusy("this advance");
     try {
       const c = await this.refundCandidate(input.tenantId, input.dueId);
       if (!(await this.deps.desk.waiveRefund(input.tenantId, c.advance.id, by, reason))) {
@@ -650,7 +654,7 @@ export class BillingDeskService {
         payload: { partyId: c.advance.party.id, invoiceId: c.invoice.id, remaining: c.remaining },
       });
     } finally {
-      await this.deps.desk.release(input.tenantId, [input.dueId]);
+      await this.deps.desk.release(input.tenantId, [input.dueId], token);
     }
   }
 

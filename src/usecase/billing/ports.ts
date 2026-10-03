@@ -266,6 +266,10 @@ export interface DueFilters {
   } | undefined;
 }
 
+/** Whose claim it is (B35): an opaque token `claim` hands back and `release`
+ *  must show. Null from `claim` means somebody else holds a bill. */
+export type ClaimToken = string;
+
 export interface BillingDueDesk {
   list(tenantId: string, filters: DueFilters): Promise<readonly BillingDueRecord[]>;
   findMany(tenantId: string, ids: readonly string[]): Promise<readonly BillingDueRecord[]>;
@@ -304,9 +308,13 @@ export interface BillingDueDesk {
    * number is drawn, so a second raise of the same bill, or of a bill taking the
    * same advance, is refused while nothing is numbered.
    */
-  claim(tenantId: string, dueIds: readonly string[]): Promise<boolean>;
-  /** Let them go again; always called once the settling is over. */
-  release(tenantId: string, dueIds: readonly string[]): Promise<void>;
+  claim(tenantId: string, dueIds: readonly string[]): Promise<ClaimToken | null>;
+  /**
+   * Let them go again; always called once the settling is over. ONLY the claim
+   * this token names (B35): a request that ran past the claim's lifetime must
+   * not clear a newer request's claim on the same bills.
+   */
+  release(tenantId: string, dueIds: readonly string[], token: ClaimToken): Promise<void>;
   /** How an invoice is already used by bills (0321): as some bill's advance
    *  invoice, and how many bills name it as theirs. */
   invoiceUse(tenantId: string, invoiceId: string): Promise<{ readonly asAdvance: boolean; readonly byBills: number }>;
