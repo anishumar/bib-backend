@@ -92,7 +92,7 @@ export class UnknownRole extends AuthzError {
           `when a tenant is created, so this firm's provisioning did not finish.`
         : `membership role ${JSON.stringify(role)} is not one this firm defines, so it carries no ` +
           `permissions. Either the membership names the wrong one, or the role needs defining in ` +
-          `the configuration registry — an administrator can see both lists on the roles screen.`,
+          `the configuration registry: an administrator can see both lists on the roles screen.`,
     );
     this.definedRoles = known;
   }

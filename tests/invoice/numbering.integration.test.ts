@@ -34,7 +34,7 @@ import { PostgresFirmTimeZone } from "../../src/infrastructure/postgres/firm-tim
 import { PostgresDocumentRepository } from "../../src/infrastructure/postgres/document-repository";
 import { PostgresPartyRepository } from "../../src/infrastructure/postgres/party-repository";
 import { systemIds } from "../../src/platform/ids";
-import { systemClock } from "../../src/platform/clock";
+import { FakeClock } from "../../src/testfakes/clock";
 import { SYSTEM_ACTOR } from "../../src/domain/ledger/model";
 import { financialYearOf } from "../../src/domain/invoice/model";
 import { FakeIssuedCopies } from "../../src/testfakes/invoice";
@@ -55,7 +55,10 @@ const service = new InvoiceService({
   firmEntities: new PostgresDocumentRepository(app),
   parties: new PostgresPartyRepository(app),
   ids: systemIds,
-  clock: systemClock,
+  // PINNED (audit 2026-10-03): an invoice and a credit note are numbered in
+  // the year of the day they are issued, and these tests name FY 2026-27. On
+  // the real clock they would go red on 1 April 2027.
+  clock: new FakeClock(new Date("2026-10-03T06:30:00Z")),
   events: ledger,
   // No document store here: these tests are about the money and the series.
   issuedCopies: new FakeIssuedCopies(),
@@ -173,7 +176,7 @@ describe("the series is consecutive", () => {
       fiscalYearStartMonth: 4,
       dueOnIfUnset: null,
     });
-    expect(next).toMatchObject({ financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" });
+    expect(next).toMatchObject({ issued: { financialYear: 2027, issuedOn: "2027-04-03", number: "INV/2027-28/0001" } });
   });
 });
 

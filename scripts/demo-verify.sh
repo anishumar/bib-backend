@@ -68,7 +68,20 @@ case "$API" in
 esac
 
 DOMAIN=10xglobal.in
-TODAY=$(python3 -c 'import datetime;print(datetime.date.today().isoformat())')
+
+# PYTHON ON WINDOWS ENDS EVERY LINE WITH A CARRIAGE RETURN. Every id below is
+# read out of a response by a one-line Python program inside `$(...)`. Git
+# Bash drops the carriage return at the very end of a `$(...)`, but not one
+# inside an answer of several lines, and other shells drop none: an id that
+# keeps one makes the API answer "not found" for a record that is there
+# (reported by the audit agents, 2026-10-03). Every python3 call goes through
+# this, so the answer is the same on every shell, in UTF-8 on every platform.
+export PYTHONUTF8=1
+python3() { command python3 "$@" | tr -d '\r'; }
+
+# THE FIRM'S DAY, which is UTC (the seed sets no time zone): "late" is a due
+# date before it, and the machine's own day is a day ahead in India until 05:30.
+TODAY=$(python3 -c 'import datetime;print(datetime.datetime.now(datetime.timezone.utc).date().isoformat())')
 
 J=$(mktemp -d)
 trap 'rm -rf "$J"' EXIT
@@ -242,7 +255,17 @@ is "...every one of them says WHY" "0" "$(pick "sum(1 for g in d['gaps'] if not 
 say "The board"
 BOARD=$(as partner "$API/api/v1/work-items")
 at_least "work items in hand"                15 "$(pick "len(d['items'])" <<< "$BOARD")"
-at_least "...raised from the calendar at T-X" 10 "$(pick "sum(1 for i in d['items'] if i['isStatutoryDue'])" <<< "$BOARD")"
+# COUNTED ON THE CALENDAR, where the link lives: a filing whose task the T-X
+# sweep raised carries its `workItemId`. This read "at least 10 statutory cards
+# on the board" until 2026-10-03, which counted the three statutory tasks the
+# seed raises BY HAND as well, and whose 10 dated from before T6.16, when the
+# four rules reached every engagement and Cobalt Logistics carried TDS filings
+# it never bought. On their services, the letter's month of history and the
+# lead times (T-6 on the two GST returns for two companies, T-4 on the TDS
+# deposit) raise at least five on any day of the month, and the seed files one,
+# which leaves the calendar's open rows: at least four. Early in a month the
+# board held 8 statutory cards, and the old check failed on the date alone.
+at_least "...raised from the calendar at T-X" 4 "$(pick "sum(1 for r in d['rows'] if r.get('workItemId'))" <<< "$CAL")"
 at_least "...late"                            2 "$(pick "sum(1 for i in d['items'] if i['dueOn'] and i['dueOn'] < '$TODAY')" <<< "$BOARD")"
 at_least "...on nobody's desk"                1 "$(pick "sum(1 for i in d['items'] if i['assignee'] is None)" <<< "$BOARD")"
 # THE SENTENCE IS THE FEATURE. Without it "two SPOCs, pick one" and "nobody has

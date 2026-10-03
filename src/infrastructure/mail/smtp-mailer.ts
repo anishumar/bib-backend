@@ -89,7 +89,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       `The link works ONCE and stops working at ${when}.`,
       ``,
       `If you did not ask for this, nothing has happened and you can ignore this`,
-      `message — the link is the only way in and nobody else has it.`,
+      `message: the link is the only way in and nobody else has it.`,
     ].join("\n");
 
     return this.transport.send({
@@ -101,7 +101,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
         button(url, "Sign in"),
         paragraph(`The link works <strong>once</strong> and stops working at ${esc(when)}.`),
         paragraph(
-          `If you did not ask for this, nothing has happened and you can ignore this message — ` +
+          `If you did not ask for this, nothing has happened and you can ignore this message: ` +
             `the link is the only way in and nobody else has it.`,
         ),
         fallback(url),
@@ -319,7 +319,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       `you have been invoiced.`,
       ``,
       `The link works ONCE and stops working at ${when}. If it has expired by the`,
-      `time you read this, nothing is lost — sign in as you normally do.`,
+      `time you read this, nothing is lost: sign in as you normally do.`,
       ``,
       `If you were not expecting this, please check with your contact at`,
       `${who} before opening it, rather than replying to this message.`,
@@ -350,7 +350,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
         ),
         paragraph(
           `The link works <strong>once</strong> and stops working at ${esc(when)}. If it has ` +
-            `expired by the time you read this, nothing is lost — sign in as you normally do.`,
+            `expired by the time you read this, nothing is lost: sign in as you normally do.`,
         ),
         paragraph(
           `If you were not expecting this, please check with your contact at ` +
@@ -395,7 +395,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
       `cancels this.`,
       ``,
       `If you did not ask for this, your password has NOT changed and nothing`,
-      `will happen as long as you leave this link alone — simply ignore this`,
+      `will happen as long as you leave this link alone: simply ignore this`,
       `message. Nobody can read the link but you.`,
     ].join("\n");
 
@@ -414,7 +414,7 @@ export class SmtpMailer implements Mailer, ProposalMailer, BillingMailer {
         ),
         paragraph(
           `If you did not ask for this, <strong>your password has not changed</strong> and ` +
-            `nothing will happen as long as you leave this link alone — simply ignore this ` +
+            `nothing will happen as long as you leave this link alone: simply ignore this ` +
             `message. Nobody can read the link but you.`,
         ),
         fallback(url),

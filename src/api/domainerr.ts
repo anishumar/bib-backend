@@ -1012,6 +1012,9 @@ export function mapError(err: unknown): MappedError {
       // currency than the letter priced the work in. MANAGER_NOT_STAFF is 409
       // like OWNER_NOT_STAFF and ASSIGNEE_NOT_STAFF: the id is well formed, the
       // roster says no. A manager is frozen once the invoice is issued.
+      // INVOICE_NUMBER_OUT_OF_ORDER (B51): a draft numbered before 0322 whose
+      // number would now go out of order; answered by cancelling it and raising
+      // it again, never by retrying.
       case "INVOICE_NOT_EDITABLE":
       case "EMPTY_INVOICE":
       case "INVALID_INVOICE_TRANSITION":
@@ -1029,6 +1032,7 @@ export function mapError(err: unknown): MappedError {
       case "INVOICE_HAS_PAYMENTS":
       case "DUNNING_NOTHING_OWED":
       case "DUE_BEFORE_ISSUE":
+      case "INVOICE_NUMBER_OUT_OF_ORDER":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       default:
         return unmapped(err.code);
@@ -1286,7 +1290,7 @@ export function mapError(err: unknown): MappedError {
       status: 409,
       code: "CONFLICT",
       message:
-        "that already exists — something else created it between this request being " +
+        "that already exists: something else created it between this request being " +
         "checked and being written",
       reason: violation,
     };

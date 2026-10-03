@@ -29,7 +29,7 @@ import {
   PAYMENT_METHODS,
 } from "../../domain/invoice/model";
 import { DUNNING_ACTIONS } from "../../domain/config/model";
-import type { InvoiceRecord, InvoiceSummary } from "../../usecase/invoice/ports";
+import type { InvoiceSummary, InvoiceView } from "../../usecase/invoice/ports";
 import type { AuthzService } from "../../usecase/authz/service";
 import type { Principal } from "../../platform/callctx";
 
@@ -169,6 +169,17 @@ const InvoiceRecordSchema = z
           "The tax rate a line added by hand starts at (CA#5), by the automatic advance's rule: the " +
           "rate last invoiced on that engagement, else the issuing company's default tax rate (Your " +
           "firm), else none. A tax rate is a statutory fact, not a price: never redacted.",
+      }),
+    issueBlocked: z
+      .object({ reason: z.enum(["INVOICE_NUMBER_OUT_OF_ORDER"]), message: z.string() })
+      .nullable()
+      .openapi({
+        description:
+          "Why Issue would be refused today, when the record alone shows it (B51): a draft numbered " +
+          "before 0322 whose number is now out of order in its series (a later number of the series " +
+          "has been issued, or today is in another financial year). `message` is the refusal's own " +
+          "sentence, for the screen to show where Issue is offered. Null when nothing on the record " +
+          "stops it; the issue call still decides.",
       }),
   })
   .openapi("InvoiceRecord");
@@ -388,7 +399,9 @@ const issueRoute = createRoute({
     "the caller's `asOf`, or the firm's day. This is when the number is drawn (0322): the next " +
     "in the draft's series, in the same transaction as the issue. A draft whose due date is before " +
     "the issue date is refused (DUE_BEFORE_ISSUE, 409: change it with PUT /due-date); one with no " +
-    "due date takes the firm's payment terms when it has set them (0327), else stays without one.",
+    "due date takes the firm's payment terms when it has set them (0327), else stays without one. " +
+    "A draft numbered before 0322 keeps its number and is refused when that number would go out of " +
+    "order (INVOICE_NUMBER_OUT_OF_ORDER, 409, B51): cancel it and raise it again.",
   request: { params: z.object({ invoiceId: z.string().uuid() }), query: CallerDayQuery },
   responses: {
     200: { description: "Issued", content: { "application/json": { schema: InvoiceSchema } } },
@@ -396,7 +409,10 @@ const issueRoute = createRoute({
     403: errorResponse("No org selected, or the role does not permit it"),
     404: errorResponse("No such invoice at this firm"),
     400: errorResponse("asOf is not today anywhere"),
-    409: errorResponse("Not a draft, it has no lines, or its due date is before today's issue date"),
+    409: errorResponse(
+      "Not a draft, it has no lines, its due date is before today's issue date, or its number " +
+        "(drawn before 0322) would go out of order",
+    ),
   },
 });
 
@@ -1254,7 +1270,7 @@ function toTotalsBody(t: InvoiceTotals, fees: boolean): z.infer<typeof TotalsSch
   };
 }
 
-function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof InvoiceRecordSchema> {
+function toRecordBody(record: InvoiceView, fees: boolean): z.infer<typeof InvoiceRecordSchema> {
   return {
     invoice: toInvoiceBody(record.invoice, fees),
     party: { id: record.party.id, displayName: record.party.displayName },
@@ -1285,5 +1301,9 @@ function toRecordBody(record: InvoiceRecord, fees: boolean): z.infer<typeof Invo
         taxPercent: t.taxPercent,
       })),
     },
+    issueBlocked:
+      record.issueBlocked === null
+        ? null
+        : { reason: record.issueBlocked.reason, message: record.issueBlocked.message },
   };
 }

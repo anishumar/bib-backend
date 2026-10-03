@@ -317,7 +317,7 @@ export class NotADraft extends ProposalError {
       "NOT_A_DRAFT",
       `This proposal is ${status}, and only a draft can be changed. The client has the document ` +
         `as it was sent; altering it now would leave no record of what they were shown. Draft a ` +
-        `new proposal instead — the old one stays readable as what was actually offered.`,
+        `new proposal instead: the old one stays readable as what was actually offered.`,
     );
   }
 }
@@ -357,7 +357,7 @@ export class ProposalExpired extends ProposalError {
     super(
       "PROPOSAL_EXPIRED",
       `This proposal was valid until ${longDay(validUntil)} and has now been marked expired. ` +
-        `Honouring it late is a commercial decision, not a data one — draft a new proposal, dated today.`,
+        `Honouring it late is a commercial decision, not a data one: draft a new proposal, dated today.`,
     );
   }
 }
@@ -368,7 +368,7 @@ export class DiscountNeedsApproval extends ProposalError {
       "DISCOUNT_NEEDS_APPROVAL",
       limit === null
         ? `this proposal discounts a line by ${largest}%, and this firm has published no discount ` +
-          `policy — so any discount at all needs sign-off from somebody holding ` +
+          `policy, so any discount at all needs sign-off from somebody holding ` +
           `"proposal:approve". Publish a policy with a maxDiscountPercent to set a limit.`
         : `this proposal discounts a line by ${largest}%, past this firm's published limit of ` +
           `${limit}%. Somebody holding "proposal:approve" has to sign it off before it can be sent.`,
@@ -399,7 +399,7 @@ export class AlreadyApproved extends ProposalError {
       "ALREADY_APPROVED",
       `This proposal's discount was already approved at ${approvedAt}. Approving again would ` +
         `record a second sign-off for one decision in a log that cannot be corrected. If the ` +
-        `discount has changed since, the quote has too — draft a new proposal.`,
+        `discount has changed since, the quote has too: draft a new proposal.`,
     );
   }
 }
@@ -433,7 +433,7 @@ export class ServiceNotPublished extends ProposalError {
       "SERVICE_NOT_PUBLISHED",
       `Configuration version ${JSON.stringify(versionId)} is still a draft and was never in ` +
         `force, so it cannot be quoted. Publish it first. (A version that has since been ` +
-        `superseded is fine — that is what a pinned quote is supposed to resolve to.)`,
+        `superseded is fine: that is what a pinned quote is supposed to resolve to.)`,
     );
   }
 }
@@ -447,7 +447,7 @@ export class ShareLinkUnknown extends ProposalError {
     super(
       "SHARE_LINK_UNKNOWN",
       `This link is not one we recognise. It may have been mistyped, or the proposal may have ` +
-        `been withdrawn — ask whoever sent it for a new one.`,
+        `been withdrawn: ask whoever sent it for a new one.`,
     );
   }
 }
@@ -491,7 +491,7 @@ export class UnpricedLineNeedsReason extends ProposalError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `A line with no unit amount has to say WHY — "As mutually agreed", "Quoted on receipt of ` +
+      `A line with no unit amount has to say WHY: "As mutually agreed", "Quoted on receipt of ` +
         `the registrar's schedule". Send a "pricingNote" with it. Leaving a price blank with no ` +
         `reason is indistinguishable on the client's document from a figure somebody forgot to ` +
         `type, and quoting it as "0" says something different again.`,
@@ -516,7 +516,7 @@ export class InvalidLineBillingFrequency extends ProposalError {
     super(
       "INVALID_BILLING_FREQUENCY",
       `Billing frequency ${JSON.stringify(value)} must be one of ${allowed.join(", ")}. It is ` +
-        `how often this DEAL is invoiced, which is not how often the work comes round — a ` +
+        `how often this DEAL is invoiced, which is not how often the work comes round: a ` +
         `monthly service billed quarterly is why it is a field at all.`,
     );
   }
@@ -535,8 +535,8 @@ export class InvalidOutOfPocketEstimate extends ProposalError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
-        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency: ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"}, reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do. Its currency need not be ` +
         `the document's: a client quoted in INR still faces a filing fee in USD.`,
     );
@@ -566,7 +566,7 @@ export class InvalidQuoteCurrency extends ProposalError {
   constructor(currency: string) {
     super(
       "INVALID_CURRENCY",
-      `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code — three letters, like ` +
+      `Quote currency ${JSON.stringify(currency)} is not an ISO 4217 code: three letters, like ` +
         `"INR" or "AED".`,
     );
   }

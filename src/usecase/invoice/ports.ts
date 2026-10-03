@@ -10,6 +10,7 @@ import type {
   InvoiceLine,
   InvoiceStatus,
   InvoiceTotals,
+  NumberOutOfOrder,
   Payment,
   PaymentMethod,
 } from "../../domain/invoice/model";
@@ -48,6 +49,23 @@ export type CreditNoteOutcome =
 
 /** A cancellation, or the money that stopped it (B05). */
 export type CancelOutcome = { readonly cancelled: Invoice } | { readonly paid: string };
+
+/**
+ * An issue, or why a draft numbered before 0322 was not issued (B51): its
+ * number would go out of order, decided under the series' row lock so nothing
+ * can be issued between the check and the write. Nothing is written then.
+ */
+export type IssueOutcome =
+  | { readonly issued: Invoice }
+  | { readonly outOfOrder: { readonly number: string; readonly order: NumberOutOfOrder } };
+
+/** Why Issue would be refused now, when the record alone can say so (B51). The
+ *  message is the refusal's own, so the screen can show it where Issue is
+ *  offered; the API still decides at issue. */
+export interface IssueBlocked {
+  readonly reason: "INVOICE_NUMBER_OUT_OF_ORDER";
+  readonly message: string;
+}
 
 /** What `issue` writes besides the status: the day, the year that day falls
  *  in (and the month that year starts in, for the number's label), and the due
@@ -113,6 +131,12 @@ export interface InvoiceRecord {
     readonly companyDefault: string | null;
     readonly byEngagement: readonly { readonly engagementId: string; readonly taxPercent: string }[];
   };
+}
+
+/** The invoice as the screen reads it: the record, and whether Issue would be
+ *  refused right now (B51). Null when nothing on the record stops it. */
+export interface InvoiceView extends InvoiceRecord {
+  readonly issueBlocked: IssueBlocked | null;
 }
 
 export interface InvoiceLineRecord {
@@ -247,7 +271,17 @@ export interface InvoiceRepository {
    * The same reasoning `AssignmentStrategy.assign` gives for choosing and
    * recording being one method, reached from money instead of from fairness.
    */
-  issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice>;
+  issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<IssueOutcome>;
+  /**
+   * The highest-numbered invoice of one series (a company's invoices for one
+   * financial year) that carries an issue date, other than `exceptInvoiceId`:
+   * issued, or issued and cancelled since. Null when none has (B51).
+   */
+  latestIssuedInSeries(
+    tenantId: string,
+    series: { readonly entityPartyId: string; readonly financialYear: number },
+    exceptInvoiceId: string,
+  ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null>;
   /**
    * Cancel it, unless it is ISSUED and money was received against it (B05):
    * then nothing changes and the net paid comes back. Checked under the

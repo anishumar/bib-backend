@@ -40,7 +40,7 @@ export class InvalidPortalDates extends PortalAccessError {
       `The dates ${JSON.stringify(validFrom)} and ${JSON.stringify(validTo)} do not ` +
         `describe a grant. validTo is the FIRST DAY NOT IN FORCE: granting needs it LATER ` +
         `than validFrom, because a grant in force on no day reads as "granted" and lets ` +
-        `nobody in. Ending is different — the same day is allowed there, and is how access ` +
+        `nobody in. Ending is different: the same day is allowed there, and is how access ` +
         `is removed the moment somebody decides to remove it.`,
     );
   }
@@ -74,7 +74,7 @@ export class PortalMembershipInactive extends PortalAccessError {
     super(
       "PORTAL_MEMBERSHIP_INACTIVE",
       `Membership ${JSON.stringify(membershipId)} has been revoked, so there is nothing to ` +
-        `grant access to. Restore the membership on the roster first — granting a client to a ` +
+        `grant access to. Restore the membership on the roster first: granting a client to a ` +
         `revoked login would leave the firm believing somebody has access that no session can ` +
         `ever use.`,
     );
@@ -123,7 +123,7 @@ export class PortalGrantDuplicate extends PortalAccessError {
     super(
       "PORTAL_GRANT_DUPLICATE",
       `This login already has access to ${clientName} over those days. Granting it twice ` +
-        `would make "who could see this client" answer with the same person twice — end the ` +
+        `would make "who could see this client" answer with the same person twice: end the ` +
         `existing grant first if you mean to change the dates.`,
     );
   }

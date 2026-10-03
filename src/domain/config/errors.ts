@@ -40,7 +40,7 @@ export class InvalidKey extends ConfigError {
   constructor(key: string) {
     super(
       "INVALID_KEY",
-      `${JSON.stringify(key)} is not a usable key. A key is a stable, url-safe handle — ` +
+      `${JSON.stringify(key)} is not a usable key. A key is a stable, url-safe handle: ` +
         `lowercase letters, digits, and single - or _ between them, like "gst-filing". ` +
         `The name people read goes in the body, where it can be changed freely.`,
     );
@@ -80,7 +80,7 @@ export class VersionNotDraft extends ConfigError {
     super(
       "VERSION_NOT_DRAFT",
       `${ref} is ${status}, and only a draft can be published. A published version is frozen ` +
-        `because running work may be pinned to it — add a new version instead.`,
+        `because running work may be pinned to it: add a new version instead.`,
     );
   }
 }
@@ -106,7 +106,7 @@ export class WouldLockOutAdministration extends ConfigError {
     super(
       "WOULD_LOCK_OUT_ADMINISTRATION",
       `Publishing this would leave no role in the firm carrying ${JSON.stringify(adminPermission)}, ` +
-        `and that permission is what lets anyone change configuration at all — including this. ` +
+        `and that permission is what lets anyone change configuration at all, including this. ` +
         `Nobody could undo it from inside the product. Give another role ${JSON.stringify(adminPermission)} ` +
         `first, or keep it on ${JSON.stringify(role)}.`,
     );

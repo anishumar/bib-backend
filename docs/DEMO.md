@@ -239,7 +239,7 @@ numbers always reconcile and *why* ₹40,000 came off does not.
 
 ### 13 · The chase  ·  **Receivables**
 
-The invoice (`0003`) 75 days overdue has climbed the ladder on its own: reminders at D+3
+The invoice (`0001`, issued first so the series runs in date order) 75 days overdue has climbed the ladder on its own: reminders at D+3
 and D+7, a call at D+15 — and then it **stopped**.
 
 > "The worker may chase a client. Only a person may put one on **credit hold**.

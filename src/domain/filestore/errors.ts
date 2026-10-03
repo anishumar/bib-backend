@@ -46,7 +46,7 @@ export class VersionNotFound extends FileStoreError {
     super(
       "VERSION_NOT_FOUND",
       versionNo === null
-        ? `document ${JSON.stringify(documentId)} has no versions — which should be impossible, ` +
+        ? `document ${JSON.stringify(documentId)} has no versions, which should be impossible, ` +
             `because a document is created with its first version in one transaction. Treat this ` +
             `as data corruption rather than an ordinary miss.`
         : `document ${JSON.stringify(documentId)} has no version ${versionNo}`,
@@ -62,7 +62,7 @@ export class EmptyContent extends FileStoreError {
     super(
       "EMPTY_CONTENT",
       `${JSON.stringify(filename)} is zero bytes. An empty file is a failed upload, not a ` +
-        `document — storing it would show as an attachment over nothing.`,
+        `document: storing it would show as an attachment over nothing.`,
     );
   }
 }
@@ -72,7 +72,7 @@ export class ContentTooLarge extends FileStoreError {
     super(
       "CONTENT_TOO_LARGE",
       `This file is ${byteSize} bytes and the limit is ${limitBytes} ` +
-        `(BIB_MAX_UPLOAD_BYTES). Raise the limit deliberately if the firm genuinely needs it — ` +
+        `(BIB_MAX_UPLOAD_BYTES). Raise the limit deliberately if the firm genuinely needs it: ` +
         `the whole file is held in memory to be hashed, so the limit is a memory budget and not ` +
         `an arbitrary preference.`,
     );
@@ -103,7 +103,7 @@ export class InvalidTitle extends FileStoreError {
   constructor() {
     super(
       "INVALID_TITLE",
-      `A document needs a title — it is what somebody scanning a client's file sees, and the ` +
+      `A document needs a title: it is what somebody scanning a client's file sees, and the ` +
         `filename is not always legible ("scan_0043.pdf")`,
     );
   }
@@ -118,7 +118,7 @@ export class UnknownSubjectKind extends FileStoreError {
       "UNKNOWN_SUBJECT_KIND",
       `${JSON.stringify(raw)} is not something a document can be attached to. Known: ` +
         `${known.join(", ")}. This is checked rather than trusted because a subject reference ` +
-        `carries no foreign key — an unknown kind would be a link nothing can follow.`,
+        `carries no foreign key: an unknown kind would be a link nothing can follow.`,
     );
   }
 }
@@ -185,7 +185,7 @@ export class BytesMissing extends FileStoreError {
     super(
       "BYTES_MISSING",
       `The storage backend has no object at ${JSON.stringify(storageKey)}, but a version row ` +
-        `says it should. The document's metadata is intact and its bytes are not — this is a ` +
+        `says it should. The document's metadata is intact and its bytes are not: this is a ` +
         `storage fault, not a missing document.`,
     );
   }
@@ -211,7 +211,7 @@ export class BrandAssetNotDrawable extends FileStoreError {
     super(
       "BRAND_ASSET_NOT_DRAWABLE",
       `A ${kind.replace(/_/g, " ")} is drawn onto the documents this entity issues, and the renderer can only ` +
-        `draw PNG and JPEG — ${JSON.stringify(mediaType)} cannot be. Upload a .png or .jpg. ` +
+        `draw PNG and JPEG: ${JSON.stringify(mediaType)} cannot be. Upload a .png or .jpg. ` +
         `A signature needs a transparent background, so PNG is the one to use for that.`,
     );
   }

@@ -150,7 +150,7 @@ export class RelationshipEndsBeforeItBegan extends PartyError {
     super(
       "RELATIONSHIP_ENDS_BEFORE_IT_BEGAN",
       `A relationship cannot end before it began. This one began on ${longDay(validFrom)}, and ` +
-        `${longDay(validTo)} is not after that — the end date is the first day it is NO LONGER ` +
+        `${longDay(validTo)} is not after that: the end date is the first day it is NO LONGER ` +
         `in force, so the earliest it can be is the day after it began.`,
     );
   }

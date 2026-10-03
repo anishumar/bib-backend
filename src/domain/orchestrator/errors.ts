@@ -60,7 +60,7 @@ export class NotYourStep extends OrchestratorError {
     super(
       "NOT_YOUR_STEP",
       `Step ${JSON.stringify(stepKey)} is on ${holder}'s desk. Take it first, or ask them to ` +
-        `hand it over — a step is ticked by the person it sits with, so the record of who did ` +
+        `hand it over: a step is ticked by the person it sits with, so the record of who did ` +
         `the work means something.`,
     );
   }
@@ -72,7 +72,7 @@ export class PerformerOutOfBand extends OrchestratorError {
     super(
       "PERFORMER_OUT_OF_BAND",
       `Step ${JSON.stringify(stepKey)} is for ${band}; ${who} is ${grade ?? "not graded"}. ` +
-        `The firm's process says who does this step — change the process, or the person's ` +
+        `The firm's process says who does this step: change the process, or the person's ` +
         `grade, rather than the step.`,
     );
   }
@@ -81,7 +81,7 @@ export class PerformerOutOfBand extends OrchestratorError {
 /** A finished step has no desk. */
 export class StepSettled extends OrchestratorError {
   constructor(stepKey: string, status: string) {
-    super("STEP_SETTLED", `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)} — it is nobody's desk any more.`);
+    super("STEP_SETTLED", `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}: it is nobody's desk any more.`);
   }
 }
 
@@ -124,7 +124,7 @@ export class NoTemplatePublished extends OrchestratorError {
     super(
       "NO_TEMPLATE_PUBLISHED",
       `This firm has no published workflow template ${JSON.stringify(key)}, so a job using it ` +
-        `cannot start. The work is not lost — the job waits until a process is published. ` +
+        `cannot start. The work is not lost: the job waits until a process is published. ` +
         `Write it on the workflow screen and publish it; jobs already waiting pick it up on ` +
         `the next sweep.`,
     );
@@ -151,7 +151,7 @@ export class StepNotWaiting extends OrchestratorError {
     super(
       "STEP_NOT_WAITING",
       `Step ${JSON.stringify(stepKey)} is ${JSON.stringify(status)}, not waiting for anybody. ` +
-        `Only a blocked step can be completed by hand — a second completion would overwrite ` +
+        `Only a blocked step can be completed by hand: a second completion would overwrite ` +
         `who did it and when.`,
     );
   }
@@ -172,7 +172,7 @@ export class ProposalUndecided extends OrchestratorError {
     super(
       "PROPOSAL_UNDECIDED",
       `Step ${JSON.stringify(stepKey)} has an answer from a machine that nobody has ` +
-        `decided about. Accept it, correct it, or reject it with a reason — ticking it done ` +
+        `decided about. Accept it, correct it, or reject it with a reason: ticking it done ` +
         `would record that a person did the work and lose whether the machine was right.`,
     );
   }
@@ -217,7 +217,7 @@ export class CorrectionChangedNothing extends OrchestratorError {
     super(
       "CORRECTION_CHANGED_NOTHING",
       `The correction to step ${JSON.stringify(stepKey)} is identical to what the machine ` +
-        `proposed. If it was right, accept it — recording it as a correction would say the ` +
+        `proposed. If it was right, accept it: recording it as a correction would say the ` +
         `machine got it wrong, and that number is the only measure of whether it is improving.`,
     );
   }
@@ -237,7 +237,7 @@ export class AwaitingCheck extends OrchestratorError {
     super(
       "AWAITING_CHECK",
       `Step ${JSON.stringify(stepKey)} is finished and waiting for somebody else to check it. ` +
-        `It is not yours to tick off again — and by the firm's own rule it could not be ` +
+        `It is not yours to tick off again, and by the firm's own rule it could not be ` +
         `yours to approve either.`,
     );
   }

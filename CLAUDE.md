@@ -1903,6 +1903,17 @@ Every rule below came from the audit of 3 October 2026 (`bib/qa/audit-2026-10-03
 - **Quantity is how many each billing period** (the user, 2026-10-03, F03): a monthly line bills
   quantity x fee x (1 - discount) every month. The screens say so; the demo seed uses 1.
 - The payment `reference` stays out of the ledger (`hasReference`, B26).
+- **A number drawn before 0322 is never renumbered (B51, the user, 2026-10-03).** Such a draft
+  issues as it is while its number is in order, and is refused otherwise
+  (`INVOICE_NUMBER_OUT_OF_ORDER`, 409: "Cancel this draft and raise it again: the new draft is
+  numbered when it is issued"). Out of order (`preDrawnNumberOrder`, domain): a later number of
+  its series (same company, same year) carries an issue date, issued or issued and cancelled
+  since (a later draft cancelled before issue does not count); or today's issue date is in
+  another financial year than its series. Decided in `issue` under the series' row lock, the
+  lock an unnumbered issue takes, so nothing can be issued between the check and the write
+  (`tests/invoice/predrawn.integration.test.ts` holds that lock and watches the issue wait).
+  The invoice read carries `issueBlocked` (the refusal's own sentence) so the screen says it
+  where Issue is offered.
 
 ## Billing by company — the one dashboard figure cut by MONTH (Wave 5, 2026-09-29)
 

@@ -21,6 +21,7 @@ import {
   DEFAULT_CREDIT_NOTE_PREFIX,
   DEFAULT_SERIES_PREFIX,
   formatInvoiceNumber,
+  preDrawnNumberOrder,
 } from "../domain/invoice/model";
 import type {
   EngagementBilling,
@@ -33,6 +34,7 @@ import type {
   CancelOutcome,
   CreditNoteOutcome,
   IssueOn,
+  IssueOutcome,
   IssuedCopies,
   NewCreditNote,
   NewInvoice,
@@ -181,28 +183,102 @@ export class FakeInvoiceRepo implements InvoiceRepository {
     return Promise.resolve(this.liveLines(invoiceId));
   }
 
+  /**
+   * A draft as one made before 0322 was: numbered when it was drafted, the
+   * series' counter moved for it then (B51). Only a test makes one; the
+   * product has not since 0322.
+   */
+  preDrawnDraft(d: {
+    readonly id: string;
+    readonly tenantId: string;
+    readonly partyId: string;
+    readonly entityPartyId: string;
+    readonly financialYear: number;
+  }): Invoice {
+    const k = keyOf(d);
+    const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
+    const sequence = existing.last + 1;
+    this.series.set(k, { ...existing, last: sequence });
+    const invoice: Invoice = {
+      id: d.id,
+      tenantId: d.tenantId,
+      partyId: d.partyId,
+      entityPartyId: d.entityPartyId,
+      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear: d.financialYear, sequence }),
+      financialYear: d.financialYear,
+      sequenceNumber: sequence,
+      status: "draft",
+      currency: "INR",
+      fxRate: "1",
+      fxRateDate: "2026-04-01",
+      issuedOn: null,
+      dueOn: null,
+      irn: null,
+      irnRegisteredAt: null,
+      notes: null,
+      managerUserId: null,
+    };
+    this.invoices.push(invoice);
+    return invoice;
+  }
+
   /** Issue and number in one step (0322): the next in the draft's series, or
-   *  the number a pre-0322 draft already holds. */
-  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<Invoice> {
+   *  the number a pre-0322 draft already holds while it is in order (B51). */
+  async issue(tenantId: string, invoiceId: string, on: IssueOn): Promise<IssueOutcome> {
     const draft = await this.find(tenantId, invoiceId);
     if (draft === null || draft.status !== "draft") throw new Error(`could not issue invoice ${invoiceId}`);
     const issuedOn = on.issuedOn;
     const dueOn = draft.dueOn ?? on.dueOnIfUnset;
-    if (draft.number !== null) return this.patch(tenantId, invoiceId, { status: "issued", issuedOn, dueOn });
+    if (draft.number !== null && draft.sequenceNumber !== null) {
+      const order = preDrawnNumberOrder({
+        draft: { financialYear: draft.financialYear, sequenceNumber: draft.sequenceNumber },
+        issueFinancialYear: on.financialYear,
+        latestIssued: await this.latestIssuedInSeries(tenantId, draft, invoiceId),
+      });
+      if (!order.inOrder) return { outOfOrder: { number: draft.number, order } };
+      return { issued: await this.patch(tenantId, invoiceId, { status: "issued", issuedOn, dueOn }) };
+    }
     // The issue date's year (B03), as the adapter moves an unnumbered draft.
     const financialYear = on.financialYear;
     const k = keyOf({ tenantId, entityPartyId: draft.entityPartyId, financialYear });
     const existing = this.series.get(k) ?? { last: 0, prefix: DEFAULT_SERIES_PREFIX };
     const sequence = existing.last + 1;
     this.series.set(k, { ...existing, last: sequence });
-    return this.patch(tenantId, invoiceId, {
-      status: "issued",
-      issuedOn,
-      dueOn,
-      financialYear,
-      number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: on.fiscalYearStartMonth }),
-      sequenceNumber: sequence,
-    });
+    return {
+      issued: await this.patch(tenantId, invoiceId, {
+        status: "issued",
+        issuedOn,
+        dueOn,
+        financialYear,
+        number: formatInvoiceNumber({ prefix: existing.prefix, financialYear, sequence, startMonth: on.fiscalYearStartMonth }),
+        sequenceNumber: sequence,
+      }),
+    };
+  }
+
+  latestIssuedInSeries(
+    tenantId: string,
+    series: { readonly entityPartyId: string; readonly financialYear: number },
+    exceptInvoiceId: string,
+  ): Promise<{ readonly number: string; readonly sequenceNumber: number } | null> {
+    let latest: { number: string; sequenceNumber: number } | null = null;
+    for (const i of this.invoices) {
+      if (
+        i.tenantId !== tenantId ||
+        i.id === exceptInvoiceId ||
+        i.entityPartyId !== series.entityPartyId ||
+        i.financialYear !== series.financialYear ||
+        i.issuedOn === null ||
+        i.number === null ||
+        i.sequenceNumber === null
+      ) {
+        continue;
+      }
+      if (latest === null || i.sequenceNumber > latest.sequenceNumber) {
+        latest = { number: i.number, sequenceNumber: i.sequenceNumber };
+      }
+    }
+    return Promise.resolve(latest);
   }
 
   async cancel(tenantId: string, invoiceId: string): Promise<CancelOutcome> {

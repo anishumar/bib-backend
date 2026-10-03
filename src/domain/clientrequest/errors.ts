@@ -51,8 +51,8 @@ export class RequestCompanyNotYours extends ClientRequestError {
       "REQUEST_COMPANY_NOT_YOURS",
       `You have not been granted company ${JSON.stringify(clientPartyId)}, so a request ` +
         `about it cannot be raised from this session. This is the FIRST write in this ` +
-        `product where the company is named by the caller rather than read from a parent row ` +
-        `— the database refuses it through the policy's WITH CHECK (0068), and this sentence ` +
+        `product where the company is named by the caller rather than read from a parent row` +
+        `: the database refuses it through the policy's WITH CHECK (0068), and this sentence ` +
         `is what that refusal reads as.`,
     );
   }
@@ -86,7 +86,7 @@ export class RequestAlreadySettled extends ClientRequestError {
       `Request ${JSON.stringify(requestId)} is already ${JSON.stringify(status)}. Adding to ` +
         `it would reopen something one side has finished with without anybody deciding to ` +
         `reopen it, and settling it again would move the date somebody is answering ` +
-        `questions about — raise a new one instead, so it reads as a fresh request rather ` +
+        `questions about: raise a new one instead, so it reads as a fresh request rather ` +
         `than an edit of an old one.`,
     );
   }
@@ -108,7 +108,7 @@ export class RequestDocumentNotFound extends ClientRequestError {
     super(
       "REQUEST_DOCUMENT_NOT_FOUND",
       `No document ${JSON.stringify(documentId)} filed against this client. A reply may only ` +
-        `attach a document already filed against the company that asked — never another ` +
+        `attach a document already filed against the company that asked, never another ` +
         `client's, and never one of the firm's own working papers, whose party is null. File ` +
         `it against the client first; that is the ordinary act, and it is what makes the ` +
         `document theirs to be sent.`,
@@ -121,8 +121,8 @@ export class RequestAssigneeNotStaff extends ClientRequestError {
     super(
       "REQUEST_ASSIGNEE_NOT_STAFF",
       `${JSON.stringify(userId)} is not an active member of this firm, so a request cannot be ` +
-        `put on their desk. A foreign key cannot refuse this — tenancy.user_account is a ` +
-        `GLOBAL table, and nothing in SQL can say "still works here" — which is why it is ` +
+        `put on their desk. A foreign key cannot refuse this: tenancy.user_account is a ` +
+        `GLOBAL table, and nothing in SQL can say "still works here", which is why it is ` +
         `checked here, exactly as it is for a client assignment and a work item.`,
     );
   }

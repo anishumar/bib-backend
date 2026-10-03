@@ -297,7 +297,7 @@ export class LetterNotEditable extends EngagementError {
     super(
       "LETTER_NOT_EDITABLE",
       status === "signed"
-        ? `this letter is signed, and a signed letter never changes — the database refuses it, ` +
+        ? `this letter is signed, and a signed letter never changes: the database refuses it, ` +
           `not just this code. It is the record of what the client agreed to. Draft a new ` +
           `letter that supersedes it; the old one stays readable as what was actually signed.`
         : `this letter is ${status}, and only a draft can be changed. The client has it as it ` +
@@ -323,7 +323,7 @@ export class NoClauses extends EngagementError {
     // into it.
     super(
       "NO_CLAUSES",
-      `An engagement letter with no clauses has no terms — no scope, no liability limit, no ` +
+      `An engagement letter with no clauses has no terms: no scope, no liability limit, no ` +
         `termination. Signing one leaves the firm bound by whatever is read into it. Add at ` +
         `least one clause from the library first.`,
     );
@@ -352,8 +352,8 @@ export class InvalidLetterTransition extends EngagementError {
   constructor(from: string, to: string) {
     super(
       "INVALID_LETTER_TRANSITION",
-      `An engagement letter cannot go from ${from} to ${to}. Signing is final — the document ` +
-        `freezes — and a withdrawn letter stays withdrawn, so that the interval in which it ` +
+      `An engagement letter cannot go from ${from} to ${to}. Signing is final: the document ` +
+        `freezes, and a withdrawn letter stays withdrawn, so that the interval in which it ` +
         `was off the table is still on the record.`,
     );
   }
@@ -396,7 +396,7 @@ export class ClauseNotPublished extends EngagementError {
       "CLAUSE_NOT_PUBLISHED",
       `Clause version ${JSON.stringify(versionId)} is still a draft and was never in force, so ` +
         `it cannot be put in a contract. Publish it first. (A version that has since been ` +
-        `superseded is fine — that is what a pinned clause is supposed to resolve to.)`,
+        `superseded is fine: that is what a pinned clause is supposed to resolve to.)`,
     );
   }
 }
@@ -462,7 +462,7 @@ export class IssuerJurisdictionUnknown extends EngagementError {
     super(
       "ISSUER_JURISDICTION_UNKNOWN",
       `The clause ${JSON.stringify(title)} names a governing law or a forum, and this letter is ` +
-        `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction — so ` +
+        `issued by ${JSON.stringify(entityName)}, which has no registered jurisdiction, so ` +
         `there is nothing to check the term against. Register that entity (its jurisdiction, ` +
         `entity type and incorporation) and the clause goes on, or use a clause that names ` +
         `neither term.`,
@@ -539,7 +539,7 @@ export class UnpricedLineNeedsReason extends EngagementError {
   constructor() {
     super(
       "UNPRICED_LINE_NEEDS_REASON",
-      `A line with no unit amount has to say WHY — "As mutually agreed". Send a "pricingNote" ` +
+      `A line with no unit amount has to say WHY: "As mutually agreed". Send a "pricingNote" ` +
         `with it. On a letter this is a TERM: the signature commits to it, and a blank where a ` +
         `price belongs is a term nobody can read afterwards.`,
     );
@@ -611,8 +611,8 @@ export class InvalidOutOfPocketEstimate extends EngagementError {
   constructor(reason: string) {
     super(
       "INVALID_OOP_ESTIMATE",
-      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency — ` +
-        `{"min": "5000", "max": "6000", "currency": "USD"} — reimbursed at actuals and separate ` +
+      `Out-of-pocket estimate: ${reason}. It is a RANGE in its own currency: ` +
+        `{"min": "5000", "max": "6000", "currency": "USD"}, reimbursed at actuals and separate ` +
         `from the fee, so all three travel together or none of them do.`,
     );
   }
@@ -622,7 +622,7 @@ export class InvalidDate extends EngagementError {
   constructor(field: string, value: string) {
     super(
       "INVALID_DATE",
-      `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD — "2026-10-01". ` +
+      `${field} ${JSON.stringify(value)} must be a calendar day as YYYY-MM-DD: "2026-10-01". ` +
         `A day, not an instant: an engagement that begins on 1 October begins on the client's ` +
         `1 October, and midnight UTC is somebody else's evening.`,
     );
@@ -798,7 +798,7 @@ export class QuoteNotAccepted extends EngagementError {
     super(
       "QUOTE_NOT_ACCEPTED",
       `${ref} is ${status}, and a letter is drafted from a quote the client has ACCEPTED. ` +
-        `Record the acceptance first — that is the act that turns an offer into something to ` +
+        `Record the acceptance first: that is the act that turns an offer into something to ` +
         `write up. A quote that was rejected or has expired is not re-opened: a client who ` +
         `comes back is a new quote.`,
     );
@@ -821,7 +821,7 @@ export class QuoteJurisdictionUnclear extends EngagementError {
       "QUOTE_JURISDICTION_UNCLEAR",
       found.length === 0
         ? `no line on ${ref} says which country the work is in, and a letter states one for the ` +
-            `whole document — it settles governing law, the courts, and which of the firm's own ` +
+            `whole document: it settles governing law, the courts, and which of the firm's own ` +
             `companies contracts. Say which.`
         : `${ref} quotes work in ${found.join(", ")}, and a letter states ONE country for the ` +
             `whole document because that is what decides its governing law. Say which this ` +
@@ -855,7 +855,7 @@ export class FeeGroupTitleRequired extends EngagementError {
   constructor() {
     super(
       "FEE_GROUP_TITLE_REQUIRED",
-      `A fee group needs a title — "Ongoing recurring services". It is the heading of its ` +
+      `A fee group needs a title: "Ongoing recurring services". It is the heading of its ` +
         `section of the letter and the name its row in the Summary of Fees goes by.`,
     );
   }
@@ -893,7 +893,7 @@ export class GroupedLinePriced extends EngagementError {
   constructor() {
     super(
       "GROUPED_LINE_PRICED",
-      `A service covered by a fee group has no price or discount of its own — the group's fee ` +
+      `A service covered by a fee group has no price or discount of its own: the group's fee ` +
         `pays for it, and a price on both would charge the client twice. Leave "unitAmount" ` +
         `out and send a discount of "0", or take the service out of the group.`,
     );

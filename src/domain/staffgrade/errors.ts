@@ -24,7 +24,7 @@ export class InvalidGradeCode extends StaffGradeError {
     super(
       "INVALID_GRADE_CODE",
       `Grade code ${JSON.stringify(code)} is not a lowercase handle (2-40 chars, letters, ` +
-        `digits, "-" or "_") — like "senior_manager". It is the firm's stable name for the ` +
+        `digits, "-" or "_"): like "senior_manager". It is the firm's stable name for the ` +
         `rung; the label people read is the name, which has no such restriction.`,
     );
   }
@@ -35,7 +35,7 @@ export class InvalidRank extends StaffGradeError {
     super(
       "INVALID_RANK",
       `Rank ${JSON.stringify(rank)} must be a whole number above zero, where 1 is the most ` +
-        `junior rung. Ranks need not be unique or consecutive — two rungs may share one, and ` +
+        `junior rung. Ranks need not be unique or consecutive: two rungs may share one, and ` +
         `gaps are how a firm leaves room to insert a rung later.`,
     );
   }
