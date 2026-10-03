@@ -446,9 +446,10 @@ describe("changePassword", () => {
     }
     // Even the RIGHT one, which is what stops the route being a network-hopped
     // oracle for a password somebody reuses elsewhere.
-    await expect(
-      h.service.changePassword(userId, PASSWORD, NEW_PASSWORD, TENANT_A),
-    ).rejects.toBeInstanceOf(TooManyAttempts);
+    const refused = h.service.changePassword(userId, PASSWORD, NEW_PASSWORD, TENANT_A);
+    await expect(refused).rejects.toBeInstanceOf(TooManyAttempts);
+    // About THIS act: nobody was signing in.
+    await expect(refused).rejects.toThrow(/^Too many tries at your current password\. Try again in /);
   });
 });
 

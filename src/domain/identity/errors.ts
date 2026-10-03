@@ -101,7 +101,7 @@ export class UserDisabled extends IdentityError {
 export class TooManyAttempts extends IdentityError {
   constructor(
     readonly retryAfterSeconds: number,
-    message = `too many sign-in attempts for this account; retry in ${String(retryAfterSeconds)}s`,
+    message = `Too many sign-in attempts for this account. Try again in ${retryIn(retryAfterSeconds)}.`,
   ) {
     super("TOO_MANY_ATTEMPTS", message);
   }

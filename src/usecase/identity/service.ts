@@ -963,7 +963,14 @@ export class IdentityService {
       PASSWORD_CHANGE_ATTEMPTS_PER_WINDOW,
       PASSWORD_CHANGE_WINDOW_SECONDS,
     );
-    if (!budget.allowed) throw new TooManyAttempts(budget.retryAfterSeconds);
+    if (!budget.allowed) {
+      // About THIS act. The default sentence is the sign-in page's, and
+      // nobody here was signing in.
+      throw new TooManyAttempts(
+        budget.retryAfterSeconds,
+        `Too many tries at your current password. Try again in ${retryIn(budget.retryAfterSeconds)}.`,
+      );
+    }
 
     const user = await this.deps.users.findById(userId);
     // Unreachable through the guard, which resolved a session for this id a

@@ -644,9 +644,12 @@ describe("per-account throttling", () => {
         h.service.login("priya@harbourpoint.in", `guess-${String(i)}`, GUESSER),
       ).rejects.toBeInstanceOf(InvalidCredentials);
     }
-    await expect(
-      h.service.login("priya@harbourpoint.in", "guess-again", GUESSER),
-    ).rejects.toBeInstanceOf(TooManyAttempts);
+    const refused = h.service.login("priya@harbourpoint.in", "guess-again", GUESSER);
+    await expect(refused).rejects.toBeInstanceOf(TooManyAttempts);
+    // In words a person reads, not "retry in 3582s".
+    await expect(refused).rejects.toThrow(
+      /^Too many sign-in attempts for this account\. Try again in (\d+ (seconds|minutes)|an hour|\d+ hours)\.$/,
+    );
   });
 
   it("CANNOT be aimed at somebody — a stranger's guesses do not lock the owner out", async () => {
