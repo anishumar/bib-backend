@@ -217,7 +217,12 @@ export class InvoiceService {
     if (ownCurrency && compareAmounts(fxRate, "1") !== 0) throw new FxRateNotOne(currency, fxRate);
     const fxRateDate = input.fxRateDate?.trim() || today;
     this.dateOrThrow("fxRateDate", fxRateDate);
-    if (input.dueOn !== undefined) this.dateOrThrow("dueOn", input.dueOn);
+    if (input.dueOn !== undefined) {
+      this.dateOrThrow("dueOn", input.dueOn);
+      // B21 at the API too: the raise dialog bounded the day, the route did
+      // not, and such a draft was refused only later, at issue.
+      if (input.dueOn < today) throw new DueDateInThePast(input.dueOn, today);
+    }
 
     // WHO issues it and WHO it bills, before anything is written (F-10-1). The
     // number is allocated in the issuer's own gapless series, so a client named

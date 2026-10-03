@@ -999,6 +999,15 @@ describe("the due date (B20, B21, audit 2026-10-03)", () => {
     });
   });
 
+  it("refuses to raise an invoice already past its due date (B21 at the API, not only the dialog)", async () => {
+    // The raise dialog bounded the date, but POST /invoices took any day, and
+    // the draft was refused only later, at issue.
+    const s = setup();
+    await expect(s.service.raise({ ...raise(), dueOn: "2026-06-30" }, ACTOR)).rejects.toMatchObject({
+      code: "DUE_DATE_IN_THE_PAST",
+    });
+  });
+
   it("does not change an issued invoice's due date", async () => {
     const s = setup();
     const draft = await lined(s);
