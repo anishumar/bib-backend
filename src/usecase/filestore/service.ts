@@ -30,6 +30,7 @@ import {
   BytesMissing,
   ContentTooLarge,
   DocumentNotFound,
+  DraftNotShareable,
   EmptyContent,
   InvalidFilename,
   InvalidTitle,
@@ -406,6 +407,12 @@ export class FileStoreService {
     // screen offering the control at all has the answer, and a second error
     // code for a state the UI cannot reach is a code nobody handles.
     if (!record) throw new DocumentNotFound(input.documentId);
+    // B10: refused in the write itself, so nothing moved. Named by the title
+    // the firm sees on the row.
+    if (record === "draft") {
+      const doc = await this.get(input.tenantId, input.documentId);
+      throw new DraftNotShareable(doc.document.title);
+    }
 
     await this.deps.events.recordEvent({
       tenantId: input.tenantId,

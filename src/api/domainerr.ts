@@ -1120,6 +1120,7 @@ export function mapError(err: unknown): MappedError {
       case "LINK_NOT_FOUND":
         return { status: 404, code: "NOT_FOUND", message: err.message, reason: err.code };
       case "COPY_OF_RECORD_STAYS":
+      case "DRAFT_NOT_SHAREABLE":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };
       case "ALREADY_ATTACHED":
         return { status: 409, code: "CONFLICT", message: err.message, reason: err.code };

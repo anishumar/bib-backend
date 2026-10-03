@@ -694,6 +694,30 @@ describe("the copy of record: an invoice or a letter is filed ONCE after it goes
     expect(listed.map((d) => d.role)).toEqual(["copy_of_record"]);
   });
 
+  it("a draft copy is never shared with the client, and nothing is recorded (B10)", async () => {
+    const { service, renderSource, events } = makeService();
+    renderSource.documents.set(INVOICE, aRenderableDocument("INV/2026-27/0008"));
+    renderSource.parties.set(INVOICE, PARTY);
+    renderSource.drafts.add(INVOICE);
+    const draft = await service.render({
+      tenantId: TENANT, kind: "invoice", subjectKind: "invoice", subjectRef: INVOICE, actor,
+    });
+    const before = events.recorded.length;
+
+    const shared = service.setClientVisible({
+      tenantId: TENANT, documentId: draft.document.id, visible: true, actor,
+    });
+    await expect(shared).rejects.toMatchObject({ code: "DRAFT_NOT_SHAREABLE" });
+    await expect(shared).rejects.toThrow(/is a draft, and a draft is never shown to the client/);
+    expect(events.recorded.length).toBe(before);
+
+    // Taking it off is always allowed.
+    const off = await service.setClientVisible({
+      tenantId: TENANT, documentId: draft.document.id, visible: false, actor,
+    });
+    expect(off.document.isClientVisible).toBe(false);
+  });
+
   it("a proposal is untouched: its record is pinned at Send, and its page may copy it again", async () => {
     const { service, renderSource } = makeService();
     renderSource.renderable = ["engagement_letter", "invoice", "proposal"];

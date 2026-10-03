@@ -518,7 +518,10 @@ const clientVisibilityRoute = createRoute({
     "party to; a working paper is your own thinking. This is how you disagree with that in " +
     "either direction. " +
     "A document with no `partyId` is the firm's own and belongs to no client, so there is " +
-    "nobody to share it with — it answers 404.",
+    "nobody to share it with — it answers 404. " +
+    "A DRAFT is never shared (B10): a draft copy, or a copy drawn while its proposal, letter or " +
+    "invoice was still a draft, answers 409 `DRAFT_NOT_SHAREABLE`. Taking any document off the " +
+    "portal always works.",
   request: {
     params: DocumentParam,
     body: {
@@ -537,6 +540,7 @@ const clientVisibilityRoute = createRoute({
     401: errorResponse("No authenticated session"),
     403: errorResponse("No org chosen, or the role may not write documents"),
     404: errorResponse("No such document at this firm, or it belongs to no client"),
+    409: errorResponse("It is a draft, and a draft is never shared with the client (DRAFT_NOT_SHAREABLE)"),
   },
 });
 
